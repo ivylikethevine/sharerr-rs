@@ -35,6 +35,52 @@ use sharerr_store::{Vault, master_key_from_env};
 use super::WebState;
 use super::config_io::{ConfigFile, Edit, parse_path_map};
 use super::templates::{PathRow, SettingsPage, render};
+use crate::torznab::public_base_url;
+
+/// Mint a fresh secret and show it once.
+///
+/// The Torznab API key is unlike every other secret on this page: it has to be
+/// *copied into a friend's Prowlarr*, so a write-only field that can never be read
+/// back would make it unusable. Generating server-side and revealing the value on
+/// exactly the response that created it is the compromise — the key is never in a
+/// URL, never in a redirect, and never re-readable. Lose it and generate another.
+pub async fn generate_secret(
+    State(state): State<WebState>,
+    axum::extract::Path(field): axum::extract::Path<String>,
+) -> Response {
+    let key = match field.as_str() {
+        "torznab" => secret_keys::TORZNAB_API_KEY,
+        "tracker" => secret_keys::TRACKER_TOKEN,
+        _ => return reject(&state, "There is no such secret to generate.").await,
+    };
+
+    let generated = match random_key() {
+        Ok(generated) => generated,
+        Err(reason) => return reject(&state, &reason).await,
+    };
+
+    if let Err(message) = apply_secret(&state, key, &generated, None).await {
+        return reject(&state, &message).await;
+    }
+
+    let mut page = build_page(&state, Some(field), None).await;
+    page.revealed = Some(generated);
+    render(&page)
+}
+
+/// 160 bits, hex encoded — long enough that guessing is not a strategy, short
+/// enough to paste. Same source the vault uses for its nonces.
+fn random_key() -> Result<String, String> {
+    let mut bytes = [0u8; 20];
+    getrandom::fill(&mut bytes).map_err(|e| format!("could not generate a key: {e}"))?;
+
+    let mut key = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(key, "{byte:02x}");
+    }
+    Ok(key)
+}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct PageQuery {
@@ -351,8 +397,7 @@ async fn apply_secret(
         return Ok(());
     }
 
-    let config = state.serve.config().await;
-    let mut vault = open_vault(&config).await?;
+    let mut vault = state.serve.open_vault().await?;
 
     if clearing {
         vault
@@ -371,21 +416,6 @@ async fn apply_secret(
     // authenticating with the old value.
     state.serve.invalidate("a credential changed").await;
     Ok(())
-}
-
-/// Open the vault off the runtime.
-///
-/// Argon2 key derivation is tens of milliseconds of solid CPU, and a container
-/// pinned to one core has one worker thread — doing it inline would stall
-/// `/health` for the duration of a save.
-pub(super) async fn open_vault(config: &Config) -> Result<Vault, String> {
-    let master = master_key_from_env().map_err(|err| err.to_string())?;
-    let path = config.vault_path();
-
-    tokio::task::spawn_blocking(move || Vault::open(&path, &master))
-        .await
-        .map_err(|_| "the vault task panicked".to_owned())?
-        .map_err(|err| format!("opening the vault: {err}"))
 }
 
 /// Which vault keys currently hold a value.
@@ -489,6 +519,13 @@ async fn build_page(
             .map(|p| p.to_string())
             .unwrap_or_default(),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
+        torznab_key_set: is_set(secret_keys::TORZNAB_API_KEY),
+        torznab_url: format!("{}/api", public_base_url(&config)),
+        tracker_builtin_selected: matches!(
+            config.tracker.backend,
+            sharerr_core::config::TrackerBackend::Builtin
+        ),
+        revealed: None,
 
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,

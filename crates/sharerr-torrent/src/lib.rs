@@ -13,11 +13,13 @@
 //! * [`title`] — picks the release title, which travels *alongside* the torrent
 //!   rather than inside it. That distinction is load-bearing; see the module docs.
 
+pub mod announce;
 pub mod error;
 pub mod factory;
 pub mod title;
 pub mod tracker;
 
+pub use announce::{AnnounceError, AnnounceRequest, AnnounceResponse, Event, InfoHash, Swarms};
 pub use error::{Result, TorrentError};
 pub use factory::{
     BuiltTorrent, LavaTorrentFactory, TorrentFactory, TorrentRequest, piece_length_for,

@@ -69,6 +69,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/tracker", post(settings::save_tracker))
         .route("/settings/paths", post(settings::save_paths))
         .route("/settings/sync", post(settings::save_sync))
+        .route(
+            "/settings/generate/{field}",
+            post(settings::generate_secret),
+        )
         .route("/settings/test/{service}", post(probe::test))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

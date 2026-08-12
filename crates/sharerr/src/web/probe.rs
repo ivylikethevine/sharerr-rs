@@ -31,9 +31,9 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
     let config = state.serve.config().await;
 
     let outcome = match service.as_str() {
-        "sonarr" => check_arr(MediaSource::Sonarr, &config).await,
-        "radarr" => check_arr(MediaSource::Radarr, &config).await,
-        "qbittorrent" => check_qbit(&config).await,
+        "sonarr" => check_arr(MediaSource::Sonarr, &state, &config).await,
+        "radarr" => check_arr(MediaSource::Radarr, &state, &config).await,
+        "qbittorrent" => check_qbit(&state, &config).await,
         _ => Outcome::Bad("Unknown service.".to_owned()),
     };
 
@@ -71,14 +71,16 @@ impl Outcome {
 /// Returns `Ok(None)` for "not stored yet", which is a different message from "the
 /// vault will not open" — the first is a field to fill in, the second is a missing
 /// environment variable.
-async fn secret(config: &Config, key: &'static str) -> Result<Option<SecretString>, String> {
-    super::settings::open_vault(config)
+async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretString>, String> {
+    state
+        .serve
+        .open_vault()
         .await?
         .get(key)
         .map_err(|err| err.to_string())
 }
 
-async fn check_arr(kind: MediaSource, config: &Config) -> Outcome {
+async fn check_arr(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
     let (service, key) = match kind {
         MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
         MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
@@ -88,7 +90,7 @@ async fn check_arr(kind: MediaSource, config: &Config) -> Outcome {
         return Outcome::Bad("No URL configured. Save one first.".to_owned());
     };
 
-    let api_key = match secret(config, key).await {
+    let api_key = match secret(state, key).await {
         Ok(Some(api_key)) => api_key,
         Ok(None) => return Outcome::Bad("No API key stored. Save one first.".to_owned()),
         Err(reason) => return Outcome::Bad(reason),
@@ -123,8 +125,8 @@ async fn check_arr(kind: MediaSource, config: &Config) -> Outcome {
     }
 }
 
-async fn check_qbit(config: &Config) -> Outcome {
-    let password = match secret(config, secret_keys::QBITTORRENT_PASSWORD).await {
+async fn check_qbit(state: &WebState, config: &Config) -> Outcome {
+    let password = match secret(state, secret_keys::QBITTORRENT_PASSWORD).await {
         Ok(Some(password)) => password,
         Ok(None) => return Outcome::Bad("No password stored. Save one first.".to_owned()),
         Err(reason) => return Outcome::Bad(reason),

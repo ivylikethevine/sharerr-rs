@@ -116,7 +116,12 @@ impl TrackerProvider for QbitEmbeddedTracker {
     }
 }
 
-/// sharerr's own tracker. Milestone 2.
+/// sharerr's own tracker.
+///
+/// Unlike the qBittorrent backend there is nothing to turn on: the announce
+/// endpoint is part of `sharerr serve` and is serving whenever the process is.
+/// That is also the one caveat — a one-shot `sharerr sync` builds correct torrents
+/// whose announces fail until `serve` is running, which is why `doctor` says so.
 #[derive(Debug)]
 pub struct BuiltinTracker {
     advertised_host: String,
@@ -143,9 +148,16 @@ impl BuiltinTracker {
 #[async_trait]
 impl TrackerProvider for BuiltinTracker {
     async fn ensure_ready(&self) -> Result<()> {
-        // Refusing here is the point. Producing torrents that announce into the
-        // void would look like success and fail silently at the friend's end.
-        Err(TorrentError::BuiltinTrackerUnavailable)
+        // Nothing to enable or verify. The endpoint is mounted on the same router
+        // that is answering this process's requests, so if anything is calling
+        // this, the tracker is up.
+        tracing::debug!(
+            host = %self.advertised_host,
+            port = self.port,
+            token = self.token.is_some(),
+            "builtin tracker ready"
+        );
+        Ok(())
     }
 
     async fn announce_url(&self) -> Result<Url> {
@@ -173,16 +185,11 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn the_builtin_tracker_refuses_to_pretend_it_is_ready() {
+    async fn the_builtin_tracker_is_ready_without_any_setup() {
+        // Unlike the qBittorrent backend there is no preferences write and no port
+        // to discover — the endpoint ships with the server.
         let tracker = BuiltinTracker::new(Some("sharerr.example"), 8477, None).unwrap();
-
-        let err = tracker.ensure_ready().await.unwrap_err();
-        assert!(
-            matches!(err, TorrentError::BuiltinTrackerUnavailable),
-            "got {err:?}"
-        );
-        // The message has to point at the backend that does work today.
-        assert!(err.to_string().contains("qbittorrent-embedded"), "{err}");
+        assert!(tracker.ensure_ready().await.is_ok());
     }
 
     /// Configuration written for the builtin backend today must stay valid when the

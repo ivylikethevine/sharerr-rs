@@ -104,6 +104,42 @@ impl Store {
         rows.iter().map(row_to_item).collect()
     }
 
+    /// Whether this instance is currently seeding the torrent with this hash.
+    ///
+    /// The builtin tracker's admission check: it answers only for torrents sharerr
+    /// made, so it never becomes an open tracker that strangers can register
+    /// swarms on. Hits `idx_shared_items_info_hash`, because it runs on every
+    /// announce from every peer.
+    ///
+    /// `Unshared` and `Failed` items are excluded deliberately — withdrawing a
+    /// share has to stop the tracker introducing peers for it, or the swarm
+    /// outlives the decision to leave it.
+    pub async fn is_shared(&self, info_hash: &str) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 AS present FROM shared_items \
+             WHERE info_hash = ?1 AND state IN ('seeding', 'pending') LIMIT 1",
+        )
+        .bind(info_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Every item currently being shared, newest first.
+    ///
+    /// What the Torznab feed publishes. Filtered in SQL rather than by the caller
+    /// so an item without a torrent yet can never reach the feed — a release the
+    /// friend's Sonarr can find but not download is worse than one it cannot see.
+    pub async fn seeding_items(&self) -> Result<Vec<SharedItem>> {
+        let rows = sqlx::query(&format!(
+            "{SELECT_COLUMNS} WHERE state = 'seeding' AND info_hash IS NOT NULL \
+             ORDER BY created_at DESC, id DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_item).collect()
+    }
+
     pub async fn get(&self, source: MediaSource, file_id: i64) -> Result<Option<SharedItem>> {
         let row = sqlx::query(&format!(
             "{SELECT_COLUMNS} WHERE source = ?1 AND file_id = ?2"
@@ -642,6 +678,49 @@ mod tests {
             matches!(&err, StoreError::Malformed { detail, .. } if detail.starts_with("spec_json")),
             "expected a Malformed error naming the column, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn is_shared_admits_only_live_torrents() {
+        // The tracker's admission check. A withdrawn share must stop being served,
+        // or the swarm outlives the decision to leave it.
+        let store = Store::open_in_memory().await.unwrap();
+        let mut item = episode(1);
+        item.info_hash = Some("aa".repeat(20));
+        item.state = ShareState::Seeding;
+        store.upsert(&item).await.unwrap();
+
+        assert!(store.is_shared(&"aa".repeat(20)).await.unwrap());
+        assert!(
+            !store.is_shared(&"bb".repeat(20)).await.unwrap(),
+            "unknown hash"
+        );
+
+        store
+            .set_state(MediaSource::Sonarr, 1, ShareState::Unshared, None)
+            .await
+            .unwrap();
+        assert!(
+            !store.is_shared(&"aa".repeat(20)).await.unwrap(),
+            "an unshared item must stop being tracked"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeding_items_excludes_anything_without_a_torrent() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        // Pending, no info_hash: discovered but not built yet.
+        store.upsert(&episode(1)).await.unwrap();
+
+        let mut ready = episode(2);
+        ready.info_hash = Some("cc".repeat(20));
+        ready.state = ShareState::Seeding;
+        store.upsert(&ready).await.unwrap();
+
+        let feed = store.seeding_items().await.unwrap();
+        assert_eq!(feed.len(), 1, "only the seeding item belongs in the feed");
+        assert_eq!(feed[0].file_id, 2);
     }
 
     #[tokio::test]

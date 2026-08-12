@@ -149,6 +149,16 @@ pub struct SettingsPage {
     pub tracker_port: String,
     pub tracker_token_set: bool,
 
+    pub torznab_key_set: bool,
+    /// The `/api` URL a friend pastes into Prowlarr, built from the advertised host.
+    pub torznab_url: String,
+    /// Whether the builtin tracker is the selected backend, which is what makes the
+    /// announce endpoint on this instance the one in use.
+    pub tracker_builtin_selected: bool,
+    /// A freshly minted secret, shown exactly once on the response that created it.
+    /// Never populated by an ordinary page load.
+    pub revealed: Option<String>,
+
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
 

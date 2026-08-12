@@ -20,8 +20,10 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
+use secrecy::ExposeSecret;
 use sharerr_core::Config;
-use sharerr_store::Store;
+use sharerr_core::config::secret_keys;
+use sharerr_store::{Store, Vault, master_key_from_env};
 use tokio::sync::{Notify, RwLock};
 
 use crate::sync::Syncer;
@@ -52,6 +54,13 @@ pub struct ServeState {
     /// log in to fix the very thing blocking the syncer.
     store: RwLock<Option<Store>>,
     syncer: RwLock<Result<Arc<Syncer>, String>>,
+    /// The builtin tracker's announce token, cached because it is consulted on
+    /// every announce from every peer and reading it means an Argon2 derivation.
+    ///
+    /// `None` outer means "not looked up yet"; `Some(None)` means "looked up, and
+    /// there is no token". Cleared by [`Self::invalidate`], so changing it through
+    /// the UI takes effect without a restart.
+    tracker_token: RwLock<Option<Option<String>>>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -74,6 +83,7 @@ impl ServeState {
             // the moment `run` starts polling it. Only observable in the sliver
             // between binding the listener and that first attempt finishing.
             syncer: RwLock::new(Err("still starting up".to_owned())),
+            tracker_token: RwLock::new(None),
             wake: Notify::new(),
         }
     }
@@ -107,6 +117,46 @@ impl ServeState {
         }
     }
 
+    /// Open the credential vault, off the runtime.
+    ///
+    /// Argon2 key derivation is tens of milliseconds of solid CPU and ~19 MiB; a
+    /// container pinned to one core has one runtime worker, so doing it inline
+    /// stalls `/health` for the duration. The single opener for the whole binary —
+    /// the web settings pages, the connection probes, and the tracker all come
+    /// through here.
+    pub async fn open_vault(&self) -> Result<Vault, String> {
+        let master = master_key_from_env().map_err(|err| err.to_string())?;
+        let path = self.config.read().await.vault_path();
+
+        tokio::task::spawn_blocking(move || Vault::open(&path, &master))
+            .await
+            .map_err(|_| "the vault task panicked".to_owned())?
+            .map_err(|err| format!("opening the vault: {err}"))
+    }
+
+    /// The token the builtin tracker requires in announce URLs, if any.
+    ///
+    /// Cached after the first read. A vault that will not open yields `None`,
+    /// which is correct rather than merely convenient: without a vault there is no
+    /// stored token, so there is none to enforce.
+    pub async fn tracker_token(&self) -> Option<String> {
+        if let Some(cached) = &*self.tracker_token.read().await {
+            return cached.clone();
+        }
+
+        let token = match self.open_vault().await {
+            Ok(vault) => vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .ok()
+                .flatten()
+                .map(|secret| secret.expose_secret().to_owned()),
+            Err(_) => None,
+        };
+
+        *self.tracker_token.write().await = Some(token.clone());
+        token
+    }
+
     /// Why reconciliation is not running, or `None` when it is.
     ///
     /// `Option` rather than a `(bool, String)` pair, whose `String` would be
@@ -133,6 +183,9 @@ impl ServeState {
     pub async fn invalidate(&self, reason: &str) {
         tracing::info!(reason, "rebuilding the syncer");
         *self.syncer.write().await = Err(format!("reloading — {reason}"));
+        // The token is a vault value too, so a credential change has to drop it or
+        // the tracker keeps enforcing the old one.
+        *self.tracker_token.write().await = None;
         self.wake.notify_one();
     }
 
@@ -192,6 +245,8 @@ pub async fn run(config: &Config, config_path: &Path) -> Result<()> {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .with_state(Arc::clone(&state))
+        .merge(crate::tracker::routes(Arc::clone(&state)))
+        .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
 
     let listener = tokio::net::TcpListener::bind(config.server.bind)
@@ -210,8 +265,13 @@ pub async fn run(config: &Config, config_path: &Path) -> Result<()> {
     // cannot be built at all — is logged and retried rather than taking the process
     // down; the HTTP endpoint staying up is what lets an operator see and repair
     // the problem.
+    // `into_make_service_with_connect_info` rather than a bare service: the
+    // tracker records the address a peer actually reached us from, because a
+    // client behind NAT reports a private address that no other peer can dial.
+    let service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+
     tokio::select! {
-        result = axum::serve(listener, app) => result.context("http server failed"),
+        result = axum::serve(listener, service) => result.context("http server failed"),
         () = background(state) => Ok(()),
     }
 }

@@ -45,6 +45,30 @@ Then tag something `sharerr` in Sonarr and:
 docker compose -f docker/compose.test.yml exec sharerr sharerr sync
 ```
 
+## Exercising the indexer and the tracker
+
+With the stack up and something tagged and synced:
+
+```bash
+# The Torznab endpoint needs an API key; generate one in the UI (Settings →
+# Indexer) or pipe one in.
+docker compose -f docker/compose.test.yml exec -T sharerr \
+    sh -c 'printf %s "a-test-key" | sharerr vault set torznab.api_key'
+
+# What a friend's Prowlarr would fetch.
+curl -s "http://127.0.0.1:18477/api?t=caps&apikey=a-test-key"
+curl -s "http://127.0.0.1:18477/api?t=tvsearch&apikey=a-test-key"
+```
+
+Prowlarr is already in the stack: add a *Generic Torznab* indexer pointing at
+`http://sharerr:8477/api` with that key.
+
+To exercise sharerr's own tracker rather than qBittorrent's, set
+`backend = "builtin"` under `[tracker]` in `docker/config/sharerr.toml` and
+re-sync. `/announce` refuses any info hash the instance is not sharing, so a
+`d14:failure reason...` response to a made-up hash is the expected result, not a
+fault.
+
 ## The opt-in test suite
 
 ```bash

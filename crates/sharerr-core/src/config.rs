@@ -14,8 +14,14 @@ pub mod secret_keys {
     pub const SONARR_API_KEY: &str = "sonarr.api_key";
     pub const RADARR_API_KEY: &str = "radarr.api_key";
     pub const QBITTORRENT_PASSWORD: &str = "qbittorrent.password";
-    /// Shared secret embedded in builtin-tracker announce URLs (milestone 2).
+    /// Shared secret embedded in builtin-tracker announce URLs.
     pub const TRACKER_TOKEN: &str = "tracker.token";
+    /// The `apikey` a friend's Prowlarr sends to the Torznab endpoint.
+    ///
+    /// Its absence closes the endpoint rather than opening it: the feed lists
+    /// everything this instance shares, so defaulting to unauthenticated would
+    /// publish the library to anyone who found the port.
+    pub const TORZNAB_API_KEY: &str = "torznab.api_key";
 
     /// Every key sharerr actually reads.
     ///
@@ -29,6 +35,7 @@ pub mod secret_keys {
         RADARR_API_KEY,
         QBITTORRENT_PASSWORD,
         TRACKER_TOKEN,
+        TORZNAB_API_KEY,
     ];
 }
 

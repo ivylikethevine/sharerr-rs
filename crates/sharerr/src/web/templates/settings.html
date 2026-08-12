@@ -21,6 +21,17 @@
 <p class="error" role="alert">{{ message }}</p>
 {% endif %}
 
+{% if let Some(secret) = revealed %}
+<div class="ok" role="status">
+  <p><strong>Copy this now — it will not be shown again.</strong></p>
+  <p><code>{{ secret }}</code></p>
+  <p class="hint">
+    It is stored encrypted and cannot be read back. If you lose it, generate a new
+    one and update wherever you pasted it.
+  </p>
+</div>
+{% endif %}
+
 {% if !master_key_present %}
 <p class="warn">
   <strong>No vault master key.</strong> API keys and passwords cannot be stored
@@ -160,10 +171,49 @@
   {% if tracker_token_set %}
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
   {% endif %}
-  <p class="hint">Only used by the builtin tracker.</p>
+  <p class="hint">
+    Only used by the builtin tracker. When set, it is embedded in every announce
+    URL, so holding the <code>.torrent</code> is what grants the right to announce.
+    Changing it invalidates torrents already published — leave it alone unless you
+    mean to cut off existing peers.
+  </p>
 
   <button type="submit">Save</button>
 </form>
+
+{% if tracker_builtin_selected %}
+<form method="post" action="/settings/generate/tracker" class="panel">
+  <p class="hint">sharerr is serving its own tracker on this instance.</p>
+  <button type="submit" class="secondary" {% if !master_key_present %}disabled{% endif %}>
+    {% if tracker_token_set %}Replace the announce token{% else %}Generate an announce token{% endif %}
+  </button>
+</form>
+{% endif %}
+
+<h2>Indexer (Torznab)</h2>
+<div class="panel">
+  <p class="hint">
+    This is how a friend finds what you share. In their Prowlarr, add a
+    <em>Generic Torznab</em> indexer with the URL and API key below; their Sonarr
+    and Radarr then reach it through Prowlarr.
+  </p>
+
+  <dl class="facts">
+    <dt>Feed URL</dt><dd><code>{{ torznab_url }}</code></dd>
+    <dt>API key</dt>
+    <dd>{% if torznab_key_set %}stored{% else %}<strong>not set — the feed is closed until you generate one</strong>{% endif %}</dd>
+  </dl>
+
+  <form method="post" action="/settings/generate/torznab">
+    <button type="submit" {% if !master_key_present %}disabled{% endif %}>
+      {% if torznab_key_set %}Replace the API key{% else %}Generate an API key{% endif %}
+    </button>
+  </form>
+  <p class="hint">
+    The feed URL uses the tracker's advertised host, so set that first if it looks
+    wrong. Replacing the key immediately stops any Prowlarr still using the old one.
+  </p>
+</div>
 
 <h2>Path mappings</h2>
 <form method="post" action="/settings/paths" class="panel">

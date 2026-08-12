@@ -83,6 +83,40 @@ Anyone on the network who can reach port 8477 can reach the login page, and the
 session cookie is not sent over TLS, because sharerr is normally run on a LAN. If
 that is not true of your network, put it behind a TLS-terminating proxy.
 
+### Sharing with a friend
+
+sharerr publishes what it shares as a **Torznab** feed, which is what Prowlarr
+speaks. In **Settings → Indexer**, generate an API key and copy it together with
+the feed URL. Your friend adds a *Generic Torznab* indexer in their Prowlarr using
+those two values; their Sonarr and Radarr then find your releases through it, with
+the TVDB/TMDb/IMDb ids attached so a release matches a known series or film rather
+than being parsed from its name.
+
+The feed lists only what is actually seeding, and the `.torrent` files it links to
+are served from the same instance. Both the feed and the downloads require the API
+key — without one, the endpoint stays closed rather than open, because the feed is
+a list of everything you share.
+
+The feed URL is built from `tracker.advertised_host`, so that has to be an address
+your friend can reach. Everything here is a single HTTP port; whatever you do to
+make port 8477 reachable also makes the tracker and the feed reachable.
+
+#### Which tracker
+
+**qBittorrent's embedded tracker** is the default and needs nothing from you.
+
+**sharerr's builtin tracker** is the alternative, selected under Settings →
+Tracker. It serves `/announce` and `/scrape` from the sharerr process itself, and
+it answers only for torrents sharerr made — it will not act as a tracker for
+anything else, whoever asks. Optionally generate an announce token: it is embedded
+in the announce URL of every torrent built afterwards, so holding the `.torrent` is
+what grants the right to announce. Note that changing the token invalidates
+torrents already published.
+
+One caveat with the builtin tracker: the announce endpoint is part of
+`sharerr serve`, so a one-shot `sharerr sync` produces correct torrents whose
+announces fail until `serve` is running.
+
 #### Configuring it without the UI
 
 Everything above has a headless equivalent, which is what a scripted deployment or

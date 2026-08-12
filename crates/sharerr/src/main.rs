@@ -2,6 +2,8 @@ mod cli;
 mod commands;
 mod settings;
 mod sync;
+mod torznab;
+mod tracker;
 mod web;
 
 use anyhow::Result;
