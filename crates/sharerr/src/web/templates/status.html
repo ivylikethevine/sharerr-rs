@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+{% block title %}sharerr status{% endblock %}
+
+{% block content %}
+<h1>Status</h1>
+
+{% if let Some(reason) = blocked %}
+<p class="warn" role="status">
+  Not reconciling yet — {{ reason }}
+</p>
+<p class="hint">
+  Saving a fix in <a href="/settings">Settings</a> retries immediately; otherwise
+  this is re-checked every {{ recovery_secs }} seconds. Either way, no restart.
+</p>
+{% else %}
+<p class="ok" role="status">Reconciliation is running. sharerr can reach everything it needs.</p>
+{% endif %}
+
+{% if !master_key_present %}
+<p class="warn">
+  No vault master key. Set <code>SHARERR_MASTER_KEY</code> (or
+  <code>SHARERR_MASTER_KEY_FILE</code>) on the container and restart — until then
+  sharerr cannot store API keys or passwords at all.
+</p>
+{% endif %}
+
+<dl class="facts">
+  <dt>Tag watched</dt><dd><code>{{ tag }}</code></dd>
+  <dt>Sonarr</dt><dd>{% if let Some(url) = sonarr_url %}<code>{{ url }}</code>{% else %}not configured{% endif %}</dd>
+  <dt>Radarr</dt><dd>{% if let Some(url) = radarr_url %}<code>{{ url }}</code>{% else %}not configured{% endif %}</dd>
+  <dt>qBittorrent</dt><dd><code>{{ qbit_url }}</code></dd>
+  <dt>Periodic sync</dt>
+  <dd>{% if sync_enabled %}every {{ sync_interval_secs }}s{% else %}disabled{% endif %}</dd>
+  <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>
+</dl>
+{% endblock %}

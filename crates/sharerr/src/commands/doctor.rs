@@ -63,7 +63,7 @@ impl Report {
     }
 }
 
-fn chain(err: &dyn std::error::Error) -> String {
+pub(crate) fn chain(err: &dyn std::error::Error) -> String {
     let mut rendered = err.to_string();
     let mut cause = err.source();
 

@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod settings;
 mod sync;
+mod web;
 
 use anyhow::Result;
 use clap::Parser;
@@ -20,7 +21,10 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Doctor => commands::doctor::run(&config).await,
         Command::Sync(args) => commands::sync::run(&config, args.dry_run).await,
-        Command::Serve => commands::serve::run(&config).await,
+        // The config *path* travels with the config, not just its contents: the web
+        // UI writes settings back to this same file, and it is the CLI flag or
+        // SHARERR_CONFIG that decides which one that is.
+        Command::Serve => commands::serve::run(&config, &args.config).await,
         Command::Vault(VaultCommand::Set { key }) => commands::vault::set(&config, &key),
         Command::Vault(VaultCommand::List) => commands::vault::list(&config),
         Command::Vault(VaultCommand::Remove { key }) => commands::vault::remove(&config, &key),

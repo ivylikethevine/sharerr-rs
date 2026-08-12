@@ -1,0 +1,224 @@
+{% extends "layout.html" %}
+{% block title %}sharerr settings{% endblock %}
+
+{% macro lock_attr(key) %}{% if locks.contains_key(*key) %}disabled{% endif %}{% endmacro %}
+{%- macro locked(key) %}
+{%- if let Some(var) = locks.get(*key) %}
+  <p class="locked">Pinned by <code>{{ var }}</code>. Unset that variable to edit this here.</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
+
+
+{% block content %}
+<h1>Settings</h1>
+
+{% if let Some(section) = saved %}
+<p class="ok" role="status">Saved {{ section }}. Changes take effect within a few seconds — no restart needed.</p>
+{% endif %}
+
+{% if let Some(message) = error %}
+<p class="error" role="alert">{{ message }}</p>
+{% endif %}
+
+{% if !master_key_present %}
+<p class="warn">
+  <strong>No vault master key.</strong> API keys and passwords cannot be stored
+  until <code>SHARERR_MASTER_KEY</code> (or <code>SHARERR_MASTER_KEY_FILE</code>)
+  is set on the container and it is restarted. Everything else on this page still
+  saves. sharerr will not fall back to keeping credentials in plaintext.
+</p>
+{% endif %}
+
+<h2>General</h2>
+<form method="post" action="/settings/general" class="panel">
+  <label for="tag">Tag to watch</label>
+  <input id="tag" name="tag" value="{{ tag }}" required
+         {% call lock_attr("tag") %}{% endcall %}>
+  {% call locked("tag") %}{% endcall %}
+  <p class="hint">Sonarr and Radarr content carrying this tag is what gets shared.</p>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Sonarr</h2>
+<form method="post" action="/settings/sonarr" class="panel">
+  <label for="sonarr_url">URL</label>
+  <input id="sonarr_url" name="url" value="{{ sonarr_url }}" placeholder="http://sonarr:8989"
+         {% call lock_attr("sonarr.url") %}{% endcall %}>
+  {% call locked("sonarr.url") %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no Sonarr.</p>
+
+  <label for="sonarr_key">API key</label>
+  <input id="sonarr_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(sonarr_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if sonarr_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/sonarr" hx-target="#test-sonarr" hx-swap="innerHTML">Test connection</button>
+  <span id="test-sonarr"></span>
+</form>
+
+<h2>Radarr</h2>
+<form method="post" action="/settings/radarr" class="panel">
+  <label for="radarr_url">URL</label>
+  <input id="radarr_url" name="url" value="{{ radarr_url }}" placeholder="http://radarr:7878"
+         {% call lock_attr("radarr.url") %}{% endcall %}>
+  {% call locked("radarr.url") %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no Radarr.</p>
+
+  <label for="radarr_key">API key</label>
+  <input id="radarr_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(radarr_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if radarr_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/radarr" hx-target="#test-radarr" hx-swap="innerHTML">Test connection</button>
+  <span id="test-radarr"></span>
+</form>
+
+<h2>qBittorrent</h2>
+<form method="post" action="/settings/qbittorrent" class="panel">
+  <label for="qbit_url">URL</label>
+  <input id="qbit_url" name="url" value="{{ qbit_url }}" required
+         {% call lock_attr("qbittorrent.url") %}{% endcall %}>
+  {% call locked("qbittorrent.url") %}{% endcall %}
+
+  <label for="qbit_username">Username</label>
+  <input id="qbit_username" name="username" value="{{ qbit_username }}" autocomplete="off"
+         {% call lock_attr("qbittorrent.username") %}{% endcall %}>
+  {% call locked("qbittorrent.username") %}{% endcall %}
+
+  <label for="qbit_password">Password</label>
+  <input id="qbit_password" name="password" type="password" autocomplete="off"
+         placeholder="{% call stored(qbit_password_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if qbit_password_set %}
+  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+
+  <label for="qbit_category">Category for sharerr's torrents</label>
+  <input id="qbit_category" name="category" value="{{ qbit_category }}"
+         {% call lock_attr("qbittorrent.category") %}{% endcall %}>
+  {% call locked("qbittorrent.category") %}{% endcall %}
+
+  <label for="qbit_tag">Tag for sharerr's torrents</label>
+  <input id="qbit_tag" name="tag" value="{{ qbit_tag }}"
+         {% call lock_attr("qbittorrent.tag") %}{% endcall %}>
+  {% call locked("qbittorrent.tag") %}{% endcall %}
+
+  <label class="hint">
+    <input type="checkbox" name="skip_checking" value="1" {% if qbit_skip_checking %}checked{% endif %}
+           {% call lock_attr("qbittorrent.skip_checking") %}{% endcall %}>
+    Skip the hash check when adding a torrent
+  </label>
+  {% call locked("qbittorrent.skip_checking") %}{% endcall %}
+  <p class="hint">
+    Faster on a large library, but it will seed mismatched data if a path mapping
+    is wrong. Leave off unless you know the mappings are right.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/qbittorrent" hx-target="#test-qbittorrent" hx-swap="innerHTML">Test connection</button>
+  <span id="test-qbittorrent"></span>
+</form>
+
+<h2>Tracker</h2>
+<form method="post" action="/settings/tracker" class="panel">
+  <label for="backend">Backend</label>
+  <select id="backend" name="backend" {% call lock_attr("tracker.backend") %}{% endcall %}>
+    <option value="qbittorrent-embedded" {% if !tracker_builtin %}selected{% endif %}>qBittorrent's embedded tracker</option>
+    <option value="builtin" {% if tracker_builtin %}selected{% endif %}>sharerr's builtin tracker (not yet implemented)</option>
+  </select>
+  {% call locked("tracker.backend") %}{% endcall %}
+
+  <label for="advertised_host">Advertised host</label>
+  <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
+         placeholder="the name or IP your friends reach you on"
+         {% call lock_attr("tracker.advertised_host") %}{% endcall %}>
+  {% call locked("tracker.advertised_host") %}{% endcall %}
+  <p class="hint">
+    Required. sharerr cannot guess its own externally reachable address, and a
+    wrong value silently produces torrents nobody can announce to.
+  </p>
+
+  <label for="tracker_port">Announce port</label>
+  <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"
+         placeholder="default: whatever qBittorrent reports"
+         {% call lock_attr("tracker.port") %}{% endcall %}>
+  {% call locked("tracker.port") %}{% endcall %}
+
+  <label for="tracker_token">Tracker token</label>
+  <input id="tracker_token" name="token" type="password" autocomplete="off"
+         placeholder="{% call stored(tracker_token_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if tracker_token_set %}
+  <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
+  {% endif %}
+  <p class="hint">Only used by the builtin tracker.</p>
+
+  <button type="submit">Save</button>
+</form>
+
+<h2>Path mappings</h2>
+<form method="post" action="/settings/paths" class="panel">
+  <p class="hint">
+    How the *arr apps, sharerr, and qBittorrent each see the same library. Leave
+    the table empty if all three agree. Blank rows are ignored, so use the spare
+    row at the bottom to add one.
+  </p>
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr><th>As Sonarr/Radarr report it</th><th>As sharerr sees it</th><th>As qBittorrent sees it</th></tr>
+    </thead>
+    <tbody>
+      {% for row in path_map %}
+      <tr>
+        <td><input name="arr" value="{{ row.arr }}" placeholder="/tv"></td>
+        <td><input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"></td>
+        <td><input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+</form>
+
+<h2>Periodic sync</h2>
+<form method="post" action="/settings/sync" class="panel">
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if sync_enabled %}checked{% endif %}
+           {% call lock_attr("sync.enabled") %}{% endcall %}>
+    Reconcile on a timer while sharerr is running
+  </label>
+  {% call locked("sync.enabled") %}{% endcall %}
+
+  <label for="interval">Interval (seconds)</label>
+  <input id="interval" name="interval_secs" value="{{ sync_interval_secs }}" inputmode="numeric"
+         {% call lock_attr("sync.interval_secs") %}{% endcall %}>
+  {% call locked("sync.interval_secs") %}{% endcall %}
+  <p class="hint">Minimum 60.</p>
+
+  <button type="submit">Save</button>
+</form>
+
+<h2>Fixed at startup</h2>
+<div class="panel">
+  <p class="hint">
+    These need a restart to change, so they are not editable here — a wrong bind
+    address applied live would leave nothing listening to fix it from.
+  </p>
+  <dl class="facts">
+    <dt>Data directory</dt><dd><code>{{ data_dir }}</code></dd>
+    <dt>Listening on</dt><dd><code>{{ bind }}</code></dd>
+    <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>
+  </dl>
+</div>
+{% endblock %}

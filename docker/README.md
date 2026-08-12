@@ -16,19 +16,28 @@ cargo run -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 # 2. Bring the stack up.
 docker compose -f docker/compose.test.yml up -d --build
 
-# 3. Collect API keys from each app's config, and load them into sharerr's vault.
+# 3. Collect API keys from each app's config.
 SONARR_KEY=$(docker compose -f docker/compose.test.yml exec -T sonarr \
     sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' /config/config.xml)
-
-docker compose -f docker/compose.test.yml exec -T sharerr \
-    sh -c "printf %s '$SONARR_KEY' | sharerr vault set sonarr.api_key"
 
 # qBittorrent prints a temporary admin password to its log on first start.
 docker compose -f docker/compose.test.yml logs qbittorrent | grep -i password
 
-# 4. Check the wiring before trying to sync.
+# 4. Load them into sharerr. Either open http://127.0.0.1:18477/ and paste them
+#    into Settings, or pipe them in — the two write to the same vault.
+docker compose -f docker/compose.test.yml exec -T sharerr \
+    sh -c "printf %s '$SONARR_KEY' | sharerr vault set sonarr.api_key"
+
+# 5. Check the wiring before trying to sync. The UI's per-service "Test
+#    connection" buttons cover the same ground for the services themselves;
+#    `doctor` additionally resolves the path mappings, which is what the
+#    deliberately-disagreeing mounts in this stack exist to exercise.
 docker compose -f docker/compose.test.yml exec sharerr sharerr doctor
 ```
+
+The stack sets `SHARERR_MASTER_KEY`, without which the vault cannot be opened and
+neither the UI nor the CLI can store a credential. A real deployment must set it
+too — see the root `README.md`.
 
 Then tag something `sharerr` in Sonarr and:
 

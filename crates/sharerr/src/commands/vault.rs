@@ -8,16 +8,6 @@ use sharerr_core::Config;
 use sharerr_core::config::secret_keys;
 use sharerr_store::{Vault, master_key_from_env};
 
-/// Keys sharerr itself looks for. Others are allowed — a deployment may stash
-/// extra values — but a typo in one of these would be silently ineffective, so
-/// unknown keys draw a warning.
-const KNOWN_KEYS: &[&str] = &[
-    secret_keys::SONARR_API_KEY,
-    secret_keys::RADARR_API_KEY,
-    secret_keys::QBITTORRENT_PASSWORD,
-    secret_keys::TRACKER_TOKEN,
-];
-
 fn open(config: &Config) -> Result<Vault> {
     let master = master_key_from_env()?;
     Vault::open(config.vault_path(), &master)
@@ -25,10 +15,12 @@ fn open(config: &Config) -> Result<Vault> {
 }
 
 pub fn set(config: &Config, key: &str) -> Result<()> {
-    if !KNOWN_KEYS.contains(&key) {
+    // Others are allowed — a deployment may stash extra values — but a typo in one
+    // of the keys sharerr reads would be silently ineffective, so it draws a warning.
+    if !secret_keys::ALL.contains(&key) {
         eprintln!(
             "warning: {key:?} is not a key sharerr reads. Known keys: {}",
-            KNOWN_KEYS.join(", ")
+            secret_keys::ALL.join(", ")
         );
     }
 

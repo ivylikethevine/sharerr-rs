@@ -114,13 +114,23 @@ impl Syncer {
     /// Wire everything from configuration and the vault.
     pub async fn build(config: &Config) -> Result<Self> {
         let master = master_key_from_env()?;
-        let vault = Vault::open(config.vault_path(), &master)
+
+        // Off the runtime: opening the vault derives its key with Argon2, ~16ms of
+        // solid CPU on x86 and considerably more on the ARM boxes this ships to.
+        // `serve` calls this on a timer *while already serving HTTP*, and a
+        // container pinned to one CPU has exactly one worker thread — so run inline
+        // it would stall /health on every retry.
+        let vault_path = config.vault_path();
+        let vault = tokio::task::spawn_blocking(move || Vault::open(&vault_path, &master))
+            .await?
             .with_context(|| format!("opening vault at {}", config.vault_path().display()))?;
 
-        let store = Store::open(&config.database_path())
-            .await
-            .with_context(|| format!("opening {}", config.database_path().display()))?;
-
+        // Every credential is read before anything is *opened*. `serve` retries this
+        // whole function on a timer while the vault is incomplete, and opening the
+        // store is the expensive half: it creates the data directory, builds a
+        // connection pool, and runs the migrations. Ordering it after the cheap
+        // lookups keeps a not-yet-configured instance from doing that work — and
+        // from materialising sharerr.db — every time round the loop.
         let qbit_password = vault
             .get(secret_keys::QBITTORRENT_PASSWORD)?
             .with_context(|| format!("no {} in the vault", secret_keys::QBITTORRENT_PASSWORD))?;
@@ -146,6 +156,10 @@ impl Syncer {
             skip_checking: config.qbittorrent.skip_checking,
             torrent_dir: config.torrent_dir(),
         };
+
+        let store = Store::open(&config.database_path())
+            .await
+            .with_context(|| format!("opening {}", config.database_path().display()))?;
 
         Ok(Self::new(
             config.clone(),

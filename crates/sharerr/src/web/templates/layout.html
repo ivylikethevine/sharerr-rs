@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}sharerr{% endblock %}</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script src="/assets/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="/">sharerr</a>
+  {% if signed_in %}
+  <nav>
+    <a href="/">Status</a>
+    <a href="/settings">Settings</a>
+    <form method="post" action="/logout" class="inline">
+      <button type="submit" class="link">Sign out</button>
+    </form>
+  </nav>
+  {% endif %}
+</header>
+
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

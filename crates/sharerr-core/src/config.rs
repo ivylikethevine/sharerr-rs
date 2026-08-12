@@ -16,6 +16,20 @@ pub mod secret_keys {
     pub const QBITTORRENT_PASSWORD: &str = "qbittorrent.password";
     /// Shared secret embedded in builtin-tracker announce URLs (milestone 2).
     pub const TRACKER_TOKEN: &str = "tracker.token";
+
+    /// Every key sharerr actually reads.
+    ///
+    /// One list, because both consumers ask the same question and used to answer
+    /// it separately: the CLI warns when `vault set` is given something outside
+    /// it, and the web UI offers exactly these as editable fields. A fifth secret
+    /// added to only one of those copies is a field the UI silently will not
+    /// manage — so the list lives beside the constants that define it.
+    pub const ALL: &[&str] = &[
+        SONARR_API_KEY,
+        RADARR_API_KEY,
+        QBITTORRENT_PASSWORD,
+        TRACKER_TOKEN,
+    ];
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

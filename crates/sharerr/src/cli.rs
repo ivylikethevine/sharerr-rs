@@ -1,8 +1,11 @@
 //! Command-line surface.
 //!
-//! Milestone 1 is headless — there is no web UI yet — so the vault subcommands
-//! are the only way to get API keys into sharerr. They are not a stopgap: an
-//! operator automating a deployment wants them regardless of the UI.
+//! Since the web UI landed, none of this is *required*: `serve` alone is enough to
+//! configure an instance from a browser, credentials included. The subcommands
+//! remain because they are the right tool for a different job — `vault set` reads
+//! a piped secret, which is what a scripted deployment or a secrets manager wants,
+//! and `doctor` exits non-zero, which is what a healthcheck wants. Neither is a
+//! stopgap for the UI.
 
 use std::path::PathBuf;
 

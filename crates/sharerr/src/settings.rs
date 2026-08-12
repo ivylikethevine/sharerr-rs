@@ -19,7 +19,7 @@ use sharerr_store::vault::{ENV_MASTER_KEY, ENV_MASTER_KEY_FILE};
 /// startup error rather than a setting that silently does nothing. That strictness
 /// means every non-config variable sharing the prefix has to be excluded here, or
 /// simply pointing `SHARERR_CONFIG` at a file would fail to load it.
-const NON_CONFIG_ENV: &[&str] = &[
+pub const NON_CONFIG_ENV: &[&str] = &[
     "CONFIG",
     strip_prefix(ENV_MASTER_KEY),
     strip_prefix(ENV_MASTER_KEY_FILE),
@@ -42,16 +42,34 @@ const fn strip_prefix(var: &str) -> &str {
 }
 
 pub fn load(path: &Path) -> Result<Config> {
-    let figment = Figment::from(Serialized::defaults(Config::default()))
-        .merge(Toml::file(path))
-        .merge(Env::prefixed("SHARERR_").ignore(NON_CONFIG_ENV).split("__"));
-
-    figment.extract().with_context(|| {
+    layered(Toml::file(path)).extract().with_context(|| {
         format!(
             "failed to load configuration (file: {}, env: SHARERR_*)",
             path.display()
         )
     })
+}
+
+/// Load from TOML held in memory rather than on disk.
+///
+/// The web UI uses this to prove an edited `sharerr.toml` still parses *before*
+/// it replaces the real file. Going through the identical layering matters: with
+/// `deny_unknown_fields`, a document that survives a bare TOML parse can still be
+/// rejected by `extract`, and discovering that at the next startup would leave the
+/// operator locked out of the UI they would need to fix it.
+pub fn validate(toml_text: &str) -> Result<Config> {
+    layered(Toml::string(toml_text))
+        .extract()
+        .context("the edited configuration is not valid")
+}
+
+/// The one definition of how the layers stack: defaults, then the document, then
+/// `SHARERR_*`. Both entry points share it so validation can never drift from
+/// what startup actually does.
+fn layered<P: figment::Provider>(document: P) -> Figment {
+    Figment::from(Serialized::defaults(Config::default()))
+        .merge(document)
+        .merge(Env::prefixed("SHARERR_").ignore(NON_CONFIG_ENV).split("__"))
 }
 
 #[cfg(test)]

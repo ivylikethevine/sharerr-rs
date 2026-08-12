@@ -47,6 +47,58 @@ Assumptions:
 3. The user may or may not be using a VPN, or a VPN container such as gluetun.
 4. The user has their media library accessable to the container(s).
 
+### Getting started
+
+sharerr is configured from its web interface. No CLI command is required.
+
+```bash
+docker run -d --name sharerr \
+  -p 8477:8477 \
+  -e SHARERR_MASTER_KEY="$(openssl rand -base64 32)" \
+  -v sharerr-config:/config \
+  -v sharerr-data:/data \
+  -v /path/to/library:/media:ro \
+  ghcr.io/ivyduggan/sharerr-rs:latest
+```
+
+Then open `http://localhost:8477/`. The first visit asks you to create an account —
+whoever gets there first claims the instance, so do it now rather than leaving it
+reachable and unclaimed. After that, **Settings** takes the Sonarr and Radarr URLs
+and API keys, the qBittorrent URL, username and password, the path mappings, and
+the tracker's advertised host. Each service has a *Test connection* button, and
+changes take effect within about fifteen seconds — no restart.
+
+`SHARERR_MASTER_KEY` is the one thing that cannot come from the UI, because it is
+what encrypts the vault the UI writes into. Set it (or `SHARERR_MASTER_KEY_FILE`,
+pointing at a docker secret) and keep it: **losing it means losing every stored
+credential.** Without it sharerr still starts and the UI still loads — it will just
+tell you the credential fields are unavailable until you set it, rather than
+quietly storing your API keys in plaintext.
+
+Two volumes matter. `/data` holds the vault, the database, and the generated
+`.torrent` files; `/config` holds `sharerr.toml`, which the UI rewrites in place
+(comments and all) when you save. Both must persist across restarts.
+
+Anyone on the network who can reach port 8477 can reach the login page, and the
+session cookie is not sent over TLS, because sharerr is normally run on a LAN. If
+that is not true of your network, put it behind a TLS-terminating proxy.
+
+#### Configuring it without the UI
+
+Everything above has a headless equivalent, which is what a scripted deployment or
+a secrets manager wants:
+
+```bash
+printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
+docker exec sharerr sharerr doctor
+```
+
+Settings can also come from the environment — `SHARERR_QBITTORRENT__URL` sets
+`qbittorrent.url`, and so on for any field. Be aware that these take precedence
+over the config file, so a field pinned by a variable cannot be changed from the
+UI; sharerr renders those inputs disabled and names the variable rather than
+accepting a save that would be silently discarded.
+
 ###### AI Usage
 
 Heavily inspired by: https://v2.dictionarry.dev/ai-transparency

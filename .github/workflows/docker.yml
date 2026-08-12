@@ -1,0 +1,88 @@
+# Builds the image and publishes it to GHCR.
+#
+# This also doubles as the MSRV check for the whole project. The Dockerfile's
+# builder stage is pinned to the workspace's declared rust-version (1.88) while a
+# developer's local toolchain is invariably newer, so a build here is the only
+# thing that reliably catches code reaching past the MSRV. That is why pull
+# requests build the image even though they never publish it.
+
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # GHCR rejects uppercase paths. `github.repository` happens to be all-lowercase
+  # today, so no normalisation is needed — worth remembering if the repo is ever
+  # moved under an org whose name has capitals in it.
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU is needed for the arm64 leg, but only barely: the Dockerfile
+      # cross-compiles the Rust build natively, so the only emulated work is the
+      # runtime stage's apt-get and useradd. That is seconds, against the ~45
+      # minutes an emulated `cargo build --release` would cost.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # Required for --platform builds and for the type=gha cache backend.
+      - uses: docker/setup-buildx-action@v3
+
+      # Skipped on pull requests. A PR from a fork gets a read-only GITHUB_TOKEN,
+      # so logging in would fail for exactly the contributors least equipped to
+      # diagnose it — and there is nothing to log in for, since push is false.
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Also emits the OCI labels, including org.opencontainers.image.source —
+      # that label is what links the GHCR package back to this repo and lets it
+      # inherit the repo's permissions.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # `mode=min`, not `max`. Exporting the intermediate builder stage would
+          # push a multi-GB release target/ tree per architecture into a cache that
+          # is 10 GB for the whole repository — evicting ci.yml's rust-cache — for a
+          # layer that can never be reused anyway, since `COPY . .` sits before the
+          # build and every commit changes its digest. What does get reused is the
+          # runtime stage's emulated apt-get, and min covers that.
+          cache-from: type=gha
+          cache-to: type=gha,mode=min

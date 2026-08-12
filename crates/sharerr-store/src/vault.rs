@@ -246,6 +246,33 @@ impl Vault {
         self.records.keys().map(String::as_str)
     }
 
+    /// The names of the stored secrets, without opening the vault.
+    ///
+    /// Record keys are cleartext in the file format by design (see the module
+    /// header), so listing them needs no master key and, crucially, no Argon2
+    /// derivation — which is ~16ms of solid CPU and 19 MiB. The web UI asks this
+    /// question on every settings render purely to show "stored" or "not set"
+    /// beside each field; going through [`Self::open`] for it made drawing a page
+    /// as expensive as authenticating.
+    ///
+    /// Deliberately reports names even when the master key is absent or wrong: a
+    /// secret that cannot currently be decrypted is still *stored*, and telling
+    /// the operator otherwise would invite them to overwrite it.
+    pub fn key_names(path: &Path) -> Result<Vec<String>> {
+        let raw = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(VaultError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+
+        Ok(parse(&raw)?.1.into_keys().collect())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -482,6 +509,31 @@ mod tests {
         assert_eq!(
             vault.keys().collect::<Vec<_>>(),
             vec!["qbittorrent.password", "sonarr.api_key"]
+        );
+    }
+
+    #[test]
+    fn key_names_are_readable_without_the_master_key() {
+        // The settings page draws "stored"/"not set" from this on every render, so
+        // it must not cost an Argon2 derivation — and it must still tell the truth
+        // when the master key is missing, or the UI would invite an operator to
+        // overwrite a secret it merely could not decrypt.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.bin");
+
+        assert!(
+            Vault::key_names(&path).unwrap().is_empty(),
+            "an absent vault has no keys, and is not an error"
+        );
+
+        let mut vault = vault_in(&dir, "master");
+        vault.put("sonarr.api_key", &secret("v")).unwrap();
+        vault.put("qbittorrent.password", &secret("v")).unwrap();
+
+        assert_eq!(
+            Vault::key_names(&path).unwrap(),
+            vec!["qbittorrent.password", "sonarr.api_key"],
+            "no master key involved"
         );
     }
 

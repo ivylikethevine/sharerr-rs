@@ -4,5 +4,10 @@
 /data
 /tests/fixtures/media
 .git
+# Neither CI definitions nor prose can affect the image, but either one landing in
+# the context changes the digest `COPY . .` is keyed on — and that buys a full cold
+# rebuild on both architectures for a typo fix.
+/.github
+*.md
 .env
 *.key

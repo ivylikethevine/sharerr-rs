@@ -1,0 +1,6 @@
+# Templates live beside the code that renders them, under src/web/, rather than in
+# askama's default top-level `templates/` directory. The web UI is one module of a
+# crate that is mostly not a web app, and splitting its markup to the crate root
+# would leave `src/web/` looking self-contained when it is not.
+[general]
+dirs = ["src/web/templates"]

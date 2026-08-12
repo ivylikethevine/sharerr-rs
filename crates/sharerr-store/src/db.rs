@@ -30,6 +30,17 @@ pub enum StoreError {
 
     #[error("stored row {id} is malformed: {detail}")]
     Malformed { id: i64, detail: String },
+
+    #[error("password hashing failed: {0}")]
+    PasswordHash(String),
+
+    #[error("a user named {username:?} already exists")]
+    UserExists { username: String },
+
+    /// Rejected before hashing. `&'static str` rather than `String` because every
+    /// one of these is a fixed message safe to render straight back to the form.
+    #[error("{0}")]
+    InvalidUser(&'static str),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -319,7 +330,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     })
 }
 
-fn now_epoch() -> i64 {
+pub(crate) fn now_epoch() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))

@@ -1,0 +1,80 @@
+# The hermetic tier of the test suite, plus the formatting and lint gates.
+#
+# Nothing here needs a service container, a database, or the network: the *arr and
+# qBittorrent clients are exercised against wiremock on loopback, sqlx runs against
+# `sqlite::memory:`, and migrations are embedded at compile time by `sqlx::migrate!`.
+# The tier-2 suite that drives docker/compose.test.yml is deliberately excluded —
+# see the note on `cargo test` below.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A quick follow-up commit should not leave the previous run burning a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustfmt.toml sets only stable options (edition 2024, max_width,
+      # use_field_init_shorthand), so the stable toolchain is sufficient — this
+      # does not need nightly rustfmt.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Its own job rather than a step in `test`: it takes seconds, and a stray
+      # blank line should not hide the test results behind a failed job.
+      - run: cargo fmt --all --check
+
+  test:
+    name: clippy + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # `cache-on-failure` because this job is *designed* to fail: it is the gate on
+      # unwrap_used/expect_used. Without it, every lint failure throws away the
+      # compiled dependency tree, so the fix-up push rebuilds all of it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      # Clippy and the tests share a job because they share target/ and the
+      # registry, so splitting them would pay for the dependency build twice.
+      #
+      # `-D warnings` is what gives the workspace lints teeth: unwrap_used,
+      # expect_used and missing_debug_implementations are set to `warn` in
+      # Cargo.toml precisely so a gate like this can promote them. If this fails,
+      # fix the code — the project's convention is that test modules opt out with
+      # an inner `#![allow(clippy::unwrap_used, clippy::expect_used)]`, not that
+      # the workspace lint gets weakened.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      # --all-features compiles crates/sharerr/tests/e2e.rs so it cannot silently
+      # rot, while its #[ignore] keeps it from running.
+      #
+      # Never add --include-ignored here: those tests shell out to
+      # `docker compose -f docker/compose.test.yml` and need a four-container *arr
+      # stack plus a generated fixture library. They stay local and opt-in.
+      - run: cargo test --workspace --all-features --locked
