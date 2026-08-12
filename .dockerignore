@@ -1,0 +1,8 @@
+# Keep the build context small: the target directory is by far the largest thing
+# in the tree and is never useful inside the image.
+/target
+/data
+/tests/fixtures/media
+.git
+.env
+*.key

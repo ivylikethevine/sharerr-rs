@@ -1,0 +1,17 @@
+[package]
+name = "sharerr-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# Test scaffolding only — never part of a release.
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1.0.151"
+
+[dev-dependencies]
+tempfile = "3.27.0"

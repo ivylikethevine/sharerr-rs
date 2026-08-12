@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# Above edition 2024's 1.85 floor for two reasons: `settings::strip_prefix` needs
+# `str::split_at_checked` in a const context (1.86), and the reconciliation loop
+# and title resolution use let-chains (1.88).
+#
+# The Dockerfile pins this same toolchain, which makes `docker build` the de-facto
+# MSRV check — a local toolchain is invariably newer and will not catch a breach.
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/ivyduggan/sharerr-rs"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+# The vault and qbit clients handle secrets; make accidental panics loud in review.
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

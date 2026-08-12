@@ -1,0 +1,50 @@
+# Configuration for the compose test stack.
+#
+# Secrets are deliberately absent: API keys and the qBittorrent password live in
+# the encrypted vault, not here. Load them once the stack is up:
+#
+#   docker compose -f docker/compose.test.yml exec sharerr \
+#     sh -c 'printf %s "$SONARR_KEY" | sharerr vault set sonarr.api_key'
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"
+
+[qbittorrent]
+url = "http://qbittorrent:8080"
+username = "admin"
+category = "sharerr"
+tag = "sharerr"
+# Let qBittorrent verify the files it already has and go straight to seeding.
+skip_checking = false
+
+[tracker]
+backend = "qbittorrent-embedded"
+# Whatever friends resolve this instance as. `localhost` only works because every
+# peer in this test stack is the same machine.
+advertised_host = "localhost"
+port = 19000
+
+[sync]
+enabled = false
+interval_secs = 900
+
+# The three views of one library, which is the whole reason path mapping exists.
+# Sonarr reports /tv, sharerr reads /media/tv, qBittorrent is told /downloads/tv.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"

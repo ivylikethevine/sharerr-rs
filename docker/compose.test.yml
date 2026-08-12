@@ -1,0 +1,121 @@
+# A disposable *arr stack for exercising sharerr against real services.
+#
+#   cargo run -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
+#   docker compose -f docker/compose.test.yml up -d
+#
+# This is the tier-2, opt-in stack. The default `cargo test` suite is hermetic and
+# needs none of this.
+#
+# ## The network is internal on purpose
+#
+# `internal: true` gives the containers no route off the host, which is how the
+# no-egress requirement is enforced rather than merely stated. Image pulls still
+# work — those happen on the host, before the network is joined.
+#
+# It also breaks one thing, honestly documented rather than worked around: adding
+# a series through Sonarr's API triggers a metadata lookup against
+# services.sonarr.tv, which cannot resolve here. See docker/README.md for the two
+# ways out. Everything sharerr itself does — tag lookup, file discovery, torrent
+# creation, seeding — works fine offline.
+
+name: sharerr-test
+
+networks:
+  sharerr-test:
+    internal: true
+
+services:
+  sonarr:
+    # Pinned rather than :latest — the pre-seeding workaround in README.md couples
+    # to Sonarr's database schema, so a silent major bump would be a bad surprise.
+    image: lscr.io/linuxserver/sonarr:4.0.15
+    container_name: sharerr-test-sonarr
+    networks: [sharerr-test]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+    volumes:
+      - sonarr-config:/config
+      # Sonarr's view of the library. Read-only: nothing in this test should ever
+      # write to the fixtures, and a bind mount is the cheapest way to prove it.
+      - ../tests/fixtures/media/tv:/tv:ro
+    ports:
+      - "127.0.0.1:18989:8989"
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.14.0
+    container_name: sharerr-test-radarr
+    networks: [sharerr-test]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+    volumes:
+      - radarr-config:/config
+      - ../tests/fixtures/media/movies:/movies:ro
+    ports:
+      - "127.0.0.1:17878:7878"
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.0.4
+    container_name: sharerr-test-qbittorrent
+    networks: [sharerr-test]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      WEBUI_PORT: "8080"
+    volumes:
+      - qbit-config:/config
+      # qBittorrent's view of the same files, at a *third* path. The three views
+      # differing is the normal case, so the test stack reproduces it rather than
+      # letting a path-mapping bug hide behind identical mounts.
+      - ../tests/fixtures/media:/downloads:ro
+    ports:
+      - "127.0.0.1:18080:8080"
+      # The embedded tracker. Friends announce here, so it has to be reachable
+      # from outside the container — the detail most easily forgotten in a real
+      # deployment.
+      - "127.0.0.1:19000:9000"
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:1.28.2
+    container_name: sharerr-test-prowlarr
+    networks: [sharerr-test]
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+    volumes:
+      - prowlarr-config:/config
+    ports:
+      - "127.0.0.1:19696:9696"
+
+  sharerr:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sharerr-test-sharerr
+    networks: [sharerr-test]
+    depends_on: [sonarr, radarr, qbittorrent]
+    environment:
+      # A throwaway key for a throwaway stack. A real deployment supplies this as
+      # a docker secret via SHARERR_MASTER_KEY_FILE.
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      - ./config:/config
+      - sharerr-data:/data
+      # sharerr's own view of the library — a fourth path, and read-only, because
+      # sharerr never needs to write to the media it shares.
+      - ../tests/fixtures/media:/media:ro
+    ports:
+      - "127.0.0.1:18477:8477"
+
+volumes:
+  sonarr-config:
+  radarr-config:
+  qbit-config:
+  prowlarr-config:
+  sharerr-data:

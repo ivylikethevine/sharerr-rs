@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+
+# Local runtime state — vault, sqlite db, generated torrents.
+/data
+/config/sharerr.toml
+
+# Test fixtures are generated, never committed (they are large synthetic blobs).
+/tests/fixtures/media
+
+# Never commit a master key.
+.env
+*.key
