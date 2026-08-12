@@ -14,7 +14,7 @@
 //! A single-file v1 torrent's `info.name` **is the filename on disk**; a client
 //! told a different name looks for a file that does not exist and stalls at 0%.
 //! The release title is metadata that travels alongside the torrent — in sharerr's
-//! database now, and in the Torznab `<title>` element in milestone 2. See
+//! database now, and in the Torznab `<title>` element. See
 //! [`crate::factory`], which deliberately takes no name argument.
 
 use std::path::Path;

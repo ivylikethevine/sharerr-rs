@@ -278,20 +278,15 @@ fn imdb_matches(stored: Option<&str>, wanted: &str) -> bool {
 // HTTP
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-pub struct TorznabState {
-    pub serve: Arc<ServeState>,
-}
-
 pub fn routes(serve: Arc<ServeState>) -> axum::Router {
     axum::Router::new()
         .route("/api", axum::routing::get(api))
-        .with_state(Arc::new(TorznabState { serve }))
+        .with_state(serve)
 }
 
 /// `GET /api?t=...`
 pub async fn api(
-    State(state): State<Arc<TorznabState>>,
+    State(state): State<Arc<ServeState>>,
     Query(query): Query<SearchQuery>,
 ) -> Response {
     if let Err(response) = check_api_key(&state, query.apikey.as_deref()).await {
@@ -313,8 +308,8 @@ pub async fn api(
     }
 }
 
-async fn search(state: &TorznabState, query: &SearchQuery) -> Response {
-    let store = match state.serve.store().await {
+async fn search(state: &ServeState, query: &SearchQuery) -> Response {
+    let store = match state.store().await {
         Ok(store) => store,
         Err(reason) => {
             return xml_status(
@@ -335,7 +330,7 @@ async fn search(state: &TorznabState, query: &SearchQuery) -> Response {
         }
     };
 
-    let config = state.serve.config().await;
+    let config = state.config().await;
     let base = public_base_url(&config);
 
     let matched: Vec<_> = items.iter().filter(|item| query.matches(item)).collect();
@@ -388,9 +383,8 @@ pub fn public_base_url(config: &sharerr_core::Config) -> String {
 /// Absent from the vault means the endpoint is closed rather than open: an
 /// indexer feed lists everything this instance shares, and defaulting to
 /// unauthenticated would publish the library to anyone who found the port.
-async fn check_api_key(state: &TorznabState, supplied: Option<&str>) -> Result<(), Response> {
+async fn check_api_key(state: &ServeState, supplied: Option<&str>) -> Result<(), Response> {
     let stored = state
-        .serve
         .open_vault()
         .await
         .ok()
@@ -407,7 +401,7 @@ async fn check_api_key(state: &TorznabState, supplied: Option<&str>) -> Result<(
     };
 
     let stored = secrecy::ExposeSecret::expose_secret(&stored);
-    if constant_time_eq(stored, supplied.unwrap_or_default()) {
+    if crate::secrets::constant_time_eq(stored, supplied.unwrap_or_default()) {
         Ok(())
     } else {
         tracing::warn!("rejected a torznab request with a bad api key");
@@ -416,14 +410,6 @@ async fn check_api_key(state: &TorznabState, supplied: Option<&str>) -> Result<(
             error_xml(100, "incorrect user credentials"),
         ))
     }
-}
-
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && a.bytes()
-            .zip(b.bytes())
-            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-            == 0
 }
 
 fn xml(body: String) -> Response {
@@ -729,14 +715,6 @@ mod tests {
             ..Default::default()
         };
         assert!(query.matches(&episode("anything", 1, 1)));
-    }
-
-    #[test]
-    fn api_keys_compare_without_short_circuiting_and_reject_mismatches() {
-        assert!(constant_time_eq("abc", "abc"));
-        assert!(!constant_time_eq("abc", "abd"));
-        assert!(!constant_time_eq("abc", "ab"));
-        assert!(!constant_time_eq("abc", ""));
     }
 
     #[test]

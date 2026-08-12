@@ -20,6 +20,7 @@ axum-extra = { version = "0.12.6", features = ["cookie", "form"] }
 clap = { version = "4.6.6", features = ["derive", "env"] }
 figment = { version = "0.10.19", features = ["toml", "env"] }
 getrandom = "0.4"
+hex = "0.4"
 rpassword = "7.5.4"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }

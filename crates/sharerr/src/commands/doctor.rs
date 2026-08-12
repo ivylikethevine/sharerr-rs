@@ -187,17 +187,36 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     for key in expected {
         match vault.get(key) {
             Ok(Some(_)) => report.ok(format!("{key} is set")),
-            Ok(None) => report.fail(format!("{key} is missing — run: sharerr vault set {key}")),
+            Ok(None) => report.fail(format!("{key} is missing — {}", fix_hint(key))),
             Err(err) => report.fail(format!("{key} could not be read: {err}")),
         }
+    }
+
+    // A warning, not a failure: an instance can reconcile and seed perfectly well
+    // without ever publishing a feed. It just cannot be found by a friend.
+    match vault.get(secret_keys::TORZNAB_API_KEY) {
+        Ok(Some(_)) => report.ok(format!("{} is set", secret_keys::TORZNAB_API_KEY)),
+        Ok(None) => report.warn(
+            "no torznab.api_key — the indexer feed is closed, so no friend can \
+             find what this instance shares. Generate one in Settings.",
+        ),
+        Err(err) => report.fail(format!("torznab.api_key could not be read: {err}")),
     }
 
     Some(vault)
 }
 
+/// How to supply a missing secret.
+///
+/// Names the web UI first and the CLI second, which is the order of least effort
+/// since the UI needs no shell inside the container. Both write the same vault.
+fn fix_hint(key: &str) -> String {
+    format!("set it in Settings on the web UI, or run: sharerr vault set {key}")
+}
+
 /// Fetch a secret, reporting the precise reason it is unavailable — **exactly
 /// once**. A read error and a missing entry have different fixes, and reporting a
-/// decryption failure as "run `sharerr vault set`" sends the operator the wrong way.
+/// decryption failure as a missing value sends the operator the wrong way.
 fn secret(vault: Option<&Vault>, key: &str, report: &mut Report) -> Option<SecretString> {
     let Some(vault) = vault else {
         // The vault section already said why it could not be opened; do not
@@ -211,7 +230,7 @@ fn secret(vault: Option<&Vault>, key: &str, report: &mut Report) -> Option<Secre
     match vault.get(key) {
         Ok(Some(value)) => Some(value),
         Ok(None) => {
-            report.fail(format!("{key} is missing — run: sharerr vault set {key}"));
+            report.fail(format!("{key} is missing — {}", fix_hint(key)));
             None
         }
         Err(err) => {
@@ -372,9 +391,14 @@ fn check_tracker(config: &Config, report: &mut Report) {
             report.ok("backend: qbittorrent-embedded");
         }
         TrackerBackend::Builtin => {
-            // Selecting this produces valid announce URLs that nothing answers yet.
-            // Better to say so plainly than to let it look configured and working.
-            report.warn("backend: builtin — the tracker server itself is not implemented yet");
+            report.ok("backend: builtin — sharerr serves /announce itself");
+            // The one way this backend can look configured and still not work:
+            // `doctor` and `sync` are one-shot commands, and the announce endpoint
+            // only exists while `serve` is running.
+            report.info(
+                "announces are answered by `sharerr serve`; a one-shot sync builds \
+                 correct torrents whose announces fail until it is running",
+            );
         }
     }
 

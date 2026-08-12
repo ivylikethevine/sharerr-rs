@@ -34,12 +34,6 @@ pub enum TorrentError {
     },
 
     #[error(
-        "the builtin tracker is not implemented yet (milestone 2). Set \
-         tracker.backend = \"qbittorrent-embedded\" to share content today"
-    )]
-    BuiltinTrackerUnavailable,
-
-    #[error(
         "tracker.advertised_host is not set — sharerr cannot guess the address \
          friends reach it on"
     )]

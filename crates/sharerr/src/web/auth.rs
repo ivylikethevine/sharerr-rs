@@ -72,7 +72,8 @@ struct Session {
 impl Sessions {
     /// Mint a session and return its token.
     pub async fn create(&self, username: &str) -> Result<String, String> {
-        let token = random_token()?;
+        // 256 bits: a session token is a bearer credential with a fortnight's life.
+        let token = crate::secrets::random_hex(32)?;
         let mut sessions = self.inner.write().await;
 
         // Expired entries are only ever removed here. There is no reaper task: a
@@ -107,24 +108,6 @@ impl Sessions {
     async fn remove(&self, token: &str) {
         self.inner.write().await.remove(token);
     }
-}
-
-/// 256 bits from the same source the vault uses for its nonces, hex encoded.
-///
-/// Hand-rolled hex rather than a dependency: it is four lines, and the encoding is
-/// not the interesting part of this.
-fn random_token() -> Result<String, String> {
-    let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| format!("could not generate a session token: {e}"))?;
-
-    let mut token = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        // Writing into a String cannot fail; the result is discarded rather than
-        // unwrapped because the workspace lints against `unwrap`.
-        let _ = write!(token, "{byte:02x}");
-    }
-    Ok(token)
 }
 
 /// The signed-in user, if any.

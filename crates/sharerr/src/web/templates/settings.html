@@ -144,7 +144,7 @@
   <label for="backend">Backend</label>
   <select id="backend" name="backend" {% call lock_attr("tracker.backend") %}{% endcall %}>
     <option value="qbittorrent-embedded" {% if !tracker_builtin %}selected{% endif %}>qBittorrent's embedded tracker</option>
-    <option value="builtin" {% if tracker_builtin %}selected{% endif %}>sharerr's builtin tracker (not yet implemented)</option>
+    <option value="builtin" {% if tracker_builtin %}selected{% endif %}>sharerr's builtin tracker (served by this instance)</option>
   </select>
   {% call locked("tracker.backend") %}{% endcall %}
 

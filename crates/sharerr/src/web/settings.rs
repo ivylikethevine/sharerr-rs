@@ -54,7 +54,9 @@ pub async fn generate_secret(
         _ => return reject(&state, "There is no such secret to generate.").await,
     };
 
-    let generated = match random_key() {
+    // 160 bits: long enough that guessing is not a strategy, short enough to
+    // paste into another app's settings box.
+    let generated = match crate::secrets::random_hex(20) {
         Ok(generated) => generated,
         Err(reason) => return reject(&state, &reason).await,
     };
@@ -66,20 +68,6 @@ pub async fn generate_secret(
     let mut page = build_page(&state, Some(field), None).await;
     page.revealed = Some(generated);
     render(&page)
-}
-
-/// 160 bits, hex encoded — long enough that guessing is not a strategy, short
-/// enough to paste. Same source the vault uses for its nonces.
-fn random_key() -> Result<String, String> {
-    let mut bytes = [0u8; 20];
-    getrandom::fill(&mut bytes).map_err(|e| format!("could not generate a key: {e}"))?;
-
-    let mut key = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(key, "{byte:02x}");
-    }
-    Ok(key)
 }
 
 #[derive(Debug, Default, Deserialize)]

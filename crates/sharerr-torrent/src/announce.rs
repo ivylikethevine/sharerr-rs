@@ -27,10 +27,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// How long a client is told to wait before re-announcing.
-pub const INTERVAL: Duration = Duration::from_secs(1800);
+const INTERVAL: Duration = Duration::from_secs(1800);
 
 /// The floor a well-behaved client will respect for manual re-announces.
-pub const MIN_INTERVAL: Duration = Duration::from_secs(900);
+const MIN_INTERVAL: Duration = Duration::from_secs(900);
 
 /// A peer is forgotten after two missed announces.
 ///
@@ -488,21 +488,6 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Percent-encode 20 raw bytes the way a client would, for tests and for building
-/// scrape URLs.
-pub fn percent_encode(raw: &[u8]) -> String {
-    let mut out = String::with_capacity(raw.len() * 3);
-    for byte in raw {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char);
-            }
-            _ => out.push_str(&format!("%{byte:02x}")),
-        }
-    }
-    out
-}
-
 /// Parse a hex info hash — the form sharerr stores and the Torznab feed publishes.
 pub fn info_hash_from_hex(hex: &str) -> Option<InfoHash> {
     if hex.len() != HASH_LEN * 2 {
@@ -522,6 +507,23 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// Percent-encode raw bytes the way a client would — the inverse of
+    /// [`percent_decode`]. Lives here because only these tests need it: they build
+    /// realistic queries rather than pasting pre-encoded strings, which is what
+    /// makes the round trip through the decoder worth asserting.
+    fn percent_encode(raw: &[u8]) -> String {
+        let mut out = String::with_capacity(raw.len() * 3);
+        for byte in raw {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(*byte as char);
+                }
+                _ => out.push_str(&format!("%{byte:02x}")),
+            }
+        }
+        out
+    }
 
     fn hash(seed: u8) -> InfoHash {
         [seed; HASH_LEN]

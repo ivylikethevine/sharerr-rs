@@ -21,6 +21,14 @@ for the services I would like to integrate with. The idea is as follows:
    data as well as metadata found with the file. I want to also preserve any existing
    torrents if possible, instead of moving the file & causing errors.
 
+> **One correction to points 2 and 3, kept here because the design depends on it.**
+> qBittorrent *consumes* RSS feeds; it does not publish one. There is therefore no
+> qBittorrent feed for Prowlarr to index. sharerr serves the feed itself, as
+> Torznab, which is the format Prowlarr's *Generic Torznab* indexer speaks — see
+> [Sharing with a friend](#sharing-with-a-friend). qBittorrent's *embedded tracker*
+> is real and is used; it is only the feed half of the original plan that had to
+> change.
+
 The services:
 
 1. Sonarr - library and request system for tv shows
@@ -66,7 +74,7 @@ whoever gets there first claims the instance, so do it now rather than leaving i
 reachable and unclaimed. After that, **Settings** takes the Sonarr and Radarr URLs
 and API keys, the qBittorrent URL, username and password, the path mappings, and
 the tracker's advertised host. Each service has a *Test connection* button, and
-changes take effect within about fifteen seconds — no restart.
+saving takes effect within a second or two — no restart.
 
 `SHARERR_MASTER_KEY` is the one thing that cannot come from the UI, because it is
 what encrypts the vault the UI writes into. Set it (or `SHARERR_MASTER_KEY_FILE`,

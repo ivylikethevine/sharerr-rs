@@ -1,8 +1,9 @@
 //! `sharerr serve` — the long-running mode: periodic reconciliation plus HTTP.
 //!
-//! The HTTP surface is `/health` and `/ready` for the orchestrator, plus the web
-//! UI (see [`crate::web`]) mounted onto the same router. The tracker and the
-//! Torznab endpoint arrive later and mount here too.
+//! One router carries everything: `/health` and `/ready` for the orchestrator, the
+//! web UI ([`crate::web`]), sharerr's own tracker ([`crate::tracker`]), and the
+//! Torznab feed a friend's Prowlarr indexes ([`crate::torznab`]). One process, one
+//! port — whatever makes 8477 reachable makes all of it reachable.
 //!
 //! Serving is deliberately decoupled from being *configured*. An instance whose
 //! vault has no `qbittorrent.password` in it yet still binds, still answers

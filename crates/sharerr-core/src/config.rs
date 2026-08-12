@@ -148,10 +148,12 @@ impl Default for QbitConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrackerBackend {
-    /// qBittorrent's own embedded tracker. Fully supported in milestone 1.
+    /// qBittorrent's own embedded tracker. The default: sharerr turns it on and
+    /// nothing else is required.
     QbittorrentEmbedded,
-    /// sharerr's builtin tracker. Announce URLs are generated, but the tracker
-    /// server itself arrives in milestone 2.
+    /// sharerr's own tracker, served from this process on [`ServerConfig::bind`].
+    /// Answers only for torrents sharerr made, and honours `tracker.token` when
+    /// one is stored.
     Builtin,
 }
 

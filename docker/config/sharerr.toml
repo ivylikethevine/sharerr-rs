@@ -1,7 +1,8 @@
 # Configuration for the compose test stack.
 #
-# Secrets are deliberately absent: API keys and the qBittorrent password live in
-# the encrypted vault, not here. Load them once the stack is up:
+# Secrets are deliberately absent: API keys, the qBittorrent password, and the
+# Torznab API key live in the encrypted vault, not here. Load them once the stack
+# is up — either at http://127.0.0.1:18477/ under Settings, or by piping them in:
 #
 #   docker compose -f docker/compose.test.yml exec sharerr \
 #     sh -c 'printf %s "$SONARR_KEY" | sharerr vault set sonarr.api_key'

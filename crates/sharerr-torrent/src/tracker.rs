@@ -1,12 +1,15 @@
-//! Where sharerr's torrents announce.
-//!
-//! Two backends, both configurable, only one of which works in milestone 1:
+//! Where sharerr's torrents announce. Two working backends:
 //!
 //! * [`QbitEmbeddedTracker`] — qBittorrent has a tracker built in. Turning it on is
-//!   a preferences write, and it is then serving immediately. Fully implemented.
-//! * [`BuiltinTracker`] — sharerr's own tracker. The URL scheme is settled so that
-//!   configuration written today stays valid, but the server arrives in milestone 2
-//!   and [`TrackerProvider::ensure_ready`] says so plainly rather than pretending.
+//!   a preferences write, and it is then serving immediately. The default, because
+//!   it needs nothing from the operator.
+//! * [`BuiltinTracker`] — sharerr serves `/announce` itself, from the same process
+//!   and port as everything else. The protocol lives in [`crate::announce`] and the
+//!   HTTP handlers in the binary crate.
+//!
+//! This module is only the *provider* side: what URL to embed in a new torrent and
+//! what has to be true before doing so. Serving announces is a separate concern
+//! with a separate home.
 
 use std::sync::Arc;
 

@@ -209,11 +209,7 @@ async fn is_served(state: &TrackerState, info_hash: &InfoHash) -> bool {
     }
 }
 
-/// Compare the token in the URL against the configured one, in constant time.
-///
-/// Not because a timing attack on a tracker token is likely, but because the
-/// comparison is one line either way and a short-circuiting `==` on a secret is
-/// the kind of thing that gets copied into somewhere it does matter.
+/// Compare the token in the URL against the configured one.
 fn check_token(required: Option<&str>, supplied: Option<&str>) -> Result<(), AnnounceError> {
     let Some(required) = required else {
         // No token configured: the announce URLs sharerr generates have no token
@@ -221,22 +217,16 @@ fn check_token(required: Option<&str>, supplied: Option<&str>) -> Result<(), Ann
         return Ok(());
     };
 
-    let supplied = supplied.unwrap_or_default();
-    if required.len() == supplied.len()
-        && required
-            .bytes()
-            .zip(supplied.bytes())
-            .fold(0u8, |differences, (a, b)| differences | (a ^ b))
-            == 0
-    {
+    if crate::secrets::constant_time_eq(required, supplied.unwrap_or_default()) {
         Ok(())
     } else {
         Err(AnnounceError::BadToken)
     }
 }
 
+/// Lowercase hex, matching exactly what the store holds in `info_hash`.
 fn hex(bytes: &InfoHash) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(bytes)
 }
 
 fn bencode(body: Vec<u8>) -> Response {
