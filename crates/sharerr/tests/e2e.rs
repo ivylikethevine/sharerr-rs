@@ -3,11 +3,17 @@
 //! Opt-in, and inert unless the `e2e` feature is on:
 //!
 //! ```text
-//! cargo run -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
-//! docker compose -f docker/compose.test.yml up -d --build
-//! # ... one-time setup, see docker/README.md ...
-//! cargo test -p sharerr --features e2e -- --ignored --test-threads=1
+//! ./run_docker_tests.sh
 //! ```
+//!
+//! which brings the stack up, seeds Sonarr and Radarr with tagged content, loads
+//! the credentials, and ends by running these. Driving it by hand is documented in
+//! `docker/README.md`; the invocation these expect is
+//! `cargo test -p sharerr --features e2e -- --ignored --test-threads=1`.
+//!
+//! All three depend on there *being* tagged content — without it `sharerr sync`
+//! bails with "no *arr app could be scanned" — so the seeding step is not optional
+//! scaffolding, it is a precondition.
 //!
 //! The assertion that justifies the whole tier: after a real sync through a real
 //! qBittorrent, every media file has the same inode, mtime, and length it started
@@ -136,11 +142,22 @@ fn a_real_sync_never_moves_or_rewrites_the_library() {
     );
 
     let out = sharerr(&["sync"]);
-    println!("{}", String::from_utf8_lossy(&out.stdout));
+    let report = String::from_utf8_lossy(&out.stdout);
+    println!("{report}");
     assert!(
         out.status.success(),
         "sync failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Without this the test passes vacuously: a sync that discovers nothing also
+    // moves nothing. The count comes from the same fixtures `seed-arr` tags, so it
+    // cannot drift from what Sonarr and Radarr were told about.
+    let expected = sharerr_testkit::library::tv_files(&media).len()
+        + sharerr_testkit::library::movie_files(&media).len();
+    assert!(
+        report.contains(&format!("{expected} discovered")),
+        "expected {expected} tagged file(s) — is the stack seeded? got: {report}"
     );
 
     // qBittorrent hash-checks on add; give it a moment to finish and settle.

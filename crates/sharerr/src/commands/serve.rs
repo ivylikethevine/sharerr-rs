@@ -50,6 +50,13 @@ pub struct ServeState {
     config: RwLock<Config>,
     /// Which `sharerr.toml` the UI writes back to — the `--config` flag's value.
     config_path: PathBuf,
+    /// Why the config on disk could not be loaded, when it could not be.
+    ///
+    /// `Some` means the `config` above is [`crate::settings::load_or_recover`]'s
+    /// salvage rather than what the operator wrote, and the server is up only so
+    /// that the file can be repaired. Behind a lock because a successful settings
+    /// save clears it — the write proved the file parses.
+    config_error: RwLock<Option<String>>,
     /// Opened independently of the syncer, because login has to work *before* any
     /// credential exists. Going through `syncer.store()` would mean nobody could
     /// log in to fix the very thing blocking the syncer.
@@ -75,10 +82,11 @@ pub struct ServeState {
 }
 
 impl ServeState {
-    fn new(config: Config, config_path: impl Into<PathBuf>) -> Self {
+    fn new(config: Config, config_path: impl Into<PathBuf>, config_error: Option<String>) -> Self {
         Self {
             config: RwLock::new(config),
             config_path: config_path.into(),
+            config_error: RwLock::new(config_error),
             store: RwLock::new(None),
             // Replaced by the first `ensure_ready`, which the background loop runs
             // the moment `run` starts polling it. Only observable in the sliver
@@ -96,6 +104,11 @@ impl ServeState {
 
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// Why `sharerr.toml` could not be loaded, or `None` when it was.
+    pub async fn config_error(&self) -> Option<String> {
+        self.config_error.read().await.clone()
     }
 
     /// The database, opening it on first use and caching it thereafter.
@@ -170,8 +183,13 @@ impl ServeState {
     }
 
     /// Adopt a freshly written configuration and force the syncer to be rebuilt.
+    ///
+    /// Clears any recorded load error: the caller only has a `Config` because
+    /// `settings::validate` accepted the document it just wrote, so whatever was
+    /// wrong with the file on disk no longer is.
     pub async fn replace_config(&self, config: Config) {
         *self.config.write().await = config;
+        *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;
     }
 
@@ -212,6 +230,15 @@ impl ServeState {
             return Some(Arc::clone(syncer));
         }
 
+        // Short-circuit rather than letting `Syncer::build` run against the salvage.
+        // It would fail anyway, but with "neither sonarr nor radarr is configured",
+        // which sends the operator looking for a missing URL instead of the typo
+        // that actually stopped the file loading.
+        if let Some(reason) = self.config_error().await {
+            *self.syncer.write().await = Err(format!("{}: {reason}", self.config_path.display()));
+            return None;
+        }
+
         let config = self.config().await;
         match Syncer::build(&config).await {
             Ok(syncer) => {
@@ -236,8 +263,12 @@ impl ServeState {
     }
 }
 
-pub async fn run(config: &Config, config_path: &Path) -> Result<()> {
-    let state = Arc::new(ServeState::new(config.clone(), config_path));
+pub async fn run(config: &Config, config_path: &Path, config_error: Option<String>) -> Result<()> {
+    let state = Arc::new(ServeState::new(
+        config.clone(),
+        config_path,
+        config_error.clone(),
+    ));
 
     // The probes keep their own state and stay outside the web UI's auth layer.
     // `/health` in particular is what the Dockerfile's HEALTHCHECK curls, with no
@@ -258,7 +289,12 @@ pub async fn run(config: &Config, config_path: &Path) -> Result<()> {
     // Stated at startup rather than from inside the loop: it is true regardless of
     // whether any credentials load, and an operator reading the first few lines of
     // the log should not have to wait for a vault fix to learn it.
-    if !config.sync.enabled {
+    if config_error.is_some() {
+        tracing::warn!(
+            config = %config_path.display(),
+            "serving only so the configuration can be repaired — open the web UI"
+        );
+    } else if !config.sync.enabled {
         tracing::info!("periodic sync is disabled; serving http only");
     }
 
@@ -328,10 +364,20 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Readiness covers the two things that stop this instance doing work: credentials
-/// it could not load, and its own database. The *arr apps and qBittorrent being
-/// down is a `doctor` question, not a reason to pull this instance out of service.
+/// Readiness covers the three things that stop this instance doing work: a config
+/// file it could not load, credentials it could not load, and its own database. The
+/// *arr apps and qBittorrent being down is a `doctor` question, not a reason to pull
+/// this instance out of service.
 async fn ready(State(state): State<Arc<ServeState>>) -> (StatusCode, String) {
+    // Reported ahead of the syncer's reason, which would otherwise relay the same
+    // string under the less specific "not configured" heading.
+    if let Some(reason) = state.config_error().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("configuration invalid: {reason}"),
+        );
+    }
+
     let syncer = match &*state.syncer.read().await {
         Ok(syncer) => Arc::clone(syncer),
         Err(reason) => {
@@ -370,7 +416,19 @@ mod tests {
             ..Config::default()
         };
         let path = dir.path().join("sharerr.toml");
-        (dir, Arc::new(ServeState::new(config, path)))
+        (dir, Arc::new(ServeState::new(config, path, None)))
+    }
+
+    /// The same fresh container, except its `sharerr.toml` did not load at all.
+    fn unloadable() -> (tempfile::TempDir, Arc<ServeState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.toml");
+        let state = ServeState::new(
+            Config::default(),
+            path,
+            Some("invalid key `taag`".to_owned()),
+        );
+        (dir, Arc::new(state))
     }
 
     #[tokio::test]
@@ -388,6 +446,45 @@ mod tests {
     #[tokio::test]
     async fn health_is_unconditional() {
         assert_eq!(health().await, "ok");
+    }
+
+    /// A file that would not load must be *named* as the obstacle. Letting
+    /// `Syncer::build` run against the salvaged config instead reports "neither
+    /// sonarr nor radarr is configured", which is true of the defaults and sends
+    /// the operator hunting for a missing URL rather than the typo.
+    #[tokio::test]
+    async fn an_unloadable_config_is_the_reported_reason() {
+        let (_dir, state) = unloadable();
+
+        assert!(state.ensure_ready().await.is_none());
+        let reason = state.blocked_reason().await.expect("must be blocked");
+        assert!(reason.contains("taag"), "got {reason:?}");
+        assert!(
+            !reason.contains("nothing to share"),
+            "must not relay Syncer::build's misleading reason: {reason:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_reports_the_config_error_before_anything_else() {
+        let (_dir, state) = unloadable();
+
+        let (status, body) = ready(State(state)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.starts_with("configuration invalid:"), "got {body:?}");
+        assert!(body.contains("taag"), "got {body:?}");
+    }
+
+    /// A successful save is proof the file parses — `settings::validate` produced
+    /// the `Config` being adopted — so the banner has to clear itself. Leaving it
+    /// set would tell an operator who just fixed the file that it is still broken.
+    #[tokio::test]
+    async fn a_successful_save_clears_the_config_error() {
+        let (_dir, state) = unloadable();
+
+        state.replace_config(Config::default()).await;
+
+        assert_eq!(state.config_error().await, None);
     }
 
     /// The regression the web UI depends on. `ensure_ready` caches the first

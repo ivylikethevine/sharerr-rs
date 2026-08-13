@@ -345,9 +345,13 @@ where
 {
     let path = state.serve.config_path().to_path_buf();
 
-    let mut file = match ConfigFile::open(&path) {
-        Ok(file) => file,
-        Err(err) => return reject(state, &format!("{err:#}")).await,
+    let mut file = if state.serve.config_error().await.is_some() {
+        replacement_for(state, &path).await
+    } else {
+        match ConfigFile::open(&path) {
+            Ok(file) => file,
+            Err(err) => return reject(state, &format!("{err:#}")).await,
+        }
     };
 
     if let Err(err) = edit(&mut file) {
@@ -364,6 +368,29 @@ where
         }
         Err(err) => reject(state, &format!("{err:#}")).await,
     }
+}
+
+/// A blank document to write over a `sharerr.toml` that did not load.
+///
+/// Editing that file in place cannot repair it: whatever `Config` rejected is
+/// still in there, so `settings::validate` keeps refusing every save and the
+/// operator is stuck behind a page that promises to help. Replacing it works
+/// because a file that did not load is not in effect — the process is already
+/// running on the values written here.
+///
+/// The two carried forward are the two [`crate::settings::load_or_recover`]
+/// salvages, and they are carried for the same reason it salvages them: `data_dir`
+/// is where the vault and database live, and dropping it now would move the
+/// operator's instance out from under them at the next restart.
+async fn replacement_for(state: &WebState, path: &std::path::Path) -> ConfigFile {
+    let config = state.serve.config().await;
+    let mut file = ConfigFile::replacing(path);
+
+    file.apply([
+        Edit::str("data_dir", config.data_dir.to_string_lossy().as_ref()),
+        Edit::str("server.bind", config.server.bind.to_string()),
+    ]);
+    file
 }
 
 /// Store, clear, or leave a vault secret alone.
@@ -467,10 +494,28 @@ async fn build_page(
     let secrets = secrets_present(&config).await;
     let is_set = |key: &str| secrets.contains(key);
 
+    // The one state where what is on disk and what the page renders disagree, so
+    // the operator has to be told which of the two a save keeps — and where the
+    // other one goes.
+    let config_error = state.serve.config_error().await;
+    let config_notice = config_error.as_ref().and_then(|_| {
+        ConfigFile::replacing(state.serve.config_path())
+            .backup_path()
+            .map(|aside| {
+                format!(
+                    "The current file will be kept as {} — nothing in it is lost, \
+                     but only what this page shows stays in effect.",
+                    aside.display()
+                )
+            })
+    });
+
     SettingsPage {
         signed_in: true,
         saved,
         error,
+        config_error,
+        config_notice,
         master_key_present: master_key_from_env().is_ok(),
         locks: super::config_io::env_overrides(),
 

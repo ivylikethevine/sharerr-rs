@@ -92,30 +92,56 @@ impl Edit {
 pub struct ConfigFile {
     path: PathBuf,
     doc: DocumentMut,
+    /// Set when the file on disk did not parse and `doc` is a blank replacement.
+    /// [`Self::save`] moves the original aside rather than overwriting it.
+    recovered: bool,
 }
 
 impl ConfigFile {
-    /// Open the file, or start an empty document if it is absent.
+    /// Open the file for editing, or start an empty document if it is absent.
     ///
     /// A missing config file is legal today — a deployment can be configured
     /// entirely through `SHARERR_*` — and must stay legal, so this is not an error.
+    /// Unparseable TOML *is* one: there is a document here and it cannot be edited.
+    /// [`Self::replacing`] is the way past that.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(source) => {
-                return Err(anyhow::Error::new(source))
-                    .with_context(|| format!("reading {}", path.display()));
-            }
-        };
+        let text = read_or_empty(&path)?;
 
         let doc = text
             .parse::<DocumentMut>()
             .with_context(|| format!("{} is not valid TOML", path.display()))?;
 
-        Ok(Self { path, doc })
+        Ok(Self {
+            path,
+            doc,
+            recovered: false,
+        })
+    }
+
+    /// Start a fresh document that will *replace* whatever is on disk.
+    ///
+    /// For the one case editing cannot fix: a `sharerr.toml` that failed to load.
+    /// Editing it in place does not help, because the reason it failed is still
+    /// there — save a corrected `tag` beside a typo'd `taag` and the document is
+    /// still rejected, forever. Since a file that did not load is not in effect
+    /// anyway, the honest move is to write out what the running process actually
+    /// has and let the operator carry on.
+    ///
+    /// [`Self::save`] renames the original to `sharerr.toml.invalid` first, so the
+    /// only copy of what they hand-wrote — including the one stray character that
+    /// probably caused this — survives for them to consult.
+    pub fn replacing(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            doc: DocumentMut::new(),
+            recovered: true,
+        }
+    }
+
+    /// Where [`Self::save`] will move the current file, when it is replacing one.
+    pub fn backup_path(&self) -> Option<PathBuf> {
+        (self.recovered && self.path.exists()).then(|| invalid_path(&self.path))
     }
 
     /// Apply edits in order. Nothing is written until [`Self::save`].
@@ -170,6 +196,19 @@ impl ConfigFile {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
+        // Keep the original instead of overwriting it. It is still the only copy of
+        // whatever the operator hand-wrote — comments, a URL they typed once and
+        // would have to look up again — and the reason it did not load may be a
+        // single character they can lift straight back out.
+        if let Some(aside) = self.backup_path() {
+            std::fs::rename(&self.path, &aside)
+                .with_context(|| format!("moving {} aside", self.path.display()))?;
+            tracing::warn!(
+                moved_to = %aside.display(),
+                "replaced an unparseable config file"
+            );
+        }
+
         // tmp-then-rename, mirroring `Vault::persist`: a crash or a full disk
         // partway through leaves the previous config intact rather than truncated.
         // A truncated sharerr.toml is not merely lost settings — with
@@ -181,6 +220,21 @@ impl ConfigFile {
 
         Ok(config)
     }
+}
+
+/// Read the file, treating "not there" as "empty" and anything else as an error.
+fn read_or_empty(path: &std::path::Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(source) => Err(anyhow::Error::new(source))
+            .with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Where an unparseable config is moved before a fresh one replaces it.
+fn invalid_path(path: &std::path::Path) -> PathBuf {
+    path.with_extension("toml.invalid")
 }
 
 fn apply_one(doc: &mut DocumentMut, edit: Edit) {
@@ -310,6 +364,7 @@ mod tests {
         ConfigFile {
             path: PathBuf::from("sharerr.toml"),
             doc: text.parse().expect("valid toml"),
+            recovered: false,
         }
     }
 
@@ -478,6 +533,101 @@ username = "admin"
 
         assert_eq!(config.tag, "fresh");
         assert!(std::fs::read_to_string(&path).unwrap().contains("fresh"));
+    }
+
+    /// A file that parses has nothing to recover from, and must not be treated as
+    /// disposable — the whole point of `toml_edit` is that its comments survive.
+    #[test]
+    fn a_parseable_file_is_edited_in_place_and_never_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.toml");
+        std::fs::write(&path, "# keep me\ntag = \"first\"\n").unwrap();
+
+        let mut file = ConfigFile::open(&path).unwrap();
+        assert_eq!(file.backup_path(), None);
+
+        file.apply([Edit::str("tag", "second")]);
+        file.save().unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# keep me"), "comments must survive");
+        assert!(!path.with_extension("toml.invalid").exists());
+    }
+
+    /// The case editing cannot reach. A typo'd key is still a typo'd key after any
+    /// number of corrected sections are saved beside it, so `validate` rejects
+    /// every one — the operator would be stuck behind a page offering to help.
+    #[test]
+    fn replacing_writes_over_a_file_that_editing_could_never_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.toml");
+        let original = "taag = \"typo\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        // Editing in place: the offending key travels with the document.
+        let mut edited = ConfigFile::open(&path).unwrap();
+        edited.apply([Edit::str("tag", "repaired")]);
+        assert!(edited.save().is_err(), "editing cannot get past the typo");
+
+        let mut file = ConfigFile::replacing(&path);
+        file.apply([Edit::str("tag", "repaired")]);
+        let config = file.save().unwrap();
+
+        assert_eq!(config.tag, "repaired");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("repaired"));
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.invalid")).unwrap(),
+            original,
+            "the only copy of what the operator wrote must be kept"
+        );
+    }
+
+    /// Unparseable TOML takes the same route — `open` refuses it outright.
+    #[test]
+    fn an_unparseable_file_is_refused_by_open_and_handled_by_replacing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.toml");
+        let original = "this is not toml at all {{{\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(ConfigFile::open(&path).is_err());
+
+        let mut file = ConfigFile::replacing(&path);
+        file.apply([Edit::str("tag", "repaired")]);
+        file.save().unwrap();
+
+        assert!(std::fs::read_to_string(&path).unwrap().contains("repaired"));
+        assert_eq!(
+            std::fs::read_to_string(path.with_extension("toml.invalid")).unwrap(),
+            original
+        );
+    }
+
+    /// Replacing still validates. Writing a document that `Config` rejects would
+    /// swap one unloadable file for another, having already destroyed the first.
+    #[test]
+    fn a_replacement_that_would_not_load_leaves_the_original_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.toml");
+        let original = "not toml {{{\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut file = ConfigFile::replacing(&path);
+        file.apply([Edit::str("taag", "typo")]);
+
+        assert!(file.save().is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!path.with_extension("toml.invalid").exists());
+    }
+
+    /// There is nothing to keep when there was no file, and offering to preserve
+    /// one would be a lie on the page that says so.
+    #[test]
+    fn replacing_an_absent_file_has_no_backup_to_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.toml");
+
+        assert_eq!(ConfigFile::replacing(&path).backup_path(), None);
     }
 
     #[test]

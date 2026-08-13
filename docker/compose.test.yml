@@ -1,7 +1,6 @@
 # A disposable *arr stack for exercising sharerr against real services.
 #
-#   cargo run -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
-#   docker compose -f docker/compose.test.yml up -d
+#   ./run_docker_tests.sh
 #
 # This is the tier-2, opt-in stack. The default `cargo test` suite is hermetic and
 # needs none of this.
@@ -12,11 +11,18 @@
 # no-egress requirement is enforced rather than merely stated. Image pulls still
 # work — those happen on the host, before the network is joined.
 #
-# It also breaks one thing, honestly documented rather than worked around: adding
-# a series through Sonarr's API triggers a metadata lookup against
-# services.sonarr.tv, which cannot resolve here. See docker/README.md for the two
-# ways out. Everything sharerr itself does — tag lookup, file discovery, torrent
-# creation, seeding — works fine offline.
+# It also breaks one thing: adding a series through Sonarr's API triggers a
+# metadata lookup against services.sonarr.tv, which cannot resolve here. That is
+# why the tagged content this stack needs is written straight into Sonarr's and
+# Radarr's own databases instead — see `seed-arr` and docker/README.md. Everything
+# sharerr itself does — tag lookup, file discovery, torrent creation, seeding —
+# works fine offline.
+#
+# ## Sonarr and Radarr keep their config in `./state`, not a named volume
+#
+# `seed-arr` runs on the host and writes to those SQLite databases directly, which
+# needs a path the host can actually open. PUID/PGID are 1000 to match. `down -v`
+# does not clear a bind mount, so teardown removes `docker/state` as well.
 
 name: sharerr-test
 
@@ -36,7 +42,7 @@ services:
       PGID: "1000"
       TZ: Etc/UTC
     volumes:
-      - sonarr-config:/config
+      - ./state/sonarr:/config
       # Sonarr's view of the library. Read-only: nothing in this test should ever
       # write to the fixtures, and a bind mount is the cheapest way to prove it.
       - ../tests/fixtures/media/tv:/tv:ro
@@ -52,7 +58,7 @@ services:
       PGID: "1000"
       TZ: Etc/UTC
     volumes:
-      - radarr-config:/config
+      - ./state/radarr:/config
       - ../tests/fixtures/media/movies:/movies:ro
     ports:
       - "127.0.0.1:17878:7878"
@@ -114,8 +120,6 @@ services:
       - "127.0.0.1:18477:8477"
 
 volumes:
-  sonarr-config:
-  radarr-config:
   qbit-config:
   prowlarr-config:
   sharerr-data:

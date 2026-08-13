@@ -2619,8 +2619,11 @@ dependencies = [
 name = "sharerr-testkit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde_json",
+ "sqlx",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

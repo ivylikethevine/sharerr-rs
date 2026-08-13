@@ -21,6 +21,20 @@
 <p class="error" role="alert">{{ message }}</p>
 {% endif %}
 
+{% if let Some(reason) = config_error %}
+<div class="error" role="alert">
+  <p><strong>The configuration file did not load.</strong> {{ reason }}</p>
+  <p>
+    sharerr is running on the values shown below, not on what the file says.
+    Saving any section replaces the file with them, which is how you get out of
+    this — after that, edit normally.
+  </p>
+  {% if let Some(notice) = config_notice %}
+  <p>{{ notice }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if let Some(secret) = revealed %}
 <div class="ok" role="status">
   <p><strong>Copy this now — it will not be shown again.</strong></p>

@@ -4,7 +4,18 @@
 {% block content %}
 <h1>Status</h1>
 
-{% if let Some(reason) = blocked %}
+{# The config error replaces the blocked banner rather than joining it: while the
+   file will not load, `blocked` is relaying this same sentence. #}
+{% if let Some(reason) = config_error %}
+<p class="error" role="alert">
+  <strong>{{ config_path }} did not load.</strong> {{ reason }}
+</p>
+<p class="hint">
+  sharerr is running on built-in defaults and sharing nothing. Fix the file and
+  restart, or repair it from <a href="/settings">Settings</a> — saving any section
+  there writes a file that loads, and takes effect without a restart.
+</p>
+{% else if let Some(reason) = blocked %}
 <p class="warn" role="status">
   Not reconciling yet — {{ reason }}
 </p>

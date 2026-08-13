@@ -94,6 +94,9 @@ pub struct StatusPage {
     /// Why reconciliation is not running, or `None` when it is. Carries the same
     /// string `/ready` reports, so the page and the probe cannot drift apart.
     pub blocked: Option<String>,
+    /// Why `sharerr.toml` did not load, when it did not. Takes the place of
+    /// `blocked`, which in this state is only relaying the same sentence.
+    pub config_error: Option<String>,
     pub recovery_secs: u64,
     pub master_key_present: bool,
     pub tag: String,
@@ -123,6 +126,13 @@ pub struct SettingsPage {
     pub signed_in: bool,
     pub saved: Option<String>,
     pub error: Option<String>,
+    /// Why `sharerr.toml` did not load, when it did not. Unlike `error` this is not
+    /// about the submission that just happened — it persists until the file is
+    /// repaired, and it is the reason every field below shows a default.
+    pub config_error: Option<String>,
+    /// Set only when the file will not even parse, and so cannot be edited in
+    /// place: says where the original is kept when a save replaces it.
+    pub config_notice: Option<String>,
     pub master_key_present: bool,
     /// Config paths currently pinned by a `SHARERR_*` variable, mapped to the
     /// variable's name. Consulted per field by the template.

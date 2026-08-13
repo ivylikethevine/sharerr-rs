@@ -103,6 +103,7 @@ async fn status_page(State(state): State<WebState>) -> Response {
     render(&StatusPage {
         signed_in: true,
         blocked: state.serve.blocked_reason().await,
+        config_error: state.serve.config_error().await,
         recovery_secs: RECOVERY_INTERVAL.as_secs(),
         // Checked live rather than cached: the fix is to set the variable and
         // restart, and this banner is how the operator learns that is still needed.

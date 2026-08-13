@@ -13,11 +13,43 @@ use serde_json::{Value, json};
 use crate::media::write_media_file;
 
 /// The tag id the fixtures mark shareable content with.
+///
+/// A mock-server detail, not a fact about the tag. Anything writing to a *real*
+/// Sonarr or Radarr must let it assign the id and resolve [`TAG_LABEL`] instead —
+/// which is what sharerr itself does.
 pub const TAG_ID: i64 = 3;
+/// The tag label sharerr is configured to watch. This one *is* a fact: it is
+/// matched case-insensitively against what the *arr apps report.
+pub const TAG_LABEL: &str = "sharerr";
 /// The prefix the *arr apps report — deliberately different from where the files
 /// really are, so every test exercises path mapping rather than assuming identity.
 pub const ARR_TV_PREFIX: &str = "/tv";
 pub const ARR_MOVIE_PREFIX: &str = "/movies";
+
+/// The tagged series, as the *arr apps record it.
+///
+/// Constants rather than literals inside [`TvLibrary::series_json`] because the
+/// compose stack seeds these same values into Sonarr's own database, and the two
+/// descriptions of one series drifting apart is exactly the failure this module
+/// exists to prevent.
+pub const SERIES_ID: i64 = 11;
+pub const SERIES_TITLE: &str = "Lanternwick Hollow";
+pub const SERIES_FOLDER: &str = "Lanternwick Hollow";
+pub const SERIES_TVDB_ID: i64 = 918_273;
+pub const SERIES_TVMAZE_ID: i64 = 4242;
+pub const SERIES_IMDB_ID: &str = "tt7654321";
+
+/// Season, episode, and the file id it points at. `0` means aired but not
+/// downloaded — an episode with nothing to share.
+pub const EPISODES: [(i64, i64, i64); 3] = [(2, 1, 501), (2, 2, 502), (2, 3, 0)];
+
+/// The tagged movie, as Radarr records it.
+pub const MOVIE_ID: i64 = 31;
+pub const MOVIE_TITLE: &str = "The Gilded Ferry";
+pub const MOVIE_FOLDER: &str = "The Gilded Ferry (2019)";
+pub const MOVIE_YEAR: i64 = 2019;
+pub const MOVIE_TMDB_ID: i64 = 555_444;
+pub const MOVIE_IMDB_ID: &str = "tt1234567";
 
 /// Big enough to span several pieces at the 256 KiB floor, small enough to be free.
 const FILE_SIZE: usize = 768 * 1024;
@@ -48,36 +80,61 @@ pub struct MovieLibrary {
     pub files: Vec<MediaFile>,
 }
 
-/// Two tagged episodes of one series, plus an untagged series that must never
-/// appear in discovery.
-pub fn tv_library(root: &Path) -> std::io::Result<TvLibrary> {
+/// The TV fixtures as records, without touching the disk.
+///
+/// Split out from [`tv_library`] for the compose stack's database seeder, which
+/// needs to know what the files *are* but must not write them — `gen-fixtures`
+/// owns that, and a second writer would rewrite the library out from under the
+/// e2e test that asserts a sync never touches it.
+///
+/// The seed is the index, so order here is load-bearing: reordering these entries
+/// changes the bytes on disk, and with them every recorded info hash.
+pub fn tv_files(root: &Path) -> Vec<MediaFile> {
     let relative = [
         (
             501i64,
-            "Lanternwick Hollow/Season 02/lanternwick.s02e01.mkv",
+            "Season 02/lanternwick.s02e01.mkv",
             Some("Lanternwick.Hollow.S02E01.1080p.WEB-DL.DD5.1.H.264-FAKEGRP"),
         ),
         // No scene name: forces the release title through basename resolution.
-        (
-            502,
-            "Lanternwick Hollow/Season 02/lanternwick.s02e02.mkv",
-            None,
-        ),
+        (502, "Season 02/lanternwick.s02e02.mkv", None),
     ];
 
-    let mut files = Vec::new();
-    for (index, (file_id, suffix, scene_name)) in relative.into_iter().enumerate() {
-        let disk_path = root.join("tv").join(suffix);
-        write_media_file(&disk_path, FILE_SIZE, 1000 + index as u64)?;
+    relative
+        .into_iter()
+        .map(|(file_id, tail, scene_name)| {
+            let suffix = format!("{SERIES_FOLDER}/{tail}");
+            MediaFile {
+                file_id,
+                source_id: SERIES_ID,
+                arr_path: format!("{ARR_TV_PREFIX}/{suffix}"),
+                disk_path: root.join("tv").join(&suffix),
+                size: FILE_SIZE as u64,
+                scene_name: scene_name.map(str::to_owned),
+            }
+        })
+        .collect()
+}
 
-        files.push(MediaFile {
-            file_id,
-            source_id: 11,
-            arr_path: format!("{ARR_TV_PREFIX}/{suffix}"),
-            disk_path,
-            size: FILE_SIZE as u64,
-            scene_name: scene_name.map(str::to_owned),
-        });
+/// The movie fixtures as records, without touching the disk. See [`tv_files`].
+pub fn movie_files(root: &Path) -> Vec<MediaFile> {
+    let suffix = format!("{MOVIE_FOLDER}/gilded.ferry.2019.mkv");
+    vec![MediaFile {
+        file_id: 900,
+        source_id: MOVIE_ID,
+        arr_path: format!("{ARR_MOVIE_PREFIX}/{suffix}"),
+        disk_path: root.join("movies").join(&suffix),
+        size: FILE_SIZE as u64,
+        scene_name: Some("The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP".to_owned()),
+    }]
+}
+
+/// Two tagged episodes of one series, plus an untagged series that must never
+/// appear in discovery. Writes the files.
+pub fn tv_library(root: &Path) -> std::io::Result<TvLibrary> {
+    let files = tv_files(root);
+    for (index, file) in files.iter().enumerate() {
+        write_media_file(&file.disk_path, FILE_SIZE, 1000 + index as u64)?;
     }
 
     Ok(TvLibrary {
@@ -87,22 +144,16 @@ pub fn tv_library(root: &Path) -> std::io::Result<TvLibrary> {
 }
 
 /// One tagged movie with a file, one untagged movie, and one tagged movie that has
-/// not been downloaded yet.
+/// not been downloaded yet. Writes the files.
 pub fn movie_library(root: &Path) -> std::io::Result<MovieLibrary> {
-    let suffix = "The Gilded Ferry (2019)/gilded.ferry.2019.mkv";
-    let disk_path = root.join("movies").join(suffix);
-    write_media_file(&disk_path, FILE_SIZE, 2000)?;
+    let files = movie_files(root);
+    for file in &files {
+        write_media_file(&file.disk_path, FILE_SIZE, 2000)?;
+    }
 
     Ok(MovieLibrary {
         root: root.to_path_buf(),
-        files: vec![MediaFile {
-            file_id: 900,
-            source_id: 31,
-            arr_path: format!("{ARR_MOVIE_PREFIX}/{suffix}"),
-            disk_path,
-            size: FILE_SIZE as u64,
-            scene_name: Some("The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP".to_owned()),
-        }],
+        files,
     })
 }
 
@@ -110,7 +161,7 @@ pub fn movie_library(root: &Path) -> std::io::Result<MovieLibrary> {
 pub fn tag_json() -> Value {
     json!([
         { "id": 1, "label": "anime" },
-        { "id": TAG_ID, "label": "sharerr" },
+        { "id": TAG_ID, "label": TAG_LABEL },
     ])
 }
 
@@ -122,11 +173,11 @@ impl TvLibrary {
     pub fn series_json(&self) -> Value {
         json!([
             {
-                "id": 11,
-                "title": "Lanternwick Hollow",
-                "tvdbId": 918273,
-                "tvMazeId": 4242,
-                "imdbId": "tt7654321",
+                "id": SERIES_ID,
+                "title": SERIES_TITLE,
+                "tvdbId": SERIES_TVDB_ID,
+                "tvMazeId": SERIES_TVMAZE_ID,
+                "imdbId": SERIES_IMDB_ID,
                 "tags": [TAG_ID],
             },
             {
@@ -159,12 +210,18 @@ impl TvLibrary {
     }
 
     pub fn episode_json(&self) -> Value {
-        json!([
-            { "seasonNumber": 2, "episodeNumber": 1, "episodeFileId": 501 },
-            { "seasonNumber": 2, "episodeNumber": 2, "episodeFileId": 502 },
-            // Aired but not downloaded — no file to share.
-            { "seasonNumber": 2, "episodeNumber": 3, "episodeFileId": 0 },
-        ])
+        Value::Array(
+            EPISODES
+                .iter()
+                .map(|&(season, episode, file_id)| {
+                    json!({
+                        "seasonNumber": season,
+                        "episodeNumber": episode,
+                        "episodeFileId": file_id,
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// Look a fixture up by its *arr file id.
@@ -181,11 +238,11 @@ impl MovieLibrary {
         let file = &self.files[0];
         json!([
             {
-                "id": 31,
-                "title": "The Gilded Ferry",
-                "year": 2019,
-                "tmdbId": 555444,
-                "imdbId": "tt1234567",
+                "id": MOVIE_ID,
+                "title": MOVIE_TITLE,
+                "year": MOVIE_YEAR,
+                "tmdbId": MOVIE_TMDB_ID,
+                "imdbId": MOVIE_IMDB_ID,
                 "tags": [TAG_ID],
                 "hasFile": true,
                 "movieFile": {

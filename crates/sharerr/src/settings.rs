@@ -5,13 +5,14 @@
 //! be configured entirely through the environment, which is the common case for
 //! a docker-compose setup.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use sharerr_core::Config;
 use sharerr_store::vault::{ENV_MASTER_KEY, ENV_MASTER_KEY_FILE};
+use toml_edit::Item;
 
 /// `SHARERR_`-prefixed variables that are *not* config fields.
 ///
@@ -48,6 +49,56 @@ pub fn load(path: &Path) -> Result<Config> {
             path.display()
         )
     })
+}
+
+/// Load, or recover enough of a configuration to keep serving.
+///
+/// A malformed `sharerr.toml` used to abort startup, which under Docker is a
+/// restart loop with no HTTP surface — and the web UI is the tool an operator
+/// would use to fix it. So the error is returned alongside a usable `Config`
+/// instead of replacing it; the caller decides how loudly to say so.
+///
+/// The fallback is *not* a bare `Config::default()`. `data_dir` and `server.bind`
+/// are salvaged from the file when it parses as TOML at all, and from the
+/// environment either way, because those two decide whether the operator can reach
+/// the UI: `bind` is the port, and `data_dir` is where [`Config::database_path`]
+/// and [`Config::vault_path`] point. Defaulting `data_dir` past a typo elsewhere in
+/// the file would drop the operator into a *fresh, empty* instance and make their
+/// real vault look lost.
+pub fn load_or_recover(path: &Path) -> (Config, Option<String>) {
+    let error = match load(path) {
+        Ok(config) => return (config, None),
+        Err(err) => format!("{err:#}"),
+    };
+
+    let mut config = Config::default();
+
+    // Same order figment uses: the document first, then the environment on top.
+    if let Ok(text) = std::fs::read_to_string(path)
+        && let Ok(doc) = text.parse::<toml_edit::DocumentMut>()
+    {
+        if let Some(dir) = doc.get("data_dir").and_then(Item::as_str) {
+            config.data_dir = PathBuf::from(dir);
+        }
+        if let Some(bind) = doc
+            .get("server")
+            .and_then(Item::as_table_like)
+            .and_then(|server| server.get("bind"))
+            .and_then(Item::as_str)
+            && let Ok(addr) = bind.parse()
+        {
+            config.server.bind = addr;
+        }
+    }
+
+    if let Ok(dir) = std::env::var("SHARERR_DATA_DIR") {
+        config.data_dir = PathBuf::from(dir);
+    }
+    if let Ok(Ok(addr)) = std::env::var("SHARERR_SERVER__BIND").map(|bind| bind.parse()) {
+        config.server.bind = addr;
+    }
+
+    (config, Some(error))
 }
 
 /// Load from TOML held in memory rather than on disk.
@@ -171,6 +222,82 @@ mod tests {
                 format!("{err:#}").contains("taag"),
                 "error should name the offending key"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_valid_file_recovers_to_itself_with_no_error() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("sharerr.toml", "tag = \"from-file\"\n")?;
+            let (cfg, err) = load_or_recover(&jail.directory().join("sharerr.toml"));
+            assert_eq!(cfg.tag, "from-file");
+            assert_eq!(err, None);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_rejected_key_yields_defaults_plus_the_reason() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("sharerr.toml", "taag = \"typo\"\n")?;
+            let (cfg, err) = load_or_recover(&jail.directory().join("sharerr.toml"));
+            assert_eq!(cfg.tag, "sharerr", "falls back to the default");
+            assert!(
+                err.expect("a rejected key must be reported").contains("taag"),
+                "the reason must name the offending key"
+            );
+            Ok(())
+        });
+    }
+
+    /// The whole point of salvaging rather than defaulting: the vault and database
+    /// live under `data_dir`, so losing it to an unrelated typo would present the
+    /// operator with an empty instance instead of theirs.
+    #[test]
+    fn recovery_keeps_the_data_dir_and_bind_a_broken_file_still_states() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "sharerr.toml",
+                r#"
+                taag = "typo"
+                data_dir = "/srv/sharerr"
+                [server]
+                bind = "127.0.0.1:9999"
+                "#,
+            )?;
+            let (cfg, err) = load_or_recover(&jail.directory().join("sharerr.toml"));
+            assert!(err.is_some());
+            assert_eq!(cfg.data_dir, Path::new("/srv/sharerr"));
+            assert_eq!(cfg.server.bind.port(), 9999);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_environment_still_wins_during_recovery() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("sharerr.toml", "taag = \"typo\"\ndata_dir = \"/from-file\"\n")?;
+            jail.set_env("SHARERR_DATA_DIR", "/from-env");
+            jail.set_env("SHARERR_SERVER__BIND", "0.0.0.0:9100");
+
+            let (cfg, _) = load_or_recover(&jail.directory().join("sharerr.toml"));
+            assert_eq!(cfg.data_dir, Path::new("/from-env"));
+            assert_eq!(cfg.server.bind.port(), 9100);
+            Ok(())
+        });
+    }
+
+    /// Nothing to salvage from — but there must still be a config to serve with,
+    /// because this is precisely the state the UI has to be reachable to repair.
+    #[test]
+    fn a_file_that_is_not_toml_at_all_still_yields_a_usable_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("sharerr.toml", "this is not toml at all {{{\n")?;
+            let (cfg, err) = load_or_recover(&jail.directory().join("sharerr.toml"));
+            assert!(err.is_some());
+            assert_eq!(cfg.server.bind.port(), 8477);
+            assert_eq!(cfg.data_dir, Path::new("/data"));
             Ok(())
         });
     }

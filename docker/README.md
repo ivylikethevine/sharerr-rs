@@ -10,40 +10,56 @@ pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhe
 ## Running it
 
 ```bash
+./run_docker_tests.sh
+```
+
+That is the whole runbook, and it is the supported path: generate the fixtures,
+bring the stack up, seed tagged content, load the credentials each app generated,
+run `doctor`, run the opt-in suite, tear down. Every step is idempotent and the
+teardown runs however the script exits.
+
+The steps, if you want to drive them by hand:
+
+```bash
 # 1. Generate the synthetic library (idempotent — same bytes every time).
 cargo run -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 
-# 2. Bring the stack up.
+# 2. Bring the stack up. Sonarr and Radarr keep their config in ./docker/state,
+#    which has to exist first — see "Seeding tagged content" below.
+mkdir -p docker/state/sonarr docker/state/radarr
 docker compose -f docker/compose.test.yml up -d --build
 
-# 3. Collect API keys from each app's config.
-SONARR_KEY=$(docker compose -f docker/compose.test.yml exec -T sonarr \
-    sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' /config/config.xml)
+# 3. Give the *arr apps something tagged. They must be stopped for this.
+docker compose -f docker/compose.test.yml stop sonarr radarr
+cargo run -p sharerr-testkit --bin seed-arr -- \
+    --sonarr docker/state/sonarr/sonarr.db \
+    --radarr docker/state/radarr/radarr.db
+docker compose -f docker/compose.test.yml start sonarr radarr
+
+# 4. Collect API keys from each app's config.
+SONARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/sonarr/config.xml)
 
 # qBittorrent prints a temporary admin password to its log on first start.
 docker compose -f docker/compose.test.yml logs qbittorrent | grep -i password
 
-# 4. Load them into sharerr. Either open http://127.0.0.1:18477/ and paste them
+# 5. Load them into sharerr. Either open http://127.0.0.1:18477/ and paste them
 #    into Settings, or pipe them in — the two write to the same vault.
 docker compose -f docker/compose.test.yml exec -T sharerr \
     sh -c "printf %s '$SONARR_KEY' | sharerr vault set sonarr.api_key"
 
-# 5. Check the wiring before trying to sync. The UI's per-service "Test
+# 6. Check the wiring before trying to sync. The UI's per-service "Test
 #    connection" buttons cover the same ground for the services themselves;
 #    `doctor` additionally resolves the path mappings, which is what the
 #    deliberately-disagreeing mounts in this stack exist to exercise.
 docker compose -f docker/compose.test.yml exec sharerr sharerr doctor
+
+# 7. And a real sync.
+docker compose -f docker/compose.test.yml exec sharerr sharerr sync
 ```
 
 The stack sets `SHARERR_MASTER_KEY`, without which the vault cannot be opened and
 neither the UI nor the CLI can store a credential. A real deployment must set it
 too — see the root `README.md`.
-
-Then tag something `sharerr` in Sonarr and:
-
-```bash
-docker compose -f docker/compose.test.yml exec sharerr sharerr sync
-```
 
 ## Exercising the indexer and the tracker
 
@@ -82,34 +98,51 @@ genuinely tried to manage the files can.
 
 Serialised with `--test-threads=1` because the tests share one stack.
 
-## The network is internal, and that has a consequence
+## Seeding tagged content
+
+sharerr shares what carries the `sharerr` tag and nothing else, so a stack with no
+tagged content exercises nothing: `doctor` fails with `TagNotFound`, and `sync`
+bails with "no *arr app could be scanned". Getting content in is the one part of
+this stack that cannot go through the *arr APIs, and it is worth knowing why.
 
 `internal: true` on the compose network means the containers have no route off the
 host. That is how the project's no-egress requirement is *enforced* rather than
 merely documented. Image pulls still work — they happen on the host, before the
-network is joined.
-
-One thing genuinely does not work offline, stated plainly rather than papered over:
+network is joined. But:
 
 > **Adding a series or movie through the *arr API triggers a metadata lookup**
 > against `services.sonarr.tv` / `api.radarr.video`, which cannot resolve on an
 > internal network. The add fails.
 
-Everything sharerr itself does works offline: tag lookup, file discovery, path
-resolution, torrent creation, and seeding all stay inside the stack.
+Dropping `internal: true` does not rescue it either: every fixture title is
+invented, so the lookup finds nothing to add. So `seed-arr` writes the rows
+straight into Sonarr's and Radarr's own SQLite databases:
 
-Two ways to get content into the *arr apps anyway:
+```bash
+cargo run -p sharerr-testkit --bin seed-arr -- \
+    --sonarr docker/state/sonarr/sonarr.db \
+    --radarr docker/state/radarr/radarr.db
+```
 
-1. **Pre-seed the database** (keeps the stack fully offline). Write rows directly
-   into Sonarr's `/config/sonarr.db`. This couples the fixture to Sonarr's schema,
-   which is why the image tags in `compose.test.yml` are pinned rather than
-   `:latest`.
-2. **Allow the lookup once.** Temporarily drop `internal: true`, add the content,
-   then restore it. Simpler, and fine for local exploration, but it means the
-   no-egress guarantee is off for the duration.
+Three things about it:
 
-Neither is automated here. Whichever you choose, sharerr's own behaviour is
-unaffected — it only ever reads what the *arr apps already have.
+- **Both apps must be stopped.** They hold their databases open and will not
+  observe an external write while running. `run_docker_tests.sh` stops and starts
+  them around the seed.
+- **Sonarr and Radarr keep their config in `./docker/state`**, bind-mounted rather
+  than in a named volume, so a host-side seeder can open those files at all. `down
+  -v` does not clear a bind mount, so teardown removes the directory too.
+- **It is coupled to their schemas.** That is the cost of the offline guarantee,
+  and it is why the image tags in `compose.test.yml` are pinned rather than
+  `:latest`. The rows are minimal — enough for the four endpoints sharerr reads
+  (`tag`, `series`, `episodefile`+`episode`, `movie`), not enough for a metadata
+  refresh.
+
+The tag id is left to SQLite. sharerr resolves the *label*, case-insensitively, so
+`sharerr_testkit::TAG_ID` — a mock-server detail — deliberately does not apply here.
+
+Everything else sharerr does already worked offline: tag lookup, file discovery,
+path resolution, torrent creation, and seeding all stay inside the stack.
 
 ## Four views of one library
 
@@ -147,8 +180,10 @@ just on the docker network.
 ## Tearing down
 
 ```bash
-docker compose -f docker/compose.test.yml down -v
+docker compose -f docker/compose.test.yml down -v && rm -rf docker/state
 ```
 
-`-v` drops the config volumes too, which is what you want between runs — the API
-keys are regenerated on every fresh start.
+Both halves are needed. `-v` drops the named volumes, which is what you want
+between runs — the API keys are regenerated on every fresh start. It does *not*
+touch `docker/state`, where Sonarr and Radarr keep theirs, so that goes separately.
+`run_docker_tests.sh` does both from a trap.

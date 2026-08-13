@@ -81,10 +81,17 @@ pub(crate) fn chain(err: &dyn std::error::Error) -> String {
     rendered
 }
 
-pub async fn run(config: &Config) -> Result<()> {
+pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
     let mut report = Report::default();
 
     report.section("configuration");
+    // Reported as a check rather than bailing, so the rest of the picture is still
+    // printed — and so the summary below explains why every subsequent line is
+    // describing defaults instead of what the operator wrote.
+    if let Some(error) = config_error {
+        report.fail(error);
+        report.info("everything below reflects built-in defaults, not this file");
+    }
     print_config_summary(config);
 
     report.section("vault");
