@@ -15,7 +15,7 @@ use anyhow::{Result, bail};
 use crate::checks::{self, ArrOutcome, QbitOutcome, chain};
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
-use sharerr_core::config::{ServiceConfig, TorrentBackend, TrackerBackend, secret_keys};
+use sharerr_core::config::{ServiceConfig, TrackerBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Store, Vault, master_key_from_env};
 
@@ -52,16 +52,6 @@ impl Report {
         self.failures += 1;
         println!("  [FAIL] {message}");
     }
-
-    /// Report an error together with its cause chain.
-    ///
-    /// The distinction matters here: reqwest's own `Display` is just "error
-    /// sending request for url (...)", and the part an operator actually needs —
-    /// `Connection refused`, `dns error`, `operation timed out` — lives further
-    /// down the chain.
-    fn fail_err(&mut self, err: &dyn std::error::Error) {
-        self.fail(chain(err));
-    }
 }
 
 pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
@@ -84,35 +74,18 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
     check_database(config, &mut report).await;
 
     let mut discovered = Vec::new();
-    if let Some(sonarr) = &config.sonarr {
-        report.section("sonarr");
-        discovered.extend(
-            check_arr(
-                MediaSource::Sonarr,
-                sonarr,
-                config,
-                vault.as_ref(),
-                &mut report,
-            )
-            .await,
-        );
+    let sources = config.configured_sources();
+    for kind in sources.iter().copied() {
+        // `service()` is Some for everything `configured_sources` returned.
+        let Some(service) = config.service(kind) else {
+            continue;
+        };
+        report.section(kind.as_str());
+        discovered.extend(check_arr(kind, service, config, vault.as_ref(), &mut report).await);
     }
-    if let Some(radarr) = &config.radarr {
-        report.section("radarr");
-        discovered.extend(
-            check_arr(
-                MediaSource::Radarr,
-                radarr,
-                config,
-                vault.as_ref(),
-                &mut report,
-            )
-            .await,
-        );
-    }
-    if config.sonarr.is_none() && config.radarr.is_none() {
-        report.section("sonarr / radarr");
-        report.fail("neither sonarr nor radarr is configured — there is nothing to share");
+    if sources.is_empty() {
+        report.section("*arr apps");
+        report.fail("no *arr app is configured — there is nothing to share");
     }
 
     report.section(config.torrent_backend.as_str());
@@ -146,7 +119,7 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     let master = match master_key_from_env() {
         Ok(master) => master,
         Err(err) => {
-            report.fail_err(&err);
+            report.fail(chain(&err));
             return None;
         }
     };
@@ -169,16 +142,13 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     // The password key follows the *configured* client. Demanding qBittorrent's
     // regardless was a check that failed on a perfectly good Transmission setup —
     // and told the operator to go and set a credential nothing would ever read.
-    let mut expected = vec![match config.torrent_backend {
-        TorrentBackend::Qbittorrent => secret_keys::QBITTORRENT_PASSWORD,
-        TorrentBackend::Transmission => secret_keys::TRANSMISSION_PASSWORD,
-    }];
-    if config.sonarr.is_some() {
-        expected.push(secret_keys::SONARR_API_KEY);
-    }
-    if config.radarr.is_some() {
-        expected.push(secret_keys::RADARR_API_KEY);
-    }
+    let mut expected = vec![config.torrent_client().password_key];
+    expected.extend(
+        config
+            .configured_sources()
+            .into_iter()
+            .map(secret_keys::api_key_for),
+    );
 
     for key in expected {
         match vault.get(key) {
@@ -341,20 +311,8 @@ async fn check_arr(
 /// `sharerr.toml` differ per client, so the URL, username and vault key are all
 /// resolved together rather than assuming qBittorrent's.
 async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report) {
-    let (url, username, key, label) = match config.torrent_backend {
-        TorrentBackend::Qbittorrent => (
-            &config.qbittorrent.url,
-            config.qbittorrent.username.as_str(),
-            secret_keys::QBITTORRENT_PASSWORD,
-            config.qbittorrent.category.clone(),
-        ),
-        TorrentBackend::Transmission => (
-            &config.transmission.url,
-            config.transmission.username.as_str(),
-            secret_keys::TRANSMISSION_PASSWORD,
-            config.transmission.label.clone(),
-        ),
-    };
+    let settings = config.torrent_client();
+    let (url, key, label) = (settings.url, settings.password_key, settings.category);
 
     let Some(password) = secret(vault, key, report) else {
         return;
@@ -362,37 +320,43 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
 
     // Shared with the web UI's "Test connection" button — see `crate::checks`. The
     // client comes back on success so the checks below do not re-authenticate.
-    let client =
-        match checks::check_qbit(config.torrent_backend, url, username, Ok(Some(password))).await {
-            QbitOutcome::Ready {
-                version,
-                kind,
-                client,
-            } => {
-                report.ok(format!("{url} responded ({kind} {version})"));
-                client
-            }
-            QbitOutcome::AuthRejected => {
-                report.fail(format!(
-                    "{url} rejected the username or password — check {key}"
-                ));
-                return;
-            }
-            QbitOutcome::Unreachable(reason) => {
-                report.fail(format!("{url} could not be reached: {reason}"));
-                return;
-            }
-            QbitOutcome::BadUrl(reason)
-            | QbitOutcome::Failed(reason)
-            | QbitOutcome::CredentialUnreadable(reason) => {
-                report.fail(reason);
-                return;
-            }
-            // Unreachable: the credential was resolved above.
-            QbitOutcome::NoCredential => return,
-        };
+    let client = match checks::check_qbit(
+        config.torrent_backend,
+        url,
+        settings.username,
+        Ok(Some(password)),
+    )
+    .await
+    {
+        QbitOutcome::Ready {
+            version,
+            kind,
+            client,
+        } => {
+            report.ok(format!("{url} responded ({kind} {version})"));
+            client
+        }
+        QbitOutcome::AuthRejected => {
+            report.fail(format!(
+                "{url} rejected the username or password — check {key}"
+            ));
+            return;
+        }
+        QbitOutcome::Unreachable(reason) => {
+            report.fail(format!("{url} could not be reached: {reason}"));
+            return;
+        }
+        QbitOutcome::BadUrl(reason)
+        | QbitOutcome::Failed(reason)
+        | QbitOutcome::CredentialUnreadable(reason) => {
+            report.fail(reason);
+            return;
+        }
+        // Unreachable: the credential was resolved above.
+        QbitOutcome::NoCredential => return,
+    };
 
-    match client.list(Some(&label)).await {
+    match client.list(Some(label)).await {
         Ok(torrents) => report.info(format!(
             "{} torrent(s) already labelled {label:?}",
             torrents.len()
@@ -429,10 +393,16 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
 fn check_tracker(config: &Config, report: &mut Report) {
     match config.tracker.backend {
         TrackerBackend::QbittorrentEmbedded => {
-            report.ok("backend: qbittorrent-embedded");
+            report.ok(format!(
+                "backend: {}",
+                TrackerBackend::QbittorrentEmbedded.as_str()
+            ));
         }
         TrackerBackend::Builtin => {
-            report.ok("backend: builtin — sharerr serves /announce itself");
+            report.ok(format!(
+                "backend: {} — sharerr serves /announce itself",
+                TrackerBackend::Builtin.as_str()
+            ));
             // The one way this backend can look configured and still not work:
             // `doctor` and `sync` are one-shot commands, and the announce endpoint
             // only exists while `serve` is running.
@@ -538,39 +508,27 @@ fn print_config_summary(config: &Config) {
     println!("  data dir:  {}", config.data_dir.display());
     println!("  tag:       {}", config.tag);
     println!("  bind:      {}", config.server.bind);
-    println!(
-        "  sonarr:    {}",
-        config
-            .sonarr
-            .as_ref()
-            .map_or("(not configured)", |s| s.url.as_str())
-    );
-    println!(
-        "  radarr:    {}",
-        config
-            .radarr
-            .as_ref()
-            .map_or("(not configured)", |s| s.url.as_str())
-    );
+    for kind in MediaSource::ALL.iter().copied() {
+        println!(
+            "  {:<11}{}",
+            format!("{kind}:"),
+            config
+                .service(kind)
+                .map_or("(not configured)", |s| s.url.as_str())
+        );
+    }
     // The configured client, not always qBittorrent's — printing the unused
     // section's URL is how an operator ends up debugging the wrong service.
-    let (client_url, client_user) = match config.torrent_backend {
-        TorrentBackend::Qbittorrent => (
-            config.qbittorrent.url.as_str(),
-            config.qbittorrent.username.as_str(),
-        ),
-        TorrentBackend::Transmission => (
-            config.transmission.url.as_str(),
-            config.transmission.username.as_str(),
-        ),
-    };
+    let client = config.torrent_client();
     println!(
-        "  client:    {} {client_url} (user {client_user})",
-        config.torrent_backend.as_str()
+        "  client:    {} {} (user {})",
+        config.torrent_backend.as_str(),
+        client.url,
+        client.username
     );
     println!(
-        "  tracker:   {:?} advertised_host={}",
-        config.tracker.backend,
+        "  tracker:   {} advertised_host={}",
+        config.tracker.backend.as_str(),
         config
             .tracker
             .advertised_host

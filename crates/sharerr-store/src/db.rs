@@ -121,26 +121,45 @@ impl Store {
     pub async fn is_shared(&self, info_hash: &str) -> Result<bool> {
         let row = sqlx::query(
             "SELECT 1 AS present FROM shared_items \
-             WHERE info_hash = ?1 AND state IN ('seeding', 'pending') LIMIT 1",
+             WHERE info_hash = ?1 AND state IN (?2, ?3) LIMIT 1",
         )
         .bind(info_hash)
+        .bind(ShareState::Seeding.as_str())
+        .bind(ShareState::Pending.as_str())
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.is_some())
     }
 
-    /// Every item currently being shared, newest first.
+    /// Every item currently being shared that `scope` may see, newest first.
     ///
     /// What the Torznab feed publishes. Filtered in SQL rather than by the caller
-    /// so an item without a torrent yet can never reach the feed — a release the
-    /// friend's Sonarr can find but not download is worse than one it cannot see.
-    pub async fn seeding_items(&self) -> Result<Vec<SharedItem>> {
-        let rows = sqlx::query(&format!(
-            "{SELECT_COLUMNS} WHERE state = 'seeding' AND info_hash IS NOT NULL \
-             ORDER BY created_at DESC, id DESC"
-        ))
-        .fetch_all(&self.pool)
-        .await?;
+    /// for two reasons: an item without a torrent yet can never reach the feed —
+    /// a release the friend's Sonarr can find but not download is worse than one
+    /// it cannot see — and rows outside the caller's scope are skipped before
+    /// their two JSON columns are decoded, which is most of a feed request's work
+    /// for a narrowly-scoped friend.
+    pub async fn seeding_items(&self, scope: crate::PeerScope) -> Result<Vec<SharedItem>> {
+        // Derived from `PeerScope::allows` over the fixed source list — the SQL
+        // fragment interpolates only the placeholder count, never input.
+        let allowed: Vec<&'static str> = MediaSource::ALL
+            .iter()
+            .copied()
+            .filter(|source| scope.allows(*source))
+            .map(MediaSource::as_str)
+            .collect();
+        let placeholders = vec!["?"; allowed.len()].join(", ");
+
+        let sql = format!(
+            "{SELECT_COLUMNS} WHERE state = ? AND info_hash IS NOT NULL \
+             AND source IN ({placeholders}) ORDER BY created_at DESC, id DESC"
+        );
+        let mut query = sqlx::query(&sql).bind(ShareState::Seeding.as_str());
+        for source in allowed {
+            query = query.bind(source);
+        }
+
+        let rows = query.fetch_all(&self.pool).await?;
         rows.iter().map(row_to_item).collect()
     }
 
@@ -231,6 +250,33 @@ impl Store {
         )
         .bind(state.as_str())
         .bind(last_error)
+        .bind(now_epoch())
+        .bind(source.as_str())
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Mark an item seeding under `info_hash`, in one write.
+    ///
+    /// The hash and the state always change together when a share lands — a
+    /// seeding item must have one, since it is what the tracker admits announces
+    /// against and what the feed publishes — and two UPDATEs here were two write
+    /// transactions per newly-shared item, hundreds back-to-back on a first
+    /// sync. A cleared `last_error` rides along: the share just succeeded.
+    pub async fn set_seeding(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        info_hash: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE shared_items SET info_hash = ?1, state = ?2, last_error = NULL, \
+             updated_at = ?3 WHERE source = ?4 AND file_id = ?5",
+        )
+        .bind(info_hash)
+        .bind(ShareState::Seeding.as_str())
         .bind(now_epoch())
         .bind(source.as_str())
         .bind(file_id)
@@ -345,19 +391,13 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     let id: i64 = row.try_get("id")?;
     let malformed = |detail: String| StoreError::Malformed { id, detail };
 
-    let source = match row.try_get::<String, _>("source")?.as_str() {
-        "sonarr" => MediaSource::Sonarr,
-        "radarr" => MediaSource::Radarr,
-        other => return Err(malformed(format!("unknown source {other:?}"))),
-    };
+    let raw_source = row.try_get::<String, _>("source")?;
+    let source = MediaSource::parse(&raw_source)
+        .ok_or_else(|| malformed(format!("unknown source {raw_source:?}")))?;
 
-    let state = match row.try_get::<String, _>("state")?.as_str() {
-        "pending" => ShareState::Pending,
-        "seeding" => ShareState::Seeding,
-        "unshared" => ShareState::Unshared,
-        "failed" => ShareState::Failed,
-        other => return Err(malformed(format!("unknown state {other:?}"))),
-    };
+    let raw_state = row.try_get::<String, _>("state")?;
+    let state = ShareState::parse(&raw_state)
+        .ok_or_else(|| malformed(format!("unknown state {raw_state:?}")))?;
 
     let spec: MediaSpec = serde_json::from_str(&row.try_get::<String, _>("spec_json")?)
         .map_err(|e| malformed(format!("spec_json: {e}")))?;
@@ -381,6 +421,26 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at").ok(),
     })
+}
+
+/// Trim and bound a human-entered name, with the caller's own messages.
+///
+/// Usernames and peer labels share the same rule — non-blank, at most 64
+/// characters — and used to enforce it separately; the messages stay
+/// per-caller because they render straight back to different forms.
+pub(crate) fn validate_name(
+    raw: &str,
+    blank_msg: &'static str,
+    long_msg: &'static str,
+) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(StoreError::InvalidUser(blank_msg));
+    }
+    if trimmed.chars().count() > 64 {
+        return Err(StoreError::InvalidUser(long_msg));
+    }
+    Ok(trimmed.to_owned())
 }
 
 pub(crate) fn now_epoch() -> i64 {
@@ -424,6 +484,33 @@ mod tests {
             last_error: None,
             created_at: None,
         }
+    }
+
+    /// Every source must survive an insert and a read-back.
+    ///
+    /// The schema once carried its own `CHECK (source IN ('sonarr', 'radarr'))`
+    /// copy of the closed set, so Lidarr, Readarr and Whisparr rows failed at
+    /// INSERT while everything on the Rust side compiled clean — and no test
+    /// wrote a non-Sonarr/Radarr row to notice. This is that test.
+    #[tokio::test]
+    async fn every_media_source_round_trips_through_the_store() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        for (n, source) in MediaSource::ALL.iter().copied().enumerate() {
+            let item = SharedItem {
+                source,
+                ..episode(n as i64 + 1)
+            };
+            store
+                .upsert(&item)
+                .await
+                .unwrap_or_else(|err| panic!("could not store a {source} item: {err}"));
+        }
+
+        let stored = store.all_items().await.unwrap();
+        let sources: std::collections::HashSet<MediaSource> =
+            stored.iter().map(|item| item.source).collect();
+        assert_eq!(sources.len(), MediaSource::ALL.len());
     }
 
     fn movie(file_id: i64) -> SharedItem {
@@ -667,27 +754,24 @@ mod tests {
         );
     }
 
-    /// The CHECK constraints pin the column to exactly what `as_str` emits; if the
-    /// two ever drift apart this fails rather than writing a row nothing can read.
+    /// The closed set of states lives in `ShareState`, not the schema — the SQL
+    /// CHECK copy of it is what once silently rejected every Lidarr row. Writes
+    /// only ever bind `as_str`, and a row something else scribbled a bad state
+    /// into must surface as `Malformed` on read, never decode to a wrong state.
     #[tokio::test]
-    async fn schema_rejects_states_outside_the_enum() {
+    async fn a_state_outside_the_enum_is_malformed_on_read() {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
 
-        let bad = sqlx::query("UPDATE shared_items SET state = 'bogus' WHERE file_id = 1001")
+        sqlx::query("UPDATE shared_items SET state = 'bogus' WHERE file_id = 1001")
             .execute(store.pool())
-            .await;
-        assert!(
-            bad.is_err(),
-            "CHECK (state IN (...)) should have rejected this"
-        );
+            .await
+            .unwrap();
 
-        for state in [
-            ShareState::Pending,
-            ShareState::Seeding,
-            ShareState::Unshared,
-            ShareState::Failed,
-        ] {
+        let err = store.get(MediaSource::Sonarr, 1001).await.unwrap_err();
+        assert!(matches!(err, StoreError::Malformed { .. }), "got {err:?}");
+
+        for state in ShareState::ALL.iter().copied() {
             store
                 .set_state(MediaSource::Sonarr, 1001, state, None)
                 .await
@@ -750,7 +834,7 @@ mod tests {
         ready.state = ShareState::Seeding;
         store.upsert(&ready).await.unwrap();
 
-        let feed = store.seeding_items().await.unwrap();
+        let feed = store.seeding_items(crate::PeerScope::All).await.unwrap();
         assert_eq!(feed.len(), 1, "only the seeding item belongs in the feed");
         assert_eq!(feed[0].file_id, 2);
     }

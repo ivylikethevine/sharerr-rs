@@ -6,6 +6,12 @@
 //! They live here so the *properties* — a single entropy source, and a comparison
 //! that does not short-circuit — hold everywhere rather than per call site.
 
+/// The entropy of every secret sharerr mints: 160 bits, hex encoded. Long
+/// enough that guessing is not a strategy, short enough to paste into another
+/// application's settings box. One constant, so peer keys and the Torznab and
+/// tracker secrets cannot quietly diverge in strength.
+pub const KEY_BYTES: usize = 20;
+
 /// A fresh secret: `bytes` bytes of entropy, hex encoded.
 ///
 /// Same source the vault uses for its salts and nonces. Hex rather than base64 so

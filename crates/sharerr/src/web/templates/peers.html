@@ -51,11 +51,9 @@
 
   <label for="scope">Can see</label>
   <select id="scope" name="scope">
-    <option value="all">Everything I share</option>
-    <option value="tv">TV only</option>
-    <option value="movies">Films only</option>
-    <option value="music">Music only</option>
-    <option value="books">Books only</option>
+    {% for option in scope_options %}
+    <option value="{{ option.value }}">{{ option.label }}</option>
+    {% endfor %}
   </select>
   <p class="hint">
     Applies to the feed itself, not just what they are shown — content outside the
@@ -87,11 +85,9 @@
           {% else %}
           <form method="post" action="/peers/{{ peer.id }}/scope" class="inline">
             <select name="scope" onchange="this.form.submit()" aria-label="What {{ peer.label }} can see">
-              <option value="all"{% if peer.scope == "all" %} selected{% endif %}>Everything</option>
-              <option value="tv"{% if peer.scope == "tv" %} selected{% endif %}>TV only</option>
-              <option value="movies"{% if peer.scope == "movies" %} selected{% endif %}>Films only</option>
-              <option value="music"{% if peer.scope == "music" %} selected{% endif %}>Music only</option>
-              <option value="books"{% if peer.scope == "books" %} selected{% endif %}>Books only</option>
+              {% for option in scope_options %}
+              <option value="{{ option.value }}"{% if peer.scope == option.value %} selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
             </select>
             <noscript><button type="submit" class="link">Set</button></noscript>
           </form>

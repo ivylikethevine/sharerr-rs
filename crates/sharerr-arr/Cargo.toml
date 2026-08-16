@@ -15,6 +15,7 @@ reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sharerr-client = { workspace = true }
 sharerr-core = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
@@ -22,5 +23,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+sharerr-testkit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 wiremock = { workspace = true }

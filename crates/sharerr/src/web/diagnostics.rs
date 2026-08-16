@@ -29,36 +29,57 @@ const MAX_LISTED: usize = 20;
 pub async fn page(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
 
+    // One vault open for the whole page. Opening it derives the key with Argon2 —
+    // ~16ms of solid CPU, more on ARM — so paying that once per configured
+    // service turned this into the most expensive page in the UI.
+    let vault = state.serve.open_vault().await;
+    let api_key = |key: &'static str| -> Result<Option<SecretString>, String> {
+        match &vault {
+            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
+            Err(reason) => Err(reason.clone()),
+        }
+    };
+
+    // The services are independent, so the page waits for the slowest of them
+    // rather than the sum of all five.
+    let outcomes = futures::future::join_all(config.configured_sources().into_iter().map(|kind| {
+        let api_key = api_key(secret_keys::api_key_for(kind));
+        let config = &config;
+        async move {
+            let url = config.service(kind).map(|s| &s.url);
+            (
+                kind,
+                checks::check_arr(kind, url, api_key, &config.tag).await,
+            )
+        }
+    }))
+    .await;
+
     let mut services = Vec::new();
     let mut discovered: Vec<Discovered> = Vec::new();
-
-    for kind in MediaSource::ALL.iter().copied() {
-        let (service, key) = (config.service(kind), secret_keys::api_key_for(kind));
-
-        // An unconfigured service is not a fault to report — plenty of instances
-        // run only one of the two.
-        if service.is_none() {
-            continue;
-        }
-
-        let outcome = checks::check_arr(
-            kind,
-            service.map(|s| &s.url),
-            secret(&state, key).await,
-            &config.tag,
-        )
-        .await;
+    for (kind, outcome) in outcomes {
         services.push(describe(kind, &config, &outcome));
         discovered.extend(outcome.into_items());
     }
 
-    let paths = checks::check_paths(&config, &discovered);
+    // `check_paths` stats every discovered file. On a container pinned to one
+    // CPU there is exactly one worker thread, so running it inline would stall
+    // /health and every other request for the duration of the walk.
+    let scanned = !discovered.is_empty();
+    let paths = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || checks::check_paths(&config, &discovered))
+            .await
+            // A panicked walk renders as an empty report rather than a 500; the
+            // service lines above still carry the useful half of the page.
+            .unwrap_or_default()
+    };
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
     render(&DiagnosticsPage {
         signed_in: true,
         services,
-        scanned: !discovered.is_empty(),
+        scanned,
         rules: paths.rules,
         checked: paths.checked,
         unmapped: paths.unmapped,
@@ -78,15 +99,6 @@ pub async fn page(State(state): State<WebState>) -> Response {
             qbit: sample.qbit.display().to_string(),
         }),
     })
-}
-
-async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretString>, String> {
-    state
-        .serve
-        .open_vault()
-        .await?
-        .get(key)
-        .map_err(|err| err.to_string())
 }
 
 /// One line per service, saying whether it contributed anything to the scan.

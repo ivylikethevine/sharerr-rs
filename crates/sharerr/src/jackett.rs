@@ -38,9 +38,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::state::ServeState;
-use crate::torznab::{
-    CAT_AUDIO, CAT_BOOKS, CAT_MOVIES, CAT_TV, CAT_XXX, SearchQuery, check_api_key, collect,
-};
+use crate::torznab::{Caller, SearchQuery, collect};
 
 /// The single indexer this instance exposes.
 ///
@@ -92,11 +90,12 @@ pub fn routes(serve: Arc<ServeState>) -> axum::Router {
 /// at this instance, so a client follows them whichever path it searched through.
 async fn torznab_search(
     State(state): State<Arc<ServeState>>,
+    caller: Caller,
     Path(indexer): Path<String>,
     Query(query): Query<SearchQuery>,
 ) -> Response {
     tracing::debug!(indexer, "torznab request over the jackett path");
-    crate::torznab::api(State(state), Query(query)).await
+    crate::torznab::api(State(state), caller, Query(query)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -136,18 +135,12 @@ struct Capability {
 /// `GET /api/v2.0/indexers` — the list of indexers, which for sharerr is one.
 ///
 /// Jackett supports `?configured=true`. sharerr's single indexer is always
-/// configured, so the filter is accepted and changes nothing — but it is accepted,
-/// because a client that sends it and gets an error learns nothing useful.
-async fn indexers(
-    State(state): State<Arc<ServeState>>,
-    Query(query): Query<AdminQuery>,
-) -> Response {
-    if let Err(response) = check_api_key(&state, query.apikey.as_deref()).await {
-        return response;
-    }
-
+/// configured, so the filter is accepted and changes nothing — no `Query`
+/// extractor means every filter a client sends is accepted and ignored, because
+/// a client that sends one and gets an error learns nothing useful.
+async fn indexers(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
     let config = state.config().await;
-    let base = crate::torznab::public_base_url(&config);
+    let base = config.public_base_url();
 
     let entry = IndexerEntry {
         id: INDEXER_ID,
@@ -158,28 +151,13 @@ async fn indexers(
         site_link: base,
         language: "en-US",
         last_error: "",
-        caps: vec![
-            Capability {
-                id: CAT_TV.to_string(),
-                name: "TV",
-            },
-            Capability {
-                id: CAT_MOVIES.to_string(),
-                name: "Movies",
-            },
-            Capability {
-                id: CAT_AUDIO.to_string(),
-                name: "Audio",
-            },
-            Capability {
-                id: CAT_BOOKS.to_string(),
-                name: "Books",
-            },
-            Capability {
-                id: CAT_XXX.to_string(),
-                name: "XXX",
-            },
-        ],
+        caps: crate::torznab::CATEGORIES
+            .iter()
+            .map(|(id, name)| Capability {
+                id: id.to_string(),
+                name,
+            })
+            .collect(),
     };
 
     json([entry])
@@ -211,14 +189,7 @@ struct ServerConfigDto {
 
 /// `GET /api/v2.0/server/config` — what a client reads to learn who it is talking
 /// to.
-async fn server_config(
-    State(state): State<Arc<ServeState>>,
-    Query(query): Query<AdminQuery>,
-) -> Response {
-    if let Err(response) = check_api_key(&state, query.apikey.as_deref()).await {
-        return response;
-    }
-
+async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
     let config = state.config().await;
 
     json(ServerConfigDto {
@@ -310,13 +281,10 @@ struct QueriedIndexer {
 /// between `doctor` and the web UI's probes.
 async fn json_results(
     State(state): State<Arc<ServeState>>,
+    caller: Caller,
     Path(indexer): Path<String>,
     Query(query): Query<SearchQuery>,
 ) -> Response {
-    let caller = match check_api_key(&state, query.apikey.as_deref()).await {
-        Ok(caller) => caller,
-        Err(response) => return response,
-    };
     tracing::debug!(indexer, "jackett json results");
 
     // Scoped to the friend who asked, exactly as the XML feed is. A second surface
@@ -363,31 +331,17 @@ async fn json_results(
                 details: link.clone(),
                 link,
                 category: vec![category],
-                category_desc: match category {
-                    CAT_MOVIES => "Movies",
-                    CAT_AUDIO => "Audio",
-                    CAT_XXX => "XXX",
-                    CAT_BOOKS => "Books",
-                    _ => "TV",
-                },
+                category_desc: crate::torznab::category_name(category),
                 size: item.size,
-                // One seeder — this instance — for the same reason the XML feed
-                // says so: a truthful zero hides every release nobody has taken yet.
-                seeders: 1,
-                peers: 1,
+                // Shared with the XML feed — see the constants' docs.
+                seeders: crate::torznab::ADVERTISED_SEEDERS,
+                peers: crate::torznab::ADVERTISED_PEERS,
                 info_hash,
-                // Nothing here is ratio-metered, so downloads are free and uploads
-                // count normally.
-                download_volume_factor: 0.0,
-                upload_volume_factor: 1.0,
+                download_volume_factor: crate::torznab::DOWNLOAD_VOLUME_FACTOR,
+                upload_volume_factor: crate::torznab::UPLOAD_VOLUME_FACTOR,
                 // Jackett's JSON carries the IMDb id as a bare number, without the
                 // `tt`, unlike Torznab's attribute.
-                imdb: item
-                    .ids
-                    .imdb
-                    .as_deref()
-                    .map(|id| id.trim_start_matches("tt"))
-                    .and_then(|id| id.parse().ok()),
+                imdb: item.ids.imdb_numeric().and_then(|id| id.parse().ok()),
                 tvdb: item.ids.tvdb,
                 tmdb: item.ids.tmdb,
             }
@@ -435,19 +389,6 @@ async fn unimplemented_endpoint(
         r#"{"error":"sharerr implements only Jackett's read-only endpoints"}"#,
     )
         .into_response()
-}
-
-/// Query parameters shared by the admin endpoints.
-///
-/// Only the key matters; Jackett's own filters (`configured`) are accepted and
-/// ignored, because rejecting them would fail a request sharerr can answer
-/// perfectly well.
-#[derive(Debug, Default, serde::Deserialize)]
-struct AdminQuery {
-    apikey: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code, reason = "accepted so a client sending it is not rejected")]
-    configured: Option<String>,
 }
 
 /// `axum::Json` rather than a hand-rolled serializer: it sets the content type and

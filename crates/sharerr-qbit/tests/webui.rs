@@ -9,7 +9,7 @@
 
 use secrecy::SecretString;
 use serde_json::json;
-use sharerr_qbit::{AddTorrent, QbitClient, QbitError};
+use sharerr_qbit::{AddRequest, QbitClient, QbitError};
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -335,7 +335,7 @@ async fn add_torrent_always_disables_automatic_torrent_management() {
     let torrent = b"d8:announce4:faked4:infod4:name4:teseee";
     client(&server)
         .add_torrent(
-            &AddTorrent::new(torrent, "share.torrent", "/downloads/tv/Lanternwick Hollow")
+            &AddRequest::new(torrent, "share.torrent", "/downloads/tv/Lanternwick Hollow")
                 .category("sharerr")
                 .tags("sharerr"),
         )
@@ -392,7 +392,7 @@ async fn skip_checking_is_opt_in() {
         .await;
 
     client(&server)
-        .add_torrent(&AddTorrent::new(b"data", "s.torrent", "/downloads").skip_checking(true))
+        .add_torrent(&AddRequest::new(b"data", "s.torrent", "/downloads").skip_checking(true))
         .await
         .unwrap();
 
@@ -411,7 +411,7 @@ async fn a_rejected_torrent_is_an_error_despite_the_200() {
         .await;
 
     let err = client(&server)
-        .add_torrent(&AddTorrent::new(
+        .add_torrent(&AddRequest::new(
             b"not a torrent",
             "bad.torrent",
             "/downloads",
@@ -534,5 +534,4 @@ async fn preferences_tolerates_the_hundred_keys_it_does_not_model() {
     let prefs = client(&server).preferences().await.unwrap();
     assert!(prefs.enable_embedded_tracker);
     assert_eq!(prefs.embedded_tracker_port, 9000);
-    assert_eq!(prefs.save_path, "/downloads");
 }

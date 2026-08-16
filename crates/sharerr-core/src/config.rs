@@ -86,6 +86,21 @@ pub mod config_paths {
     pub const READARR_URL: &str = "readarr.url";
     pub const WHISPARR_URL: &str = "whisparr.url";
 
+    /// The config path holding one *arr app's URL — the write-side counterpart
+    /// of [`super::secret_keys::api_key_for`], for the same reason: every
+    /// consumer asks the same question, and a sixth app should mean editing one
+    /// function.
+    pub fn url_for(source: crate::MediaSource) -> &'static str {
+        use crate::MediaSource::{Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        match source {
+            Sonarr => SONARR_URL,
+            Radarr => RADARR_URL,
+            Lidarr => LIDARR_URL,
+            Readarr => READARR_URL,
+            Whisparr => WHISPARR_URL,
+        }
+    }
+
     pub const QBITTORRENT_URL: &str = "qbittorrent.url";
     pub const QBITTORRENT_USERNAME: &str = "qbittorrent.username";
     pub const QBITTORRENT_CATEGORY: &str = "qbittorrent.category";
@@ -103,6 +118,15 @@ pub mod config_paths {
 
     pub const SYNC_ENABLED: &str = "sync.enabled";
     pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
+
+    /// The `SHARERR_*` variable that overrides a dotted config path — the inverse
+    /// of the env scan's lowercase-and-`__`-to-`.` transform. Kept beside the
+    /// paths so a consumer that needs the variable's name derives it from the
+    /// same constant everything else uses, instead of hand-typing a third
+    /// spelling that breaks silently when a field is renamed.
+    pub fn env_var(path: &str) -> String {
+        format!("SHARERR_{}", path.to_uppercase().replace('.', "__"))
+    }
 
     /// Every path the UI writes, for the test that proves each one names a real
     /// field. Keep in step with the constants above — a path missing from here is
@@ -202,8 +226,6 @@ impl Config {
         self.data_dir.join("torrents")
     }
 
-    /// A resolver over the configured `path_map`, for translating between the
-    /// three views of the library.
     /// The configuration for one *arr app, or `None` if it is not set up.
     ///
     /// Every consumer wants this and none of them should carry a five-way match to
@@ -228,9 +250,81 @@ impl Config {
             .collect()
     }
 
+    /// A resolver over the configured `path_map`, for translating between the
+    /// three views of the library.
     pub fn resolver(&self) -> crate::paths::PathResolver {
         crate::paths::PathResolver::new(self.path_map.clone())
     }
+
+    /// The HTTP base URL a friend reaches this instance on.
+    ///
+    /// Built from `tracker.advertised_host`, the only address sharerr is told
+    /// that is known to work from outside — the bind address is usually
+    /// `0.0.0.0`, which is not a URL anyone can fetch. The port is this server's
+    /// own: `tracker.port` names where friends *announce*, which under the
+    /// qbittorrent-embedded backend is **qBittorrent's** port — using it here
+    /// once pointed every feed link at a BitTorrent announce endpoint. Only the
+    /// builtin backend, where the tracker is this same HTTP server, honours the
+    /// override.
+    pub fn public_base_url(&self) -> String {
+        let host = self
+            .tracker
+            .advertised_host
+            .as_deref()
+            .unwrap_or("localhost");
+        let port = match self.tracker.backend {
+            TrackerBackend::Builtin => self.tracker.port.unwrap_or_else(|| self.server.bind.port()),
+            TrackerBackend::QbittorrentEmbedded => self.server.bind.port(),
+        };
+        format!("http://{host}:{port}")
+    }
+
+    /// The selected torrent client's connection and labelling settings.
+    ///
+    /// One accessor instead of a `match self.torrent_backend` at every call site:
+    /// the section names in `sharerr.toml` differ per client, so the URL, username
+    /// and vault key must be resolved together — plucking fields from the unused
+    /// section is how an operator ends up debugging the wrong service.
+    pub fn torrent_client(&self) -> TorrentClientConfig<'_> {
+        match self.torrent_backend {
+            TorrentBackend::Qbittorrent => TorrentClientConfig {
+                url: &self.qbittorrent.url,
+                username: &self.qbittorrent.username,
+                password_key: secret_keys::QBITTORRENT_PASSWORD,
+                category: &self.qbittorrent.category,
+                tag: &self.qbittorrent.tag,
+                skip_checking: self.qbittorrent.skip_checking,
+            },
+            TorrentBackend::Transmission => TorrentClientConfig {
+                url: &self.transmission.url,
+                username: &self.transmission.username,
+                password_key: secret_keys::TRANSMISSION_PASSWORD,
+                // Transmission has only labels, so the category and tag collapse
+                // into one value, and there is no skip-check switch to honour.
+                category: &self.transmission.label,
+                tag: &self.transmission.label,
+                skip_checking: false,
+            },
+        }
+    }
+}
+
+/// What [`Config::torrent_client`] resolves: everything about whichever torrent
+/// client is configured, independent of which one that is.
+#[derive(Debug, Clone, Copy)]
+pub struct TorrentClientConfig<'a> {
+    pub url: &'a Url,
+    pub username: &'a str,
+    /// Vault key holding this client's password.
+    pub password_key: &'static str,
+    /// The grouping applied to torrents sharerr creates: qBittorrent's category,
+    /// or Transmission's label.
+    pub category: &'a str,
+    /// qBittorrent's tag; for Transmission this repeats the label.
+    pub tag: &'a str,
+    /// Whether to skip hash-checking on add. Always `false` for Transmission,
+    /// which has no such switch.
+    pub skip_checking: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -351,6 +445,19 @@ pub enum TrackerBackend {
     Builtin,
 }
 
+impl TrackerBackend {
+    /// Both backends, in the order the UI offers them.
+    pub const ALL: &'static [Self] = &[Self::QbittorrentEmbedded, Self::Builtin];
+
+    /// The kebab-case name, matching both the serde form and `sharerr.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QbittorrentEmbedded => "qbittorrent-embedded",
+            Self::Builtin => "builtin",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 /// Which tracker announce URLs point at, and the address peers should use.
@@ -383,6 +490,18 @@ pub struct SyncConfig {
     /// Run the reconciliation loop on a timer while `serve` is running.
     pub enabled: bool,
     pub interval_secs: u64,
+}
+
+impl SyncConfig {
+    /// The shortest interval the loop will run at. One constant, because the
+    /// settings form rejects values below it and the loop clamps to it — two
+    /// hand-typed 60s would drift into a form that stores what the loop ignores.
+    pub const MIN_INTERVAL_SECS: u64 = 60;
+
+    /// The configured interval with the floor applied.
+    pub fn effective_interval_secs(&self) -> u64 {
+        self.interval_secs.max(Self::MIN_INTERVAL_SECS)
+    }
 }
 
 impl Default for SyncConfig {

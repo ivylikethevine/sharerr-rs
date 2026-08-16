@@ -282,14 +282,10 @@ impl Swarms {
             })
     }
 
-    /// How many swarms are currently tracked. For the status page.
-    pub async fn len(&self) -> usize {
+    /// How many swarms are currently tracked.
+    #[cfg(test)]
+    async fn len(&self) -> usize {
         self.inner.read().await.len()
-    }
-
-    /// Whether any peer is currently known to any swarm.
-    pub async fn is_empty(&self) -> bool {
-        self.len().await == 0
     }
 }
 
@@ -323,14 +319,7 @@ impl AnnounceResponse {
 
         put_key(&mut out, "peers");
         if compact {
-            let mut packed = Vec::with_capacity(v4.len() * 6);
-            for addr in &v4 {
-                if let IpAddr::V4(ip) = addr.ip() {
-                    packed.extend_from_slice(&ip.octets());
-                    packed.extend_from_slice(&addr.port().to_be_bytes());
-                }
-            }
-            put_bytes(&mut out, &packed);
+            put_bytes(&mut out, &pack_compact(&v4));
         } else {
             out.push(b'l');
             for addr in &v4 {
@@ -347,15 +336,8 @@ impl AnnounceResponse {
         // Only emitted when there is something to put in it. An empty `peers6` is
         // harmless but some older clients are happier without the key at all.
         if compact && !v6.is_empty() {
-            let mut packed = Vec::with_capacity(v6.len() * 18);
-            for addr in &v6 {
-                if let IpAddr::V6(ip) = addr.ip() {
-                    packed.extend_from_slice(&ip.octets());
-                    packed.extend_from_slice(&addr.port().to_be_bytes());
-                }
-            }
             put_key(&mut out, "peers6");
-            put_bytes(&mut out, &packed);
+            put_bytes(&mut out, &pack_compact(&v6));
         }
 
         out.push(b'e');
@@ -484,6 +466,22 @@ fn percent_decode(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Pack peers in BEP 23/7 compact form: address octets then a big-endian port,
+/// 6 bytes per IPv4 peer and 18 per IPv6. The caller partitions by family —
+/// `peers` and `peers6` are separate keys — and this packs whichever list it is
+/// handed.
+fn pack_compact(addrs: &[&SocketAddr]) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(addrs.len() * 18);
+    for addr in addrs {
+        match addr.ip() {
+            IpAddr::V4(ip) => packed.extend_from_slice(&ip.octets()),
+            IpAddr::V6(ip) => packed.extend_from_slice(&ip.octets()),
+        }
+        packed.extend_from_slice(&addr.port().to_be_bytes());
+    }
+    packed
+}
+
 const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -494,16 +492,9 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 /// Parse a hex info hash — the form sharerr stores and the Torznab feed publishes.
-pub fn info_hash_from_hex(hex: &str) -> Option<InfoHash> {
-    if hex.len() != HASH_LEN * 2 {
-        return None;
-    }
-
+pub fn info_hash_from_hex(raw: &str) -> Option<InfoHash> {
     let mut out = [0u8; HASH_LEN];
-    for (byte, pair) in out.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
-        let (hi, lo) = (hex_nibble(pair[0])?, hex_nibble(pair[1])?);
-        *byte = (hi << 4) | lo;
-    }
+    hex::decode_to_slice(raw, &mut out).ok()?;
     Some(out)
 }
 

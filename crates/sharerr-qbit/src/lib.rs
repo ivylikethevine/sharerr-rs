@@ -8,14 +8,15 @@
 //! ```no_run
 //! # async fn example() -> Result<(), sharerr_qbit::QbitError> {
 //! use secrecy::SecretString;
-//! use sharerr_qbit::{AddTorrent, QbitClient};
+//! use sharerr_client::AddRequest;
+//! use sharerr_qbit::QbitClient;
 //!
 //! let url = "http://localhost:8080".parse().expect("literal url");
 //! let qbit = QbitClient::new(&url, "admin", SecretString::from("password"))?;
 //!
 //! let torrent: Vec<u8> = Vec::new(); // built by sharerr-torrent
 //! qbit.add_torrent(
-//!     &AddTorrent::new(&torrent, "share.torrent", "/downloads/tv/Some Show")
+//!     &AddRequest::new(&torrent, "share.torrent", "/downloads/tv/Some Show")
 //!         .category("sharerr")
 //!         .tags("sharerr"),
 //! )
@@ -33,4 +34,6 @@ mod torrents;
 
 pub use client::QbitClient;
 pub use error::{QbitError, Result};
-pub use models::{AddTorrent, Preferences, TorrentFile, TorrentInfo};
+pub use models::{Preferences, TorrentFile, TorrentInfo};
+// Re-exported because [`QbitClient::add_torrent`] takes it directly.
+pub use sharerr_client::AddRequest;

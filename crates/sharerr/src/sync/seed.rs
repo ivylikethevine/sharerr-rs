@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
 use sharerr_core::paths::ResolvedPaths;
-use sharerr_torrent::{TorrentFactory, TorrentRequest, torrent_file_path};
+use sharerr_torrent::{LavaTorrentFactory, TorrentRequest, torrent_file_path};
 use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +40,6 @@ impl SeedOutcome {
 
 pub struct Seeder {
     pub qbit: Arc<dyn TorrentClient>,
-    pub factory: Arc<dyn TorrentFactory>,
     pub category: String,
     pub tag: String,
     pub skip_checking: bool,
@@ -62,8 +61,19 @@ impl std::fmt::Debug for Seeder {
 impl Seeder {
     /// Ensure the file at `paths` is being seeded, building a torrent only if
     /// nothing already covers it.
-    pub async fn seed(&self, paths: &ResolvedPaths, announce: &Url) -> Result<SeedOutcome> {
-        if let Some(existing) = self.find_existing(&paths.qbit).await? {
+    ///
+    /// `torrents` is the client's full list, fetched once per reconciliation pass
+    /// by the caller — refetching it here per item once made a first sync of a
+    /// large library cost one full-library round trip per file. A snapshot is
+    /// sound: torrents this pass adds are single-file and each discovered item is
+    /// a distinct file, so a later item can never be covered by an earlier add.
+    pub async fn seed(
+        &self,
+        paths: &ResolvedPaths,
+        announce: &Url,
+        torrents: &[TorrentSummary],
+    ) -> Result<SeedOutcome> {
+        if let Some(existing) = self.find_existing(torrents, &paths.qbit).await? {
             tracing::info!(
                 file = %paths.qbit.display(),
                 info_hash = %existing,
@@ -106,44 +116,51 @@ impl Seeder {
         paths: &ResolvedPaths,
         announce: &Url,
     ) -> Result<sharerr_torrent::BuiltTorrent> {
-        let factory = Arc::clone(&self.factory);
         let path = paths.sharerr.clone();
         let announce = announce.clone();
+        let torrent_dir = self.torrent_dir.clone();
 
-        // Hashing a media file is gigabytes of CPU work. Doing it on the runtime
-        // would stall every other task for the duration.
+        // Hashing a media file is gigabytes of CPU work, and the cache write can
+        // block for tens of milliseconds on the network mounts these deployments
+        // sit on. Both stay off the runtime; doing either inline would stall
+        // every other task — /health and /announce included — for the duration.
         let built = tokio::task::spawn_blocking(move || {
-            factory.create(&TorrentRequest {
+            let built = LavaTorrentFactory.create(&TorrentRequest {
                 path: &path,
                 announce: &announce,
-            })
+            })?;
+
+            // Best-effort: the torrent is already in memory and about to be
+            // handed over, so a failure to cache it must not fail the share.
+            let cached = torrent_file_path(&torrent_dir, &built.info_hash);
+            if let Err(err) = write_torrent_file(&cached, &built.data) {
+                tracing::warn!(path = %cached.display(), %err, "could not cache the .torrent file");
+            }
+
+            Ok::<_, sharerr_torrent::TorrentError>(built)
         })
         .await
         .context("torrent build task panicked")?
         .with_context(|| format!("building a torrent for {}", paths.sharerr.display()))?;
 
-        // Best-effort: the torrent is already in memory and about to be handed
-        // over, so a failure to cache it must not fail the share.
-        let cached = torrent_file_path(&self.torrent_dir, &built.info_hash);
-        if let Err(err) = write_torrent_file(&cached, &built.data) {
-            tracing::warn!(path = %cached.display(), %err, "could not cache the .torrent file");
-        }
-
         Ok(built)
     }
 
-    /// Find a torrent qBittorrent already has that contains `target`.
+    /// Find a torrent the client already has that contains `target`.
     ///
-    /// Two passes, cheap first. `torrents/info` alone answers the common case,
+    /// Two passes, cheap first. The summary list alone answers the common case,
     /// because a single-file torrent's `content_path` is the file itself. Only
     /// torrents that could plausibly contain the target — by save path — cost an
     /// extra `torrents/files` call.
-    pub async fn find_existing(&self, target: &Path) -> Result<Option<String>> {
-        let torrents = self
-            .qbit
-            .list(None)
-            .await
-            .context("listing existing torrents in the torrent client")?;
+    async fn find_existing(
+        &self,
+        torrents: &[TorrentSummary],
+        target: &Path,
+    ) -> Result<Option<String>> {
+        // Normalised once: the target is invariant across the whole scan, and
+        // re-deriving it per candidate torrent was two allocations times the
+        // client's entire list, per item.
+        let target = &normalize_path(target);
 
         if let Some(found) = torrents.iter().find(|t| matches_content_path(t, target)) {
             return Ok(Some(found.hash.clone()));
@@ -177,8 +194,9 @@ fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// A single-file torrent points `content_path` straight at the file.
+/// `target` arrives already normalised.
 fn matches_content_path(torrent: &TorrentSummary, target: &Path) -> bool {
-    !torrent.content_path.is_empty() && normalize(&torrent.content_path) == normalize_path(target)
+    !torrent.content_path.is_empty() && normalize(&torrent.content_path) == target
 }
 
 /// Whether this torrent's save path could contain `target` at all.
@@ -189,13 +207,12 @@ fn could_contain(torrent: &TorrentSummary, target: &Path) -> bool {
     if torrent.save_path.is_empty() {
         return false;
     }
-    normalize_path(target).starts_with(normalize(&torrent.save_path))
+    target.starts_with(normalize(&torrent.save_path))
 }
 
 /// Whether any file in the torrent resolves to `target`.
 fn contains_file(save_path: &str, files: &[TorrentFileEntry], target: &Path) -> bool {
     let root = normalize(save_path);
-    let target = normalize_path(target);
     files.iter().any(|file| root.join(&file.name) == target)
 }
 

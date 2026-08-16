@@ -40,6 +40,9 @@ axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
 clap = "4.6.6"
 figment = "0.10.19"
+# The facade over the futures-util that reqwest and axum already pull in;
+# used for join_all over dynamically-sized sets of independent requests.
+futures = "0.3.31"
 getrandom = "0.4.3"
 hex = "0.4.3"
 lava_torrent = "0.11.1"

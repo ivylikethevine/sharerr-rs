@@ -11,36 +11,22 @@ use secrecy::SecretString;
 use serde_json::json;
 use sharerr_arr::{ArrClient, ArrError};
 use sharerr_core::{MediaSource, MediaSpec};
+use sharerr_testkit::library::TAG_ID;
+use sharerr_testkit::mock::mount_json;
 use url::Url;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const API_KEY: &str = "0123456789abcdef0123456789abcdef";
-const TAG_ID: i64 = 3;
 
 fn client(kind: MediaSource, server: &MockServer) -> ArrClient {
     let base = Url::parse(&server.uri()).expect("wiremock uri is a valid url");
     ArrClient::new(kind, &base, SecretString::from(API_KEY)).expect("client builds")
 }
 
-/// Mounts `GET /api/v3/tag` with a `sharerr` tag plus a decoy.
+/// Mounts `GET /api/v3/tag` with the testkit's `sharerr` tag plus its decoy.
 async fn mount_tags(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path("/api/v3/tag"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "id": 1, "label": "anime" },
-            { "id": TAG_ID, "label": "sharerr" },
-        ])))
-        .mount(server)
-        .await;
-}
-
-async fn mount_json(server: &MockServer, route: &str, body: serde_json::Value) {
-    Mock::given(method("GET"))
-        .and(path(route))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(server)
-        .await;
+    mount_json(server, "/api/v3/tag", sharerr_testkit::library::tag_json()).await;
 }
 
 // --------------------------------------------------------------- tag resolution

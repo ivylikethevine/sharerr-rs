@@ -9,11 +9,9 @@ use async_trait::async_trait;
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
 };
-use url::Url;
 
 use crate::QbitClient;
 use crate::error::QbitError;
-use crate::models::AddTorrent;
 
 /// Translate a qBittorrent error into the shared shape.
 ///
@@ -21,21 +19,23 @@ use crate::models::AddTorrent;
 /// shared error preserves, so nothing is lost — an unreachable service and a
 /// rejected password stay apart, and everything else becomes an API error carrying
 /// the original text.
-fn translate(url: &Url, err: QbitError) -> ClientError {
-    let kind = ClientKind::QBittorrent;
-    if err.is_auth_failure() {
-        return ClientError::AuthRejected { kind };
-    }
-    if err.is_unreachable() {
-        return ClientError::Unreachable {
+impl QbitClient {
+    fn translate(&self, err: QbitError) -> ClientError {
+        let kind = ClientKind::QBittorrent;
+        if err.is_auth_failure() {
+            return ClientError::AuthRejected { kind };
+        }
+        if err.is_unreachable() {
+            return ClientError::Unreachable {
+                kind,
+                url: self.base_url().to_string(),
+                detail: err.to_string(),
+            };
+        }
+        ClientError::Api {
             kind,
-            url: url.to_string(),
             detail: err.to_string(),
-        };
-    }
-    ClientError::Api {
-        kind,
-        detail: err.to_string(),
+        }
     }
 }
 
@@ -45,27 +45,21 @@ impl TorrentClient for QbitClient {
         ClientKind::QBittorrent
     }
 
-    fn base_url(&self) -> &Url {
-        QbitClient::base_url(self)
-    }
-
     async fn login(&self) -> Result<()> {
-        QbitClient::login(self)
-            .await
-            .map_err(|e| translate(QbitClient::base_url(self), e))
+        QbitClient::login(self).await.map_err(|e| self.translate(e))
     }
 
     async fn version(&self) -> Result<String> {
         QbitClient::version(self)
             .await
-            .map_err(|e| translate(QbitClient::base_url(self), e))
+            .map_err(|e| self.translate(e))
     }
 
     async fn list(&self, category: Option<&str>) -> Result<Vec<TorrentSummary>> {
         let torrents = self
             .torrents_info(category, None)
             .await
-            .map_err(|e| translate(QbitClient::base_url(self), e))?;
+            .map_err(|e| self.translate(e))?;
 
         Ok(torrents
             .into_iter()
@@ -85,7 +79,7 @@ impl TorrentClient for QbitClient {
         let files = self
             .torrent_files(hash)
             .await
-            .map_err(|e| translate(QbitClient::base_url(self), e))?;
+            .map_err(|e| self.translate(e))?;
 
         Ok(files
             .into_iter()
@@ -97,19 +91,9 @@ impl TorrentClient for QbitClient {
     }
 
     async fn add(&self, request: &AddRequest<'_>) -> Result<()> {
-        let mut add = AddTorrent::new(request.data, request.filename, request.save_path)
-            .skip_checking(request.skip_checking)
-            .stopped(request.stopped);
-        if let Some(category) = request.category {
-            add = add.category(category);
-        }
-        if let Some(tags) = request.tags {
-            add = add.tags(tags);
-        }
-
-        self.add_torrent(&add)
+        self.add_torrent(request)
             .await
-            .map_err(|e| translate(QbitClient::base_url(self), e))
+            .map_err(|e| self.translate(e))
     }
 
     async fn remove(&self, hash: &str) -> Result<()> {
@@ -117,7 +101,7 @@ impl TorrentClient for QbitClient {
         // operator's and predates sharerr knowing about it.
         self.remove_torrent(hash)
             .await
-            .map_err(|e| translate(QbitClient::base_url(self), e))
+            .map_err(|e| self.translate(e))
     }
 
     async fn embedded_tracker_port(&self) -> Result<Option<u16>> {
@@ -126,6 +110,6 @@ impl TorrentClient for QbitClient {
         self.ensure_embedded_tracker()
             .await
             .map(Some)
-            .map_err(|e| translate(QbitClient::base_url(self), e))
+            .map_err(|e| self.translate(e))
     }
 }

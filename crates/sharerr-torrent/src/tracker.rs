@@ -187,10 +187,21 @@ impl TrackerProvider for BuiltinTracker {
     }
 }
 
+/// The URL paths peers announce and scrape on.
+///
+/// These cross a crate boundary: this crate writes them into every announce URL
+/// it builds, and the binary's router mounts its handlers on the same constants
+/// — the same keep-them-adjacent discipline as `torrent_download_path`, but for
+/// the path that, if drifted, would send every torrent announcing to a 404 that
+/// clients retry forever (refusals are deliberately HTTP 200, so nothing would
+/// ever say so).
+pub const ANNOUNCE_PATH: &str = "/announce";
+pub const SCRAPE_PATH: &str = "/scrape";
+
 fn announce_url(host: &str, port: u16, token: Option<&str>) -> Result<Url> {
     let raw = match token {
-        Some(token) => format!("http://{host}:{port}/announce/{token}"),
-        None => format!("http://{host}:{port}/announce"),
+        Some(token) => format!("http://{host}:{port}{ANNOUNCE_PATH}/{token}"),
+        None => format!("http://{host}:{port}{ANNOUNCE_PATH}"),
     };
 
     Url::parse(&raw).map_err(|source| TorrentError::AnnounceUrl {

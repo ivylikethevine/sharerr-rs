@@ -49,6 +49,26 @@ impl MediaSource {
         Self::Readarr,
         Self::Whisparr,
     ];
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    ///
+    /// This is *the* decoder for stored and URL-borne source names; a local
+    /// string match at a call site is how the database once lost every Lidarr
+    /// row to an "unknown source" error.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|s| s.as_str() == value)
+    }
+
+    /// The name as a heading or label writes it — `as_str` capitalised.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Sonarr => "Sonarr",
+            Self::Radarr => "Radarr",
+            Self::Lidarr => "Lidarr",
+            Self::Readarr => "Readarr",
+            Self::Whisparr => "Whisparr",
+        }
+    }
 }
 
 impl fmt::Display for MediaSource {
@@ -77,6 +97,23 @@ pub struct ExternalIds {
     /// ISBN, for books. Kept alongside Goodreads because indexers match on either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,
+}
+
+impl ExternalIds {
+    /// Any IMDb id spelling reduced to the bare number.
+    ///
+    /// Sonarr sends `1234567`, Radarr sends `tt1234567`, and the *arr APIs
+    /// return either depending on the endpoint — so every comparison and every
+    /// renderer that wants the bare number goes through here rather than
+    /// restating the rule.
+    pub fn imdb_bare(raw: &str) -> &str {
+        raw.trim().trim_start_matches("tt")
+    }
+
+    /// The stored IMDb id as [`Self::imdb_bare`] renders it, if one is known.
+    pub fn imdb_numeric(&self) -> Option<&str> {
+        self.imdb.as_deref().map(Self::imdb_bare)
+    }
 }
 
 /// What a shared file actually contains.
@@ -175,6 +212,9 @@ pub enum ShareState {
 }
 
 impl ShareState {
+    /// Every lifecycle state, for iteration and round-trip tests.
+    pub const ALL: &'static [Self] = &[Self::Pending, Self::Seeding, Self::Unshared, Self::Failed];
+
     /// The lowercase name used in the database and in log output.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -183,6 +223,11 @@ impl ShareState {
             Self::Unshared => "unshared",
             Self::Failed => "failed",
         }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|s| s.as_str() == value)
     }
 }
 
@@ -220,5 +265,26 @@ impl SharedItem {
     /// database id. Used to diff discovery output against stored state.
     pub fn key(&self) -> (MediaSource, i64) {
         (self.source, self.file_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_source_names_round_trip() {
+        for source in MediaSource::ALL {
+            assert_eq!(MediaSource::parse(source.as_str()), Some(*source));
+        }
+        assert_eq!(MediaSource::parse("plex"), None);
+    }
+
+    #[test]
+    fn share_state_names_round_trip() {
+        for state in ShareState::ALL {
+            assert_eq!(ShareState::parse(state.as_str()), Some(*state));
+        }
+        assert_eq!(ShareState::parse("paused"), None);
     }
 }

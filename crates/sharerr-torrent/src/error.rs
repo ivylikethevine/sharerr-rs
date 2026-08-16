@@ -50,9 +50,6 @@ pub enum TorrentError {
         source: url::ParseError,
     },
 
-    #[error("qBittorrent: {0}")]
-    Qbit(#[from] sharerr_qbit::QbitError),
-
     /// Anything the torrent client reported, whichever client it is. The client's
     /// own error already names itself, so this adds no prefix.
     #[error("{0}")]

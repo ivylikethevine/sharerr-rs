@@ -17,13 +17,16 @@ use crate::{Discovered, lidarr, radarr, readarr, sonarr};
 
 /// The API prefix is per-source: Sonarr, Radarr and Whisparr are on `v3`, Lidarr
 /// and Readarr on `v1`. See [`MediaSource::api_version`].
-fn api_prefix(kind: MediaSource) -> String {
-    format!("api/{}/", kind.api_version())
+fn api_prefix(kind: MediaSource) -> &'static str {
+    // Static rather than formatted: this runs on every single HTTP call.
+    match kind.api_version() {
+        "v1" => "api/v1/",
+        _ => "api/v3/",
+    }
 }
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Enough of an error body to identify the problem, bounded so a stray HTML error
-/// page from a misconfigured reverse proxy does not flood the logs.
-const MAX_ERROR_BODY: usize = 400;
+
+use sharerr_client::clamp_body;
 
 /// A Sonarr or Radarr v3 client.
 ///
@@ -56,25 +59,9 @@ impl ArrClient {
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(ArrError::Client)?;
-        Self::with_http(kind, base, api_key, http)
-    }
-
-    /// Same as [`Self::new`] but with a caller-supplied client, so tests can point
-    /// several clients at one wiremock server without rebuilding TLS state.
-    pub fn with_http(
-        kind: MediaSource,
-        base: &Url,
-        api_key: SecretString,
-        http: reqwest::Client,
-    ) -> Result<Self> {
-        let mut base = base.clone();
-        if !base.path().ends_with('/') {
-            let with_slash = format!("{}/", base.path());
-            base.set_path(&with_slash);
-        }
         Ok(Self {
             kind,
-            base,
+            base: sharerr_client::normalise_base(base),
             api_key,
             http,
         })
@@ -85,14 +72,9 @@ impl ArrClient {
         self.kind
     }
 
-    /// The instance this client talks to, for error messages that name it.
-    pub fn base_url(&self) -> &Url {
-        &self.base
-    }
-
     fn endpoint(&self, path: &str) -> Result<Url> {
         self.base
-            .join(&api_prefix(self.kind))
+            .join(api_prefix(self.kind))
             .and_then(|u| u.join(path))
             .map_err(|source| ArrError::Url {
                 service: self.kind,
@@ -102,7 +84,11 @@ impl ArrClient {
 
     /// The only place the API key is read. Everything else goes through here, so
     /// there is exactly one line to audit.
-    async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
+    pub(crate) async fn get<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
         let url = self.endpoint(path)?;
 
         let response = self
@@ -154,14 +140,6 @@ impl ArrClient {
         })
     }
 
-    pub(crate) async fn get_list<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        query: &[(&str, String)],
-    ) -> Result<Vec<T>> {
-        self.get(path, query).await
-    }
-
     /// Cheap liveness + auth probe for `doctor`.
     pub async fn system_status(&self) -> Result<SystemStatus> {
         self.get("system/status", &[]).await
@@ -193,6 +171,13 @@ impl ArrClient {
     /// advice and look identical from the outside.
     pub async fn discover(&self, tag_label: &str) -> Result<Vec<Discovered>> {
         let tag_id = self.tag_id(tag_label).await?;
+        self.discover_with_tag_id(tag_id).await
+    }
+
+    /// [`Self::discover`] for a caller that already resolved the tag id — the
+    /// health checks do, and re-resolving here cost every probe a duplicate
+    /// `/tag` round trip.
+    pub async fn discover_with_tag_id(&self, tag_id: i64) -> Result<Vec<Discovered>> {
         match self.kind {
             // Whisparr is Sonarr's codebase with a different catalogue, so it walks
             // series and episode files identically — the same code, not a copy.
@@ -202,14 +187,4 @@ impl ArrClient {
             MediaSource::Readarr => readarr::discover(self, tag_id).await,
         }
     }
-}
-
-/// Clamp an error body for inclusion in a message.
-///
-/// Bounded by **characters, not bytes**: `String::truncate` panics outright if the
-/// byte index lands inside a multi-byte character, and error bodies are exactly
-/// where non-ASCII shows up — a localized error page from a reverse proxy, or a
-/// title quoted back in the message.
-fn clamp_body(body: &str) -> String {
-    body.chars().take(MAX_ERROR_BODY).collect()
 }

@@ -20,7 +20,6 @@ secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sharerr-client = { workspace = true }
-sharerr-core = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 tracing = { workspace = true }

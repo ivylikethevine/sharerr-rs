@@ -21,8 +21,6 @@ pub struct SystemStatus {
     pub version: String,
     #[serde(default)]
     pub app_name: String,
-    #[serde(default)]
-    pub instance_name: String,
 }
 
 // ---------------------------------------------------------------- Sonarr
@@ -107,10 +105,6 @@ pub(crate) fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|s| !s.trim().is_empty())
 }
 
-pub(crate) fn non_zero(value: Option<i64>) -> Option<i64> {
-    value.filter(|v| *v != 0)
-}
-
-pub(crate) fn non_zero_year(value: Option<u16>) -> Option<u16> {
-    value.filter(|v| *v != 0)
+pub(crate) fn non_zero<T: PartialEq + Default>(value: Option<T>) -> Option<T> {
+    value.filter(|v| *v != T::default())
 }

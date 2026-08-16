@@ -46,6 +46,34 @@ pub struct WebState {
     pub sessions: Arc<Sessions>,
 }
 
+impl WebState {
+    /// Fetch one stored secret.
+    ///
+    /// Returns `Ok(None)` for "not stored yet", which is a different message from
+    /// "the vault will not open" — the first is a field to fill in, the second is
+    /// a missing environment variable.
+    pub(crate) async fn secret(
+        &self,
+        key: &'static str,
+    ) -> Result<Option<secrecy::SecretString>, String> {
+        self.serve
+            .open_vault()
+            .await?
+            .get(key)
+            .map_err(|err| err.to_string())
+    }
+
+    /// The store, or the one 503 every handler answers with when the database
+    /// cannot open. Written here once so handlers cannot drift into inventing
+    /// their own failure semantics for the same condition.
+    pub(crate) async fn store_or_503(&self) -> Result<sharerr_store::Store, Response> {
+        self.serve
+            .store()
+            .await
+            .map_err(|reason| (StatusCode::SERVICE_UNAVAILABLE, reason).into_response())
+    }
+}
+
 /// Every route the browser talks to, ready to merge into the server's router.
 ///
 /// Returns a fully-stated `Router` so it composes with `/health` and `/ready`,
@@ -70,8 +98,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/peers/{id}/delete", post(peers::delete))
         .route("/settings", get(settings::page))
         .route("/settings/general", post(settings::save_general))
-        .route("/settings/sonarr", post(settings::save_sonarr))
-        .route("/settings/radarr", post(settings::save_radarr))
+        .route("/settings/arr/{source}", post(settings::save_arr))
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
         .route("/settings/tracker", post(settings::save_tracker))
         .route("/settings/paths", post(settings::save_paths))
@@ -117,9 +144,16 @@ async fn status_page(State(state): State<WebState>) -> Response {
         // restart, and this banner is how the operator learns that is still needed.
         master_key_present: master_key_from_env().is_ok(),
         tag: config.tag.clone(),
-        sonarr_url: config.sonarr.as_ref().map(|s| s.url.to_string()),
-        radarr_url: config.radarr.as_ref().map(|r| r.url.to_string()),
-        qbit_url: config.qbittorrent.url.to_string(),
+        services: sharerr_core::MediaSource::ALL
+            .iter()
+            .copied()
+            .map(|kind| crate::web::templates::ServiceUrl {
+                title: settings::title_case(kind.as_str()),
+                url: config.service(kind).map(|s| s.url.to_string()),
+            })
+            .collect(),
+        client_name: config.torrent_backend.as_str(),
+        client_url: config.torrent_client().url.to_string(),
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
         config_path: state.serve.config_path().display().to_string(),
@@ -206,8 +240,8 @@ mod tests {
         let protected_gets = ["/", "/settings", "/diagnostics", "/peers"];
         let protected_posts = [
             "/settings/general",
-            "/settings/sonarr",
-            "/settings/radarr",
+            "/settings/arr/sonarr",
+            "/settings/arr/lidarr",
             "/settings/qbittorrent",
             "/settings/tracker",
             "/settings/paths",

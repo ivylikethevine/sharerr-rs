@@ -19,7 +19,7 @@ use sharerr_core::{Config, MediaSource, ShareState};
 use sharerr_qbit::QbitClient;
 use sharerr_store::Store;
 use sharerr_testkit::library::{self, TvLibrary};
-use sharerr_torrent::{LavaTorrentFactory, TrackerProvider};
+use sharerr_torrent::TrackerProvider;
 use url::Url;
 use wiremock::matchers::{method, path as route};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -79,20 +79,8 @@ struct FakeQbit {
 
 impl FakeQbit {
     async fn mount(&self, server: &MockServer) {
-        Mock::given(method("POST"))
-            .and(route("/api/v2/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-            .mount(server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(route("/api/v2/app/preferences"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "enable_embedded_tracker": true,
-                "embedded_tracker_port": 9000,
-            })))
-            .mount(server)
-            .await;
+        sharerr_testkit::mock::mount_qbit_login(server).await;
+        sharerr_testkit::mock::mount_qbit_prefs(server, true, 9000).await;
 
         let state = Arc::clone(&self.state);
         Mock::given(method("POST"))
@@ -319,7 +307,6 @@ async fn harness(series_json: Value) -> Harness {
 
     let seeder = Seeder {
         qbit: Arc::clone(&qbit),
-        factory: Arc::new(LavaTorrentFactory),
         category: "sharerr".to_owned(),
         tag: "sharerr".to_owned(),
         skip_checking: false,
@@ -330,7 +317,6 @@ async fn harness(series_json: Value) -> Harness {
         config,
         Store::open_in_memory().await.unwrap(),
         vec![sonarr],
-        Arc::clone(&qbit),
         Arc::new(StubTracker),
         seeder,
     );

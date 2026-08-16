@@ -18,8 +18,7 @@
 
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
-use secrecy::SecretString;
-use sharerr_core::config::{TorrentBackend, secret_keys};
+use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
@@ -33,14 +32,12 @@ use crate::checks::{ArrOutcome, QbitOutcome, check_arr, check_qbit};
 pub async fn test(State(state): State<WebState>, Path(service): Path<String>) -> Response {
     let config = state.serve.config().await;
 
-    let outcome = match service.as_str() {
-        "sonarr" => arr_badge(MediaSource::Sonarr, &state, &config).await,
-        "radarr" => arr_badge(MediaSource::Radarr, &state, &config).await,
-        "lidarr" => arr_badge(MediaSource::Lidarr, &state, &config).await,
-        "readarr" => arr_badge(MediaSource::Readarr, &state, &config).await,
-        "whisparr" => arr_badge(MediaSource::Whisparr, &state, &config).await,
-        "qbittorrent" => qbit_badge(&state, &config).await,
-        _ => Outcome::Bad("Unknown service.".to_owned()),
+    let outcome = if service == "qbittorrent" {
+        qbit_badge(&state, &config).await
+    } else if let Some(kind) = MediaSource::parse(&service) {
+        arr_badge(kind, &state, &config).await
+    } else {
+        Outcome::Bad("Unknown service.".to_owned())
     };
 
     outcome.into_fragment()
@@ -72,24 +69,10 @@ impl Outcome {
     }
 }
 
-/// Fetch one stored secret.
-///
-/// Returns `Ok(None)` for "not stored yet", which is a different message from "the
-/// vault will not open" — the first is a field to fill in, the second is a missing
-/// environment variable.
-async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretString>, String> {
-    state
-        .serve
-        .open_vault()
-        .await?
-        .get(key)
-        .map_err(|err| err.to_string())
-}
-
 async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
     let (service, key) = (config.service(kind), secret_keys::api_key_for(kind));
 
-    let api_key = secret(state, key).await;
+    let api_key = state.secret(key).await;
     let outcome = check_arr(
         kind,
         service.map(|service| &service.url),
@@ -134,21 +117,16 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
     // Which client, and therefore which URL and which vault key, is a configuration
     // choice — the button cannot infer it from the URL, because two clients can
     // live on the same host.
-    let (url, username, key) = match config.torrent_backend {
-        TorrentBackend::Qbittorrent => (
-            &config.qbittorrent.url,
-            config.qbittorrent.username.as_str(),
-            secret_keys::QBITTORRENT_PASSWORD,
-        ),
-        TorrentBackend::Transmission => (
-            &config.transmission.url,
-            config.transmission.username.as_str(),
-            secret_keys::TRANSMISSION_PASSWORD,
-        ),
-    };
+    let client = config.torrent_client();
 
-    let password = secret(state, key).await;
-    let outcome = check_qbit(config.torrent_backend, url, username, password).await;
+    let password = state.secret(client.password_key).await;
+    let outcome = check_qbit(
+        config.torrent_backend,
+        client.url,
+        client.username,
+        password,
+    )
+    .await;
 
     match outcome {
         QbitOutcome::NoCredential => Outcome::Bad("No password stored. Save one first.".to_owned()),

@@ -69,47 +69,28 @@
   <button type="submit">Save</button>
 </form>
 
-<h2>Sonarr</h2>
-<form method="post" action="/settings/sonarr" class="panel">
-  <label for="sonarr_url">URL</label>
-  <input id="sonarr_url" name="url" value="{{ sonarr_url }}" placeholder="http://sonarr:8989"
-         {% call lock_attr("sonarr.url") %}{% endcall %}>
-  {% call locked("sonarr.url") %}{% endcall %}
-  <p class="hint">Leave blank if this instance has no Sonarr.</p>
+{% for arr in arrs %}
+<h2>{{ arr.title }}</h2>
+<form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
+  <label for="{{ arr.source }}_url">URL</label>
+  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
+         {% call lock_attr(arr.url_path) %}{% endcall %}>
+  {% call locked(arr.url_path) %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
 
-  <label for="sonarr_key">API key</label>
-  <input id="sonarr_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(sonarr_key_set) %}{% endcall %}"
+  <label for="{{ arr.source }}_key">API key</label>
+  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
-  {% if sonarr_key_set %}
+  {% if arr.key_set %}
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
   {% endif %}
 
   <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/sonarr" hx-target="#test-sonarr" hx-swap="innerHTML">Test connection</button>
-  <span id="test-sonarr"></span>
+  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
+  <span id="test-{{ arr.source }}"></span>
 </form>
-
-<h2>Radarr</h2>
-<form method="post" action="/settings/radarr" class="panel">
-  <label for="radarr_url">URL</label>
-  <input id="radarr_url" name="url" value="{{ radarr_url }}" placeholder="http://radarr:7878"
-         {% call lock_attr("radarr.url") %}{% endcall %}>
-  {% call locked("radarr.url") %}{% endcall %}
-  <p class="hint">Leave blank if this instance has no Radarr.</p>
-
-  <label for="radarr_key">API key</label>
-  <input id="radarr_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(radarr_key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if radarr_key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-  {% endif %}
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/radarr" hx-target="#test-radarr" hx-swap="innerHTML">Test connection</button>
-  <span id="test-radarr"></span>
-</form>
+{% endfor %}
 
 <h2>qBittorrent</h2>
 <form method="post" action="/settings/qbittorrent" class="panel">
@@ -199,7 +180,7 @@
   <button type="submit">Save</button>
 </form>
 
-{% if tracker_builtin_selected %}
+{% if tracker_builtin %}
 <form method="post" action="/settings/generate/tracker" class="panel">
   <p class="hint">sharerr is serving its own tracker on this instance.</p>
   <button type="submit" class="secondary" {% if !master_key_present %}disabled{% endif %}>

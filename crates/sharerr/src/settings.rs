@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use sharerr_core::Config;
+use sharerr_core::config::config_paths;
 use sharerr_store::vault::{ENV_MASTER_KEY, ENV_MASTER_KEY_FILE};
-use toml_edit::Item;
 
 /// `SHARERR_`-prefixed variables that are *not* config fields.
 ///
@@ -75,31 +75,43 @@ pub fn load_or_recover(path: &Path) -> (Config, Option<String>) {
     let mut config = Config::default();
 
     // Same order figment uses: the document first, then the environment on top.
+    // Both reads address the fields through `config_paths`, so renaming a config
+    // field breaks this in the same compile/test as everything else — the salvage
+    // quietly falling back to defaults is precisely the failure it exists to
+    // prevent.
     if let Ok(text) = std::fs::read_to_string(path)
         && let Ok(doc) = text.parse::<toml_edit::DocumentMut>()
     {
-        if let Some(dir) = doc.get("data_dir").and_then(Item::as_str) {
+        if let Some(dir) = doc_str(&doc, config_paths::DATA_DIR) {
             config.data_dir = PathBuf::from(dir);
         }
-        if let Some(bind) = doc
-            .get("server")
-            .and_then(Item::as_table_like)
-            .and_then(|server| server.get("bind"))
-            .and_then(Item::as_str)
+        if let Some(bind) = doc_str(&doc, config_paths::SERVER_BIND)
             && let Ok(addr) = bind.parse()
         {
             config.server.bind = addr;
         }
     }
 
-    if let Ok(dir) = std::env::var("SHARERR_DATA_DIR") {
+    if let Ok(dir) = std::env::var(config_paths::env_var(config_paths::DATA_DIR)) {
         config.data_dir = PathBuf::from(dir);
     }
-    if let Ok(Ok(addr)) = std::env::var("SHARERR_SERVER__BIND").map(|bind| bind.parse()) {
+    if let Ok(Ok(addr)) =
+        std::env::var(config_paths::env_var(config_paths::SERVER_BIND)).map(|bind| bind.parse())
+    {
         config.server.bind = addr;
     }
 
     (config, Some(error))
+}
+
+/// Walk a dotted `config_paths` path through a TOML document to a string value.
+fn doc_str<'a>(doc: &'a toml_edit::DocumentMut, path: &str) -> Option<&'a str> {
+    let mut segments = path.split('.');
+    let mut item = doc.get(segments.next()?)?;
+    for segment in segments {
+        item = item.as_table_like()?.get(segment)?;
+    }
+    item.as_str()
 }
 
 /// Load from TOML held in memory rather than on disk.

@@ -229,9 +229,9 @@ pub async fn setup_submit(
         return reject(&message);
     }
 
-    let store = match state.serve.store().await {
+    let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(reason) => return (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+        Err(response) => return response,
     };
 
     // Re-checked here and not only in `setup_page`: two people racing the form on an
@@ -274,9 +274,9 @@ pub async fn login_submit(
     jar: CookieJar,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let store = match state.serve.store().await {
+    let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(reason) => return (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+        Err(response) => return response,
     };
 
     let password = SecretString::from(form.password.clone());
@@ -350,9 +350,9 @@ pub async fn change_password(
         return settings_error(&state, &message).await;
     }
 
-    let store = match state.serve.store().await {
+    let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(reason) => return (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+        Err(response) => return response,
     };
 
     // Verified before anything is written, and reported in the same words as a

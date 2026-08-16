@@ -46,15 +46,6 @@ impl TrackerState {
             swarms: Swarms::default(),
         }
     }
-
-    /// The token an announce must carry, if one is configured.
-    ///
-    /// Read from the running syncer rather than the vault directly: the syncer
-    /// already holds it, and going to the vault here would mean an Argon2
-    /// derivation on every announce.
-    async fn required_token(&self) -> Option<String> {
-        self.serve.tracker_token().await
-    }
 }
 
 /// Every route the tracker serves.
@@ -66,11 +57,19 @@ impl TrackerState {
 pub fn routes(serve: Arc<ServeState>) -> axum::Router {
     let state = Arc::new(TrackerState::new(serve));
 
+    // Mounted from the same constants `sharerr-torrent` writes into announce
+    // URLs, so the two sides of the crate boundary cannot drift.
     axum::Router::new()
-        .route("/announce", axum::routing::get(announce))
-        .route("/announce/{token}", axum::routing::get(announce_with_token))
-        .route("/scrape", axum::routing::get(scrape))
-        .route("/scrape/{token}", axum::routing::get(scrape_with_token))
+        .route(sharerr_torrent::ANNOUNCE_PATH, axum::routing::get(announce))
+        .route(
+            &format!("{}/{{token}}", sharerr_torrent::ANNOUNCE_PATH),
+            axum::routing::get(announce_with_token),
+        )
+        .route(sharerr_torrent::SCRAPE_PATH, axum::routing::get(scrape))
+        .route(
+            &format!("{}/{{token}}", sharerr_torrent::SCRAPE_PATH),
+            axum::routing::get(scrape_with_token),
+        )
         .route("/torrents/{name}", axum::routing::get(torrent_file))
         .with_state(state)
 }
@@ -120,7 +119,10 @@ async fn handle_announce(
     remote: SocketAddr,
     query: &[u8],
 ) -> Result<Vec<u8>, AnnounceError> {
-    check_token(state.required_token().await.as_deref(), token.as_deref())?;
+    check_token(
+        state.serve.tracker_token().await.as_deref(),
+        token.as_deref(),
+    )?;
 
     let request = AnnounceRequest::parse(query)?;
     if !is_served(state, &request.info_hash).await {
@@ -131,7 +133,7 @@ async fn handle_announce(
     let response = state.swarms.announce(&request, addr).await;
 
     tracing::debug!(
-        info_hash = %hex(&request.info_hash),
+        info_hash = %hex::encode(request.info_hash),
         peer = %addr,
         event = ?request.event,
         peers = response.peers.len(),
@@ -160,7 +162,10 @@ async fn handle_scrape(
     token: Option<String>,
     query: Option<String>,
 ) -> Response {
-    if let Err(err) = check_token(state.required_token().await.as_deref(), token.as_deref()) {
+    if let Err(err) = check_token(
+        state.serve.tracker_token().await.as_deref(),
+        token.as_deref(),
+    ) {
         return bencode(failure_bencode(&err.to_string()));
     }
 
@@ -200,7 +205,7 @@ async fn is_served(state: &TrackerState, info_hash: &InfoHash) -> bool {
         return false;
     };
 
-    match store.is_shared(&hex(info_hash)).await {
+    match store.is_shared(&hex::encode(info_hash)).await {
         Ok(served) => served,
         Err(err) => {
             tracing::warn!(error = %err, "could not check whether a torrent is shared");
@@ -224,15 +229,16 @@ fn check_token(required: Option<&str>, supplied: Option<&str>) -> Result<(), Ann
     }
 }
 
-/// Lowercase hex, matching exactly what the store holds in `info_hash`.
-fn hex(bytes: &InfoHash) -> String {
-    hex::encode(bytes)
-}
-
 fn bencode(body: Vec<u8>) -> Response {
     // Always 200, even for a refusal. Many clients treat a non-2xx as a transport
     // failure and retry forever without ever showing the operator the reason.
     ([(header::CONTENT_TYPE, BENCODE)], body).into_response()
+}
+
+/// The URL path one torrent is served under — the shape [`torrent_file`] parses
+/// back apart. Kept beside the route so the feed's links cannot drift from it.
+pub(crate) fn torrent_download_path(info_hash: &str) -> String {
+    format!("/torrents/{info_hash}.torrent")
 }
 
 /// `GET /torrents/{info_hash}.torrent` — the file itself.
@@ -258,7 +264,7 @@ pub async fn torrent_file(
     }
 
     let config = state.serve.config().await;
-    let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex(&info_hash));
+    let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex::encode(info_hash));
 
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
@@ -266,7 +272,10 @@ pub async fn torrent_file(
                 (header::CONTENT_TYPE, "application/x-bittorrent".to_owned()),
                 (
                     header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}.torrent\"", hex(&info_hash)),
+                    format!(
+                        "attachment; filename=\"{}.torrent\"",
+                        hex::encode(info_hash)
+                    ),
                 ),
             ],
             bytes,
@@ -314,12 +323,6 @@ mod tests {
                 "{wrong:?} should not be accepted"
             );
         }
-    }
-
-    #[test]
-    fn hashes_render_as_lowercase_hex_matching_what_the_store_holds() {
-        assert_eq!(hex(&[0x0a; 20]), "0a".repeat(20));
-        assert_eq!(hex(&[0xff; 20]), "ff".repeat(20));
     }
 
     // ------------------------------------------------- router-level coverage

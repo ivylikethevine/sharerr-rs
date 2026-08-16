@@ -27,7 +27,8 @@ use crate::error::{QbitError, Result};
 
 const API_PREFIX: &str = "api/v2/";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_ERROR_BODY: usize = 400;
+
+pub(crate) use sharerr_client::clamp_body;
 
 /// Builds the per-request body. A closure rather than a prepared builder because
 /// `multipart::Form` cannot be cloned, and a retry needs a fresh one.
@@ -62,28 +63,14 @@ impl std::fmt::Debug for QbitClient {
 
 impl QbitClient {
     pub fn new(base: &Url, username: &str, password: SecretString) -> Result<Self> {
+        // The SID cookie qBittorrent hands back at login rides on the cookie
+        // store; without one every call after login would 403.
         let http = reqwest::Client::builder()
             .timeout(DEFAULT_TIMEOUT)
-            // The SID cookie qBittorrent hands back at login rides on this.
             .cookie_store(true)
             .build()
             .map_err(QbitError::Client)?;
-        Self::with_http(base, username, password, http)
-    }
-
-    /// Same as [`Self::new`] with a caller-supplied client. The client **must**
-    /// have a cookie store enabled or every call after login will 403.
-    pub fn with_http(
-        base: &Url,
-        username: &str,
-        password: SecretString,
-        http: reqwest::Client,
-    ) -> Result<Self> {
-        let mut base = base.clone();
-        if !base.path().ends_with('/') {
-            let with_slash = format!("{}/", base.path());
-            base.set_path(&with_slash);
-        }
+        let base = sharerr_client::normalise_base(base);
 
         // Origin only — scheme, host, and port, no path. That is what qBittorrent
         // compares against, and a path would just be noise in its logs.
@@ -273,14 +260,4 @@ impl QbitClient {
         let body = self.send_ok(Method::GET, "app/version", &|rb| rb).await?;
         Ok(body.trim().to_owned())
     }
-}
-
-/// Clamp an error body for inclusion in a message.
-///
-/// Bounded by **characters, not bytes**: `String::truncate` panics outright if the
-/// byte index lands inside a multi-byte character, and error bodies are exactly
-/// where non-ASCII shows up — a localized error page from a reverse proxy, or a
-/// title quoted back in the message.
-pub(crate) fn clamp_body(body: &str) -> String {
-    body.chars().take(MAX_ERROR_BODY).collect()
 }

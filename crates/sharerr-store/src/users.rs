@@ -112,16 +112,11 @@ static DECOY_HASH: LazyLock<String> = LazyLock::new(|| {
 });
 
 fn validate_username(username: &str) -> Result<String> {
-    let trimmed = username.trim();
-    if trimmed.is_empty() {
-        return Err(StoreError::InvalidUser("username must not be blank"));
-    }
-    if trimmed.chars().count() > 64 {
-        return Err(StoreError::InvalidUser(
-            "username must be 64 characters or fewer",
-        ));
-    }
-    Ok(trimmed.to_owned())
+    crate::db::validate_name(
+        username,
+        "username must not be blank",
+        "username must be 64 characters or fewer",
+    )
 }
 
 fn validate_password(password: &SecretString) -> Result<()> {
@@ -159,8 +154,7 @@ fn clone_secret(password: &SecretString) -> Zeroizing<String> {
 }
 
 fn blocking_hash(password: &str) -> Result<String> {
-    let mut raw = [0u8; SALT_LEN];
-    getrandom::fill(&mut raw)
+    let raw = crate::random_array::<SALT_LEN>()
         .map_err(|e| StoreError::PasswordHash(format!("salt generation failed: {e}")))?;
     let salt = SaltString::encode_b64(&raw)
         .map_err(|e| StoreError::PasswordHash(format!("salt encoding failed: {e}")))?;

@@ -5,7 +5,9 @@ use reqwest::multipart::{Form, Part};
 
 use crate::client::QbitClient;
 use crate::error::{QbitError, Result};
-use crate::models::{AddTorrent, TorrentFile, TorrentInfo};
+use sharerr_client::AddRequest;
+
+use crate::models::{TorrentFile, TorrentInfo};
 
 /// qBittorrent wants the part typed as a real torrent, not `application/octet-stream`.
 const TORRENT_MIME: &str = "application/x-bittorrent";
@@ -53,7 +55,7 @@ impl QbitClient {
     ///   moment the torrent is added.
     /// * `savepath` is the directory the content already occupies, so qBittorrent
     ///   finds it in place and has no reason to move anything.
-    pub async fn add_torrent(&self, request: &AddTorrent<'_>) -> Result<()> {
+    pub async fn add_torrent(&self, request: &AddRequest<'_>) -> Result<()> {
         let build = move |rb: reqwest::RequestBuilder| {
             // Rebuilt per attempt: a multipart Form cannot be cloned for a retry.
             let part = Part::bytes(request.data.to_vec())

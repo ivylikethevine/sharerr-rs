@@ -28,14 +28,13 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
-use sharerr_core::Config;
-use sharerr_core::config::{config_paths, secret_keys};
+use sharerr_core::config::{TrackerBackend, config_paths, secret_keys};
+use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
 use super::WebState;
 use super::config_io::{ConfigFile, Edit, parse_path_map};
-use super::templates::{PathRow, SettingsPage, render};
-use crate::torznab::public_base_url;
+use super::templates::{ArrSection, PathRow, SettingsPage, render};
 
 /// Mint a fresh secret and show it once.
 ///
@@ -54,9 +53,7 @@ pub async fn generate_secret(
         _ => return reject(&state, "There is no such secret to generate.").await,
     };
 
-    // 160 bits: long enough that guessing is not a strategy, short enough to
-    // paste into another app's settings box.
-    let generated = match crate::secrets::random_hex(20) {
+    let generated = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
         Ok(generated) => generated,
         Err(reason) => return reject(&state, &reason).await,
     };
@@ -113,7 +110,11 @@ pub struct QbitForm {
 
 #[derive(Debug, Deserialize)]
 pub struct TrackerForm {
-    backend: String,
+    /// Strictly one of [`TrackerBackend`]'s kebab-case names. An unknown value
+    /// fails deserialization rather than silently falling back — the old
+    /// `_ => "qbittorrent-embedded"` arm meant a stale option value could
+    /// switch a Transmission setup's tracker out from under it.
+    backend: TrackerBackend,
     advertised_host: String,
     port: String,
     token: String,
@@ -165,37 +166,18 @@ pub async fn save_general(
     .await
 }
 
-pub async fn save_sonarr(State(state): State<WebState>, Form(form): Form<ArrForm>) -> Response {
-    save_arr(
-        state,
-        form,
-        config_paths::SONARR_URL,
-        secret_keys::SONARR_API_KEY,
-    )
-    .await
-}
-
-pub async fn save_radarr(State(state): State<WebState>, Form(form): Form<ArrForm>) -> Response {
-    save_arr(
-        state,
-        form,
-        config_paths::RADARR_URL,
-        secret_keys::RADARR_API_KEY,
-    )
-    .await
-}
-
-async fn save_arr(
-    state: WebState,
-    form: ArrForm,
-    url_path: &'static str,
-    secret_key: &'static str,
+/// One handler for all five *arr apps: the path segment parses straight to a
+/// [`MediaSource`], and the config path and vault key both come from the same
+/// per-source accessors every other consumer uses — adding a sixth app touches
+/// neither this function nor the template's `{% for %}` block.
+pub async fn save_arr(
+    State(state): State<WebState>,
+    axum::extract::Path(source): axum::extract::Path<MediaSource>,
+    Form(form): Form<ArrForm>,
 ) -> Response {
-    // Both halves come from the path the caller already had in hand. Deriving one
-    // from the other by string comparison would mean a third *arr app silently
-    // writing to whichever branch it fell through to. Subslicing a `&'static str`
-    // stays `'static`, which is what `Edit` requires.
-    let section = url_path.trim_end_matches(".url");
+    let url_path = config_paths::url_for(source);
+    let secret_key = secret_keys::api_key_for(source);
+    let section = source.as_str();
 
     if let Err(message) = apply_secret(&state, secret_key, &form.api_key, form.clear_api_key).await
     {
@@ -205,7 +187,7 @@ async fn save_arr(
     write_config(&state, section, |file| {
         let url = form.url.trim();
         if url.is_empty() {
-            // Removing the whole table, not just the URL: `sonarr` is
+            // Removing the whole table, not just the URL: each *arr section is
             // `Option<ServiceConfig>`, and a table with no `url` fails to parse
             // where an absent table correctly means "not configured".
             file.apply([Edit::unset(section)]);
@@ -268,16 +250,8 @@ pub async fn save_tracker(
     }
 
     write_config(&state, "tracker", |file| {
-        let backend = match form.backend.as_str() {
-            // Matched against a fixed set rather than written through: this lands
-            // in a `deny_unknown_fields` enum, and an unrecognised string would be
-            // a config file that will not load.
-            "builtin" => "builtin",
-            _ => "qbittorrent-embedded",
-        };
-
         let mut edits = vec![
-            Edit::str(config_paths::TRACKER_BACKEND, backend),
+            Edit::str(config_paths::TRACKER_BACKEND, form.backend.as_str()),
             Edit::str_or_unset(config_paths::TRACKER_ADVERTISED_HOST, &form.advertised_host),
         ];
 
@@ -327,10 +301,13 @@ pub async fn save_paths(State(state): State<WebState>, Form(form): Form<PathsFor
     // rather than an empty field, and zipping blindly would silently pair the wrong
     // paths together — which is the single most damaging thing this page can get
     // wrong, because it makes qBittorrent seed the wrong file.
-    let rows: Vec<(String, String, String)> = (0..form.arr.len())
-        .map(|i| {
+    let rows: Vec<(String, String, String)> = form
+        .arr
+        .iter()
+        .enumerate()
+        .map(|(i, arr)| {
             (
-                form.arr[i].clone(),
+                arr.clone(),
                 form.sharerr.get(i).cloned().unwrap_or_default(),
                 form.qbit.get(i).cloned().unwrap_or_default(),
             )
@@ -464,7 +441,7 @@ async fn apply_secret(
 /// It also means the page tells the truth when the master key is missing or wrong:
 /// a secret that cannot currently be decrypted is still stored, and reporting it
 /// as unset would invite the operator to overwrite it.
-async fn secrets_present(config: &Config) -> BTreeSet<String> {
+pub(super) async fn secrets_present(config: &Config) -> BTreeSet<String> {
     let path = config.vault_path();
     tokio::task::spawn_blocking(move || Vault::key_names(&path))
         .await
@@ -506,6 +483,29 @@ fn normalise_url(raw: &str) -> anyhow::Result<String> {
         .map_err(|err| anyhow::anyhow!("{raw:?} is not a valid URL: {err}"))
 }
 
+/// How the app's name is written, for headings — `as_str` is the lowercase
+/// wire/storage form.
+pub(super) fn title_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The example URL shown in each app's empty URL field: its documented default
+/// port, which is the strongest hint a placeholder can give.
+fn url_placeholder(source: MediaSource) -> &'static str {
+    use MediaSource::{Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    match source {
+        Sonarr => "http://sonarr:8989",
+        Radarr => "http://radarr:7878",
+        Lidarr => "http://lidarr:8686",
+        Readarr => "http://readarr:8787",
+        Whisparr => "http://whisparr:6969",
+    }
+}
+
 async fn build_page(
     state: &WebState,
     saved: Option<String>,
@@ -514,12 +514,32 @@ async fn build_page(
     let config = state.serve.config().await;
     let secrets = secrets_present(&config).await;
     let is_set = |key: &str| secrets.contains(key);
+    let locks = super::config_io::env_overrides();
+
+    // One section per app, from the same list everything else iterates — the
+    // settings page used to be the one surface that hand-enumerated two of the
+    // five and silently could not configure the rest.
+    let arrs = MediaSource::ALL
+        .iter()
+        .copied()
+        .map(|kind| ArrSection {
+            source: kind.as_str(),
+            title: title_case(kind.as_str()),
+            url: config
+                .service(kind)
+                .map(|s| s.url.to_string())
+                .unwrap_or_default(),
+            key_set: is_set(secret_keys::api_key_for(kind)),
+            placeholder: url_placeholder(kind),
+            url_path: config_paths::url_for(kind),
+        })
+        .collect();
 
     // The one state where what is on disk and what the page renders disagree, so
     // the operator has to be told which of the two a save keeps — and where the
     // other one goes.
     let config_error = state.serve.config_error().await;
-    let config_notice = config_error.as_ref().and_then(|_| {
+    let config_notice = if config_error.is_some() {
         ConfigFile::replacing(state.serve.config_path())
             .backup_path()
             .map(|aside| {
@@ -529,7 +549,9 @@ async fn build_page(
                     aside.display()
                 )
             })
-    });
+    } else {
+        None
+    };
 
     SettingsPage {
         signed_in: true,
@@ -538,22 +560,11 @@ async fn build_page(
         config_error,
         config_notice,
         master_key_present: master_key_from_env().is_ok(),
-        locks: super::config_io::env_overrides(),
+        locks,
 
         tag: config.tag.clone(),
 
-        sonarr_url: config
-            .sonarr
-            .as_ref()
-            .map(|s| s.url.to_string())
-            .unwrap_or_default(),
-        sonarr_key_set: is_set(secret_keys::SONARR_API_KEY),
-        radarr_url: config
-            .radarr
-            .as_ref()
-            .map(|r| r.url.to_string())
-            .unwrap_or_default(),
-        radarr_key_set: is_set(secret_keys::RADARR_API_KEY),
+        arrs,
 
         qbit_url: config.qbittorrent.url.to_string(),
         qbit_username: config.qbittorrent.username.clone(),
@@ -562,10 +573,7 @@ async fn build_page(
         qbit_tag: config.qbittorrent.tag.clone(),
         qbit_skip_checking: config.qbittorrent.skip_checking,
 
-        tracker_builtin: matches!(
-            config.tracker.backend,
-            sharerr_core::config::TrackerBackend::Builtin
-        ),
+        tracker_builtin: matches!(config.tracker.backend, TrackerBackend::Builtin),
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
         tracker_port: config
             .tracker
@@ -574,11 +582,7 @@ async fn build_page(
             .unwrap_or_default(),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
         torznab_key_set: is_set(secret_keys::TORZNAB_API_KEY),
-        torznab_url: format!("{}/api", public_base_url(&config)),
-        tracker_builtin_selected: matches!(
-            config.tracker.backend,
-            sharerr_core::config::TrackerBackend::Builtin
-        ),
+        torznab_url: format!("{}/api", config.public_base_url()),
         revealed: None,
 
         sync_enabled: config.sync.enabled,

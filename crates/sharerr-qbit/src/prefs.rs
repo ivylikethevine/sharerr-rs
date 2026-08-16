@@ -18,7 +18,7 @@ impl QbitClient {
     /// qBittorrent merges what it is given, so only the keys being changed need to
     /// be sent — important, since round-tripping the whole preference set would
     /// rewrite settings sharerr does not model.
-    pub async fn set_preferences(&self, patch: &serde_json::Value) -> Result<()> {
+    async fn set_preferences(&self, patch: &serde_json::Value) -> Result<()> {
         let body = patch.to_string();
         let build = move |rb: reqwest::RequestBuilder| rb.form(&[("json", body.as_str())]);
         self.send_ok(Method::POST, "app/preferences", &build)

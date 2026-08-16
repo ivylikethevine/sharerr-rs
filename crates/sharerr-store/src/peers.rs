@@ -23,7 +23,13 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// A closed set rather than free-form rules: this is the choice an operator
 /// actually makes, and three options cover it. Anything finer — per-series, per-tag
 /// — would want a join table and is a different feature.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Two decoders, two boundaries, on purpose. `Deserialize` is strict and guards
+/// the web form: a stale `<select>` value must be rejected, not silently widened
+/// into an access-control grant. [`Self::parse`] is lenient and decodes stored
+/// rows, where widening is the safer failure — see its docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PeerScope {
     /// Everything this instance shares.
     #[default]
@@ -39,6 +45,9 @@ pub enum PeerScope {
 }
 
 impl PeerScope {
+    /// Every scope, in the order the UI offers them.
+    pub const ALL: &'static [Self] = &[Self::All, Self::Tv, Self::Movies, Self::Music, Self::Books];
+
     /// The value stored in the `scope` column and echoed in the UI's `<select>`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -50,7 +59,8 @@ impl PeerScope {
         }
     }
 
-    /// Parse a stored or submitted value.
+    /// Parse a **stored** value. Form input goes through the strict `Deserialize`
+    /// impl instead — see the type docs.
     ///
     /// Anything unrecognised is [`Self::All`], deliberately. The alternative — an
     /// error — would mean a row written by a newer version, or a hand-edited
@@ -58,13 +68,14 @@ impl PeerScope {
     /// confusion is the safer failure here because the feed still requires a valid
     /// key to reach at all.
     pub fn parse(value: &str) -> Self {
-        match value {
-            "tv" => Self::Tv,
-            "movies" => Self::Movies,
-            "music" => Self::Music,
-            "books" => Self::Books,
-            _ => Self::All,
-        }
+        // Derived from `as_str` over `ALL` so the two cannot drift — a scope
+        // added to one and forgotten in a hand-written match here would widen
+        // to `All`, which is an access-control grant.
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|scope| scope.as_str() == value)
+            .unwrap_or(Self::All)
     }
 
     /// Whether content from `source` is visible under this scope.
@@ -122,24 +133,15 @@ impl Peer {
 /// about the encoding — a mismatch there would present as "the key I just issued
 /// does not work", with nothing in the logs.
 fn hash_key(key: &SecretString) -> String {
-    let digest = Sha256::digest(key.expose_secret().as_bytes());
-    // `{:02x}` per byte rather than a helper crate: this is the only place in the
-    // workspace that needs it, and the encoding is load-bearing enough to be
-    // visible.
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex::encode(Sha256::digest(key.expose_secret().as_bytes()))
 }
 
 fn validate_label(label: &str) -> Result<String> {
-    let trimmed = label.trim();
-    if trimmed.is_empty() {
-        return Err(StoreError::InvalidUser("a peer needs a name"));
-    }
-    if trimmed.chars().count() > 64 {
-        return Err(StoreError::InvalidUser(
-            "a peer name must be 64 characters or fewer",
-        ));
-    }
-    Ok(trimmed.to_owned())
+    crate::db::validate_name(
+        label,
+        "a peer needs a name",
+        "a peer name must be 64 characters or fewer",
+    )
 }
 
 fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
@@ -228,12 +230,20 @@ impl Store {
     /// Deliberately not part of `peer_by_key`: a read that writes would make the
     /// authentication path take a write lock on every single query. The caller
     /// decides when it is worth recording.
+    ///
+    /// The update itself is also throttled in SQL: `last_seen` renders with
+    /// per-day granularity, so a Prowlarr RSS burst refreshing it every few
+    /// seconds was pure write contention against the sync loop. Five minutes of
+    /// slack keeps the answer to "recently?" honest at zero cost.
     pub async fn touch_peer(&self, id: i64) -> Result<()> {
-        sqlx::query("UPDATE peers SET last_seen_at = ?1 WHERE id = ?2")
-            .bind(now_epoch())
-            .bind(id)
-            .execute(self.pool())
-            .await?;
+        let now = now_epoch();
+        sqlx::query(
+            "UPDATE peers SET last_seen_at = ?1              WHERE id = ?2 AND (last_seen_at IS NULL OR last_seen_at < ?1 - 300)",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 

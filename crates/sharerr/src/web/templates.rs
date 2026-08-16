@@ -100,9 +100,13 @@ pub struct StatusPage {
     pub recovery_secs: u64,
     pub master_key_present: bool,
     pub tag: String,
-    pub sonarr_url: Option<String>,
-    pub radarr_url: Option<String>,
-    pub qbit_url: String,
+    /// One row per *arr app, configured or not, in `MediaSource::ALL` order.
+    pub services: Vec<ServiceUrl>,
+    /// The *configured* torrent client — showing the unused section's URL on the
+    /// "what is this instance using" page sent operators debugging the wrong
+    /// service.
+    pub client_name: &'static str,
+    pub client_url: String,
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
     pub config_path: String,
@@ -140,10 +144,10 @@ pub struct SettingsPage {
 
     pub tag: String,
 
-    pub sonarr_url: String,
-    pub sonarr_key_set: bool,
-    pub radarr_url: String,
-    pub radarr_key_set: bool,
+    /// One section per *arr app, in [`sharerr_core::MediaSource::ALL`] order.
+    /// The template renders these with a single loop, so a new app appears on
+    /// this page without anyone editing HTML.
+    pub arrs: Vec<ArrSection>,
 
     pub qbit_url: String,
     pub qbit_username: String,
@@ -162,9 +166,6 @@ pub struct SettingsPage {
     pub torznab_key_set: bool,
     /// The `/api` URL a friend pastes into Prowlarr, built from the advertised host.
     pub torznab_url: String,
-    /// Whether the builtin tracker is the selected backend, which is what makes the
-    /// announce endpoint on this instance the one in use.
-    pub tracker_builtin_selected: bool,
     /// A freshly minted secret, shown exactly once on the response that created it.
     /// Never populated by an ordinary page load.
     pub revealed: Option<String>,
@@ -184,6 +185,38 @@ pub struct SettingsPage {
     pub data_dir: String,
     pub bind: String,
     pub config_path: String,
+}
+
+/// One `<option>` in a peer-scope selector.
+#[derive(Debug)]
+pub struct ScopeOption {
+    pub value: &'static str,
+    pub label: String,
+}
+
+/// One *arr app's row on the status page.
+#[derive(Debug)]
+pub struct ServiceUrl {
+    pub title: String,
+    pub url: Option<String>,
+}
+
+/// One *arr app's section on the settings page.
+#[derive(Debug)]
+pub struct ArrSection {
+    /// The lowercase name, used in ids, routes and test-button targets.
+    pub source: &'static str,
+    /// The heading form of the name.
+    pub title: String,
+    /// The configured URL, or empty when the app is not set up.
+    pub url: String,
+    pub key_set: bool,
+    /// Example URL with the app's documented default port.
+    pub placeholder: &'static str,
+    /// The config path of the URL field, for the template's shared lock macros —
+    /// a precomputed "is it locked" flag here would hide these fields from the
+    /// test that proves every lock key in the template is a real config path.
+    pub url_path: &'static str,
 }
 
 /// One service's contribution to the scan behind the diagnostics page.
@@ -257,6 +290,11 @@ pub struct PeerRow {
 #[derive(Debug, Template)]
 #[template(path = "peers.html")]
 pub struct PeersPage {
+    /// One row per [`sharerr_store::PeerScope`], in `ALL` order, so both
+    /// `<select>`s render from the enum — a scope added there appears here
+    /// without editing HTML, and the strict form decoder can never 400 on a
+    /// value this page itself offered.
+    pub scope_options: Vec<ScopeOption>,
     pub signed_in: bool,
     pub peers: Vec<PeerRow>,
     pub error: Option<String>,

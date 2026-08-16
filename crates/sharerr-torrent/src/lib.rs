@@ -7,8 +7,7 @@
 //!
 //! Three pieces:
 //!
-//! * [`TorrentFactory`] — builds the `.torrent`. Behind a trait because
-//!   `lava_torrent` is in maintenance mode.
+//! * [`LavaTorrentFactory`] — builds the `.torrent`.
 //! * [`TrackerProvider`] — decides where it announces.
 //! * [`title`] — picks the release title, which travels *alongside* the torrent
 //!   rather than inside it. That distinction is load-bearing; see the module docs.
@@ -22,8 +21,9 @@ pub mod tracker;
 pub use announce::{AnnounceError, AnnounceRequest, AnnounceResponse, Event, InfoHash, Swarms};
 pub use error::{Result, TorrentError};
 pub use factory::{
-    BuiltTorrent, LavaTorrentFactory, TorrentFactory, TorrentRequest, piece_length_for,
-    torrent_file_path,
+    BuiltTorrent, LavaTorrentFactory, TorrentRequest, piece_length_for, torrent_file_path,
 };
 pub use title::{ParsedTitle, parse, resolve, synthesize};
-pub use tracker::{BuiltinTracker, QbitEmbeddedTracker, TrackerProvider};
+pub use tracker::{
+    ANNOUNCE_PATH, BuiltinTracker, QbitEmbeddedTracker, SCRAPE_PATH, TrackerProvider,
+};

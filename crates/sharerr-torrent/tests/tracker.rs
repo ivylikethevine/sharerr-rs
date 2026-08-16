@@ -15,11 +15,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// A qBittorrent whose embedded tracker starts **off**, so enabling it is
 /// observable: the `expect` on the POST is the assertion.
 async fn qbit_with_tracker_off(server: &MockServer, enable_expected: u64) {
-    Mock::given(method("POST"))
-        .and(path("/api/v2/auth/login"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .mount(server)
-        .await;
+    sharerr_testkit::mock::mount_qbit_login(server).await;
 
     Mock::given(method("GET"))
         .and(path("/api/v2/app/preferences"))
@@ -38,14 +34,7 @@ async fn qbit_with_tracker_off(server: &MockServer, enable_expected: u64) {
         .mount(server)
         .await;
 
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/preferences"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "enable_embedded_tracker": true,
-            "embedded_tracker_port": 9000,
-        })))
-        .mount(server)
-        .await;
+    sharerr_testkit::mock::mount_qbit_prefs(server, true, 9000).await;
 }
 
 fn client(server: &MockServer) -> Arc<QbitClient> {

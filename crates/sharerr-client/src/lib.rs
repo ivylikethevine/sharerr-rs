@@ -20,10 +20,69 @@
 //! precisely why that tracker exists.
 
 use std::fmt::Debug;
-use std::path::Path;
 
 use async_trait::async_trait;
 use url::Url;
+
+/// Enough of an error body to identify the problem, bounded so a stray HTML error
+/// page from a misconfigured reverse proxy does not flood the logs.
+pub const MAX_ERROR_BODY: usize = 400;
+
+/// Clamp an error body for inclusion in a message.
+///
+/// Bounded by **characters, not bytes**: `String::truncate` panics outright if the
+/// byte index lands inside a multi-byte character, and error bodies are exactly
+/// where non-ASCII shows up — a localized error page from a reverse proxy, or a
+/// title quoted back in the message.
+pub fn clamp_body(body: &str) -> String {
+    body.chars().take(MAX_ERROR_BODY).collect()
+}
+
+/// Render an error together with its cause chain.
+///
+/// The distinction matters: reqwest's own `Display` is just "error sending request
+/// for url (...)", and the part an operator actually needs — `Connection refused`,
+/// `dns error`, `operation timed out` — lives further down the chain.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut cause = err.source();
+
+    while let Some(next) = cause {
+        let text = next.to_string();
+        // `#[source]` fields are often interpolated into the parent's message
+        // already; only append what is genuinely new.
+        if !rendered.contains(&text) {
+            rendered.push_str(": ");
+            rendered.push_str(&text);
+        }
+        cause = next.source();
+    }
+
+    rendered
+}
+
+/// Split a comma-joined tag string, however the sender spaced it.
+///
+/// The one place the comma-joined-tag convention is decoded — qBittorrent reports
+/// tags this way and [`AddRequest::tags`] carries them this way.
+pub fn split_tags(raw: &str) -> Vec<&str> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// A copy of `base` whose path ends in `/`, so `Url::join` appends rather than
+/// replacing the last segment. This is what makes reverse-proxy subpaths
+/// (`http://host/sonarr/`) work.
+pub fn normalise_base(base: &Url) -> Url {
+    let mut base = base.clone();
+    if !base.path().ends_with('/') {
+        let with_slash = format!("{}/", base.path());
+        base.set_path(&with_slash);
+    }
+    base
+}
 
 /// Which client an error or message is about.
 ///
@@ -198,12 +257,7 @@ impl<'a> AddRequest<'a> {
 
     /// The tags as a list, however the caller joined them.
     pub fn tag_list(&self) -> Vec<&str> {
-        self.tags
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .collect()
+        split_tags(self.tags.unwrap_or_default())
     }
 }
 
@@ -215,9 +269,6 @@ impl<'a> AddRequest<'a> {
 pub trait TorrentClient: Send + Sync + Debug {
     /// Which client this is, for messages that need to name it.
     fn kind(&self) -> ClientKind;
-
-    /// The instance being talked to, for errors that name it.
-    fn base_url(&self) -> &Url;
 
     /// Establish a session, if the protocol has one.
     ///
@@ -258,15 +309,6 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// qBittorrent. That is not an error: it means announce URLs have to point at
     /// sharerr's own tracker instead.
     async fn embedded_tracker_port(&self) -> Result<Option<u16>>;
-}
-
-/// Whether a path looks like something a client could be handed as a save path.
-///
-/// Cheap sanity, not validation: only the client can say whether a path exists in
-/// *its* filesystem, and that is exactly the mismatch path mapping exists to
-/// resolve.
-pub fn looks_like_absolute(path: &Path) -> bool {
-    path.is_absolute()
 }
 
 #[cfg(test)]
@@ -324,5 +366,79 @@ mod tests {
         let request = AddRequest::new(data, "a.torrent", "/downloads");
         assert!(!request.skip_checking, "skipping the check must be opt-in");
         assert!(!request.stopped);
+    }
+
+    /// The cause chain is the whole reason this helper exists: reqwest's own
+    /// `Display` stops before the part that names what went wrong.
+    #[test]
+    fn the_cause_chain_is_appended_without_repeating_itself() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "connection refused")
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer;
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error sending request")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&Inner)
+            }
+        }
+
+        assert_eq!(
+            error_chain(&Outer),
+            "error sending request: connection refused"
+        );
+    }
+
+    /// A parent that already interpolates its source must not say it twice.
+    #[test]
+    fn an_already_interpolated_cause_is_not_repeated() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "refused")
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer;
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "sending request: refused")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&Inner)
+            }
+        }
+
+        assert_eq!(error_chain(&Outer), "sending request: refused");
+    }
+
+    /// A subpath base must keep its prefix once normalised, or a reverse-proxied
+    /// client would have its last segment replaced by `Url::join`.
+    #[test]
+    fn a_normalised_subpath_base_keeps_its_prefix() {
+        let base = Url::parse("http://host/qbit").unwrap();
+        let normalised = normalise_base(&base);
+        assert_eq!(normalised.as_str(), "http://host/qbit/");
+        assert_eq!(
+            normalise_base(&normalised).as_str(),
+            "http://host/qbit/",
+            "an already-normalised base must pass through unchanged"
+        );
     }
 }

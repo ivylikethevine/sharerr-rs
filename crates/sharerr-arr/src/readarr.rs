@@ -65,7 +65,7 @@ struct BookFile {
 }
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let authors: Vec<Author> = client.get_list("author", &[]).await?;
+    let authors: Vec<Author> = client.get("author", &[]).await?;
     let tagged: Vec<&Author> = authors
         .iter()
         .filter(|a| a.tags.contains(&tag_id))
@@ -81,19 +81,24 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
     for author in tagged {
         let author_id = author.id.to_string();
 
-        let books: Vec<Book> = client
-            .get_list("book", &[("authorId", author_id.clone())])
-            .await?;
-        let files: Vec<BookFile> = client
-            .get_list("bookfile", &[("authorId", author_id)])
-            .await?;
+        // Independent lookups, so they run concurrently — per tagged author this
+        // halves the round trips paid in sequence.
+        let by_author = [("authorId", author_id)];
+        let (books, files) = tokio::try_join!(
+            client.get::<Vec<Book>>("book", &by_author),
+            client.get::<Vec<BookFile>>("bookfile", &by_author),
+        )?;
         if files.is_empty() {
             tracing::debug!(author = %author.author_name, "tagged but has no files on disk");
             continue;
         }
 
+        // Indexed once, then each file's lookup is O(1).
+        let book_by_id: std::collections::HashMap<i64, &Book> =
+            books.iter().map(|b| (b.id, b)).collect();
+
         for file in files {
-            let Some(book) = books.iter().find(|b| b.id == file.book_id) else {
+            let Some(book) = book_by_id.get(&file.book_id).copied() else {
                 tracing::warn!(
                     author = %author.author_name,
                     file_id = file.id,

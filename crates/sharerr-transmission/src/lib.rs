@@ -32,6 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
+    error_chain, normalise_base,
 };
 use tokio::sync::RwLock;
 use url::Url;
@@ -79,23 +80,7 @@ impl TransmissionClient {
         let http = reqwest::Client::builder()
             .build()
             .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))?;
-        Self::with_http(base, username, password, http)
-    }
-
-    /// The same, with a caller-supplied HTTP client. Used by the tests.
-    pub fn with_http(
-        base: &Url,
-        username: &str,
-        password: SecretString,
-        http: reqwest::Client,
-    ) -> Result<Self> {
-        let mut base = base.clone();
-        // A base whose path does not end in `/` would have its last segment
-        // replaced by `join`, which silently breaks reverse-proxy subpaths.
-        if !base.path().ends_with('/') {
-            let with_slash = format!("{}/", base.path());
-            base.set_path(&with_slash);
-        }
+        let base = normalise_base(base);
         let endpoint = base
             .join(RPC_PATH)
             .map_err(|e| ClientError::Config(format!("{base} is not a usable base URL: {e}")))?;
@@ -114,7 +99,7 @@ impl TransmissionClient {
         ClientError::Unreachable {
             kind: KIND,
             url: self.base.to_string(),
-            detail: chain(err),
+            detail: error_chain(err),
         }
     }
 
@@ -207,20 +192,51 @@ struct Envelope {
     arguments: Option<Value>,
 }
 
-/// Render an error together with its cause chain — reqwest's own `Display` stops
-/// before the part that names what went wrong.
-fn chain(err: &dyn std::error::Error) -> String {
-    let mut rendered = err.to_string();
-    let mut cause = err.source();
-    while let Some(next) = cause {
-        let text = next.to_string();
-        if !rendered.contains(&text) {
-            rendered.push_str(": ");
-            rendered.push_str(&text);
-        }
-        cause = next.source();
-    }
-    rendered
+/// Typed views of the `torrent-get` responses, mirroring the sibling qBittorrent
+/// crate's wire structs. Typed on purpose: hand-walking `Value` with
+/// `unwrap_or_default` once turned a renamed `hashString` into an empty hash —
+/// which never matches the live set, so reconciliation silently re-added every
+/// torrent on every pass. A missing field here is a `Malformed` error that names
+/// the call instead.
+#[derive(Debug, Deserialize)]
+struct TorrentGetResponse {
+    torrents: Vec<ListedTorrent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListedTorrent {
+    hash_string: String,
+    name: String,
+    download_dir: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    status: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct FilesResponse {
+    torrents: Vec<FilesTorrent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FilesTorrent {
+    #[serde(default)]
+    files: Vec<ListedFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListedFile {
+    name: String,
+    length: u64,
+}
+
+/// Decode one RPC response body, naming the call on failure.
+fn decode<T: serde::de::DeserializeOwned>(call: &str, arguments: Value) -> Result<T> {
+    serde_json::from_value(arguments).map_err(|err| ClientError::Malformed {
+        kind: KIND,
+        detail: format!("reading the {call} response: {err}"),
+    })
 }
 
 /// Transmission's numeric status values that mean "complete and uploading".
@@ -235,10 +251,6 @@ fn is_seeding_status(status: i64) -> bool {
 impl TorrentClient for TransmissionClient {
     fn kind(&self) -> ClientKind {
         KIND
-    }
-
-    fn base_url(&self) -> &Url {
-        &self.base
     }
 
     async fn login(&self) -> Result<()> {
@@ -266,73 +278,43 @@ impl TorrentClient for TransmissionClient {
                 }),
             )
             .await?;
+        let listed: TorrentGetResponse = decode("torrent-get", arguments)?;
 
-        let torrents = arguments
-            .get("torrents")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ClientError::Malformed {
-                kind: KIND,
-                detail: "torrent-get returned no torrents array".to_owned(),
-            })?;
-
-        let mut out = Vec::with_capacity(torrents.len());
-        for torrent in torrents {
-            let labels: Vec<String> = torrent
-                .get("labels")
-                .and_then(Value::as_array)
-                .map(|l| {
-                    l.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default();
-
+        let mut out = Vec::with_capacity(listed.torrents.len());
+        for torrent in listed.torrents {
             // Transmission has no categories, so sharerr's category is simply one
             // of the labels. Filtering here rather than server-side is why the
             // trait warns callers not to assume the filter was applied remotely.
             if let Some(wanted) = category
-                && !labels.iter().any(|l| l == wanted)
+                && !torrent.labels.iter().any(|l| l == wanted)
             {
                 continue;
             }
 
-            let download_dir = torrent
-                .get("downloadDir")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            let name = torrent
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
+            // Transmission has no `content_path`. Joining the download directory
+            // with the torrent name reconstructs it, which is what qBittorrent
+            // reports directly — so cross-seed detection behaves the same on both
+            // clients rather than silently degrading here.
+            let content_path = if torrent.download_dir.is_empty() || torrent.name.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{}/{}",
+                    torrent.download_dir.trim_end_matches('/'),
+                    torrent.name
+                )
+            };
 
             out.push(TorrentSummary {
                 // Lowercased because sharerr joins on this against its own store,
                 // which holds lowercase hex.
-                hash: torrent
-                    .get("hashString")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase(),
-                name: name.clone(),
-                save_path: download_dir.clone(),
-                // Transmission has no `content_path`. Joining the download
-                // directory with the torrent name reconstructs it, which is what
-                // qBittorrent reports directly — so cross-seed detection behaves
-                // the same on both clients rather than silently degrading here.
-                content_path: if download_dir.is_empty() || name.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}/{}", download_dir.trim_end_matches('/'), name)
-                },
+                hash: torrent.hash_string.to_ascii_lowercase(),
+                name: torrent.name,
+                save_path: torrent.download_dir,
+                content_path,
                 category: category.unwrap_or_default().to_owned(),
-                is_seeding: torrent
-                    .get("status")
-                    .and_then(Value::as_i64)
-                    .is_some_and(is_seeding_status),
-                tags: labels,
+                is_seeding: is_seeding_status(torrent.status),
+                tags: torrent.labels,
             });
         }
 
@@ -343,37 +325,22 @@ impl TorrentClient for TransmissionClient {
         let arguments = self
             .rpc("torrent-get", json!({ "ids": [hash], "fields": ["files"] }))
             .await?;
+        let listed: FilesResponse = decode("torrent-get files", arguments)?;
 
-        let files = arguments
-            .get("torrents")
-            .and_then(Value::as_array)
-            .and_then(|t| t.first())
-            .and_then(|t| t.get("files"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(files
-            .iter()
-            .map(|f| TorrentFileEntry {
-                name: f
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                size: f.get("length").and_then(Value::as_u64).unwrap_or(0),
+        Ok(listed
+            .torrents
+            .into_iter()
+            .next()
+            .map(|torrent| torrent.files)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| TorrentFileEntry {
+                name: file.name,
+                size: file.length,
             })
             .collect())
     }
 
-    /// Seed content that already exists.
-    ///
-    /// Two fields do the work:
-    ///
-    /// * `download-dir` is set to the directory the content is *already* in, so
-    ///   Transmission verifies what is there instead of fetching it.
-    /// * `paused` reflects the caller's intent, and nothing here ever asks
-    ///   Transmission to move or rename anything.
     async fn add(&self, request: &AddRequest<'_>) -> Result<()> {
         let metainfo = base64::engine::general_purpose::STANDARD.encode(request.data);
 
@@ -502,10 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
+        let port = sharerr_testkit::net::closed_port();
         let base = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
         let client = TransmissionClient::new(&base, "admin", SecretString::from("pw")).unwrap();
 

@@ -69,7 +69,7 @@ struct Track {
 }
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let artists: Vec<Artist> = client.get_list("artist", &[]).await?;
+    let artists: Vec<Artist> = client.get("artist", &[]).await?;
     let tagged: Vec<&Artist> = artists
         .iter()
         .filter(|a| a.tags.contains(&tag_id))
@@ -85,23 +85,38 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
     for artist in tagged {
         let artist_id = artist.id.to_string();
 
-        let albums: Vec<Album> = client
-            .get_list("album", &[("artistId", artist_id.clone())])
-            .await?;
-        let files: Vec<TrackFile> = client
-            .get_list("trackfile", &[("artistId", artist_id.clone())])
-            .await?;
+        // Independent lookups, so they run concurrently — per tagged artist this
+        // costs one round trip's latency instead of three. The track list carries
+        // numbers so a single-track file can be named precisely; a file no track
+        // points at is still shareable — it is simply the whole album.
+        let by_artist = [("artistId", artist_id)];
+        let (albums, files, tracks) = tokio::try_join!(
+            client.get::<Vec<Album>>("album", &by_artist),
+            client.get::<Vec<TrackFile>>("trackfile", &by_artist),
+            client.get::<Vec<Track>>("track", &by_artist),
+        )?;
         if files.is_empty() {
             tracing::debug!(artist = %artist.artist_name, "tagged but has no files on disk");
             continue;
         }
 
-        // Track numbers, so a single-track file can be named precisely. A file that
-        // no track points at is still shareable — it is simply the whole album.
-        let tracks: Vec<Track> = client.get_list("track", &[("artistId", artist_id)]).await?;
+        // Indexed once, then each file's lookups are O(1) — a 400-track
+        // discography was ~160k linear-scan comparisons per artist without this.
+        let album_by_id: std::collections::HashMap<i64, &Album> =
+            albums.iter().map(|a| (a.id, a)).collect();
+        let mut numbers_by_file: std::collections::HashMap<i64, Vec<u32>> =
+            std::collections::HashMap::new();
+        for track in &tracks {
+            if let Some(number) = track.absolute_track_number {
+                numbers_by_file
+                    .entry(track.track_file_id)
+                    .or_default()
+                    .push(number);
+            }
+        }
 
         for file in files {
-            let Some(album) = albums.iter().find(|a| a.id == file.album_id) else {
+            let Some(album) = album_by_id.get(&file.album_id).copied() else {
                 // A file whose album Lidarr no longer lists. Sharing it would
                 // produce a release named after nothing.
                 tracing::warn!(
@@ -115,15 +130,9 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             // Exactly one track pointing at this file means the file *is* that
             // track. More than one means it holds several, so the album is the only
             // honest name for it.
-            let numbered: Vec<u32> = tracks
-                .iter()
-                .filter(|t| t.track_file_id == file.id)
-                .filter_map(|t| t.absolute_track_number)
-                .collect();
-            let track = if numbered.len() == 1 {
-                numbered.first().copied()
-            } else {
-                None
+            let track = match numbers_by_file.get(&file.id).map(Vec::as_slice) {
+                Some([number]) => Some(*number),
+                _ => None,
             };
 
             discovered.push(Discovered {

@@ -14,6 +14,7 @@ workspace = true
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
 getrandom = { workspace = true }
+hex = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,7 +25,6 @@ sharerr-core = { workspace = true }
 sqlx = { workspace = true, features = ["migrate", "macros", "time"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs"] }
-tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

@@ -19,15 +19,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
-use sharerr_core::config::{TorrentBackend, TrackerBackend, secret_keys};
+use sharerr_core::config::{TrackerBackend, secret_keys};
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
-use sharerr_qbit::QbitClient;
 use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
-use sharerr_torrent::{
-    BuiltinTracker, LavaTorrentFactory, QbitEmbeddedTracker, TrackerProvider, title,
-};
-use sharerr_transmission::TransmissionClient;
+use sharerr_torrent::{BuiltinTracker, QbitEmbeddedTracker, TrackerProvider, title};
 
 use seed::{SeedOutcome, Seeder};
 
@@ -40,8 +36,9 @@ pub struct Syncer {
     /// places to edit for a sixth, and the discovery loop treats them identically
     /// anyway — the differences live inside `ArrClient::discover`.
     arrs: Vec<ArrClient>,
-    qbit: Arc<dyn TorrentClient>,
     tracker: Arc<dyn TrackerProvider>,
+    /// Owns the torrent client too — the syncer reads it through
+    /// [`Seeder::client`], so there is exactly one handle to keep consistent.
     seeder: Seeder,
     resolver: PathResolver,
 }
@@ -156,28 +153,14 @@ impl Syncer {
 
         let tracker = build_tracker(config, &vault, Arc::clone(&qbit))?;
 
-        // Transmission has only labels, so the category and tag collapse into one
-        // value there. Resolved here rather than inside the seeder, which should
-        // not have to know which client it is driving.
-        let (category, tag, skip_checking) = match config.torrent_backend {
-            TorrentBackend::Qbittorrent => (
-                config.qbittorrent.category.clone(),
-                config.qbittorrent.tag.clone(),
-                config.qbittorrent.skip_checking,
-            ),
-            TorrentBackend::Transmission => (
-                config.transmission.label.clone(),
-                config.transmission.label.clone(),
-                false,
-            ),
-        };
-
+        // Resolved here rather than inside the seeder, which should not have to
+        // know which client it is driving.
+        let client_config = config.torrent_client();
         let seeder = Seeder {
             qbit: Arc::clone(&qbit),
-            factory: Arc::new(LavaTorrentFactory),
-            category,
-            tag,
-            skip_checking,
+            category: client_config.category.to_owned(),
+            tag: client_config.tag.to_owned(),
+            skip_checking: client_config.skip_checking,
             torrent_dir: config.torrent_dir(),
         };
 
@@ -185,14 +168,7 @@ impl Syncer {
             .await
             .with_context(|| format!("opening {}", config.database_path().display()))?;
 
-        Ok(Self::new(
-            config.clone(),
-            store,
-            arrs,
-            qbit,
-            tracker,
-            seeder,
-        ))
+        Ok(Self::new(config.clone(), store, arrs, tracker, seeder))
     }
 
     /// Assemble from already-built parts.
@@ -204,7 +180,6 @@ impl Syncer {
         config: Config,
         store: Store,
         arrs: Vec<ArrClient>,
-        qbit: Arc<dyn TorrentClient>,
         tracker: Arc<dyn TrackerProvider>,
         seeder: Seeder,
     ) -> Self {
@@ -213,7 +188,6 @@ impl Syncer {
             config,
             store,
             arrs,
-            qbit,
             tracker,
             seeder,
         }
@@ -261,7 +235,19 @@ impl Syncer {
         self.tracker.ensure_ready().await?;
         let announce = self.tracker.announce_url().await?;
 
-        let discovery = self.discover().await;
+        // Three independent reads, overlapped: the *arr walk is the long pole,
+        // and the torrent list plus the store snapshot ride under it instead of
+        // queueing behind it. The torrent list is fetched once for the whole
+        // pass — the hash set answers "is it still live", and the summaries feed
+        // the seeder's cross-seed search, which once refetched this same list
+        // per item. This is also what makes the loop self-healing: a torrent
+        // removed behind sharerr's back is simply absent here and gets re-added.
+        let (discovery, torrents, known_items) = tokio::join!(
+            self.discover(),
+            self.seeder.qbit.list(None),
+            self.store.all_items()
+        );
+
         let discovered = &discovery.items;
         report.discovered = discovered.len();
         report.sources_failed = discovery.failures;
@@ -273,29 +259,27 @@ impl Syncer {
             bail!("no *arr app could be scanned — nothing was changed");
         }
 
-        // One call, then membership tests are free. This is also what makes the
-        // loop self-healing: a torrent removed behind sharerr's back is simply
-        // absent here and gets re-added.
-        let live: HashSet<String> = self
-            .qbit
-            .list(None)
-            .await
-            .context("listing torrents in qBittorrent")?
-            .into_iter()
+        let torrents = torrents.context("listing torrents in qBittorrent")?;
+        let live: HashSet<String> = torrents
+            .iter()
             .map(|t| t.hash.to_ascii_lowercase())
             .collect();
 
-        let known: HashMap<(MediaSource, i64), SharedItem> = self
-            .store
-            .all_items()
-            .await?
+        let known: HashMap<(MediaSource, i64), SharedItem> = known_items?
             .into_iter()
             .map(|item| (item.key(), item))
             .collect();
 
         for item in discovered {
             match self
-                .share(item, &announce, &live, known.get(&item.key()), dry_run)
+                .share(
+                    item,
+                    &announce,
+                    &live,
+                    &torrents,
+                    known.get(&item.key()),
+                    dry_run,
+                )
                 .await
             {
                 Ok(Step::Added) => report.added += 1,
@@ -341,18 +325,28 @@ impl Syncer {
     /// "Sonarr has the tag, Radarr does not" is a routine setup that surfaces as a
     /// hard error from [`sharerr_arr::ArrError::TagNotFound`].
     async fn discover(&self) -> Discovery {
-        let mut discovery = Discovery::default();
+        // The apps are independent services, so scan them concurrently: the phase
+        // costs the slowest app's walk rather than the sum of all of them.
+        // `join_all` preserves input order, which keeps the fold — and the log
+        // lines — as stable as the sequential loop was.
+        let results = futures::future::join_all(
+            self.arrs
+                .iter()
+                .map(|client| async { (client.kind(), client.discover(&self.config.tag).await) }),
+        )
+        .await;
 
-        for client in &self.arrs {
-            match client.discover(&self.config.tag).await {
+        let mut discovery = Discovery::default();
+        for (kind, result) in results {
+            match result {
                 Ok(found) => {
-                    discovery.scanned.insert(client.kind());
+                    discovery.scanned.insert(kind);
                     discovery.items.extend(found);
                 }
                 Err(err) => {
                     discovery.failures += 1;
                     tracing::error!(
-                        service = %client.kind(),
+                        service = %kind,
                         error = format!("{err:#}"),
                         "discovery failed — everything already shared from this app \
                          will be left exactly as it is"
@@ -369,6 +363,7 @@ impl Syncer {
         item: &Discovered,
         announce: &url::Url,
         live: &HashSet<String>,
+        torrents: &[sharerr_client::TorrentSummary],
         known: Option<&SharedItem>,
         dry_run: bool,
     ) -> Result<Step> {
@@ -402,8 +397,10 @@ impl Syncer {
         // file that is missing — which is what lets the row below be complete.
         let release_title = title::resolve(&item.spec, item.scene_name.as_deref(), &paths.sharerr);
 
+        // `try_exists` rather than a blocking `exists()`: this runs per item on
+        // the async loop, against a mount that may be remote.
         if dry_run {
-            if !paths.sharerr.exists() {
+            if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
                 return Err(missing());
             }
             tracing::info!(
@@ -423,16 +420,13 @@ impl Syncer {
         let record = item.clone().into_shared_item(release_title);
         self.store.upsert(&record).await?;
 
-        if !paths.sharerr.exists() {
+        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
             return Err(missing());
         }
 
-        let outcome = self.seeder.seed(&paths, announce).await?;
+        let outcome = self.seeder.seed(&paths, announce, torrents).await?;
         self.store
-            .set_info_hash(item.source, item.file_id, outcome.info_hash())
-            .await?;
-        self.store
-            .set_state(item.source, item.file_id, ShareState::Seeding, None)
+            .set_seeding(item.source, item.file_id, outcome.info_hash())
             .await?;
 
         Ok(match outcome {
@@ -474,7 +468,7 @@ impl Syncer {
             }
 
             if let Some(hash) = &item.info_hash
-                && let Err(err) = self.qbit.remove(hash).await
+                && let Err(err) = self.seeder.qbit.remove(hash).await
             {
                 // Worth continuing: marking the row Unshared is still correct, and
                 // the torrent can be cleaned up by hand.
@@ -523,32 +517,18 @@ fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option
 /// operator switching backends does not silently keep authenticating with the other
 /// client's credential.
 fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>> {
-    match config.torrent_backend {
-        TorrentBackend::Qbittorrent => {
-            let password = vault
-                .get(secret_keys::QBITTORRENT_PASSWORD)?
-                .with_context(|| {
-                    format!("no {} in the vault", secret_keys::QBITTORRENT_PASSWORD)
-                })?;
-            Ok(Arc::new(QbitClient::new(
-                &config.qbittorrent.url,
-                &config.qbittorrent.username,
-                password,
-            )?))
-        }
-        TorrentBackend::Transmission => {
-            let password = vault
-                .get(secret_keys::TRANSMISSION_PASSWORD)?
-                .with_context(|| {
-                    format!("no {} in the vault", secret_keys::TRANSMISSION_PASSWORD)
-                })?;
-            Ok(Arc::new(TransmissionClient::new(
-                &config.transmission.url,
-                &config.transmission.username,
-                password,
-            )?))
-        }
-    }
+    let client = config.torrent_client();
+    let password = vault
+        .get(client.password_key)?
+        .with_context(|| format!("no {} in the vault", client.password_key))?;
+
+    crate::checks::build_torrent_client(
+        config.torrent_backend,
+        client.url,
+        client.username,
+        password,
+    )
+    .map_err(|reason| anyhow::anyhow!(reason))
 }
 
 fn build_tracker(

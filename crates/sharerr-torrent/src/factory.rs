@@ -23,42 +23,35 @@ pub struct TorrentRequest<'a> {
 }
 
 /// A finished torrent, in memory.
+///
+/// The filename inside the torrent equals the on-disk basename by design; it is
+/// not carried here because nothing reads it back — the `.torrent` itself is the
+/// record.
 #[derive(Debug, Clone)]
 pub struct BuiltTorrent {
     /// Hex-encoded SHA-1 of the info dictionary — the identity qBittorrent uses.
     pub info_hash: String,
     /// The bencoded `.torrent`, ready to hand to a client.
     pub data: Vec<u8>,
-    /// The filename inside the torrent. Equals the on-disk basename, by design.
-    pub name: String,
-    pub piece_length: u64,
     pub size: u64,
 }
 
-/// Creates torrents.
-///
-/// A trait because `lava_torrent` is in maintenance mode; swapping it for
-/// hand-rolled `serde_bencode` + `sha1` should cost one impl and no call sites.
-///
-/// **Synchronous on purpose.** Building a torrent means SHA-1 over the entire
-/// file, which for a media library is gigabytes of CPU-bound work. An `async fn`
-/// here would invite callers to run it directly on the runtime and stall every
-/// other task. Callers offload it with `tokio::task::spawn_blocking`.
-pub trait TorrentFactory: Send + Sync + std::fmt::Debug {
-    /// Build a torrent describing the file exactly where it already sits.
-    ///
-    /// Implementations must not move, rename, or rewrite anything.
-    fn create(&self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent>;
-}
-
 #[derive(Debug, Default, Clone, Copy)]
-/// The default [`TorrentFactory`], backed by `lava_torrent`.
+/// Creates torrents, backed by `lava_torrent`.
 ///
-/// Behind the trait because `lava_torrent` is in maintenance mode.
+/// `lava_torrent` is in maintenance mode; swapping it for hand-rolled bencoding
+/// and hashing should cost only this type's one method and no call sites.
 pub struct LavaTorrentFactory;
 
-impl TorrentFactory for LavaTorrentFactory {
-    fn create(&self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent> {
+impl LavaTorrentFactory {
+    /// Build a torrent describing the file exactly where it already sits,
+    /// without moving, renaming, or rewriting anything.
+    ///
+    /// **Synchronous on purpose.** Building a torrent means SHA-1 over the entire
+    /// file, which for a media library is gigabytes of CPU-bound work. An `async
+    /// fn` here would invite callers to run it directly on the runtime and stall
+    /// every other task. Callers offload it with `tokio::task::spawn_blocking`.
+    pub fn create(self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent> {
         let path = request.path;
 
         let metadata = std::fs::metadata(path).map_err(|source| TorrentError::Unreadable {
@@ -71,13 +64,13 @@ impl TorrentFactory for LavaTorrentFactory {
             });
         }
 
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| TorrentError::NoFileName {
+        // A path with no printable filename cannot name the file inside the
+        // torrent, so it is rejected before any hashing starts.
+        if path.file_name().and_then(|n| n.to_str()).is_none() {
+            return Err(TorrentError::NoFileName {
                 path: path.to_path_buf(),
-            })?
-            .to_owned();
+            });
+        }
 
         let size = metadata.len();
         let piece_length = piece_length_for(size);
@@ -110,8 +103,6 @@ impl TorrentFactory for LavaTorrentFactory {
         Ok(BuiltTorrent {
             info_hash,
             data,
-            name,
-            piece_length,
             size,
         })
     }

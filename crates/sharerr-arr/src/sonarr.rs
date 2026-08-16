@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::models::{Episode, EpisodeFile, Series, non_empty, non_zero};
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let series: Vec<Series> = client.get_list("series", &[]).await?;
+    let series: Vec<Series> = client.get("series", &[]).await?;
     let tagged: Vec<&Series> = series.iter().filter(|s| s.tags.contains(&tag_id)).collect();
 
     tracing::debug!(
@@ -32,17 +32,18 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
     let mut discovered = Vec::new();
     for show in tagged {
         let series_id = show.id.to_string();
-        let files: Vec<EpisodeFile> = client
-            .get_list("episodefile", &[("seriesId", series_id.clone())])
-            .await?;
+        // Independent lookups, so they run concurrently — per tagged series this
+        // halves the round trips paid in sequence.
+        let by_series = [("seriesId", series_id)];
+        let (files, episodes) = tokio::try_join!(
+            client.get::<Vec<EpisodeFile>>("episodefile", &by_series),
+            client.get::<Vec<Episode>>("episode", &by_series),
+        )?;
         if files.is_empty() {
             tracing::debug!(series = %show.title, "tagged but has no files on disk");
             continue;
         }
 
-        let episodes: Vec<Episode> = client
-            .get_list("episode", &[("seriesId", series_id)])
-            .await?;
         let numbering = numbering_by_file(&episodes);
 
         let ids = ExternalIds {

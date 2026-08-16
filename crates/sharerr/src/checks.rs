@@ -34,28 +34,7 @@ use sharerr_qbit::QbitClient;
 use sharerr_transmission::TransmissionClient;
 use url::Url;
 
-/// Render an error together with its cause chain.
-///
-/// The distinction matters: reqwest's own `Display` is just "error sending request
-/// for url (...)", and the part an operator actually needs — `Connection refused`,
-/// `dns error`, `operation timed out` — lives further down the chain.
-pub fn chain(err: &dyn std::error::Error) -> String {
-    let mut rendered = err.to_string();
-    let mut cause = err.source();
-
-    while let Some(next) = cause {
-        let text = next.to_string();
-        // `#[source]` fields are often interpolated into the parent's message
-        // already; only append what is genuinely new.
-        if !rendered.contains(&text) {
-            rendered.push_str(": ");
-            rendered.push_str(&text);
-        }
-        cause = next.source();
-    }
-
-    rendered
-}
+pub use sharerr_client::error_chain as chain;
 
 /// What a Sonarr or Radarr instance turned out to be.
 ///
@@ -148,12 +127,13 @@ pub async fn check_arr(
     };
 
     // Both tag questions are asked, every time. Previously each caller asked only
-    // one of them and reported the other's condition in its wording.
-    if client.tag_id(tag).await.is_err() {
+    // one of them and reported the other's condition in its wording. The id from
+    // the first answers feeds the walk, so the `/tag` list is fetched once.
+    let Ok(tag_id) = client.tag_id(tag).await else {
         return ArrOutcome::TagMissing { version };
-    }
+    };
 
-    match client.discover(tag).await {
+    match client.discover_with_tag_id(tag_id).await {
         Ok(items) if items.is_empty() => ArrOutcome::TagUnused { version },
         Ok(items) => ArrOutcome::Ready {
             version,
@@ -270,6 +250,28 @@ pub enum QbitOutcome {
 /// Which client this talks to is a configuration choice, and the caller passes the
 /// already-resolved backend rather than guessing from the URL — two clients can
 /// perfectly well live on the same host.
+/// Construct whichever torrent client `backend` selects.
+///
+/// The one place the backend→constructor decision lives: the reconciliation
+/// loop and every health probe build their client through here, so a change to
+/// how one is constructed cannot leave `doctor` testing a different thing from
+/// what actually seeds.
+pub fn build_torrent_client(
+    backend: TorrentBackend,
+    url: &Url,
+    username: &str,
+    password: SecretString,
+) -> Result<Arc<dyn TorrentClient>, String> {
+    Ok(match backend {
+        TorrentBackend::Qbittorrent => {
+            Arc::new(QbitClient::new(url, username, password).map_err(|e| chain(&e))?)
+        }
+        TorrentBackend::Transmission => {
+            Arc::new(TransmissionClient::new(url, username, password).map_err(|e| chain(&e))?)
+        }
+    })
+}
+
 pub async fn check_qbit(
     backend: TorrentBackend,
     url: &Url,
@@ -282,15 +284,9 @@ pub async fn check_qbit(
         Err(reason) => return QbitOutcome::CredentialUnreadable(reason),
     };
 
-    let client: Arc<dyn TorrentClient> = match backend {
-        TorrentBackend::Qbittorrent => match QbitClient::new(url, username, password) {
-            Ok(client) => Arc::new(client),
-            Err(err) => return QbitOutcome::BadUrl(chain(&err)),
-        },
-        TorrentBackend::Transmission => match TransmissionClient::new(url, username, password) {
-            Ok(client) => Arc::new(client),
-            Err(err) => return QbitOutcome::BadUrl(chain(&err)),
-        },
+    let client = match build_torrent_client(backend, url, username, password) {
+        Ok(client) => client,
+        Err(reason) => return QbitOutcome::BadUrl(reason),
     };
 
     if let Err(err) = client.login().await {
@@ -319,8 +315,7 @@ mod tests {
 
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::MockServer;
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 
@@ -328,20 +323,13 @@ mod tests {
         Ok(Some(SecretString::from(API_KEY)))
     }
 
-    async fn mount(server: &MockServer, route: &str, status: u16, body: serde_json::Value) {
-        Mock::given(method("GET"))
-            .and(path(route))
-            .respond_with(ResponseTemplate::new(status).set_body_json(body))
-            .mount(server)
-            .await;
-    }
+    use sharerr_testkit::mock::mount_json_status as mount;
 
     async fn mount_status(server: &MockServer) {
-        mount(
+        sharerr_testkit::mock::mount_json(
             server,
             "/api/v3/system/status",
-            200,
-            json!({ "version": "4.0.15", "appName": "Sonarr" }),
+            sharerr_testkit::library::system_status_json("Sonarr"),
         )
         .await;
     }
@@ -414,14 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        // Bind a port, learn its number, then drop the listener — that leaves an
-        // address where the connection is refused outright, which is what a service
-        // being down actually looks like. A dropped `MockServer` is not equivalent:
-        // its port gets reused and answers 404, which is a *reachable* service.
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
+        let port = sharerr_testkit::net::closed_port();
         let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
 
         let outcome = check_arr(MediaSource::Sonarr, Some(&url), key(), "sharerr").await;
@@ -465,62 +446,5 @@ mod tests {
             matches!(unreadable, ArrOutcome::CredentialUnreadable(_)),
             "got {unreadable:?}"
         );
-    }
-
-    /// The cause chain is the whole reason this helper exists: reqwest's own
-    /// `Display` stops before the part that names what went wrong.
-    #[test]
-    fn the_cause_chain_is_appended_without_repeating_itself() {
-        #[derive(Debug)]
-        struct Inner;
-        impl std::fmt::Display for Inner {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "connection refused")
-            }
-        }
-        impl std::error::Error for Inner {}
-
-        #[derive(Debug)]
-        struct Outer;
-        impl std::fmt::Display for Outer {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "error sending request")
-            }
-        }
-        impl std::error::Error for Outer {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&Inner)
-            }
-        }
-
-        assert_eq!(chain(&Outer), "error sending request: connection refused");
-    }
-
-    /// A parent that already interpolates its source must not say it twice.
-    #[test]
-    fn an_already_interpolated_cause_is_not_repeated() {
-        #[derive(Debug)]
-        struct Inner;
-        impl std::fmt::Display for Inner {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "refused")
-            }
-        }
-        impl std::error::Error for Inner {}
-
-        #[derive(Debug)]
-        struct Outer;
-        impl std::fmt::Display for Outer {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "sending request: refused")
-            }
-        }
-        impl std::error::Error for Outer {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&Inner)
-            }
-        }
-
-        assert_eq!(chain(&Outer), "sending request: refused");
     }
 }

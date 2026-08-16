@@ -6,7 +6,7 @@ use std::path::Path;
 
 use lava_torrent::torrent::v1::Torrent;
 use sharerr_testkit::{deterministic_bytes, write_media_file};
-use sharerr_torrent::{LavaTorrentFactory, TorrentError, TorrentFactory, TorrentRequest};
+use sharerr_torrent::{LavaTorrentFactory, TorrentError, TorrentRequest, piece_length_for};
 use url::Url;
 
 fn announce() -> Url {
@@ -35,7 +35,7 @@ fn builds_a_torrent_over_a_file_where_it_already_is() {
     let built = build(&path);
 
     assert_eq!(built.size, 768 * 1024);
-    assert_eq!(built.piece_length, 256 * 1024);
+    assert_eq!(piece_length_for(built.size), 256 * 1024);
     assert_eq!(
         built.info_hash.len(),
         40,
@@ -61,7 +61,6 @@ fn the_torrent_is_named_after_the_file_not_the_release() {
     write_media_file(&path, 4096, 1).unwrap();
 
     let built = build(&path);
-    assert_eq!(built.name, "lanternwick.s02e01.mkv");
 
     let decoded = Torrent::read_from_bytes(&built.data).unwrap();
     assert_eq!(decoded.name, "lanternwick.s02e01.mkv");
@@ -145,7 +144,7 @@ fn the_piece_count_matches_the_file_size() {
     let built = build(&path);
     let decoded = Torrent::read_from_bytes(&built.data).unwrap();
 
-    let expected = (700 * 1024_u64).div_ceil(built.piece_length);
+    let expected = (700 * 1024_u64).div_ceil(piece_length_for(built.size));
     assert_eq!(decoded.pieces.len() as u64, expected);
     assert_eq!(decoded.length as u64, built.size);
 }
@@ -187,8 +186,6 @@ fn a_directory_is_refused() {
 
 #[test]
 fn piece_length_scales_with_file_size() {
-    use sharerr_torrent::piece_length_for;
-
     let small = piece_length_for(100 * 1024 * 1024);
     let large = piece_length_for(40 * 1024 * 1024 * 1024);
     assert!(

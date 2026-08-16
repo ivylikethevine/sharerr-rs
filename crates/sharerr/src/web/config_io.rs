@@ -646,6 +646,28 @@ username = "admin"
         assert!(reopened.to_toml().contains(r#"tag = "second""#));
     }
 
+    /// The two transforms are inverses over every writable path, which is what
+    /// lets `load_or_recover` derive `SHARERR_DATA_DIR` from the same constant
+    /// the UI writes through — a renamed field breaks this test instead of
+    /// silently breaking recovery.
+    #[test]
+    fn env_var_names_round_trip_through_the_override_scan() {
+        use sharerr_core::config::config_paths;
+
+        let vars = config_paths::ALL
+            .iter()
+            .map(|path| (config_paths::env_var(path), "x".to_owned()));
+        let found = collect_overrides(vars);
+
+        for path in config_paths::ALL {
+            assert_eq!(
+                found.get(*path).map(String::as_str),
+                Some(config_paths::env_var(path).as_str()),
+                "{path:?} did not survive the env round-trip"
+            );
+        }
+    }
+
     #[test]
     fn env_overrides_map_variables_back_to_config_paths() {
         let vars = [
