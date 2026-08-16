@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use sharerr_arr::{ArrClient, Discovered};
-use sharerr_core::config::{TrackerBackend, secret_keys};
+use sharerr_client::TorrentClient;
+use sharerr_core::config::{TorrentBackend, TrackerBackend, secret_keys};
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
 use sharerr_qbit::QbitClient;
@@ -26,15 +27,20 @@ use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
 use sharerr_torrent::{
     BuiltinTracker, LavaTorrentFactory, QbitEmbeddedTracker, TrackerProvider, title,
 };
+use sharerr_transmission::TransmissionClient;
 
 use seed::{SeedOutcome, Seeder};
 
 pub struct Syncer {
     config: Config,
     store: Store,
-    sonarr: Option<ArrClient>,
-    radarr: Option<ArrClient>,
-    qbit: Arc<QbitClient>,
+    /// Every configured *arr app, in a stable order.
+    ///
+    /// A list rather than one field per app: five named `Option`s would mean five
+    /// places to edit for a sixth, and the discovery loop treats them identically
+    /// anyway — the differences live inside `ArrClient::discover`.
+    arrs: Vec<ArrClient>,
+    qbit: Arc<dyn TorrentClient>,
     tracker: Arc<dyn TrackerProvider>,
     seeder: Seeder,
     resolver: PathResolver,
@@ -44,8 +50,10 @@ impl std::fmt::Debug for Syncer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Syncer")
             .field("tag", &self.config.tag)
-            .field("sonarr", &self.sonarr.is_some())
-            .field("radarr", &self.radarr.is_some())
+            .field(
+                "arrs",
+                &self.arrs.iter().map(ArrClient::kind).collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -131,29 +139,45 @@ impl Syncer {
         // connection pool, and runs the migrations. Ordering it after the cheap
         // lookups keeps a not-yet-configured instance from doing that work — and
         // from materialising sharerr.db — every time round the loop.
-        let qbit_password = vault
-            .get(secret_keys::QBITTORRENT_PASSWORD)?
-            .with_context(|| format!("no {} in the vault", secret_keys::QBITTORRENT_PASSWORD))?;
-        let qbit = Arc::new(QbitClient::new(
-            &config.qbittorrent.url,
-            &config.qbittorrent.username,
-            qbit_password,
-        )?);
+        let qbit = build_client(config, &vault)?;
 
-        let sonarr = build_arr(MediaSource::Sonarr, config, &vault)?;
-        let radarr = build_arr(MediaSource::Radarr, config, &vault)?;
-        if sonarr.is_none() && radarr.is_none() {
-            bail!("neither sonarr nor radarr is configured — there is nothing to share");
+        let mut arrs = Vec::new();
+        for source in MediaSource::ALL.iter().copied() {
+            if let Some(client) = build_arr(source, config, &vault)? {
+                arrs.push(client);
+            }
+        }
+        if arrs.is_empty() {
+            bail!(
+                "no *arr app is configured — there is nothing to share. Set at least \
+                 one of sonarr, radarr, lidarr, readarr or whisparr."
+            );
         }
 
         let tracker = build_tracker(config, &vault, Arc::clone(&qbit))?;
 
+        // Transmission has only labels, so the category and tag collapse into one
+        // value there. Resolved here rather than inside the seeder, which should
+        // not have to know which client it is driving.
+        let (category, tag, skip_checking) = match config.torrent_backend {
+            TorrentBackend::Qbittorrent => (
+                config.qbittorrent.category.clone(),
+                config.qbittorrent.tag.clone(),
+                config.qbittorrent.skip_checking,
+            ),
+            TorrentBackend::Transmission => (
+                config.transmission.label.clone(),
+                config.transmission.label.clone(),
+                false,
+            ),
+        };
+
         let seeder = Seeder {
             qbit: Arc::clone(&qbit),
             factory: Arc::new(LavaTorrentFactory),
-            category: config.qbittorrent.category.clone(),
-            tag: config.qbittorrent.tag.clone(),
-            skip_checking: config.qbittorrent.skip_checking,
+            category,
+            tag,
+            skip_checking,
             torrent_dir: config.torrent_dir(),
         };
 
@@ -164,8 +188,7 @@ impl Syncer {
         Ok(Self::new(
             config.clone(),
             store,
-            sonarr,
-            radarr,
+            arrs,
             qbit,
             tracker,
             seeder,
@@ -180,9 +203,8 @@ impl Syncer {
     pub(crate) fn new(
         config: Config,
         store: Store,
-        sonarr: Option<ArrClient>,
-        radarr: Option<ArrClient>,
-        qbit: Arc<QbitClient>,
+        arrs: Vec<ArrClient>,
+        qbit: Arc<dyn TorrentClient>,
         tracker: Arc<dyn TrackerProvider>,
         seeder: Seeder,
     ) -> Self {
@@ -190,8 +212,7 @@ impl Syncer {
             resolver: config.resolver(),
             config,
             store,
-            sonarr,
-            radarr,
+            arrs,
             qbit,
             tracker,
             seeder,
@@ -257,7 +278,7 @@ impl Syncer {
         // absent here and gets re-added.
         let live: HashSet<String> = self
             .qbit
-            .torrents_info(None, None)
+            .list(None)
             .await
             .context("listing torrents in qBittorrent")?
             .into_iter()
@@ -322,10 +343,7 @@ impl Syncer {
     async fn discover(&self) -> Discovery {
         let mut discovery = Discovery::default();
 
-        for client in [self.sonarr.as_ref(), self.radarr.as_ref()]
-            .into_iter()
-            .flatten()
-        {
+        for client in &self.arrs {
             match client.discover(&self.config.tag).await {
                 Ok(found) => {
                     discovery.scanned.insert(client.kind());
@@ -456,7 +474,7 @@ impl Syncer {
             }
 
             if let Some(hash) = &item.info_hash
-                && let Err(err) = self.qbit.remove_torrent(hash).await
+                && let Err(err) = self.qbit.remove(hash).await
             {
                 // Worth continuing: marking the row Unshared is still correct, and
                 // the torrent can be cleaned up by hand.
@@ -487,10 +505,7 @@ enum Step {
 }
 
 fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option<ArrClient>> {
-    let (service, key_name) = match kind {
-        MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
-        MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
-    };
+    let (service, key_name) = (config.service(kind), secret_keys::api_key_for(kind));
 
     let Some(service) = service else {
         return Ok(None);
@@ -502,10 +517,44 @@ fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option
     Ok(Some(ArrClient::new(kind, &service.url, api_key)?))
 }
 
+/// Construct whichever torrent client the configuration selects.
+///
+/// Both branches read their password from the vault under their own key, so an
+/// operator switching backends does not silently keep authenticating with the other
+/// client's credential.
+fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>> {
+    match config.torrent_backend {
+        TorrentBackend::Qbittorrent => {
+            let password = vault
+                .get(secret_keys::QBITTORRENT_PASSWORD)?
+                .with_context(|| {
+                    format!("no {} in the vault", secret_keys::QBITTORRENT_PASSWORD)
+                })?;
+            Ok(Arc::new(QbitClient::new(
+                &config.qbittorrent.url,
+                &config.qbittorrent.username,
+                password,
+            )?))
+        }
+        TorrentBackend::Transmission => {
+            let password = vault
+                .get(secret_keys::TRANSMISSION_PASSWORD)?
+                .with_context(|| {
+                    format!("no {} in the vault", secret_keys::TRANSMISSION_PASSWORD)
+                })?;
+            Ok(Arc::new(TransmissionClient::new(
+                &config.transmission.url,
+                &config.transmission.username,
+                password,
+            )?))
+        }
+    }
+}
+
 fn build_tracker(
     config: &Config,
     vault: &Vault,
-    qbit: Arc<QbitClient>,
+    qbit: Arc<dyn TorrentClient>,
 ) -> Result<Arc<dyn TrackerProvider>> {
     let host = config.tracker.advertised_host.as_deref();
 

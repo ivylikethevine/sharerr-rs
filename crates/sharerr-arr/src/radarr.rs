@@ -44,6 +44,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 tmdb: non_zero(movie.tmdb_id),
                 tvmaze: None,
                 imdb: non_empty(movie.imdb_id.clone()),
+                ..ExternalIds::default()
             },
             scene_name: non_empty(file.scene_name),
         });

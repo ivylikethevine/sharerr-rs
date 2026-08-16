@@ -14,13 +14,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use sharerr_qbit::QbitClient;
+use sharerr_client::TorrentClient;
 use tokio::sync::Mutex;
 use url::Url;
 
 use crate::error::{Result, TorrentError};
 
 #[async_trait]
+/// Decides the announce URL a newly built torrent carries.
+///
+/// A trait because the choice is a configuration decision — qBittorrent's embedded
+/// tracker or sharerr's own — made once and then applied to every torrent.
 pub trait TrackerProvider: Send + Sync + std::fmt::Debug {
     /// Make the tracker serve, if it does not already.
     ///
@@ -31,10 +35,15 @@ pub trait TrackerProvider: Send + Sync + std::fmt::Debug {
     async fn announce_url(&self) -> Result<Url>;
 }
 
-/// qBittorrent's embedded tracker.
+/// The torrent client's own embedded tracker.
+///
+/// Only qBittorrent has one. The provider is written against the client trait
+/// rather than qBittorrent specifically, so selecting a client without a tracker
+/// fails with a sentence naming the fix instead of a type error — see
+/// [`Self::served_port`].
 #[derive(Debug)]
 pub struct QbitEmbeddedTracker {
-    qbit: Arc<QbitClient>,
+    qbit: Arc<dyn TorrentClient>,
     /// The address **friends** reach the tracker on. Cannot be inferred: the
     /// container's own view of its address is almost never the one that works from
     /// outside, and a wrong guess yields torrents nobody can announce to.
@@ -49,7 +58,7 @@ pub struct QbitEmbeddedTracker {
 
 impl QbitEmbeddedTracker {
     pub fn new(
-        qbit: Arc<QbitClient>,
+        qbit: Arc<dyn TorrentClient>,
         advertised_host: Option<&str>,
         port_override: Option<u16>,
     ) -> Result<Self> {
@@ -77,7 +86,17 @@ impl QbitEmbeddedTracker {
             return Ok(port);
         }
 
-        let served = self.qbit.ensure_embedded_tracker().await?;
+        let served = match self.qbit.embedded_tracker_port().await? {
+            Some(port) => port,
+            // Transmission and most other clients have no embedded tracker. This is
+            // a configuration mistake rather than a fault, and the message has to
+            // name the fix: switch the tracker backend to sharerr's own.
+            None => {
+                return Err(TorrentError::NoEmbeddedTracker {
+                    client: self.qbit.kind().as_str(),
+                });
+            }
+        };
         // Only fatal without an override to fall back on: an operator who named a
         // published port knows more about the deployment than qBittorrent does.
         if served == 0 && self.port_override.is_none() {

@@ -46,6 +46,9 @@ pub enum StoreError {
 type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, Clone)]
+/// sharerr's SQLite database: what is shared, and every reconciliation run.
+///
+/// Cheap to clone — it is a connection pool handle, not a connection.
 pub struct Store {
     pool: SqlitePool,
 }
@@ -94,6 +97,7 @@ impl Store {
         Ok(Self { pool })
     }
 
+    /// The underlying pool, for queries that live in sibling modules.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -140,6 +144,8 @@ impl Store {
         rows.iter().map(row_to_item).collect()
     }
 
+    /// One item by its stable identity. The pair is the key — `file_id` alone is not
+    /// unique across the two *arr apps.
     pub async fn get(&self, source: MediaSource, file_id: i64) -> Result<Option<SharedItem>> {
         let row = sqlx::query(&format!(
             "{SELECT_COLUMNS} WHERE source = ?1 AND file_id = ?2"
@@ -233,6 +239,10 @@ impl Store {
         Ok(())
     }
 
+    /// Record the info hash of the torrent built for an item.
+    ///
+    /// A seeding item must have one: it is what the tracker admits announces against
+    /// and what the feed publishes.
     pub async fn set_info_hash(
         &self,
         source: MediaSource,
@@ -252,6 +262,7 @@ impl Store {
         Ok(())
     }
 
+    /// Open a reconciliation run, returning its id for [`Self::finish_run`].
     pub async fn begin_run(&self) -> Result<i64> {
         let row = sqlx::query("INSERT INTO sync_runs (started_at) VALUES (?1) RETURNING id")
             .bind(now_epoch())
@@ -260,6 +271,7 @@ impl Store {
         Ok(row.try_get::<i64, _>("id")?)
     }
 
+    /// Close a run and record what it did.
     pub async fn finish_run(&self, run_id: i64, summary: &RunSummary) -> Result<()> {
         sqlx::query(
             "UPDATE sync_runs SET finished_at = ?1, discovered = ?2, added = ?3, \
@@ -277,6 +289,8 @@ impl Store {
         Ok(())
     }
 
+    /// The most recent runs, newest first. Also the readiness probe's cheap proof
+    /// that the database is answering.
     pub async fn recent_runs(&self, limit: i64) -> Result<Vec<RunRecord>> {
         let rows = sqlx::query(
             "SELECT id, started_at, finished_at, discovered, added, unshared, failed, error \
@@ -306,6 +320,7 @@ impl Store {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// What one reconciliation pass changed.
 pub struct RunSummary {
     pub discovered: i64,
     pub added: i64,
@@ -315,6 +330,7 @@ pub struct RunSummary {
 }
 
 #[derive(Debug, Clone)]
+/// A completed run as stored, with its timing.
 pub struct RunRecord {
     pub id: i64,
     pub started_at: i64,
@@ -323,7 +339,7 @@ pub struct RunRecord {
 }
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
-     arr_path, size, ids_json, info_hash, state, last_error FROM shared_items";
+     arr_path, size, ids_json, info_hash, state, last_error, created_at FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     let id: i64 = row.try_get("id")?;
@@ -363,6 +379,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         info_hash: row.try_get("info_hash")?,
         state,
         last_error: row.try_get("last_error")?,
+        created_at: row.try_get("created_at").ok(),
     })
 }
 
@@ -400,10 +417,12 @@ mod tests {
                 tmdb: None,
                 tvmaze: Some(4_242),
                 imdb: Some("tt7654321".to_owned()),
+                ..ExternalIds::default()
             },
             info_hash: None,
             state: ShareState::Pending,
             last_error: None,
+            created_at: None,
         }
     }
 
@@ -427,6 +446,7 @@ mod tests {
             info_hash: None,
             state: ShareState::Pending,
             last_error: None,
+            created_at: None,
         }
     }
 
@@ -458,10 +478,22 @@ mod tests {
 
         let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
         assert_eq!(got.id, Some(id));
-        // Compare on equal footing: `item` has no database id yet.
+
+        // `created_at` is assigned by the store, so a freshly discovered item does
+        // not carry one and this is the only place it can be checked. It is not
+        // cosmetic: it becomes the feed's `pubDate`, and Sonarr rejects an entire
+        // feed whose items lack one.
+        assert!(
+            got.created_at.is_some(),
+            "the store must stamp created_at; the Torznab feed depends on it"
+        );
+
+        // Compare the rest on equal footing: `item` has neither a database id nor a
+        // timestamp yet.
         assert_eq!(
             SharedItem {
                 id: Some(id),
+                created_at: got.created_at,
                 ..item
             },
             got

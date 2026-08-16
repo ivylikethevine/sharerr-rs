@@ -14,6 +14,8 @@ pub(crate) struct Tag {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// What `/system/status` reports: enough to prove the service is reachable and
+/// the key is accepted.
 pub struct SystemStatus {
     #[serde(default)]
     pub version: String,

@@ -63,6 +63,8 @@ impl QbitError {
         matches!(self, Self::Unreachable { .. })
     }
 
+    /// Whether this is a rejected credential rather than an unreachable service —
+    /// the two have different fixes and must be reported differently.
     pub fn is_auth_failure(&self) -> bool {
         matches!(self, Self::LoginRejected | Self::LoginBanned)
     }

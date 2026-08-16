@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
+use sharerr_core::{ExternalIds, MediaSpec};
 
 use crate::Discovered;
 use crate::client::ArrClient;
@@ -50,6 +50,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             tmdb: None,
             tvmaze: non_zero(show.tv_maze_id),
             imdb: non_empty(show.imdb_id.clone()),
+            ..ExternalIds::default()
         };
 
         for file in files {
@@ -66,7 +67,10 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             };
 
             discovered.push(Discovered {
-                source: MediaSource::Sonarr,
+                // `client.kind()`, not a hardcoded Sonarr: Whisparr shares this
+                // walk, and mislabelling its items would put adult content in the
+                // TV category and hand it to a friend scoped to TV.
+                source: client.kind(),
                 source_id: show.id,
                 file_id: file.id,
                 spec: MediaSpec::Episode {

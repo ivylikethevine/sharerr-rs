@@ -70,6 +70,8 @@ impl ArrError {
         matches!(self, Self::Unreachable { .. })
     }
 
+    /// Whether the service rejected the API key, as opposed to being unreachable.
+    /// The fixes differ, so the caller must be able to tell them apart.
     pub fn is_auth_failure(&self) -> bool {
         matches!(self, Self::Unauthorized { .. })
     }

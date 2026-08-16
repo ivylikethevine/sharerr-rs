@@ -29,7 +29,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-const COMPOSE_FILE: &str = "docker/compose.test.yml";
+/// Which stack these run against.
+///
+/// Overridden by `run_docker_tests.sh --vpn`, which brings up the same services
+/// with qBittorrent inside a VPN container's network namespace. The assertions are
+/// identical on purpose — the point is that a different topology does not change
+/// what sharerr is supposed to do.
+///
+/// Listed in `settings::NON_CONFIG_ENV`, or `deny_unknown_fields` would turn this
+/// into a startup failure for anyone who exports it.
+fn compose_file() -> String {
+    std::env::var("SHARERR_E2E_COMPOSE").unwrap_or_else(|_| "docker/compose.test.yml".to_owned())
+}
 
 /// Identity of a file in the sense that matters here: *is it still the same file,
 /// in the same place, unmodified?*
@@ -90,7 +101,7 @@ fn compose(args: &[&str]) -> std::process::Output {
     Command::new("docker")
         .current_dir(repo_root())
         .arg("compose")
-        .args(["-f", COMPOSE_FILE])
+        .args(["-f", &compose_file()])
         .args(args)
         .output()
         .expect("docker compose is required for the e2e suite")

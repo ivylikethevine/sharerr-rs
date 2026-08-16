@@ -13,14 +13,22 @@ use url::Url;
 
 use crate::error::{ArrError, Result};
 use crate::models::{SystemStatus, Tag};
-use crate::{Discovered, radarr, sonarr};
+use crate::{Discovered, lidarr, radarr, readarr, sonarr};
 
-const API_PREFIX: &str = "api/v3/";
+/// The API prefix is per-source: Sonarr, Radarr and Whisparr are on `v3`, Lidarr
+/// and Readarr on `v1`. See [`MediaSource::api_version`].
+fn api_prefix(kind: MediaSource) -> String {
+    format!("api/{}/", kind.api_version())
+}
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Enough of an error body to identify the problem, bounded so a stray HTML error
 /// page from a misconfigured reverse proxy does not flood the logs.
 const MAX_ERROR_BODY: usize = 400;
 
+/// A Sonarr or Radarr v3 client.
+///
+/// One transport for both, because the two APIs are near-identical; [`Self::kind`]
+/// is what decides the resource walk.
 pub struct ArrClient {
     kind: MediaSource,
     /// Always ends in `/`, so `Url::join` appends rather than replacing the last
@@ -72,17 +80,19 @@ impl ArrClient {
         })
     }
 
+    /// Whether this client talks to Sonarr or Radarr.
     pub fn kind(&self) -> MediaSource {
         self.kind
     }
 
+    /// The instance this client talks to, for error messages that name it.
     pub fn base_url(&self) -> &Url {
         &self.base
     }
 
     fn endpoint(&self, path: &str) -> Result<Url> {
         self.base
-            .join(API_PREFIX)
+            .join(&api_prefix(self.kind))
             .and_then(|u| u.join(path))
             .map_err(|source| ArrError::Url {
                 service: self.kind,
@@ -184,8 +194,12 @@ impl ArrClient {
     pub async fn discover(&self, tag_label: &str) -> Result<Vec<Discovered>> {
         let tag_id = self.tag_id(tag_label).await?;
         match self.kind {
-            MediaSource::Sonarr => sonarr::discover(self, tag_id).await,
+            // Whisparr is Sonarr's codebase with a different catalogue, so it walks
+            // series and episode files identically — the same code, not a copy.
+            MediaSource::Sonarr | MediaSource::Whisparr => sonarr::discover(self, tag_id).await,
             MediaSource::Radarr => radarr::discover(self, tag_id).await,
+            MediaSource::Lidarr => lidarr::discover(self, tag_id).await,
+            MediaSource::Readarr => readarr::discover(self, tag_id).await,
         }
     }
 }

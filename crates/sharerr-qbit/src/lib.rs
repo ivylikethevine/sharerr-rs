@@ -24,6 +24,7 @@
 //! # }
 //! ```
 
+mod adapter;
 mod client;
 mod error;
 mod models;

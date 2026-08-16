@@ -11,15 +11,44 @@ use serde::{Deserialize, Serialize};
 pub enum MediaSource {
     Sonarr,
     Radarr,
+    Lidarr,
+    Readarr,
+    Whisparr,
 }
 
 impl MediaSource {
+    /// The lowercase name used in the database and in log output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sonarr => "sonarr",
             Self::Radarr => "radarr",
+            Self::Lidarr => "lidarr",
+            Self::Readarr => "readarr",
+            Self::Whisparr => "whisparr",
         }
     }
+
+    /// Which version of the *arr HTTP API this app speaks.
+    ///
+    /// Not cosmetic: Sonarr, Radarr and Whisparr are on `v3` while Lidarr and
+    /// Readarr are on `v1`. Hardcoding one prefix is why the client could only ever
+    /// have talked to the first two, and getting it wrong presents as a 404 that
+    /// looks like a wrong URL rather than a wrong version.
+    pub fn api_version(self) -> &'static str {
+        match self {
+            Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",
+            Self::Lidarr | Self::Readarr => "v1",
+        }
+    }
+
+    /// Every source sharerr can discover from.
+    pub const ALL: &'static [Self] = &[
+        Self::Sonarr,
+        Self::Radarr,
+        Self::Lidarr,
+        Self::Readarr,
+        Self::Whisparr,
+    ];
 }
 
 impl fmt::Display for MediaSource {
@@ -38,6 +67,16 @@ pub struct ExternalIds {
     pub tmdb: Option<i64>,
     pub tvmaze: Option<i64>,
     pub imdb: Option<String>,
+    /// MusicBrainz release-group id, for music. A string rather than a number
+    /// because MusicBrainz ids are UUIDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musicbrainz: Option<String>,
+    /// Goodreads work id, for books.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goodreads: Option<String>,
+    /// ISBN, for books. Kept alongside Goodreads because indexers match on either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
 }
 
 /// What a shared file actually contains.
@@ -53,13 +92,44 @@ pub enum MediaSpec {
         title: String,
         year: Option<u16>,
     },
+    /// One music file. Lidarr's unit of import is a *track file*, which may hold a
+    /// whole album, so the album is the thing named and the track is optional.
+    Track {
+        artist: String,
+        album: String,
+        /// `None` when the file is the whole album rather than one track.
+        track: Option<u32>,
+    },
+    /// One book file.
+    Book {
+        author: String,
+        title: String,
+    },
 }
 
 impl MediaSpec {
+    /// The title a searcher would look for: the series, film, album, or book.
+    ///
+    /// For music this is the *album*, not the artist — that is what a friend's
+    /// Lidarr searches on, the same way a series title is what Sonarr searches on.
     pub fn title(&self) -> &str {
         match self {
             Self::Episode { series_title, .. } => series_title,
             Self::Movie { title, .. } => title,
+            Self::Track { album, .. } => album,
+            Self::Book { title, .. } => title,
+        }
+    }
+
+    /// The credited artist or author, when the medium has one.
+    ///
+    /// Music and books are searched by *creator* far more than film and television
+    /// are, so this is carried separately rather than folded into the title.
+    pub fn creator(&self) -> Option<&str> {
+        match self {
+            Self::Track { artist, .. } => Some(artist),
+            Self::Book { author, .. } => Some(author),
+            Self::Episode { .. } | Self::Movie { .. } => None,
         }
     }
 }
@@ -79,6 +149,13 @@ impl fmt::Display for MediaSpec {
                 year: Some(y),
             } => write!(f, "{title} ({y})"),
             Self::Movie { title, year: None } => write!(f, "{title}"),
+            Self::Track {
+                artist,
+                album,
+                track: Some(n),
+            } => write!(f, "{artist} - {album} [{n:02}]"),
+            Self::Track { artist, album, .. } => write!(f, "{artist} - {album}"),
+            Self::Book { author, title } => write!(f, "{author} - {title}"),
         }
     }
 }
@@ -98,6 +175,7 @@ pub enum ShareState {
 }
 
 impl ShareState {
+    /// The lowercase name used in the database and in log output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -128,6 +206,13 @@ pub struct SharedItem {
     pub info_hash: Option<String>,
     pub state: ShareState,
     pub last_error: Option<String>,
+    /// When sharerr first recorded this file, as a Unix timestamp.
+    ///
+    /// Carried out of the store because the Torznab feed has to publish it: Sonarr
+    /// and Radarr **reject an entire feed** whose items have no `pubDate`, so this
+    /// is not decoration — without it a friend cannot add sharerr as an indexer at
+    /// all. `None` on an item that has not been stored yet.
+    pub created_at: Option<i64>,
 }
 
 impl SharedItem {

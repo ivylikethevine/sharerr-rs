@@ -21,7 +21,7 @@ use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
-use sharerr_store::Peer;
+use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
 use super::templates::{PeerRow, PeersPage, RevealedPeer, render};
@@ -39,6 +39,15 @@ pub async fn page(State(state): State<WebState>) -> Response {
 #[derive(Debug, Deserialize)]
 pub struct AddForm {
     label: String,
+    /// `all`, `tv` or `movies`. Anything else widens to `all` rather than failing —
+    /// see `PeerScope::parse`.
+    #[serde(default)]
+    scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScopeForm {
+    scope: String,
 }
 
 /// Mint a key, record the peer, and reveal the key exactly once.
@@ -54,12 +63,13 @@ pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Re
     };
 
     let label = form.label.trim().to_owned();
+    let scope = PeerScope::parse(&form.scope);
     match store
-        .create_peer(&label, &SecretString::from(key.clone()))
+        .create_peer(&label, &SecretString::from(key.clone()), scope)
         .await
     {
         Ok(peer) => {
-            tracing::info!(peer = %peer.label, "added a friend");
+            tracing::info!(peer = %peer.label, scope = peer.scope.as_str(), "added a friend");
             let mut page = build(&state, None, None).await;
             page.revealed = Some(RevealedPeer {
                 label: peer.label,
@@ -94,6 +104,31 @@ pub async fn revoke(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
             Redirect::to("/peers").into_response()
         }
         Err(err) => rejected(&state, &format!("could not revoke that key: {err}")).await,
+    }
+}
+
+/// Change what a friend is allowed to see.
+pub async fn set_scope(
+    State(state): State<WebState>,
+    Path(id): Path<i64>,
+    Form(form): Form<ScopeForm>,
+) -> Response {
+    let store = match state.serve.store().await {
+        Ok(store) => store,
+        Err(reason) => return service_unavailable(&reason),
+    };
+
+    let scope = PeerScope::parse(&form.scope);
+    match store.set_peer_scope(id, scope).await {
+        Ok(_) => {
+            tracing::info!(
+                peer_id = id,
+                scope = scope.as_str(),
+                "changed what a friend can see"
+            );
+            Redirect::to("/peers").into_response()
+        }
+        Err(err) => rejected(&state, &format!("could not change that: {err}")).await,
     }
 }
 
@@ -169,6 +204,8 @@ fn row(peer: &Peer) -> PeerRow {
     PeerRow {
         id: peer.id,
         label: peer.label.clone(),
+        scope: peer.scope.as_str(),
+        scope_label: peer.scope.label(),
         created: ago(peer.created_at),
         last_seen: match peer.last_seen_at {
             Some(at) => ago(at),
@@ -239,6 +276,7 @@ mod tests {
             created_at: 0,
             last_seen_at: None,
             revoked_at: None,
+            scope: PeerScope::All,
         };
 
         assert_eq!(row(&peer).last_seen, "never");
@@ -253,6 +291,7 @@ mod tests {
             created_at: 0,
             last_seen_at: Some(0),
             revoked_at: Some(1),
+            scope: PeerScope::Tv,
         };
 
         assert!(row(&peer).revoked);

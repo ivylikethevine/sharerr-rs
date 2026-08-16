@@ -45,10 +45,16 @@ pub struct BuiltTorrent {
 /// here would invite callers to run it directly on the runtime and stall every
 /// other task. Callers offload it with `tokio::task::spawn_blocking`.
 pub trait TorrentFactory: Send + Sync + std::fmt::Debug {
+    /// Build a torrent describing the file exactly where it already sits.
+    ///
+    /// Implementations must not move, rename, or rewrite anything.
     fn create(&self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+/// The default [`TorrentFactory`], backed by `lava_torrent`.
+///
+/// Behind the trait because `lava_torrent` is in maintenance mode.
 pub struct LavaTorrentFactory;
 
 impl TorrentFactory for LavaTorrentFactory {

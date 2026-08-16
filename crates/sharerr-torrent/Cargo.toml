@@ -17,6 +17,7 @@ lava_torrent = { workspace = true }
 serde = { workspace = true }
 serde_bencode = { workspace = true }
 sha1 = { workspace = true }
+sharerr-client = { workspace = true }
 sharerr-core = { workspace = true }
 sharerr-qbit = { workspace = true }
 thiserror = { workspace = true }

@@ -2537,12 +2537,15 @@ dependencies = [
  "serde",
  "serde_json",
  "sharerr-arr",
+ "sharerr-client",
  "sharerr-core",
  "sharerr-qbit",
  "sharerr-store",
  "sharerr-testkit",
  "sharerr-torrent",
+ "sharerr-transmission",
  "tempfile",
+ "time",
  "tokio",
  "toml_edit",
  "tower",
@@ -2569,6 +2572,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sharerr-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
 name = "sharerr-core"
 version = "0.1.0"
 dependencies = [
@@ -2584,10 +2596,12 @@ dependencies = [
 name = "sharerr-qbit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "reqwest",
  "secrecy",
  "serde",
  "serde_json",
+ "sharerr-client",
  "sharerr-core",
  "thiserror 2.0.20",
  "tokio",
@@ -2639,10 +2653,29 @@ dependencies = [
  "serde_bencode",
  "serde_json",
  "sha1 0.11.0",
+ "sharerr-client",
  "sharerr-core",
  "sharerr-qbit",
  "sharerr-testkit",
  "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "sharerr-transmission"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sharerr-client",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

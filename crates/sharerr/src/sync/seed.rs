@@ -17,8 +17,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
 use sharerr_core::paths::ResolvedPaths;
-use sharerr_qbit::{AddTorrent, QbitClient, TorrentFile, TorrentInfo};
 use sharerr_torrent::{TorrentFactory, TorrentRequest, torrent_file_path};
 use url::Url;
 
@@ -39,7 +39,7 @@ impl SeedOutcome {
 }
 
 pub struct Seeder {
-    pub qbit: Arc<QbitClient>,
+    pub qbit: Arc<dyn TorrentClient>,
     pub factory: Arc<dyn TorrentFactory>,
     pub category: String,
     pub tag: String,
@@ -83,19 +83,17 @@ impl Seeder {
             .map(Path::to_path_buf)
             .with_context(|| format!("{} has no parent directory", paths.qbit.display()))?;
 
+        let filename = format!("{}.torrent", built.info_hash);
+        let save_path = save_path.to_string_lossy();
         self.qbit
-            .add_torrent(
-                &AddTorrent::new(
-                    &built.data,
-                    &format!("{}.torrent", built.info_hash),
-                    &save_path.to_string_lossy(),
-                )
-                .category(&self.category)
-                .tags(&self.tag)
-                .skip_checking(self.skip_checking),
+            .add(
+                &AddRequest::new(&built.data, &filename, &save_path)
+                    .category(&self.category)
+                    .tags(&self.tag)
+                    .skip_checking(self.skip_checking),
             )
             .await
-            .with_context(|| format!("adding {} to qBittorrent", paths.qbit.display()))?;
+            .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 
         Ok(SeedOutcome::Added {
             info_hash: built.info_hash,
@@ -143,16 +141,16 @@ impl Seeder {
     pub async fn find_existing(&self, target: &Path) -> Result<Option<String>> {
         let torrents = self
             .qbit
-            .torrents_info(None, None)
+            .list(None)
             .await
-            .context("listing existing torrents in qBittorrent")?;
+            .context("listing existing torrents in the torrent client")?;
 
         if let Some(found) = torrents.iter().find(|t| matches_content_path(t, target)) {
             return Ok(Some(found.hash.clone()));
         }
 
         for torrent in torrents.iter().filter(|t| could_contain(t, target)) {
-            let files = match self.qbit.torrent_files(&torrent.hash).await {
+            let files = match self.qbit.files(&torrent.hash).await {
                 Ok(files) => files,
                 Err(err) => {
                     // One unreadable torrent must not stop the search; the worst
@@ -179,7 +177,7 @@ fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// A single-file torrent points `content_path` straight at the file.
-fn matches_content_path(torrent: &TorrentInfo, target: &Path) -> bool {
+fn matches_content_path(torrent: &TorrentSummary, target: &Path) -> bool {
     !torrent.content_path.is_empty() && normalize(&torrent.content_path) == normalize_path(target)
 }
 
@@ -187,7 +185,7 @@ fn matches_content_path(torrent: &TorrentInfo, target: &Path) -> bool {
 ///
 /// Compared component-wise, so `/downloads/tv` does not appear to contain
 /// `/downloads/tv-archive/...` the way a string prefix check would.
-fn could_contain(torrent: &TorrentInfo, target: &Path) -> bool {
+fn could_contain(torrent: &TorrentSummary, target: &Path) -> bool {
     if torrent.save_path.is_empty() {
         return false;
     }
@@ -195,7 +193,7 @@ fn could_contain(torrent: &TorrentInfo, target: &Path) -> bool {
 }
 
 /// Whether any file in the torrent resolves to `target`.
-fn contains_file(save_path: &str, files: &[TorrentFile], target: &Path) -> bool {
+fn contains_file(save_path: &str, files: &[TorrentFileEntry], target: &Path) -> bool {
     let root = normalize(save_path);
     let target = normalize_path(target);
     files.iter().any(|file| root.join(&file.name) == target)
@@ -225,24 +223,23 @@ mod tests {
 
     use super::*;
 
-    fn torrent(hash: &str, save_path: &str, content_path: &str) -> TorrentInfo {
-        // `TorrentInfo` is deserialize-only, so build it through serde.
-        serde_json::from_value(serde_json::json!({
-            "hash": hash,
-            "name": "whatever",
-            "save_path": save_path,
-            "content_path": content_path,
-            "state": "stalledUP",
-            "progress": 1.0,
-            "category": "",
-            "tags": "",
-        }))
-        .unwrap()
+    fn torrent(hash: &str, save_path: &str, content_path: &str) -> TorrentSummary {
+        TorrentSummary {
+            hash: hash.to_owned(),
+            name: "whatever".to_owned(),
+            save_path: save_path.to_owned(),
+            content_path: content_path.to_owned(),
+            category: String::new(),
+            tags: Vec::new(),
+            is_seeding: true,
+        }
     }
 
-    fn file(name: &str) -> TorrentFile {
-        serde_json::from_value(serde_json::json!({ "name": name, "size": 1, "progress": 1.0 }))
-            .unwrap()
+    fn file(name: &str) -> TorrentFileEntry {
+        TorrentFileEntry {
+            name: name.to_owned(),
+            size: 1,
+        }
     }
 
     #[test]

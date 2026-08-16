@@ -48,6 +48,20 @@
   <input id="label" name="label" required maxlength="64" autocomplete="off"
          placeholder="Sam">
   <p class="hint">Just for you — it is how you will recognise them in this list.</p>
+
+  <label for="scope">Can see</label>
+  <select id="scope" name="scope">
+    <option value="all">Everything I share</option>
+    <option value="tv">TV only</option>
+    <option value="movies">Films only</option>
+    <option value="music">Music only</option>
+    <option value="books">Books only</option>
+  </select>
+  <p class="hint">
+    Applies to the feed itself, not just what they are shown — content outside the
+    scope is never listed and never offered.
+  </p>
+
   <button type="submit">Generate a key</button>
 </form>
 
@@ -61,12 +75,28 @@
   {% else %}
   <table>
     <thead>
-      <tr><th>Name</th><th>Added</th><th>Last seen</th><th></th></tr>
+      <tr><th>Name</th><th>Can see</th><th>Added</th><th>Last seen</th><th></th></tr>
     </thead>
     <tbody>
       {% for peer in peers %}
       <tr{% if peer.revoked %} class="revoked"{% endif %}>
         <td>{{ peer.label }}{% if peer.revoked %} <span class="error">(revoked)</span>{% endif %}</td>
+        <td>
+          {% if peer.revoked %}
+          {{ peer.scope_label }}
+          {% else %}
+          <form method="post" action="/peers/{{ peer.id }}/scope" class="inline">
+            <select name="scope" onchange="this.form.submit()" aria-label="What {{ peer.label }} can see">
+              <option value="all"{% if peer.scope == "all" %} selected{% endif %}>Everything</option>
+              <option value="tv"{% if peer.scope == "tv" %} selected{% endif %}>TV only</option>
+              <option value="movies"{% if peer.scope == "movies" %} selected{% endif %}>Films only</option>
+              <option value="music"{% if peer.scope == "music" %} selected{% endif %}>Music only</option>
+              <option value="books"{% if peer.scope == "books" %} selected{% endif %}>Books only</option>
+            </select>
+            <noscript><button type="submit" class="link">Set</button></noscript>
+          </form>
+          {% endif %}
+        </td>
         <td>{{ peer.created }}</td>
         <td>{{ peer.last_seen }}</td>
         <td class="actions">

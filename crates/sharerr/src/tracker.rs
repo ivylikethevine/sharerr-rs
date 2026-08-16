@@ -321,4 +321,99 @@ mod tests {
         assert_eq!(hex(&[0x0a; 20]), "0a".repeat(20));
         assert_eq!(hex(&[0xff; 20]), "ff".repeat(20));
     }
+
+    // ------------------------------------------------- router-level coverage
+
+    use crate::state::fixtures::unconfigured;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get(state: &Arc<crate::state::ServeState>, uri: &str) -> (StatusCode, String) {
+        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        // The announce handler records the address a peer actually reached us from,
+        // which `serve` supplies via `into_make_service_with_connect_info`. Driving
+        // the router directly skips that, and the extractor then fails with a 500
+        // that looks like a handler bug — so the test provides it the way the real
+        // server does.
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [203, 0, 113, 7],
+                51413,
+            ))));
+
+        let response = routes(Arc::clone(state)).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The admission rule, asserted over the assembled router rather than the
+    /// helper. This is what stops sharerr becoming an open tracker that strangers
+    /// can register swarms on, and it is a property of what `routes()` wires up.
+    #[tokio::test]
+    async fn the_tracker_refuses_an_info_hash_it_is_not_sharing() {
+        let (_dir, state) = unconfigured();
+
+        // 20 bytes, percent-encoded the way a real client sends them.
+        let hash = "%00".repeat(20);
+        let (status, body) = get(
+            &state,
+            &format!("/announce?info_hash={hash}&peer_id={hash}&port=6881"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "trackers report refusals in-band");
+        assert!(
+            body.contains("failure reason"),
+            "an unknown hash must be refused, not introduced to peers: {body}"
+        );
+    }
+
+    /// Every route the tracker claims to serve must actually be wired up. A handler
+    /// that exists but was never routed is exactly the class of bug router-level
+    /// tests exist to catch.
+    #[tokio::test]
+    async fn every_tracker_route_is_reachable() {
+        let (_dir, state) = unconfigured();
+        let hash = "%00".repeat(20);
+
+        for uri in [
+            format!("/announce?info_hash={hash}&peer_id={hash}&port=6881"),
+            format!("/announce/sometoken?info_hash={hash}&peer_id={hash}&port=6881"),
+            "/scrape".to_owned(),
+            "/scrape/sometoken".to_owned(),
+        ] {
+            let (status, _) = get(&state, &uri).await;
+            assert_ne!(status, StatusCode::NOT_FOUND, "{uri} is not routed");
+        }
+    }
+
+    /// A `.torrent` sharerr did not make must not be served, whoever asks — the
+    /// same admission rule as the announce endpoint, one layer along.
+    #[tokio::test]
+    async fn an_unknown_torrent_file_is_not_served() {
+        let (_dir, state) = unconfigured();
+
+        let (status, _) = get(&state, "/torrents/deadbeef.torrent").await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "serving an arbitrary name would be a file-read primitive"
+        );
+    }
+
+    /// A path that tries to climb out of the torrent directory must not be honoured.
+    #[tokio::test]
+    async fn a_traversing_torrent_name_is_refused() {
+        let (_dir, state) = unconfigured();
+
+        for name in ["..%2f..%2fetc%2fpasswd", "....//etc/passwd"] {
+            let (status, _) = get(&state, &format!("/torrents/{name}")).await;
+            assert_ne!(status, StatusCode::OK, "{name} was served");
+        }
+    }
 }

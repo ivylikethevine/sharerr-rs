@@ -30,6 +30,7 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     // field has to be listed here — that cost is the price of `deny_unknown_fields`
     // turning a typo into an error instead of a setting that silently does nothing.
     "E2E_MEDIA",
+    "E2E_COMPOSE",
 ];
 
 const fn strip_prefix(var: &str) -> &str {

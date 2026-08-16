@@ -287,6 +287,7 @@ impl Swarms {
         self.inner.read().await.len()
     }
 
+    /// Whether any peer is currently known to any swarm.
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
     }
@@ -302,6 +303,10 @@ impl Swarms {
 /// the one that matters — `peers` as a byte string of packed addresses, not a
 /// UTF-8 string — is precisely the thing a serde derive makes awkward.
 impl AnnounceResponse {
+    /// Render as the bencoded response a BitTorrent client expects.
+    ///
+    /// `compact` selects the packed 6-bytes-per-peer form, which is what modern
+    /// clients ask for.
     pub fn to_bencode(&self, compact: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(128);
         out.push(b'd');

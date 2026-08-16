@@ -20,8 +20,10 @@
 
 mod client;
 mod error;
+mod lidarr;
 mod models;
 mod radarr;
+mod readarr;
 mod sonarr;
 
 use std::path::PathBuf;
@@ -78,6 +80,9 @@ impl Discovered {
             info_hash: None,
             state: ShareState::Pending,
             last_error: None,
+            // Assigned by the store on insert; a discovered item has not been
+            // recorded yet, so it has no publication date to report.
+            created_at: None,
         }
     }
 }

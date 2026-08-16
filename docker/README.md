@@ -194,6 +194,85 @@ The tracker port is the one most easily forgotten in a real deployment: friends
 announce to it directly, so it has to be reachable from outside the container, not
 just on the docker network.
 
+## The Transmission stack
+
+```bash
+./run_docker_tests.sh --transmission
+```
+
+The same services and the same assertions, seeding through Transmission instead of
+qBittorrent. It exists because the two clients differ in ways that no amount of
+mocking establishes:
+
+| | qBittorrent | Transmission |
+|---|---|---|
+| Embedded tracker | yes, and it is the default announce backend | **none** — `tracker.backend` must be `builtin` |
+| Categories | a category plus tags | one flat list of labels; both collapse into it |
+| Skip hash check | supported | not supported; it always verifies |
+| Credentials | a temporary password printed to the log on first start | given up front by compose |
+
+The first row is the one that matters. A Transmission setup left on the default
+tracker backend produces torrents that look perfect and that nobody can announce
+to — so `doctor` fails with a sentence naming the fix, and the run asserts that the
+built torrents carry an announce URL from sharerr's own tracker.
+
+Ports are offset again (38989, 37878, 39091, 38477) so all three stacks can run at
+once.
+
+## The VPN stack
+
+```bash
+./run_docker_tests.sh --vpn
+```
+
+The same services and the same assertions, with qBittorrent inside a VPN
+container's network namespace — which is close to standard practice in this
+ecosystem and which nothing exercised until now. `docker/compose.vpn.yml` has the
+full reasoning; the short version is that this is a genuinely different topology,
+not a variation:
+
+| | Plain stack | VPN stack |
+|---|---|---|
+| qBittorrent's address | `http://qbittorrent:8080` | `http://gluetun:8080` — it has no network, and no DNS name, of its own |
+| Its published ports | on `qbittorrent` | on `gluetun`; declaring them on qBittorrent is a compose error |
+| Announce address | the machine | the tunnel's exit |
+
+The first row is the one that bites. `qbittorrent:8080` does not merely refuse the
+connection — **the name does not resolve at all** — and the run asserts exactly that
+rather than only asserting the right name works.
+
+### There is a WireGuard server in the stack
+
+So the suite needs no VPN subscription, no credentials, and no egress. `vpn`
+terminates a real tunnel that gluetun really connects to, with both ends inside the
+stack, so the namespace, routing, and firewall behaviour are real. The tunnel
+simply does not go anywhere. Keys live in `docker/wireguard/wg0.conf` and are
+committed on purpose — they are as secret as the `SHARERR_MASTER_KEY` literal in
+`compose.test.yml`, which is to say not at all.
+
+One non-obvious piece: gluetun health-checks its tunnel by reaching something on
+the far side, and its default target is on the internet. A listener is parked
+inside the tunnel for it to find (`PostUp` in `wg0.conf`). Without it gluetun
+decides the tunnel is dead and restarts it every twenty seconds.
+
+### Ports
+
+Offset from the plain stack so both can run at once.
+
+| Service | Host port |
+|---|---|
+| Sonarr | 28989 |
+| Radarr | 27878 |
+| qBittorrent WebUI | 28080 (published by gluetun) |
+| qBittorrent embedded tracker | 29000 (published by gluetun) |
+| sharerr | 28477 |
+
+Tear it down with the same two halves as the plain stack, against the other file:
+
+```bash
+docker compose -f docker/compose.vpn.yml down -v && rm -rf docker/state-vpn
+```
+
 ## Tearing down
 
 ```bash

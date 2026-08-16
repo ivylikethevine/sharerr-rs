@@ -65,6 +65,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/", get(status_page))
         .route("/diagnostics", get(diagnostics::page))
         .route("/peers", get(peers::page).post(peers::add))
+        .route("/peers/{id}/scope", post(peers::set_scope))
         .route("/peers/{id}/revoke", post(peers::revoke))
         .route("/peers/{id}/delete", post(peers::delete))
         .route("/settings", get(settings::page))
@@ -215,6 +216,7 @@ mod tests {
             "/settings/test/sonarr",
             "/settings/account/password",
             "/peers",
+            "/peers/1/scope",
             "/peers/1/revoke",
             "/peers/1/delete",
         ];

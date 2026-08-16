@@ -19,7 +19,7 @@
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
 use secrecy::SecretString;
-use sharerr_core::config::secret_keys;
+use sharerr_core::config::{TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
@@ -36,6 +36,9 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
     let outcome = match service.as_str() {
         "sonarr" => arr_badge(MediaSource::Sonarr, &state, &config).await,
         "radarr" => arr_badge(MediaSource::Radarr, &state, &config).await,
+        "lidarr" => arr_badge(MediaSource::Lidarr, &state, &config).await,
+        "readarr" => arr_badge(MediaSource::Readarr, &state, &config).await,
+        "whisparr" => arr_badge(MediaSource::Whisparr, &state, &config).await,
         "qbittorrent" => qbit_badge(&state, &config).await,
         _ => Outcome::Bad("Unknown service.".to_owned()),
     };
@@ -84,10 +87,7 @@ async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretStri
 }
 
 async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
-    let (service, key) = match kind {
-        MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
-        MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
-    };
+    let (service, key) = (config.service(kind), secret_keys::api_key_for(kind));
 
     let api_key = secret(state, key).await;
     let outcome = check_arr(
@@ -131,13 +131,24 @@ async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outc
 }
 
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    let password = secret(state, secret_keys::QBITTORRENT_PASSWORD).await;
-    let outcome = check_qbit(
-        &config.qbittorrent.url,
-        &config.qbittorrent.username,
-        password,
-    )
-    .await;
+    // Which client, and therefore which URL and which vault key, is a configuration
+    // choice — the button cannot infer it from the URL, because two clients can
+    // live on the same host.
+    let (url, username, key) = match config.torrent_backend {
+        TorrentBackend::Qbittorrent => (
+            &config.qbittorrent.url,
+            config.qbittorrent.username.as_str(),
+            secret_keys::QBITTORRENT_PASSWORD,
+        ),
+        TorrentBackend::Transmission => (
+            &config.transmission.url,
+            config.transmission.username.as_str(),
+            secret_keys::TRANSMISSION_PASSWORD,
+        ),
+    };
+
+    let password = secret(state, key).await;
+    let outcome = check_qbit(config.torrent_backend, url, username, password).await;
 
     match outcome {
         QbitOutcome::NoCredential => Outcome::Bad("No password stored. Save one first.".to_owned()),
@@ -149,8 +160,8 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
             Outcome::Bad("Reached it, but the username or password was rejected.".to_owned())
         }
         QbitOutcome::Failed(reason) => Outcome::Bad(format!("Signed in, but: {reason}")),
-        QbitOutcome::Ready { version, .. } => {
-            Outcome::Good(format!("Signed in to qBittorrent {version}."))
+        QbitOutcome::Ready { version, kind, .. } => {
+            Outcome::Good(format!("Signed in to {kind} {version}."))
         }
     }
 }

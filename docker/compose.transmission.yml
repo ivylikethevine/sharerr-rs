@@ -1,0 +1,95 @@
+# The same stack, seeding through Transmission instead of qBittorrent.
+#
+#   ./run_docker_tests.sh --transmission
+#
+# Transmission is the second torrent client sharerr supports, and it differs from
+# qBittorrent in two ways that matter far more than the shape of the API:
+#
+#   * **No embedded tracker.** qBittorrent's is the default announce backend and
+#     there is nothing equivalent here, so `tracker.backend` must be `builtin` and
+#     sharerr serves announces itself. That is not a workaround — it is the reason
+#     the builtin tracker was written. `doctor` fails with that sentence if the
+#     configuration says otherwise, and this stack is what proves it.
+#   * **No categories.** Transmission has one flat list of labels per torrent, so
+#     sharerr's category and tag both collapse into a label.
+#
+# Everything else — the *arr apps, the fixtures, the deliberately-disagreeing
+# mounts — is identical to `compose.test.yml`, because the whole point is that
+# changing the torrent client changes nothing about what sharerr is supposed to do.
+#
+# Ports are offset again so this can run alongside both other stacks.
+
+name: sharerr-tm-test
+
+x-puid: &puid "${SHARERR_TEST_UID:-1000}"
+x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
+
+services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.15
+    container_name: sharerr-tm-test-sonarr
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-tm/sonarr:/config
+      - ../tests/fixtures/media/tv:/tv:ro
+    ports:
+      - "127.0.0.1:38989:8989"
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.14.0
+    container_name: sharerr-tm-test-radarr
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-tm/radarr:/config
+      - ../tests/fixtures/media/movies:/movies:ro
+    ports:
+      - "127.0.0.1:37878:7878"
+
+  transmission:
+    # Pinned like the rest. The RPC is stable, but label handling is not something
+    # to discover from a silent minor bump.
+    image: lscr.io/linuxserver/transmission:4.0.5
+    container_name: sharerr-tm-test-transmission
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+      # Unlike qBittorrent, Transmission takes its credentials up front rather than
+      # printing a temporary password to the log — so the test script does not have
+      # to scrape one.
+      USER: admin
+      PASS: transmission-test-password
+    volumes:
+      - transmission-config:/config
+      # Transmission's view of the same files, at a third path — the same
+      # deliberately-disagreeing mounts as the qBittorrent stack, because path
+      # mapping is exactly as easy to get wrong here.
+      - ../tests/fixtures/media:/downloads:ro
+    ports:
+      - "127.0.0.1:39091:9091"
+
+  sharerr:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sharerr-tm-test-sharerr
+    depends_on: [sonarr, radarr, transmission]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      - ./config-tm:/config
+      - sharerr-data:/data
+      - ../tests/fixtures/media:/media:ro
+    ports:
+      - "127.0.0.1:38477:8477"
+
+volumes:
+  transmission-config:
+  sharerr-data:

@@ -2,7 +2,8 @@
 
 Share your media library with friends, over the tools you already run.
 
-sharerr connects to Sonarr and Radarr, finds everything tagged `sharerr`, builds a
+sharerr connects to your *arr apps — Sonarr, Radarr, Lidarr, Readarr, Whisparr —
+finds everything tagged `sharerr`, builds a
 torrent for each file **where it already sits**, seeds it through your qBittorrent,
 and publishes the lot as a Torznab feed. Your friend adds that feed to their
 Prowlarr; their Sonarr and Radarr then find your releases with the TVDB/TMDb/IMDb
@@ -20,16 +21,17 @@ design is built around.
 
 | | |
 |---|---|
-| Sonarr / Radarr discovery by tag | ✅ |
+| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr** | ✅ |
 | Torrent construction, files never moved | ✅ |
-| Seeding through qBittorrent | ✅ |
+| Seeding through qBittorrent **or Transmission** | ✅ |
 | qBittorrent embedded tracker, or sharerr's own | ✅ |
 | Torznab feed for Prowlarr | ✅ |
-| Jackett-shaped URLs, for clients configured that way | ✅ |
+| Jackett compatibility: URLs, indexer list, JSON results | ✅ |
 | Web UI: setup, settings, connection tests | ✅ |
 | Path-mapping diagnostics in the browser | ✅ |
 | Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
-| Lidarr / Readarr, non-qBittorrent clients | ❌ |
+| Per-friend scoping: this friend sees TV, that one films | ✅ |
+| Jellyfin / Plex, or a plain tagged directory | ❌ |
 
 ## Quickstart
 
@@ -79,15 +81,32 @@ Because each friend has their own key, the Friends page can tell you when each o
 them last used the feed — "never" means they have the key but have not finished
 setting up — and revoking one person leaves everybody else working.
 
+You can also scope what each friend sees: everything, or only TV, films, music or
+books. That
+applies to the feed itself, not just the display — content outside a friend's scope
+is never listed and never offered, and they cannot search their way around it.
+
 > A single shared `torznab.api_key` still works, for setups made before per-friend
 > keys existed. While one is set, revoking a friend does **not** cut them off,
 > because the shared key still opens the feed; the Friends page says so. Clear it
 > under Settings → Indexer once everyone has their own.
 
 If your friend has a client set up for **Jackett** rather than Prowlarr, it works
-unmodified: sharerr answers Jackett's URL shape
-(`/api/v2.0/indexers/<anything>/results/torznab/api`) with the same feed. The
-indexer id in that path is ignored — sharerr is the only thing it serves.
+unmodified. sharerr answers Jackett's URL shape
+(`/api/v2.0/indexers/<anything>/results/torznab/api`) with the same feed, plus its
+read-only admin endpoints — the indexer list, the server config, and the JSON
+results some clients prefer to Torznab. The indexer id in the path is ignored, so
+whatever id was in the old Jackett config keeps working.
+
+Jackett's *write* endpoints — adding, configuring or deleting indexers — are not
+implemented, because sharerr has exactly one indexer and it is not configurable
+over HTTP. A client that calls one gets a `501` and sharerr logs the exact method
+and path, so a gap that actually matters says so instead of failing silently.
+
+**Tag something before your friend adds the indexer.** Sonarr and Radarr treat an
+empty feed as a failed test — "no results in the configured categories" is an
+error, not a warning — so an indexer added before anything is shared will not
+validate, even though nothing is wrong.
 
 The feed lists only what is actually seeding, and the `.torrent` files it links to
 are served from the same instance. Both the feed and the downloads require the API
@@ -100,7 +119,10 @@ make port 8477 reachable also makes the tracker and the feed reachable.
 
 ### Which tracker
 
-**qBittorrent's embedded tracker** is the default and needs nothing from you.
+**qBittorrent's embedded tracker** is the default and needs nothing from you. It is
+only available when qBittorrent is the client — Transmission has none, so the
+builtin tracker below is required there, and `doctor` says so rather than leaving
+you with torrents nobody can announce to.
 
 **sharerr's builtin tracker** is the alternative, selected under Settings →
 Tracker. It serves `/announce` and `/scrape` from the sharerr process itself, and
@@ -113,6 +135,62 @@ torrents already published.
 One caveat with the builtin tracker: the announce endpoint is part of
 `sharerr serve`, so a one-shot `sharerr sync` produces correct torrents whose
 announces fail until `serve` is running.
+
+## Sharing music, books, and more
+
+Each *arr app is its own optional section, and any combination works:
+
+```toml
+[lidarr]
+url = "http://localhost:8686"
+
+[readarr]
+url = "http://localhost:8787"
+
+[whisparr]
+url = "http://localhost:6969"
+```
+
+Then store each key: `printf %s "$KEY" | sharerr vault set lidarr.api_key`.
+
+Notes that are easy to trip over:
+
+- **Tags live on the artist and the author**, not the album or the book — so
+  tagging one shares their whole discography or catalogue, the same way tagging a
+  Sonarr series shares every episode.
+- **Lidarr and Readarr are on API v1**, Sonarr/Radarr/Whisparr on v3. sharerr picks
+  the right one per app; you only supply the base URL.
+- **Whisparr content is categorised as XXX**, not TV, and a friend scoped to "TV
+  only" does **not** receive it. Only an unscoped friend does, which has to be
+  chosen deliberately.
+
+## Using Transmission instead of qBittorrent
+
+```toml
+torrent_backend = "transmission"
+
+[transmission]
+url = "http://localhost:9091"
+username = "transmission"
+# Transmission has no categories, only a flat list of labels per torrent, so this
+# one value stands in for qBittorrent's category and tag.
+label = "sharerr"
+
+[tracker]
+# Required: Transmission has no embedded tracker.
+backend = "builtin"
+```
+
+Then store the password: `printf %s "$PW" | sharerr vault set transmission.password`.
+
+Two differences worth knowing, both enforced rather than documented-and-hoped:
+
+- **No embedded tracker.** `tracker.backend` must be `builtin`, so sharerr serves
+  announces itself. `doctor` fails with that sentence if it is not.
+- **No skip-checking.** qBittorrent can be told to trust the data on disk;
+  Transmission cannot, so it always verifies. That is slower on a large library the
+  first time and is not something sharerr can fake safely — claiming completeness
+  without verifying would mean seeding whatever happens to be at the path.
 
 ## The CLI
 

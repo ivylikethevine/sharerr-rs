@@ -22,11 +22,16 @@
 //! only `doctor` currently does it — folding it in would mean this module growing a
 //! second shape for one caller.
 
+use std::sync::Arc;
+
 use secrecy::SecretString;
 use sharerr_arr::{ArrClient, Discovered};
+use sharerr_client::{ClientKind, TorrentClient};
+use sharerr_core::config::TorrentBackend;
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_core::{Config, MediaSource};
 use sharerr_qbit::QbitClient;
+use sharerr_transmission::TransmissionClient;
 use url::Url;
 
 /// Render an error together with its cause chain.
@@ -236,7 +241,7 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
     report
 }
 
-/// What the qBittorrent instance turned out to be.
+/// What the torrent client turned out to be.
 #[derive(Debug)]
 pub enum QbitOutcome {
     NoCredential,
@@ -250,16 +255,23 @@ pub enum QbitOutcome {
     /// authenticate a second one.
     Ready {
         version: String,
-        client: Box<QbitClient>,
+        /// Which client answered, so a message can name it.
+        kind: ClientKind,
+        client: Arc<dyn TorrentClient>,
     },
 }
 
-/// Sign in to qBittorrent and read its version.
+/// Sign in to the configured torrent client and read its version.
 ///
 /// The login is explicit rather than left to the first real call, because "reached
 /// it but the password is wrong" and "could not reach it" have different fixes and
 /// an implicit login reports them identically.
+///
+/// Which client this talks to is a configuration choice, and the caller passes the
+/// already-resolved backend rather than guessing from the URL — two clients can
+/// perfectly well live on the same host.
 pub async fn check_qbit(
+    backend: TorrentBackend,
     url: &Url,
     username: &str,
     password: Result<Option<SecretString>, String>,
@@ -270,9 +282,15 @@ pub async fn check_qbit(
         Err(reason) => return QbitOutcome::CredentialUnreadable(reason),
     };
 
-    let client = match QbitClient::new(url, username, password) {
-        Ok(client) => client,
-        Err(err) => return QbitOutcome::BadUrl(chain(&err)),
+    let client: Arc<dyn TorrentClient> = match backend {
+        TorrentBackend::Qbittorrent => match QbitClient::new(url, username, password) {
+            Ok(client) => Arc::new(client),
+            Err(err) => return QbitOutcome::BadUrl(chain(&err)),
+        },
+        TorrentBackend::Transmission => match TransmissionClient::new(url, username, password) {
+            Ok(client) => Arc::new(client),
+            Err(err) => return QbitOutcome::BadUrl(chain(&err)),
+        },
     };
 
     if let Err(err) = client.login().await {
@@ -288,7 +306,8 @@ pub async fn check_qbit(
     match client.version().await {
         Ok(version) => QbitOutcome::Ready {
             version,
-            client: Box::new(client),
+            kind: client.kind(),
+            client,
         },
         Err(err) => QbitOutcome::Failed(chain(&err)),
     }

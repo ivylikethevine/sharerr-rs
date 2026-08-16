@@ -28,6 +28,7 @@ pub struct TorrentInfo {
 }
 
 impl TorrentInfo {
+    /// The torrent's tags, split out of qBittorrent's comma-joined string.
     pub fn tag_list(&self) -> Vec<&str> {
         self.tags
             .split(',')
@@ -109,21 +110,28 @@ impl<'a> AddTorrent<'a> {
         }
     }
 
+    /// Set the category qBittorrent files this torrent under.
     pub fn category(mut self, category: &'a str) -> Self {
         self.category = Some(category);
         self
     }
 
+    /// Set the tags applied alongside the category, comma-separated.
     pub fn tags(mut self, tags: &'a str) -> Self {
         self.tags = Some(tags);
         self
     }
 
+    /// Skip the hash check on add.
+    ///
+    /// Faster on a large library, but qBittorrent will then seed whatever is at the
+    /// save path — including the wrong file, if a path mapping is wrong.
     pub fn skip_checking(mut self, skip: bool) -> Self {
         self.skip_checking = skip;
         self
     }
 
+    /// Add the torrent without starting it.
     pub fn stopped(mut self, stopped: bool) -> Self {
         self.stopped = stopped;
         self

@@ -292,7 +292,9 @@ async fn harness(series_json: Value) -> Harness {
     )
     .unwrap();
 
-    let qbit = Arc::new(
+    // Typed as the trait object, because that is what the syncer holds now — the
+    // concrete client is one implementation of it.
+    let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(
         QbitClient::new(
             &Url::parse(&qbit_server.uri()).unwrap(),
             "admin",
@@ -327,8 +329,7 @@ async fn harness(series_json: Value) -> Harness {
     let syncer = Syncer::new(
         config,
         Store::open_in_memory().await.unwrap(),
-        Some(sonarr),
-        None,
+        vec![sonarr],
         Arc::clone(&qbit),
         Arc::new(StubTracker),
         seeder,
@@ -760,7 +761,7 @@ async fn with_broken_radarr(h: &mut Harness) -> MockServer {
         .mount(&radarr)
         .await;
 
-    h.syncer.radarr = Some(
+    h.syncer.arrs.push(
         sharerr_arr::ArrClient::new(
             MediaSource::Radarr,
             &Url::parse(&radarr.uri()).unwrap(),
@@ -819,6 +820,7 @@ async fn a_broken_arr_app_never_causes_its_shares_to_be_withdrawn() {
         info_hash: Some("radarrhash0000000000000000000000000000aa".to_owned()),
         state: ShareState::Seeding,
         last_error: None,
+        created_at: None,
     };
     h.syncer.store().upsert(&movie).await.unwrap();
 
@@ -864,14 +866,15 @@ async fn a_pass_with_no_reachable_arr_app_changes_nothing() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&broken)
         .await;
-    h.syncer.sonarr = Some(
+    // Replace the only *arr client with a broken one.
+    h.syncer.arrs = vec![
         sharerr_arr::ArrClient::new(
             MediaSource::Sonarr,
             &Url::parse(&broken.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    );
+    ];
 
     let err = h.syncer.run(false).await.unwrap_err();
     assert!(err.to_string().contains("no *arr app"), "got {err:#}");
@@ -897,14 +900,15 @@ async fn a_failed_pass_records_its_reason() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&broken)
         .await;
-    h.syncer.sonarr = Some(
+    // Replace the only *arr client with a broken one.
+    h.syncer.arrs = vec![
         sharerr_arr::ArrClient::new(
             MediaSource::Sonarr,
             &Url::parse(&broken.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    );
+    ];
 
     h.syncer.run(false).await.unwrap_err();
 

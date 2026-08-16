@@ -11,11 +11,87 @@
 
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
+use sharerr_core::MediaSource;
 use sqlx::Row;
 
 use crate::db::{Store, StoreError, now_epoch};
 
 type Result<T> = std::result::Result<T, StoreError>;
+
+/// What a friend is allowed to see.
+///
+/// A closed set rather than free-form rules: this is the choice an operator
+/// actually makes, and three options cover it. Anything finer — per-series, per-tag
+/// — would want a join table and is a different feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PeerScope {
+    /// Everything this instance shares.
+    #[default]
+    All,
+    /// Only what came from Sonarr.
+    Tv,
+    /// Only what came from Radarr.
+    Movies,
+    /// Only what came from Lidarr.
+    Music,
+    /// Only what came from Readarr.
+    Books,
+}
+
+impl PeerScope {
+    /// The value stored in the `scope` column and echoed in the UI's `<select>`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Tv => "tv",
+            Self::Movies => "movies",
+            Self::Music => "music",
+            Self::Books => "books",
+        }
+    }
+
+    /// Parse a stored or submitted value.
+    ///
+    /// Anything unrecognised is [`Self::All`], deliberately. The alternative — an
+    /// error — would mean a row written by a newer version, or a hand-edited
+    /// database, silently cutting a friend off with no way to tell why. Widening on
+    /// confusion is the safer failure here because the feed still requires a valid
+    /// key to reach at all.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "tv" => Self::Tv,
+            "movies" => Self::Movies,
+            "music" => Self::Music,
+            "books" => Self::Books,
+            _ => Self::All,
+        }
+    }
+
+    /// Whether content from `source` is visible under this scope.
+    pub fn allows(self, source: MediaSource) -> bool {
+        match self {
+            Self::All => true,
+            // Whisparr's files are episodes structurally, but sharing adult content
+            // with someone scoped to "TV" would be a surprise of the worst kind, so
+            // it is deliberately not included.
+            Self::Tv => source == MediaSource::Sonarr,
+            Self::Movies => source == MediaSource::Radarr,
+            Self::Music => source == MediaSource::Lidarr,
+            Self::Books => source == MediaSource::Readarr,
+        }
+    }
+
+    /// How to describe it to the operator.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "everything",
+            Self::Tv => "TV only",
+            Self::Movies => "films only",
+            Self::Music => "music only",
+            Self::Books => "books only",
+        }
+    }
+}
 
 /// One friend, as the UI lists them. Never carries the key — it cannot, and that
 /// is the point.
@@ -28,9 +104,13 @@ pub struct Peer {
     pub last_seen_at: Option<i64>,
     /// When the key was revoked, or `None` while it still works.
     pub revoked_at: Option<i64>,
+    /// What this friend is allowed to see.
+    pub scope: PeerScope,
 }
 
 impl Peer {
+    /// Whether this friend's key has been withdrawn. Revoked rows stay in the list
+    /// so the operator can see it happened.
     pub fn is_revoked(&self) -> bool {
         self.revoked_at.is_some()
     }
@@ -69,6 +149,7 @@ fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
         created_at: row.try_get("created_at")?,
         last_seen_at: row.try_get("last_seen_at")?,
         revoked_at: row.try_get("revoked_at")?,
+        scope: PeerScope::parse(&row.try_get::<String, _>("scope")?),
     })
 }
 
@@ -78,19 +159,25 @@ impl Store {
     /// The key is consumed as a `SecretString` and only its hash is kept, so the
     /// caller is the last thing that can show it to anybody. That is deliberate:
     /// the UI reveals it once on the response that created it and never again.
-    pub async fn create_peer(&self, label: &str, key: &SecretString) -> Result<Peer> {
+    pub async fn create_peer(
+        &self,
+        label: &str,
+        key: &SecretString,
+        scope: PeerScope,
+    ) -> Result<Peer> {
         let label = validate_label(label)?;
         let now = now_epoch();
 
         // The UNIQUE constraint decides this, not a prior SELECT — two submissions
         // racing would both pass a check-then-insert.
         let row = sqlx::query(
-            "INSERT INTO peers (label, key_hash, created_at) VALUES (?1, ?2, ?3) \
-             RETURNING id, label, created_at, last_seen_at, revoked_at",
+            "INSERT INTO peers (label, key_hash, created_at, scope) VALUES (?1, ?2, ?3, ?4) \
+             RETURNING id, label, created_at, last_seen_at, revoked_at, scope",
         )
         .bind(&label)
         .bind(hash_key(key))
         .bind(now)
+        .bind(scope.as_str())
         .fetch_one(self.pool())
         .await
         .map_err(|err| match &err {
@@ -110,7 +197,7 @@ impl Store {
     /// like a bug.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
         let rows = sqlx::query(
-            "SELECT id, label, created_at, last_seen_at, revoked_at FROM peers \
+            "SELECT id, label, created_at, last_seen_at, revoked_at, scope FROM peers \
              ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(self.pool())
@@ -126,7 +213,7 @@ impl Store {
     /// the operator's benefit, not to keep letting its key in.
     pub async fn peer_by_key(&self, key: &SecretString) -> Result<Option<Peer>> {
         let row = sqlx::query(
-            "SELECT id, label, created_at, last_seen_at, revoked_at FROM peers \
+            "SELECT id, label, created_at, last_seen_at, revoked_at, scope FROM peers \
              WHERE key_hash = ?1 AND revoked_at IS NULL",
         )
         .bind(hash_key(key))
@@ -165,6 +252,17 @@ impl Store {
         Ok(affected > 0)
     }
 
+    /// Change what a friend is allowed to see. Returns whether anything changed.
+    pub async fn set_peer_scope(&self, id: i64, scope: PeerScope) -> Result<bool> {
+        let affected = sqlx::query("UPDATE peers SET scope = ?1 WHERE id = ?2")
+            .bind(scope.as_str())
+            .bind(id)
+            .execute(self.pool())
+            .await?
+            .rows_affected();
+        Ok(affected > 0)
+    }
+
     /// Remove a peer entirely, freeing its label for reuse.
     pub async fn delete_peer(&self, id: i64) -> Result<bool> {
         let affected = sqlx::query("DELETE FROM peers WHERE id = ?1")
@@ -196,7 +294,7 @@ mod tests {
     async fn a_peer_round_trips_and_is_found_by_its_key() {
         let store = store().await;
         let created = store
-            .create_peer("Sam", &key("peer-key-one"))
+            .create_peer("Sam", &key("peer-key-one"), PeerScope::All)
             .await
             .unwrap();
 
@@ -216,7 +314,7 @@ mod tests {
     async fn a_key_nobody_was_issued_matches_nothing() {
         let store = store().await;
         store
-            .create_peer("Sam", &key("peer-key-one"))
+            .create_peer("Sam", &key("peer-key-one"), PeerScope::All)
             .await
             .unwrap();
 
@@ -228,8 +326,14 @@ mod tests {
     #[tokio::test]
     async fn revoking_one_peer_leaves_the_others_working() {
         let store = store().await;
-        let sam = store.create_peer("Sam", &key("sam-key")).await.unwrap();
-        store.create_peer("Alex", &key("alex-key")).await.unwrap();
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store
+            .create_peer("Alex", &key("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
 
         assert!(store.revoke_peer(sam.id).await.unwrap());
 
@@ -247,7 +351,10 @@ mod tests {
     #[tokio::test]
     async fn a_revoked_peer_is_still_listed() {
         let store = store().await;
-        let sam = store.create_peer("Sam", &key("sam-key")).await.unwrap();
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
         store.revoke_peer(sam.id).await.unwrap();
 
         let listed = store.list_peers().await.unwrap();
@@ -259,7 +366,10 @@ mod tests {
     #[tokio::test]
     async fn revoking_is_idempotent() {
         let store = store().await;
-        let sam = store.create_peer("Sam", &key("sam-key")).await.unwrap();
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
 
         assert!(store.revoke_peer(sam.id).await.unwrap());
         assert!(
@@ -271,7 +381,10 @@ mod tests {
     #[tokio::test]
     async fn last_seen_starts_empty_and_is_recorded_on_demand() {
         let store = store().await;
-        let sam = store.create_peer("Sam", &key("sam-key")).await.unwrap();
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
         assert_eq!(sam.last_seen_at, None);
 
         store.touch_peer(sam.id).await.unwrap();
@@ -286,29 +399,64 @@ mod tests {
     #[tokio::test]
     async fn two_peers_cannot_share_a_label() {
         let store = store().await;
-        store.create_peer("Sam", &key("one")).await.unwrap();
+        store
+            .create_peer("Sam", &key("one"), PeerScope::All)
+            .await
+            .unwrap();
 
-        let err = store.create_peer("Sam", &key("two")).await;
+        let err = store.create_peer("Sam", &key("two"), PeerScope::All).await;
         assert!(matches!(err, Err(StoreError::UserExists { .. })), "{err:?}");
+    }
+
+    /// Whisparr's files are episodes structurally, so a naive "is this an episode"
+    /// scope check would hand adult content to a friend who asked for TV.
+    #[test]
+    fn tv_scope_does_not_include_whisparr() {
+        assert!(PeerScope::Tv.allows(MediaSource::Sonarr));
+        assert!(
+            !PeerScope::Tv.allows(MediaSource::Whisparr),
+            "a friend scoped to TV must not receive adult content"
+        );
+        // Only the unscoped setting reaches it, which has to be chosen explicitly.
+        assert!(PeerScope::All.allows(MediaSource::Whisparr));
+    }
+
+    #[test]
+    fn every_scope_round_trips_through_its_stored_value() {
+        for scope in [
+            PeerScope::All,
+            PeerScope::Tv,
+            PeerScope::Movies,
+            PeerScope::Music,
+            PeerScope::Books,
+        ] {
+            assert_eq!(PeerScope::parse(scope.as_str()), scope);
+        }
     }
 
     #[tokio::test]
     async fn a_blank_label_is_refused() {
         let store = store().await;
-        let err = store.create_peer("   ", &key("one")).await;
+        let err = store.create_peer("   ", &key("one"), PeerScope::All).await;
         assert!(matches!(err, Err(StoreError::InvalidUser(_))), "{err:?}");
     }
 
     #[tokio::test]
     async fn deleting_a_peer_frees_its_label() {
         let store = store().await;
-        let sam = store.create_peer("Sam", &key("one")).await.unwrap();
+        let sam = store
+            .create_peer("Sam", &key("one"), PeerScope::All)
+            .await
+            .unwrap();
 
         assert!(store.delete_peer(sam.id).await.unwrap());
         assert!(store.list_peers().await.unwrap().is_empty());
         // The label is reusable again, which is what distinguishes delete from
         // revoke.
-        store.create_peer("Sam", &key("two")).await.unwrap();
+        store
+            .create_peer("Sam", &key("two"), PeerScope::All)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -323,7 +471,7 @@ mod tests {
     async fn the_key_itself_is_never_stored() {
         let store = store().await;
         store
-            .create_peer("Sam", &key("SUPERSECRETPEERKEY"))
+            .create_peer("Sam", &key("SUPERSECRETPEERKEY"), PeerScope::All)
             .await
             .unwrap();
 

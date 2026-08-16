@@ -33,6 +33,10 @@ const MAX_ERROR_BODY: usize = 400;
 /// `multipart::Form` cannot be cloned, and a retry needs a fresh one.
 pub(crate) type BuildRequest<'a> = &'a (dyn Fn(RequestBuilder) -> RequestBuilder + Send + Sync);
 
+/// A signed-in qBittorrent WebUI client.
+///
+/// Holds the session cookie, so [`Self::login`] is called once and every later
+/// call reuses it.
 pub struct QbitClient {
     /// Always ends in `/` so `Url::join` appends rather than replaces.
     base: Url,
@@ -100,6 +104,7 @@ impl QbitClient {
         })
     }
 
+    /// The instance this client talks to, for error messages that name it.
     pub fn base_url(&self) -> &Url {
         &self.base
     }

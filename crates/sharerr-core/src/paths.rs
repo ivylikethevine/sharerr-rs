@@ -37,6 +37,8 @@ pub struct ResolvedPaths {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Translates one file path between the *arr view, sharerr's view, and
+/// qBittorrent's view of the same library.
 pub struct PathResolver {
     /// Sorted longest-prefix-first so nested mounts resolve to the most specific rule.
     maps: Vec<PathMapping>,

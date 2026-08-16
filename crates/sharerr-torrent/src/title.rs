@@ -119,6 +119,26 @@ pub fn synthesize(spec: &MediaSpec) -> String {
             Some(year) => format!("{}.{year}.WEB-DL.x264-{GROUP}", dotted(title)),
             None => format!("{}.WEB-DL.x264-{GROUP}", dotted(title)),
         },
+        // Music convention is `Artist-Album-FORMAT-GROUP`, hyphen-separated rather
+        // than dotted, and with an audio format instead of a video codec. A music
+        // release named like a TV episode is rejected by the profiles that matter.
+        MediaSpec::Track {
+            artist,
+            album,
+            track,
+        } => match track {
+            Some(track) => format!(
+                "{}-{}-{track:02}-FLAC-{GROUP}",
+                dotted(artist),
+                dotted(album)
+            ),
+            None => format!("{}-{}-FLAC-{GROUP}", dotted(artist), dotted(album)),
+        },
+        // Books have no scene convention worth imitating; author and title are what
+        // a reader and a parser both look for.
+        MediaSpec::Book { author, title } => {
+            format!("{}-{}-EPUB-{GROUP}", dotted(author), dotted(title))
+        }
     }
 }
 

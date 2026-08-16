@@ -563,3 +563,218 @@ async fn discovered_items_promote_to_storable_items() {
     assert!(item.id.is_none());
     assert!(item.info_hash.is_none());
 }
+
+// --------------------------------------------------------------- music & books
+
+/// Lidarr and Readarr are on API **v1**, not v3. A client that assumed one prefix
+/// for every *arr app 404s here in a way that looks like a wrong URL.
+#[tokio::test]
+async fn lidarr_is_reached_on_api_v1() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/tag"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": TAG_ID, "label": "sharerr" }
+        ])))
+        .mount(&server)
+        .await;
+
+    let client = client(MediaSource::Lidarr, &server);
+    assert_eq!(client.tag_id("sharerr").await.unwrap(), TAG_ID);
+}
+
+async fn mount_lidarr(server: &MockServer) {
+    mount_json(
+        server,
+        "/api/v1/tag",
+        json!([{ "id": TAG_ID, "label": "sharerr" }]),
+    )
+    .await;
+    mount_json(
+        server,
+        "/api/v1/artist",
+        json!([{
+            "id": 11,
+            "artistName": "Lanternwick Ensemble",
+            "tags": [TAG_ID],
+            "foreignArtistId": "artist-mbid"
+        }]),
+    )
+    .await;
+    mount_json(
+        server,
+        "/api/v1/album",
+        json!([{ "id": 21, "title": "Hollow Songs", "foreignAlbumId": "album-mbid" }]),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn lidarr_discovers_a_tagged_artists_files() {
+    let server = MockServer::start().await;
+    mount_lidarr(&server).await;
+    mount_json(
+        &server,
+        "/api/v1/trackfile",
+        json!([{
+            "id": 31, "albumId": 21,
+            "path": "/music/Lanternwick Ensemble/Hollow Songs/01.flac",
+            "size": 41_943_040_u64
+        }]),
+    )
+    .await;
+    // One track claims the file, so it is that track.
+    mount_json(
+        &server,
+        "/api/v1/track",
+        json!([{ "trackFileId": 31, "absoluteTrackNumber": 1 }]),
+    )
+    .await;
+
+    let found = client(MediaSource::Lidarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].source, MediaSource::Lidarr);
+    assert_eq!(
+        found[0].spec,
+        MediaSpec::Track {
+            artist: "Lanternwick Ensemble".to_owned(),
+            album: "Hollow Songs".to_owned(),
+            track: Some(1),
+        }
+    );
+    // The album's MusicBrainz id is what a friend's Lidarr matches on.
+    assert_eq!(found[0].ids.musicbrainz.as_deref(), Some("album-mbid"));
+}
+
+/// A file several tracks point at holds a whole album, and naming it after any one
+/// of them would be wrong.
+#[tokio::test]
+async fn a_lidarr_file_holding_a_whole_album_carries_no_track_number() {
+    let server = MockServer::start().await;
+    mount_lidarr(&server).await;
+    mount_json(
+        &server,
+        "/api/v1/trackfile",
+        json!([{
+            "id": 31, "albumId": 21,
+            "path": "/music/Lanternwick Ensemble/Hollow Songs/album.flac",
+            "size": 419_430_400_u64
+        }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/track",
+        json!([
+            { "trackFileId": 31, "absoluteTrackNumber": 1 },
+            { "trackFileId": 31, "absoluteTrackNumber": 2 }
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Lidarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert!(
+        matches!(found[0].spec, MediaSpec::Track { track: None, .. }),
+        "a multi-track file must not claim to be one track: {:?}",
+        found[0].spec
+    );
+}
+
+#[tokio::test]
+async fn readarr_discovers_a_tagged_authors_books() {
+    let server = MockServer::start().await;
+    mount_json(
+        &server,
+        "/api/v1/tag",
+        json!([{ "id": TAG_ID, "label": "sharerr" }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/author",
+        json!([{ "id": 41, "authorName": "Marisol Vane", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/book",
+        json!([{
+            "id": 51, "title": "The Gilded Ferry", "foreignBookId": "gr-9001",
+            "editions": [
+                { "isbn13": "9780000000001", "monitored": false },
+                { "isbn13": "9780000000002", "monitored": true }
+            ]
+        }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/bookfile",
+        json!([{
+            "id": 61, "bookId": 51,
+            "path": "/books/Marisol Vane/The Gilded Ferry.epub",
+            "size": 1_048_576_u64
+        }]),
+    )
+    .await;
+
+    let found = client(MediaSource::Readarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].spec,
+        MediaSpec::Book {
+            author: "Marisol Vane".to_owned(),
+            title: "The Gilded Ferry".to_owned(),
+        }
+    );
+    assert_eq!(found[0].ids.goodreads.as_deref(), Some("gr-9001"));
+    // The monitored edition's ISBN, not just the first one listed.
+    assert_eq!(found[0].ids.isbn.as_deref(), Some("9780000000002"));
+}
+
+/// Whisparr is Sonarr's codebase, so it walks series and episode files with the
+/// same code and the same v3 prefix — the difference is only what it catalogues.
+#[tokio::test]
+async fn whisparr_walks_like_sonarr() {
+    let server = MockServer::start().await;
+    mount_tags(&server).await;
+    mount_json(
+        &server,
+        "/api/v3/series",
+        json!([{ "id": 71, "title": "Lanternwick After Dark", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v3/episodefile",
+        json!([{ "id": 81, "seriesId": 71, "path": "/xxx/a.mkv", "size": 1024_u64 }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v3/episode",
+        json!([{ "seriesId": 71, "episodeFileId": 81, "seasonNumber": 1, "episodeNumber": 1 }]),
+    )
+    .await;
+
+    let found = client(MediaSource::Whisparr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].source, MediaSource::Whisparr);
+}

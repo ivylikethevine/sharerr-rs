@@ -32,6 +32,9 @@ anyhow = "1.0.104"
 argon2 = "0.5.3"
 askama = "0.16.0"
 async-trait = "0.1.92"
+# Transmission's RPC takes the .torrent as base64 in a JSON body, unlike
+# qBittorrent's multipart upload.
+base64 = "0.22.1"
 axum = "0.8.9"
 axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
@@ -74,9 +77,11 @@ zeroize = "1.9.0"
 
 # The workspace's own crates, so a version bump is one edit rather than five.
 sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
+sharerr-client = { version = "0.1.0", path = "crates/sharerr-client" }
 sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
 sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
 sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
+sharerr-transmission = { version = "0.1.0", path = "crates/sharerr-transmission" }
 sharerr-testkit = { version = "0.1.0", path = "crates/sharerr-testkit" }
 sharerr-torrent = { version = "0.1.0", path = "crates/sharerr-torrent" }
 

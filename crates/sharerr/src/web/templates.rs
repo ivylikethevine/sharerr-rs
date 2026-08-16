@@ -242,6 +242,10 @@ pub struct DiagnosticsPage {
 pub struct PeerRow {
     pub id: i64,
     pub label: String,
+    /// The stored scope value (`all`/`tv`/`movies`), for pre-selecting the control.
+    pub scope: &'static str,
+    /// How to say it to a person — "everything", "TV only", "films only".
+    pub scope_label: &'static str,
     pub created: String,
     /// Rendered relative time, or "never" — the answer to "is my friend actually
     /// set up?", which nothing could report before peers existed.

@@ -144,6 +144,11 @@ struct Record {
     ciphertext: Vec<u8>,
 }
 
+/// The encrypted credential store.
+///
+/// Holds the secrets sharerr must *replay* to other services, which is why they
+/// are recoverable rather than hashed. Opening one costs an Argon2 derivation, so
+/// callers should open it once and reuse it.
 pub struct Vault {
     path: PathBuf,
     salt: [u8; SALT_LEN],
@@ -242,6 +247,7 @@ impl Vault {
         Ok(existed)
     }
 
+    /// Every key stored, sorted. Never the values.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.records.keys().map(String::as_str)
     }
@@ -273,6 +279,7 @@ impl Vault {
         Ok(parse(&raw)?.1.into_keys().collect())
     }
 
+    /// Whether anything is stored yet — true on a fresh instance.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }

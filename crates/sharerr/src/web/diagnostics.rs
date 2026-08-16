@@ -32,11 +32,8 @@ pub async fn page(State(state): State<WebState>) -> Response {
     let mut services = Vec::new();
     let mut discovered: Vec<Discovered> = Vec::new();
 
-    for kind in [MediaSource::Sonarr, MediaSource::Radarr] {
-        let (service, key) = match kind {
-            MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
-            MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
-        };
+    for kind in MediaSource::ALL.iter().copied() {
+        let (service, key) = (config.service(kind), secret_keys::api_key_for(kind));
 
         // An unconfigured service is not a fault to report — plenty of instances
         // run only one of the two.
