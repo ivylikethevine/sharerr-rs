@@ -17,6 +17,7 @@ getrandom = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sharerr-core = { workspace = true }
 # `migrate` and `macros` are what provide `sqlx::migrate!`, which embeds
 # migrations/ into the binary at compile time; `time` maps the timestamp columns.

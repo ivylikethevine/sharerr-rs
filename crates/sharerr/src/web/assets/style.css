@@ -185,3 +185,17 @@ form.inline { display: inline; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.4rem 0.5rem 0.4rem 0; font-size: 0.92rem; }
 th { color: var(--muted); font-weight: 550; }
+
+/* A revoked friend stays in the list so the operator can see it happened, but
+   should not read as an active one. */
+tr.revoked td { color: var(--muted); text-decoration: line-through; }
+tr.revoked td .error { text-decoration: none; }
+
+/* Revoke/Delete sit together on one row without wrapping onto two lines. */
+td.actions { display: flex; gap: 0.75rem; white-space: nowrap; }
+
+/* Path lists on the diagnostics page: many similar strings, so they want to be
+   scannable and monospaced rather than prose. */
+.paths { margin: 0.5rem 0 0; padding-left: 1.25rem; }
+.paths li { font-size: 0.9rem; margin: 0.15rem 0; }
+.paths code { word-break: break-all; }

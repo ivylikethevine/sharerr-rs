@@ -1,0 +1,92 @@
+{% extends "layout.html" %}
+{% block title %}Friends — sharerr{% endblock %}
+
+{% block content %}
+<h1>Friends</h1>
+
+<p class="hint">
+  Each friend gets their own key. That is what makes it possible to see who is
+  actually using the feed, and to cut one person off without disturbing anyone
+  else.
+</p>
+
+{% if let Some(message) = error %}
+<p class="error" role="alert">{{ message }}</p>
+{% endif %}
+
+{% if let Some(new) = revealed %}
+<div class="ok" role="status">
+  <h2>{{ new.label }}'s key</h2>
+  <p class="error">
+    Copy it now — this is the only time it is shown. sharerr stores only a hash of
+    it and cannot show it again. If it is lost, delete this friend and add them
+    back.
+  </p>
+  <p><code>{{ new.key }}</code></p>
+  <p class="hint">
+    In their Prowlarr: add a <em>Generic Torznab</em> indexer with this URL and
+    this key.
+  </p>
+  <dl class="facts">
+    <dt>Feed URL</dt><dd><code>{{ feed_url }}</code></dd>
+  </dl>
+</div>
+{% endif %}
+
+{% if shared_key_set %}
+<p class="error" role="alert">
+  A shared <code>torznab.api_key</code> is still set. Anyone holding it can read the
+  feed regardless of the friends listed below, so revoking someone here does not
+  fully cut them off until it is cleared under
+  <a href="/settings">Settings&nbsp;→&nbsp;Indexer</a>.
+</p>
+{% endif %}
+
+<h2>Add a friend</h2>
+<form method="post" action="/peers" class="panel">
+  <label for="label">Name</label>
+  <input id="label" name="label" required maxlength="64" autocomplete="off"
+         placeholder="Sam">
+  <p class="hint">Just for you — it is how you will recognise them in this list.</p>
+  <button type="submit">Generate a key</button>
+</form>
+
+<h2>Sharing with {{ peers.len() }} friend(s)</h2>
+<div class="panel">
+  {% if peers.is_empty() %}
+  <p class="hint">
+    Nobody yet. Add a friend above to generate the key they will paste into their
+    Prowlarr.
+  </p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Added</th><th>Last seen</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for peer in peers %}
+      <tr{% if peer.revoked %} class="revoked"{% endif %}>
+        <td>{{ peer.label }}{% if peer.revoked %} <span class="error">(revoked)</span>{% endif %}</td>
+        <td>{{ peer.created }}</td>
+        <td>{{ peer.last_seen }}</td>
+        <td class="actions">
+          {% if !peer.revoked %}
+          <form method="post" action="/peers/{{ peer.id }}/revoke" class="inline">
+            <button type="submit" class="link">Revoke</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/peers/{{ peer.id }}/delete" class="inline">
+            <button type="submit" class="link">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">
+    <strong>Revoke</strong> stops the key working but keeps the row, so you can see
+    it happened. <strong>Delete</strong> removes it entirely and frees the name.
+  </p>
+  {% endif %}
+</div>
+{% endblock %}

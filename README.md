@@ -25,9 +25,10 @@ design is built around.
 | Seeding through qBittorrent | ✅ |
 | qBittorrent embedded tracker, or sharerr's own | ✅ |
 | Torznab feed for Prowlarr | ✅ |
+| Jackett-shaped URLs, for clients configured that way | ✅ |
 | Web UI: setup, settings, connection tests | ✅ |
 | Path-mapping diagnostics in the browser | ✅ |
-| Friend/peer management | ❌ — one shared API key; see [roadmap](docs/roadmap.md) |
+| Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
 | Lidarr / Readarr, non-qBittorrent clients | ❌ |
 
 ## Quickstart
@@ -70,18 +71,28 @@ that is not true of your network, put it behind a TLS-terminating proxy.
 ## Sharing with a friend
 
 sharerr publishes what it shares as a **Torznab** feed, which is what Prowlarr
-speaks. In **Settings → Indexer**, generate an API key and copy it together with
-the feed URL. Your friend adds a *Generic Torznab* indexer in their Prowlarr using
-those two values.
+speaks. Open **Friends**, add your friend by name, and sharerr generates a key just
+for them — shown once, alongside the feed URL. They add a *Generic Torznab* indexer
+in their Prowlarr using those two values.
+
+Because each friend has their own key, the Friends page can tell you when each of
+them last used the feed — "never" means they have the key but have not finished
+setting up — and revoking one person leaves everybody else working.
+
+> A single shared `torznab.api_key` still works, for setups made before per-friend
+> keys existed. While one is set, revoking a friend does **not** cut them off,
+> because the shared key still opens the feed; the Friends page says so. Clear it
+> under Settings → Indexer once everyone has their own.
+
+If your friend has a client set up for **Jackett** rather than Prowlarr, it works
+unmodified: sharerr answers Jackett's URL shape
+(`/api/v2.0/indexers/<anything>/results/torznab/api`) with the same feed. The
+indexer id in that path is ignored — sharerr is the only thing it serves.
 
 The feed lists only what is actually seeding, and the `.torrent` files it links to
 are served from the same instance. Both the feed and the downloads require the API
 key — without one, the endpoint stays closed rather than open, because the feed is
 a list of everything you share.
-
-> **One shared key, for now.** Every friend uses the same API key, so they cannot
-> be told apart and revoking one revokes all of them. Per-peer keys are the next
-> milestone — see [the roadmap](docs/roadmap.md).
 
 The feed URL is built from `tracker.advertised_host`, so that has to be an address
 your friend can reach. Everything here is a single HTTP port; whatever you do to

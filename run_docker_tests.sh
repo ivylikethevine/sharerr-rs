@@ -215,11 +215,21 @@ if ! curl -sf "http://127.0.0.1:18477/api?t=caps&apikey=$TORZNAB_KEY" | grep -q 
 fi
 echo "torznab caps ok"
 
+# The same document over Jackett's URL shape, so a Jackett-configured client works
+# unmodified. Checked here because it is pure routing — exactly the kind of thing a
+# unit test can pass while the assembled binary serves a 404.
+jackett_url="http://127.0.0.1:18477/api/v2.0/indexers/sharerr/results/torznab/api"
+if ! curl -sf "$jackett_url?t=caps&apikey=$TORZNAB_KEY" | grep -q '<caps>'; then
+    echo "error: the Jackett-shaped Torznab path did not return a <caps> document" >&2
+    exit 1
+fi
+echo "jackett path ok"
+
 # 6c. The web UI is reachable and its guard is on. This stack has no operator
 #     account, so every protected page must bounce to /setup — which is also the
 #     cheapest proof that the auth middleware is wired in the real binary and not
 #     only in the unit tests.
-for page in / /settings /diagnostics; do
+for page in / /settings /diagnostics /peers; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18477$page")
     if [[ $code != 303 ]]; then
         echo "error: $page returned $code, expected a 303 redirect to /setup" >&2

@@ -233,6 +233,47 @@ pub struct DiagnosticsPage {
     pub healthy: bool,
 }
 
+/// One friend, as the peers page lists them.
+///
+/// Timestamps arrive pre-rendered as strings: the template has no clock and no
+/// formatter, and "never" is a legitimate value for `last_seen` that a number
+/// cannot express.
+#[derive(Debug)]
+pub struct PeerRow {
+    pub id: i64,
+    pub label: String,
+    pub created: String,
+    /// Rendered relative time, or "never" — the answer to "is my friend actually
+    /// set up?", which nothing could report before peers existed.
+    pub last_seen: String,
+    pub revoked: bool,
+}
+
+/// Friends this instance shares with, and the key each one holds.
+#[derive(Debug, Template)]
+#[template(path = "peers.html")]
+pub struct PeersPage {
+    pub signed_in: bool,
+    pub peers: Vec<PeerRow>,
+    pub error: Option<String>,
+    /// A freshly minted peer key, shown exactly once on the response that created
+    /// it — the same reveal-once rule the Torznab key follows, and for the same
+    /// reason: it has to be copied into someone else's Prowlarr, but it is never
+    /// readable again.
+    pub revealed: Option<RevealedPeer>,
+    /// The feed URL a friend pastes alongside their key.
+    pub feed_url: String,
+    /// Whether the legacy single shared key is still set. While it is, revoking a
+    /// peer does not fully cut them off, so the page has to say so.
+    pub shared_key_set: bool,
+}
+
+#[derive(Debug)]
+pub struct RevealedPeer {
+    pub label: String,
+    pub key: String,
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

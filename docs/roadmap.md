@@ -13,9 +13,9 @@ ordering is a judgement about value, not a schedule.
 | M1 | Core: config, encrypted vault, SQLite store, Sonarr/Radarr + qBittorrent clients, `doctor`, torrent construction, seeding, reconciliation loop | **Done** |
 | M2 | Builtin tracker + Torznab feed | **Done** |
 | M3 | Web UI: setup/login, settings, per-service connection tests, status page | **Done** |
-| M4 | Friend/peer management | Next |
-| M5 | Full Jackett API compatibility | Planned |
-| M6 | A second test stack, behind gluetun | Planned |
+| M4 | Friend/peer management — per-peer keys, peers page, last-seen | **Done** |
+| M5 | Jackett compatibility — search half done, admin half open | **Partly done** |
+| M6 | A second test stack, behind gluetun | Next |
 | M7+ | Everything below | Backlog |
 
 The M3 follow-up backlog is now cleared: the checks `doctor` and the web UI run are
@@ -26,46 +26,71 @@ layer, and the router is covered by tests that drive the real middleware stack.
 
 ---
 
-## M4 — Friend/peer management
+## M4 — Friend/peer management — **done**
 
-The one milestone that changes the trust model. Today the Torznab feed is guarded
-by a **single shared `torznab.api_key`**, so every friend holds the same secret:
-there is no way to tell them apart, and revoking one revokes all of them. A friend
-is wired up entirely by hand, by pasting a URL and that key into their Prowlarr.
+Shipped. The Torznab feed used to be guarded by a single `torznab.api_key` handed
+to everybody, which made two ordinary things impossible: seeing whether a friend
+had actually got set up, and cutting one person off without cutting off everyone.
 
-1. **Peers table + migration.** A peer is a label, a per-peer API key (hashed, the
-   way `users` stores passwords), created/last-seen timestamps, and revoked state.
-2. **Per-peer Torznab auth.** Replace the single-key comparison with a peer lookup,
-   keeping the shared key working so existing setups do not break. Record last-seen
-   on each query.
-3. **Peers page.** Add, label, revoke. Reveal the key once on creation, reusing the
-   existing reveal-once flow.
-4. **Per-peer feed URL**, generated ready to paste — that is the actual handoff.
-5. **Per-peer announce tokens.** `tracker.token` is likewise one shared secret; the
-   same idea applied to the builtin tracker.
+What exists now:
 
-**Why it matters:** without it, "stop sharing with one person" is not expressible.
+- **A `peers` table** (`migrations/0003_peers.sql`). Each friend is a label, a
+  hashed key, and created/last-seen/revoked timestamps.
+- **Per-peer Torznab auth.** A peer's key is checked first, by indexed lookup; the
+  old shared key still works so upgrading breaks nobody, and the Friends page warns
+  while it is still set — because until it is cleared, revoking someone does not
+  actually cut them off.
+- **`last_seen`**, recorded on each authenticated request. "never" is the answer
+  that matters: the friend has the key but has not finished setting up.
+- **A Friends page** at `/peers` — add, revoke, delete, with the key revealed once
+  on creation alongside the feed URL to paste into their Prowlarr.
+
+**One design note worth keeping.** Peer keys are hashed with SHA-256, not Argon2.
+Argon2 exists to make *low-entropy human passwords* expensive to guess; a peer key
+is 160 bits from the system CSPRNG, so a slow hash buys nothing against that threat
+— and costs something real against one that matters, because a slow hash cannot be
+looked up by index. It would mean verifying the presented key against every peer
+row in turn on every single feed request. See the header of `0003_peers.sql`.
+
+**Still open, deliberately:**
+
+- **Per-peer announce tokens.** `tracker.token` is still one shared secret, so the
+  builtin tracker cannot tell peers apart the way the feed now can. Same idea,
+  applied one layer down.
+- **Retiring the shared key.** It is kept for compatibility and flagged in the UI,
+  but nothing yet walks an operator through migrating their friends off it.
+- **Selective sharing per peer** — see Functionality below. Now expressible for the
+  first time, since there is finally an identity to scope against.
 
 ---
 
-## M5 — Full Jackett API compatibility
+## M5 — Jackett compatibility
 
-sharerr serves Torznab on `/api`, which is what Prowlarr's *Generic Torznab*
-indexer speaks. Jackett-configured clients expect a different URL shape for the
-same query grammar, so most of this is routing over the existing search path.
+**The search half is done.** A client configured for Jackett does not send a
+different *query* — the grammar is the same Torznab already implemented. What
+differed was only where it sends it: Jackett namespaces each tracker it proxies
+under `/api/v2.0/indexers/<id>/results/torznab/`, and clients append `api?t=...`.
+So anything set up for Jackett failed against a bare `/api` for purely clerical
+reasons.
 
-Staged, because the two halves differ enormously in size:
+All three shapes a client may produce now serve the same feed — with and without
+the trailing `/api`, with and without the trailing slash — and the document is
+asserted byte-identical to `/api`'s so the two cannot drift. The indexer id is
+accepted and ignored, including Jackett's `all` aggregate: sharerr is the only
+thing it serves, so every id means the same feed, and rejecting unfamiliar ones
+would only break someone pasting the id from their old config. Authentication is
+unchanged — the Jackett path is not a way around it, and a test says so.
 
-- **Search half** (small, high value) — `/api/v2.0/indexers/{id}/results/torznab/api`
-  including the `all` aggregate indexer, and Jackett-shaped download links lining up
-  with the existing `.torrent` serving. Delivers "a Jackett-configured
-  Prowlarr/Sonarr/Radarr just works". Verify against the real Prowlarr already in
-  the test stack.
-- **Admin half** (large) — `/api/v2.0/indexers` CRUD, server config, indexer
-  definitions. Mostly describes a multi-indexer aggregator that sharerr is not.
-  Decide from real client behaviour how much is actually called.
+Download links needed nothing: the enclosure URLs in the feed are absolute and
+already point at this instance, so a client follows them whichever path it searched
+through.
 
-Generic Torznab on `/api` keeps working unchanged throughout.
+**The admin half is open**, and is much larger: `/api/v2.0/indexers` CRUD, server
+config, indexer definitions. Almost all of it describes a multi-indexer aggregator
+that sharerr is not, so the right next step is not to build it speculatively but to
+point a real Prowlarr at the Jackett path — the test stack already has one behind
+the `indexer` profile — and see which endpoints a client actually calls before
+deciding.
 
 ---
 

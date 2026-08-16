@@ -30,6 +30,8 @@ use serde::Deserialize;
 use sharerr_core::config::secret_keys;
 use sharerr_core::model::{MediaSpec, SharedItem};
 
+use secrecy::SecretString;
+
 use crate::state::ServeState;
 
 /// Newznab category numbers. Sonarr and Radarr filter on these, and a release in
@@ -281,7 +283,47 @@ fn imdb_matches(stored: Option<&str>, wanted: &str) -> bool {
 pub fn routes(serve: Arc<ServeState>) -> axum::Router {
     axum::Router::new()
         .route("/api", axum::routing::get(api))
+        // Jackett's URL shape, answered by the same handler — see `jackett`.
+        .route(
+            "/api/v2.0/indexers/{indexer}/results/torznab",
+            axum::routing::get(jackett),
+        )
+        .route(
+            "/api/v2.0/indexers/{indexer}/results/torznab/",
+            axum::routing::get(jackett),
+        )
+        .route(
+            "/api/v2.0/indexers/{indexer}/results/torznab/api",
+            axum::routing::get(jackett),
+        )
         .with_state(serve)
+}
+
+/// Jackett's Torznab endpoint, which is the same Torznab at a different address.
+///
+/// A client configured for Jackett does not send a different *query* — the grammar
+/// is identical, and it is the one already implemented. What differs is where it
+/// sends it: Jackett namespaces each tracker it proxies under
+/// `/api/v2.0/indexers/<id>/results/torznab/`, and clients append `api?t=...` to
+/// that. Anything set up for Jackett therefore fails against a bare `/api` for
+/// purely clerical reasons.
+///
+/// The indexer id is accepted and ignored. Jackett is an aggregator in front of
+/// many trackers, so the segment identifies which one; sharerr *is* the one thing
+/// it serves, so every id — including Jackett's `all` aggregate — means the same
+/// feed. Rejecting unknown ids would buy nothing and would break the common case of
+/// someone pasting whatever id they used in their old Jackett config.
+///
+/// Download links are unaffected: the enclosure URLs in the feed are absolute and
+/// already point at this instance's `/torrents/...`, so a client follows them
+/// whichever path it searched through.
+async fn jackett(
+    State(state): State<Arc<ServeState>>,
+    axum::extract::Path(indexer): axum::extract::Path<String>,
+    Query(query): Query<SearchQuery>,
+) -> Response {
+    tracing::debug!(indexer, "torznab request over the jackett path");
+    api(State(state), Query(query)).await
 }
 
 /// `GET /api?t=...`
@@ -380,36 +422,79 @@ pub fn public_base_url(config: &sharerr_core::Config) -> String {
 
 /// Torznab authenticates with an `apikey` query parameter.
 ///
-/// Absent from the vault means the endpoint is closed rather than open: an
-/// indexer feed lists everything this instance shares, and defaulting to
-/// unauthenticated would publish the library to anyone who found the port.
+/// Two things can satisfy it, in this order:
+///
+/// 1. **A peer's own key.** The normal case since M4 — each friend holds a
+///    different key, so one can be revoked without disturbing the others, and the
+///    request records who made it.
+/// 2. **The shared `torznab.api_key` from the vault.** Kept working so that
+///    upgrading does not silently break a friend who was set up before peers
+///    existed. It authenticates nobody in particular, which is exactly its
+///    weakness.
+///
+/// Neither present means the endpoint is closed rather than open: an indexer feed
+/// lists everything this instance shares, and defaulting to unauthenticated would
+/// publish the library to anyone who found the port.
 async fn check_api_key(state: &ServeState, supplied: Option<&str>) -> Result<(), Response> {
+    let refused = || {
+        xml_status(
+            StatusCode::UNAUTHORIZED,
+            error_xml(100, "incorrect user credentials"),
+        )
+    };
+
+    // An absent key is refused the same way a wrong one is. Saying "this instance
+    // has no key configured" to an unauthenticated caller would confirm the port
+    // belongs to sharerr.
+    let Some(supplied) = supplied.filter(|key| !key.is_empty()) else {
+        return Err(refused());
+    };
+
+    // Peers first. This is one indexed lookup on a SHA-256, so it costs nothing
+    // even when the shared key is what ends up matching.
+    if let Ok(store) = state.store().await {
+        match store.peer_by_key(&SecretString::from(supplied)).await {
+            Ok(Some(peer)) => {
+                // Recorded after authenticating, and failure to record is not
+                // failure to authenticate: a read-only or busy database should not
+                // take the feed down.
+                if let Err(err) = store.touch_peer(peer.id).await {
+                    tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
+                }
+                tracing::debug!(peer = %peer.label, "torznab request authenticated");
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(err) => {
+                // A database that will not answer must not silently fall through to
+                // a comparison that might pass — but it also must not be reported as
+                // bad credentials, which would send the operator to the wrong place.
+                tracing::error!(error = %err, "could not check peer keys");
+                return Err(xml_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_xml(900, "could not check credentials"),
+                ));
+            }
+        }
+    }
+
+    // Fall back to the single shared key, for setups that predate peers.
     let stored = state
         .open_vault()
         .await
         .ok()
         .and_then(|vault| vault.get(secret_keys::TORZNAB_API_KEY).ok().flatten());
 
-    let Some(stored) = stored else {
-        return Err(xml_status(
-            StatusCode::SERVICE_UNAVAILABLE,
-            error_xml(
-                100,
-                "this sharerr instance has no Torznab API key yet — generate one in Settings",
-            ),
-        ));
-    };
-
-    let stored = secrecy::ExposeSecret::expose_secret(&stored);
-    if crate::secrets::constant_time_eq(stored, supplied.unwrap_or_default()) {
-        Ok(())
-    } else {
-        tracing::warn!("rejected a torznab request with a bad api key");
-        Err(xml_status(
-            StatusCode::UNAUTHORIZED,
-            error_xml(100, "incorrect user credentials"),
-        ))
+    if let Some(stored) = stored {
+        let stored = secrecy::ExposeSecret::expose_secret(&stored);
+        if crate::secrets::constant_time_eq(stored, supplied) {
+            tracing::debug!("torznab request authenticated with the shared key");
+            return Ok(());
+        }
     }
+
+    tracing::warn!("rejected a torznab request with a bad api key");
+    Err(refused())
 }
 
 fn xml(body: String) -> Response {
@@ -722,5 +807,214 @@ mod tests {
         let xml = error_xml(100, r#"bad <key> & "stuff""#);
         assert!(xml.contains(r#"code="100""#));
         assert!(xml.contains("&lt;key&gt; &amp; &quot;stuff&quot;"), "{xml}");
+    }
+
+    // ---------------------------------------------------------------- peer auth
+
+    use crate::state::fixtures::unconfigured;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use secrecy::SecretString;
+    use tower::ServiceExt;
+
+    /// Ask the real router, so the answer covers routing and extraction too.
+    async fn caps_with_key(state: &std::sync::Arc<ServeState>, key: Option<&str>) -> StatusCode {
+        let uri = match key {
+            Some(key) => format!("/api?t=caps&apikey={key}"),
+            None => "/api?t=caps".to_owned(),
+        };
+        routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// The point of M4: a friend's own key opens the feed.
+    #[tokio::test]
+    async fn a_peers_key_authenticates_the_feed() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"))
+            .await
+            .unwrap();
+
+        assert_eq!(caps_with_key(&state, Some("sam-key")).await, StatusCode::OK);
+    }
+
+    /// And the other half of the point: revoking one friend cuts off exactly that
+    /// friend. Under the old single shared key this was not expressible at all.
+    #[tokio::test]
+    async fn revoking_one_peer_closes_the_feed_only_for_them() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"))
+            .await
+            .unwrap();
+        store
+            .create_peer("Alex", &SecretString::from("alex-key"))
+            .await
+            .unwrap();
+
+        store.revoke_peer(sam.id).await.unwrap();
+
+        assert_eq!(
+            caps_with_key(&state, Some("sam-key")).await,
+            StatusCode::UNAUTHORIZED,
+            "a revoked key must stop working"
+        );
+        assert_eq!(
+            caps_with_key(&state, Some("alex-key")).await,
+            StatusCode::OK,
+            "revoking Sam must not affect Alex"
+        );
+    }
+
+    /// A key nobody was issued, and no key at all, are refused the same way — and
+    /// neither gets a message confirming what this port is.
+    #[tokio::test]
+    async fn an_unknown_or_absent_key_is_refused() {
+        let (_dir, state) = unconfigured();
+        state.store().await.unwrap();
+
+        assert_eq!(
+            caps_with_key(&state, Some("guessed")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(caps_with_key(&state, None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            caps_with_key(&state, Some("")).await,
+            StatusCode::UNAUTHORIZED,
+            "an empty key must not be treated as absent-and-therefore-fine"
+        );
+    }
+
+    /// Using the feed is what proves a friend is actually set up, so it has to be
+    /// recorded — that column is the whole answer to "did Sam get it working?".
+    #[tokio::test]
+    async fn a_successful_request_records_that_the_peer_was_seen() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.list_peers().await.unwrap()[0].last_seen_at,
+            None,
+            "nobody has used the key yet"
+        );
+
+        assert_eq!(caps_with_key(&state, Some("sam-key")).await, StatusCode::OK);
+
+        assert!(
+            store.list_peers().await.unwrap()[0].last_seen_at.is_some(),
+            "an authenticated request must record the peer as seen"
+        );
+    }
+
+    // ------------------------------------------------------------- jackett shape
+
+    async fn get(state: &std::sync::Arc<ServeState>, uri: &str) -> StatusCode {
+        routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn body(state: &std::sync::Arc<ServeState>, uri: &str) -> String {
+        let response = routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    async fn with_peer() -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
+        let (dir, state) = unconfigured();
+        state
+            .store()
+            .await
+            .unwrap()
+            .create_peer("Sam", &SecretString::from("sam-key"))
+            .await
+            .unwrap();
+        (dir, state)
+    }
+
+    /// The three shapes a Jackett-configured client actually requests. All of them
+    /// have to work, because which one you get depends on whether the client
+    /// appends `/api` to a base URL that may or may not already end in a slash.
+    #[tokio::test]
+    async fn the_jackett_paths_serve_the_same_feed() {
+        let (_dir, state) = with_peer().await;
+
+        for uri in [
+            "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps&apikey=sam-key",
+            "/api/v2.0/indexers/sharerr/results/torznab/?t=caps&apikey=sam-key",
+            "/api/v2.0/indexers/sharerr/results/torznab?t=caps&apikey=sam-key",
+        ] {
+            assert_eq!(get(&state, uri).await, StatusCode::OK, "{uri}");
+        }
+    }
+
+    /// Jackett proxies many trackers and names each one in the path. sharerr is the
+    /// only thing it serves, so any id — including Jackett's `all` aggregate, and
+    /// whatever id someone had in their old config — means this feed.
+    #[tokio::test]
+    async fn any_indexer_id_reaches_the_same_feed() {
+        let (_dir, state) = with_peer().await;
+
+        for id in ["sharerr", "all", "some-old-jackett-id"] {
+            let uri = format!("/api/v2.0/indexers/{id}/results/torznab/api?t=caps&apikey=sam-key");
+            assert_eq!(get(&state, &uri).await, StatusCode::OK, "{uri}");
+        }
+    }
+
+    /// Byte-identical to `/api`, or the two paths would drift into describing
+    /// different capabilities to different clients.
+    #[tokio::test]
+    async fn the_jackett_path_returns_the_same_document_as_the_plain_one() {
+        let (_dir, state) = with_peer().await;
+
+        let plain = body(&state, "/api?t=caps&apikey=sam-key").await;
+        let jackett = body(
+            &state,
+            "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps&apikey=sam-key",
+        )
+        .await;
+
+        assert_eq!(plain, jackett);
+        assert!(plain.contains("<caps>"), "{plain}");
+    }
+
+    /// The Jackett path must not be a way around authentication.
+    #[tokio::test]
+    async fn the_jackett_path_is_authenticated_too() {
+        let (_dir, state) = with_peer().await;
+
+        assert_eq!(
+            get(
+                &state,
+                "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps"
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(
+                &state,
+                "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps&apikey=wrong"
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

@@ -49,13 +49,17 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_bencode = "0.2.4"
 serde_json = "1.0.151"
 sha1 = "0.11.0"
+# Peer API keys are hashed with SHA-256, not Argon2 — they are 160 bits of CSPRNG
+# output rather than a human password, and the lookup has to be an indexed
+# equality on every Torznab request. See migrations/0003_peers.sql.
+sha2 = "0.10.9"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
 sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
-time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
+time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
 tokio = "1.53.1"
 toml_edit = "0.22"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
@@ -73,7 +77,7 @@ sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
 sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
 sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
 sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
-sharerr-testkit = { path = "crates/sharerr-testkit" }
+sharerr-testkit = { version = "0.1.0", path = "crates/sharerr-testkit" }
 sharerr-torrent = { version = "0.1.0", path = "crates/sharerr-torrent" }
 
 [workspace.lints.rust]

@@ -16,6 +16,7 @@
 pub mod auth;
 pub mod config_io;
 pub mod diagnostics;
+pub mod peers;
 pub mod probe;
 pub mod settings;
 pub mod templates;
@@ -63,6 +64,9 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     let protected = Router::new()
         .route("/", get(status_page))
         .route("/diagnostics", get(diagnostics::page))
+        .route("/peers", get(peers::page).post(peers::add))
+        .route("/peers/{id}/revoke", post(peers::revoke))
+        .route("/peers/{id}/delete", post(peers::delete))
         .route("/settings", get(settings::page))
         .route("/settings/general", post(settings::save_general))
         .route("/settings/sonarr", post(settings::save_sonarr))
@@ -198,7 +202,7 @@ mod tests {
     /// would not notice.
     #[tokio::test]
     async fn every_protected_route_refuses_an_anonymous_visitor() {
-        let protected_gets = ["/", "/settings", "/diagnostics"];
+        let protected_gets = ["/", "/settings", "/diagnostics", "/peers"];
         let protected_posts = [
             "/settings/general",
             "/settings/sonarr",
@@ -210,6 +214,9 @@ mod tests {
             "/settings/generate/torznab",
             "/settings/test/sonarr",
             "/settings/account/password",
+            "/peers",
+            "/peers/1/revoke",
+            "/peers/1/delete",
         ];
 
         for path in protected_gets {
