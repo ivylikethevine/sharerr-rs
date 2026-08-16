@@ -1,4 +1,8 @@
-# Builds the image and publishes it to GHCR.
+# Builds the image, and publishes it to GHCR on a `v*` tag only.
+#
+# Branch pushes and pull requests build both architectures but ship nothing. That
+# split is deliberate: the build is load-bearing as the MSRV check (below), while
+# publishing should be something you choose to do, not a side effect of merging.
 #
 # This also doubles as the MSRV check for the whole project. The Dockerfile's
 # builder stage is pinned to the workspace's declared rust-version (1.88) while a
@@ -47,10 +51,12 @@ jobs:
       # Required for --platform builds and for the type=gha cache backend.
       - uses: docker/setup-buildx-action@v3
 
-      # Skipped on pull requests. A PR from a fork gets a read-only GITHUB_TOKEN,
-      # so logging in would fail for exactly the contributors least equipped to
-      # diagnose it — and there is nothing to log in for, since push is false.
-      - if: github.event_name != 'pull_request'
+      # Only when something is actually going to be pushed. A PR from a fork gets a
+      # read-only GITHUB_TOKEN, so logging in would fail for exactly the
+      # contributors least equipped to diagnose it — and there is nothing to log in
+      # for on a branch build either, now that only tags publish. Keep this
+      # condition identical to `push:` below.
+      - if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -75,7 +81,13 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          # Tags only. This used to push on every commit to `main`, which quietly
+          # published an image the project's own commit messages said not to
+          # publish. A push to `main` still *builds* both architectures, so this
+          # job keeps working as the MSRV gate — it just no longer ships the
+          # result. Cutting a `v*` tag is now the deliberate act that publishes,
+          # and it is also what produces `:latest`.
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # `mode=min`, not `max`. Exporting the intermediate builder stage would

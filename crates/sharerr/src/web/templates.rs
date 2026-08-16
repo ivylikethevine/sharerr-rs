@@ -174,11 +174,63 @@ pub struct SettingsPage {
 
     pub path_map: Vec<PathRow>,
 
+    /// Stated on the change-password form so the rule is visible before the
+    /// submission that would otherwise reject it. Comes from the constant the
+    /// handler actually enforces, so the two cannot drift.
+    pub min_password_len: usize,
+
     // Shown but not editable: changing either needs a restart, and getting `bind`
     // wrong from the UI would strand the operator on a port nothing is listening on.
     pub data_dir: String,
     pub bind: String,
     pub config_path: String,
+}
+
+/// One service's contribution to the scan behind the diagnostics page.
+#[derive(Debug)]
+pub struct ServiceLine {
+    pub name: String,
+    pub message: String,
+    pub ok: bool,
+}
+
+/// One file traced through all three views of the library.
+#[derive(Debug)]
+pub struct SampleRow {
+    pub arr: String,
+    pub sharerr: String,
+    pub qbit: String,
+}
+
+/// The check that used to be reachable only from a shell.
+///
+/// `doctor` resolves the path mappings and reports what it finds; the web UI's
+/// per-service "Test connection" buttons deliberately do not, because they answer a
+/// one-line question and this needs a library walk. So the check most likely to
+/// explain "nothing is shared" was the one an operator using only the browser could
+/// never run.
+#[derive(Debug, Template)]
+#[template(path = "diagnostics.html")]
+pub struct DiagnosticsPage {
+    pub signed_in: bool,
+    pub services: Vec<ServiceLine>,
+    /// Whether any tagged file was found at all. Distinguishes "everything
+    /// resolves" from "there was nothing to resolve", which look identical if you
+    /// only count failures.
+    pub scanned: bool,
+    pub rules: usize,
+    pub checked: usize,
+    pub unmapped: usize,
+    /// Capped for display; `more_missing` carries the remainder.
+    pub missing: Vec<String>,
+    pub more_missing: usize,
+    pub invalid: Vec<String>,
+    pub sample: Option<SampleRow>,
+    /// Files that resolved to something sharerr can actually open.
+    pub readable: usize,
+    /// Whether anything here stops a file being shared. Drives the one-line verdict
+    /// at the top, so the answer is visible without reading the whole page.
+    pub healthy: bool,
 }
 
 #[cfg(test)]
@@ -225,5 +277,52 @@ mod tests {
         let html = LoginPage::blank().render().unwrap();
         assert!(!html.contains("Sign out"), "{html}");
         assert!(!html.contains("/settings"), "{html}");
+    }
+
+    /// Every settings path named in `settings.html` must be one the code actually
+    /// writes.
+    ///
+    /// The template decides whether to disable a field by looking its dotted path
+    /// up in a map whose keys are *generated* at runtime from `SHARERR_*`
+    /// environment variables. Nothing tied those hand-typed literals to the schema,
+    /// so a typo here compiled cleanly and simply never matched — rendering a field
+    /// as editable while the environment had it pinned, and silently discarding the
+    /// save. This is the check that closes that gap from the template side;
+    /// `sharerr_core::config` covers the Rust side.
+    #[test]
+    fn every_lock_key_in_the_template_is_a_known_config_path() {
+        use sharerr_core::config::config_paths;
+
+        let template = include_str!("templates/settings.html");
+        let mut found = std::collections::BTreeSet::new();
+
+        for line in template.lines() {
+            let mut rest = line;
+            while let Some(at) = rest
+                .find("call lock_attr(\"")
+                .or_else(|| rest.find("call locked(\""))
+            {
+                let after = &rest[at..];
+                let Some(open) = after.find('"') else { break };
+                let Some(close) = after[open + 1..].find('"') else {
+                    break;
+                };
+                found.insert(after[open + 1..open + 1 + close].to_owned());
+                rest = &after[open + 1 + close..];
+            }
+        }
+
+        assert!(
+            !found.is_empty(),
+            "parsed no lock keys — the macro syntax changed and this test went blind"
+        );
+
+        for key in &found {
+            assert!(
+                config_paths::ALL.contains(&key.as_str()),
+                "settings.html locks {key:?}, which is not in config_paths::ALL — \
+                 a typo here disables nothing and the save is discarded silently"
+            );
+        }
     }
 }

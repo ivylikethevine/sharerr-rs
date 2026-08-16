@@ -15,6 +15,67 @@ rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/ivyduggan/sharerr-rs"
 
+# One version pin per dependency, for the whole workspace.
+#
+# These used to live in each crate: `serde_json` was written out in seven
+# manifests, `tracing` in six, `tokio` in five with five different feature sets. The
+# drift that produced was already visible — `getrandom` was pinned to "0.4" in one
+# crate and "0.4.3" in another — and sharerr-testkit carried a hand-written comment
+# reminding the reader to keep its `sqlx` in step with sharerr-store's, which is
+# exactly the job this table does automatically.
+#
+# Features stay per-crate, since they are genuinely per-crate: a crate writes
+# `tokio = { workspace = true, features = [...] }` and cargo unions them. Only the
+# version and `default-features` are settled here.
+[workspace.dependencies]
+anyhow = "1.0.104"
+argon2 = "0.5.3"
+askama = "0.16.0"
+async-trait = "0.1.92"
+axum = "0.8.9"
+axum-extra = "0.12.6"
+chacha20poly1305 = "0.11.0"
+clap = "4.6.6"
+figment = "0.10.19"
+getrandom = "0.4.3"
+hex = "0.4.3"
+lava_torrent = "0.11.1"
+# `default-features = false` on purpose: it drops the default TLS backend in favour
+# of rustls, so no build here needs OpenSSL on the host or in the image.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "http2", "charset"] }
+rpassword = "7.5.4"
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_bencode = "0.2.4"
+serde_json = "1.0.151"
+sha1 = "0.11.0"
+# `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
+# binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
+# still need no live database. One pin here also means one libsqlite3-sys.
+sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
+tempfile = "3.27.0"
+thiserror = "2.0.20"
+time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
+tokio = "1.53.1"
+toml_edit = "0.22"
+# Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
+#-process, so the handler tests exercise the real middleware stack — the auth
+# guard and the cross-origin layer — rather than the handlers in isolation.
+tower = { version = "0.5.3", features = ["util"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+wiremock = "0.6.5"
+zeroize = "1.9.0"
+
+# The workspace's own crates, so a version bump is one edit rather than five.
+sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
+sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
+sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
+sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
+sharerr-testkit = { path = "crates/sharerr-testkit" }
+sharerr-torrent = { version = "0.1.0", path = "crates/sharerr-torrent" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"

@@ -4,21 +4,23 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Sonarr and Radarr v3 API clients, and the tagged-content discovery walk sharerr runs over them."
 
 [lints]
 workspace = true
 
 [dependencies]
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "http2", "charset"] }
-secrecy = "0.10.3"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sharerr-core = { version = "0.1.0", path = "../sharerr-core" }
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt", "macros"] }
-tracing = "0.1.44"
-url = "2.5.8"
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sharerr-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
-wiremock = "0.6.5"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock = { workspace = true }

@@ -1,0 +1,52 @@
+# cargo-deny configuration. Run locally with:
+#
+#   cargo deny check advisories licenses bans sources
+#
+# CI runs the same command on every push and once a week — the weekly run is the
+# point, since a new advisory against a dependency arrives without anyone touching
+# this repository.
+
+[graph]
+# Only the platforms sharerr is actually built for. Without this, advisories and
+# licence findings from Windows- and macOS-only dependencies are reported against a
+# project that never compiles them.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[advisories]
+version = 2
+# No blanket ignores. An advisory that genuinely does not apply gets its id listed
+# here with a comment saying why — never a silent global downgrade.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only, matching the project's own MIT. A copyleft dependency
+# is a decision to make deliberately, not to discover at release time.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# `warn`, not `deny`: duplicate versions are usually somebody else's transitive
+# problem and blocking the build on one would mean pinning dependencies for
+# reasons unrelated to sharerr. Worth seeing, not worth failing on.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Share your media library with friends over the *arr stack you already run."
 
 [lints]
 workspace = true
@@ -13,32 +15,33 @@ workspace = true
 e2e = []
 
 [dependencies]
-anyhow = "1.0.104"
-askama = "0.16.0"
-axum = "0.8.9"
-axum-extra = { version = "0.12.6", features = ["cookie", "form"] }
-clap = { version = "4.6.6", features = ["derive", "env"] }
-figment = { version = "0.10.19", features = ["toml", "env"] }
-getrandom = "0.4"
-hex = "0.4"
-rpassword = "7.5.4"
-secrecy = "0.10.3"
-serde = { version = "1.0.229", features = ["derive"] }
-sharerr-arr = { version = "0.1.0", path = "../sharerr-arr" }
-sharerr-core = { version = "0.1.0", path = "../sharerr-core" }
-sharerr-qbit = { version = "0.1.0", path = "../sharerr-qbit" }
-sharerr-store = { version = "0.1.0", path = "../sharerr-store" }
-sharerr-torrent = { version = "0.1.0", path = "../sharerr-torrent" }
-tokio = { version = "1.53.1", features = ["full"] }
-toml_edit = "0.22"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-url = "2.5.8"
+anyhow = { workspace = true }
+askama = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true, features = ["cookie", "form"] }
+clap = { workspace = true, features = ["derive", "env"] }
+figment = { workspace = true, features = ["toml", "env"] }
+getrandom = { workspace = true }
+hex = { workspace = true }
+rpassword = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+sharerr-arr = { workspace = true }
+sharerr-core = { workspace = true }
+sharerr-qbit = { workspace = true }
+sharerr-store = { workspace = true }
+sharerr-torrent = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml_edit = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1.92"
-figment = { version = "0.10.19", features = ["toml", "env", "test"] }
-serde_json = "1.0.151"
-sharerr-testkit = { path = "../sharerr-testkit" }
-tempfile = "3.27.0"
-wiremock = "0.6.5"
+async-trait = { workspace = true }
+figment = { workspace = true, features = ["toml", "env", "test"] }
+serde_json = { workspace = true }
+sharerr-testkit = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true }
+wiremock = { workspace = true }

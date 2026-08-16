@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Synthetic, deterministic fixtures for sharerr's tests. Never part of a release."
 # Test scaffolding only — never part of a release.
 publish = false
 
@@ -11,13 +13,12 @@ publish = false
 workspace = true
 
 [dependencies]
-anyhow = "1.0.104"
-serde_json = "1.0.151"
-
-# For the `seed-arr` binary only. Same pin as sharerr-store so the workspace
-# resolves one libsqlite3-sys.
-sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+# For the `seed-arr` binary only. The workspace pin is what keeps this in step
+# with sharerr-store, so the tree resolves a single libsqlite3-sys.
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile = { workspace = true }

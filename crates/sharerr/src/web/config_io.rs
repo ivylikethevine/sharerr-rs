@@ -227,8 +227,9 @@ fn read_or_empty(path: &std::path::Path) -> Result<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(source) => Err(anyhow::Error::new(source))
-            .with_context(|| format!("reading {}", path.display())),
+        Err(source) => {
+            Err(anyhow::Error::new(source)).with_context(|| format!("reading {}", path.display()))
+        }
     }
 }
 

@@ -26,7 +26,7 @@ use sharerr_torrent::announce::{
     self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
 };
 
-use crate::commands::serve::ServeState;
+use crate::state::ServeState;
 
 /// The bencoded content type. Clients do not check it, but a browser hitting the
 /// endpoint by hand should not be offered a download prompt.

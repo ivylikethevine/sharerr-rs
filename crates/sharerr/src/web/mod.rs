@@ -8,13 +8,14 @@
 //!
 //! CSS and htmx are compiled into the binary with `include_str!` rather than
 //! served from a directory or fetched from a CDN. The container is expected to run
-//! on a network with no egress — `docker/compose.test.yml` enforces exactly that
-//! with `internal: true` — so a CDN reference would simply hang, and a
-//! `ServeDir` would mean shipping files alongside the binary that the Dockerfile
-//! deliberately does not copy.
+//! somewhere with no egress — a home server behind a VPN container is the normal
+//! case — so a CDN reference would simply hang, and a `ServeDir` would mean
+//! shipping files alongside the binary that the Dockerfile deliberately does not
+//! copy.
 
 pub mod auth;
 pub mod config_io;
+pub mod diagnostics;
 pub mod probe;
 pub mod settings;
 pub mod templates;
@@ -29,7 +30,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use sharerr_store::master_key_from_env;
 
-use crate::commands::serve::{RECOVERY_INTERVAL, ServeState};
+use crate::state::{RECOVERY_INTERVAL, ServeState};
 use crate::web::auth::Sessions;
 use crate::web::templates::{StatusPage, render};
 
@@ -61,6 +62,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     // endpoint that writes to the vault.
     let protected = Router::new()
         .route("/", get(status_page))
+        .route("/diagnostics", get(diagnostics::page))
         .route("/settings", get(settings::page))
         .route("/settings/general", post(settings::save_general))
         .route("/settings/sonarr", post(settings::save_sonarr))
@@ -74,6 +76,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
             post(settings::generate_secret),
         )
         .route("/settings/test/{service}", post(probe::test))
+        .route("/settings/account/password", post(auth::change_password))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -143,4 +146,190 @@ async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Respon
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::state::fixtures::unconfigured;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// Drive the *assembled* router, middleware and all.
+    ///
+    /// Everything under `web/` was previously tested one helper at a time, which
+    /// left the two properties that actually matter unasserted: that the auth guard
+    /// is wired to every protected route, and that the cross-origin layer really
+    /// does cover the public POSTs. Both are facts about how `routes()` composes
+    /// its layers, and neither is observable from a unit test of the handler.
+    fn router() -> (tempfile::TempDir, Router) {
+        let (dir, serve) = unconfigured();
+        (dir, routes(serve))
+    }
+
+    async fn send(router: Router, request: Request<Body>) -> axum::response::Response {
+        router.oneshot(request).await.unwrap()
+    }
+
+    fn get(path: &str) -> Request<Body> {
+        Request::builder().uri(path).body(Body::empty()).unwrap()
+    }
+
+    fn post(path: &str) -> axum::http::request::Builder {
+        Request::builder().method("POST").uri(path)
+    }
+
+    fn location(response: &axum::response::Response) -> &str {
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+    }
+
+    /// Every protected route must refuse an anonymous caller.
+    ///
+    /// Enumerated rather than spot-checked: the guard is applied with a single
+    /// `route_layer` over the group, and the failure mode being guarded against is
+    /// somebody adding a route *outside* that group. A spot check of one route
+    /// would not notice.
+    #[tokio::test]
+    async fn every_protected_route_refuses_an_anonymous_visitor() {
+        let protected_gets = ["/", "/settings", "/diagnostics"];
+        let protected_posts = [
+            "/settings/general",
+            "/settings/sonarr",
+            "/settings/radarr",
+            "/settings/qbittorrent",
+            "/settings/tracker",
+            "/settings/paths",
+            "/settings/sync",
+            "/settings/generate/torznab",
+            "/settings/test/sonarr",
+            "/settings/account/password",
+        ];
+
+        for path in protected_gets {
+            let (_dir, app) = router();
+            let response = send(app, get(path)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "GET {path} must redirect an anonymous visitor, got {:?}",
+                response.status()
+            );
+            // No account exists on this instance, so the destination is /setup.
+            assert_eq!(location(&response), "/setup", "GET {path}");
+        }
+
+        for path in protected_posts {
+            let (_dir, app) = router();
+            let response = send(app, post(path).body(Body::empty()).unwrap()).await;
+            assert_ne!(
+                response.status(),
+                StatusCode::OK,
+                "POST {path} must not succeed for an anonymous visitor"
+            );
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "POST {path} must redirect rather than run, got {:?}",
+                response.status()
+            );
+        }
+    }
+
+    /// The public routes must stay public, or a fresh instance is unusable.
+    #[tokio::test]
+    async fn the_setup_and_login_pages_are_reachable_without_a_session() {
+        for path in ["/setup", "/login"] {
+            let (_dir, app) = router();
+            let response = send(app, get(path)).await;
+            assert!(
+                response.status().is_success() || response.status().is_redirection(),
+                "{path} returned {:?}",
+                response.status()
+            );
+        }
+    }
+
+    /// `/assets/*` sits outside the guard so the login page can style itself —
+    /// a stylesheet behind a login is a login page with no stylesheet.
+    #[tokio::test]
+    async fn assets_are_served_without_a_session() {
+        let (_dir, app) = router();
+        let response = send(app, get("/assets/style.css")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_asset_is_not_found_rather_than_a_redirect() {
+        let (_dir, app) = router();
+        let response = send(app, get("/assets/../secrets")).await;
+        assert_ne!(response.status(), StatusCode::OK);
+    }
+
+    /// The CSRF defence, asserted over the real router rather than over the
+    /// helper. `deny_cross_origin` is applied as a `.layer` on the merged router,
+    /// and the whole point of putting it there was that it covers `/login` and
+    /// `/setup` too — which sit *outside* the auth guard and are the most
+    /// attackable POSTs on the instance.
+    #[tokio::test]
+    async fn a_cross_origin_post_is_refused_on_public_routes_too() {
+        for path in ["/login", "/setup", "/logout"] {
+            let (_dir, app) = router();
+            let request = post(path)
+                .header("origin", "https://evil.example")
+                .header("host", "box.lan:8477")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=a&password=b"))
+                .unwrap();
+
+            let response = send(app, request).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "cross-origin POST to {path} must be refused"
+            );
+        }
+    }
+
+    /// A same-origin POST must get past the layer — a CSRF check that rejects
+    /// everything would pass the test above while breaking the application.
+    #[tokio::test]
+    async fn a_same_origin_post_is_not_refused_by_the_csrf_layer() {
+        let (_dir, app) = router();
+        let request = post("/login")
+            .header("origin", "http://box.lan:8477")
+            .header("host", "box.lan:8477")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("username=a&password=b"))
+            .unwrap();
+
+        let response = send(app, request).await;
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a same-origin sign-in attempt must reach the handler"
+        );
+    }
+
+    /// GET is exempt from the origin check, or every ordinary page load from a
+    /// browser that sends `Origin` would be refused.
+    #[tokio::test]
+    async fn a_cross_origin_get_is_allowed() {
+        let (_dir, app) = router();
+        let request = Request::builder()
+            .uri("/login")
+            .header("origin", "https://evil.example")
+            .header("host", "box.lan:8477")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = send(app, request).await;
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    }
 }

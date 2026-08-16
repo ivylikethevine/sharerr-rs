@@ -1,7 +1,9 @@
+mod checks;
 mod cli;
 mod commands;
 mod secrets;
 mod settings;
+mod state;
 mod sync;
 mod torznab;
 mod tracker;

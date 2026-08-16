@@ -29,7 +29,7 @@ use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::Config;
-use sharerr_core::config::secret_keys;
+use sharerr_core::config::{config_paths, secret_keys};
 use sharerr_store::{Vault, master_key_from_env};
 
 use super::WebState;
@@ -159,18 +159,30 @@ pub async fn save_general(
     }
 
     write_config(&state, "general", |file| {
-        file.apply([Edit::str("tag", tag)]);
+        file.apply([Edit::str(config_paths::TAG, tag)]);
         Ok(())
     })
     .await
 }
 
 pub async fn save_sonarr(State(state): State<WebState>, Form(form): Form<ArrForm>) -> Response {
-    save_arr(state, form, "sonarr.url", secret_keys::SONARR_API_KEY).await
+    save_arr(
+        state,
+        form,
+        config_paths::SONARR_URL,
+        secret_keys::SONARR_API_KEY,
+    )
+    .await
 }
 
 pub async fn save_radarr(State(state): State<WebState>, Form(form): Form<ArrForm>) -> Response {
-    save_arr(state, form, "radarr.url", secret_keys::RADARR_API_KEY).await
+    save_arr(
+        state,
+        form,
+        config_paths::RADARR_URL,
+        secret_keys::RADARR_API_KEY,
+    )
+    .await
 }
 
 async fn save_arr(
@@ -226,11 +238,14 @@ pub async fn save_qbittorrent(
             anyhow::bail!("qBittorrent's URL is required — sharerr cannot seed without it");
         }
         file.apply([
-            Edit::str("qbittorrent.url", normalise_url(url)?),
-            Edit::str("qbittorrent.username", form.username.trim()),
-            Edit::str("qbittorrent.category", form.category.trim()),
-            Edit::str("qbittorrent.tag", form.tag.trim()),
-            Edit::bool("qbittorrent.skip_checking", checked(&form.skip_checking)),
+            Edit::str(config_paths::QBITTORRENT_URL, normalise_url(url)?),
+            Edit::str(config_paths::QBITTORRENT_USERNAME, form.username.trim()),
+            Edit::str(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
+            Edit::str(config_paths::QBITTORRENT_TAG, form.tag.trim()),
+            Edit::bool(
+                config_paths::QBITTORRENT_SKIP_CHECKING,
+                checked(&form.skip_checking),
+            ),
         ]);
         Ok(())
     })
@@ -262,18 +277,18 @@ pub async fn save_tracker(
         };
 
         let mut edits = vec![
-            Edit::str("tracker.backend", backend),
-            Edit::str_or_unset("tracker.advertised_host", &form.advertised_host),
+            Edit::str(config_paths::TRACKER_BACKEND, backend),
+            Edit::str_or_unset(config_paths::TRACKER_ADVERTISED_HOST, &form.advertised_host),
         ];
 
         let port = form.port.trim();
         if port.is_empty() {
-            edits.push(Edit::unset("tracker.port"));
+            edits.push(Edit::unset(config_paths::TRACKER_PORT));
         } else {
             let parsed: u16 = port.parse().map_err(|_| {
                 anyhow::anyhow!("{port:?} is not a port number between 1 and 65535")
             })?;
-            edits.push(Edit::int("tracker.port", i64::from(parsed)));
+            edits.push(Edit::int(config_paths::TRACKER_PORT, i64::from(parsed)));
         }
 
         file.apply(edits);
@@ -296,8 +311,11 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
         }
 
         file.apply([
-            Edit::bool("sync.enabled", checked(&form.enabled)),
-            Edit::int("sync.interval_secs", i64::try_from(interval).unwrap_or(900)),
+            Edit::bool(config_paths::SYNC_ENABLED, checked(&form.enabled)),
+            Edit::int(
+                config_paths::SYNC_INTERVAL_SECS,
+                i64::try_from(interval).unwrap_or(900),
+            ),
         ]);
         Ok(())
     })
@@ -387,8 +405,11 @@ async fn replacement_for(state: &WebState, path: &std::path::Path) -> ConfigFile
     let mut file = ConfigFile::replacing(path);
 
     file.apply([
-        Edit::str("data_dir", config.data_dir.to_string_lossy().as_ref()),
-        Edit::str("server.bind", config.server.bind.to_string()),
+        Edit::str(
+            config_paths::DATA_DIR,
+            config.data_dir.to_string_lossy().as_ref(),
+        ),
+        Edit::str(config_paths::SERVER_BIND, config.server.bind.to_string()),
     ]);
     file
 }
@@ -458,7 +479,7 @@ async fn secrets_present(config: &Config) -> BTreeSet<String> {
 /// Post/redirect/get on success, straight render on failure: a redirect would
 /// either drop the message or smuggle it through the query string, and this way
 /// the reason sits next to the form that caused it.
-async fn reject(state: &WebState, message: &str) -> Response {
+pub(super) async fn reject(state: &WebState, message: &str) -> Response {
     tracing::warn!(message, "rejected a settings change");
     let page = build_page(state, None, Some(message.to_owned())).await;
     (axum::http::StatusCode::BAD_REQUEST, render(&page)).into_response()
@@ -581,6 +602,7 @@ async fn build_page(
             .chain(std::iter::once(PathRow::default()))
             .collect(),
 
+        min_password_len: super::auth::MIN_PASSWORD_LEN,
         data_dir: config.data_dir.display().to_string(),
         bind: config.server.bind.to_string(),
         config_path: state.serve.config_path().display().to_string(),

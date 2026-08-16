@@ -67,17 +67,27 @@ With the stack up and something tagged and synced:
 
 ```bash
 # The Torznab endpoint needs an API key; generate one in the UI (Settings →
-# Indexer) or pipe one in.
-docker compose -f docker/compose.test.yml exec -T sharerr \
-    sh -c 'printf %s "a-test-key" | sharerr vault set torznab.api_key'
+# Indexer) or pipe one in. Piped on stdin rather than interpolated into `sh -c`,
+# so a value containing a quote cannot break out of the command.
+printf %s "a-test-key" | docker compose -f docker/compose.test.yml exec -T sharerr \
+    sharerr vault set torznab.api_key
 
 # What a friend's Prowlarr would fetch.
 curl -s "http://127.0.0.1:18477/api?t=caps&apikey=a-test-key"
 curl -s "http://127.0.0.1:18477/api?t=tvsearch&apikey=a-test-key"
 ```
 
-Prowlarr is already in the stack: add a *Generic Torznab* indexer pointing at
-`http://sharerr:8477/api` with that key.
+`run_docker_tests.sh` sets a key of its own and asserts `t=caps` returns a document,
+so the feed is covered by a normal run — but only that far.
+
+Prowlarr is in the stack behind an opt-in profile, since nothing automated uses it:
+
+```bash
+docker compose -f docker/compose.test.yml --profile indexer up -d prowlarr
+```
+
+Then add a *Generic Torznab* indexer pointing at `http://sharerr:8477/api` with
+that key.
 
 To exercise sharerr's own tracker rather than qBittorrent's, set
 `backend = "builtin"` under `[tracker]` in `docker/config/sharerr.toml` and
@@ -105,18 +115,13 @@ tagged content exercises nothing: `doctor` fails with `TagNotFound`, and `sync`
 bails with "no *arr app could be scanned". Getting content in is the one part of
 this stack that cannot go through the *arr APIs, and it is worth knowing why.
 
-`internal: true` on the compose network means the containers have no route off the
-host. That is how the project's no-egress requirement is *enforced* rather than
-merely documented. Image pulls still work — they happen on the host, before the
-network is joined. But:
-
 > **Adding a series or movie through the *arr API triggers a metadata lookup**
-> against `services.sonarr.tv` / `api.radarr.video`, which cannot resolve on an
-> internal network. The add fails.
+> against `services.sonarr.tv` / `api.radarr.video`. Every fixture title is
+> invented, so the lookup finds nothing and the add fails.
 
-Dropping `internal: true` does not rescue it either: every fixture title is
-invented, so the lookup finds nothing to add. So `seed-arr` writes the rows
-straight into Sonarr's and Radarr's own SQLite databases:
+That is a property of the fixtures, not of the network, so it holds however the
+stack is wired. `seed-arr` therefore writes the rows straight into Sonarr's and
+Radarr's own SQLite databases:
 
 ```bash
 cargo run -p sharerr-testkit --bin seed-arr -- \
@@ -132,17 +137,29 @@ Three things about it:
 - **Sonarr and Radarr keep their config in `./docker/state`**, bind-mounted rather
   than in a named volume, so a host-side seeder can open those files at all. `down
   -v` does not clear a bind mount, so teardown removes the directory too.
-- **It is coupled to their schemas.** That is the cost of the offline guarantee,
-  and it is why the image tags in `compose.test.yml` are pinned rather than
-  `:latest`. The rows are minimal — enough for the four endpoints sharerr reads
-  (`tag`, `series`, `episodefile`+`episode`, `movie`), not enough for a metadata
-  refresh.
+- **It is coupled to their schemas.** That is the cost of seeding this way, and it
+  is why the image tags in `compose.test.yml` are pinned rather than `:latest`. The
+  rows are minimal — enough for the four endpoints sharerr reads (`tag`, `series`,
+  `episodefile`+`episode`, `movie`), not enough for a metadata refresh.
+
+### The network used to be `internal: true`
+
+It is not any more. An internal bridge severs the host→container path that
+*published ports* travel, and this stack's whole control plane runs over those
+ports: the readiness probes curl `127.0.0.1`, the API keys are scraped from a bind
+mount, `seed-arr` runs on the host, and the browser URLs above are host-side. With
+the network isolated, those probes hung for their full timeout against containers
+that were perfectly healthy.
+
+The trade is explicit: the stack no longer *proves* sharerr makes no outbound
+requests. That property now rests on the code and the hermetic test suite rather
+than on the kernel refusing to route.
 
 The tag id is left to SQLite. sharerr resolves the *label*, case-insensitively, so
 `sharerr_testkit::TAG_ID` — a mock-server detail — deliberately does not apply here.
 
-Everything else sharerr does already worked offline: tag lookup, file discovery,
-path resolution, torrent creation, and seeding all stay inside the stack.
+Everything else sharerr does stays inside the stack anyway: tag lookup, file
+discovery, path resolution, torrent creation, and seeding.
 
 ## Four views of one library
 
@@ -170,7 +187,7 @@ All bound to `127.0.0.1` so the stack is not exposed on the network.
 | Radarr | 17878 |
 | qBittorrent WebUI | 18080 |
 | qBittorrent embedded tracker | 19000 |
-| Prowlarr | 19696 |
+| Prowlarr | 19696 (opt-in — see below) |
 | sharerr | 18477 |
 
 The tracker port is the one most easily forgotten in a real deployment: friends
@@ -180,10 +197,21 @@ just on the docker network.
 ## Tearing down
 
 ```bash
-docker compose -f docker/compose.test.yml down -v && rm -rf docker/state
+docker compose -f docker/compose.test.yml --profile indexer down -v && rm -rf docker/state
 ```
 
 Both halves are needed. `-v` drops the named volumes, which is what you want
-between runs — the API keys are regenerated on every fresh start. It does *not*
-touch `docker/state`, where Sonarr and Radarr keep theirs, so that goes separately.
+between runs — the API keys are regenerated on every fresh start, and qBittorrent
+only logs its temporary password when it has no stored one. It does *not* touch
+`docker/state`, where Sonarr and Radarr keep theirs, so that goes separately.
 `run_docker_tests.sh` does both from a trap.
+
+If `rm -rf docker/state` fails with a permission error, Docker auto-created that
+directory as root before the script could. Delete it as root instead:
+
+```bash
+docker run --rm -v "$PWD/docker:/w" alpine:3 rm -rf /w/state
+```
+
+The script pre-creates the directory to avoid this, and falls back to the same
+command when it finds a tree an older run left behind.

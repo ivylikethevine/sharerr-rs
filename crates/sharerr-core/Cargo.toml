@@ -4,14 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared domain types, layered configuration, and path mapping for sharerr."
 
 [lints]
 workspace = true
 
 [dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-thiserror = "2.0.20"
-time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
-tracing = "0.1.44"
-url = { version = "2.5.8", features = ["serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true, features = ["serde"] }

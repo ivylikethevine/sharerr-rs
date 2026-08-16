@@ -4,21 +4,26 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "qBittorrent WebUI API v2 client, shaped so that adding a share never moves or rewrites the media."
 
 [lints]
 workspace = true
 
 [dependencies]
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "form", "rustls", "http2", "charset", "multipart", "cookies"] }
-secrecy = "0.10.3"
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sharerr-core = { version = "0.1.0", path = "../sharerr-core" }
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt", "macros", "sync"] }
-tracing = "0.1.44"
-url = "2.5.8"
+# Adds to the workspace feature set rather than replacing it: `form` and
+# `multipart` are what post the .torrent file, and `cookies` carries qBittorrent's
+# session between the login call and everything after it.
+reqwest = { workspace = true, features = ["form", "multipart", "cookies"] }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sharerr-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tracing = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
-wiremock = "0.6.5"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock = { workspace = true }

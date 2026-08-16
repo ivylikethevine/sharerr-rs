@@ -149,7 +149,9 @@ async fn open(path: &std::path::Path) -> anyhow::Result<SqlitePool> {
         );
     }
 
-    let options = SqliteConnectOptions::new().filename(path).create_if_missing(false);
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false);
     Ok(SqlitePool::connect_with(options).await?)
 }
 
@@ -325,7 +327,13 @@ async fn seed_radarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
 fn slug(title: &str) -> String {
     title
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -345,7 +353,10 @@ mod tests {
     #[test]
     fn a_relative_path_is_what_is_left_below_the_folder() {
         assert_eq!(
-            relative_path("/tv/Lanternwick Hollow/Season 02/a.mkv", "/tv/Lanternwick Hollow"),
+            relative_path(
+                "/tv/Lanternwick Hollow/Season 02/a.mkv",
+                "/tv/Lanternwick Hollow"
+            ),
             "Season 02/a.mkv"
         );
     }

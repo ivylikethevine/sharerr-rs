@@ -108,6 +108,33 @@ impl Sessions {
     async fn remove(&self, token: &str) {
         self.inner.write().await.remove(token);
     }
+
+    /// Drop every session except `keep`.
+    ///
+    /// Used after a password change. The point of changing a password is usually
+    /// that someone else might know the old one, and leaving their session alive
+    /// would make the change cosmetic — sessions are bearer tokens and do not
+    /// re-check the password. The current session is spared so the operator is not
+    /// signed out of the page they just used.
+    async fn revoke_all_except(&self, keep: &str) {
+        self.inner.write().await.retain(|token, _| token == keep);
+    }
+}
+
+/// Check a proposed password against the rules the forms state.
+///
+/// Shared by setup and by the change-password form so the two cannot drift — the
+/// rule is also rendered into the page from [`MIN_PASSWORD_LEN`].
+fn password_rejection(password: &str, confirm: &str) -> Option<String> {
+    if password != confirm {
+        return Some("Those passwords do not match.".to_owned());
+    }
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Some(format!(
+            "Password must be at least {MIN_PASSWORD_LEN} characters."
+        ));
+    }
+    None
 }
 
 /// The signed-in user, if any.
@@ -198,13 +225,8 @@ pub async fn setup_submit(
 ) -> Response {
     let reject = |message: &str| render(&SetupPage::rejected(&form.username, message));
 
-    if form.password != form.confirm {
-        return reject("Those passwords do not match.");
-    }
-    if form.password.chars().count() < MIN_PASSWORD_LEN {
-        return reject(&format!(
-            "Password must be at least {MIN_PASSWORD_LEN} characters."
-        ));
+    if let Some(message) = password_rejection(&form.password, &form.confirm) {
+        return reject(&message);
     }
 
     let store = match state.serve.store().await {
@@ -288,6 +310,80 @@ pub async fn logout(State(state): State<WebState>, jar: CookieJar) -> Response {
     // works, which reads as a bug on the next sign-in.
     let jar = jar.remove(Cookie::from(COOKIE_NAME));
     (jar, Redirect::to("/login")).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordForm {
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+/// Change the signed-in operator's own password.
+///
+/// This closes the one hole in the account model: [`sharerr_store::Store::set_password`]
+/// existed and was tested, but nothing called it, so an operator who forgot their
+/// password had no route back in short of deleting a row from the `users` table by
+/// hand.
+///
+/// The current password is required even though the session already proves who
+/// this is. A session cookie is a long-lived bearer token — a borrowed laptop is
+/// enough to hold one — and re-asking is what stops it being escalated into
+/// permanent ownership of the account.
+pub async fn change_password(
+    State(state): State<WebState>,
+    jar: CookieJar,
+    Form(form): Form<ChangePasswordForm>,
+) -> Response {
+    let Some(username) = current_user(&state, &jar).await else {
+        // The guard should have caught this; treat it as a session that expired
+        // between rendering the form and submitting it.
+        return Redirect::to("/login").into_response();
+    };
+
+    // Rejections render back onto the settings page rather than redirecting, so the
+    // reason sits next to the form that caused it — the same choice every other
+    // settings rejection makes.
+    use crate::web::settings::reject as settings_error;
+
+    if let Some(message) = password_rejection(&form.new_password, &form.confirm_password) {
+        return settings_error(&state, &message).await;
+    }
+
+    let store = match state.serve.store().await {
+        Ok(store) => store,
+        Err(reason) => return (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+    };
+
+    // Verified before anything is written, and reported in the same words as a
+    // failed sign-in.
+    let current = SecretString::from(form.current_password.clone());
+    match store.verify_password(&username, &current).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(%username, "rejected a password change: wrong current password");
+            return settings_error(&state, "That is not your current password.").await;
+        }
+        Err(err) => return internal(&format!("checking the password: {err}")),
+    }
+
+    let new = SecretString::from(form.new_password.clone());
+    match store.set_password(&username, &new).await {
+        Ok(true) => {}
+        // The account vanished between the two queries, which means someone is
+        // editing the database underneath us.
+        Ok(false) => return settings_error(&state, "That account no longer exists.").await,
+        Err(StoreError::InvalidUser(message)) => return settings_error(&state, message).await,
+        Err(err) => return internal(&format!("changing the password: {err}")),
+    }
+
+    // Everything else holding a session was authorised by the *old* password.
+    if let Some(cookie) = jar.get(COOKIE_NAME) {
+        state.sessions.revoke_all_except(cookie.value()).await;
+    }
+
+    tracing::info!(%username, "password changed");
+    Redirect::to("/settings?saved=account").into_response()
 }
 
 async fn sign_in(state: &WebState, jar: CookieJar, username: &str) -> Response {

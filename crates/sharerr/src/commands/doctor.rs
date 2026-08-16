@@ -11,11 +11,12 @@
 //! anything failed, which makes it usable as a container healthcheck.
 
 use anyhow::{Result, bail};
+
+use crate::checks::{self, ArrOutcome, QbitOutcome, chain};
 use secrecy::SecretString;
-use sharerr_arr::{ArrClient, Discovered};
+use sharerr_arr::Discovered;
 use sharerr_core::config::{ServiceConfig, TrackerBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
-use sharerr_qbit::QbitClient;
 use sharerr_store::{Store, Vault, master_key_from_env};
 
 /// How many individual problem files to name before summarising the rest. A
@@ -61,24 +62,6 @@ impl Report {
     fn fail_err(&mut self, err: &dyn std::error::Error) {
         self.fail(chain(err));
     }
-}
-
-pub(crate) fn chain(err: &dyn std::error::Error) -> String {
-    let mut rendered = err.to_string();
-    let mut cause = err.source();
-
-    while let Some(next) = cause {
-        let text = next.to_string();
-        // `#[source]` fields are often interpolated into the parent's message
-        // already; only append what is genuinely new.
-        if !rendered.contains(&text) {
-            rendered.push_str(": ");
-            rendered.push_str(&text);
-        }
-        cause = next.source();
-    }
-
-    rendered
 }
 
 pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
@@ -277,47 +260,25 @@ async fn check_arr(
         MediaSource::Radarr => secret_keys::RADARR_API_KEY,
     };
 
+    // `secret` reports its own failure, in this command's voice and with the
+    // `vault set` hint. Handing `checks` an `Ok(None)` afterwards would report it a
+    // second time, so a missing credential short-circuits here instead.
     let Some(api_key) = secret(vault, key_name, report) else {
         return Vec::new();
     };
 
-    let client = match ArrClient::new(kind, &service.url, api_key) {
-        Ok(client) => client,
-        Err(err) => {
-            report.fail_err(&err);
-            return Vec::new();
-        }
-    };
+    let outcome = checks::check_arr(kind, Some(&service.url), Ok(Some(api_key)), &config.tag).await;
 
-    // Reachability and authentication first: every later check would report the
-    // same underlying problem in a less useful way.
-    match client.system_status().await {
-        Ok(status) => {
-            let name = if status.app_name.is_empty() {
-                kind.as_str()
-            } else {
-                &status.app_name
-            };
-            report.ok(format!(
-                "{} responded ({name} {})",
-                service.url, status.version
-            ));
-        }
-        Err(err) => {
-            report.fail_err(&err);
-            return Vec::new();
-        }
-    }
-
-    match client.discover(&config.tag).await {
-        Ok(items) if items.is_empty() => {
-            report.warn(format!(
-                "tag {:?} exists but nothing carries it — apply it to content you want to share",
-                config.tag
-            ));
-            Vec::new()
-        }
-        Ok(items) => {
+    // The rendering is this command's own — a terminal report in the third person,
+    // where the web UI writes a badge in the second. What the two can no longer do
+    // is disagree about which condition they found.
+    match outcome {
+        ArrOutcome::Ready {
+            version,
+            app_name,
+            items,
+        } => {
+            report.ok(format!("{} responded ({app_name} {version})", service.url));
             report.ok(format!("{} file(s) tagged {:?}", items.len(), config.tag));
             if kind == MediaSource::Sonarr {
                 // Not a defect, but it surprises people: Sonarr has no
@@ -326,8 +287,44 @@ async fn check_arr(
             }
             items
         }
-        Err(err) => {
-            report.fail_err(&err);
+        ArrOutcome::TagUnused { version } => {
+            report.ok(format!("{} responded ({version})", service.url));
+            report.warn(format!(
+                "tag {:?} exists but nothing carries it — apply it to content you want to share",
+                config.tag
+            ));
+            Vec::new()
+        }
+        // Distinct from the above, and it was not previously reported here at all:
+        // a tag that does not exist needs creating, not applying.
+        ArrOutcome::TagMissing { version } => {
+            report.ok(format!("{} responded ({version})", service.url));
+            report.fail(format!(
+                "no tag named {:?} exists in {} — create it, then apply it to content",
+                config.tag,
+                kind.as_str()
+            ));
+            Vec::new()
+        }
+        ArrOutcome::AuthRejected => {
+            report.fail(format!(
+                "{} rejected the API key — check {key_name}",
+                service.url
+            ));
+            Vec::new()
+        }
+        ArrOutcome::Unreachable(reason) => {
+            report.fail(format!("{} could not be reached: {reason}", service.url));
+            Vec::new()
+        }
+        ArrOutcome::BadUrl(reason) | ArrOutcome::Failed(reason) => {
+            report.fail(reason);
+            Vec::new()
+        }
+        // Both are unreachable from here: the credential was resolved above.
+        ArrOutcome::NotConfigured | ArrOutcome::NoCredential => Vec::new(),
+        ArrOutcome::CredentialUnreadable(reason) => {
+            report.fail(reason);
             Vec::new()
         }
     }
@@ -340,25 +337,43 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
         return;
     };
 
-    let qbit = match QbitClient::new(
+    // Shared with the web UI's "Test connection" button — see `crate::checks`. The
+    // client comes back on success so the checks below do not re-authenticate.
+    let qbit = match checks::check_qbit(
         &config.qbittorrent.url,
         &config.qbittorrent.username,
-        password,
-    ) {
-        Ok(qbit) => qbit,
-        Err(err) => {
-            report.fail_err(&err);
+        Ok(Some(password)),
+    )
+    .await
+    {
+        QbitOutcome::Ready { version, client } => {
+            report.ok(format!("{} responded ({version})", config.qbittorrent.url));
+            client
+        }
+        QbitOutcome::AuthRejected => {
+            report.fail(format!(
+                "{} rejected the username or password — check {}",
+                config.qbittorrent.url,
+                secret_keys::QBITTORRENT_PASSWORD
+            ));
             return;
         }
+        QbitOutcome::Unreachable(reason) => {
+            report.fail(format!(
+                "{} could not be reached: {reason}",
+                config.qbittorrent.url
+            ));
+            return;
+        }
+        QbitOutcome::BadUrl(reason)
+        | QbitOutcome::Failed(reason)
+        | QbitOutcome::CredentialUnreadable(reason) => {
+            report.fail(reason);
+            return;
+        }
+        // Unreachable: the credential was resolved above.
+        QbitOutcome::NoCredential => return,
     };
-
-    match qbit.version().await {
-        Ok(version) => report.ok(format!("{} responded ({version})", config.qbittorrent.url)),
-        Err(err) => {
-            report.fail_err(&err);
-            return;
-        }
-    }
 
     match qbit
         .torrents_info(Some(&config.qbittorrent.category), None)
@@ -439,71 +454,60 @@ fn check_paths(config: &Config, discovered: &[Discovered], report: &mut Report) 
         return;
     }
 
-    let resolver = config.resolver();
-    let mut unmapped = 0usize;
-    let mut missing = Vec::new();
-    let mut invalid = 0usize;
-    let mut sample = None;
+    // Resolution itself is shared with the web UI — see `crate::checks`. Only the
+    // wording below belongs to this command.
+    let paths = checks::check_paths(config, discovered);
 
-    for item in discovered {
-        match resolver.resolve(&item.arr_path) {
-            Ok(paths) => {
-                if !paths.mapping_applied {
-                    unmapped += 1;
-                }
-                if !paths.sharerr.exists() {
-                    missing.push(paths.sharerr.clone());
-                }
-                if sample.is_none() {
-                    sample = Some(paths);
-                }
-            }
-            Err(err) => {
-                invalid += 1;
-                if invalid <= MAX_LISTED {
-                    report.fail_err(&err);
-                }
-            }
-        }
+    for reason in paths.invalid.iter().take(MAX_LISTED) {
+        report.fail(reason);
+    }
+    if paths.invalid.len() > MAX_LISTED {
+        report.info(format!(
+            "  ... and {} more unresolvable path(s)",
+            paths.invalid.len() - MAX_LISTED
+        ));
     }
 
-    if let Some(paths) = sample {
+    if let Some(sample) = &paths.sample {
         report.info(format!(
             "example resolution, {} file(s) checked:",
-            discovered.len()
+            paths.checked
         ));
-        report.info(format!("  arr view     {}", paths.arr.display()));
-        report.info(format!("  sharerr view {}", paths.sharerr.display()));
+        report.info(format!("  arr view     {}", sample.arr.display()));
+        report.info(format!("  sharerr view {}", sample.sharerr.display()));
         // sharerr cannot stat this one — it is another container's filesystem.
         report.info(format!(
             "  qbit view    {} (verify against qBittorrent)",
-            paths.qbit.display()
+            sample.qbit.display()
         ));
     }
 
-    if unmapped > 0 && !config.path_map.is_empty() {
+    if paths.unmapped > 0 && paths.rules > 0 {
         report.warn(format!(
-            "{unmapped} of {} file(s) matched no mapping rule and passed through unchanged",
-            discovered.len()
+            "{} of {} file(s) matched no mapping rule and passed through unchanged",
+            paths.unmapped, paths.checked
         ));
     }
 
-    if missing.is_empty() {
+    if paths.missing.is_empty() {
         report.ok(format!(
             "all {} tagged file(s) are readable by sharerr",
-            discovered.len()
+            paths.checked
         ));
     } else {
         report.fail(format!(
             "{} of {} tagged file(s) do not exist at their sharerr-view path",
-            missing.len(),
-            discovered.len()
+            paths.missing.len(),
+            paths.checked
         ));
-        for path in missing.iter().take(MAX_LISTED) {
+        for path in paths.missing.iter().take(MAX_LISTED) {
             report.info(format!("  {}", path.display()));
         }
-        if missing.len() > MAX_LISTED {
-            report.info(format!("  ... and {} more", missing.len() - MAX_LISTED));
+        if paths.missing.len() > MAX_LISTED {
+            report.info(format!(
+                "  ... and {} more",
+                paths.missing.len() - MAX_LISTED
+            ));
         }
         report.info("fix the [[path_map]] rules so the arr view maps onto sharerr's mount");
     }

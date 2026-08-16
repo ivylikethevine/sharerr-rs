@@ -39,6 +39,61 @@ pub mod secret_keys {
     ];
 }
 
+/// Dotted paths of the settings the web UI can write back to `sharerr.toml`.
+///
+/// These strings are load-bearing in three independent places: the settings
+/// handlers name them when building a `toml_edit` edit, `settings.html` names them
+/// again to decide whether a field is pinned by an environment variable, and the
+/// environment scan *synthesises* the same strings by lowercasing `SHARERR_*` and
+/// turning `__` into `.`. The template's lookup is therefore a string join between
+/// a generated key and a hand-typed literal.
+///
+/// Typed once here so a typo is a compile error on the Rust side rather than a
+/// field that silently renders editable while the environment has it pinned — a
+/// mismatch nothing else in the build would catch.
+pub mod config_paths {
+    pub const TAG: &str = "tag";
+    pub const DATA_DIR: &str = "data_dir";
+    pub const SERVER_BIND: &str = "server.bind";
+
+    pub const SONARR_URL: &str = "sonarr.url";
+    pub const RADARR_URL: &str = "radarr.url";
+
+    pub const QBITTORRENT_URL: &str = "qbittorrent.url";
+    pub const QBITTORRENT_USERNAME: &str = "qbittorrent.username";
+    pub const QBITTORRENT_CATEGORY: &str = "qbittorrent.category";
+    pub const QBITTORRENT_TAG: &str = "qbittorrent.tag";
+    pub const QBITTORRENT_SKIP_CHECKING: &str = "qbittorrent.skip_checking";
+
+    pub const TRACKER_BACKEND: &str = "tracker.backend";
+    pub const TRACKER_ADVERTISED_HOST: &str = "tracker.advertised_host";
+    pub const TRACKER_PORT: &str = "tracker.port";
+
+    pub const SYNC_ENABLED: &str = "sync.enabled";
+    pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
+
+    /// Every path the UI writes, for the test that proves each one names a real
+    /// field. Keep in step with the constants above — a path missing from here is
+    /// simply unverified, not broken.
+    pub const ALL: &[&str] = &[
+        TAG,
+        DATA_DIR,
+        SERVER_BIND,
+        SONARR_URL,
+        RADARR_URL,
+        QBITTORRENT_URL,
+        QBITTORRENT_USERNAME,
+        QBITTORRENT_CATEGORY,
+        QBITTORRENT_TAG,
+        QBITTORRENT_SKIP_CHECKING,
+        TRACKER_BACKEND,
+        TRACKER_ADVERTISED_HOST,
+        TRACKER_PORT,
+        SYNC_ENABLED,
+        SYNC_INTERVAL_SECS,
+    ];
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -213,4 +268,71 @@ pub struct PathMapping {
     /// Prefix as qBittorrent sees it. Defaults to `sharerr` when omitted.
     #[serde(default)]
     pub qbit: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// Every writable path must name a field that actually exists on `Config`.
+    ///
+    /// This is the check that was missing. The same dotted strings are typed by
+    /// hand in the settings handlers and again in `settings.html`, and are
+    /// generated a third time from `SHARERR_*` environment variables — so a typo in
+    /// any one of them used to compile cleanly and simply stop matching, leaving a
+    /// field that looks editable while the environment has it pinned.
+    ///
+    /// Walking the serialised form rather than naming fields again keeps this
+    /// honest: renaming a field in `Config` breaks this test rather than silently
+    /// making a constant wrong.
+    #[test]
+    fn every_writable_path_resolves_to_a_real_config_field() {
+        // Sonarr and Radarr are `None` by default and would serialise to null, so
+        // populate them — the paths under them are the point.
+        let config = Config {
+            sonarr: Some(ServiceConfig {
+                url: Url::parse("http://sonarr:8989").unwrap(),
+            }),
+            radarr: Some(ServiceConfig {
+                url: Url::parse("http://radarr:7878").unwrap(),
+            }),
+            ..Config::default()
+        };
+        let document = serde_json::to_value(&config).unwrap();
+
+        for path in config_paths::ALL {
+            let mut cursor = &document;
+            for segment in path.split('.') {
+                cursor = cursor.get(segment).unwrap_or_else(|| {
+                    panic!("config path {path:?} has no field {segment:?} on Config")
+                });
+            }
+        }
+    }
+
+    /// The environment scan lowercases `SHARERR_*` and turns `__` into `.`, so a
+    /// path containing an uppercase letter could never be matched by an override
+    /// and would render as editable no matter what the operator set.
+    #[test]
+    fn writable_paths_are_lowercase_so_env_overrides_can_match_them() {
+        for path in config_paths::ALL {
+            assert_eq!(
+                **path,
+                *path.to_lowercase(),
+                "{path:?} must be lowercase to match a SHARERR_* override"
+            );
+        }
+    }
+
+    /// A duplicate would mean two settings sections writing the same key, with the
+    /// second silently winning.
+    #[test]
+    fn writable_paths_are_unique() {
+        let mut seen = std::collections::BTreeSet::new();
+        for path in config_paths::ALL {
+            assert!(seen.insert(*path), "{path:?} is listed twice");
+        }
+    }
 }

@@ -7,6 +7,11 @@
 //! two questions a wrong setting raises — *can I reach it* and *does it accept the
 //! credential* — separately, because the fixes are different.
 //!
+//! The checking itself lives in [`crate::checks`], shared with `doctor`. This file
+//! is only the renderer: it turns one outcome into one badge. Deciding what is true
+//! in two places is what let the two tools drift into describing different
+//! conditions in similar words.
+//!
 //! Deliberately narrower than `doctor`: path-mapping resolution and tracker state
 //! are not checked here. Those need a library to walk and are worth a page of
 //! their own rather than a one-line badge.
@@ -14,13 +19,11 @@
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
 use secrecy::SecretString;
-use sharerr_arr::ArrClient;
 use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
-use sharerr_qbit::QbitClient;
 
 use super::WebState;
-use crate::commands::doctor::chain;
+use crate::checks::{ArrOutcome, QbitOutcome, check_arr, check_qbit};
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
 ///
@@ -31,9 +34,9 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
     let config = state.serve.config().await;
 
     let outcome = match service.as_str() {
-        "sonarr" => check_arr(MediaSource::Sonarr, &state, &config).await,
-        "radarr" => check_arr(MediaSource::Radarr, &state, &config).await,
-        "qbittorrent" => check_qbit(&state, &config).await,
+        "sonarr" => arr_badge(MediaSource::Sonarr, &state, &config).await,
+        "radarr" => arr_badge(MediaSource::Radarr, &state, &config).await,
+        "qbittorrent" => qbit_badge(&state, &config).await,
         _ => Outcome::Bad("Unknown service.".to_owned()),
     };
 
@@ -80,78 +83,75 @@ async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretStri
         .map_err(|err| err.to_string())
 }
 
-async fn check_arr(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
+async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
     let (service, key) = match kind {
         MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
         MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
     };
 
-    let Some(service) = service else {
-        return Outcome::Bad("No URL configured. Save one first.".to_owned());
-    };
+    let api_key = secret(state, key).await;
+    let outcome = check_arr(
+        kind,
+        service.map(|service| &service.url),
+        api_key,
+        &config.tag,
+    )
+    .await;
 
-    let api_key = match secret(state, key).await {
-        Ok(Some(api_key)) => api_key,
-        Ok(None) => return Outcome::Bad("No API key stored. Save one first.".to_owned()),
-        Err(reason) => return Outcome::Bad(reason),
-    };
-
-    let client = match ArrClient::new(kind, &service.url, api_key) {
-        Ok(client) => client,
-        Err(err) => return Outcome::Bad(chain(&err)),
-    };
-
-    let version = match client.system_status().await {
-        Ok(status) => status.version,
-        Err(err) if err.is_auth_failure() => {
-            return Outcome::Bad("Reached it, but the API key was rejected.".to_owned());
+    // Second person and a next action, which is what distinguishes these from
+    // `doctor`'s report — the operator is looking at the field they just filled in.
+    match outcome {
+        ArrOutcome::NotConfigured => Outcome::Bad("No URL configured. Save one first.".to_owned()),
+        ArrOutcome::NoCredential => Outcome::Bad("No API key stored. Save one first.".to_owned()),
+        ArrOutcome::CredentialUnreadable(reason) | ArrOutcome::BadUrl(reason) => {
+            Outcome::Bad(reason)
         }
-        Err(err) if err.is_unreachable() => {
-            return Outcome::Bad(format!("Could not reach it: {}", chain(&err)));
+        ArrOutcome::Unreachable(reason) => Outcome::Bad(format!("Could not reach it: {reason}")),
+        ArrOutcome::AuthRejected => {
+            Outcome::Bad("Reached it, but the API key was rejected.".to_owned())
         }
-        Err(err) => return Outcome::Bad(chain(&err)),
-    };
-
-    // The tag is checked in the same breath because a correct URL and key with no
-    // matching tag is the most common "sharerr does nothing" state, and it looks
-    // identical to a working setup from the outside.
-    match client.tag_id(&config.tag).await {
-        Ok(_) => Outcome::Good(format!("Connected to {version}; the tag exists.")),
-        Err(_) => Outcome::Bad(format!(
+        ArrOutcome::Failed(reason) => Outcome::Bad(reason),
+        ArrOutcome::TagMissing { version } => Outcome::Bad(format!(
             "Connected to {version}, but no tag named {:?} exists there yet — \
              create it and tag something, or nothing will ever be shared.",
+            config.tag
+        )),
+        // Not an error: the tag is there and simply has nothing on it yet, which is
+        // the normal state right after setup. Saying so is still worth a badge,
+        // because it is the most common reason sharerr appears to do nothing.
+        ArrOutcome::TagUnused { version } => Outcome::Good(format!(
+            "Connected to {version}; the tag exists but nothing carries it yet.",
+        )),
+        ArrOutcome::Ready { version, items, .. } => Outcome::Good(format!(
+            "Connected to {version}; {} file(s) tagged {:?}.",
+            items.len(),
             config.tag
         )),
     }
 }
 
-async fn check_qbit(state: &WebState, config: &Config) -> Outcome {
-    let password = match secret(state, secret_keys::QBITTORRENT_PASSWORD).await {
-        Ok(Some(password)) => password,
-        Ok(None) => return Outcome::Bad("No password stored. Save one first.".to_owned()),
-        Err(reason) => return Outcome::Bad(reason),
-    };
-
-    let client = match QbitClient::new(
+async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
+    let password = secret(state, secret_keys::QBITTORRENT_PASSWORD).await;
+    let outcome = check_qbit(
         &config.qbittorrent.url,
         &config.qbittorrent.username,
         password,
-    ) {
-        Ok(client) => client,
-        Err(err) => return Outcome::Bad(chain(&err)),
-    };
+    )
+    .await;
 
-    if let Err(err) = client.login().await {
-        return if err.is_auth_failure() {
+    match outcome {
+        QbitOutcome::NoCredential => Outcome::Bad("No password stored. Save one first.".to_owned()),
+        QbitOutcome::CredentialUnreadable(reason) | QbitOutcome::BadUrl(reason) => {
+            Outcome::Bad(reason)
+        }
+        QbitOutcome::Unreachable(reason) => Outcome::Bad(format!("Could not reach it: {reason}")),
+        QbitOutcome::AuthRejected => {
             Outcome::Bad("Reached it, but the username or password was rejected.".to_owned())
-        } else {
-            Outcome::Bad(format!("Could not reach it: {}", chain(&err)))
-        };
-    }
-
-    match client.version().await {
-        Ok(version) => Outcome::Good(format!("Signed in to qBittorrent {version}.")),
-        Err(err) => Outcome::Bad(format!("Signed in, but: {}", chain(&err))),
+        }
+        QbitOutcome::Failed(reason) => Outcome::Bad(format!("Signed in, but: {reason}")),
+        QbitOutcome::Ready { version, .. } => {
+            Outcome::Good(format!("Signed in to qBittorrent {version}."))
+        }
     }
 }
 

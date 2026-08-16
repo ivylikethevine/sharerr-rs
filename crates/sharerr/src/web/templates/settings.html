@@ -14,7 +14,11 @@
 <h1>Settings</h1>
 
 {% if let Some(section) = saved %}
+{% if section == "account" %}
+<p class="ok" role="status">Password changed. Any other signed-in session has been signed out.</p>
+{% else %}
 <p class="ok" role="status">Saved {{ section }}. Changes take effect within a few seconds — no restart needed.</p>
+{% endif %}
 {% endif %}
 
 {% if let Some(message) = error %}
@@ -271,6 +275,25 @@
   <p class="hint">Minimum 60.</p>
 
   <button type="submit">Save</button>
+</form>
+
+<h2>Your account</h2>
+<form method="post" action="/settings/account/password" class="panel">
+  <p class="hint">
+    Changing this signs out every other session, here and elsewhere.
+  </p>
+
+  <label for="current_password">Current password</label>
+  <input id="current_password" name="current_password" type="password" autocomplete="current-password">
+
+  <label for="new_password">New password</label>
+  <input id="new_password" name="new_password" type="password" autocomplete="new-password">
+
+  <label for="confirm_password">Confirm new password</label>
+  <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password">
+  <p class="hint">At least {{ min_password_len }} characters.</p>
+
+  <button type="submit">Change password</button>
 </form>
 
 <h2>Fixed at startup</h2>

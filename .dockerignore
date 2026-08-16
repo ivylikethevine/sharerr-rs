@@ -9,5 +9,11 @@
 # rebuild on both architectures for a typo fix.
 /.github
 *.md
+# The compose test stack builds with `context: ..`, so without this the *arr apps'
+# live state — SQLite databases, WAL files, logs, and a config.xml containing a
+# real API key — is copied into the build context and baked into the builder layer.
+# Those databases also mutate on every run, so they change the `COPY . .` digest
+# each time and defeat layer caching outright.
+/docker
 .env
 *.key

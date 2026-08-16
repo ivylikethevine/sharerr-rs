@@ -13,6 +13,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, for `audit` only. A new advisory against a dependency is not something
+  # a commit to this repo causes, so waiting for the next push to hear about it is
+  # waiting for the wrong event.
+  schedule:
+    - cron: "0 6 * * 1"
 
 # A quick follow-up commit should not leave the previous run burning a runner.
 concurrency:
@@ -78,3 +83,35 @@ jobs:
       # `docker compose -f docker/compose.test.yml` and need a four-container *arr
       # stack plus a generated fixture library. They stay local and opt-in.
       - run: cargo test --workspace --all-features --locked
+
+  audit:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Advisories, licences, and duplicate/banned crates. The tree includes
+      # argon2, chacha20poly1305, rustls and an HTTP server, none of which had any
+      # advisory gate before this job existed.
+      #
+      # Its own job because it is the one check that can start failing without
+      # anybody touching the repository — which is also why this workflow has a
+      # weekly `schedule:` trigger.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+
+  # Neither of these compiles anything, and both guard files that no Rust check
+  # looks at. The test stack in particular has already shipped with its `networks:`
+  # block commented out and nothing noticed.
+  scripts:
+    name: shell + compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Would have caught the secret spliced into a remote `sh -c` string.
+      - run: shellcheck run_docker_tests.sh
+
+      # Schema-validates the compose file without needing the images or a daemon.
+      - run: docker compose -f docker/compose.test.yml config -q

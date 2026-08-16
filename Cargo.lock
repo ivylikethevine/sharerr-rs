@@ -2546,6 +2546,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",

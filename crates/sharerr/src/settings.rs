@@ -244,7 +244,8 @@ mod tests {
             let (cfg, err) = load_or_recover(&jail.directory().join("sharerr.toml"));
             assert_eq!(cfg.tag, "sharerr", "falls back to the default");
             assert!(
-                err.expect("a rejected key must be reported").contains("taag"),
+                err.expect("a rejected key must be reported")
+                    .contains("taag"),
                 "the reason must name the offending key"
             );
             Ok(())
@@ -277,7 +278,10 @@ mod tests {
     #[test]
     fn the_environment_still_wins_during_recovery() {
         figment::Jail::expect_with(|jail| {
-            jail.create_file("sharerr.toml", "taag = \"typo\"\ndata_dir = \"/from-file\"\n")?;
+            jail.create_file(
+                "sharerr.toml",
+                "taag = \"typo\"\ndata_dir = \"/from-file\"\n",
+            )?;
             jail.set_env("SHARERR_DATA_DIR", "/from-env");
             jail.set_env("SHARERR_SERVER__BIND", "0.0.0.0:9100");
 

@@ -30,7 +30,7 @@ use serde::Deserialize;
 use sharerr_core::config::secret_keys;
 use sharerr_core::model::{MediaSpec, SharedItem};
 
-use crate::commands::serve::ServeState;
+use crate::state::ServeState;
 
 /// Newznab category numbers. Sonarr and Radarr filter on these, and a release in
 /// the wrong one is invisible to the app that wants it.

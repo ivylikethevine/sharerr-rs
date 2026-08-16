@@ -1,63 +1,36 @@
-This is a project that aims to help users with content share that content over
-already existing tools, as a friend-to-friend system. It aims to be as friction-less
-as possible, and slim on resource and configuration requirements. It will be
-run typically as a docker image, accessable via a web interface.
+# sharerr
 
-I want the tech stack to use Rust as the base layer. There are existing APIs
-for the services I would like to integrate with. The idea is as follows:
+Share your media library with friends, over the tools you already run.
 
-1. Existing selfhosted deployments have libraries of content, as well as all
-   the required metadata to accurately request and serve that content.
-2. qbittorrent has a built-in rss feed & an optional embedded tracker
-3. Prowlarr can index torrents from qbittorrent's rss feed
-4. I would like sharerr to connect to sonarr and radarr to find any content tagged
-   "sharerr", and serve it over the existing tools, making the new torrent as easily
-   searchable/indexable by those existing tools as possible.
-5. One would then be able to connect to another friend's sharerr instance to
-   share content.
-6. Eventually, I would like a web interface to manage sharerr instances and content,
-   and the ability for a sonarr or radarr instance to directly request content from
-   a sharerr instance, again with as much metadata as possible, using the sonarr/radarr
-   data as well as metadata found with the file. I want to also preserve any existing
-   torrents if possible, instead of moving the file & causing errors.
+sharerr connects to Sonarr and Radarr, finds everything tagged `sharerr`, builds a
+torrent for each file **where it already sits**, seeds it through your qBittorrent,
+and publishes the lot as a Torznab feed. Your friend adds that feed to their
+Prowlarr; their Sonarr and Radarr then find your releases with the TVDB/TMDb/IMDb
+ids attached, so a release matches a known series or film rather than being guessed
+from its filename.
 
-> **One correction to points 2 and 3, kept here because the design depends on it.**
-> qBittorrent *consumes* RSS feeds; it does not publish one. There is therefore no
-> qBittorrent feed for Prowlarr to index. sharerr serves the feed itself, as
-> Torznab, which is the format Prowlarr's *Generic Torznab* indexer speaks — see
-> [Sharing with a friend](#sharing-with-a-friend). qBittorrent's *embedded tracker*
-> is real and is used; it is only the feed half of the original plan that had to
-> change.
+Nothing is copied, renamed, re-linked, or moved. That is the constraint the whole
+design is built around.
 
-The services:
+> **Status: experimental.** This is a personal project and has not had a tagged
+> release. See [the roadmap](docs/roadmap.md) for what works and what does not.
+> Large parts were written with generative AI — see [AI usage](#ai-usage).
 
-1. Sonarr - library and request system for tv shows
-2. Radarr - library and request system for movies
-3. Qbittorrent - torrent client
-4. Prowlarr - torrent indexer
-5. Docker - container runtime
+## What works today
 
-Requirements:
+| | |
+|---|---|
+| Sonarr / Radarr discovery by tag | ✅ |
+| Torrent construction, files never moved | ✅ |
+| Seeding through qBittorrent | ✅ |
+| qBittorrent embedded tracker, or sharerr's own | ✅ |
+| Torznab feed for Prowlarr | ✅ |
+| Web UI: setup, settings, connection tests | ✅ |
+| Path-mapping diagnostics in the browser | ✅ |
+| Friend/peer management | ❌ — one shared API key; see [roadmap](docs/roadmap.md) |
+| Lidarr / Readarr, non-qBittorrent clients | ❌ |
 
-1. Security - use API tokens for the services, and store them securely. Only send
-   them with requests as necessary. Do not store them in plaintext, and maintain
-   them between service restarts.
-2. Network usage - do not make any requests outside of the configured services
-   unless absolutely necessary.
-3. Testing - use docker ro run the various services with test configurations.
-   Do not use any real files or filenames.
-
-Assumptions:
-
-1. The user has a system with currently deployed sonarr (and/or) radarr.
-   This is typically via docker.
-2. The user has a torrent client (qbittorrent) and indexer (prowlarr) running.
-3. The user may or may not be using a VPN, or a VPN container such as gluetun.
-4. The user has their media library accessable to the container(s).
-
-### Getting started
-
-sharerr is configured from its web interface. No CLI command is required.
+## Quickstart
 
 ```bash
 docker run -d --name sharerr \
@@ -66,8 +39,11 @@ docker run -d --name sharerr \
   -v sharerr-config:/config \
   -v sharerr-data:/data \
   -v /path/to/library:/media:ro \
-  ghcr.io/ivyduggan/sharerr-rs:latest
+  ghcr.io/ivyduggan/sharerr-rs:main
 ```
+
+> The `:latest` tag is only published from a version tag, and there are none yet.
+> Until the first release, `:main` is the image to use.
 
 Then open `http://localhost:8477/`. The first visit asks you to create an account —
 whoever gets there first claims the instance, so do it now rather than leaving it
@@ -91,25 +67,27 @@ Anyone on the network who can reach port 8477 can reach the login page, and the
 session cookie is not sent over TLS, because sharerr is normally run on a LAN. If
 that is not true of your network, put it behind a TLS-terminating proxy.
 
-### Sharing with a friend
+## Sharing with a friend
 
 sharerr publishes what it shares as a **Torznab** feed, which is what Prowlarr
 speaks. In **Settings → Indexer**, generate an API key and copy it together with
 the feed URL. Your friend adds a *Generic Torznab* indexer in their Prowlarr using
-those two values; their Sonarr and Radarr then find your releases through it, with
-the TVDB/TMDb/IMDb ids attached so a release matches a known series or film rather
-than being parsed from its name.
+those two values.
 
 The feed lists only what is actually seeding, and the `.torrent` files it links to
 are served from the same instance. Both the feed and the downloads require the API
 key — without one, the endpoint stays closed rather than open, because the feed is
 a list of everything you share.
 
+> **One shared key, for now.** Every friend uses the same API key, so they cannot
+> be told apart and revoking one revokes all of them. Per-peer keys are the next
+> milestone — see [the roadmap](docs/roadmap.md).
+
 The feed URL is built from `tracker.advertised_host`, so that has to be an address
 your friend can reach. Everything here is a single HTTP port; whatever you do to
 make port 8477 reachable also makes the tracker and the feed reachable.
 
-#### Which tracker
+### Which tracker
 
 **qBittorrent's embedded tracker** is the default and needs nothing from you.
 
@@ -125,10 +103,17 @@ One caveat with the builtin tracker: the announce endpoint is part of
 `sharerr serve`, so a one-shot `sharerr sync` produces correct torrents whose
 announces fail until `serve` is running.
 
-#### Configuring it without the UI
+## The CLI
 
-Everything above has a headless equivalent, which is what a scripted deployment or
-a secrets manager wants:
+The UI covers everything, but each verb has a headless equivalent, which is what a
+scripted deployment or a secrets manager wants:
+
+| Command | What it does |
+|---|---|
+| `sharerr serve` | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs. |
+| `sharerr sync` | One reconciliation pass, then exit. |
+| `sharerr doctor` | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the UI's **Diagnostics** page, so the two cannot disagree. |
+| `sharerr vault set <key>` | Reads a secret from stdin into the encrypted vault. |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -141,20 +126,61 @@ over the config file, so a field pinned by a variable cannot be changed from the
 UI; sharerr renders those inputs disabled and names the variable rather than
 accepting a save that would be silently discarded.
 
-###### AI Usage
+## Building and testing
+
+Rust **1.88** or newer (the workspace sets `rust-version`; `docker build .` is the
+de-facto MSRV check, since a local toolchain is invariably newer).
+
+```bash
+cargo build
+cargo test --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+Clippy must stay at zero warnings. The workspace sets `unwrap_used` and
+`expect_used` to `warn` because the vault and service clients handle secrets, and
+CI promotes them with `-D warnings`. Test modules opt out with an inner
+`#![allow(clippy::unwrap_used, clippy::expect_used)]` rather than weakening the
+workspace lint.
+
+The default suite is **hermetic** — no network, no containers, no database: the
+service clients run against wiremock on loopback and sqlx against
+`sqlite::memory:`. There is a second, opt-in tier that drives a real
+Sonarr + Radarr + qBittorrent stack:
+
+```bash
+./run_docker_tests.sh
+```
+
+See [docker/README.md](docker/README.md) for what it does and how to drive it by
+hand. Everything it touches is synthetic — invented titles, seeded pseudo-random
+bytes. No real content is involved anywhere.
+
+## Layout
+
+| Crate | |
+|---|---|
+| `sharerr` | The binary: CLI, web UI, Torznab, tracker, reconciliation |
+| `sharerr-core` | Domain types, layered config, path mapping. No I/O |
+| `sharerr-arr` | Sonarr/Radarr clients and tagged-content discovery |
+| `sharerr-qbit` | qBittorrent WebUI client |
+| `sharerr-store` | Encrypted vault + SQLite store |
+| `sharerr-torrent` | Torrent construction and tracker resolution |
+| `sharerr-testkit` | Synthetic fixtures. Never in a release build |
+
+The original design brief, and the two corrections the implementation forced on
+it, are in [docs/design.md](docs/design.md).
+
+## AI usage
 
 Heavily inspired by: https://v2.dictionarry.dev/ai-transparency
 
-I have used generative AI to write large parts of this project. Regardless, all of the code in this repository is my _responsibility_. AI is a tool, not an owner of a project. I have personally understood, reviewed, and approved all of the AI generated code in this repository. _Mainline releases_ have the same level of accountability to me as any code I write and publish.
+I have used generative AI to write large parts of this project. Regardless, all of
+the code in this repository is my _responsibility_. AI is a tool, not an owner of a
+project. I have personally understood, reviewed, and approved all of the AI
+generated code in this repository. _Mainline releases_ have the same level of
+accountability to me as any code I write and publish.
 
-###### The MIT License (MIT)
+## Licence
 
-From: https://mit-license.org/
-
-Copyright © 2026 Ivy Duggan ivylikethevine.com
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+MIT — see [LICENSE](LICENSE).
