@@ -352,8 +352,8 @@ fn check_library(
             ));
             if skipped > 0 {
                 report.warn(format!(
-                    "{skipped} file(s) skipped — their names have no SxxEyy, so there is \
-                     no episode to advertise. Rename them the way a release is named"
+                    "{skipped} file(s) skipped — their names carry nothing a release could \
+                     advertise. Rename them the way a release is named"
                 ));
             }
             report.info("note: no external ids — a friend's app matches these by name alone");

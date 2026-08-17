@@ -393,10 +393,22 @@ pub fn parse_libraries(rows: &[(String, String)]) -> Result<Vec<LibraryConfig>> 
                 index + 1
             );
         };
-        libraries.push(LibraryConfig {
-            path: PathBuf::from(path),
-            kind,
-        });
+        let path = PathBuf::from(path);
+        // A relative path would scan fine against the working directory and
+        // then fail at share time, when the path resolver refuses it.
+        if !path.is_absolute() {
+            bail!("library {} must be an absolute path", path.display());
+        }
+        libraries.push(LibraryConfig { path, kind });
+    }
+
+    if let Some((a, b)) = crate::library::overlapping_roots(&libraries) {
+        bail!(
+            "library directories overlap: {} and {} — a file reachable from both \
+             would be shared under whichever kind came last",
+            a.display(),
+            b.display()
+        );
     }
 
     Ok(libraries)

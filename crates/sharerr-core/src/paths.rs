@@ -78,6 +78,42 @@ impl PathResolver {
             mapping_applied: false,
         })
     }
+
+    /// Resolve a path sharerr itself discovered — a `[[library]]` file.
+    ///
+    /// The path is already the sharerr view, so no arr-side rule may rewrite it:
+    /// a `[[path_map]]` whose `arr` prefix happens to match the library would
+    /// otherwise translate the path into one that exists nowhere. The only
+    /// translation that can apply is sharerr→qbit, taken from the most specific
+    /// rule that spells out a distinct `qbit` prefix. With no such rule the path
+    /// passes through to all three views, which is correct when qBittorrent
+    /// shares sharerr's mounts.
+    pub fn resolve_sharerr(&self, path: &Path) -> Result<ResolvedPaths, PathError> {
+        if !path.is_absolute() {
+            return Err(PathError::NotAbsolute(path.to_path_buf()));
+        }
+
+        let translated = self
+            .maps
+            .iter()
+            .filter_map(|map| {
+                let qbit_prefix = map.qbit.as_ref()?;
+                let rest = path.strip_prefix(&map.sharerr).ok()?;
+                Some((map.sharerr.components().count(), qbit_prefix.join(rest)))
+            })
+            .max_by_key(|(specificity, _)| *specificity);
+
+        let (mapping_applied, qbit) = match translated {
+            Some((_, qbit)) => (true, qbit),
+            None => (false, path.to_path_buf()),
+        };
+        Ok(ResolvedPaths {
+            arr: path.to_path_buf(),
+            sharerr: path.to_path_buf(),
+            qbit,
+            mapping_applied,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -159,5 +195,42 @@ mod tests {
             r.resolve(Path::new("tv/ep.mkv")),
             Err(PathError::NotAbsolute(_))
         ));
+        assert!(matches!(
+            r.resolve_sharerr(Path::new("tv/ep.mkv")),
+            Err(PathError::NotAbsolute(_))
+        ));
+    }
+
+    /// The trap this method exists to avoid: an arr-side rule whose prefix
+    /// happens to match a library path must not rewrite a path that is already
+    /// the sharerr view.
+    #[test]
+    fn a_sharerr_view_path_is_never_rewritten_by_an_arr_rule() {
+        let r = PathResolver::new(vec![map("/media", "/mnt/media", None)]);
+        let out = r.resolve_sharerr(Path::new("/media/extras/x.mkv")).unwrap();
+        assert_eq!(out.sharerr, PathBuf::from("/media/extras/x.mkv"));
+        assert_eq!(out.qbit, PathBuf::from("/media/extras/x.mkv"));
+        assert!(!out.mapping_applied);
+    }
+
+    #[test]
+    fn a_sharerr_view_path_still_gets_its_qbit_translation() {
+        let r = PathResolver::new(vec![
+            map("/tv", "/media", Some("/downloads")),
+            map("/tv/extras", "/media/extras", Some("/downloads/extras")),
+        ]);
+        let out = r.resolve_sharerr(Path::new("/media/extras/x.mkv")).unwrap();
+        assert_eq!(out.sharerr, PathBuf::from("/media/extras/x.mkv"));
+        // The most specific sharerr prefix wins, exactly as it does arr-side.
+        assert_eq!(out.qbit, PathBuf::from("/downloads/extras/x.mkv"));
+        assert!(out.mapping_applied);
+    }
+
+    #[test]
+    fn a_rule_without_a_qbit_view_leaves_a_sharerr_path_alone() {
+        let r = PathResolver::new(vec![map("/arr/tv", "/media", None)]);
+        let out = r.resolve_sharerr(Path::new("/media/x.mkv")).unwrap();
+        assert_eq!(out.qbit, PathBuf::from("/media/x.mkv"));
+        assert!(!out.mapping_applied);
     }
 }

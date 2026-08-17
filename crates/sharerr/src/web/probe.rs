@@ -135,14 +135,19 @@ async fn library_badge(config: &Config) -> Outcome {
     let libraries = config.library.clone();
     // The scans stat every file; off the async loop so a slow mount cannot
     // stall the single worker thread this may be running on.
-    let outcomes = tokio::task::spawn_blocking(move || {
+    let outcomes = match tokio::task::spawn_blocking(move || {
         libraries
             .iter()
             .map(|library| (library.clone(), check_library(library)))
             .collect::<Vec<_>>()
     })
     .await
-    .unwrap_or_default();
+    {
+        Ok(outcomes) => outcomes,
+        // A panicked or cancelled scan must not render as a green "0 folders
+        // found" badge asserting the configuration is fine.
+        Err(err) => return Outcome::Bad(format!("The scan did not complete: {err}")),
+    };
 
     let (mut folders, mut files, mut skipped) = (0usize, 0usize, 0usize);
     for (library, outcome) in outcomes {

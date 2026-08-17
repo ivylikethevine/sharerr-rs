@@ -72,7 +72,7 @@ pub async fn page(State(state): State<WebState>) -> Response {
     // The directory scans are filesystem-bound; off the async loop for the same
     // reason as `check_paths` below.
     let libraries = config.library.clone();
-    let library_lines = tokio::task::spawn_blocking(move || {
+    let library_lines = match tokio::task::spawn_blocking(move || {
         libraries
             .iter()
             .map(|library| {
@@ -82,7 +82,19 @@ pub async fn page(State(state): State<WebState>) -> Response {
             .collect::<Vec<_>>()
     })
     .await
-    .unwrap_or_default();
+    {
+        Ok(lines) => lines,
+        // A panicked scan must not make a configured [[library]] install look
+        // identical to one with no libraries at all.
+        Err(err) => vec![(
+            ServiceLine {
+                name: "library".to_owned(),
+                message: format!("the scan did not complete: {err}"),
+                ok: false,
+            },
+            Vec::new(),
+        )],
+    };
     for (line, items) in library_lines {
         services.push(line);
         discovered.extend(items);

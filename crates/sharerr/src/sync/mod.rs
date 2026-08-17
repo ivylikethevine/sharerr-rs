@@ -40,7 +40,19 @@ pub trait LibrarySource: Send + Sync {
     fn kind(&self) -> MediaSource;
     /// Every file this source currently wants shared. The tag is the *arr
     /// share marker; sources without tags ignore it.
-    async fn discover(&self, tag: &str) -> Result<Vec<Discovered>>;
+    async fn discover(&self, tag: &str) -> Result<SourceScan>;
+}
+
+/// What one source's discovery produced.
+#[derive(Debug)]
+pub struct SourceScan {
+    pub items: Vec<Discovered>,
+    /// Whether every corner of the source was listed. `false` — a directory
+    /// walk that could not read one subtree — means the items are still shared,
+    /// because sharing is additive, but nothing may be withdrawn on this
+    /// source's behalf: an absent item may simply have been in the part that
+    /// was not seen.
+    pub complete: bool,
 }
 
 #[async_trait::async_trait]
@@ -49,8 +61,12 @@ impl LibrarySource for ArrClient {
         ArrClient::kind(self)
     }
 
-    async fn discover(&self, tag: &str) -> Result<Vec<Discovered>> {
-        Ok(ArrClient::discover(self, tag).await?)
+    async fn discover(&self, tag: &str) -> Result<SourceScan> {
+        Ok(SourceScan {
+            items: ArrClient::discover(self, tag).await?,
+            // An *arr answer is its whole database: there is no partial success.
+            complete: true,
+        })
     }
 }
 
@@ -60,12 +76,16 @@ impl LibrarySource for DirectoryScanner {
         MediaSource::Directory
     }
 
-    async fn discover(&self, _tag: &str) -> Result<Vec<Discovered>> {
+    async fn discover(&self, _tag: &str) -> Result<SourceScan> {
         // A directory has no tag — being in it is the tag. The walk is
         // filesystem-bound, so it runs off the async loop; a library on a slow
         // or remote mount must not stall /health while it is listed.
         let scanner = self.clone();
-        tokio::task::spawn_blocking(move || scanner.scan_all()).await?
+        let outcome = tokio::task::spawn_blocking(move || scanner.scan_all()).await??;
+        Ok(SourceScan {
+            items: outcome.items,
+            complete: outcome.incomplete == 0,
+        })
     }
 }
 
@@ -153,9 +173,13 @@ impl std::fmt::Display for SyncReport {
 #[derive(Debug, Default)]
 struct Discovery {
     items: Vec<Discovered>,
-    /// Sources that answered. **Only these may have items withdrawn** — see
-    /// [`Syncer::withdraw_untagged`].
+    /// Sources that answered at all — the pass is abandoned when this is empty.
     scanned: HashSet<MediaSource>,
+    /// Sources that answered *completely*. **Only these may have items
+    /// withdrawn** — see [`Syncer::withdraw_untagged`]. A source that answered
+    /// but could not list part of itself shares what it found and withdraws
+    /// nothing.
+    withdrawable: HashSet<MediaSource>,
     failures: usize,
 }
 
@@ -360,7 +384,7 @@ impl Syncer {
 
         let tagged: HashSet<(MediaSource, i64)> = discovered.iter().map(Discovered::key).collect();
         report.unshared = self
-            .withdraw_untagged(&known, &tagged, &discovery.scanned, dry_run)
+            .withdraw_untagged(&known, &tagged, &discovery.withdrawable, dry_run)
             .await;
 
         Ok(report)
@@ -387,9 +411,18 @@ impl Syncer {
         let mut discovery = Discovery::default();
         for (kind, result) in results {
             match result {
-                Ok(found) => {
+                Ok(scan) => {
                     discovery.scanned.insert(kind);
-                    discovery.items.extend(found);
+                    if scan.complete {
+                        discovery.withdrawable.insert(kind);
+                    } else {
+                        tracing::warn!(
+                            service = %kind,
+                            "the scan was incomplete — new files are still shared, but \
+                             nothing is withdrawn until the whole library can be listed"
+                        );
+                    }
+                    discovery.items.extend(scan.items);
                 }
                 Err(err) => {
                     discovery.failures += 1;
@@ -425,20 +458,35 @@ impl Syncer {
             return Ok(Step::Unchanged);
         }
 
-        let paths = self
-            .resolver
-            .resolve(&item.arr_path)
-            .with_context(|| format!("resolving {}", item.arr_path.display()))?;
+        // A directory item's path is already sharerr's own view — running it
+        // through the arr-side rules would let a [[path_map]] meant for Sonarr
+        // rewrite it into a path that exists nowhere. Only the sharerr→qbit
+        // half of a mapping can apply to it.
+        let paths = if item.source == MediaSource::Directory {
+            self.resolver.resolve_sharerr(&item.arr_path)
+        } else {
+            self.resolver.resolve(&item.arr_path)
+        }
+        .with_context(|| format!("resolving {}", item.arr_path.display()))?;
 
         // Checked before hashing: discovering a missing file only after SHA-1ing
         // gigabytes would be a needlessly expensive way to find out.
         let missing = || {
-            anyhow::anyhow!(
-                "{} does not exist as sharerr sees it (reported by {} as {}). Check [[path_map]]",
-                paths.sharerr.display(),
-                item.source,
-                paths.arr.display()
-            )
+            if item.source == MediaSource::Directory {
+                // No mapping was involved, so pointing at [[path_map]] would
+                // send the operator to the wrong setting.
+                anyhow::anyhow!(
+                    "{} does not exist as sharerr sees it — check the [[library]] mount",
+                    paths.sharerr.display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "{} does not exist as sharerr sees it (reported by {} as {}). Check [[path_map]]",
+                    paths.sharerr.display(),
+                    item.source,
+                    paths.arr.display()
+                )
+            }
         };
 
         // Resolution only reads the path, never the file, so it works even for a
@@ -491,15 +539,16 @@ impl Syncer {
         &self,
         known: &HashMap<(MediaSource, i64), SharedItem>,
         tagged: &HashSet<(MediaSource, i64)>,
-        scanned: &HashSet<MediaSource>,
+        withdrawable: &HashSet<MediaSource>,
         dry_run: bool,
     ) -> usize {
         let stale = known.values().filter(|item| {
-            // Only withdraw on behalf of an app that actually answered. An app
-            // that failed to respond has said nothing about what it still carries,
-            // and reading its silence as "untagged everything" would tear down a
-            // working library because a container was restarting.
-            scanned.contains(&item.source)
+            // Only withdraw on behalf of a source that answered completely. One
+            // that failed to respond — or listed only part of itself — has said
+            // nothing certain about what it still carries, and reading that
+            // silence as "untagged everything" would tear down a working library
+            // because a container was restarting.
+            withdrawable.contains(&item.source)
                 && !tagged.contains(&item.key())
                 && matches!(
                     item.state,
