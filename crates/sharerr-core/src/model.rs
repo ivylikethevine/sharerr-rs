@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Which *arr app a shared item came from.
+/// Where a shared item was discovered: one of the *arr apps, or a plain
+/// tagged directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaSource {
@@ -14,6 +15,10 @@ pub enum MediaSource {
     Lidarr,
     Readarr,
     Whisparr,
+    /// A `[[library]]` directory scanned straight from disk — no app, no API,
+    /// no external ids. Everything URL-or-API-key shaped iterates
+    /// [`Self::ARRS`] instead of [`Self::ALL`] to leave this variant out.
+    Directory,
 }
 
 impl MediaSource {
@@ -25,6 +30,7 @@ impl MediaSource {
             Self::Lidarr => "lidarr",
             Self::Readarr => "readarr",
             Self::Whisparr => "whisparr",
+            Self::Directory => "directory",
         }
     }
 
@@ -38,11 +44,29 @@ impl MediaSource {
         match self {
             Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",
             Self::Lidarr | Self::Readarr => "v1",
+            // A directory has no HTTP API at all; only `ArrClient` reads this,
+            // and one is never built for a directory. The arm exists because
+            // the function is total, and panicking here would let a future
+            // caller take the whole process down over a label.
+            Self::Directory => "none",
         }
     }
 
     /// Every source sharerr can discover from.
     pub const ALL: &'static [Self] = &[
+        Self::Sonarr,
+        Self::Radarr,
+        Self::Lidarr,
+        Self::Readarr,
+        Self::Whisparr,
+        Self::Directory,
+    ];
+
+    /// Only the *arr apps — the sources that have a URL, an API key, and a
+    /// settings section shaped like one. Everything that loops "the configured
+    /// apps" iterates this; [`Self::ALL`] additionally carries
+    /// [`Self::Directory`], which has none of those.
+    pub const ARRS: &'static [Self] = &[
         Self::Sonarr,
         Self::Radarr,
         Self::Lidarr,
@@ -67,6 +91,7 @@ impl MediaSource {
             Self::Lidarr => "Lidarr",
             Self::Readarr => "Readarr",
             Self::Whisparr => "Whisparr",
+            Self::Directory => "Directory",
         }
     }
 }
@@ -268,6 +293,61 @@ impl SharedItem {
     }
 }
 
+/// One tagged file, as its library source describes it.
+///
+/// This is everything discovery can know. The fields a [`SharedItem`] adds — the
+/// database id, the info hash, the share state — belong to sharerr, not to the
+/// source, and are filled in by the reconciliation loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    pub source: MediaSource,
+    /// Series or movie id within the *arr app; for a directory, a stable hash
+    /// of the library root.
+    pub source_id: i64,
+    /// `episodeFile` / `movieFile` id — the natural key sharerr diffs against.
+    /// For a directory, a stable hash of the file's path.
+    pub file_id: i64,
+    pub spec: MediaSpec,
+    /// The path **exactly as the source reported it**, before any mapping is
+    /// applied. Stored verbatim so that changing a path mapping later does not
+    /// orphan existing rows.
+    pub arr_path: PathBuf,
+    pub size: u64,
+    pub ids: ExternalIds,
+    /// The original scene release name, when the file was imported from one. This
+    /// is the best possible release title — it is already known to parse.
+    pub scene_name: Option<String>,
+}
+
+impl Discovered {
+    /// Stable identity of the underlying file, matching [`SharedItem::key`].
+    pub fn key(&self) -> (MediaSource, i64) {
+        (self.source, self.file_id)
+    }
+
+    /// Promote to a storable item. The release title is resolved separately
+    /// because it needs rules this crate does not own.
+    pub fn into_shared_item(self, release_title: String) -> SharedItem {
+        SharedItem {
+            id: None,
+            source: self.source,
+            source_id: self.source_id,
+            file_id: self.file_id,
+            spec: self.spec,
+            release_title,
+            arr_path: self.arr_path,
+            size: self.size,
+            ids: self.ids,
+            info_hash: None,
+            state: ShareState::Pending,
+            last_error: None,
+            // Assigned by the store on insert; a discovered item has not been
+            // recorded yet, so it has no publication date to report.
+            created_at: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +358,16 @@ mod tests {
             assert_eq!(MediaSource::parse(source.as_str()), Some(*source));
         }
         assert_eq!(MediaSource::parse("plex"), None);
+    }
+
+    /// `ARRS` is `ALL` minus the directory source — the loops that render URL
+    /// and API-key fields depend on that being exact.
+    #[test]
+    fn arrs_is_all_without_the_directory() {
+        assert!(!MediaSource::ARRS.contains(&MediaSource::Directory));
+        let mut expected: Vec<MediaSource> = MediaSource::ALL.to_vec();
+        expected.retain(|s| *s != MediaSource::Directory);
+        assert_eq!(MediaSource::ARRS, expected.as_slice());
     }
 
     #[test]

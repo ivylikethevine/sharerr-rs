@@ -316,7 +316,7 @@ async fn harness(series_json: Value) -> Harness {
     let syncer = Syncer::new(
         config,
         Store::open_in_memory().await.unwrap(),
-        vec![sonarr],
+        vec![Box::new(sonarr)],
         Arc::new(StubTracker),
         seeder,
     );
@@ -736,6 +736,131 @@ async fn a_file_inside_a_pre_existing_season_pack_is_detected() {
     );
 }
 
+// ------------------------------------------------- directory libraries
+
+/// Give the harness a `[[library]]` directory of movies alongside its Sonarr.
+fn with_movie_library(h: &mut Harness) -> tempfile::TempDir {
+    use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+    let extras = tempfile::tempdir().unwrap();
+    sharerr_testkit::media::write_media_file(
+        &extras.path().join("The.Gilded.Ferry.2019.mkv"),
+        4096,
+        77,
+    )
+    .unwrap();
+
+    h.syncer
+        .sources
+        .push(Box::new(crate::library::DirectoryScanner::new(vec![
+            LibraryConfig {
+                path: extras.path().to_path_buf(),
+                kind: LibraryKind::Movie,
+            },
+        ])));
+    extras
+}
+
+/// The zero-dependency source: a plain directory shares alongside a Sonarr,
+/// idempotently, and its filename becomes the release title.
+#[tokio::test]
+async fn a_directory_library_shares_alongside_sonarr() {
+    let mut h = tagged_harness().await;
+    let _extras = with_movie_library(&mut h);
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.discovered, 3, "two episodes plus the directory movie");
+    assert_eq!(report.added, 3);
+    assert_eq!(report.sources_failed, 0);
+
+    let items = h.syncer.store().all_items().await.unwrap();
+    let movie = items
+        .iter()
+        .find(|i| i.source == MediaSource::Directory)
+        .expect("the directory item should be recorded");
+    assert_eq!(movie.state, ShareState::Seeding);
+    assert_eq!(
+        movie.release_title, "The.Gilded.Ferry.2019",
+        "a parseable filename is its own release title"
+    );
+    assert_eq!(movie.ids, sharerr_core::ExternalIds::default());
+
+    let second = h.syncer.run(false).await.unwrap();
+    assert_eq!(second.added, 0, "a repeat run must change nothing");
+    assert_eq!(second.unchanged, 3);
+}
+
+/// Deleting a file from the directory is the tag being removed: the torrent is
+/// withdrawn and nothing on disk is touched.
+#[tokio::test]
+async fn a_file_removed_from_the_directory_is_withdrawn() {
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.run(false).await.unwrap();
+
+    std::fs::remove_file(extras.path().join("The.Gilded.Ferry.2019.mkv")).unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.unshared, 1, "the vanished file must be withdrawn");
+    assert_eq!(
+        h.qbit.snapshot().removed.len(),
+        1,
+        "its torrent should have been removed"
+    );
+}
+
+/// A library that cannot be scanned is a silent source, and silence never
+/// withdraws — same contract as an *arr app that did not answer.
+#[tokio::test]
+async fn an_unscannable_directory_never_causes_withdrawals() {
+    use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.run(false).await.unwrap();
+
+    // Replace the scanner with one whose directory does not exist.
+    h.syncer.sources.pop();
+    h.syncer
+        .sources
+        .push(Box::new(crate::library::DirectoryScanner::new(vec![
+            LibraryConfig {
+                path: extras.path().join("vanished"),
+                kind: LibraryKind::Movie,
+            },
+        ])));
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.sources_failed, 1);
+    assert_eq!(report.unshared, 0, "a silent source must not withdraw");
+    assert!(h.qbit.snapshot().removed.is_empty());
+
+    let movie_state = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.source == MediaSource::Directory)
+        .unwrap()
+        .state;
+    assert_eq!(movie_state, ShareState::Seeding, "the item must be untouched");
+}
+
+/// A dry run against a directory library reports without writing.
+#[tokio::test]
+async fn a_directory_dry_run_writes_nothing() {
+    let mut h = tagged_harness().await;
+    let _extras = with_movie_library(&mut h);
+
+    let report = h.syncer.run(true).await.unwrap();
+    assert_eq!(report.discovered, 3);
+    assert_eq!(report.added, 3, "a dry run reports what it would add");
+    assert_eq!(h.qbit.snapshot().add_calls, 0, "nothing must reach qbit");
+    assert!(h.syncer.store().all_items().await.unwrap().is_empty());
+}
+
 // ------------------------------------------------- multi-app resilience
 
 /// Attach a Radarr that fails every request to an otherwise-healthy harness.
@@ -747,14 +872,14 @@ async fn with_broken_radarr(h: &mut Harness) -> MockServer {
         .mount(&radarr)
         .await;
 
-    h.syncer.arrs.push(
+    h.syncer.sources.push(Box::new(
         sharerr_arr::ArrClient::new(
             MediaSource::Radarr,
             &Url::parse(&radarr.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    );
+    ));
     radarr
 }
 
@@ -853,17 +978,20 @@ async fn a_pass_with_no_reachable_arr_app_changes_nothing() {
         .mount(&broken)
         .await;
     // Replace the only *arr client with a broken one.
-    h.syncer.arrs = vec![
+    h.syncer.sources = vec![Box::new(
         sharerr_arr::ArrClient::new(
             MediaSource::Sonarr,
             &Url::parse(&broken.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    ];
+    )];
 
     let err = h.syncer.run(false).await.unwrap_err();
-    assert!(err.to_string().contains("no *arr app"), "got {err:#}");
+    assert!(
+        err.to_string().contains("no library source"),
+        "got {err:#}"
+    );
 
     let after = h.qbit.snapshot();
     assert!(
@@ -887,14 +1015,14 @@ async fn a_failed_pass_records_its_reason() {
         .mount(&broken)
         .await;
     // Replace the only *arr client with a broken one.
-    h.syncer.arrs = vec![
+    h.syncer.sources = vec![Box::new(
         sharerr_arr::ArrClient::new(
             MediaSource::Sonarr,
             &Url::parse(&broken.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    ];
+    )];
 
     h.syncer.run(false).await.unwrap_err();
 

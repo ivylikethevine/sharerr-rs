@@ -21,14 +21,16 @@ pub mod secret_keys {
     ///
     /// A function rather than five match arms at each call site — every consumer
     /// asks the same question, and a sixth app should mean editing one place.
-    pub fn api_key_for(source: crate::MediaSource) -> &'static str {
-        use crate::MediaSource::{Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    /// `None` for the directory source, which has no credential at all.
+    pub fn api_key_for(source: crate::MediaSource) -> Option<&'static str> {
+        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
-            Sonarr => SONARR_API_KEY,
-            Radarr => RADARR_API_KEY,
-            Lidarr => LIDARR_API_KEY,
-            Readarr => READARR_API_KEY,
-            Whisparr => WHISPARR_API_KEY,
+            Sonarr => Some(SONARR_API_KEY),
+            Radarr => Some(RADARR_API_KEY),
+            Lidarr => Some(LIDARR_API_KEY),
+            Readarr => Some(READARR_API_KEY),
+            Whisparr => Some(WHISPARR_API_KEY),
+            Directory => None,
         }
     }
     pub const QBITTORRENT_PASSWORD: &str = "qbittorrent.password";
@@ -89,15 +91,16 @@ pub mod config_paths {
     /// The config path holding one *arr app's URL — the write-side counterpart
     /// of [`super::secret_keys::api_key_for`], for the same reason: every
     /// consumer asks the same question, and a sixth app should mean editing one
-    /// function.
-    pub fn url_for(source: crate::MediaSource) -> &'static str {
-        use crate::MediaSource::{Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    /// function. `None` for the directory source, which has no URL.
+    pub fn url_for(source: crate::MediaSource) -> Option<&'static str> {
+        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
-            Sonarr => SONARR_URL,
-            Radarr => RADARR_URL,
-            Lidarr => LIDARR_URL,
-            Readarr => READARR_URL,
-            Whisparr => WHISPARR_URL,
+            Sonarr => Some(SONARR_URL),
+            Radarr => Some(RADARR_URL),
+            Lidarr => Some(LIDARR_URL),
+            Readarr => Some(READARR_URL),
+            Whisparr => Some(WHISPARR_URL),
+            Directory => None,
         }
     }
 
@@ -187,6 +190,11 @@ pub struct Config {
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
     pub path_map: Vec<PathMapping>,
+    /// Plain directories shared without any *arr app: everything in each one is
+    /// shared, classified by its declared [`LibraryKind`]. The zero-dependency
+    /// path — but it loses every external id, so a friend's app can only parse
+    /// the release name.
+    pub library: Vec<LibraryConfig>,
 }
 
 impl Default for Config {
@@ -206,6 +214,7 @@ impl Default for Config {
             tracker: TrackerConfig::default(),
             sync: SyncConfig::default(),
             path_map: Vec::new(),
+            library: Vec::new(),
         }
     }
 }
@@ -231,19 +240,22 @@ impl Config {
     /// Every consumer wants this and none of them should carry a five-way match to
     /// get it — adding a sixth app should mean editing one function.
     pub fn service(&self, source: crate::MediaSource) -> Option<&ServiceConfig> {
-        use crate::MediaSource::{Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => self.sonarr.as_ref(),
             Radarr => self.radarr.as_ref(),
             Lidarr => self.lidarr.as_ref(),
             Readarr => self.readarr.as_ref(),
             Whisparr => self.whisparr.as_ref(),
+            // A directory is configured through `library`, not a service section.
+            Directory => None,
         }
     }
 
-    /// Every *arr app that is actually configured.
+    /// Every *arr app that is actually configured. Directory libraries are not
+    /// listed here — they have no service section; see [`Config::library`].
     pub fn configured_sources(&self) -> Vec<crate::MediaSource> {
-        crate::MediaSource::ALL
+        crate::MediaSource::ARRS
             .iter()
             .copied()
             .filter(|s| self.service(*s).is_some())
@@ -513,6 +525,51 @@ impl Default for SyncConfig {
     }
 }
 
+/// What a `[[library]]` directory holds, declared by the operator.
+///
+/// Declared rather than sniffed: SxxEyy makes television detectable, but music
+/// and books are not, and a misclassified file lands in a Torznab category no
+/// friend's app will search. The kind decides the [`crate::MediaSpec`] variant
+/// each file becomes, and with it the feed category and the peer-scope bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryKind {
+    Tv,
+    Movie,
+    Music,
+    Book,
+}
+
+impl LibraryKind {
+    /// Every kind, in the order the UI offers them.
+    pub const ALL: &'static [Self] = &[Self::Tv, Self::Movie, Self::Music, Self::Book];
+
+    /// The lowercase name, matching both the serde form and `sharerr.toml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tv => "tv",
+            Self::Movie => "movie",
+            Self::Music => "music",
+            Self::Book => "book",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == value)
+    }
+}
+
+/// One plain directory shared without an *arr app.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryConfig {
+    /// The directory as the sharerr process sees it. Scanned recursively.
+    pub path: PathBuf,
+    /// What every media file under `path` is treated as.
+    pub kind: LibraryKind,
+}
+
 /// One rewrite rule between the three views of the media library.
 ///
 /// Sonarr reports `arr`, sharerr must open `sharerr`, and qBittorrent must be told
@@ -588,6 +645,41 @@ mod tests {
                 *path.to_lowercase(),
                 "{path:?} must be lowercase to match a SHARERR_* override"
             );
+        }
+    }
+
+    /// `library` entries round-trip through serde, and a kind outside the four
+    /// known ones is a startup error rather than a silently empty library.
+    #[test]
+    fn library_sections_round_trip_and_reject_unknown_kinds() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "library": [
+                { "path": "/media/extras", "kind": "movie" },
+                { "path": "/media/tapes", "kind": "tv" },
+            ],
+        }))
+        .unwrap();
+        assert_eq!(
+            config.library,
+            vec![
+                LibraryConfig {
+                    path: PathBuf::from("/media/extras"),
+                    kind: LibraryKind::Movie,
+                },
+                LibraryConfig {
+                    path: PathBuf::from("/media/tapes"),
+                    kind: LibraryKind::Tv,
+                },
+            ]
+        );
+
+        let err = serde_json::from_value::<Config>(serde_json::json!({
+            "library": [{ "path": "/media/x", "kind": "anime" }],
+        }));
+        assert!(err.is_err(), "an unknown kind must fail to parse");
+
+        for kind in LibraryKind::ALL {
+            assert_eq!(LibraryKind::parse(kind.as_str()), Some(*kind));
         }
     }
 

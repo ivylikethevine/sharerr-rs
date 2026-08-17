@@ -31,7 +31,8 @@ design is built around.
 | Path-mapping diagnostics in the browser | ✅ |
 | Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
 | Per-friend scoping: this friend sees TV, that one films | ✅ |
-| Jellyfin / Plex, or a plain tagged directory | ❌ |
+| Plain directory sharing, no *arr app at all | ✅ |
+| Jellyfin / Plex as library sources | ❌ |
 
 ## Quickstart
 
@@ -163,6 +164,35 @@ Notes that are easy to trip over:
 - **Whisparr content is categorised as XXX**, not TV, and a friend scoped to "TV
   only" does **not** receive it. Only an unscoped friend does, which has to be
   chosen deliberately.
+
+## Sharing a plain directory, no *arr app at all
+
+Point sharerr at a folder and everything in it is shared — the zero-dependency
+path for a library curated by hand:
+
+```toml
+[[library]]
+path = "/media/extras"
+kind = "movie"   # tv, movie, music, or book
+
+[[library]]
+path = "/media/tapes"
+kind = "tv"
+```
+
+Each entry is scanned recursively; being in the directory is the tag, and the
+declared `kind` decides the feed category and which scoped friends see it. The
+trade-offs to know:
+
+- **No external ids travel with these releases.** A friend's app matches them by
+  parsing the release name alone, so name files the way releases are named —
+  `Show.Name.S01E02.mkv`, `Film.Title.2019.mkv`. A `tv` file with no `SxxEyy` in
+  its name is skipped (and `doctor` says so) rather than advertised as something
+  it cannot be matched to.
+- **Music and books lean on the directory layout**: `Artist/Album/01 - Track.flac`
+  and `Author/Title.epub`.
+- **One file, one torrent.** An album is shared per track file, not as a folder.
+- The directory is never modified — same rule as everywhere else in sharerr.
 
 ## Using Transmission instead of qBittorrent
 

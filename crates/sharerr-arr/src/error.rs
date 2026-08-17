@@ -61,6 +61,9 @@ pub enum ArrError {
 
     #[error("could not build the HTTP client: {0}")]
     Client(#[source] reqwest::Error),
+
+    #[error("{service} is not an *arr app and has no HTTP API to call")]
+    NotAnApp { service: MediaSource },
 }
 
 impl ArrError {

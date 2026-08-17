@@ -100,7 +100,8 @@ pub struct StatusPage {
     pub recovery_secs: u64,
     pub master_key_present: bool,
     pub tag: String,
-    /// One row per *arr app, configured or not, in `MediaSource::ALL` order.
+    /// One row per *arr app, configured or not, in `MediaSource::ARRS` order,
+    /// then one per `[[library]]` directory.
     pub services: Vec<ServiceUrl>,
     /// The *configured* torrent client — showing the unused section's URL on the
     /// "what is this instance using" page sent operators debugging the wrong
@@ -124,6 +125,24 @@ pub struct PathRow {
     pub qbit: String,
 }
 
+/// One row of the `[[library]]` table — form state, same as [`PathRow`].
+#[derive(Debug, Clone)]
+pub struct LibraryRow {
+    pub path: String,
+    /// The selected kind's lowercase name; the blank spare row defaults to the
+    /// first option the `<select>` offers.
+    pub kind: &'static str,
+}
+
+impl Default for LibraryRow {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            kind: sharerr_core::config::LibraryKind::Tv.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Template)]
 #[template(path = "settings.html")]
 pub struct SettingsPage {
@@ -144,7 +163,7 @@ pub struct SettingsPage {
 
     pub tag: String,
 
-    /// One section per *arr app, in [`sharerr_core::MediaSource::ALL`] order.
+    /// One section per *arr app, in [`sharerr_core::MediaSource::ARRS`] order.
     /// The template renders these with a single loop, so a new app appears on
     /// this page without anyone editing HTML.
     pub arrs: Vec<ArrSection>,
@@ -172,6 +191,9 @@ pub struct SettingsPage {
 
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
+
+    /// One row per `[[library]]` directory, plus a spare blank row.
+    pub libraries: Vec<LibraryRow>,
 
     pub path_map: Vec<PathRow>,
 

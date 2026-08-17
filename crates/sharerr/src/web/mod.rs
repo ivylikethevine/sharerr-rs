@@ -101,6 +101,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/arr/{source}", post(settings::save_arr))
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
         .route("/settings/tracker", post(settings::save_tracker))
+        .route("/settings/libraries", post(settings::save_libraries))
         .route("/settings/paths", post(settings::save_paths))
         .route("/settings/sync", post(settings::save_sync))
         .route(
@@ -144,13 +145,19 @@ async fn status_page(State(state): State<WebState>) -> Response {
         // restart, and this banner is how the operator learns that is still needed.
         master_key_present: master_key_from_env().is_ok(),
         tag: config.tag.clone(),
-        services: sharerr_core::MediaSource::ALL
+        services: sharerr_core::MediaSource::ARRS
             .iter()
             .copied()
             .map(|kind| crate::web::templates::ServiceUrl {
                 title: settings::title_case(kind.as_str()),
                 url: config.service(kind).map(|s| s.url.to_string()),
             })
+            .chain(config.library.iter().map(|library| {
+                crate::web::templates::ServiceUrl {
+                    title: format!("Library ({})", library.kind.as_str()),
+                    url: Some(library.path.display().to_string()),
+                }
+            }))
             .collect(),
         client_name: config.torrent_backend.as_str(),
         client_url: config.torrent_client().url.to_string(),
@@ -244,6 +251,7 @@ mod tests {
             "/settings/arr/lidarr",
             "/settings/qbittorrent",
             "/settings/tracker",
+            "/settings/libraries",
             "/settings/paths",
             "/settings/sync",
             "/settings/generate/torznab",

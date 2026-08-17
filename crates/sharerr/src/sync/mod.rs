@@ -25,17 +25,60 @@ use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
 use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
 use sharerr_torrent::{BuiltinTracker, QbitEmbeddedTracker, TrackerProvider, title};
 
+use crate::library::DirectoryScanner;
 use seed::{SeedOutcome, Seeder};
+
+/// Anything that can answer "which files should be shared right now?".
+///
+/// The *arr clients and the directory scanner disagree about everything except
+/// that question, which is why the trait is one method wide plus a label. The
+/// label matters to the loop: [`Discovery::scanned`] records which sources
+/// answered, and only an answering source may have items withdrawn.
+#[async_trait::async_trait]
+pub trait LibrarySource: Send + Sync {
+    /// Which [`MediaSource`] this source's items carry.
+    fn kind(&self) -> MediaSource;
+    /// Every file this source currently wants shared. The tag is the *arr
+    /// share marker; sources without tags ignore it.
+    async fn discover(&self, tag: &str) -> Result<Vec<Discovered>>;
+}
+
+#[async_trait::async_trait]
+impl LibrarySource for ArrClient {
+    fn kind(&self) -> MediaSource {
+        ArrClient::kind(self)
+    }
+
+    async fn discover(&self, tag: &str) -> Result<Vec<Discovered>> {
+        Ok(ArrClient::discover(self, tag).await?)
+    }
+}
+
+#[async_trait::async_trait]
+impl LibrarySource for DirectoryScanner {
+    fn kind(&self) -> MediaSource {
+        MediaSource::Directory
+    }
+
+    async fn discover(&self, _tag: &str) -> Result<Vec<Discovered>> {
+        // A directory has no tag — being in it is the tag. The walk is
+        // filesystem-bound, so it runs off the async loop; a library on a slow
+        // or remote mount must not stall /health while it is listed.
+        let scanner = self.clone();
+        tokio::task::spawn_blocking(move || scanner.scan_all()).await?
+    }
+}
 
 pub struct Syncer {
     config: Config,
     store: Store,
-    /// Every configured *arr app, in a stable order.
+    /// Every configured library source — the *arr apps, then the directory
+    /// scanner when any `[[library]]` is set — in a stable order.
     ///
-    /// A list rather than one field per app: five named `Option`s would mean five
-    /// places to edit for a sixth, and the discovery loop treats them identically
-    /// anyway — the differences live inside `ArrClient::discover`.
-    arrs: Vec<ArrClient>,
+    /// A list rather than one field per source: five named `Option`s would mean
+    /// five places to edit for a sixth, and the discovery loop treats them
+    /// identically anyway — the differences live behind [`LibrarySource`].
+    sources: Vec<Box<dyn LibrarySource>>,
     tracker: Arc<dyn TrackerProvider>,
     /// Owns the torrent client too — the syncer reads it through
     /// [`Seeder::client`], so there is exactly one handle to keep consistent.
@@ -48,8 +91,8 @@ impl std::fmt::Debug for Syncer {
         f.debug_struct("Syncer")
             .field("tag", &self.config.tag)
             .field(
-                "arrs",
-                &self.arrs.iter().map(ArrClient::kind).collect::<Vec<_>>(),
+                "sources",
+                &self.sources.iter().map(|s| s.kind()).collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
     }
@@ -65,8 +108,9 @@ pub struct SyncReport {
     pub unchanged: usize,
     pub unshared: usize,
     pub failed: usize,
-    /// *arr apps that could not be scanned at all. Their existing shares are left
-    /// untouched, so this is a gap in coverage rather than a set of failed items.
+    /// Library sources that could not be scanned at all. Their existing shares
+    /// are left untouched, so this is a gap in coverage rather than a set of
+    /// failed items.
     pub sources_failed: usize,
 }
 
@@ -97,7 +141,7 @@ impl std::fmt::Display for SyncReport {
         if self.sources_failed > 0 {
             write!(
                 f,
-                " ({} *arr app(s) could not be scanned; their shares were left alone)",
+                " ({} source(s) could not be scanned; their shares were left alone)",
                 self.sources_failed
             )?;
         }
@@ -105,11 +149,11 @@ impl std::fmt::Display for SyncReport {
     }
 }
 
-/// The outcome of asking every configured *arr app what carries the tag.
+/// The outcome of asking every configured library source what carries the tag.
 #[derive(Debug, Default)]
 struct Discovery {
     items: Vec<Discovered>,
-    /// Apps that answered. **Only these may have items withdrawn** — see
+    /// Sources that answered. **Only these may have items withdrawn** — see
     /// [`Syncer::withdraw_untagged`].
     scanned: HashSet<MediaSource>,
     failures: usize,
@@ -138,16 +182,20 @@ impl Syncer {
         // from materialising sharerr.db — every time round the loop.
         let qbit = build_client(config, &vault)?;
 
-        let mut arrs = Vec::new();
-        for source in MediaSource::ALL.iter().copied() {
+        let mut sources: Vec<Box<dyn LibrarySource>> = Vec::new();
+        for source in MediaSource::ARRS.iter().copied() {
             if let Some(client) = build_arr(source, config, &vault)? {
-                arrs.push(client);
+                sources.push(Box::new(client));
             }
         }
-        if arrs.is_empty() {
+        if !config.library.is_empty() {
+            sources.push(Box::new(DirectoryScanner::new(config.library.clone())));
+        }
+        if sources.is_empty() {
             bail!(
-                "no *arr app is configured — there is nothing to share. Set at least \
-                 one of sonarr, radarr, lidarr, readarr or whisparr."
+                "no library source is configured — there is nothing to share. Set at \
+                 least one of sonarr, radarr, lidarr, readarr or whisparr, or a \
+                 [[library]] directory."
             );
         }
 
@@ -168,7 +216,7 @@ impl Syncer {
             .await
             .with_context(|| format!("opening {}", config.database_path().display()))?;
 
-        Ok(Self::new(config.clone(), store, arrs, tracker, seeder))
+        Ok(Self::new(config.clone(), store, sources, tracker, seeder))
     }
 
     /// Assemble from already-built parts.
@@ -179,7 +227,7 @@ impl Syncer {
     pub(crate) fn new(
         config: Config,
         store: Store,
-        arrs: Vec<ArrClient>,
+        sources: Vec<Box<dyn LibrarySource>>,
         tracker: Arc<dyn TrackerProvider>,
         seeder: Seeder,
     ) -> Self {
@@ -187,7 +235,7 @@ impl Syncer {
             resolver: config.resolver(),
             config,
             store,
-            arrs,
+            sources,
             tracker,
             seeder,
         }
@@ -256,7 +304,7 @@ impl Syncer {
         // library because Sonarr happened to be restarting would be far worse than
         // doing nothing, so this is the one failure that stops the pass.
         if discovery.scanned.is_empty() {
-            bail!("no *arr app could be scanned — nothing was changed");
+            bail!("no library source could be scanned — nothing was changed");
         }
 
         let torrents = torrents.context("listing torrents in qBittorrent")?;
@@ -318,21 +366,21 @@ impl Syncer {
         Ok(report)
     }
 
-    /// Ask every configured *arr app what carries the tag.
+    /// Ask every configured library source what carries the tag.
     ///
-    /// One app failing does not abort the pass — the module's whole contract is
-    /// that a healthy library is not held hostage by a broken neighbour, and
+    /// One source failing does not abort the pass — the module's whole contract
+    /// is that a healthy library is not held hostage by a broken neighbour, and
     /// "Sonarr has the tag, Radarr does not" is a routine setup that surfaces as a
     /// hard error from [`sharerr_arr::ArrError::TagNotFound`].
     async fn discover(&self) -> Discovery {
-        // The apps are independent services, so scan them concurrently: the phase
-        // costs the slowest app's walk rather than the sum of all of them.
+        // The sources are independent, so scan them concurrently: the phase
+        // costs the slowest source's walk rather than the sum of all of them.
         // `join_all` preserves input order, which keeps the fold — and the log
         // lines — as stable as the sequential loop was.
         let results = futures::future::join_all(
-            self.arrs
+            self.sources
                 .iter()
-                .map(|client| async { (client.kind(), client.discover(&self.config.tag).await) }),
+                .map(|source| async { (source.kind(), source.discover(&self.config.tag).await) }),
         )
         .await;
 
@@ -348,7 +396,7 @@ impl Syncer {
                     tracing::error!(
                         service = %kind,
                         error = format!("{err:#}"),
-                        "discovery failed — everything already shared from this app \
+                        "discovery failed — everything already shared from this source \
                          will be left exactly as it is"
                     );
                 }
@@ -499,9 +547,11 @@ enum Step {
 }
 
 fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option<ArrClient>> {
-    let (service, key_name) = (config.service(kind), secret_keys::api_key_for(kind));
-
-    let Some(service) = service else {
+    let Some(service) = config.service(kind) else {
+        return Ok(None);
+    };
+    // Only called over `MediaSource::ARRS`, and every *arr app has a vault key.
+    let Some(key_name) = secret_keys::api_key_for(kind) else {
         return Ok(None);
     };
     let api_key = vault

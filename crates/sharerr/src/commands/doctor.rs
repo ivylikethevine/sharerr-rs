@@ -12,7 +12,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::checks::{self, ArrOutcome, QbitOutcome, chain};
+use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome, chain};
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
 use sharerr_core::config::{ServiceConfig, TrackerBackend, secret_keys};
@@ -83,9 +83,15 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
         report.section(kind.as_str());
         discovered.extend(check_arr(kind, service, config, vault.as_ref(), &mut report).await);
     }
-    if sources.is_empty() {
-        report.section("*arr apps");
-        report.fail("no *arr app is configured — there is nothing to share");
+    for library in &config.library {
+        report.section(&format!("library {}", library.path.display()));
+        discovered.extend(check_library(library, &mut report));
+    }
+    if sources.is_empty() && config.library.is_empty() {
+        report.section("library sources");
+        report.fail(
+            "no *arr app or [[library]] directory is configured — there is nothing to share",
+        );
     }
 
     report.section(config.torrent_backend.as_str());
@@ -147,7 +153,7 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
         config
             .configured_sources()
             .into_iter()
-            .map(secret_keys::api_key_for),
+            .filter_map(secret_keys::api_key_for),
     );
 
     for key in expected {
@@ -231,7 +237,10 @@ async fn check_arr(
     vault: Option<&Vault>,
     report: &mut Report,
 ) -> Vec<Discovered> {
-    let key_name = secret_keys::api_key_for(kind);
+    // Only *arr apps reach here, and every *arr app has a vault key.
+    let Some(key_name) = secret_keys::api_key_for(kind) else {
+        return Vec::new();
+    };
 
     // `secret` reports its own failure, in this command's voice and with the
     // `vault set` hint. Handing `checks` an `Ok(None)` afterwards would report it a
@@ -299,6 +308,56 @@ async fn check_arr(
         ArrOutcome::CredentialUnreadable(reason) => {
             report.fail(reason);
             Vec::new()
+        }
+    }
+}
+
+// ------------------------------------------------------------------ library
+
+fn check_library(
+    library: &sharerr_core::config::LibraryConfig,
+    report: &mut Report,
+) -> Vec<Discovered> {
+    match checks::check_library(library) {
+        DirOutcome::Missing => {
+            report.fail(format!(
+                "{} does not exist as sharerr sees it — check the mount",
+                library.path.display()
+            ));
+            Vec::new()
+        }
+        DirOutcome::NotADirectory => {
+            report.fail(format!(
+                "{} is not a directory — [[library]] shares a folder, not a file",
+                library.path.display()
+            ));
+            Vec::new()
+        }
+        DirOutcome::Unreadable(reason) => {
+            report.fail(format!("could not scan: {reason}"));
+            Vec::new()
+        }
+        DirOutcome::Empty => {
+            report.warn(format!(
+                "no {} files found — anything placed here is shared automatically",
+                library.kind.as_str()
+            ));
+            Vec::new()
+        }
+        DirOutcome::Ready { skipped, items } => {
+            report.ok(format!(
+                "{} {} file(s) found",
+                items.len(),
+                library.kind.as_str()
+            ));
+            if skipped > 0 {
+                report.warn(format!(
+                    "{skipped} file(s) skipped — their names have no SxxEyy, so there is \
+                     no episode to advertise. Rename them the way a release is named"
+                ));
+            }
+            report.info("note: no external ids — a friend's app matches these by name alone");
+            items
         }
     }
 }
@@ -508,13 +567,20 @@ fn print_config_summary(config: &Config) {
     println!("  data dir:  {}", config.data_dir.display());
     println!("  tag:       {}", config.tag);
     println!("  bind:      {}", config.server.bind);
-    for kind in MediaSource::ALL.iter().copied() {
+    for kind in MediaSource::ARRS.iter().copied() {
         println!(
             "  {:<11}{}",
             format!("{kind}:"),
             config
                 .service(kind)
                 .map_or("(not configured)", |s| s.url.as_str())
+        );
+    }
+    for library in &config.library {
+        println!(
+            "  library:   {} ({})",
+            library.path.display(),
+            library.kind.as_str()
         );
     }
     // The configured client, not always qBittorrent's — printing the unused

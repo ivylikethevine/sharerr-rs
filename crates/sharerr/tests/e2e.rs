@@ -12,7 +12,7 @@
 //! `cargo test -p sharerr --features e2e -- --ignored --test-threads=1`.
 //!
 //! All three depend on there *being* tagged content — without it `sharerr sync`
-//! bails with "no *arr app could be scanned" — so the seeding step is not optional
+//! bails with "no library source could be scanned" — so the seeding step is not optional
 //! scaffolding, it is a precondition.
 //!
 //! The assertion that justifies the whole tier: after a real sync through a real
