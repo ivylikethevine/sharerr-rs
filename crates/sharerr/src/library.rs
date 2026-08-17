@@ -7,14 +7,22 @@
 //! can only parse the release name. That is the documented trade of the
 //! zero-dependency path.
 //!
-//! The scan is deliberately all-or-nothing across every configured entry: the
-//! reconciliation loop withdraws items a *successful* scan no longer reports,
-//! so a partial listing that silently dropped one unreadable directory would
-//! read as "untagged" and tear its shares down. One entry failing fails the
-//! whole scan, and the loop leaves everything alone — same contract as an *arr
-//! app that did not answer.
+//! The reconciliation loop withdraws items a *successful* scan no longer
+//! reports, so a listing that silently dropped anything would read as
+//! "untagged" and tear its shares down. That shapes every failure mode here:
+//! an entry whose root is missing, unreadable, or empty fails the whole scan
+//! and the loop leaves everything alone — same contract as an *arr app that
+//! did not answer — while a corner of the tree that cannot be listed (a
+//! root-owned `lost+found`, a walk cut short) marks the scan **incomplete**:
+//! what was found is still shared, because sharing is additive, but nothing is
+//! withdrawn on the evidence of a partial inventory.
+//!
+//! An *empty* root fails rather than scanning to nothing because it is the
+//! exact signature of a bind mount that has not come up — a successful empty
+//! scan would withdraw every share this source owns in one pass.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -33,10 +41,17 @@ const MAX_DEPTH: usize = 16;
 #[derive(Debug, Default)]
 pub struct ScanOutcome {
     pub items: Vec<Discovered>,
-    /// Media files left out because their names could not be classified — a tv
-    /// file with no `SxxEyy` has no episode to advertise, and inventing one
-    /// would publish a release that downloads the wrong thing.
+    /// Media files left out because their names carry nothing a release of
+    /// this library's kind could honestly advertise — a tv file with no
+    /// `SxxEyy`, a movie named like an episode, a music file with no
+    /// artist or album directory. Inventing metadata would publish a release
+    /// that downloads the wrong thing or that nothing can search for.
     pub skipped: usize,
+    /// Corners of the tree that could not be listed — an unreadable
+    /// subdirectory, a walk cut short at [`MAX_DEPTH`]. The items found are
+    /// still worth sharing, but the scan is not a complete inventory, so
+    /// nothing may be withdrawn on its evidence.
+    pub incomplete: usize,
 }
 
 /// Scan one `[[library]]` directory.
@@ -46,10 +61,31 @@ pub struct ScanOutcome {
 /// are comparable.
 pub fn scan(library: &LibraryConfig) -> Result<ScanOutcome> {
     let root = &library.path;
+    // Relative paths would scan fine against the current directory and then
+    // fail at share time, when the path resolver refuses them — a green doctor
+    // followed by a failing sync. Refuse where the operator can see why.
+    if !root.is_absolute() {
+        bail!("library {} is not an absolute path", root.display());
+    }
     let metadata = fs::metadata(root)
         .with_context(|| format!("library {} is not readable", root.display()))?;
     if !metadata.is_dir() {
         bail!("library {} is not a directory", root.display());
+    }
+    // A directory with no entries at all is what an unmounted bind mount looks
+    // like, and a successful empty scan would withdraw every share this source
+    // owns. Failing keeps them: a genuinely new library starts scanning the
+    // moment it holds anything.
+    if fs::read_dir(root)
+        .with_context(|| format!("could not read {}", root.display()))?
+        .next()
+        .is_none()
+    {
+        bail!(
+            "library {} is empty — nothing to share yet, or the mount is not up; \
+             existing shares are left alone",
+            root.display()
+        );
     }
 
     let source_id = path_id(root);
@@ -70,35 +106,79 @@ fn walk(
     if depth > MAX_DEPTH {
         tracing::warn!(
             dir = %dir.display(),
-            "library walk stopped at depth {MAX_DEPTH}; not descending further"
+            "library walk stopped at depth {MAX_DEPTH}; this subtree is not shared and \
+             nothing is withdrawn while it cannot be listed"
         );
+        outcome.incomplete += 1;
         return Ok(());
     }
 
-    let entries =
-        fs::read_dir(dir).with_context(|| format!("could not read {}", dir.display()))?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // The root must be readable — scan() proved it exists — but one
+        // unreadable subdirectory (a root-owned lost+found, say) must not stop
+        // every other file in the library from being shared, pass after pass.
+        Err(err) if depth > 0 => {
+            tracing::warn!(
+                dir = %dir.display(),
+                %err,
+                "could not list directory; its contents are not shared and nothing is \
+                 withdrawn while it cannot be listed"
+            );
+            outcome.incomplete += 1;
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("could not read {}", dir.display()));
+        }
+    };
     for entry in entries {
-        let entry = entry.with_context(|| format!("could not read {}", dir.display()))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(dir = %dir.display(), %err, "could not read a directory entry");
+                outcome.incomplete += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         let name = entry.file_name();
         if name.to_string_lossy().starts_with('.') {
             continue;
         }
 
-        // `symlink_metadata` so a link is seen as a link: a symlinked directory
-        // is skipped (it is how walks loop forever), and a symlinked file is
-        // shared via the path the operator gave, not its target.
-        let meta = entry
-            .metadata()
-            .with_context(|| format!("could not stat {}", path.display()))?;
-        if meta.is_dir() {
-            if fs::symlink_metadata(&path)
-                .with_context(|| format!("could not stat {}", path.display()))?
-                .is_symlink()
-            {
-                tracing::debug!(path = %path.display(), "skipping symlinked directory");
+        // `DirEntry::metadata` does not traverse symlinks, so a link is seen as
+        // a link first and resolved deliberately below.
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            // Deleted between listing and stat: genuinely gone, same as never
+            // listed — an actively managed library must not fail the pass over it.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                tracing::warn!(file = %path.display(), %err, "could not stat; not shared and not withdrawn");
+                outcome.incomplete += 1;
                 continue;
             }
+        };
+        // A symlinked directory is skipped (it is how walks loop forever), but a
+        // symlinked file is shared via the path the operator gave — following the
+        // link here is what makes a hand-curated directory of symlinks work.
+        let meta = if meta.is_symlink() {
+            match fs::metadata(&path) {
+                Ok(target) if target.is_dir() => {
+                    tracing::debug!(path = %path.display(), "skipping symlinked directory");
+                    continue;
+                }
+                Ok(target) => target,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), %err, "skipping broken symlink");
+                    continue;
+                }
+            }
+        } else {
+            meta
+        };
+        if meta.is_dir() {
             walk(root, &path, library, source_id, depth + 1, outcome)?;
             continue;
         }
@@ -121,7 +201,8 @@ fn walk(
                 outcome.skipped += 1;
                 tracing::warn!(
                     file = %path.display(),
-                    "skipped: the name has no SxxEyy, so there is no episode to advertise"
+                    kind = library.kind.as_str(),
+                    "skipped: the name carries nothing a release of this kind could advertise"
                 );
             }
         }
@@ -170,20 +251,35 @@ fn spec_for(root: &Path, path: &Path, kind: LibraryKind) -> Option<MediaSpec> {
         },
         LibraryKind::Movie => match title::parse(&stem) {
             ParsedTitle::Movie { title, year } => Some(MediaSpec::Movie { title, year }),
+            // An episode-shaped name is misfiled television: advertising it as
+            // a movie would publish numbering no Radarr can match.
+            ParsedTitle::Episode { .. } => None,
             // Still listable: a title without a year searches fine, it just
-            // cannot be pinned to a release year on the far end.
-            ParsedTitle::Episode { .. } | ParsedTitle::Unparseable => Some(MediaSpec::Movie {
-                title: humanize(&stem),
-                year: None,
-            }),
+            // cannot be pinned to a release year on the far end. But only the
+            // title part — a stem that is all release cruft has no title, and
+            // publishing "Film Title 1080p BluRay x264-GROUP" as the *title*
+            // makes a release nobody's search ever matches.
+            ParsedTitle::Unparseable => {
+                let title = display_title(&stem);
+                (!title.is_empty()).then_some(MediaSpec::Movie { title, year: None })
+            }
         },
         // Music libraries are conventionally artist/album/track on disk, so the
-        // directory names are the closest thing to metadata a bare file has.
-        LibraryKind::Music => Some(MediaSpec::Track {
-            artist: dir_name(root, path, 2).unwrap_or_else(|| "Unknown Artist".to_owned()),
-            album: dir_name(root, path, 1).unwrap_or_else(|| "Unknown Album".to_owned()),
-            track: leading_number(&stem),
-        }),
+        // directory names are the closest thing to metadata a bare file has. A
+        // file at the root has neither, and every such file would synthesize
+        // the same byte-identical "Unknown Artist" release — skipped instead.
+        LibraryKind::Music => {
+            let artist = dir_name(root, path, 2);
+            let album = dir_name(root, path, 1);
+            if artist.is_none() && album.is_none() {
+                return None;
+            }
+            Some(MediaSpec::Track {
+                artist: artist.unwrap_or_else(|| "Unknown Artist".to_owned()),
+                album: album.unwrap_or_else(|| "Unknown Album".to_owned()),
+                track: leading_number(&stem),
+            })
+        }
         LibraryKind::Book => Some(MediaSpec::Book {
             author: dir_name(root, path, 1).unwrap_or_else(|| "Unknown Author".to_owned()),
             title: humanize(&stem),
@@ -220,6 +316,35 @@ fn humanize(stem: &str) -> String {
     stem.replace(['.', '_'], " ").trim().to_owned()
 }
 
+/// Tokens that mark where a filename stops being a title and starts being
+/// release metadata. Compared case-insensitively, and against the part before
+/// a `-` so `x264-GROUP` matches `x264`.
+const RELEASE_TOKENS: &[&str] = &[
+    "480p", "720p", "1080p", "2160p", "4k", "bluray", "blu-ray", "webrip", "web-dl", "webdl",
+    "hdtv", "dvdrip", "bdrip", "remux", "x264", "x265", "h264", "h265", "hevc", "av1", "xvid",
+    "proper", "repack",
+];
+
+/// The humanized stem, cut at the first release-cruft token — for movie names
+/// with no year, where the whole stem would otherwise become the title.
+fn display_title(stem: &str) -> String {
+    let normalised = stem.replace(['.', '_'], " ");
+    let is_cruft = |word: &str| {
+        let lowered = word.to_ascii_lowercase();
+        let head = lowered.split('-').next().unwrap_or(&lowered);
+        RELEASE_TOKENS
+            .iter()
+            .any(|t| *t == lowered.as_str() || *t == head)
+    };
+    normalised
+        .split_whitespace()
+        .take_while(|word| !is_cruft(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(['-', ' '])
+        .to_owned()
+}
+
 /// A stable 63-bit id for a path, standing in for the file id an *arr app
 /// would have assigned. Derived from the path bytes so it survives restarts
 /// and is identical across machines that mount the library at the same point;
@@ -230,6 +355,24 @@ fn path_id(path: &Path) -> i64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     i64::from_le_bytes(bytes) & i64::MAX
+}
+
+/// The first pair of `[[library]]` roots where one contains the other (or they
+/// are equal), if any.
+///
+/// Overlapping roots are rejected outright because a file reachable from both
+/// is discovered twice under the same store key — `file_id` hashes the file
+/// path alone — with a different spec each time, so its release title, feed
+/// category, and per-friend scope would flip with config order.
+pub fn overlapping_roots(libraries: &[LibraryConfig]) -> Option<(&Path, &Path)> {
+    for (index, a) in libraries.iter().enumerate() {
+        for b in &libraries[index + 1..] {
+            if a.path.starts_with(&b.path) || b.path.starts_with(&a.path) {
+                return Some((&a.path, &b.path));
+            }
+        }
+    }
+    None
 }
 
 /// Every `[[library]]` entry, scanned as one source.
@@ -248,8 +391,17 @@ impl DirectoryScanner {
     }
 
     /// Scan every entry, or fail wholesale if any entry cannot be scanned.
-    pub fn scan_all(&self) -> Result<Vec<Discovered>> {
-        let mut items = Vec::new();
+    pub fn scan_all(&self) -> Result<ScanOutcome> {
+        if let Some((a, b)) = overlapping_roots(&self.libraries) {
+            bail!(
+                "[[library]] entries overlap: {} and {} — a file reachable from both \
+                 would be shared under whichever kind came last",
+                a.display(),
+                b.display()
+            );
+        }
+
+        let mut merged = ScanOutcome::default();
         for library in &self.libraries {
             let outcome = scan(library)?;
             if outcome.skipped > 0 {
@@ -259,9 +411,11 @@ impl DirectoryScanner {
                     "some files were skipped because their names could not be classified"
                 );
             }
-            items.extend(outcome.items);
+            merged.skipped += outcome.skipped;
+            merged.incomplete += outcome.incomplete;
+            merged.items.extend(outcome.items);
         }
-        Ok(items)
+        Ok(merged)
     }
 }
 
@@ -354,7 +508,6 @@ mod tests {
         touch(&root.join("stray.flac"), 16);
 
         let outcome = scan(&library(root, LibraryKind::Music)).unwrap();
-        assert_eq!(outcome.items.len(), 2);
         let nested = outcome
             .items
             .iter()
@@ -368,19 +521,11 @@ mod tests {
                 track: Some(3),
             }
         );
-        let stray = outcome
-            .items
-            .iter()
-            .find(|i| i.arr_path.ends_with("stray.flac"))
-            .unwrap();
-        assert_eq!(
-            stray.spec,
-            MediaSpec::Track {
-                artist: "Unknown Artist".to_owned(),
-                album: "Unknown Album".to_owned(),
-                track: None,
-            }
-        );
+        // A file at the root has no artist or album directory: every such file
+        // would synthesize the same "Unknown Artist" release, so it is skipped
+        // and counted rather than published.
+        assert_eq!(outcome.items.len(), 1);
+        assert_eq!(outcome.skipped, 1);
     }
 
     #[test]
@@ -426,12 +571,32 @@ mod tests {
         assert!(scan(&library(&file, LibraryKind::Movie)).is_err());
     }
 
+    /// An empty root is what an unmounted bind mount looks like; scanning it
+    /// to nothing would withdraw every share this source owns.
     #[test]
-    fn an_empty_library_scans_to_nothing() {
+    fn an_empty_library_fails_the_scan_rather_than_withdrawing() {
         let dir = tempfile::tempdir().unwrap();
+        let err = scan(&library(dir.path(), LibraryKind::Movie)).unwrap_err();
+        assert!(err.to_string().contains("empty"), "got {err:#}");
+    }
+
+    /// A root that holds *something* — even nothing shareable — is a mounted
+    /// filesystem, and scanning it to nothing is an honest answer.
+    #[test]
+    fn a_library_with_no_media_scans_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(&dir.path().join("notes.txt"), 8);
         let outcome = scan(&library(dir.path(), LibraryKind::Movie)).unwrap();
         assert!(outcome.items.is_empty());
         assert_eq!(outcome.skipped, 0);
+        assert_eq!(outcome.incomplete, 0);
+    }
+
+    #[test]
+    fn a_relative_library_path_fails_the_scan() {
+        let relative = library(Path::new("media/extras"), LibraryKind::Movie);
+        let err = scan(&relative).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "got {err:#}");
     }
 
     #[test]
@@ -447,6 +612,98 @@ mod tests {
         assert!(
             scanner.scan_all().is_err(),
             "a partial scan must fail wholesale or withdrawn shares would follow"
+        );
+    }
+
+    /// Overlapping roots discover the inner files twice under the same store
+    /// key with conflicting specs; the configuration is rejected wholesale.
+    #[test]
+    fn overlapping_library_roots_fail_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("tapes/Ash.Verge.S01E01.mkv"), 16);
+
+        let scanner = DirectoryScanner::new(vec![
+            library(root, LibraryKind::Movie),
+            library(&root.join("tapes"), LibraryKind::Tv),
+        ]);
+        let err = scanner.scan_all().unwrap_err();
+        assert!(err.to_string().contains("overlap"), "got {err:#}");
+    }
+
+    /// A hand-curated share folder is naturally built from symlinks into the
+    /// real library; each must be shared via the path the operator gave.
+    #[test]
+    #[cfg(unix)]
+    fn a_symlinked_file_is_shared_and_a_symlinked_directory_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("real/Gilded.Ferry.2019.mkv"), 64);
+        let share = root.join("share");
+        fs::create_dir(&share).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("real/Gilded.Ferry.2019.mkv"),
+            share.join("Gilded.Ferry.2019.mkv"),
+        )
+        .unwrap();
+        // A symlinked directory is how walks loop forever; it stays skipped.
+        std::os::unix::fs::symlink(root.join("real"), share.join("loop")).unwrap();
+        // A dangling link has nothing to share and must not fail the pass.
+        std::os::unix::fs::symlink(root.join("gone.mkv"), share.join("Bramble.Gate.2022.mkv"))
+            .unwrap();
+
+        let outcome = scan(&library(&share, LibraryKind::Movie)).unwrap();
+        assert_eq!(outcome.items.len(), 1, "the symlinked file must be found");
+        let item = &outcome.items[0];
+        assert_eq!(item.arr_path, share.join("Gilded.Ferry.2019.mkv"));
+        assert_eq!(item.size, 64, "the size is the target's, not the link's");
+        assert_eq!(outcome.incomplete, 0);
+    }
+
+    /// One unreadable subdirectory marks the scan incomplete instead of failing
+    /// it: the readable files are still shared, and the incomplete flag is what
+    /// stops the missing subtree reading as withdrawn.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_subdirectory_marks_the_scan_incomplete() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("Ash.Verge.2021.mkv"), 16);
+        let locked = root.join("lost+found");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let outcome = scan(&library(root, LibraryKind::Movie));
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.items.len(), 1, "the readable file must be shared");
+        assert_eq!(outcome.incomplete, 1);
+    }
+
+    /// The movie fallback publishes a *title*, not a filename: release cruft is
+    /// cut off, and names with no title at all are skipped, not invented.
+    #[test]
+    fn movie_titles_shed_release_cruft_and_junk_names_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("Film.Title.1080p.BluRay.x264-GROUP.mkv"), 16);
+        // Episode-shaped: misfiled television, not a movie to advertise.
+        touch(&root.join("Lanternwick.Hollow.S02E01.mkv"), 16);
+        // All cruft, no title.
+        touch(&root.join("1080p.x264.mkv"), 16);
+
+        let outcome = scan(&library(root, LibraryKind::Movie)).unwrap();
+        assert_eq!(outcome.items.len(), 1);
+        assert_eq!(outcome.skipped, 2);
+        assert_eq!(
+            outcome.items[0].spec,
+            MediaSpec::Movie {
+                title: "Film Title".to_owned(),
+                year: None,
+            }
         );
     }
 }

@@ -796,6 +796,14 @@ async fn a_directory_library_shares_alongside_sonarr() {
 async fn a_file_removed_from_the_directory_is_withdrawn() {
     let mut h = tagged_harness().await;
     let extras = with_movie_library(&mut h);
+    // A second file, so removing the first leaves a mounted, non-empty root —
+    // an *emptied* root is the failed-mount signature and refuses to scan.
+    sharerr_testkit::media::write_media_file(
+        &extras.path().join("Bramble.Gate.2022.mkv"),
+        4096,
+        78,
+    )
+    .unwrap();
     h.syncer.run(false).await.unwrap();
 
     std::fs::remove_file(extras.path().join("The.Gilded.Ferry.2019.mkv")).unwrap();
@@ -807,6 +815,92 @@ async fn a_file_removed_from_the_directory_is_withdrawn() {
         1,
         "its torrent should have been removed"
     );
+}
+
+/// An emptied root is indistinguishable from a bind mount that has not come
+/// up: the source fails and the shares survive to the next pass, instead of
+/// every directory torrent being torn down in one sweep.
+#[tokio::test]
+async fn an_emptied_library_root_never_causes_withdrawals() {
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.run(false).await.unwrap();
+
+    std::fs::remove_file(extras.path().join("The.Gilded.Ferry.2019.mkv")).unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.sources_failed, 1);
+    assert_eq!(report.unshared, 0, "an empty root must not withdraw");
+    assert!(h.qbit.snapshot().removed.is_empty());
+    let movie_state = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.source == MediaSource::Directory)
+        .unwrap()
+        .state;
+    assert_eq!(movie_state, ShareState::Seeding, "the item must be untouched");
+}
+
+/// A `[[path_map]]` rule is written for an *arr app's view of the library. One
+/// whose prefix happens to match a `[[library]]` path on disk must not rewrite
+/// the directory item's path — it is already the sharerr view.
+#[tokio::test]
+async fn a_path_map_rule_never_rewrites_a_directory_item() {
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.resolver = sharerr_core::paths::PathResolver::new(vec![
+        // Correct for some *arr app, catastrophic if applied to the directory.
+        PathMapping {
+            arr: extras.path().to_path_buf(),
+            sharerr: PathBuf::from("/nonexistent"),
+            qbit: None,
+        },
+        // The harness's own Sonarr mapping, unchanged.
+        PathMapping {
+            arr: PathBuf::from(library::ARR_TV_PREFIX),
+            sharerr: h._media.path().join("tv"),
+            qbit: Some(PathBuf::from(QBIT_PREFIX)),
+        },
+    ]);
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.failed, 0, "the directory item must resolve to itself");
+    assert_eq!(report.added, 3);
+}
+
+/// One unreadable subdirectory must not stop the readable files from sharing —
+/// and must not read as "everything in it was deleted" either.
+#[tokio::test]
+#[cfg(unix)]
+async fn an_incomplete_directory_scan_shares_but_never_withdraws() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    sharerr_testkit::media::write_media_file(
+        &extras.path().join("deep/Bramble.Gate.2022.mkv"),
+        4096,
+        78,
+    )
+    .unwrap();
+    h.syncer.run(false).await.unwrap();
+
+    let locked = extras.path().join("deep");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = h.syncer.run(false).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = report.unwrap();
+
+    assert_eq!(report.sources_failed, 0, "an incomplete scan still answers");
+    assert_eq!(
+        report.unshared, 0,
+        "a file behind an unreadable directory must not be withdrawn"
+    );
+    assert!(h.qbit.snapshot().removed.is_empty());
 }
 
 /// A library that cannot be scanned is a silent source, and silence never

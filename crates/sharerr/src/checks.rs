@@ -202,11 +202,19 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
 
     let resolver = config.resolver();
     for item in discovered {
-        match resolver.resolve(&item.arr_path) {
+        // Directory items are scanned from sharerr's own view, so only the
+        // sharerr→qbit half of a mapping may apply to them — an arr-side rule
+        // must not rewrite a path that was never an *arr's to report.
+        let resolved = if item.source == MediaSource::Directory {
+            resolver.resolve_sharerr(&item.arr_path)
+        } else {
+            resolver.resolve(&item.arr_path)
+        };
+        match resolved {
             Ok(paths) => {
-                // Directory items are scanned from sharerr's own view, so
-                // "matched no rule" is the normal case there, not the warning
-                // sign it is for a path another container reported.
+                // "Matched no rule" is the normal case for a directory item,
+                // not the warning sign it is for a path another container
+                // reported.
                 if !paths.mapping_applied && item.source != MediaSource::Directory {
                     report.unmapped += 1;
                 }
@@ -265,6 +273,18 @@ pub fn check_library(library: &sharerr_core::config::LibraryConfig) -> DirOutcom
         Err(err) => return DirOutcome::Unreadable(err.to_string()),
         Ok(meta) if !meta.is_dir() => return DirOutcome::NotADirectory,
         Ok(_) => {}
+    }
+
+    // `scan` refuses an empty root — it is what an unmounted bind mount looks
+    // like, and scanning it to nothing would withdraw everything. Classified
+    // here first so the probes report "empty" rather than a scan failure.
+    match std::fs::read_dir(&library.path) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                return DirOutcome::Empty;
+            }
+        }
+        Err(err) => return DirOutcome::Unreadable(err.to_string()),
     }
 
     match crate::library::scan(library) {
