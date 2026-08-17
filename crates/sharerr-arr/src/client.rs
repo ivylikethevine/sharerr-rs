@@ -55,6 +55,11 @@ impl std::fmt::Debug for ArrClient {
 
 impl ArrClient {
     pub fn new(kind: MediaSource, base: &Url, api_key: SecretString) -> Result<Self> {
+        // The directory source is a `MediaSource` for storage and scoping, but
+        // it has no HTTP API — refusing here keeps every later call total.
+        if kind == MediaSource::Directory {
+            return Err(ArrError::NotAnApp { service: kind });
+        }
         let http = reqwest::Client::builder()
             .timeout(DEFAULT_TIMEOUT)
             .build()
@@ -185,6 +190,8 @@ impl ArrClient {
             MediaSource::Radarr => radarr::discover(self, tag_id).await,
             MediaSource::Lidarr => lidarr::discover(self, tag_id).await,
             MediaSource::Readarr => readarr::discover(self, tag_id).await,
+            // Unreachable: `Self::new` refuses to build a Directory client.
+            MediaSource::Directory => Err(ArrError::NotAnApp { service: self.kind }),
         }
     }
 }

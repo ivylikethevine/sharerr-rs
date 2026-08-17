@@ -92,6 +92,41 @@
 </form>
 {% endfor %}
 
+<h2>Library directories</h2>
+<form method="post" action="/settings/libraries" class="panel">
+  <p class="hint">
+    Plain folders shared without any *arr app — everything in each one is shared,
+    treated as the kind you pick. No external ids travel with these, so a
+    friend's app matches them by release name alone. Blank rows are ignored, so
+    use the spare row at the bottom to add one.
+  </p>
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr><th>Directory as sharerr sees it</th><th>Kind</th></tr>
+    </thead>
+    <tbody>
+      {% for row in libraries %}
+      <tr>
+        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
+        <td>
+          <select name="kind">
+            <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
+            <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
+            <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
+            <option value="book" {% if row.kind == "book" %}selected{% endif %}>Books</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/library" hx-target="#test-library" hx-swap="innerHTML">Test directories</button>
+  <span id="test-library"></span>
+</form>
+
 <h2>qBittorrent</h2>
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>

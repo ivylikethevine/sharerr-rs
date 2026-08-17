@@ -2489,6 +2489,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "sharerr-arr",
  "sharerr-client",
  "sharerr-core",

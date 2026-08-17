@@ -33,8 +33,8 @@ use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
 use super::WebState;
-use super::config_io::{ConfigFile, Edit, parse_path_map};
-use super::templates::{ArrSection, PathRow, SettingsPage, render};
+use super::config_io::{ConfigFile, Edit, parse_libraries, parse_path_map};
+use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
 
 /// Mint a fresh secret and show it once.
 ///
@@ -142,6 +142,15 @@ pub struct PathsForm {
     qbit: Vec<String>,
 }
 
+/// The `[[library]]` rows, same repeated-input shape as [`PathsForm`].
+#[derive(Debug, Deserialize)]
+pub struct LibrariesForm {
+    #[serde(default)]
+    path: Vec<String>,
+    #[serde(default)]
+    kind: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -175,8 +184,14 @@ pub async fn save_arr(
     axum::extract::Path(source): axum::extract::Path<MediaSource>,
     Form(form): Form<ArrForm>,
 ) -> Response {
-    let url_path = config_paths::url_for(source);
-    let secret_key = secret_keys::api_key_for(source);
+    // The directory source parses as a `MediaSource` but has neither a URL nor
+    // an API key; its settings live in the Libraries section.
+    let (Some(url_path), Some(secret_key)) = (
+        config_paths::url_for(source),
+        secret_keys::api_key_for(source),
+    ) else {
+        return reject(&state, "There is no such service to configure.").await;
+    };
     let section = source.as_str();
 
     if let Err(message) = apply_secret(&state, secret_key, &form.api_key, form.clear_api_key).await
@@ -291,6 +306,32 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
                 i64::try_from(interval).unwrap_or(900),
             ),
         ]);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn save_libraries(
+    State(state): State<WebState>,
+    Form(form): Form<LibrariesForm>,
+) -> Response {
+    // Rows arrive as two parallel lists; index them from `path` the way
+    // `save_paths` does, so a malformed submission cannot pair the wrong kind
+    // with a directory.
+    let rows: Vec<(String, String)> = form
+        .path
+        .iter()
+        .enumerate()
+        .map(|(i, path)| (path.clone(), form.kind.get(i).cloned().unwrap_or_default()))
+        .collect();
+
+    let libraries = match parse_libraries(&rows) {
+        Ok(libraries) => libraries,
+        Err(err) => return reject(&state, &format!("{err:#}")).await,
+    };
+
+    write_config(&state, "libraries", |file| {
+        file.set_libraries(&libraries);
         Ok(())
     })
     .await
@@ -496,13 +537,16 @@ pub(super) fn title_case(name: &str) -> String {
 /// The example URL shown in each app's empty URL field: its documented default
 /// port, which is the strongest hint a placeholder can give.
 fn url_placeholder(source: MediaSource) -> &'static str {
-    use MediaSource::{Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    use MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
     match source {
         Sonarr => "http://sonarr:8989",
         Radarr => "http://radarr:7878",
         Lidarr => "http://lidarr:8686",
         Readarr => "http://readarr:8787",
         Whisparr => "http://whisparr:6969",
+        // Never rendered — the page loops `MediaSource::ARRS` — but the match
+        // must stay total, and a directory has no URL to hint at.
+        Directory => "",
     }
 }
 
@@ -518,20 +562,25 @@ async fn build_page(
 
     // One section per app, from the same list everything else iterates — the
     // settings page used to be the one surface that hand-enumerated two of the
-    // five and silently could not configure the rest.
-    let arrs = MediaSource::ALL
+    // five and silently could not configure the rest. `ARRS`, not `ALL`: the
+    // directory source has no URL or key and gets the Libraries section below.
+    let arrs = MediaSource::ARRS
         .iter()
         .copied()
-        .map(|kind| ArrSection {
-            source: kind.as_str(),
-            title: title_case(kind.as_str()),
-            url: config
-                .service(kind)
-                .map(|s| s.url.to_string())
-                .unwrap_or_default(),
-            key_set: is_set(secret_keys::api_key_for(kind)),
-            placeholder: url_placeholder(kind),
-            url_path: config_paths::url_for(kind),
+        .filter_map(|kind| {
+            let url_path = config_paths::url_for(kind)?;
+            let key = secret_keys::api_key_for(kind)?;
+            Some(ArrSection {
+                source: kind.as_str(),
+                title: title_case(kind.as_str()),
+                url: config
+                    .service(kind)
+                    .map(|s| s.url.to_string())
+                    .unwrap_or_default(),
+                key_set: is_set(key),
+                placeholder: url_placeholder(kind),
+                url_path,
+            })
         })
         .collect();
 
@@ -587,6 +636,18 @@ async fn build_page(
 
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
+
+        // A spare blank row so "add a library" needs no JavaScript, same as
+        // the path map below.
+        libraries: config
+            .library
+            .iter()
+            .map(|library| LibraryRow {
+                path: library.path.display().to_string(),
+                kind: library.kind.as_str(),
+            })
+            .chain(std::iter::once(LibraryRow::default()))
+            .collect(),
 
         // A spare blank row so "add a mapping" needs no JavaScript — the form
         // simply has one more row than there are mappings, and blank rows are

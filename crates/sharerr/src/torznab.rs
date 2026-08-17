@@ -1314,6 +1314,65 @@ mod tests {
         );
     }
 
+    /// Directory items reach the feed like any other item — categorised by
+    /// their spec, since the source carries no media kind — and a narrow scope
+    /// admits them by their declared kind rather than by source.
+    #[tokio::test]
+    async fn directory_items_reach_the_feed_and_honour_scope() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        let seed = [
+            (
+                41_i64,
+                "cc",
+                episode("Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR", 2, 1),
+            ),
+            (42_i64, "dd", movie("Harborlight.2019.WEB-DL.x264-SHARERR")),
+        ];
+        for (file_id, hash, mut item) in seed {
+            item.source = MediaSource::Directory;
+            item.file_id = file_id;
+            // What the scanner actually produces: no ids, nothing seeding yet.
+            item.ids = ExternalIds::default();
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Directory, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Directory, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        store
+            .create_peer("Tv", &SecretString::from("tv-key"), PeerScope::Tv)
+            .await
+            .unwrap();
+        store
+            .create_peer("All", &SecretString::from("all-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        let everything = feed_for(&state, "all-key").await;
+        assert_eq!(everything.matches("<item>").count(), 2, "{everything}");
+        assert!(
+            everything.contains(&CAT_TV.to_string()) && everything.contains(&CAT_MOVIES.to_string()),
+            "the categories must come from each item's spec: {everything}"
+        );
+
+        let tv = feed_for(&state, "tv-key").await;
+        assert_eq!(tv.matches("<item>").count(), 1, "{tv}");
+        assert!(tv.contains("Lanternwick"), "{tv}");
+        assert!(
+            !tv.contains("Harborlight"),
+            "a tv-scoped friend must not see a directory movie: {tv}"
+        );
+    }
+
     /// Scope is decided by *who is asking*, not by the query — so a friend cannot
     /// widen it by searching the other category.
     #[tokio::test]

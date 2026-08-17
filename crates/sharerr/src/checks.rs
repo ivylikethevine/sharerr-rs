@@ -204,7 +204,10 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
     for item in discovered {
         match resolver.resolve(&item.arr_path) {
             Ok(paths) => {
-                if !paths.mapping_applied {
+                // Directory items are scanned from sharerr's own view, so
+                // "matched no rule" is the normal case there, not the warning
+                // sign it is for a path another container reported.
+                if !paths.mapping_applied && item.source != MediaSource::Directory {
                     report.unmapped += 1;
                 }
                 if !paths.sharerr.exists() {
@@ -219,6 +222,59 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
     }
 
     report
+}
+
+/// What a `[[library]]` directory turned out to be.
+///
+/// The same decide-once contract as [`ArrOutcome`]: `doctor`, the settings
+/// probe, and the diagnostics page each word these their own way, but cannot
+/// disagree about which condition they found.
+#[derive(Debug)]
+pub enum DirOutcome {
+    /// The path does not exist as sharerr sees it.
+    Missing,
+    /// The path exists but is not a directory.
+    NotADirectory,
+    /// The walk failed partway — permissions, usually. Carries the reason.
+    Unreadable(String),
+    /// A perfectly good directory with nothing shareable in it.
+    Empty,
+    /// Scanned. `skipped` counts media files whose names could not be
+    /// classified; they are reported rather than shared.
+    Ready {
+        skipped: usize,
+        items: Vec<Discovered>,
+    },
+}
+
+impl DirOutcome {
+    /// The discovered files, if the scan got that far — same honest-empty
+    /// contract as [`ArrOutcome::into_items`].
+    pub fn into_items(self) -> Vec<Discovered> {
+        match self {
+            Self::Ready { items, .. } => items,
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Scan one `[[library]]` directory and establish what sharerr would share.
+pub fn check_library(library: &sharerr_core::config::LibraryConfig) -> DirOutcome {
+    match std::fs::metadata(&library.path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return DirOutcome::Missing,
+        Err(err) => return DirOutcome::Unreadable(err.to_string()),
+        Ok(meta) if !meta.is_dir() => return DirOutcome::NotADirectory,
+        Ok(_) => {}
+    }
+
+    match crate::library::scan(library) {
+        Ok(outcome) if outcome.items.is_empty() && outcome.skipped == 0 => DirOutcome::Empty,
+        Ok(outcome) => DirOutcome::Ready {
+            skipped: outcome.skipped,
+            items: outcome.items,
+        },
+        Err(err) => DirOutcome::Unreadable(format!("{err:#}")),
+    }
 }
 
 /// What the torrent client turned out to be.
@@ -420,6 +476,86 @@ mod tests {
             matches!(outcome, ArrOutcome::NotConfigured),
             "got {outcome:?}"
         );
+    }
+
+    /// Each directory condition maps to its own outcome — the wording differs
+    /// per caller, the finding must not.
+    #[test]
+    fn library_conditions_map_to_distinct_outcomes() {
+        use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = |path: std::path::PathBuf| LibraryConfig {
+            path,
+            kind: LibraryKind::Movie,
+        };
+
+        let missing = check_library(&library(dir.path().join("nope")));
+        assert!(matches!(missing, DirOutcome::Missing), "got {missing:?}");
+
+        let file_path = dir.path().join("plain.mkv");
+        std::fs::write(&file_path, b"x").unwrap();
+        let not_dir = check_library(&library(file_path));
+        assert!(
+            matches!(not_dir, DirOutcome::NotADirectory),
+            "got {not_dir:?}"
+        );
+
+        let empty_dir = dir.path().join("empty");
+        std::fs::create_dir(&empty_dir).unwrap();
+        let empty = check_library(&library(empty_dir));
+        assert!(matches!(empty, DirOutcome::Empty), "got {empty:?}");
+
+        let full_dir = dir.path().join("full");
+        std::fs::create_dir(&full_dir).unwrap();
+        std::fs::write(full_dir.join("Gilded.Ferry.2019.mkv"), b"xx").unwrap();
+        let ready = check_library(&library(full_dir));
+        match ready {
+            DirOutcome::Ready { skipped, items } => {
+                assert_eq!(skipped, 0);
+                assert_eq!(items.len(), 1);
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// A directory item resolving through no rule is by design, not a
+    /// misconfiguration — the warning is reserved for paths another container
+    /// reported.
+    #[test]
+    fn directory_items_are_not_counted_as_unmapped() {
+        use sharerr_core::config::PathMapping;
+        use sharerr_core::{ExternalIds, MediaSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Gilded.Ferry.2019.mkv");
+        std::fs::write(&file, b"xx").unwrap();
+
+        let config = Config {
+            path_map: vec![PathMapping {
+                arr: "/tv".into(),
+                sharerr: dir.path().to_path_buf(),
+                qbit: None,
+            }],
+            ..Config::default()
+        };
+        let item = sharerr_core::Discovered {
+            source: MediaSource::Directory,
+            source_id: 1,
+            file_id: 2,
+            spec: MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: file,
+            size: 2,
+            ids: ExternalIds::default(),
+            scene_name: None,
+        };
+
+        let report = check_paths(&config, &[item]);
+        assert_eq!(report.unmapped, 0);
+        assert!(report.missing.is_empty());
     }
 
     /// "No key stored yet" and "the vault would not open" have different fixes —

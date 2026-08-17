@@ -112,7 +112,7 @@ Serialised with `--test-threads=1` because the tests share one stack.
 
 sharerr shares what carries the `sharerr` tag and nothing else, so a stack with no
 tagged content exercises nothing: `doctor` fails with `TagNotFound`, and `sync`
-bails with "no *arr app could be scanned". Getting content in is the one part of
+bails with "no library source could be scanned". Getting content in is the one part of
 this stack that cannot go through the *arr APIs, and it is worth knowing why.
 
 > **Adding a series or movie through the *arr API triggers a metadata lookup**

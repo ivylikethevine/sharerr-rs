@@ -150,13 +150,26 @@ impl Store {
             .collect();
         let placeholders = vec!["?"; allowed.len()].join(", ");
 
+        // Directory items carry no app identity, so a narrow scope admits them
+        // by the declared kind in their spec instead — see
+        // `PeerScope::directory_kind`. Under `All` the source list already
+        // includes them and this clause is absent.
+        let directory_arm = match scope.directory_kind() {
+            Some(_) => " OR (source = ? AND json_extract(spec_json, '$.kind') = ?)",
+            None => "",
+        };
+
         let sql = format!(
             "{SELECT_COLUMNS} WHERE state = ? AND info_hash IS NOT NULL \
-             AND source IN ({placeholders}) ORDER BY created_at DESC, id DESC"
+             AND (source IN ({placeholders}){directory_arm}) \
+             ORDER BY created_at DESC, id DESC"
         );
         let mut query = sqlx::query(&sql).bind(ShareState::Seeding.as_str());
         for source in allowed {
             query = query.bind(source);
+        }
+        if let Some(kind) = scope.directory_kind() {
+            query = query.bind(MediaSource::Directory.as_str()).bind(kind);
         }
 
         let rows = query.fetch_all(&self.pool).await?;
@@ -837,6 +850,55 @@ mod tests {
         let feed = store.seeding_items(crate::PeerScope::All).await.unwrap();
         assert_eq!(feed.len(), 1, "only the seeding item belongs in the feed");
         assert_eq!(feed[0].file_id, 2);
+    }
+
+    /// Directory items have no app identity, so narrow scopes admit them by
+    /// the declared kind in their spec — a tv-scoped friend sees a directory
+    /// *episode* but not a directory *movie*, and Whisparr stays excluded.
+    #[tokio::test]
+    async fn narrow_scopes_admit_directory_items_by_spec_kind() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        let seeding = |mut item: SharedItem, hash: &str| {
+            item.info_hash = Some(hash.repeat(20));
+            item.state = ShareState::Seeding;
+            item
+        };
+
+        store.upsert(&seeding(episode(1), "aa")).await.unwrap();
+        let directory_episode = SharedItem {
+            source: MediaSource::Directory,
+            ..seeding(episode(2), "bb")
+        };
+        store.upsert(&directory_episode).await.unwrap();
+        let directory_movie = SharedItem {
+            source: MediaSource::Directory,
+            ..seeding(movie(3), "cc")
+        };
+        store.upsert(&directory_movie).await.unwrap();
+        let whisparr_episode = SharedItem {
+            source: MediaSource::Whisparr,
+            ..seeding(episode(4), "dd")
+        };
+        store.upsert(&whisparr_episode).await.unwrap();
+
+        let ids = |items: Vec<SharedItem>| {
+            let mut ids: Vec<i64> = items.iter().map(|i| i.file_id).collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        let tv = store.seeding_items(crate::PeerScope::Tv).await.unwrap();
+        assert_eq!(ids(tv), vec![1, 2]);
+
+        let movies = store.seeding_items(crate::PeerScope::Movies).await.unwrap();
+        assert_eq!(ids(movies), vec![3]);
+
+        let music = store.seeding_items(crate::PeerScope::Music).await.unwrap();
+        assert_eq!(ids(music), Vec::<i64>::new());
+
+        let all = store.seeding_items(crate::PeerScope::All).await.unwrap();
+        assert_eq!(ids(all), vec![1, 2, 3, 4]);
     }
 
     #[tokio::test]

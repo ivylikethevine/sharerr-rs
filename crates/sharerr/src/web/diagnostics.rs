@@ -18,7 +18,7 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use super::templates::{DiagnosticsPage, SampleRow, ServiceLine, render};
-use crate::checks::{self, ArrOutcome};
+use crate::checks::{self, ArrOutcome, DirOutcome};
 
 /// How many problem paths to name before summarising the rest.
 ///
@@ -42,17 +42,24 @@ pub async fn page(State(state): State<WebState>) -> Response {
 
     // The services are independent, so the page waits for the slowest of them
     // rather than the sum of all five.
-    let outcomes = futures::future::join_all(config.configured_sources().into_iter().map(|kind| {
-        let api_key = api_key(secret_keys::api_key_for(kind));
-        let config = &config;
-        async move {
-            let url = config.service(kind).map(|s| &s.url);
-            (
-                kind,
-                checks::check_arr(kind, url, api_key, &config.tag).await,
-            )
-        }
-    }))
+    let outcomes = futures::future::join_all(
+        config
+            .configured_sources()
+            .into_iter()
+            // `configured_sources` yields only *arr apps, each of which has a key.
+            .filter_map(|kind| secret_keys::api_key_for(kind).map(|key| (kind, key)))
+            .map(|(kind, key)| {
+                let api_key = api_key(key);
+                let config = &config;
+                async move {
+                    let url = config.service(kind).map(|s| &s.url);
+                    (
+                        kind,
+                        checks::check_arr(kind, url, api_key, &config.tag).await,
+                    )
+                }
+            }),
+    )
     .await;
 
     let mut services = Vec::new();
@@ -60,6 +67,25 @@ pub async fn page(State(state): State<WebState>) -> Response {
     for (kind, outcome) in outcomes {
         services.push(describe(kind, &config, &outcome));
         discovered.extend(outcome.into_items());
+    }
+
+    // The directory scans are filesystem-bound; off the async loop for the same
+    // reason as `check_paths` below.
+    let libraries = config.library.clone();
+    let library_lines = tokio::task::spawn_blocking(move || {
+        libraries
+            .iter()
+            .map(|library| {
+                let outcome = checks::check_library(library);
+                (describe_library(library, &outcome), outcome.into_items())
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    for (line, items) in library_lines {
+        services.push(line);
+        discovered.extend(items);
     }
 
     // `check_paths` stats every discovered file. On a container pinned to one
@@ -140,6 +166,39 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
 
     ServiceLine {
         name: kind.as_str().to_owned(),
+        message,
+        ok,
+    }
+}
+
+/// One line per `[[library]]` directory, in this page's voice.
+fn describe_library(
+    library: &sharerr_core::config::LibraryConfig,
+    outcome: &DirOutcome,
+) -> ServiceLine {
+    let (ok, message) = match outcome {
+        DirOutcome::Ready { skipped: 0, items } => {
+            (true, format!("{} {} file(s)", items.len(), library.kind.as_str()))
+        }
+        DirOutcome::Ready { skipped, items } => (
+            true,
+            format!(
+                "{} {} file(s); {skipped} skipped — their names could not be classified",
+                items.len(),
+                library.kind.as_str()
+            ),
+        ),
+        DirOutcome::Empty => (true, "empty — nothing to share yet".to_owned()),
+        DirOutcome::Missing => (
+            false,
+            "does not exist as sharerr sees it — check the mount".to_owned(),
+        ),
+        DirOutcome::NotADirectory => (false, "not a directory".to_owned()),
+        DirOutcome::Unreadable(reason) => (false, format!("could not scan: {reason}")),
+    };
+
+    ServiceLine {
+        name: format!("library {}", library.path.display()),
         message,
         ok,
     }

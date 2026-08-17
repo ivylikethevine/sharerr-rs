@@ -22,7 +22,7 @@ use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
-use crate::checks::{ArrOutcome, QbitOutcome, check_arr, check_qbit};
+use crate::checks::{ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_library, check_qbit};
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
 ///
@@ -34,8 +34,16 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
 
     let outcome = if service == "qbittorrent" {
         qbit_badge(&state, &config).await
+    } else if service == "library" {
+        library_badge(&config).await
     } else if let Some(kind) = MediaSource::parse(&service) {
-        arr_badge(kind, &state, &config).await
+        // "directory" parses as a MediaSource but is not a probeable service;
+        // its button is the "library" one above.
+        if kind == MediaSource::Directory {
+            Outcome::Bad("Unknown service.".to_owned())
+        } else {
+            arr_badge(kind, &state, &config).await
+        }
     } else {
         Outcome::Bad("Unknown service.".to_owned())
     };
@@ -70,7 +78,11 @@ impl Outcome {
 }
 
 async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
-    let (service, key) = (config.service(kind), secret_keys::api_key_for(kind));
+    let service = config.service(kind);
+    // The caller filtered Directory out, and every *arr app has a vault key.
+    let Some(key) = secret_keys::api_key_for(kind) else {
+        return Outcome::Bad("Unknown service.".to_owned());
+    };
 
     let api_key = state.secret(key).await;
     let outcome = check_arr(
@@ -111,6 +123,61 @@ async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outc
             config.tag
         )),
     }
+}
+
+/// One badge summarising every `[[library]]` directory: the counts when all is
+/// well, or the first problem — the operator fixes one thing at a time anyway.
+async fn library_badge(config: &Config) -> Outcome {
+    if config.library.is_empty() {
+        return Outcome::Bad("No library directories configured. Save one first.".to_owned());
+    }
+
+    let libraries = config.library.clone();
+    // The scans stat every file; off the async loop so a slow mount cannot
+    // stall the single worker thread this may be running on.
+    let outcomes = tokio::task::spawn_blocking(move || {
+        libraries
+            .iter()
+            .map(|library| (library.clone(), check_library(library)))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+
+    let (mut folders, mut files, mut skipped) = (0usize, 0usize, 0usize);
+    for (library, outcome) in outcomes {
+        let path = library.path.display();
+        match outcome {
+            DirOutcome::Missing => {
+                return Outcome::Bad(format!(
+                    "{path} does not exist as sharerr sees it — check the mount."
+                ));
+            }
+            DirOutcome::NotADirectory => {
+                return Outcome::Bad(format!("{path} is not a directory."));
+            }
+            DirOutcome::Unreadable(reason) => {
+                return Outcome::Bad(format!("Could not scan {path}: {reason}"));
+            }
+            DirOutcome::Empty => folders += 1,
+            DirOutcome::Ready {
+                skipped: s,
+                ref items,
+            } => {
+                folders += 1;
+                files += items.len();
+                skipped += s;
+            }
+        }
+    }
+
+    let mut message = format!("{folders} folder(s), {files} media file(s) found.");
+    if skipped > 0 {
+        message.push_str(&format!(
+            " {skipped} file(s) skipped — their names could not be classified."
+        ));
+    }
+    Outcome::Good(message)
 }
 
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {

@@ -10,12 +10,13 @@ ordering is a judgement about value, not a schedule.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| M6 | A library source that needs no *arr app at all | Next |
+| — | Jellyfin/Emby as a library source | Next |
 
 
 **Shipped, and removed from this list:** the core (M1), the builtin tracker and
 Torznab feed (M2), the web UI (M3), friend/peer management (M4), Jackett
-compatibility (M5), per-friend selective sharing, Transmission support, Lidarr/Readarr/Whisparr
+compatibility (M5), the plain tagged directory source (M6), per-friend selective
+sharing, Transmission support, Lidarr/Readarr/Whisparr
 support, the whole M3 follow-up backlog, and the second test stack behind gluetun. The code and `git log` are the record — carrying finished work here
 only makes the list harder to read.
 
@@ -34,17 +35,15 @@ tag-driven discovery. Adding an *arr app is now a discovery walk plus a config
 section; the domain model carries music and books, and the feed advertises the
 matching categories.
 
-What remains are the sources that are *not* an *arr app, and they are a different
-shape of problem — they have no tag, and weaker ids.
+The **plain tagged directory** (M6) shipped: `[[library]]` entries with a
+declared kind, scanned behind the same `LibrarySource` seam the *arr clients now
+sit behind. As predicted it loses every external id — the release name is all a
+friend's app gets — and that seam is exactly where the remaining sources plug in.
 
 | Service                      | Why                                                                                                                                                                                                                       | Difficulty |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-|
-|
-|
 | **Jellyfin / Emby**          | Not everyone runs the *arr apps. A media-server-backed source lets someone share a library they curate elsewhere — but tags are per-user and the external ids are weaker than Sonarr's, so releases match less reliably.  | Medium     |
 | **Plex**                     | Same idea, but the API is more awkward and its "collections" map badly onto a share tag.                                                                                                                                  | Medium     |
-| **A plain tagged directory** | The escape hatch: point sharerr at a folder and share what is in it, no *arr app at all. Loses every external id, so a friend's Sonarr falls back to parsing the release name. Worth having as the zero-dependency path.  | Low        |
 
 ### Torrent clients (what actually seeds)
 

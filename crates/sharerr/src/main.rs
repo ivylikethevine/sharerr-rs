@@ -2,6 +2,7 @@ mod checks;
 mod cli;
 mod commands;
 mod jackett;
+mod library;
 mod secrets;
 mod settings;
 mod state;

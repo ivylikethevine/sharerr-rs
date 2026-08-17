@@ -17,6 +17,7 @@ e2e = []
 [dependencies]
 anyhow = { workspace = true }
 askama = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true, features = ["cookie", "form"] }
 clap = { workspace = true, features = ["derive", "env"] }
@@ -27,6 +28,7 @@ hex = { workspace = true }
 rpassword = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
 sharerr-arr = { workspace = true }
 sharerr-client = { workspace = true }
 sharerr-core = { workspace = true }
@@ -42,7 +44,6 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 figment = { workspace = true, features = ["toml", "env", "test"] }
 serde_json = { workspace = true }
 sharerr-testkit = { workspace = true }

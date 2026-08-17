@@ -92,6 +92,27 @@ impl PeerScope {
         }
     }
 
+    /// The `spec_json` kind tag a directory item must carry to be visible
+    /// under this scope, or `None` when the scope admits every source anyway.
+    ///
+    /// [`Self::allows`] keys on where an item *came from*, which for a
+    /// `[[library]]` directory is always [`MediaSource::Directory`] — the
+    /// declared kind of the library, not the source, is what says whether its
+    /// files are television or music. The values are `MediaSpec`'s serde tags,
+    /// compared against `json_extract(spec_json, '$.kind')` in
+    /// `Store::seeding_items`.
+    pub fn directory_kind(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            // No Whisparr concern here: an operator who declares a directory
+            // `kind = "tv"` has said explicitly that it is television.
+            Self::Tv => Some("episode"),
+            Self::Movies => Some("movie"),
+            Self::Music => Some("track"),
+            Self::Books => Some("book"),
+        }
+    }
+
     /// How to describe it to the operator.
     pub fn label(self) -> &'static str {
         match self {
