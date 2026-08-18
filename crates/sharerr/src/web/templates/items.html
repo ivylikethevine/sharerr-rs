@@ -20,16 +20,16 @@
   <label for="source">Source</label>
   <select id="source" name="source">
     <option value=""{% if source_filter.is_empty() %} selected{% endif %}>Any</option>
-    {% for (value, label) in source_options %}
-    <option value="{{ value }}"{% if source_filter == value %} selected{% endif %}>{{ label }}</option>
+    {% for option in source_options %}
+    <option value="{{ option.value }}"{% if source_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
     {% endfor %}
   </select>
 
   <label for="state">State</label>
   <select id="state" name="state">
     <option value=""{% if state_filter.is_empty() %} selected{% endif %}>Any</option>
-    {% for (value, label) in state_options %}
-    <option value="{{ value }}"{% if state_filter == value %} selected{% endif %}>{{ label }}</option>
+    {% for option in state_options %}
+    <option value="{{ option.value }}"{% if state_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
     {% endfor %}
   </select>
 

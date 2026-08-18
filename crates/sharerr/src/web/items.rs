@@ -18,7 +18,7 @@ use sharerr_store::{Peer, PeerScope};
 use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
-use super::templates::{ItemRow, ItemsPage, SortLink, render};
+use super::templates::{FilterOption, ItemRow, ItemsPage, SortLink, render};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemsQuery {
@@ -126,11 +126,17 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         items: items.iter().map(|item| row(item, &active)).collect(),
         source_options: MediaSource::ALL
             .iter()
-            .map(|s| (s.as_str(), title_case(s.as_str())))
+            .map(|s| FilterOption {
+                value: s.as_str(),
+                label: title_case(s.as_str()),
+            })
             .collect(),
         state_options: ShareState::ALL
             .iter()
-            .map(|s| (s.as_str(), title_case(s.as_str())))
+            .map(|s| FilterOption {
+                value: s.as_str(),
+                label: title_case(s.as_str()),
+            })
             .collect(),
         source_filter: query.source,
         state_filter: query.state,
@@ -193,10 +199,8 @@ fn row(item: &SharedItem, peers: &[Peer]) -> ItemRow {
     ItemRow {
         title: item.spec.title().to_owned(),
         kind: spec_kind(&item.spec),
-        source: item.source.as_str(),
         source_label: title_case(item.source.as_str()),
         size: human_size(item.size),
-        state: item.state.as_str(),
         state_label: title_case(item.state.as_str()),
         visible_to: visible_to(item, peers),
         since: item.created_at.map(ago).unwrap_or_default(),
