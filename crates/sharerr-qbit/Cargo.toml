@@ -26,5 +26,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+sharerr-testkit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 wiremock = { workspace = true }

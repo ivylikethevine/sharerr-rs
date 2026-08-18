@@ -73,6 +73,10 @@ pub struct ServeState {
     /// there is no token". Cleared by [`Self::invalidate`], so changing it through
     /// the UI takes effect without a restart.
     tracker_token: RwLock<Option<Option<String>>>,
+    /// This instance's gossip signing identity, cached for the same reason as
+    /// `tracker_token` — loading it means opening the vault, and the pull side of
+    /// gossip is asked on every friend's poll.
+    gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -116,6 +120,7 @@ impl ServeState {
             syncer: RwLock::new(Err("still starting up".to_owned())),
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
+            gossip_identity: RwLock::new(None),
             wake: Notify::new(),
             endpoint,
             endpoint_refresh: Notify::new(),
@@ -225,6 +230,27 @@ impl ServeState {
         token
     }
 
+    /// This instance's gossip signing identity, cached after the first load.
+    ///
+    /// Loading means opening the vault — an Argon2 derivation — and `self_record`
+    /// used to pay that on every pull request a friend made. Cached the same way
+    /// as `tracker_token`, for the same reason.
+    pub async fn gossip_identity(&self) -> Option<Arc<crate::gossip::Identity>> {
+        if let Some(cached) = &*self.gossip_identity.read().await {
+            return cached.clone();
+        }
+
+        let identity = match self.open_vault().await {
+            Ok(mut vault) => crate::gossip::Identity::load_or_create(&mut vault)
+                .ok()
+                .map(Arc::new),
+            Err(_) => None,
+        };
+
+        *self.gossip_identity.write().await = Some(identity.clone());
+        identity
+    }
+
     /// Why reconciliation is not running, or `None` when it is.
     ///
     /// `Option` rather than a `(bool, String)` pair, whose `String` would be
@@ -284,6 +310,7 @@ impl ServeState {
         // These are vault values too, so a credential change has to drop them or
         // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
+        *self.gossip_identity.write().await = None;
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.

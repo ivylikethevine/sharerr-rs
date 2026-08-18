@@ -33,6 +33,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::now_epoch;
 use sharerr_store::{EndpointKind, ObservedVia, Store};
 
 use crate::state::ServeState;
@@ -195,19 +196,9 @@ impl Identity {
 /// unavailable — gossip still relays without it, it just cannot speak for
 /// itself.
 async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
-    let mut vault = match state.open_vault().await {
-        Ok(vault) => vault,
-        Err(reason) => {
-            tracing::debug!(reason, "no gossip identity without the vault");
-            return None;
-        }
-    };
-    let identity = match Identity::load_or_create(&mut vault) {
-        Ok(identity) => identity,
-        Err(reason) => {
-            tracing::warn!(reason, "could not load the gossip identity");
-            return None;
-        }
+    let Some(identity) = state.gossip_identity().await else {
+        tracing::debug!("no gossip identity available");
+        return None;
     };
 
     let now = now_epoch();
@@ -544,13 +535,6 @@ async fn exchange_with(
         tracing::info!(peer = peer_id, accepted = summary.accepted, "gossip ingested");
     }
     Ok(())
-}
-
-fn now_epoch() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

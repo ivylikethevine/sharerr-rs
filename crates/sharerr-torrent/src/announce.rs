@@ -190,6 +190,14 @@ struct Peer {
     last_seen: Instant,
 }
 
+impl Peer {
+    /// Whether this peer is still inside its TTL as of `now` — the single
+    /// liveness check `announce`, `stats`, and `scrape` all apply.
+    fn is_live(&self, now: Instant) -> bool {
+        now.duration_since(self.last_seen) < PEER_TTL
+    }
+}
+
 /// Every swarm this tracker is serving, keyed by info hash.
 ///
 /// In memory only. A restart loses the peer lists, and every client re-announces
@@ -231,7 +239,7 @@ impl Swarms {
 
         // Expiry happens here rather than on a timer: a swarm nobody announces to
         // is a swarm nobody is asking about, and sweeping it costs nothing to defer.
-        swarm.retain(|_, peer| now.duration_since(peer.last_seen) < PEER_TTL);
+        swarm.retain(|_, peer| peer.is_live(now));
 
         if request.event == Event::Stopped {
             swarm.remove(&request.peer_id);
@@ -284,9 +292,7 @@ impl Swarms {
 
         let mut stats = SwarmStats::default();
         for swarm in swarms.values() {
-            let live = swarm
-                .values()
-                .filter(|peer| now.duration_since(peer.last_seen) < PEER_TTL);
+            let live = swarm.values().filter(|peer| peer.is_live(now));
             let mut any = false;
             for peer in live {
                 any = true;
@@ -312,7 +318,7 @@ impl Swarms {
         let now = Instant::now();
         swarm
             .values()
-            .filter(|peer| now.duration_since(peer.last_seen) < PEER_TTL)
+            .filter(|peer| peer.is_live(now))
             .fold((0, 0), |(complete, incomplete), peer| {
                 if peer.left == 0 {
                     (complete + 1, incomplete)

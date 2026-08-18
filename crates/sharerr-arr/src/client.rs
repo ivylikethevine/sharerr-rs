@@ -106,7 +106,7 @@ impl ArrClient {
             .map_err(|source| ArrError::Unreachable {
                 service: self.kind,
                 url: url.to_string(),
-                source,
+                detail: sharerr_client::error_chain(&source),
             })?;
 
         let status = response.status();
@@ -135,7 +135,7 @@ impl ArrClient {
             .map_err(|source| ArrError::Unreachable {
                 service: self.kind,
                 url: url.to_string(),
-                source,
+                detail: sharerr_client::error_chain(&source),
             })?;
 
         serde_json::from_slice(&bytes).map_err(|source| ArrError::Decode {

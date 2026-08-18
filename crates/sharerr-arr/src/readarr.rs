@@ -107,14 +107,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 continue;
             };
 
-            // The monitored edition first — that is the one the operator actually
-            // has — falling back to any edition that carries an ISBN at all.
-            let isbn = book
-                .editions
-                .iter()
-                .find(|e| e.monitored && e.isbn13.is_some())
-                .or_else(|| book.editions.iter().find(|e| e.isbn13.is_some()))
-                .and_then(|e| non_empty(e.isbn13.clone()));
+            let isbn = pick_isbn(&book.editions);
 
             discovered.push(Discovered {
                 source: MediaSource::Readarr,
@@ -139,6 +132,16 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
     Ok(discovered)
 }
 
+/// The monitored edition first — that is the one the operator actually has —
+/// falling back to any edition that carries an ISBN at all.
+fn pick_isbn(editions: &[Edition]) -> Option<String> {
+    editions
+        .iter()
+        .find(|e| e.monitored && e.isbn13.is_some())
+        .or_else(|| editions.iter().find(|e| e.isbn13.is_some()))
+        .and_then(|e| non_empty(e.isbn13.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -152,14 +155,6 @@ mod tests {
         }
     }
 
-    fn pick(editions: &[Edition]) -> Option<String> {
-        editions
-            .iter()
-            .find(|e| e.monitored && e.isbn13.is_some())
-            .or_else(|| editions.iter().find(|e| e.isbn13.is_some()))
-            .and_then(|e| non_empty(e.isbn13.clone()))
-    }
-
     /// The monitored edition is the one the operator actually holds, so its ISBN is
     /// the one a friend should match on.
     #[test]
@@ -168,7 +163,7 @@ mod tests {
             edition(Some("9780000000001"), false),
             edition(Some("9780000000002"), true),
         ];
-        assert_eq!(pick(&editions).as_deref(), Some("9780000000002"));
+        assert_eq!(pick_isbn(&editions).as_deref(), Some("9780000000002"));
     }
 
     /// A book with no monitored edition still has a usable id — better an ISBN from
@@ -176,11 +171,11 @@ mod tests {
     #[test]
     fn an_unmonitored_edition_is_better_than_no_isbn() {
         let editions = vec![edition(None, true), edition(Some("9780000000003"), false)];
-        assert_eq!(pick(&editions).as_deref(), Some("9780000000003"));
+        assert_eq!(pick_isbn(&editions).as_deref(), Some("9780000000003"));
     }
 
     #[test]
     fn a_book_with_no_isbn_anywhere_reports_none() {
-        assert_eq!(pick(&[edition(None, true)]), None);
+        assert_eq!(pick_isbn(&[edition(None, true)]), None);
     }
 }

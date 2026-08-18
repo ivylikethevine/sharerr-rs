@@ -4,12 +4,8 @@ pub type Result<T> = std::result::Result<T, QbitError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QbitError {
-    #[error("could not reach qBittorrent at {url}: {source}")]
-    Unreachable {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
+    #[error("could not reach qBittorrent at {url}: {detail}")]
+    Unreachable { url: String, detail: String },
 
     #[error(
         "qBittorrent rejected the API key. Check the qbittorrent.api_key entry in the \

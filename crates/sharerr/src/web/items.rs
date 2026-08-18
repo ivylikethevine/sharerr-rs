@@ -74,16 +74,18 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // carry `dir` explicitly, so there is never an ambiguous third click.
     let sort = if query.sort.is_empty() { "since" } else { query.sort.as_str() };
     let desc = if query.sort.is_empty() { true } else { query.dir == "desc" };
-    items.sort_by(|a, b| {
-        let ordering = match sort {
-            "title" => a.spec.title().to_lowercase().cmp(&b.spec.title().to_lowercase()),
-            "source" => a.source.as_str().cmp(b.source.as_str()),
-            "size" => a.size.cmp(&b.size),
-            "state" => a.state.as_str().cmp(b.state.as_str()),
-            _ => a.created_at.unwrap_or(0).cmp(&b.created_at.unwrap_or(0)),
-        };
-        if desc { ordering.reverse() } else { ordering }
-    });
+    // `sort_by_cached_key` computes each item's key once, rather than
+    // re-lowercasing the title on every comparison the sort makes.
+    match sort {
+        "title" => items.sort_by_cached_key(|item| item.spec.title().to_lowercase()),
+        "source" => items.sort_by_cached_key(|item| item.source.as_str().to_owned()),
+        "size" => items.sort_by_cached_key(|item| item.size),
+        "state" => items.sort_by_cached_key(|item| item.state.as_str().to_owned()),
+        _ => items.sort_by_cached_key(|item| item.created_at.unwrap_or(0)),
+    }
+    if desc {
+        items.reverse();
+    }
 
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();

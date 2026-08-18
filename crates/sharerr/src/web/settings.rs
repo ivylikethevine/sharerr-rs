@@ -274,6 +274,15 @@ pub async fn save_tracker(
     }
 
     write_config(&state, "tracker", |file| {
+        let host = form.advertised_host.trim();
+        if !host.is_empty() {
+            // Wrong at save time is loud; wrong after the fact is a torrent nobody
+            // can announce to. Doctor already catches this against a *running*
+            // instance, but a hand-typed loopback or private address is knowable
+            // right here, for free.
+            validate_advertised_host(host)?;
+        }
+
         let mut edits = vec![Edit::str_or_unset(
             config_paths::TRACKER_ADVERTISED_HOST,
             &form.advertised_host,
@@ -566,6 +575,32 @@ fn checked(field: &Option<String>) -> bool {
     field.is_some()
 }
 
+/// Reject a `tracker.advertised_host` that could never work for anyone outside
+/// this machine or network.
+///
+/// A DNS name is let through unchecked — resolving one means a network call this
+/// handler has no business making, and `doctor` already flags a mismatch against
+/// a running instance. What is catchable for free is a literal address: a
+/// loopback or private IP, or `localhost` itself, is never reachable by a friend
+/// on another network, and typing one is almost always a copy-paste of the
+/// `server.bind` value instead.
+fn validate_advertised_host(host: &str) -> anyhow::Result<()> {
+    if host.eq_ignore_ascii_case("localhost") {
+        anyhow::bail!(
+            "{host:?} only resolves on this machine — a friend elsewhere could never reach it"
+        );
+    }
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
+        && sharerr_core::endpoint::is_private_ip(ip)
+    {
+        anyhow::bail!(
+            "{host:?} is a loopback or private address — a friend outside this network could \
+             never reach it"
+        );
+    }
+    Ok(())
+}
+
 /// Accept `qbit:8080` as well as `http://qbit:8080`.
 ///
 /// `Url::parse` rejects a bare host, and "relative URL without a base" is not a
@@ -777,5 +812,25 @@ mod tests {
         assert!(!checked(&None));
         // Browsers send "on"; the value is irrelevant, presence is the signal.
         assert!(checked(&Some("on".to_owned())));
+    }
+
+    #[test]
+    fn a_loopback_or_private_advertised_host_is_refused() {
+        for host in ["127.0.0.1", "localhost", "LocalHost", "::1", "10.0.0.5", "192.168.1.20"] {
+            let err = validate_advertised_host(host).expect_err(host);
+            assert!(format!("{err:#}").contains(host) || host.eq_ignore_ascii_case("localhost"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_literal_is_checked_the_same_way() {
+        assert!(validate_advertised_host("[::1]").is_err());
+        assert!(validate_advertised_host("[2001:db8::1]").is_ok());
+    }
+
+    #[test]
+    fn a_public_address_or_hostname_is_accepted() {
+        assert!(validate_advertised_host("203.0.113.9").is_ok());
+        assert!(validate_advertised_host("sharerr.example").is_ok());
     }
 }

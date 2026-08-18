@@ -16,7 +16,9 @@ use secrecy::{ExposeSecret, SecretString};
 use sqlx::Row;
 use zeroize::Zeroizing;
 
-use crate::db::{Store, StoreError, now_epoch};
+use sharerr_core::endpoint::now_epoch;
+
+use crate::db::{Store, StoreError};
 
 type Result<T> = std::result::Result<T, StoreError>;
 

@@ -11,12 +11,11 @@ pub type Result<T> = std::result::Result<T, ArrError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArrError {
-    #[error("could not reach {service} at {url}: {source}")]
+    #[error("could not reach {service} at {url}: {detail}")]
     Unreachable {
         service: MediaSource,
         url: String,
-        #[source]
-        source: reqwest::Error,
+        detail: String,
     },
 
     #[error(
