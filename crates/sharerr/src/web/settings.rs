@@ -38,17 +38,13 @@ use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
 
 /// Mint a fresh secret and show it once.
 ///
-/// The Torznab API key is unlike every other secret on this page: it has to be
-/// *copied into a friend's Prowlarr*, so a write-only field that can never be read
-/// back would make it unusable. Generating server-side and revealing the value on
-/// exactly the response that created it is the compromise — the key is never in a
-/// URL, never in a redirect, and never re-readable. Lose it and generate another.
+/// Only the tracker token is minted this way now — a friend's own key, generated
+/// on the Friends page, is what opens the Torznab feed to them.
 pub async fn generate_secret(
     State(state): State<WebState>,
     axum::extract::Path(field): axum::extract::Path<String>,
 ) -> Response {
     let key = match field.as_str() {
-        "torznab" => secret_keys::TORZNAB_API_KEY,
         "tracker" => secret_keys::TRACKER_TOKEN,
         _ => return reject(&state, "There is no such secret to generate.").await,
     };
@@ -98,10 +94,6 @@ pub struct ArrForm {
 #[derive(Debug, Deserialize)]
 pub struct QbitForm {
     url: String,
-    username: String,
-    password: String,
-    #[serde(default)]
-    clear_password: Option<String>,
     api_key: String,
     #[serde(default)]
     clear_api_key: Option<String>,
@@ -247,17 +239,6 @@ pub async fn save_qbittorrent(
         return reject(&state, &message).await;
     }
 
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::QBITTORRENT_PASSWORD,
-        &form.password,
-        form.clear_password,
-    )
-    .await
-    {
-        return reject(&state, &message).await;
-    }
-
     write_config(&state, "qbittorrent", |file| {
         let url = form.url.trim();
         if url.is_empty() {
@@ -265,7 +246,6 @@ pub async fn save_qbittorrent(
         }
         file.apply([
             Edit::str(config_paths::QBITTORRENT_URL, normalise_url(url)?),
-            Edit::str(config_paths::QBITTORRENT_USERNAME, form.username.trim()),
             Edit::str(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
             Edit::str(config_paths::QBITTORRENT_TAG, form.tag.trim()),
             Edit::bool(
@@ -615,14 +595,13 @@ pub(super) fn title_case(name: &str) -> String {
 /// The example URL shown in each app's empty URL field: its documented default
 /// port, which is the strongest hint a placeholder can give.
 fn url_placeholder(source: MediaSource) -> &'static str {
-    use MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    use MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
     match source {
         Sonarr => "http://sonarr:8989",
         Radarr => "http://radarr:7878",
         Lidarr => "http://lidarr:8686",
         Readarr => "http://readarr:8787",
         Whisparr => "http://whisparr:6969",
-        Jellyfin => "http://jellyfin:8096",
         // Never rendered — the page loops the URL-bearing sources — but the
         // match must stay total, and a directory has no URL to hint at.
         Directory => "",
@@ -646,10 +625,6 @@ async fn build_page(
     let arrs = MediaSource::ARRS
         .iter()
         .copied()
-        // Jellyfin is not an *arr app, but it configures like one — a URL here,
-        // an API key in the vault — so it renders as one more section of the
-        // same loop rather than a hand-built copy of it.
-        .chain(std::iter::once(MediaSource::Jellyfin))
         .filter_map(|kind| {
             let url_path = config_paths::url_for(kind)?;
             let key = secret_keys::api_key_for(kind)?;
@@ -663,10 +638,7 @@ async fn build_page(
                 key_set: is_set(key),
                 placeholder: url_placeholder(kind),
                 url_path,
-                primary: matches!(
-                    kind,
-                    MediaSource::Sonarr | MediaSource::Radarr | MediaSource::Jellyfin
-                ),
+                primary: matches!(kind, MediaSource::Sonarr | MediaSource::Radarr),
             })
         })
         .collect::<Vec<_>>();
@@ -707,8 +679,6 @@ async fn build_page(
         secondary_arr_configured,
 
         qbit_url: config.qbittorrent.url.to_string(),
-        qbit_username: config.qbittorrent.username.clone(),
-        qbit_password_set: is_set(secret_keys::QBITTORRENT_PASSWORD),
         qbit_api_key_set: is_set(secret_keys::QBITTORRENT_API_KEY),
         qbit_category: config.qbittorrent.category.clone(),
         qbit_tag: config.qbittorrent.tag.clone(),
@@ -735,8 +705,6 @@ async fn build_page(
             .unwrap_or_default(),
         gluetun_poll_secs: config.gluetun.poll_secs,
 
-        torznab_key_set: is_set(secret_keys::TORZNAB_API_KEY),
-        torznab_url: format!("{}/api", config.public_base_url()),
         revealed: None,
 
         sync_enabled: config.sync.enabled,

@@ -83,8 +83,6 @@ struct FakeQbit {
 
 impl FakeQbit {
     async fn mount(&self, server: &MockServer) {
-        sharerr_testkit::mock::mount_qbit_login(server).await;
-
         let state = Arc::clone(&self.state);
         Mock::given(method("POST"))
             .and(route("/api/v2/torrents/add"))
@@ -345,10 +343,9 @@ async fn harness(series_json: Value) -> Harness {
     // Typed as the trait object, because that is what the syncer holds now — the
     // concrete client is one implementation of it.
     let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(
-        QbitClient::new(
+        QbitClient::with_api_key(
             &Url::parse(&qbit_server.uri()).unwrap(),
-            "admin",
-            SecretString::from("password"),
+            SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
         )
         .unwrap(),
     );

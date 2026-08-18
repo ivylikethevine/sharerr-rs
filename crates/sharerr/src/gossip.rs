@@ -377,15 +377,11 @@ pub struct PullQuery {
 /// `GET /api/gossip/endpoints?peers=pk1,pk2` — the pull side.
 pub async fn pull(
     State(state): State<Arc<ServeState>>,
-    caller: Caller,
+    // Unused beyond authenticating the caller — the extractor is what rejects an
+    // unauthenticated request; the pull side has nothing further to check per-peer.
+    _caller: Caller,
     Query(query): Query<PullQuery>,
 ) -> Response {
-    // The legacy shared key authenticates nobody in particular, and gossip is
-    // exactly the exchange where "who" matters.
-    if caller.peer_id().is_none() {
-        return (StatusCode::FORBIDDEN, "gossip requires a peer key").into_response();
-    }
-
     let Ok(store) = state.store().await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response();
     };
@@ -431,9 +427,7 @@ pub async fn push(
     caller: Caller,
     axum::Json(batch): axum::Json<RecordBatch>,
 ) -> Response {
-    let Some(presenter) = caller.peer_id() else {
-        return (StatusCode::FORBIDDEN, "gossip requires a peer key").into_response();
-    };
+    let presenter = caller.peer_id();
     let Ok(store) = state.store().await else {
         return (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response();
     };

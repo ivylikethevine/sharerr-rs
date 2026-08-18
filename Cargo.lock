@@ -2552,7 +2552,6 @@ dependencies = [
  "sharerr-arr",
  "sharerr-client",
  "sharerr-core",
- "sharerr-jellyfin",
  "sharerr-qbit",
  "sharerr-store",
  "sharerr-testkit",
@@ -2606,24 +2605,6 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "url",
-]
-
-[[package]]
-name = "sharerr-jellyfin"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "secrecy",
- "serde",
- "serde_json",
- "sha2",
- "sharerr-client",
- "sharerr-core",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
- "wiremock",
 ]
 
 [[package]]

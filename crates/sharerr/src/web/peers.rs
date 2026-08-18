@@ -16,6 +16,7 @@
 //! issuing another, which is the correct behaviour for a bearer credential.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
@@ -24,9 +25,11 @@ use sharerr_core::config::secret_keys;
 use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
+use super::items::human_size;
 use super::settings::title_case;
 use super::templates::{
-    PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render,
+    FeedPreviewPage, FeedPreviewRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer,
+    ScopeOption, render,
 };
 
 pub async fn page(State(state): State<WebState>) -> Response {
@@ -188,6 +191,58 @@ pub async fn delete(
     Ok(applied(&state, result, "delete that friend").await)
 }
 
+/// Render the feed exactly as this friend's Prowlarr would see it: their scope,
+/// their links. Scope filtering happens per key, so "why can't Sam find the
+/// album" otherwise means hand-crafting a Torznab query with Sam's key — this
+/// button answers it in one click, and is the honest test of scoping: not what
+/// the rules *say*, but what the feed *serves*.
+pub async fn feed_preview(
+    State(state): State<WebState>,
+    Path(id): Path<i64>,
+) -> Result<Response, Response> {
+    let store = state.store_or_503().await?;
+
+    let peers = store
+        .list_peers()
+        .await
+        .map_err(|err| rejected_response(&format!("could not list friends: {err}")))?;
+    let Some(peer) = peers.into_iter().find(|p| p.id == id) else {
+        return Err((StatusCode::NOT_FOUND, "no such friend").into_response());
+    };
+
+    let matched = crate::torznab::collect(
+        &state.serve,
+        &crate::torznab::SearchQuery::default(),
+        peer.scope,
+    )
+    .await
+    .map_err(|(status, reason)| (status, reason).into_response())?;
+
+    let items = matched
+        .items
+        .iter()
+        .map(|item| FeedPreviewRow {
+            title: item.release_title.clone(),
+            category: crate::torznab::category_name(crate::torznab::category_for(item)),
+            size: human_size(item.size),
+            download_url: matched.download_url(item),
+            magnet_url: matched.magnet_url(item),
+        })
+        .collect();
+
+    Ok(render(&FeedPreviewPage {
+        signed_in: true,
+        peer_label: peer.label,
+        peer_scope_label: peer.scope.label(),
+        total: matched.items.len(),
+        items,
+    }))
+}
+
+fn rejected_response(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, message.to_owned()).into_response()
+}
+
 /// The shared tail of every peer mutation: back to the list on success, or the
 /// page again with the failure sentence.
 async fn applied<T>(
@@ -233,13 +288,7 @@ async fn build(
         Err(reason) => (Vec::new(), Vec::new(), Some(reason)),
     };
 
-    // Whether the legacy shared key is still set. While it is, revoking a peer
-    // does not actually cut them off, and a page that implied otherwise would be
-    // lying about a security control. Read from the key names on disk, the way
-    // the settings page does — presence needs no Argon2 derivation, and a vault
-    // that will not open is still *holding* the key.
     let stored_secrets = super::settings::secrets_present(&config).await;
-    let shared_key_set = stored_secrets.contains(secret_keys::TORZNAB_API_KEY);
 
     PeersPage {
         signed_in: true,
@@ -261,7 +310,6 @@ async fn build(
         error: error.or(list_error),
         revealed,
         feed_url: format!("{}/api", config.public_base_url()),
-        shared_key_set,
     }
 }
 

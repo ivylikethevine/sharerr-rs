@@ -1,0 +1,93 @@
+{% extends "layout.html" %}
+{% block title %}Items — sharerr{% endblock %}
+
+{% block content %}
+<h1>Items</h1>
+
+<p class="hint">
+  Every file sharerr has discovered, in whatever state it is in — not just what
+  is currently seeding.
+</p>
+
+{% if let Some(message) = error %}
+<p class="error" role="alert">{{ message }}</p>
+{% endif %}
+
+<form method="get" action="/items" class="panel">
+  <label for="q">Search</label>
+  <input id="q" name="q" value="{{ q }}" placeholder="title or release name" autocomplete="off">
+
+  <label for="source">Source</label>
+  <select id="source" name="source">
+    <option value=""{% if source_filter.is_empty() %} selected{% endif %}>Any</option>
+    {% for (value, label) in source_options %}
+    <option value="{{ value }}"{% if source_filter == value %} selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+
+  <label for="state">State</label>
+  <select id="state" name="state">
+    <option value=""{% if state_filter.is_empty() %} selected{% endif %}>Any</option>
+    {% for (value, label) in state_options %}
+    <option value="{{ value }}"{% if state_filter == value %} selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+
+  <button type="submit">Filter</button>
+</form>
+
+<p class="hint">
+  Showing {{ shown }} of {{ total }} item(s).
+</p>
+
+<div class="panel">
+  {% if items.is_empty() %}
+  <p class="hint">Nothing matches. Widen the filters above, or run a sync.</p>
+  {% else %}
+  <table>
+    <thead>
+      <tr>
+        {% for link in sort_links %}
+        <th><a href="{{ link.href }}">{{ link.label }}{% if link.active %}
+          {% if link.dir == "desc" %} &#9660;{% else %} &#9650;{% endif %}
+        {% endif %}</a></th>
+        {% endfor %}
+        <th>Visible to</th>
+        <th>Info hash</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.since }}</td>
+        <td>
+          {{ item.title }}
+          <span class="hint">({{ item.kind }})</span>
+          {% if let Some(reason) = item.last_error %}
+          <br><span class="error">{{ reason }}</span>
+          {% endif %}
+        </td>
+        <td>{{ item.source_label }}</td>
+        <td>{{ item.size }}</td>
+        <td>{{ item.state_label }}</td>
+        <td>
+          {% if item.visible_to.is_empty() %}
+          <span class="hint">—</span>
+          {% else %}
+          {{ item.visible_to }}
+          {% endif %}
+        </td>
+        <td>
+          {% if let Some(hash) = item.info_hash_short %}
+          <code>{{ hash }}</code>
+          {% else %}
+          <span class="hint">none yet</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

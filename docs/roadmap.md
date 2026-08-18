@@ -10,9 +10,7 @@ ordering is a judgement about value, not a schedule.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| — | Plex as a library source | Next |
 | — | The interchange: semi-anonymous endpoint rendezvous, its own image and port | Next |
-| — | List view of shared items | Next |
 | — | Ratio and bandwidth control | Next |
 
 **Shipped, and removed from this list:** the core, the builtin tracker and
@@ -21,9 +19,10 @@ plain tagged directory source, per-friend selective sharing, Transmission
 support, Lidarr/Readarr/Whisparr support, the test stacks (plain, Transmission,
 and behind gluetun), the removal of the qBittorrent-embedded tracker backend,
 first-class gluetun support with a dynamically resolved endpoint, peer endpoint
-memory and signed endpoint gossip, Jellyfin/Emby as a library source, magnet
-links in the feed, and the one-glance status summary. The code and `git log` are
-the record — carrying finished work here only makes the list harder to read.
+memory and signed endpoint gossip, magnet links in the feed, the one-glance
+status summary, the list view of shared items, and the per-peer feed preview.
+The code and `git log` are the record — carrying finished work here only makes
+the list harder to read.
 
 ---
 
@@ -36,13 +35,11 @@ piece plugs in, roughly in order of how much they would widen the audience.
 ### Library sources (where tagged content comes from)
 
 Today: **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
-tag-driven discovery, **Jellyfin / Emby** via item tags, and the **plain tagged
-directory** (`[[library]]`). All sit behind the `LibrarySource` seam, which is
-exactly where the remaining sources plug in.
-
-| Service                      | Why                                                                                                                                                                                                                       | Difficulty |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| **Plex**                     | Same idea as Jellyfin, but the API is more awkward and its "collections" map badly onto a share tag.                                                                                                                       | Medium     |
+tag-driven discovery, and the **plain tagged directory** (`[[library]]`). Both
+shapes sit behind the `LibrarySource` seam, which is where a future source would
+plug in — none is currently planned. A media-server-backed source (Jellyfin,
+Emby, Plex) was tried and removed: the *arr apps and a plain directory cover
+the two shapes of "where content lives" this project actually wants to support.
 
 ### Torrent clients (what actually seeds)
 
@@ -142,21 +139,6 @@ than creating duplicates. If a file is already seeding in qBittorrent under anot
 torrent, sharerr should recognise it rather than adding a second entry for the same
 bytes.
 
-**Per-peer feed preview in the web UI.** The feed is the thing a friend actually
-receives, and the operator currently has no way to see it as a given friend sees
-it — scope filtering happens per key, so "why can't Sam find the album" means
-hand-crafting a Torznab query with Sam's key. A button on each friend's row that
-renders their feed (their scope, their links) answers that in one click, and
-doubles as the honest test of scoping: not what the rules *say*, but what the
-feed *serves*.
-
-**List view of shared items.** There is no page that simply enumerates what this
-instance is sharing. The data is all in the store — title, size, info hash, which
-friends can see it, when it last synced — but the only way to read it today is the
-per-item status the sync loop logs, or qBittorrent's own torrent list, which
-answers a different question. A sortable, filterable list is the first thing an
-operator asks for after setup and the last thing they can currently get.
-
 **Health and history in the UI.** The store already records run history
 (`recent_runs`), and the status page shows only the latest runs. Per-item state —
 why _this_ file is not shared — is the question the UI cannot currently answer.
@@ -202,17 +184,3 @@ Not user-facing, but load-bearing for everything above.
 - **Gluetun against a real provider.** The one untested mile of the endpoint
   work: a commercial VPN whose forwarded port actually rotates. Needs an account
   and a manual session rather than code.
-- **Remove the legacy qBittorrent username + password.** qBittorrent 5.2's API
-  key is the credential; the username/password pair and the
-  key-wins-over-password precedence dance exist only to support older setups.
-  Nothing has shipped, so there are no older setups — drop the pair, the
-  `qbittorrent.username` config field, and the fallback logic.
-- **Remove all legacy-settings code.** Same reasoning, applied everywhere: the
-  shared `torznab.api_key` fallback (kept "so upgrading does not silently break
-  a friend set up before peers existed" — no such friend exists) and any other
-  shim that exists to honour a pre-v1 sharerr configuration. v1 has not been
-  deployed, so every one of these is extra code, extra tests, and an extra
-  branch in an auth path, purchased against a past that never happened.
-  (Compatibility with other *software's* versions — qBittorrent's
-  `paused`/`stopped` spelling, Transmission's RPC generations — is not legacy
-  and stays.)

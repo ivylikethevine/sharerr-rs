@@ -87,7 +87,6 @@ zeroize = "1.9.0"
 sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
 sharerr-client = { version = "0.1.0", path = "crates/sharerr-client" }
 sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
-sharerr-jellyfin = { version = "0.1.0", path = "crates/sharerr-jellyfin" }
 sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
 sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
 sharerr-transmission = { version = "0.1.0", path = "crates/sharerr-transmission" }

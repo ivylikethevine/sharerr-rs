@@ -12,7 +12,7 @@
 //! use sharerr_qbit::QbitClient;
 //!
 //! let url = "http://localhost:8080".parse().expect("literal url");
-//! let qbit = QbitClient::new(&url, "admin", SecretString::from("password"))?;
+//! let qbit = QbitClient::with_api_key(&url, SecretString::from("qbt_..."))?;
 //!
 //! let torrent: Vec<u8> = Vec::new(); // built by sharerr-torrent
 //! qbit.add_torrent(

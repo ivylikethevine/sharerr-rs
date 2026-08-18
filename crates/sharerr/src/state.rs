@@ -73,12 +73,6 @@ pub struct ServeState {
     /// there is no token". Cleared by [`Self::invalidate`], so changing it through
     /// the UI takes effect without a restart.
     tracker_token: RwLock<Option<Option<String>>>,
-    /// The legacy shared Torznab key, cached for the same reason as the tracker
-    /// token: it is consulted on every feed request that does not match a peer —
-    /// including every *wrong* key anyone sends — and reading it means an Argon2
-    /// derivation. Same `None`/`Some(None)` shape, same clearing by
-    /// [`Self::invalidate`].
-    torznab_shared_key: RwLock<Option<Option<String>>>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -122,7 +116,6 @@ impl ServeState {
             syncer: RwLock::new(Err("still starting up".to_owned())),
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
-            torznab_shared_key: RwLock::new(None),
             wake: Notify::new(),
             endpoint,
             endpoint_refresh: Notify::new(),
@@ -232,27 +225,6 @@ impl ServeState {
         token
     }
 
-    /// The legacy shared Torznab key, if one is stored. Cached after the first
-    /// read; a vault that will not open yields `None`, which closes the legacy
-    /// path rather than opening it.
-    pub async fn torznab_shared_key(&self) -> Option<String> {
-        if let Some(cached) = &*self.torznab_shared_key.read().await {
-            return cached.clone();
-        }
-
-        let key = match self.open_vault().await {
-            Ok(vault) => vault
-                .get(secret_keys::TORZNAB_API_KEY)
-                .ok()
-                .flatten()
-                .map(|secret| secret.expose_secret().to_owned()),
-            Err(_) => None,
-        };
-
-        *self.torznab_shared_key.write().await = Some(key.clone());
-        key
-    }
-
     /// Why reconciliation is not running, or `None` when it is.
     ///
     /// `Option` rather than a `(bool, String)` pair, whose `String` would be
@@ -312,7 +284,6 @@ impl ServeState {
         // These are vault values too, so a credential change has to drop them or
         // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
-        *self.torznab_shared_key.write().await = None;
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.

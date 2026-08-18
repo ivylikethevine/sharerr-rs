@@ -106,27 +106,11 @@
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
   {% endif %}
   <p class="hint">
-    Optional, and needs qBittorrent 5.2 or newer: generate one under
-    Options &rarr; Web UI &rarr; API key. When set it is used <em>instead of</em>
-    the username and password below, and it does not expire the way a session
-    does. Rotating the key in qBittorrent invalidates the old one immediately.
+    Generate one under Options &rarr; Web UI &rarr; API key (qBittorrent 5.2 or
+    newer). This is the only credential sharerr uses to sign in — it does not
+    expire the way a session does, and rotating the key in qBittorrent
+    invalidates the old one immediately.
   </p>
-
-  <label for="qbit_username">Username</label>
-  <input id="qbit_username" name="username" value="{{ qbit_username }}" autocomplete="off"
-         {% call lock_attr("qbittorrent.username") %}{% endcall %}>
-  {% call locked("qbittorrent.username") %}{% endcall %}
-
-  <label for="qbit_password">Password</label>
-  <input id="qbit_password" name="password" type="password" autocomplete="off"
-         placeholder="{% call stored(qbit_password_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if qbit_password_set %}
-  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
-  {% endif %}
-  {% if qbit_api_key_set %}
-  <p class="hint">Ignored while an API key is stored.</p>
-  {% endif %}
 
   <label for="qbit_category">Category for sharerr's torrents</label>
   <input id="qbit_category" name="category" value="{{ qbit_category }}"
@@ -239,31 +223,6 @@
 
   <button type="submit">Save</button>
 </form>
-
-<h2>Indexer (Torznab)</h2>
-<div class="panel">
-  <p class="hint">
-    This is how a friend finds what you share. In their Prowlarr, add a
-    <em>Generic Torznab</em> indexer with the URL and API key below; their Sonarr
-    and Radarr then reach it through Prowlarr.
-  </p>
-
-  <dl class="facts">
-    <dt>Feed URL</dt><dd><code>{{ torznab_url }}</code></dd>
-    <dt>API key</dt>
-    <dd>{% if torznab_key_set %}stored{% else %}<strong>not set — the feed is closed until you generate one</strong>{% endif %}</dd>
-  </dl>
-
-  <form method="post" action="/settings/generate/torznab">
-    <button type="submit" {% if !master_key_present %}disabled{% endif %}>
-      {% if torznab_key_set %}Replace the API key{% else %}Generate an API key{% endif %}
-    </button>
-  </form>
-  <p class="hint">
-    The feed URL uses the tracker's advertised host, so set that first if it looks
-    wrong. Replacing the key immediately stops any Prowlarr still using the old one.
-  </p>
-</div>
 
 <h2>Path mappings</h2>
 <form method="post" action="/settings/paths" class="panel">

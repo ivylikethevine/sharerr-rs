@@ -37,7 +37,6 @@ sha2 = { workspace = true }
 sharerr-arr = { workspace = true }
 sharerr-client = { workspace = true }
 sharerr-core = { workspace = true }
-sharerr-jellyfin = { workspace = true }
 sharerr-qbit = { workspace = true }
 sharerr-store = { workspace = true }
 sharerr-torrent = { workspace = true }

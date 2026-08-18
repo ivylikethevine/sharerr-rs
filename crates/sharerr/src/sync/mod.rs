@@ -26,8 +26,6 @@ use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
-use sharerr_jellyfin::JellyfinClient;
-
 use crate::library::DirectoryScanner;
 use seed::{SeedOutcome, Seeder};
 
@@ -68,22 +66,6 @@ impl LibrarySource for ArrClient {
         Ok(SourceScan {
             items: ArrClient::discover(self, tag).await?,
             // An *arr answer is its whole database: there is no partial success.
-            complete: true,
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl LibrarySource for sharerr_jellyfin::JellyfinClient {
-    fn kind(&self) -> MediaSource {
-        MediaSource::Jellyfin
-    }
-
-    async fn discover(&self, tag: &str) -> Result<SourceScan> {
-        Ok(SourceScan {
-            items: JellyfinClient::discover(self, tag).await?,
-            // The walk either lists everything the tag covers or errors — there
-            // is no partial success to report.
             complete: true,
         })
     }
@@ -236,17 +218,14 @@ impl Syncer {
                 sources.push(Box::new(client));
             }
         }
-        if let Some(client) = build_jellyfin(config, &vault)? {
-            sources.push(Box::new(client));
-        }
         if !config.library.is_empty() {
             sources.push(Box::new(DirectoryScanner::new(config.library.clone())));
         }
         if sources.is_empty() {
             bail!(
                 "no library source is configured — there is nothing to share. Set at \
-                 least one of sonarr, radarr, lidarr, readarr or whisparr, a jellyfin \
-                 server, or a [[library]] directory."
+                 least one of sonarr, radarr, lidarr, readarr or whisparr, or a \
+                 [[library]] directory."
             );
         }
 
@@ -635,23 +614,6 @@ enum Step {
     Unchanged,
 }
 
-fn build_jellyfin(config: &Config, vault: &Vault) -> Result<Option<JellyfinClient>> {
-    let Some(service) = &config.jellyfin else {
-        return Ok(None);
-    };
-    let api_key = vault
-        .get(secret_keys::JELLYFIN_API_KEY)?
-        .with_context(|| {
-            format!(
-                "jellyfin is configured but {} is not in the vault",
-                secret_keys::JELLYFIN_API_KEY
-            )
-        })?;
-    Ok(Some(
-        JellyfinClient::new(&service.url, api_key).map_err(|err| anyhow::anyhow!("{err}"))?,
-    ))
-}
-
 fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option<ArrClient>> {
     let Some(service) = config.service(kind) else {
         return Ok(None);
@@ -680,12 +642,18 @@ fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>
         Some(key) => vault.get(key)?,
         None => None,
     };
-    let credential =
-        crate::checks::TorrentCredential::choose(api_key, vault.get(client.password_key)?)
-            .with_context(|| match client.api_key_key {
-                Some(api) => format!("no {} or {} in the vault", api, client.password_key),
-                None => format!("no {} in the vault", client.password_key),
-            })?;
+    let password = match client.password_key {
+        Some(key) => vault.get(key)?,
+        None => None,
+    };
+    let credential = crate::checks::TorrentCredential::choose(api_key, password).with_context(
+        || match (client.api_key_key, client.password_key) {
+            (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
+            (Some(api), None) => format!("no {api} in the vault"),
+            (None, Some(password)) => format!("no {password} in the vault"),
+            (None, None) => "no credential configured for this torrent client".to_owned(),
+        },
+    )?;
 
     crate::checks::build_torrent_client(
         config.torrent_backend,

@@ -32,7 +32,6 @@ design is built around.
 | Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
 | Per-friend scoping: this friend sees TV, that one films | ✅ |
 | Plain directory sharing, no *arr app at all | ✅ |
-| Jellyfin / Emby as a library source | ✅ |
 | Dynamic endpoint from gluetun: rotating exit IP and forwarded port | ✅ |
 | Peer endpoint memory and signed endpoint gossip between friends | ✅ |
 | Plex as a library source | ❌ |
@@ -55,8 +54,8 @@ docker run -d --name sharerr \
 Then open `http://localhost:8477/`. The first visit asks you to create an account —
 whoever gets there first claims the instance, so do it now rather than leaving it
 reachable and unclaimed. After that, **Settings** takes the Sonarr and Radarr URLs
-and API keys, the qBittorrent URL, username and password, the path mappings, and
-the tracker's advertised host. Each service has a *Test connection* button, and
+and API keys, the qBittorrent URL and API key, the path mappings, and the
+tracker's advertised host. Each service has a *Test connection* button, and
 saving takes effect within a second or two — no restart.
 
 `SHARERR_MASTER_KEY` is the one thing that cannot come from the UI, because it is
@@ -198,30 +197,6 @@ Notes that are easy to trip over:
   only" does **not** receive it. Only an unscoped friend does, which has to be
   chosen deliberately.
 
-## Sharing from Jellyfin or Emby
-
-Not everyone runs the *arr apps. Point sharerr at a Jellyfin (or Emby — same
-API) server and tag content there instead:
-
-```toml
-[jellyfin]
-url = "http://localhost:8096"
-```
-
-Then store an API key (Dashboard → API Keys in Jellyfin):
-`printf %s "$KEY" | sharerr vault set jellyfin.api_key`.
-
-Tag the **container**: a movie, a series, an album, or a book. A tagged series
-shares every episode with a file; a tagged album shares every track. Tags on
-individual episodes or tracks are deliberately not discovered — "tag the
-series" is an easier rule to act on than a partial one.
-
-Two honest caveats: releases from this source match less reliably on a friend's
-end than Sonarr-sourced ones (Jellyfin's external ids are only as good as its
-metadata match, and there is no scene name), and a friend scoped to "TV only"
-sees Jellyfin's episodes but not its films — items are scoped by what they are,
-since one server holds every kind at once.
-
 ## Friends finding each other
 
 A peer used to be only a credential; sharerr now also remembers *where* each
@@ -273,40 +248,27 @@ trade-offs to know:
 
 ## Authenticating to qBittorrent
 
-By default sharerr signs in with the WebUI username and password:
-
-```
-printf %s "$PW" | sharerr vault set qbittorrent.password
-```
-
-**qBittorrent 5.2 and newer also accept an API key**, which is stateless — no
-session to expire, no re-login — and is the better choice where it is available.
-Generate one under Options → Web UI → API key, then:
+sharerr signs in with a qBittorrent 5.2+ WebUI API key — stateless, no session to
+expire, no re-login. Generate one under Options → Web UI → API key, then:
 
 ```
 printf %s "$KEY" | sharerr vault set qbittorrent.api_key
 ```
 
-When a key is stored it is used *instead of* the username and password, so you can
-clear the password afterwards. Rotating the key in qBittorrent invalidates the old
-one immediately, so store the new one at the same time.
+Rotating the key in qBittorrent invalidates the old one immediately, so store the
+new one at the same time. Older qBittorrent builds without the API key feature are
+not supported — upgrade to 5.2 or newer.
 
-### If a correct password is rejected
+### If a correct key is rejected
 
-Two causes, and neither is the password:
+**qBittorrent validates the `Host` header's port** against the port it listens on,
+and answers `401` before it ever reads the key when they differ. A remapped docker
+port (`-p 18080:8080`) or a reverse proxy on another port trips this. Either point
+`qbittorrent.url` at the port qBittorrent itself listens on, or turn off Options →
+Web UI → *Validate Host header*.
 
-- **qBittorrent 5.2 changed the login response.** Success moved from `200 Ok.` to
-  `204 No Content`, and a rejection from `200 Fails.` to `401`. Clients that check
-  for the literal `Ok.` — sharerr included, before this was fixed — report a
-  perfectly good login as a wrong password. Update sharerr.
-- **qBittorrent validates the `Host` header's port** against the port it listens
-  on, and answers `401` before it ever reads the credentials when they differ. A
-  remapped docker port (`-p 18080:8080`) or a reverse proxy on another port trips
-  this. Either point `qbittorrent.url` at the port qBittorrent itself listens on,
-  or turn off Options → Web UI → *Validate Host header*.
-
-`sharerr doctor` names both, rather than reporting "rejected the password" and
-leaving you to retype a password that was never wrong.
+`sharerr doctor` names this, rather than reporting "rejected the API key" and
+leaving you to rotate a key that was never wrong.
 
 ## Using Transmission instead of qBittorrent
 
@@ -390,7 +352,6 @@ bytes. No real content is involved anywhere.
 | `sharerr` | The binary: CLI, web UI, Torznab, tracker, reconciliation |
 | `sharerr-core` | Domain types, layered config, path mapping. No I/O |
 | `sharerr-arr` | Sonarr/Radarr clients and tagged-content discovery |
-| `sharerr-jellyfin` | Jellyfin/Emby client and its tagged-content discovery |
 | `sharerr-qbit` | qBittorrent WebUI client |
 | `sharerr-store` | Encrypted vault + SQLite store |
 | `sharerr-torrent` | Torrent construction and tracker resolution |

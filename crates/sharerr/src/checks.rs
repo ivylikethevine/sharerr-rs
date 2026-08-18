@@ -335,17 +335,25 @@ pub enum QbitOutcome {
 pub fn build_torrent_client(
     backend: TorrentBackend,
     url: &Url,
-    username: &str,
+    username: Option<&str>,
     credential: TorrentCredential,
 ) -> Result<Arc<dyn TorrentClient>, String> {
     Ok(match (backend, credential) {
-        (TorrentBackend::Qbittorrent, TorrentCredential::Password(password)) => {
-            Arc::new(QbitClient::new(url, username, password).map_err(|e| chain(&e))?)
+        // Unreachable in practice: qBittorrent's `password_key` is `None`, so
+        // nothing ever resolves a `TorrentCredential::Password` for it. Reported
+        // rather than matched away, in case that ever changes.
+        (TorrentBackend::Qbittorrent, TorrentCredential::Password(_)) => {
+            return Err(
+                "qBittorrent no longer authenticates with a username and password — set an \
+                 API key instead (Options -> Web UI -> API key, qBittorrent 5.2+)."
+                    .to_owned(),
+            );
         }
         (TorrentBackend::Qbittorrent, TorrentCredential::ApiKey(key)) => {
             Arc::new(QbitClient::with_api_key(url, key).map_err(|e| chain(&e))?)
         }
         (TorrentBackend::Transmission, TorrentCredential::Password(password)) => {
+            let username = username.unwrap_or_default();
             Arc::new(TransmissionClient::new(url, username, password).map_err(|e| chain(&e))?)
         }
         // Reported rather than silently ignored: an operator who stored a key for
@@ -397,7 +405,7 @@ impl TorrentCredential {
 pub async fn check_qbit(
     backend: TorrentBackend,
     url: &Url,
-    username: &str,
+    username: Option<&str>,
     credential: Result<Option<TorrentCredential>, String>,
 ) -> QbitOutcome {
     let credential = match credential {
