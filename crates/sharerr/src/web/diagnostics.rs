@@ -189,9 +189,10 @@ fn describe_library(
     outcome: &DirOutcome,
 ) -> ServiceLine {
     let (ok, message) = match outcome {
-        DirOutcome::Ready { skipped: 0, items } => {
-            (true, format!("{} {} file(s)", items.len(), library.kind.as_str()))
-        }
+        DirOutcome::Ready { skipped: 0, items } => (
+            true,
+            format!("{} {} file(s)", items.len(), library.kind.as_str()),
+        ),
         DirOutcome::Ready { skipped, items } => (
             true,
             format!(

@@ -7,8 +7,8 @@ use std::path::Path;
 use lava_torrent::torrent::v1::Torrent;
 use sharerr_testkit::{deterministic_bytes, write_media_file};
 use sharerr_torrent::{
-    AnnounceSet, LavaTorrentFactory, TorrentError, TorrentRequest, piece_length_for,
-    read_announce, rewrite_announce,
+    AnnounceSet, LavaTorrentFactory, TorrentError, TorrentRequest, piece_length_for, read_announce,
+    rewrite_announce,
 };
 use url::Url;
 

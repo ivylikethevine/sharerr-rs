@@ -41,6 +41,10 @@ pub mod secret_keys {
     pub const TRANSMISSION_PASSWORD: &str = "transmission.password";
     /// Shared secret embedded in builtin-tracker announce URLs.
     pub const TRACKER_TOKEN: &str = "tracker.token";
+    /// gluetun's control server API key, sent as `X-Api-Key`. Required since
+    /// gluetun v3.40 made `apikey` the default auth type for the control
+    /// server; without it every request comes back `401`.
+    pub const GLUETUN_API_KEY: &str = "gluetun.api_key";
 
     /// This instance's Ed25519 signing key for gossip records, hex-encoded.
     ///
@@ -75,6 +79,7 @@ pub mod secret_keys {
         QBITTORRENT_API_KEY,
         TRANSMISSION_PASSWORD,
         TRACKER_TOKEN,
+        GLUETUN_API_KEY,
     ];
 }
 

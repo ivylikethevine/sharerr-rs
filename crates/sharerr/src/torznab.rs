@@ -238,9 +238,8 @@ pub struct FeedItem<'a> {
 pub(crate) fn magnet_uri(info_hash: &str, title: &str, size: u64, announces: &[String]) -> String {
     // Query-string escaping via form_urlencoded: magnet consumers parse the
     // tail as a query string, and `+` for space is the convention there.
-    let encode = |value: &str| {
-        url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
-    };
+    let encode =
+        |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
 
     let mut out = format!("magnet:?xt=urn:btih:{info_hash}&dn={}", encode(title));
     if size > 0 {
@@ -1546,7 +1545,8 @@ mod tests {
         let everything = feed_for(&state, "all-key").await;
         assert_eq!(everything.matches("<item>").count(), 2, "{everything}");
         assert!(
-            everything.contains(&CAT_TV.to_string()) && everything.contains(&CAT_MOVIES.to_string()),
+            everything.contains(&CAT_TV.to_string())
+                && everything.contains(&CAT_MOVIES.to_string()),
             "the categories must come from each item's spec: {everything}"
         );
 
@@ -1672,8 +1672,18 @@ mod tests {
         let store = state.store().await.unwrap();
 
         for (file_id, hash, title, imdb) in [
-            (1_i64, "aa", "Harborlight.2019.WEB-DL.x264-SHARERR", "tt1112223"),
-            (2_i64, "bb", "Otherfilm.2020.WEB-DL.x264-SHARERR", "tt9998887"),
+            (
+                1_i64,
+                "aa",
+                "Harborlight.2019.WEB-DL.x264-SHARERR",
+                "tt1112223",
+            ),
+            (
+                2_i64,
+                "bb",
+                "Otherfilm.2020.WEB-DL.x264-SHARERR",
+                "tt9998887",
+            ),
         ] {
             let mut item = movie(title);
             item.source = MediaSource::Radarr;
@@ -1692,7 +1702,11 @@ mod tests {
                 .unwrap();
         }
 
-        let xml = xml_body(&state, "/api?t=movie-search&imdbid=tt9998887&apikey=sam-key").await;
+        let xml = xml_body(
+            &state,
+            "/api?t=movie-search&imdbid=tt9998887&apikey=sam-key",
+        )
+        .await;
         assert!(xml.contains(&"bb".repeat(20)), "{xml}");
         assert!(!xml.contains(&"aa".repeat(20)), "{xml}");
     }

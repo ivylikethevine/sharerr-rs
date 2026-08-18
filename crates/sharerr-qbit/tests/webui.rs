@@ -140,7 +140,11 @@ async fn a_long_non_ascii_body_does_not_panic() {
 
 #[tokio::test]
 async fn an_unreachable_host_is_reported_as_such() {
-    let base = Url::parse(&format!("http://127.0.0.1:{}", sharerr_testkit::net::closed_port())).unwrap();
+    let base = Url::parse(&format!(
+        "http://127.0.0.1:{}",
+        sharerr_testkit::net::closed_port()
+    ))
+    .unwrap();
     let qbit = QbitClient::with_api_key(&base, SecretString::from(API_KEY)).unwrap();
 
     let err = qbit.version().await.unwrap_err();
@@ -385,7 +389,6 @@ async fn remove_torrent_never_deletes_files() {
     client(&server).remove_torrent("aabbcc").await.unwrap();
 }
 
-
 // ----------------------------------------------------------------- trackers
 
 /// Replacing the tracker list adds the new URLs before removing the stale ones
@@ -462,7 +465,10 @@ async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
         .await;
 
     client(&server)
-        .set_torrent_trackers("aabbcc", &["http://current.example:8477/announce".to_owned()])
+        .set_torrent_trackers(
+            "aabbcc",
+            &["http://current.example:8477/announce".to_owned()],
+        )
         .await
         .unwrap();
 }

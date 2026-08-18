@@ -89,9 +89,8 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
     }
     if sources.is_empty() && config.library.is_empty() {
         report.section("library sources");
-        report.fail(
-            "no *arr app or [[library]] directory is configured — there is nothing to share",
-        );
+        report
+            .fail("no *arr app or [[library]] directory is configured — there is nothing to share");
     }
 
     report.section(config.torrent_backend.as_str());
@@ -99,7 +98,7 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
 
     if config.gluetun.control_url.is_some() {
         report.section("gluetun");
-        check_gluetun(config, &mut report).await;
+        check_gluetun(config, vault.as_ref(), &mut report).await;
     }
 
     report.section("tracker");
@@ -540,13 +539,14 @@ fn check_tracker(config: &Config, report: &mut Report) {
 /// What gluetun's control server says the world sees, next to what the config
 /// advertises — the mismatch this catches is a hand-typed address the tunnel no
 /// longer holds.
-async fn check_gluetun(config: &Config, report: &mut Report) {
+async fn check_gluetun(config: &Config, vault: Option<&Vault>, report: &mut Report) {
     // Guarded by the caller; the arm exists because the function is total.
     let Some(control) = &config.gluetun.control_url else {
         return;
     };
 
-    let client = match crate::gluetun::GluetunClient::new(control) {
+    let api_key = quiet_secret(vault, sharerr_core::config::secret_keys::GLUETUN_API_KEY);
+    let client = match crate::gluetun::GluetunClient::new(control, api_key) {
         Ok(client) => client,
         Err(err) => {
             report.fail(format!("{err}"));

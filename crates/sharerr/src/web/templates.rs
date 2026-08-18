@@ -216,6 +216,7 @@ pub struct SettingsPage {
 
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,
+    pub gluetun_api_key_set: bool,
     pub gluetun_poll_secs: u64,
 
     /// A freshly minted secret, shown exactly once on the response that created it.

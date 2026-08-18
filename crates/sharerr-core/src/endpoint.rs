@@ -54,7 +54,10 @@ pub enum EndpointError {
 /// `tracker.port`, falling back to `server_port`) builds the plain
 /// `http://host:port` every earlier version advertised. An IPv6 literal host is
 /// bracketed, which the old `format!` never did.
-pub fn advertised_base(tracker: &TrackerConfig, server_port: u16) -> Result<Option<Url>, EndpointError> {
+pub fn advertised_base(
+    tracker: &TrackerConfig,
+    server_port: u16,
+) -> Result<Option<Url>, EndpointError> {
     if let Some(url) = &tracker.advertised_url {
         return Ok(Some(url.clone()));
     }
@@ -393,7 +396,10 @@ mod tests {
         assert!(endpoint.observe(url("http://203.0.113.1:1000")));
         assert_eq!(
             endpoint.recent(),
-            vec![url("http://203.0.113.1:1000"), url("http://203.0.113.2:2000")]
+            vec![
+                url("http://203.0.113.1:1000"),
+                url("http://203.0.113.2:2000")
+            ]
         );
     }
 

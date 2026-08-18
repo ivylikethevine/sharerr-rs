@@ -21,6 +21,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sharerr_client::error_chain;
 use url::Url;
@@ -48,6 +49,16 @@ pub enum GluetunError {
          falling back to the statically configured endpoint"
     )]
     NoForwardedPort,
+
+    /// gluetun's control server has required an API key by default since
+    /// v3.40; a request sent without one comes back `401` with a terse
+    /// `Unauthorized` body, not a JSON error object.
+    #[error(
+        "gluetun's control server at {url} rejected the request as unauthorized — set \
+         gluetun.api_key in Settings to the control server's API key \
+         (CONTROL_SERVER_AUTH's apikey, from gluetun's config/auth file)"
+    )]
+    Unauthorized { url: String },
 }
 
 type Result<T> = std::result::Result<T, GluetunError>;
@@ -57,6 +68,7 @@ type Result<T> = std::result::Result<T, GluetunError>;
 pub struct GluetunClient {
     http: reqwest::Client,
     base: Url,
+    api_key: Option<SecretString>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,7 +84,7 @@ struct ForwardedPort {
 }
 
 impl GluetunClient {
-    pub fn new(base: &Url) -> Result<Self> {
+    pub fn new(base: &Url, api_key: Option<SecretString>) -> Result<Self> {
         let http = reqwest::Client::builder()
             // The control server is on loopback in the intended topology; a
             // longer wait means something is wrong, not slow.
@@ -82,6 +94,7 @@ impl GluetunClient {
         Ok(Self {
             http,
             base: sharerr_client::normalise_base(base),
+            api_key,
         })
     }
 
@@ -91,9 +104,12 @@ impl GluetunClient {
             .join(path)
             .map_err(|e| GluetunError::Malformed(format!("{} + {path}: {e}", self.base)))?;
 
-        let response = self
-            .http
-            .get(url)
+        let mut request = self.http.get(url);
+        if let Some(api_key) = &self.api_key {
+            request = request.header("X-Api-Key", api_key.expose_secret());
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| GluetunError::Unreachable {
@@ -102,6 +118,11 @@ impl GluetunClient {
             })?;
 
         let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GluetunError::Unauthorized {
+                url: self.base.to_string(),
+            });
+        }
         if !status.is_success() {
             return Err(GluetunError::Status {
                 status: status.as_u16(),
@@ -165,7 +186,8 @@ pub async fn poll_loop(state: Arc<ServeState>) {
         let interval = Duration::from_secs(config.gluetun.effective_poll_secs());
 
         if let Some(control) = &config.gluetun.control_url {
-            match resolve_once(control).await {
+            let api_key = gluetun_api_key(&state).await;
+            match resolve_once(control, api_key).await {
                 Ok(base) => {
                     if last_error.take().is_some() {
                         tracing::info!(%base, "gluetun endpoint resolution recovered");
@@ -198,8 +220,20 @@ pub async fn poll_loop(state: Arc<ServeState>) {
     }
 }
 
-async fn resolve_once(control: &Url) -> Result<Url> {
-    GluetunClient::new(control)?.resolve_base().await
+/// The control server's API key, if one is stored. A vault that will not open
+/// (no master key, none of the settings ever saved one) means an unkeyed
+/// request, same as before this key existed — the resulting `401` is what
+/// [`GluetunError::Unauthorized`] exists to explain.
+async fn gluetun_api_key(state: &ServeState) -> Option<SecretString> {
+    let vault = state.open_vault().await.ok()?;
+    vault
+        .get(sharerr_core::config::secret_keys::GLUETUN_API_KEY)
+        .ok()
+        .flatten()
+}
+
+async fn resolve_once(control: &Url, api_key: Option<SecretString>) -> Result<Url> {
+    GluetunClient::new(control, api_key)?.resolve_base().await
 }
 
 #[cfg(test)]
@@ -226,7 +260,7 @@ mod tests {
     }
 
     fn client(server: &MockServer) -> GluetunClient {
-        GluetunClient::new(&server.uri().parse().unwrap()).unwrap()
+        GluetunClient::new(&server.uri().parse().unwrap(), None).unwrap()
     }
 
     /// The faked gluetun control server the roadmap called for: the whole
@@ -292,12 +326,54 @@ mod tests {
         ));
     }
 
+    /// gluetun's own 401 body is `Unauthorized\n`, not JSON — this must be
+    /// caught before the `.json()` parse, which would otherwise report it as
+    /// [`GluetunError::Malformed`] and hide the real, actionable cause.
+    #[tokio::test]
+    async fn an_unauthorized_response_names_the_fix_instead_of_failing_to_parse() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw("Unauthorized\n", "text/plain"))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client(&server).public_ip().await.unwrap_err(),
+            GluetunError::Unauthorized { .. }
+        ));
+    }
+
+    /// When an API key is configured it must actually go out on the wire, or a
+    /// stale gluetun deployment's `401` never clears no matter what is saved
+    /// in Settings.
+    #[tokio::test]
+    async fn a_configured_api_key_is_sent_as_the_x_api_key_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .and(wiremock::matchers::header("X-Api-Key", "s3cret"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "public_ip": "203.0.113.9" })),
+            )
+            .mount(&server)
+            .await;
+
+        let keyed = GluetunClient::new(
+            &server.uri().parse().unwrap(),
+            Some(secrecy::SecretString::from("s3cret")),
+        )
+        .unwrap();
+        assert_eq!(keyed.public_ip().await.unwrap().to_string(), "203.0.113.9");
+    }
+
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
         // Port 9 (discard) on loopback: privileged, so nothing in a test run can
         // be listening there. A freed MockServer port is not usable here — a
         // parallel test's server can rebind it between drop and connect.
-        let unreachable = GluetunClient::new(&"http://127.0.0.1:9".parse().unwrap()).unwrap();
+        let unreachable = GluetunClient::new(&"http://127.0.0.1:9".parse().unwrap(), None).unwrap();
         assert!(matches!(
             unreachable.public_ip().await.unwrap_err(),
             GluetunError::Unreachable { .. }

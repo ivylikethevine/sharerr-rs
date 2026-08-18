@@ -407,12 +407,9 @@ impl TorrentClient for TransmissionClient {
             .map(Url::to_string)
             .collect::<Vec<_>>()
             .join("\n\n");
-        self.rpc(
-            "torrent-set",
-            json!({ "ids": [hash], "trackerList": list }),
-        )
-        .await
-        .map(|_| ())
+        self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
+            .await
+            .map(|_| ())
     }
 }
 

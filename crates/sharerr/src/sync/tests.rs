@@ -480,7 +480,11 @@ async fn a_rotated_endpoint_rewrites_torrents_and_repoints_the_client() {
     // calls are issued at all.
     h.syncer.run(false).await.unwrap();
     let settled = h.qbit.snapshot();
-    assert_eq!(settled.trackers_added.len(), 2, "rotation must be idempotent");
+    assert_eq!(
+        settled.trackers_added.len(),
+        2,
+        "rotation must be idempotent"
+    );
 }
 
 #[tokio::test]
@@ -888,7 +892,10 @@ async fn a_directory_library_shares_alongside_sonarr() {
     let _extras = with_movie_library(&mut h);
 
     let report = h.syncer.run(false).await.unwrap();
-    assert_eq!(report.discovered, 3, "two episodes plus the directory movie");
+    assert_eq!(
+        report.discovered, 3,
+        "two episodes plus the directory movie"
+    );
     assert_eq!(report.added, 3);
     assert_eq!(report.sources_failed, 0);
 
@@ -961,7 +968,11 @@ async fn an_emptied_library_root_never_causes_withdrawals() {
         .find(|i| i.source == MediaSource::Directory)
         .unwrap()
         .state;
-    assert_eq!(movie_state, ShareState::Seeding, "the item must be untouched");
+    assert_eq!(
+        movie_state,
+        ShareState::Seeding,
+        "the item must be untouched"
+    );
 }
 
 /// A `[[path_map]]` rule is written for an *arr app's view of the library. One
@@ -987,7 +998,10 @@ async fn a_path_map_rule_never_rewrites_a_directory_item() {
     ]);
 
     let report = h.syncer.run(false).await.unwrap();
-    assert_eq!(report.failed, 0, "the directory item must resolve to itself");
+    assert_eq!(
+        report.failed, 0,
+        "the directory item must resolve to itself"
+    );
     assert_eq!(report.added, 3);
 }
 
@@ -1058,7 +1072,11 @@ async fn an_unscannable_directory_never_causes_withdrawals() {
         .find(|i| i.source == MediaSource::Directory)
         .unwrap()
         .state;
-    assert_eq!(movie_state, ShareState::Seeding, "the item must be untouched");
+    assert_eq!(
+        movie_state,
+        ShareState::Seeding,
+        "the item must be untouched"
+    );
 }
 
 /// A dry run against a directory library reports without writing.
@@ -1201,10 +1219,7 @@ async fn a_pass_with_no_reachable_arr_app_changes_nothing() {
     )];
 
     let err = h.syncer.run(false).await.unwrap_err();
-    assert!(
-        err.to_string().contains("no library source"),
-        "got {err:#}"
-    );
+    assert!(err.to_string().contains("no library source"), "got {err:#}");
 
     let after = h.qbit.snapshot();
     assert!(

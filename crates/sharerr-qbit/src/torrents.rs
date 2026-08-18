@@ -153,12 +153,20 @@ impl QbitClient {
     /// Shared body of the add/remove halves of [`set_torrent_trackers`]: they
     /// differ only in endpoint and how qBittorrent wants the URL list joined.
     /// A no-op when `urls` is empty, so callers don't need to check first.
-    async fn post_tracker_urls(&self, hash: &str, endpoint: &str, urls: &[&str], sep: &str) -> Result<()> {
+    async fn post_tracker_urls(
+        &self,
+        hash: &str,
+        endpoint: &str,
+        urls: &[&str],
+        sep: &str,
+    ) -> Result<()> {
         if urls.is_empty() {
             return Ok(());
         }
         let joined = urls.join(sep);
-        let build = move |rb: reqwest::RequestBuilder| rb.form(&[("hash", hash), ("urls", joined.as_str())]);
+        let build = move |rb: reqwest::RequestBuilder| {
+            rb.form(&[("hash", hash), ("urls", joined.as_str())])
+        };
         self.send_ok(Method::POST, endpoint, &build).await?;
         Ok(())
     }

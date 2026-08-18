@@ -282,8 +282,8 @@ impl ServeState {
     pub async fn replace_config(&self, config: Config) {
         // Only the static half is refreshed: the poller's observed endpoints are
         // still true regardless of what the operator just typed.
-        self.endpoint
-            .set_static(match sharerr_core::endpoint::advertised_base(
+        self.endpoint.set_static(
+            match sharerr_core::endpoint::advertised_base(
                 &config.tracker,
                 config.server.bind.port(),
             ) {
@@ -292,7 +292,8 @@ impl ServeState {
                     tracing::warn!(%err, "the saved advertised address is unusable");
                     None
                 }
-            });
+            },
+        );
         *self.config.write().await = config;
         *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;
