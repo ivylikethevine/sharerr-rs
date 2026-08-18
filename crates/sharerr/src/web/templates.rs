@@ -216,8 +216,27 @@ pub struct SettingsPage {
 
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,
+    pub gluetun_enabled: bool,
     pub gluetun_api_key_set: bool,
     pub gluetun_poll_secs: u64,
+    /// What the tracker-facing poller last saw and last failed with, rendered
+    /// for the settings page's own small status line — the fuller version
+    /// lives on Diagnostics.
+    pub gluetun_last_observed: Option<String>,
+    pub gluetun_last_error: Option<String>,
+
+    /// The second poller — the torrent client's own tunnel. See
+    /// `docs/roadmap.md`'s "a peer with two addresses".
+    pub gluetun_client_control_url: String,
+    pub gluetun_client_enabled: bool,
+    pub gluetun_client_api_key_set: bool,
+    pub gluetun_client_poll_secs: u64,
+    pub gluetun_client_last_observed: Option<String>,
+    pub gluetun_client_last_error: Option<String>,
+    /// Whether the client poller has ever been pointed at anything — the
+    /// disclosure it lives in starts open once it has, same reasoning as
+    /// `secondary_arr_configured`.
+    pub gluetun_client_configured: bool,
 
     /// A freshly minted secret, shown exactly once on the response that created it.
     /// Never populated by an ordinary page load.
@@ -324,6 +343,39 @@ pub struct DiagnosticsPage {
     /// Whether anything here stops a file being shared. Drives the one-line verdict
     /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
+
+    /// One row per gluetun poller (tracker, then client) — what each is
+    /// pointed at, what it last saw, and what it last failed with. See
+    /// `docs/roadmap.md`'s "gluetun observability" and "a peer with two
+    /// addresses".
+    pub gluetun: Vec<EndpointStatus>,
+    /// Live swarm counts from the tracker's own bookkeeping — not a config
+    /// check like the rest of the page, but the other half of "is networking
+    /// actually working": credentials can all be green while no peer has
+    /// ever announced.
+    pub swarm_peers: usize,
+    pub swarm_seeders: usize,
+}
+
+/// One gluetun-tracked endpoint's state, pre-rendered for display.
+#[derive(Debug)]
+pub struct EndpointStatus {
+    pub label: &'static str,
+    /// Whether this poller is turned on. A poller can be `configured` (has a
+    /// control server URL) but not `enabled` — the whole point of the on/off
+    /// switch.
+    pub enabled: bool,
+    /// Whether a control server URL is set at all.
+    pub configured: bool,
+    /// What sharerr would advertise right now — the dynamic observation if
+    /// there is one, else the static configured address, else nothing.
+    pub current: Option<String>,
+    /// What gluetun last actually reported, with when — `None` even for a
+    /// configured poller that has not resolved yet.
+    pub last_observed: Option<String>,
+    pub last_poll: Option<String>,
+    pub last_success: Option<String>,
+    pub last_error: Option<String>,
 }
 
 /// One friend, as the peers page lists them.
@@ -393,30 +445,6 @@ pub struct RevealedPeer {
     pub key: String,
 }
 
-/// One release as this friend's Torznab client would receive it.
-#[derive(Debug)]
-pub struct FeedPreviewRow {
-    pub title: String,
-    pub category: &'static str,
-    pub size: String,
-    pub download_url: String,
-    /// Empty until the release has an info hash, same as the real feed.
-    pub magnet_url: String,
-}
-
-/// A friend's feed, rendered with their own scope and their own links — the
-/// honest test of scoping, run from the operator's browser instead of a
-/// hand-crafted Torznab query.
-#[derive(Debug, Template)]
-#[template(path = "feed_preview.html")]
-pub struct FeedPreviewPage {
-    pub signed_in: bool,
-    pub peer_label: String,
-    pub peer_scope_label: &'static str,
-    pub total: usize,
-    pub items: Vec<FeedPreviewRow>,
-}
-
 /// One `<option>` in the items page's source/state filters.
 #[derive(Debug)]
 pub struct FilterOption {
@@ -454,8 +482,13 @@ pub struct ItemRow {
     /// friend's feed.
     pub visible_to: String,
     pub since: String,
-    /// A truncated info hash, or `None` before a torrent exists.
-    pub info_hash_short: Option<String>,
+    /// The full 40-character hash, or `None` before a torrent exists.
+    pub info_hash: Option<String>,
+    /// Where this torrent currently announces — the same URL a freshly built
+    /// torrent would carry, computed live rather than stored, since it tracks
+    /// whatever the endpoint currently resolves to. `None` before a torrent
+    /// exists, or when nothing is configured to announce to.
+    pub announce_url: Option<String>,
     pub last_error: Option<String>,
 }
 

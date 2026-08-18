@@ -192,6 +192,17 @@ impl AdvertisedEndpoint {
             .or_else(|| inner.static_base.clone())
     }
 
+    /// The most recent *dynamic* observation, with when it was seen — `None`
+    /// when nothing has ever been observed, even if a static base is
+    /// configured. Unlike [`Self::current`], this never falls back to the
+    /// static base: it answers "what did gluetun last actually report",
+    /// which is a different question from "what would sharerr advertise right
+    /// now" whenever the two differ.
+    pub fn last_observed(&self) -> Option<ObservedBase> {
+        let inner = self.inner.read().ok()?;
+        inner.dynamic.first().cloned()
+    }
+
     /// Record an observed base. Returns `true` when this *changes* the current
     /// endpoint — the signal to rewrite announce lists and wake the sync loop.
     ///

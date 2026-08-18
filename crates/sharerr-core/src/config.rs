@@ -45,6 +45,10 @@ pub mod secret_keys {
     /// gluetun v3.40 made `apikey` the default auth type for the control
     /// server; without it every request comes back `401`.
     pub const GLUETUN_API_KEY: &str = "gluetun.api_key";
+    /// The API key for the *second* gluetun poller — the torrent client's own
+    /// tunnel, when it is a separate one from the tracker's. See
+    /// [`super::GluetunConfig`] and `[gluetun_client]`.
+    pub const GLUETUN_CLIENT_API_KEY: &str = "gluetun_client.api_key";
 
     /// This instance's Ed25519 signing key for gossip records, hex-encoded.
     ///
@@ -80,6 +84,7 @@ pub mod secret_keys {
         TRANSMISSION_PASSWORD,
         TRACKER_TOKEN,
         GLUETUN_API_KEY,
+        GLUETUN_CLIENT_API_KEY,
     ];
 }
 
@@ -136,8 +141,17 @@ pub mod config_paths {
     pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
     pub const TRACKER_PORT: &str = "tracker.port";
 
+    pub const GLUETUN_ENABLED: &str = "gluetun.enabled";
     pub const GLUETUN_CONTROL_URL: &str = "gluetun.control_url";
     pub const GLUETUN_POLL_SECS: &str = "gluetun.poll_secs";
+
+    /// The second gluetun poller, for the torrent client's own tunnel — see
+    /// `docker/deploy/dual-vpn/`. Independent of the tracker-facing `[gluetun]`
+    /// above: separate control server, separate enabled flag, separate poll
+    /// interval, because the two tunnels rotate on their own schedules.
+    pub const GLUETUN_CLIENT_ENABLED: &str = "gluetun_client.enabled";
+    pub const GLUETUN_CLIENT_CONTROL_URL: &str = "gluetun_client.control_url";
+    pub const GLUETUN_CLIENT_POLL_SECS: &str = "gluetun_client.poll_secs";
 
     pub const SYNC_ENABLED: &str = "sync.enabled";
     pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
@@ -174,8 +188,12 @@ pub mod config_paths {
         TRACKER_ADVERTISED_HOST,
         TRACKER_ADVERTISED_URL,
         TRACKER_PORT,
+        GLUETUN_ENABLED,
         GLUETUN_CONTROL_URL,
         GLUETUN_POLL_SECS,
+        GLUETUN_CLIENT_ENABLED,
+        GLUETUN_CLIENT_CONTROL_URL,
+        GLUETUN_CLIENT_POLL_SECS,
         SYNC_ENABLED,
         SYNC_INTERVAL_SECS,
     ];
@@ -210,6 +228,12 @@ pub struct Config {
     /// Resolving the advertised endpoint from a gluetun VPN container's control
     /// server, for deployments with no stable public IP or forwarded port.
     pub gluetun: GluetunConfig,
+    /// A second, independent gluetun poller for the torrent client's own
+    /// tunnel, when it is not the same one the tracker uses — see
+    /// `docker/deploy/dual-vpn/`. Disabled (`control_url: None`) by default:
+    /// the ordinary single-tunnel deployment has nothing to point this at, and
+    /// `gluetun` above already covers it.
+    pub gluetun_client: GluetunConfig,
     pub sync: SyncConfig,
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
@@ -237,6 +261,7 @@ impl Default for Config {
             transmission: TransmissionConfig::default(),
             tracker: TrackerConfig::default(),
             gluetun: GluetunConfig::default(),
+            gluetun_client: GluetunConfig::default(),
             sync: SyncConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
@@ -551,9 +576,13 @@ where
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GluetunConfig {
+    /// Whether this poller runs at all, independent of whether `control_url`
+    /// is set. Split from `control_url` so pausing polling is a checkbox
+    /// rather than blanking (and losing) a saved address.
+    pub enabled: bool,
     /// gluetun's control server, `http://localhost:8000` in the intended
     /// topology (sharerr inside gluetun's network namespace). `None` disables
-    /// endpoint resolution entirely.
+    /// endpoint resolution entirely, same as `enabled = false`.
     pub control_url: Option<Url>,
     /// How often to poll the control server, in seconds.
     pub poll_secs: u64,
@@ -568,11 +597,18 @@ impl GluetunConfig {
     pub fn effective_poll_secs(&self) -> u64 {
         self.poll_secs.max(Self::MIN_POLL_SECS)
     }
+
+    /// Whether this poller should actually run: turned on, and pointed
+    /// somewhere.
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.control_url.is_some()
+    }
 }
 
 impl Default for GluetunConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             control_url: None,
             poll_secs: 60,
         }

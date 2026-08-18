@@ -1,0 +1,89 @@
+# The sharerr stack: its own gluetun, and sharerr. qBittorrent, Sonarr and
+# Radarr live in ../media/, a separate `docker compose` project on a separate
+# tunnel — see ../README.md for why, and for how the two still reach each
+# other over the `sharerr-shared` network.
+#
+#   docker network create sharerr-shared   # once, before either stack
+#   cp .env.example .env && $EDITOR .env config/sharerr.toml
+#   docker compose up -d
+
+name: sharerr-tracker
+
+networks:
+  default:
+  sharerr-shared:
+    external: true
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3.40.0
+    container_name: sharerr-gluetun
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks: [default, sharerr-shared]
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set this in .env}
+      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:?set this in .env}
+      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:?set this in .env}
+      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-51820}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set this in .env}
+
+      # sharerr's HTTP port, forwarded — where a friend's announce and their
+      # Prowlarr's feed pull both arrive. qBittorrent's BitTorrent listener is
+      # not this tunnel's problem; it is forwarded by ../media/'s gluetun.
+      FIREWALL_VPN_INPUT_PORTS: "8477"
+      FIREWALL_INPUT_PORTS: "8477"
+      FIREWALL_OUTBOUND_SUBNETS: >-
+        ${LAN_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8},172.31.90.0/24
+      DNS_ADDRESS: 127.0.0.11
+
+      # Uncomment for a provider that grants a forwarded port. Nudges sharerr
+      # to re-poll immediately on reconnect rather than waiting out
+      # [gluetun].poll_secs. `localhost` because sharerr shares this
+      # container's network namespace.
+      # VPN_PORT_FORWARDING: "on"
+      # VPN_PORT_FORWARDING_PROVIDER: ${VPN_SERVICE_PROVIDER}
+      # VPN_PORT_FORWARDING_STATUS_FILE: /gluetun/forwarded_port
+      # VPN_PORT_FORWARDING_UP_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/refresh'
+      # VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/down'
+
+      TZ: ${TZ:-Etc/UTC}
+    ports:
+      - "127.0.0.1:8477:8477"
+    volumes:
+      - gluetun-config:/gluetun
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  sharerr:
+    image: ghcr.io/ivyduggan/sharerr-rs:main
+    container_name: sharerr
+    # No `networks:` here either — reaching media-gluetun and sonarr/radarr on
+    # sharerr-shared comes for free by sharing gluetun's network namespace.
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      SHARERR_MASTER_KEY: ${SHARERR_MASTER_KEY:?set this in .env}
+      RUST_LOG: ${RUST_LOG:-sharerr=info,warn}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - ./config:/config
+      - sharerr-data:/data
+      - ${MEDIA_PATH:?set this in .env}:/media:ro
+    restart: unless-stopped
+
+volumes:
+  gluetun-config:
+  sharerr-data:

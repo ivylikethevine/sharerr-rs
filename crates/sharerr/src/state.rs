@@ -17,6 +17,7 @@ use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_store::{Store, Vault, master_key_from_env};
 use tokio::sync::{Notify, RwLock};
 
+use crate::gluetun::{GluetunStatus, GluetunTarget};
 use crate::sync::Syncer;
 
 /// How soon to retry building the syncer after the first failure.
@@ -87,15 +88,35 @@ pub struct ServeState {
     /// fifteen seconds. `notify_one` stores a permit, so an invalidation that
     /// lands mid-sync is not lost.
     wake: Notify,
-    /// The live externally reachable endpoint. One value for the whole process:
-    /// the syncer's tracker provider reads it, the gluetun poller updates it,
-    /// and a settings save refreshes only its static half — so the poller's
-    /// observations survive both a config change and a syncer rebuild.
+    /// The live externally reachable endpoint — the tracker/feed address a
+    /// friend reaches this instance on. One value for the whole process: the
+    /// syncer's tracker provider reads it, the tracker-facing gluetun poller
+    /// updates it, and a settings save refreshes only its static half — so the
+    /// poller's observations survive both a config change and a syncer
+    /// rebuild.
     endpoint: Arc<AdvertisedEndpoint>,
-    /// Raised by the gluetun push endpoint so the poller re-asks the control
-    /// server *now* instead of at the next tick — the "reacted to in seconds"
-    /// half of the endpoint story.
+    /// The live externally reachable address of the torrent *client* — separate
+    /// from `endpoint` because the two can sit behind independent tunnels (see
+    /// `docker/deploy/dual-vpn/`) that rotate on unrelated schedules. Populated
+    /// only by the `[gluetun_client]` poller; there is no static configuration
+    /// for it, since nothing else in `sharerr.toml` describes the torrent
+    /// client's own reachable address. Read today by gossip's self-record;
+    /// see `docs/roadmap.md`'s "a peer with two addresses" for the rest of the
+    /// story.
+    client_endpoint: Arc<AdvertisedEndpoint>,
+    /// Raised by the gluetun push endpoint so the tracker-facing poller
+    /// re-asks its control server *now* instead of at the next tick — the
+    /// "reacted to in seconds" half of the endpoint story.
     endpoint_refresh: Notify,
+    /// The client-facing counterpart of `endpoint_refresh`, for the second
+    /// poller's own push nudge.
+    client_endpoint_refresh: Notify,
+    /// What the tracker-facing gluetun poller last saw and last failed with —
+    /// the "when did gluetun last actually tell sharerr something" the
+    /// Diagnostics page answers.
+    gluetun_status: Arc<GluetunStatus>,
+    /// The client-facing counterpart of `gluetun_status`.
+    gluetun_client_status: Arc<GluetunStatus>,
     /// The tracker's live swarms. Owned here rather than by the tracker router
     /// because two consumers need one copy: however many listeners carry
     /// `/announce`, and the status page's "n peers connected" line.
@@ -123,7 +144,11 @@ impl ServeState {
             gossip_identity: RwLock::new(None),
             wake: Notify::new(),
             endpoint,
+            client_endpoint: Arc::new(AdvertisedEndpoint::new(None)),
             endpoint_refresh: Notify::new(),
+            client_endpoint_refresh: Notify::new(),
+            gluetun_status: Arc::new(GluetunStatus::default()),
+            gluetun_client_status: Arc::new(GluetunStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
         }
     }
@@ -134,9 +159,32 @@ impl ServeState {
         Arc::clone(&self.swarms)
     }
 
-    /// The live advertised endpoint this whole process shares.
+    /// The live advertised endpoint this whole process shares — where friends
+    /// reach the tracker and the feed.
     pub fn endpoint(&self) -> Arc<AdvertisedEndpoint> {
         Arc::clone(&self.endpoint)
+    }
+
+    /// The live advertised address of the torrent client — see the field
+    /// comment on `client_endpoint`.
+    pub fn client_endpoint(&self) -> Arc<AdvertisedEndpoint> {
+        Arc::clone(&self.client_endpoint)
+    }
+
+    /// The endpoint gluetun keeps in step for `target`.
+    pub fn endpoint_for(&self, target: GluetunTarget) -> Arc<AdvertisedEndpoint> {
+        match target {
+            GluetunTarget::Tracker => self.endpoint(),
+            GluetunTarget::Client => self.client_endpoint(),
+        }
+    }
+
+    /// What `target`'s poller last saw and last failed with.
+    pub fn gluetun_status(&self, target: GluetunTarget) -> Arc<GluetunStatus> {
+        match target {
+            GluetunTarget::Tracker => Arc::clone(&self.gluetun_status),
+            GluetunTarget::Client => Arc::clone(&self.gluetun_client_status),
+        }
     }
 
     /// Ask the background loop to run a pass soon, without invalidating the
@@ -146,14 +194,20 @@ impl ServeState {
         self.wake.notify_one();
     }
 
-    /// Ask the gluetun poller to re-resolve the endpoint now.
-    pub fn nudge_endpoint(&self) {
-        self.endpoint_refresh.notify_one();
+    /// Ask `target`'s gluetun poller to re-resolve its endpoint now.
+    pub fn nudge_endpoint(&self, target: GluetunTarget) {
+        match target {
+            GluetunTarget::Tracker => self.endpoint_refresh.notify_one(),
+            GluetunTarget::Client => self.client_endpoint_refresh.notify_one(),
+        }
     }
 
-    /// Park until [`Self::nudge_endpoint`] is called.
-    pub async fn endpoint_refresh_requested(&self) {
-        self.endpoint_refresh.notified().await;
+    /// Park until [`Self::nudge_endpoint`] is called for `target`.
+    pub async fn endpoint_refresh_requested(&self, target: GluetunTarget) {
+        match target {
+            GluetunTarget::Tracker => self.endpoint_refresh.notified().await,
+            GluetunTarget::Client => self.client_endpoint_refresh.notified().await,
+        }
     }
 
     /// A snapshot of the current configuration.

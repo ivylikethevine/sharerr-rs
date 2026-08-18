@@ -205,6 +205,17 @@
     above.
   </p>
 
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if gluetun_enabled %}checked{% endif %}
+           {% call lock_attr("gluetun.enabled") %}{% endcall %}>
+    Poll gluetun
+  </label>
+  {% call locked("gluetun.enabled") %}{% endcall %}
+  <p class="hint">
+    Unticking this pauses polling without losing the control server URL below —
+    useful for a temporary hold, since re-enabling later needs nothing retyped.
+  </p>
+
   <label for="gluetun_control_url">Control server URL</label>
   <input id="gluetun_control_url" name="control_url" value="{{ gluetun_control_url }}"
          placeholder="http://localhost:8000 — leave empty to disable"
@@ -239,8 +250,91 @@
     out on its own.
   </p>
 
+  <dl>
+    <dt>Last observed</dt>
+    <dd>
+      {% if let Some(observed) = gluetun_last_observed %}
+      <code>{{ observed }}</code>
+      {% else %}
+      <span class="hint">nothing yet</span>
+      {% endif %}
+    </dd>
+    {% if let Some(error) = gluetun_last_error %}
+    <dt>Last error</dt>
+    <dd><span class="error">{{ error }}</span></dd>
+    {% endif %}
+  </dl>
+
   <button type="submit">Save</button>
 </form>
+
+{# Folded unless it is already pointed at something — a second tunnel is the
+   exception, and most instances never touch this panel. See
+   docs/roadmap.md's "a peer with two addresses". #}
+<details class="fold" {% if gluetun_client_configured %}open{% endif %}>
+  <summary>Gluetun — torrent client's own tunnel</summary>
+  <form method="post" action="/settings/gluetun/client" class="panel">
+    <p class="hint">
+      For the deployment where the torrent client sits behind a <em>different</em>
+      tunnel from this instance's own — see <code>docker/deploy/dual-vpn/</code>.
+      Independent of the section above: its own control server, its own poll
+      interval, its own on/off switch. Leave this alone unless the torrent
+      client and sharerr are genuinely on separate VPN exits.
+    </p>
+
+    <label class="hint">
+      <input type="checkbox" name="enabled" value="1" {% if gluetun_client_enabled %}checked{% endif %}
+             {% call lock_attr("gluetun_client.enabled") %}{% endcall %}>
+      Poll the torrent client's gluetun
+    </label>
+    {% call locked("gluetun_client.enabled") %}{% endcall %}
+
+    <label for="gluetun_client_control_url">Control server URL</label>
+    <input id="gluetun_client_control_url" name="control_url" value="{{ gluetun_client_control_url }}"
+           placeholder="http://media-gluetun:8000 — leave empty to disable"
+           {% call lock_attr("gluetun_client.control_url") %}{% endcall %}>
+    {% call locked("gluetun_client.control_url") %}{% endcall %}
+
+    <label for="gluetun_client_api_key">Control server API key</label>
+    <input id="gluetun_client_api_key" name="api_key" type="password" autocomplete="off"
+           placeholder="{% call stored(gluetun_client_api_key_set) %}{% endcall %}"
+           {% if !master_key_present %}disabled{% endif %}>
+    {% if gluetun_client_api_key_set %}
+    <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+    {% endif %}
+
+    <label for="gluetun_client_poll_secs">Poll interval (seconds)</label>
+    <input id="gluetun_client_poll_secs" name="poll_secs" value="{{ gluetun_client_poll_secs }}" inputmode="numeric"
+           {% call lock_attr("gluetun_client.poll_secs") %}{% endcall %}>
+    {% call locked("gluetun_client.poll_secs") %}{% endcall %}
+    <p class="hint">
+      For a fast reaction to that tunnel's own reconnects, point its
+      <code>VPN_PORT_FORWARDING_UP_COMMAND</code> and
+      <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> at
+      <code>/gluetun/refresh?target=client</code> and
+      <code>/gluetun/down?target=client</code> on this instance — the
+      <code>?target=client</code> is what keeps it from nudging the tracker's
+      own poller above instead.
+    </p>
+
+    <dl>
+      <dt>Last observed</dt>
+      <dd>
+        {% if let Some(observed) = gluetun_client_last_observed %}
+        <code>{{ observed }}</code>
+        {% else %}
+        <span class="hint">nothing yet</span>
+        {% endif %}
+      </dd>
+      {% if let Some(error) = gluetun_client_last_error %}
+      <dt>Last error</dt>
+      <dd><span class="error">{{ error }}</span></dd>
+      {% endif %}
+    </dl>
+
+    <button type="submit">Save</button>
+  </form>
+</details>
 
 <h2>Path mappings</h2>
 <form method="post" action="/settings/paths" class="panel">

@@ -25,6 +25,58 @@
 {% endif %}
 {% endif %}
 
+<h2>Networking</h2>
+<div class="panel">
+  <dl class="facts">
+    <dt>Swarm</dt>
+    <dd>{{ swarm_peers }} peer(s) connected, {{ swarm_seeders }} seeding</dd>
+  </dl>
+  {% for row in gluetun %}
+  <h3>{{ row.label }}</h3>
+  <dl class="facts">
+    <dt>Poller</dt>
+    <dd>
+      {% if !row.configured %}
+      <span class="hint">not configured</span>
+      {% else if row.enabled %}
+      <span class="ok">enabled</span>
+      {% else %}
+      <span class="hint">paused (control server URL is kept)</span>
+      {% endif %}
+    </dd>
+    <dt>Currently advertised</dt>
+    <dd>
+      {% if let Some(current) = row.current %}
+      <code>{{ current }}</code>
+      {% else %}
+      <span class="hint">nothing configured or observed yet</span>
+      {% endif %}
+    </dd>
+    <dt>Last observed from gluetun</dt>
+    <dd>
+      {% if let Some(observed) = row.last_observed %}
+      <code>{{ observed }}</code>
+      {% else %}
+      <span class="hint">never</span>
+      {% endif %}
+    </dd>
+    {% if let Some(poll) = row.last_poll %}
+    <dt>Last poll</dt>
+    <dd>{{ poll }}{% if let Some(success) = row.last_success %}, last succeeded {{ success }}{% endif %}</dd>
+    {% endif %}
+    {% if let Some(error) = row.last_error %}
+    <dt>Last error</dt>
+    <dd><span class="error">{{ error }}</span></dd>
+    {% endif %}
+  </dl>
+  {% endfor %}
+  <p class="hint">
+    Configure either poller under <a href="/settings">Settings</a> → Gluetun.
+    The torrent client's own tunnel only applies to the split-VPN deployment in
+    <code>docker/deploy/dual-vpn/</code> — most instances leave it unconfigured.
+  </p>
+</div>
+
 <h2>Services</h2>
 <div class="panel">
   {% if services.is_empty() %}

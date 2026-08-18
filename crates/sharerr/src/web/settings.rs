@@ -32,6 +32,8 @@ use sharerr_core::config::{config_paths, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
+use crate::gluetun::GluetunTarget;
+
 use super::WebState;
 use super::config_io::{ConfigFile, Edit, parse_libraries, parse_path_map};
 use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
@@ -115,6 +117,8 @@ pub struct TrackerForm {
 
 #[derive(Debug, Deserialize)]
 pub struct GluetunForm {
+    #[serde(default)]
+    enabled: Option<String>,
     control_url: String,
     api_key: String,
     #[serde(default)]
@@ -324,26 +328,62 @@ pub async fn save_gluetun(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
 ) -> Response {
-    if let Err(message) = apply_secret(
-        &state,
+    save_gluetun_section(
+        state,
+        form,
+        "gluetun",
+        config_paths::GLUETUN_ENABLED,
+        config_paths::GLUETUN_CONTROL_URL,
+        config_paths::GLUETUN_POLL_SECS,
         secret_keys::GLUETUN_API_KEY,
-        &form.api_key,
-        form.clear_api_key,
     )
     .await
+}
+
+/// The second poller — the torrent client's own tunnel, when it is a separate
+/// one from the tracker's. Same form shape, same rules, a different section:
+/// see `docs/roadmap.md`'s "a peer with two addresses".
+pub async fn save_gluetun_client(
+    State(state): State<WebState>,
+    Form(form): Form<GluetunForm>,
+) -> Response {
+    save_gluetun_section(
+        state,
+        form,
+        "gluetun_client",
+        config_paths::GLUETUN_CLIENT_ENABLED,
+        config_paths::GLUETUN_CLIENT_CONTROL_URL,
+        config_paths::GLUETUN_CLIENT_POLL_SECS,
+        secret_keys::GLUETUN_CLIENT_API_KEY,
+    )
+    .await
+}
+
+/// The save logic both gluetun sections share — only the paths and vault key
+/// differ between the tracker's poller and the client's.
+async fn save_gluetun_section(
+    state: WebState,
+    form: GluetunForm,
+    section: &'static str,
+    enabled_path: &'static str,
+    control_url_path: &'static str,
+    poll_secs_path: &'static str,
+    api_key_secret: &'static str,
+) -> Response {
+    if let Err(message) =
+        apply_secret(&state, api_key_secret, &form.api_key, form.clear_api_key).await
     {
         return reject(&state, &message).await;
     }
 
-    write_config(&state, "gluetun", |file| {
+    write_config(&state, section, move |file| {
+        file.apply([Edit::bool(enabled_path, checked(&form.enabled))]);
+
         let url = form.control_url.trim();
         if url.is_empty() {
-            file.apply([Edit::unset(config_paths::GLUETUN_CONTROL_URL)]);
+            file.apply([Edit::unset(control_url_path)]);
         } else {
-            file.apply([Edit::str(
-                config_paths::GLUETUN_CONTROL_URL,
-                normalise_url(url)?,
-            )]);
+            file.apply([Edit::str(control_url_path, normalise_url(url)?)]);
         }
 
         let poll = form.poll_secs.trim();
@@ -358,7 +398,7 @@ pub async fn save_gluetun(
                 );
             }
             file.apply([Edit::int(
-                config_paths::GLUETUN_POLL_SECS,
+                poll_secs_path,
                 i64::try_from(secs).unwrap_or(60),
             )]);
         }
@@ -589,6 +629,25 @@ fn checked(field: &Option<String>) -> bool {
     field.is_some()
 }
 
+/// What gluetun last actually reported for one endpoint, or `None` when
+/// nothing has been observed yet — the settings page's short version of what
+/// Diagnostics shows in full.
+fn gluetun_last_observed(endpoint: &sharerr_core::endpoint::AdvertisedEndpoint) -> Option<String> {
+    let observed = endpoint.last_observed()?;
+    Some(format!(
+        "{} ({})",
+        observed.base,
+        super::peers::ago(observed.observed_at)
+    ))
+}
+
+/// The most recent failure `target`'s poller hit, if it has one right now —
+/// cleared the moment a poll succeeds, so this never shows a stale error next
+/// to a working endpoint.
+async fn gluetun_last_error(state: &crate::state::ServeState, target: GluetunTarget) -> Option<String> {
+    state.gluetun_status(target).snapshot().await.last_error
+}
+
 /// Reject a `tracker.advertised_host` that could never work for anyone outside
 /// this machine or network.
 ///
@@ -752,8 +811,24 @@ async fn build_page(
             .as_ref()
             .map(url::Url::to_string)
             .unwrap_or_default(),
+        gluetun_enabled: config.gluetun.enabled,
         gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
         gluetun_poll_secs: config.gluetun.poll_secs,
+        gluetun_last_observed: gluetun_last_observed(&state.serve.endpoint()),
+        gluetun_last_error: gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
+
+        gluetun_client_control_url: config
+            .gluetun_client
+            .control_url
+            .as_ref()
+            .map(url::Url::to_string)
+            .unwrap_or_default(),
+        gluetun_client_enabled: config.gluetun_client.enabled,
+        gluetun_client_api_key_set: is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
+        gluetun_client_poll_secs: config.gluetun_client.poll_secs,
+        gluetun_client_last_observed: gluetun_last_observed(&state.serve.client_endpoint()),
+        gluetun_client_last_error: gluetun_last_error(&state.serve, GluetunTarget::Client).await,
+        gluetun_client_configured: config.gluetun_client.control_url.is_some(),
 
         revealed: None,
 

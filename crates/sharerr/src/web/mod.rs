@@ -106,6 +106,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
         .route("/settings/tracker", post(settings::save_tracker))
         .route("/settings/gluetun", post(settings::save_gluetun))
+        .route(
+            "/settings/gluetun/client",
+            post(settings::save_gluetun_client),
+        )
         .route("/settings/libraries", post(settings::save_libraries))
         .route("/settings/paths", post(settings::save_paths))
         .route("/settings/sync", post(settings::save_sync))
@@ -424,6 +428,8 @@ mod tests {
             "/settings/arr/lidarr",
             "/settings/qbittorrent",
             "/settings/tracker",
+            "/settings/gluetun",
+            "/settings/gluetun/client",
             "/settings/libraries",
             "/settings/paths",
             "/settings/sync",

@@ -3,6 +3,10 @@
 #   cd docker/deploy && cp .env.example .env && $EDITOR .env sharerr.toml
 #   docker compose up -d
 #
+# Want qBittorrent and sharerr on two separate tunnels instead — two
+# subscriptions, two exits, each rotating its address independently? See
+# `../dual-vpn/` for that layout as two compose projects.
+#
 # ## The topology
 #
 # gluetun owns the network namespace. qBittorrent and sharerr both join it with

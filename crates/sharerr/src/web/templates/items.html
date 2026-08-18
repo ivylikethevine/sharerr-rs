@@ -44,6 +44,7 @@
   {% if items.is_empty() %}
   <p class="hint">Nothing matches. Widen the filters above, or run a sync.</p>
   {% else %}
+  <div class="table-scroll">
   <table>
     <thead>
       <tr>
@@ -54,6 +55,7 @@
         {% endfor %}
         <th>Visible to</th>
         <th>Info hash</th>
+        <th>Announce URL</th>
       </tr>
     </thead>
     <tbody>
@@ -78,8 +80,15 @@
           {% endif %}
         </td>
         <td>
-          {% if let Some(hash) = item.info_hash_short %}
+          {% if let Some(hash) = item.info_hash %}
           <code>{{ hash }}</code>
+          {% else %}
+          <span class="hint">none yet</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if let Some(url) = item.announce_url %}
+          <code>{{ url }}</code>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
@@ -88,6 +97,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </div>
 {% endblock %}

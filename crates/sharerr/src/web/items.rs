@@ -98,6 +98,13 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
 
+    // Computed once for the whole page, not per row: every seeding torrent
+    // announces to the same live endpoint, so there is exactly one answer to
+    // "where does this instance's tracker currently reach". `None` when
+    // nothing is configured to announce to yet — the same condition that
+    // blocks the tracker itself (`TorrentError::NoAdvertisedHost`).
+    let announce_url = current_announce_url(&state.serve).await;
+
     let sort_links = SORT_COLUMNS
         .iter()
         .map(|(field, label)| {
@@ -137,7 +144,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         error,
         total,
         shown: items.len(),
-        items: items.iter().map(|item| row(item, &active)).collect(),
+        items: items
+            .iter()
+            .map(|item| row(item, &active, announce_url.as_deref()))
+            .collect(),
         source_options: MediaSource::ALL
             .iter()
             .map(|s| FilterOption {
@@ -209,7 +219,7 @@ fn visible_to(item: &SharedItem, peers: &[Peer]) -> String {
     }
 }
 
-fn row(item: &SharedItem, peers: &[Peer]) -> ItemRow {
+fn row(item: &SharedItem, peers: &[Peer], announce_url: Option<&str>) -> ItemRow {
     ItemRow {
         title: item.spec.title().to_owned(),
         kind: spec_kind(&item.spec),
@@ -218,12 +228,29 @@ fn row(item: &SharedItem, peers: &[Peer]) -> ItemRow {
         state_label: title_case(item.state.as_str()),
         visible_to: visible_to(item, peers),
         since: item.created_at.map(ago).unwrap_or_default(),
-        info_hash_short: item
+        info_hash: item.info_hash.clone(),
+        // A torrent with no info hash has not been built yet, so there is
+        // nothing meaningful to announce either — `None` regardless of
+        // whether the tracker itself is configured.
+        announce_url: item
             .info_hash
-            .as_deref()
-            .map(|h| format!("{}…", &h[..h.len().min(10)])),
+            .as_ref()
+            .and(announce_url)
+            .map(str::to_owned),
         last_error: item.last_error.clone(),
     }
+}
+
+/// The announce URL a freshly built torrent would carry right now: the same
+/// construction `BuiltinTracker::announce_set` uses, computed live rather
+/// than stored so it always reflects whatever the endpoint currently
+/// resolves to. `None` when nothing is configured to announce to yet.
+async fn current_announce_url(state: &crate::state::ServeState) -> Option<String> {
+    let base = state.endpoint().current()?;
+    let token = state.tracker_token().await;
+    sharerr_torrent::announce_url(&base, token.as_deref())
+        .ok()
+        .map(|url| url.to_string())
 }
 
 /// A byte count as a person reads it — binary units, one decimal past the first,

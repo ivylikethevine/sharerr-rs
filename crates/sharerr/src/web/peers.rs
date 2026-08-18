@@ -25,12 +25,8 @@ use sharerr_core::config::secret_keys;
 use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
-use super::items::human_size;
 use super::settings::title_case;
-use super::templates::{
-    FeedPreviewPage, FeedPreviewRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer,
-    ScopeOption, render,
-};
+use super::templates::{PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render};
 
 pub async fn page(State(state): State<WebState>) -> Response {
     render(&build(&state, None, None).await)
@@ -191,11 +187,16 @@ pub async fn delete(
     Ok(applied(&state, result, "delete that friend").await)
 }
 
-/// Render the feed exactly as this friend's Prowlarr would see it: their scope,
-/// their links. Scope filtering happens per key, so "why can't Sam find the
-/// album" otherwise means hand-crafting a Torznab query with Sam's key — this
-/// button answers it in one click, and is the honest test of scoping: not what
-/// the rules *say*, but what the feed *serves*.
+/// The literal XML this friend's Prowlarr would fetch: their scope, their
+/// links, their key's own view. Scope filtering happens per key, so "why
+/// can't Sam find the album" otherwise means hand-crafting a Torznab query
+/// with Sam's key — this button answers it in one click.
+///
+/// Rendered through [`crate::torznab::render_feed`], the same function the
+/// real `/torznab` route calls — not a second, hand-built HTML table that
+/// could show a field the real feed gets right (or wrong) differently. The
+/// honest test of scoping is not what the rules *say* a friend can see, but
+/// literally what the feed *serves* them, byte for byte.
 pub async fn feed_preview(
     State(state): State<WebState>,
     Path(id): Path<i64>,
@@ -218,25 +219,7 @@ pub async fn feed_preview(
     .await
     .map_err(|(status, reason)| (status, reason).into_response())?;
 
-    let items = matched
-        .items
-        .iter()
-        .map(|item| FeedPreviewRow {
-            title: item.release_title.clone(),
-            category: crate::torznab::category_name(crate::torznab::category_for(item)),
-            size: human_size(item.size),
-            download_url: matched.download_url(item),
-            magnet_url: matched.magnet_url(item),
-        })
-        .collect();
-
-    Ok(render(&FeedPreviewPage {
-        signed_in: true,
-        peer_label: peer.label,
-        peer_scope_label: peer.scope.label(),
-        total: matched.items.len(),
-        items,
-    }))
+    Ok(crate::torznab::xml(crate::torznab::render_feed(&matched)))
 }
 
 fn rejected_response(message: &str) -> Response {

@@ -14,11 +14,14 @@ use axum::response::Response;
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
-use super::templates::{DiagnosticsPage, SampleRow, ServiceLine, render};
+use super::peers::ago;
+use super::templates::{DiagnosticsPage, EndpointStatus, SampleRow, ServiceLine, render};
 use crate::checks::{self, ArrOutcome, DirOutcome};
+use crate::gluetun::GluetunTarget;
 
 /// How many problem paths to name before summarising the rest.
 ///
@@ -114,6 +117,24 @@ pub async fn page(State(state): State<WebState>) -> Response {
     };
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
+    let swarm = state.serve.swarms().stats().await;
+    let gluetun = vec![
+        endpoint_status(
+            "Tracker/feed",
+            &config.gluetun,
+            &state.serve.endpoint(),
+            state.serve.gluetun_status(GluetunTarget::Tracker),
+        )
+        .await,
+        endpoint_status(
+            "Torrent client",
+            &config.gluetun_client,
+            &state.serve.client_endpoint(),
+            state.serve.gluetun_status(GluetunTarget::Client),
+        )
+        .await,
+    ];
+
     render(&DiagnosticsPage {
         signed_in: true,
         services,
@@ -136,7 +157,32 @@ pub async fn page(State(state): State<WebState>) -> Response {
             sharerr: sample.sharerr.display().to_string(),
             qbit: sample.qbit.display().to_string(),
         }),
+        gluetun,
+        swarm_peers: swarm.peers,
+        swarm_seeders: swarm.seeders,
     })
+}
+
+/// One gluetun poller's row, pre-rendered for the template.
+async fn endpoint_status(
+    label: &'static str,
+    gluetun_config: &sharerr_core::config::GluetunConfig,
+    endpoint: &AdvertisedEndpoint,
+    status: std::sync::Arc<crate::gluetun::GluetunStatus>,
+) -> EndpointStatus {
+    let snapshot = status.snapshot().await;
+    EndpointStatus {
+        label,
+        enabled: gluetun_config.enabled,
+        configured: gluetun_config.control_url.is_some(),
+        current: endpoint.current().map(|base| base.to_string()),
+        last_observed: endpoint
+            .last_observed()
+            .map(|observed| format!("{} ({})", observed.base, ago(observed.observed_at))),
+        last_poll: snapshot.last_poll_at.map(ago),
+        last_success: snapshot.last_success_at.map(ago),
+        last_error: snapshot.last_error,
+    }
 }
 
 /// One line per service, saying whether it contributed anything to the scan.

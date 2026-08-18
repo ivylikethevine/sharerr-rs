@@ -194,7 +194,7 @@ impl Identity {
 }
 
 /// This instance's current self-record: identity from the vault, endpoints from
-/// the live advertised base. `None` when the vault (and so the identity) is
+/// the live advertised bases. `None` when the vault (and so the identity) is
 /// unavailable — gossip still relays without it, it just cannot speak for
 /// itself.
 async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
@@ -204,27 +204,35 @@ async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
     };
 
     let now = now_epoch();
-    let endpoints = state
-        .endpoint()
-        .current()
-        .map(|base| {
-            let addr = sharerr_core::endpoint::base_string(&base);
-            vec![
-                // The same listener carries both today; recorded separately so
-                // the day they split, older friends already understand it.
-                RecordEndpoint {
-                    kind: EndpointKind::Tracker.as_str().to_owned(),
-                    addr: addr.clone(),
-                    observed_at: now,
-                },
-                RecordEndpoint {
-                    kind: EndpointKind::Api.as_str().to_owned(),
-                    addr,
-                    observed_at: now,
-                },
-            ]
-        })
-        .unwrap_or_default();
+    let mut endpoints = Vec::new();
+    if let Some(base) = state.endpoint().current() {
+        let addr = sharerr_core::endpoint::base_string(&base);
+        // Tracker and Api share one listener today, so they always carry the
+        // same address; recorded separately so a friend who only understands
+        // one of the two kinds still gets it.
+        endpoints.push(RecordEndpoint {
+            kind: EndpointKind::Tracker.as_str().to_owned(),
+            addr: addr.clone(),
+            observed_at: now,
+        });
+        endpoints.push(RecordEndpoint {
+            kind: EndpointKind::Api.as_str().to_owned(),
+            addr,
+            observed_at: now,
+        });
+    }
+    // Unlike Tracker/Api, Client is genuinely independent — see
+    // `docs/roadmap.md`'s "a peer with two addresses". Present only once
+    // `[gluetun_client]` (or some other future source) has actually observed
+    // the torrent client's own address; absent is honest where nothing knows
+    // it, rather than repeating the tracker's address as a guess.
+    if let Some(base) = state.client_endpoint().current() {
+        endpoints.push(RecordEndpoint {
+            kind: EndpointKind::Client.as_str().to_owned(),
+            addr: sharerr_core::endpoint::base_string(&base),
+            observed_at: now,
+        });
+    }
 
     match identity.sign_record(endpoints, now) {
         Ok(record) => Some(record),

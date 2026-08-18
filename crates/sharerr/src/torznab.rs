@@ -580,12 +580,11 @@ pub(crate) async fn collect(
     })
 }
 
-async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Response {
-    let matched = match collect(state, query, scope).await {
-        Ok(matched) => matched,
-        Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
-    };
-
+/// Render `matched` as the literal RSS/Torznab XML a client fetches — the one
+/// renderer both the real feed and the settings-page preview go through, so
+/// the two cannot drift into disagreeing about what a friend actually sees.
+/// See [`FeedItem`] and [`feed_xml`].
+pub(crate) fn render_feed(matched: &Matched) -> String {
     let entries: Vec<FeedItem<'_>> = matched
         .items
         .iter()
@@ -595,14 +594,22 @@ async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Re
             magnet_url: matched.magnet_url(item),
         })
         .collect();
+    feed_xml(&entries)
+}
+
+async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Response {
+    let matched = match collect(state, query, scope).await {
+        Ok(matched) => matched,
+        Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
+    };
 
     tracing::debug!(
         function = %query.t,
-        returned = entries.len(),
+        returned = matched.items.len(),
         of = matched.total,
         "torznab search"
     );
-    xml(feed_xml(&entries))
+    xml(render_feed(&matched))
 }
 
 /// An authenticated caller, carrying what they are allowed to see.
@@ -755,7 +762,7 @@ async fn check_api_key(
     Err(refused())
 }
 
-fn xml(body: String) -> Response {
+pub(crate) fn xml(body: String) -> Response {
     xml_status(StatusCode::OK, body)
 }
 

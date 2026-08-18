@@ -88,7 +88,7 @@
         <td>{{ peer.last_seen }}</td>
         <td class="actions">
           {% if !peer.revoked %}
-          <a href="/peers/{{ peer.id }}/feed">Preview feed</a>
+          <a href="/peers/{{ peer.id }}/feed" target="_blank" rel="noopener">View feed XML</a>
           <form method="post" action="/peers/{{ peer.id }}/revoke" class="inline">
             <button type="submit" class="link">Revoke</button>
           </form>

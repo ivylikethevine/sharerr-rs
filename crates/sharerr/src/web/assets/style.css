@@ -195,6 +195,10 @@ form.inline { display: inline; }
 }
 
 table { border-collapse: collapse; width: 100%; }
+
+/* A table with a column that cannot reasonably wrap — a full URL or hash —
+   scrolls inside its own box instead of forcing the whole page wider. */
+.table-scroll { overflow-x: auto; }
 th, td { text-align: left; padding: 0.4rem 0.5rem 0.4rem 0; font-size: 0.92rem; }
 th { color: var(--muted); font-weight: 550; }
 

@@ -31,6 +31,17 @@
 //! known port rather than blocking the whole resolve, so a VPN reconnect that
 //! changes the exit address still gets advertised even when the port call is
 //! stuck failing.
+//!
+//! # Two independent pollers
+//!
+//! [`poll_loop`] is generic over [`GluetunTarget`] rather than assuming there is
+//! one gluetun: `Tracker` keeps the announce/feed address in step, exactly as
+//! before, and `Client` does the same for the torrent client's own tunnel when
+//! it is a *separate* one — see `docker/deploy/dual-vpn/` and `docs/roadmap.md`'s
+//! "a peer with two addresses". Both share this module's client and error types;
+//! they differ only in which `GluetunConfig`, `AdvertisedEndpoint`,
+//! [`GluetunStatus`] and vault key they read and write, which
+//! [`GluetunTarget`]'s methods resolve.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -39,9 +50,98 @@ use std::time::Duration;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sharerr_client::error_chain;
+use sharerr_core::Config;
+use sharerr_core::config::{GluetunConfig, secret_keys};
+use sharerr_core::endpoint::now_epoch;
 use url::Url;
 
 use crate::state::ServeState;
+
+/// Which tunnel a gluetun poller is keeping in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GluetunTarget {
+    /// The tracker/feed address — friends reach this instance here. The
+    /// original, and still default, poller.
+    Tracker,
+    /// The torrent client's own address, when it sits behind a separate
+    /// tunnel from the tracker's. Disabled by default; see
+    /// `[gluetun_client]` in `sharerr.toml`.
+    Client,
+}
+
+impl GluetunTarget {
+    /// Parse the `?target=` query parameter `/gluetun/refresh` and
+    /// `/gluetun/down` accept. Anything unrecognised, including absent, is
+    /// `Tracker` — the endpoint's original and only meaning before a second
+    /// poller existed.
+    pub fn from_query(raw: Option<&str>) -> Self {
+        match raw {
+            Some("client") => Self::Client,
+            _ => Self::Tracker,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tracker => "tracker",
+            Self::Client => "client",
+        }
+    }
+
+    fn config(self, config: &Config) -> &GluetunConfig {
+        match self {
+            Self::Tracker => &config.gluetun,
+            Self::Client => &config.gluetun_client,
+        }
+    }
+
+    fn api_key_secret(self) -> &'static str {
+        match self {
+            Self::Tracker => secret_keys::GLUETUN_API_KEY,
+            Self::Client => secret_keys::GLUETUN_CLIENT_API_KEY,
+        }
+    }
+}
+
+/// What a gluetun poller last saw and last failed with — the "when did
+/// gluetun last actually tell sharerr something" the Diagnostics page
+/// answers, since before this only `tracing::warn!`/`tracing::info!` said so.
+#[derive(Debug, Default)]
+pub struct GluetunStatus {
+    last_poll_at: tokio::sync::RwLock<Option<i64>>,
+    last_success_at: tokio::sync::RwLock<Option<i64>>,
+    last_error: tokio::sync::RwLock<Option<String>>,
+}
+
+/// A read-only snapshot of a [`GluetunStatus`], for rendering.
+#[derive(Debug, Clone)]
+pub struct GluetunSnapshot {
+    pub last_poll_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+impl GluetunStatus {
+    async fn record_ok(&self) {
+        let now = now_epoch();
+        *self.last_poll_at.write().await = Some(now);
+        *self.last_success_at.write().await = Some(now);
+        *self.last_error.write().await = None;
+    }
+
+    async fn record_err(&self, message: String) {
+        *self.last_poll_at.write().await = Some(now_epoch());
+        *self.last_error.write().await = Some(message);
+    }
+
+    pub async fn snapshot(&self) -> GluetunSnapshot {
+        GluetunSnapshot {
+            last_poll_at: *self.last_poll_at.read().await,
+            last_success_at: *self.last_success_at.read().await,
+            last_error: self.last_error.read().await.clone(),
+        }
+    }
+}
 
 /// What can go wrong asking gluetun.
 #[derive(Debug, thiserror::Error)]
@@ -203,25 +303,36 @@ impl GluetunClient {
     }
 }
 
-/// Keep the advertised endpoint in step with gluetun. Never returns.
+/// Keep `target`'s advertised endpoint in step with gluetun. Never returns.
 ///
 /// Re-reads the configuration every iteration, so enabling gluetun (or changing
-/// its address) through the settings page takes effect without a restart. When a
-/// resolve *changes* the endpoint, the sync loop is woken — it refreshes every
-/// stored torrent's announce URLs as part of its pass — rather than waiting for
-/// the next scheduled run with every torrent announcing to a dead address.
-pub async fn poll_loop(state: Arc<ServeState>) {
+/// its address, or flipping `enabled`) through the settings page takes effect
+/// without a restart. For [`GluetunTarget::Tracker`], a resolve that *changes*
+/// the endpoint wakes the sync loop — it refreshes every stored torrent's
+/// announce URLs as part of its pass — rather than waiting for the next
+/// scheduled run with every torrent announcing to a dead address. A
+/// [`GluetunTarget::Client`] change wakes nothing: nothing here rewrites a
+/// torrent from it today, only gossip's self-record reads it, and that reads
+/// live.
+pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
     // Logged once per transition, not per poll: a provider that grants no port
     // is a steady state, and one warning per minute forever is how a log stops
     // being read.
     let mut last_error: Option<String> = None;
+    let status = state.gluetun_status(target);
+    let endpoint = state.endpoint_for(target);
 
     loop {
         let config = state.config().await;
-        let interval = Duration::from_secs(config.gluetun.effective_poll_secs());
+        let gluetun_cfg = target.config(&config);
+        let interval = Duration::from_secs(gluetun_cfg.effective_poll_secs());
 
-        if let Some(control) = &config.gluetun.control_url {
-            let api_key = gluetun_api_key(&state).await;
+        if !gluetun_cfg.enabled {
+            // Deliberately silent: a disabled poller is a choice, not a fault,
+            // and this loop still runs (to notice re-enabling) so it must not
+            // add a warning to the log every interval forever.
+        } else if let Some(control) = &gluetun_cfg.control_url {
+            let api_key = gluetun_api_key(&state, target).await;
 
             // gluetun's control server has required an API key by default since
             // v3.40; sending an unkeyed request just to learn that again, every
@@ -237,36 +348,42 @@ pub async fn poll_loop(state: Arc<ServeState>) {
                 // `/gluetun/down` forgetting the dynamic history (a
                 // known-dead port, not a flaky lookup) also clears this
                 // fallback.
-                let fallback_port = state.endpoint().current().and_then(|base| base.port());
+                let fallback_port = endpoint.current().and_then(|base| base.port());
 
                 match resolve_once(control, Some(api_key), fallback_port).await {
                     Ok(base) => {
+                        status.record_ok().await;
                         if last_error.take().is_some() {
-                            tracing::info!(%base, "gluetun endpoint resolution recovered");
+                            tracing::info!(target = target.label(), %base, "gluetun endpoint resolution recovered");
                         }
-                        if state.endpoint().observe(base.clone()) {
-                            tracing::info!(
-                                %base,
-                                "advertised endpoint changed — waking the sync loop to \
-                                 re-announce and rewrite torrents"
-                            );
-                            state.request_sync();
+                        if endpoint.observe(base.clone()) {
+                            tracing::info!(target = target.label(), %base, "advertised endpoint changed");
+                            if target == GluetunTarget::Tracker {
+                                tracing::info!(
+                                    "waking the sync loop to re-announce and rewrite torrents"
+                                );
+                                state.request_sync();
+                            }
                         }
                     }
                     Err(err) => {
                         let rendered = err.to_string();
+                        status.record_err(rendered.clone()).await;
                         if last_error.as_deref() != Some(&rendered) {
-                            tracing::warn!(error = %rendered, "could not resolve the endpoint from gluetun");
+                            tracing::warn!(target = target.label(), error = %rendered, "could not resolve the endpoint from gluetun");
                             last_error = Some(rendered);
                         }
                     }
                 }
             } else {
-                let rendered = "no gluetun.api_key configured — skipping the poll rather \
-                                 than sending a request that would only come back 401"
-                    .to_owned();
+                let rendered = format!(
+                    "no {} configured — skipping the poll rather than sending a \
+                     request that would only come back 401",
+                    target.api_key_secret()
+                );
+                status.record_err(rendered.clone()).await;
                 if last_error.as_deref() != Some(&rendered) {
-                    tracing::warn!("{rendered}");
+                    tracing::warn!(target = target.label(), "{rendered}");
                     last_error = Some(rendered);
                 }
             }
@@ -274,23 +391,20 @@ pub async fn poll_loop(state: Arc<ServeState>) {
 
         tokio::select! {
             () = tokio::time::sleep(interval) => {}
-            () = state.endpoint_refresh_requested() => {
-                tracing::debug!("endpoint refresh requested — polling gluetun now");
+            () = state.endpoint_refresh_requested(target) => {
+                tracing::debug!(target = target.label(), "endpoint refresh requested — polling gluetun now");
             }
         }
     }
 }
 
-/// The control server's API key, if one is stored. A vault that will not open
-/// (no master key, none of the settings ever saved one) means an unkeyed
+/// `target`'s control server API key, if one is stored. A vault that will not
+/// open (no master key, none of the settings ever saved one) means an unkeyed
 /// request, same as before this key existed — the resulting `401` is what
 /// [`GluetunError::Unauthorized`] exists to explain.
-async fn gluetun_api_key(state: &ServeState) -> Option<SecretString> {
+async fn gluetun_api_key(state: &ServeState, target: GluetunTarget) -> Option<SecretString> {
     let vault = state.open_vault().await.ok()?;
-    vault
-        .get(sharerr_core::config::secret_keys::GLUETUN_API_KEY)
-        .ok()
-        .flatten()
+    vault.get(target.api_key_secret()).ok().flatten()
 }
 
 async fn resolve_once(
