@@ -44,7 +44,9 @@ async fn main() -> Result<()> {
     tracing::debug!(config = ?config, "configuration loaded");
 
     match args.command {
-        Command::Doctor(args) => commands::doctor::run(&config, config_error.as_deref(), &args).await,
+        Command::Doctor(args) => {
+            commands::doctor::run(&config, config_error.as_deref(), &args).await
+        }
         Command::Sync(args) => commands::sync::run(&config, args.dry_run).await,
         // The config *path* travels with the config, not just its contents: the web
         // UI writes settings back to this same file, and it is the CLI flag or

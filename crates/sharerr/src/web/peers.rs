@@ -22,6 +22,7 @@ use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::now_epoch;
 use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
@@ -337,10 +338,7 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
 /// usually does not have configured. `pub(crate)` because the status page's
 /// one-glance line answers the same "recently?" question.
 pub(crate) fn ago(epoch_secs: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    let seconds = now.saturating_sub(epoch_secs);
+    let seconds = now_epoch().saturating_sub(epoch_secs);
 
     match seconds {
         // Includes negative values, which mean a clock that moved backwards.
@@ -359,10 +357,7 @@ mod tests {
 
     #[test]
     fn relative_times_read_the_way_a_person_would_say_them() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = now_epoch();
 
         assert_eq!(ago(now), "just now");
         assert_eq!(ago(now - 120), "2 minute(s) ago");
@@ -374,10 +369,7 @@ mod tests {
     /// future as an enormous negative age.
     #[test]
     fn a_timestamp_in_the_future_is_not_rendered_as_nonsense() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = now_epoch();
 
         assert_eq!(ago(now + 10_000), "just now");
     }

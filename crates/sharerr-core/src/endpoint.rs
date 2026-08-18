@@ -161,11 +161,6 @@ impl AdvertisedEndpoint {
         }
     }
 
-    /// Build from configuration, with no dynamic observations yet.
-    pub fn from_tracker(tracker: &TrackerConfig, server_port: u16) -> Result<Self, EndpointError> {
-        Ok(Self::new(advertised_base(tracker, server_port)?))
-    }
-
     /// Adopt a rewritten configuration without losing the dynamic history.
     ///
     /// The settings page can change `advertised_host` while the poller has a

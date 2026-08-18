@@ -88,18 +88,6 @@ impl MediaSource {
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|s| s.as_str() == value)
     }
-
-    /// The name as a heading or label writes it — `as_str` capitalised.
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Sonarr => "Sonarr",
-            Self::Radarr => "Radarr",
-            Self::Lidarr => "Lidarr",
-            Self::Readarr => "Readarr",
-            Self::Whisparr => "Whisparr",
-            Self::Directory => "Directory",
-        }
-    }
 }
 
 impl fmt::Display for MediaSource {
@@ -176,6 +164,30 @@ pub enum MediaSpec {
 }
 
 impl MediaSpec {
+    /// Every value the `kind` tag can take, in variant order.
+    ///
+    /// Exists so [`Self::kind_tag`] can be round-tripped against serde in a test:
+    /// these strings are compared against `json_extract(spec_json, '$.kind')` in
+    /// the store, so a rename that separated the two would silently narrow what a
+    /// scoped peer can see rather than fail to compile.
+    pub const KIND_TAGS: [&'static str; 4] = ["episode", "movie", "track", "book"];
+
+    /// The `kind` discriminant serde writes into `spec_json`.
+    ///
+    /// The store filters directory-sourced items by comparing this against the
+    /// stored JSON, so it must stay in step with the `#[serde(tag = "kind",
+    /// rename_all = "lowercase")]` attribute above. Deriving it here — next to the
+    /// attribute, with a test that checks it against real serialization — is what
+    /// keeps the two from drifting apart.
+    pub fn kind_tag(&self) -> &'static str {
+        match self {
+            Self::Episode { .. } => "episode",
+            Self::Movie { .. } => "movie",
+            Self::Track { .. } => "track",
+            Self::Book { .. } => "book",
+        }
+    }
+
     /// The title a searcher would look for: the series, film, album, or book.
     ///
     /// For music this is the *album*, not the artist — that is what a friend's
@@ -364,6 +376,8 @@ impl Discovered {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     #[test]
@@ -390,5 +404,45 @@ mod tests {
             assert_eq!(ShareState::parse(state.as_str()), Some(*state));
         }
         assert_eq!(ShareState::parse("paused"), None);
+    }
+
+    /// `kind_tag` must agree with what serde actually writes, because the store
+    /// filters a scoped peer's feed by comparing the two. Asserting against real
+    /// serialization is the point: a `#[serde(rename)]` on any variant breaks this
+    /// test rather than silently emptying a friend's feed.
+    #[test]
+    fn kind_tags_match_what_serde_serializes() {
+        let specs = [
+            MediaSpec::Episode {
+                series_title: "Lanternwick Hollow".to_owned(),
+                season: 1,
+                episode: 2,
+            },
+            MediaSpec::Movie {
+                title: "Copper Vale".to_owned(),
+                year: Some(1999),
+            },
+            MediaSpec::Track {
+                artist: "*".to_owned(),
+                album: "*".to_owned(),
+                track: None,
+            },
+            MediaSpec::Book {
+                author: "*".to_owned(),
+                title: "*".to_owned(),
+            },
+        ];
+
+        for spec in &specs {
+            let json: serde_json::Value = serde_json::to_value(spec).expect("a spec serializes");
+            let serialized = json
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .expect("serde writes a kind tag");
+            assert_eq!(serialized, spec.kind_tag());
+        }
+
+        let tags: Vec<&str> = specs.iter().map(MediaSpec::kind_tag).collect();
+        assert_eq!(tags, MediaSpec::KIND_TAGS, "KIND_TAGS lists every variant");
     }
 }

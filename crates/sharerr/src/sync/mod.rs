@@ -24,7 +24,7 @@ use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
-use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
+use sharerr_store::{RunSummary, Store, Vault};
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
@@ -255,17 +255,9 @@ impl Syncer {
     /// rotated forwarded port reaches the next announce URL without rebuilding
     /// the syncer. One-shot commands build a static one from configuration.
     pub async fn build(config: &Config, endpoint: Arc<AdvertisedEndpoint>) -> Result<Self> {
-        let master = master_key_from_env()?;
-
-        // Off the runtime: opening the vault derives its key with Argon2, ~16ms of
-        // solid CPU on x86 and considerably more on the ARM boxes this ships to.
-        // `serve` calls this on a timer *while already serving HTTP*, and a
-        // container pinned to one CPU has exactly one worker thread — so run inline
-        // it would stall /health on every retry.
-        let vault_path = config.vault_path();
-        let vault = tokio::task::spawn_blocking(move || Vault::open(&vault_path, &master))
-            .await?
-            .with_context(|| format!("opening vault at {}", config.vault_path().display()))?;
+        // Off the runtime — `serve` calls this on a timer *while already serving
+        // HTTP*. See `secrets::open_vault_async`.
+        let vault = crate::secrets::open_vault_async(config).await?;
 
         // Every credential is read before anything is *opened*. `serve` retries this
         // whole function on a timer while the vault is incomplete, and opening the
@@ -400,7 +392,8 @@ impl Syncer {
             bail!("no library source could be scanned — nothing was changed");
         }
 
-        let torrents = torrents.context("listing torrents in qBittorrent")?;
+        let torrents =
+            torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
         let live: HashSet<String> = torrents
             .iter()
             .map(|t| t.hash.to_ascii_lowercase())
@@ -557,16 +550,10 @@ impl Syncer {
             return Ok(Step::Unchanged);
         }
 
-        // A directory item's path is already sharerr's own view — running it
-        // through the arr-side rules would let a [[path_map]] meant for Sonarr
-        // rewrite it into a path that exists nowhere. Only the sharerr→qbit
-        // half of a mapping can apply to it.
-        let paths = if item.source == MediaSource::Directory {
-            self.resolver.resolve_sharerr(&item.arr_path)
-        } else {
-            self.resolver.resolve(&item.arr_path)
-        }
-        .with_context(|| format!("resolving {}", item.arr_path.display()))?;
+        let paths = self
+            .resolver
+            .resolve_for(item.source, &item.arr_path)
+            .with_context(|| format!("resolving {}", item.arr_path.display()))?;
 
         // Checked before hashing: discovering a missing file only after SHA-1ing
         // gigabytes would be a needlessly expensive way to find out.
@@ -673,7 +660,10 @@ impl Syncer {
             {
                 // Worth continuing: marking the row Unshared is still correct, and
                 // the torrent can be cleaned up by hand.
-                tracing::warn!(%hash, %err, "could not remove torrent from qBittorrent");
+                // The client's own name, not a hardcoded one: this field is a
+                // `dyn TorrentClient` and may well be Transmission.
+                let client = self.seeder.qbit.kind();
+                tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
             }
 
             match self

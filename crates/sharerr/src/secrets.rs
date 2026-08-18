@@ -6,6 +6,10 @@
 //! They live here so the *properties* — a single entropy source, and a comparison
 //! that does not short-circuit — hold everywhere rather than per call site.
 
+use anyhow::Context;
+use sharerr_core::Config;
+use sharerr_store::{Vault, master_key_from_env};
+
 /// The entropy of every secret sharerr mints: 160 bits, hex encoded. Long
 /// enough that guessing is not a strategy, short enough to paste into another
 /// application's settings box. One constant, so peer keys and the Torznab and
@@ -46,6 +50,41 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
             .zip(b.bytes())
             .fold(0u8, |differences, (x, y)| differences | (x ^ y))
             == 0
+}
+
+/// Open the credential vault `config` names.
+///
+/// The one place the master key is read and the vault path is resolved. Five
+/// call sites used to spell this out themselves — the CLI's `vault` verb,
+/// `doctor`, the one-shot `sync`, the syncer, and `ServeState` — each mapping the
+/// error its own way, so changing how the vault is opened meant five edits.
+pub fn open_vault(config: &Config) -> anyhow::Result<Vault> {
+    let master = master_key_from_env()?;
+    Vault::open(config.vault_path(), &master)
+        .with_context(|| format!("opening vault at {}", config.vault_path().display()))
+}
+
+/// [`open_vault`], off the async runtime.
+///
+/// Opening the vault derives its key with Argon2 — tens of milliseconds of solid
+/// CPU and ~19 MiB, considerably more on the ARM boxes this ships to. A container
+/// pinned to one CPU has exactly one runtime worker, so doing this inline stalls
+/// every other request, `/health` included, for the duration. Every async caller
+/// goes through here rather than repeating the `spawn_blocking` and the reason
+/// for it.
+pub async fn open_vault_async(config: &Config) -> anyhow::Result<Vault> {
+    open_vault_at(config.vault_path()).await
+}
+
+/// [`open_vault_async`] for a caller that already has the path and would
+/// otherwise clone a whole [`Config`] to hand it over.
+pub async fn open_vault_at(path: std::path::PathBuf) -> anyhow::Result<Vault> {
+    let master = master_key_from_env()?;
+
+    tokio::task::spawn_blocking(move || {
+        Vault::open(&path, &master).with_context(|| format!("opening vault at {}", path.display()))
+    })
+    .await?
 }
 
 #[cfg(test)]

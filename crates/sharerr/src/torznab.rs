@@ -20,6 +20,7 @@
 //! to read literally — provided escaping is taken seriously, which is why every
 //! interpolation goes through [`escape`] and the tests attack it directly.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use sharerr_core::endpoint::now_epoch;
 use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
 
 use secrecy::SecretString;
@@ -146,7 +148,22 @@ fn error_xml(code: u32, description: &str) -> String {
 /// All five predefined entities, not the usual three. Release titles routinely
 /// contain `&` and `'`, and attribute values here are always double-quoted — but
 /// escaping `'` as well costs nothing and removes a footgun if one ever moves.
-fn escape(raw: &str) -> String {
+///
+/// Borrows when nothing needs escaping, which is the overwhelmingly common case:
+/// info hashes are hex, and most download URLs and titles contain none of the
+/// five. A feed is ten-odd escaped fields per item and can run to thousands of
+/// items per request, so always allocating meant tens of thousands of throwaway
+/// `String`s on every Prowlarr sync from every friend.
+fn escape(raw: &str) -> Cow<'_, str> {
+    fn needs_escaping(ch: char) -> bool {
+        matches!(ch, '&' | '<' | '>' | '"' | '\'')
+            || ((ch as u32) < 0x20 && ch != '\t' && ch != '\n' && ch != '\r')
+    }
+
+    if !raw.contains(needs_escaping) {
+        return Cow::Borrowed(raw);
+    }
+
     let mut out = String::with_capacity(raw.len() + 16);
     for ch in raw.chars() {
         match ch {
@@ -162,7 +179,7 @@ fn escape(raw: &str) -> String {
             c => out.push(c),
         }
     }
-    out
+    Cow::Owned(out)
 }
 
 /// What the indexer says it can do.
@@ -227,6 +244,12 @@ pub struct FeedItem<'a> {
     pub magnet_url: String,
 }
 
+/// Query-string escaping via form_urlencoded: magnet consumers parse the tail as
+/// a query string, and `+` for space is the convention there.
+fn encode_component(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
 /// Render a magnet URI for one release.
 ///
 /// `xt` is the identity, `dn` the display name, `xl` the exact length, and one
@@ -235,18 +258,27 @@ pub struct FeedItem<'a> {
 /// honestly: sharerr's torrents are private, and some clients refuse metadata
 /// exchange on private torrents, so the `.torrent` enclosure stays the primary
 /// path and the magnet is the convenience.
-pub(crate) fn magnet_uri(info_hash: &str, title: &str, size: u64, announces: &[String]) -> String {
-    // Query-string escaping via form_urlencoded: magnet consumers parse the
-    // tail as a query string, and `+` for space is the convention there.
-    let encode =
-        |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
-
-    let mut out = format!("magnet:?xt=urn:btih:{info_hash}&dn={}", encode(title));
+///
+/// The announce tiers arrive already percent-encoded, via [`encode_component`].
+/// They are the same handful of strings for every item in a response, so taking
+/// them raw meant a feed of a few thousand releases re-encoded them a few
+/// thousand times to produce identical output. The display name genuinely varies
+/// per item and is still encoded here.
+pub(crate) fn magnet_uri(
+    info_hash: &str,
+    title: &str,
+    size: u64,
+    encoded_announces: &[String],
+) -> String {
+    let mut out = format!(
+        "magnet:?xt=urn:btih:{info_hash}&dn={}",
+        encode_component(title)
+    );
     if size > 0 {
         let _ = write!(out, "&xl={size}");
     }
-    for announce in announces {
-        let _ = write!(out, "&tr={}", encode(announce));
+    for announce in encoded_announces {
+        let _ = write!(out, "&tr={announce}");
     }
     out
 }
@@ -496,8 +528,10 @@ pub(crate) struct Matched {
     /// Absolute base URL a client fetches `.torrent` files from.
     pub base: String,
     /// The announce URLs a magnet carries, current endpoint first — the same
-    /// tiers freshly built torrents get.
-    pub announces: Vec<String>,
+    /// tiers freshly built torrents get, percent-encoded once per response
+    /// rather than once per item, since they are identical for every release in
+    /// it.
+    announces_encoded: Vec<String>,
     /// How many items were considered, before filtering.
     pub total: usize,
 }
@@ -515,7 +549,12 @@ impl Matched {
     /// The same release as a magnet URI, or empty when there is no info hash.
     pub fn magnet_url(&self, item: &SharedItem) -> String {
         match item.info_hash.as_deref() {
-            Some(hash) => magnet_uri(hash, &item.release_title, item.size, &self.announces),
+            Some(hash) => magnet_uri(
+                hash,
+                &item.release_title,
+                item.size,
+                &self.announces_encoded,
+            ),
             None => String::new(),
         }
     }
@@ -564,7 +603,7 @@ pub(crate) async fn collect(
     // the magnet is an alternative to the `.torrent`, so it must grant the same
     // right to announce.
     let token = state.tracker_token().await;
-    let announces = state
+    let announces: Vec<String> = state
         .endpoint()
         .recent()
         .iter()
@@ -575,7 +614,7 @@ pub(crate) async fn collect(
     Ok(Matched {
         items: matched,
         base: config.public_base_url(),
-        announces,
+        announces_encoded: announces.iter().map(|a| encode_component(a)).collect(),
         total,
     })
 }
@@ -711,10 +750,7 @@ async fn check_api_key(
                     // sighting, not one per request.
                     Ok(true) => {
                         if let Some(remote) = remote {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs() as i64)
-                                .unwrap_or(0);
+                            let now = now_epoch();
                             if let Err(err) = store
                                 .record_peer_endpoint(
                                     peer.id,
@@ -980,7 +1016,8 @@ mod tests {
             item.info_hash.as_deref().unwrap(),
             &item.release_title,
             item.size,
-            &["http://seed.example:8477/announce".to_owned()],
+            // Encoded the way `collect` encodes them, once per response.
+            &[encode_component("http://seed.example:8477/announce")],
         );
 
         assert!(
@@ -1019,8 +1056,8 @@ mod tests {
             "X",
             0,
             &[
-                "http://203.0.113.9:41234/announce".to_owned(),
-                "http://static.example:8477/announce".to_owned(),
+                encode_component("http://203.0.113.9:41234/announce"),
+                encode_component("http://static.example:8477/announce"),
             ],
         );
         assert_eq!(magnet.matches("&tr=").count(), 2, "{magnet}");

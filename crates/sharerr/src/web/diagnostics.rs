@@ -194,22 +194,7 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
                     failed: false,
                 };
             };
-            let (summary, failed) = match &run.summary.error {
-                Some(error) => (error.clone(), true),
-                None => {
-                    let mut parts = vec![format!("{} discovered", run.summary.discovered)];
-                    if run.summary.added > 0 {
-                        parts.push(format!("{} added", run.summary.added));
-                    }
-                    if run.summary.unshared > 0 {
-                        parts.push(format!("{} unshared", run.summary.unshared));
-                    }
-                    if run.summary.failed > 0 {
-                        parts.push(format!("{} failed", run.summary.failed));
-                    }
-                    (parts.join(", "), run.summary.failed > 0)
-                }
-            };
+            let (summary, failed) = run.summary.describe(true);
             RunRow {
                 when: ago(finished_at),
                 summary,

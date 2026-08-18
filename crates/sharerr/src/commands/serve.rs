@@ -231,7 +231,7 @@ async fn background(state: Arc<ServeState>) {
         // Sleeping after the pass rather than on a fixed schedule, so a slow sync is
         // never followed by a burst of catch-up runs.
         state
-            .sleep_or_wake(Duration::from_secs(sync.interval_secs.max(60)))
+            .sleep_or_wake(Duration::from_secs(sync.effective_interval_secs()))
             .await;
     }
 }

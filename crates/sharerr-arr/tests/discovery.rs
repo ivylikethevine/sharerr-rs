@@ -340,6 +340,79 @@ async fn sonarr_discovers_only_tagged_series() {
     );
 }
 
+/// Discovery fetches tagged series concurrently and zips the responses back onto
+/// the series list, so a response arriving out of order must not attach one
+/// series' files to another's metadata. The first series' lookups are delayed
+/// past the second's to force exactly that interleaving.
+#[tokio::test]
+async fn sonarr_pairs_each_series_with_its_own_files_when_responses_race() {
+    let server = MockServer::start().await;
+    mount_tags(&server).await;
+    mount_json(
+        &server,
+        "/api/v3/series",
+        json!([
+            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918273, "tags": [TAG_ID] },
+            { "id": 21, "title": "Harrowmere", "tvdbId": 445566, "tags": [TAG_ID] },
+        ]),
+    )
+    .await;
+
+    // Series 11 answers slowly, so series 21's response lands first.
+    let slow = std::time::Duration::from_millis(150);
+    for (series_id, file_id, delay) in [(11, 501, slow), (21, 601, std::time::Duration::ZERO)] {
+        Mock::given(method("GET"))
+            .and(path("/api/v3/episodefile"))
+            .and(query_param("seriesId", series_id.to_string()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(delay)
+                    .set_body_json(json!([{
+                        "id": file_id,
+                        "path": format!("/tv/{series_id}/ep.mkv"),
+                        "size": 1024,
+                    }])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v3/episode"))
+            .and(query_param("seriesId", series_id.to_string()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(delay)
+                    .set_body_json(json!([
+                        { "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": file_id },
+                    ])),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let found = client(MediaSource::Sonarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 2);
+    for (file_id, source_id, title) in [(501, 11, "Lanternwick Hollow"), (601, 21, "Harrowmere")] {
+        let item = found
+            .iter()
+            .find(|d| d.file_id == file_id)
+            .unwrap_or_else(|| panic!("file {file_id} discovered"));
+        assert_eq!(
+            item.source_id, source_id,
+            "file {file_id} got the wrong series"
+        );
+        assert_eq!(
+            item.spec.title(),
+            title,
+            "file {file_id} got the wrong title"
+        );
+    }
+}
+
 #[tokio::test]
 async fn sonarr_carries_metadata_ids_and_the_unmapped_path() {
     let server = MockServer::start().await;

@@ -2573,6 +2573,7 @@ dependencies = [
 name = "sharerr-arr"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "reqwest",
  "secrecy",
  "serde",

@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::PathMapping;
+use crate::model::MediaSource;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PathError {
@@ -48,6 +49,26 @@ impl PathResolver {
     pub fn new(mut maps: Vec<PathMapping>) -> Self {
         maps.sort_by_key(|m| std::cmp::Reverse(m.arr.components().count()));
         Self { maps }
+    }
+
+    /// Resolve a path according to where it came from.
+    ///
+    /// The rule this encodes — a [`MediaSource::Directory`] item was scanned from
+    /// sharerr's own view, so only the sharerr→qbit half of a mapping may apply
+    /// to it — decides which file qBittorrent is pointed at. It lives here,
+    /// beside the two resolvers it chooses between, rather than at the call
+    /// sites: the reconciliation loop and the preflight checks both need it, and
+    /// when each carried its own copy the invariant was one edit away from
+    /// disagreeing with itself.
+    pub fn resolve_for(
+        &self,
+        source: MediaSource,
+        path: &Path,
+    ) -> Result<ResolvedPaths, PathError> {
+        match source {
+            MediaSource::Directory => self.resolve_sharerr(path),
+            _ => self.resolve(path),
+        }
     }
 
     /// Resolve an *arr-reported path into all three views.

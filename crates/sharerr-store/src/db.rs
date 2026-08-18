@@ -440,6 +440,41 @@ pub struct RunSummary {
     pub error: Option<String>,
 }
 
+impl RunSummary {
+    /// How this pass reads to an operator, and whether it should be marked as a
+    /// failure.
+    ///
+    /// An outright error replaces the counts — there is nothing useful to say
+    /// about a pass that did not finish. Otherwise only the counts worth acting
+    /// on appear, so a quiet pass renders as an empty string rather than three
+    /// zeroes.
+    ///
+    /// Lives beside the data because two pages render it: the status page's
+    /// one-glance line and the run history on Diagnostics. They differ only in
+    /// whether the discovered count leads, which is what `with_discovered` picks
+    /// — when they were two copies they could disagree about the same run.
+    pub fn describe(&self, with_discovered: bool) -> (String, bool) {
+        if let Some(error) = &self.error {
+            return (error.clone(), true);
+        }
+
+        let mut parts = Vec::new();
+        if with_discovered {
+            parts.push(format!("{} discovered", self.discovered));
+        }
+        if self.added > 0 {
+            parts.push(format!("{} added", self.added));
+        }
+        if self.unshared > 0 {
+            parts.push(format!("{} unshared", self.unshared));
+        }
+        if self.failed > 0 {
+            parts.push(format!("{} failed", self.failed));
+        }
+        (parts.join(", "), self.failed > 0)
+    }
+}
+
 #[derive(Debug, Clone)]
 /// A completed run as stored, with its timing.
 pub struct RunRecord {
@@ -457,17 +492,21 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     let id: i64 = row.try_get("id")?;
     let malformed = |detail: String| StoreError::Malformed { id, detail };
 
-    let raw_source = row.try_get::<String, _>("source")?;
-    let source = MediaSource::parse(&raw_source)
+    // Decoded as `&str`, which borrows the row's own buffer rather than
+    // allocating: all four of these are either parsed into an enum or handed
+    // straight to serde, so the `String` each used to build was constructed only
+    // to be dropped. This runs per row of every feed request and every sync pass.
+    let raw_source = row.try_get::<&str, _>("source")?;
+    let source = MediaSource::parse(raw_source)
         .ok_or_else(|| malformed(format!("unknown source {raw_source:?}")))?;
 
-    let raw_state = row.try_get::<String, _>("state")?;
-    let state = ShareState::parse(&raw_state)
+    let raw_state = row.try_get::<&str, _>("state")?;
+    let state = ShareState::parse(raw_state)
         .ok_or_else(|| malformed(format!("unknown state {raw_state:?}")))?;
 
-    let spec: MediaSpec = serde_json::from_str(&row.try_get::<String, _>("spec_json")?)
+    let spec: MediaSpec = serde_json::from_str(row.try_get::<&str, _>("spec_json")?)
         .map_err(|e| malformed(format!("spec_json: {e}")))?;
-    let ids: ExternalIds = serde_json::from_str(&row.try_get::<String, _>("ids_json")?)
+    let ids: ExternalIds = serde_json::from_str(row.try_get::<&str, _>("ids_json")?)
         .map_err(|e| malformed(format!("ids_json: {e}")))?;
 
     let size: i64 = row.try_get("size")?;

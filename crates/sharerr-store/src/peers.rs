@@ -102,10 +102,18 @@ impl PeerScope {
     /// [`Self::allows`] keys on where an item *came from*, which for a
     /// `[[library]]` directory says nothing about what it *is* — the declared
     /// kind of the item, not the source, is what says whether its files are
-    /// television or music. The values are
-    /// `MediaSpec`'s serde tags, compared against
-    /// `json_extract(spec_json, '$.kind')` in `Store::seeding_items` for every
-    /// source in [`MediaSource::KIND_SCOPED`].
+    /// television or music. The values are [`MediaSpec`](sharerr_core::MediaSpec)'s
+    /// serde tags, compared
+    /// against `json_extract(spec_json, '$.kind')` in `Store::seeding_items` for
+    /// every source in [`MediaSource::KIND_SCOPED`].
+    ///
+    /// They are serde's strings, owned by another crate, so
+    /// `every_scope_names_a_real_media_kind` below checks each one against
+    /// [`MediaSpec::KIND_TAGS`](sharerr_core::MediaSpec::KIND_TAGS). Without that a
+    /// `#[serde(rename)]` in
+    /// `sharerr-core` would leave these literals compiling fine while every
+    /// narrowly scoped peer quietly stopped seeing directory items — an
+    /// access-control filter failing silently.
     pub fn directory_kind(self) -> Option<&'static str> {
         match self {
             Self::All => None,
@@ -177,6 +185,15 @@ fn validate_label(label: &str) -> Result<String> {
     )
 }
 
+/// Every column [`row_to_peer`] decodes, in one place.
+///
+/// Written out three times before — twice in a `SELECT` and once in a
+/// `RETURNING` — where adding a column meant three edits and missing one was a
+/// runtime `try_get` failure rather than a compile error. `db.rs` solves the
+/// same problem for `shared_items` with `SELECT_COLUMNS`.
+const PEER_COLUMNS: &str = "id, label, created_at, last_seen_at, revoked_at, scope, pubkey, \
+     gossip_url";
+
 fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
     Ok(Peer {
         id: row.try_get("id")?,
@@ -207,10 +224,10 @@ impl Store {
 
         // The UNIQUE constraint decides this, not a prior SELECT — two submissions
         // racing would both pass a check-then-insert.
-        let row = sqlx::query(
+        let row = sqlx::query(&format!(
             "INSERT INTO peers (label, key_hash, created_at, scope) VALUES (?1, ?2, ?3, ?4) \
-             RETURNING id, label, created_at, last_seen_at, revoked_at, scope, pubkey, gossip_url",
-        )
+             RETURNING {PEER_COLUMNS}"
+        ))
         .bind(&label)
         .bind(hash_key(key))
         .bind(now)
@@ -233,10 +250,9 @@ impl Store {
     /// something an operator needs to be able to see, and a row that vanishes looks
     /// like a bug.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
-        let rows = sqlx::query(
-            "SELECT id, label, created_at, last_seen_at, revoked_at, scope, pubkey, gossip_url FROM peers \
-             ORDER BY created_at DESC, id DESC",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {PEER_COLUMNS} FROM peers ORDER BY created_at DESC, id DESC"
+        ))
         .fetch_all(self.pool())
         .await?;
 
@@ -249,10 +265,9 @@ impl Store {
     /// the stored hash is a fast one. A revoked peer is `None`: the row is kept for
     /// the operator's benefit, not to keep letting its key in.
     pub async fn peer_by_key(&self, key: &SecretString) -> Result<Option<Peer>> {
-        let row = sqlx::query(
-            "SELECT id, label, created_at, last_seen_at, revoked_at, scope, pubkey, gossip_url FROM peers \
-             WHERE key_hash = ?1 AND revoked_at IS NULL",
-        )
+        let row = sqlx::query(&format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE key_hash = ?1 AND revoked_at IS NULL"
+        ))
         .bind(hash_key(key))
         .fetch_optional(self.pool())
         .await?;
@@ -328,12 +343,29 @@ impl Store {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use sharerr_core::MediaSpec;
+
     use super::*;
 
     async fn store() -> Store {
         Store::open_in_memory()
             .await
             .expect("in-memory store opens")
+    }
+
+    /// `directory_kind` hands raw strings to `json_extract(spec_json, '$.kind')`,
+    /// so each must be a tag `MediaSpec` actually serializes. A rename in
+    /// `sharerr-core` fails here instead of silently emptying a scoped peer's feed.
+    #[test]
+    fn every_scope_names_a_real_media_kind() {
+        for scope in PeerScope::ALL {
+            if let Some(kind) = scope.directory_kind() {
+                assert!(
+                    MediaSpec::KIND_TAGS.contains(&kind),
+                    "scope {scope:?} maps to {kind:?}, which is not a MediaSpec kind tag"
+                );
+            }
+        }
     }
 
     fn key(value: &str) -> SecretString {

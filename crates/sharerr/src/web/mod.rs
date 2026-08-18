@@ -30,6 +30,7 @@ use axum::http::{StatusCode, header};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use sharerr_core::endpoint::now_epoch;
 use sharerr_store::master_key_from_env;
 
 use crate::state::{RECOVERY_INTERVAL, ServeState};
@@ -153,11 +154,15 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
 /// person chasing a problem had to know a second page existed at all.
 async fn status_page(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
-    let diag = diagnostics::gather(&state).await;
+    // Concurrently, because they share no data and `gather` is the expensive
+    // half — it probes every *arr over HTTP and stats every discovered file,
+    // while `glance` is two store queries. Run in series the cheap one sat
+    // behind the slow one on the page an operator lands on.
+    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state));
 
     render(&StatusPage {
         signed_in: true,
-        glance: glance(&state).await,
+        glance,
         blocked: state.serve.blocked_reason().await,
         config_error: state.serve.config_error().await,
         recovery_secs: RECOVERY_INTERVAL.as_secs(),
@@ -211,31 +216,15 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
     let (last_sync, last_sync_note, last_sync_failed) = match &last_run {
         Some(run) => {
             let when = run.finished_at.map(peers::ago);
-            match &run.summary.error {
-                Some(error) => (when, error.clone(), true),
-                None => {
-                    // Only the counts worth acting on; a quiet pass reads as
-                    // just the timestamp.
-                    let mut parts = Vec::new();
-                    if run.summary.added > 0 {
-                        parts.push(format!("{} added", run.summary.added));
-                    }
-                    if run.summary.unshared > 0 {
-                        parts.push(format!("{} unshared", run.summary.unshared));
-                    }
-                    if run.summary.failed > 0 {
-                        parts.push(format!("{} failed", run.summary.failed));
-                    }
-                    (when, parts.join(", "), run.summary.failed > 0)
-                }
-            }
+            // The glance leads with the timestamp, so the discovered count is
+            // left off here; Diagnostics keeps it.
+            let (note, failed) = run.summary.describe(false);
+            (when, note, failed)
         }
         None => (None, String::new(), false),
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
+    let now = now_epoch();
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
     let friends_recent = active

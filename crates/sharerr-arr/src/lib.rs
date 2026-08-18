@@ -26,6 +26,16 @@ mod radarr;
 mod readarr;
 mod sonarr;
 
+/// How many tagged entities a discovery walk has in flight at once.
+///
+/// Sonarr, Lidarr and Readarr each need one or two extra round trips per tagged
+/// entity, and awaiting them one entity at a time made a large library pay that
+/// latency serially — a 200-series Sonarr is 200 sequential round trips, and
+/// discovery is the long pole of a sync pass. Bounded rather than unbounded so a
+/// big library does not open hundreds of sockets against an *arr that is very
+/// possibly running on the same small box.
+pub(crate) const DISCOVERY_CONCURRENCY: usize = 8;
+
 pub use client::ArrClient;
 pub use error::{ArrError, Result};
 pub use models::SystemStatus;

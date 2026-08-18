@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
-use sharerr_core::config::{config_paths, secret_keys};
+use sharerr_core::config::{SyncConfig, config_paths, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
@@ -406,10 +406,7 @@ async fn save_gluetun_section(
                     sharerr_core::config::GluetunConfig::MIN_POLL_SECS
                 );
             }
-            file.apply([Edit::int(
-                poll_secs_path,
-                i64::try_from(secs).unwrap_or(60),
-            )]);
+            file.apply([Edit::int(poll_secs_path, i64::try_from(secs).unwrap_or(60))]);
         }
         Ok(())
     })
@@ -423,10 +420,14 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
                 anyhow::anyhow!("the sync interval must be a whole number of seconds")
             })?;
 
-        // Mirrors the `.max(60)` the background loop already applies. Saying so
-        // here beats silently storing 5 and running at 60.
-        if interval < 60 {
-            anyhow::bail!("the sync interval must be at least 60 seconds");
+        // The same floor the background loop clamps to, read from the one
+        // constant rather than retyped. Saying so here beats silently storing 5
+        // and running at 60.
+        if interval < SyncConfig::MIN_INTERVAL_SECS {
+            anyhow::bail!(
+                "the sync interval must be at least {} seconds",
+                SyncConfig::MIN_INTERVAL_SECS
+            );
         }
 
         file.apply([
@@ -697,7 +698,10 @@ fn gluetun_last_observed(endpoint: &sharerr_core::endpoint::AdvertisedEndpoint) 
 /// The most recent failure `target`'s poller hit, if it has one right now —
 /// cleared the moment a poll succeeds, so this never shows a stale error next
 /// to a working endpoint.
-async fn gluetun_last_error(state: &crate::state::ServeState, target: GluetunTarget) -> Option<String> {
+async fn gluetun_last_error(
+    state: &crate::state::ServeState,
+    target: GluetunTarget,
+) -> Option<String> {
     state.gluetun_status(target).snapshot().await.last_error
 }
 

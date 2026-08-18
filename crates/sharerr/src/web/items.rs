@@ -72,15 +72,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // Default view is newest first, matching the order the sync log reports
     // things in. An explicit sort overrides it; the header links below always
     // carry `dir` explicitly, so there is never an ambiguous third click.
-    let sort = if query.sort.is_empty() {
-        "since"
+    let (sort, desc) = if query.sort.is_empty() {
+        ("since", true)
     } else {
-        query.sort.as_str()
-    };
-    let desc = if query.sort.is_empty() {
-        true
-    } else {
-        query.dir == "desc"
+        (query.sort.as_str(), query.dir == "desc")
     };
     // `sort_by_cached_key` computes each item's key once, rather than
     // re-lowercasing the title on every comparison the sort makes.
@@ -153,7 +148,14 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         shown: items.len(),
         items: items
             .iter()
-            .map(|item| row(item, &active, announce_url.as_deref(), current_token_fp.as_deref()))
+            .map(|item| {
+                row(
+                    item,
+                    &active,
+                    announce_url.as_deref(),
+                    current_token_fp.as_deref(),
+                )
+            })
             .collect(),
         source_options: MediaSource::ALL
             .iter()
@@ -265,11 +267,7 @@ fn row(
         // A torrent with no info hash has not been built yet, so there is
         // nothing meaningful to announce either — `None` regardless of
         // whether the tracker itself is configured.
-        announce_url: item
-            .info_hash
-            .as_ref()
-            .and(announce_url)
-            .map(str::to_owned),
+        announce_url: item.info_hash.as_ref().and(announce_url).map(str::to_owned),
         token_fp: item.announce_token_fp.clone(),
         token_status: token_status(item, current_token_fp),
         last_error: item.last_error.clone(),

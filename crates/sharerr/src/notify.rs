@@ -58,37 +58,28 @@ impl QuietNotified {
     }
 }
 
-/// Send one notification, if a webhook is configured. Never fails outward: a
-/// misconfigured or unreachable webhook is logged and otherwise ignored, the
-/// same as any other best-effort side channel in this codebase.
-pub async fn send(state: &ServeState, event: &str, message: &str) {
-    let Ok(vault) = state.open_vault().await else {
-        return;
-    };
-    let Ok(Some(webhook)) = vault.get(secret_keys::NOTIFICATIONS_WEBHOOK_URL) else {
+/// Where notifications go, and in what shape — resolved once.
+///
+/// Reading the URL means opening the vault, an Argon2 derivation, so a caller
+/// with several notifications to send resolves this once and reuses it rather
+/// than paying that per message.
+struct Webhook {
+    url: url::Url,
+    kind: NotifyKind,
+    client: reqwest::Client,
+}
+
+/// The configured webhook, or `None` when there is none to send through.
+async fn webhook(state: &ServeState) -> Option<Webhook> {
+    let vault = state.open_vault().await.ok()?;
+    let Ok(Some(configured)) = vault.get(secret_keys::NOTIFICATIONS_WEBHOOK_URL) else {
         // Not configured — the ordinary state for most instances, so this is
         // silent rather than a warning on every sync.
-        return;
+        return None;
     };
-    let Ok(url) = url::Url::parse(webhook.expose_secret()) else {
+    let Ok(url) = url::Url::parse(configured.expose_secret()) else {
         tracing::warn!("notifications.webhook_url is not a valid URL — check Settings");
-        return;
-    };
-
-    let kind = state.config().await.notifications.kind;
-    let body = match kind {
-        NotifyKind::Generic => serde_json::json!({ "event": event, "message": message }),
-        // Discord's own webhook shape: a single "content" field, Markdown-ish.
-        NotifyKind::Discord => serde_json::json!({
-            "content": format!("**sharerr** — {event}\n{message}")
-        }),
-        // Apprise's API server shape: POST to its own /notify endpoint, which
-        // fans this one call out to whatever Apprise itself is configured to
-        // reach.
-        NotifyKind::Apprise => serde_json::json!({
-            "title": format!("sharerr — {event}"),
-            "body": message,
-        }),
+        return None;
     };
 
     let client = match reqwest::Client::builder()
@@ -98,20 +89,57 @@ pub async fn send(state: &ServeState, event: &str, message: &str) {
         Ok(client) => client,
         Err(err) => {
             tracing::warn!(error = %err, "could not build the notification client");
-            return;
+            return None;
         }
     };
 
-    match client.post(url).json(&body).send().await {
-        Ok(response) if response.status().is_success() => {
-            tracing::debug!(event, "sent a notification");
+    Some(Webhook {
+        url,
+        kind: state.config().await.notifications.kind,
+        client,
+    })
+}
+
+/// Send one notification, if a webhook is configured. Never fails outward: a
+/// misconfigured or unreachable webhook is logged and otherwise ignored, the
+/// same as any other best-effort side channel in this codebase.
+pub async fn send(state: &ServeState, event: &str, message: &str) {
+    let Some(webhook) = webhook(state).await else {
+        return;
+    };
+    webhook.post(event, message).await;
+}
+
+impl Webhook {
+    async fn post(&self, event: &str, message: &str) {
+        let body = match self.kind {
+            NotifyKind::Generic => serde_json::json!({ "event": event, "message": message }),
+            // Discord's own webhook shape: a single "content" field, Markdown-ish.
+            NotifyKind::Discord => serde_json::json!({
+                "content": format!("**sharerr** — {event}\n{message}")
+            }),
+            // Apprise's API server shape: POST to its own /notify endpoint, which
+            // fans this one call out to whatever Apprise itself is configured to
+            // reach.
+            NotifyKind::Apprise => serde_json::json!({
+                "title": format!("sharerr — {event}"),
+                "body": message,
+            }),
+        };
+
+        match self.client.post(self.url.clone()).json(&body).send().await {
+            Ok(response) if response.status().is_success() => {
+                tracing::debug!(event, "sent a notification");
+            }
+            Ok(response) => tracing::warn!(
+                status = %response.status(),
+                event,
+                "the notification webhook responded with an error"
+            ),
+            Err(err) => {
+                tracing::warn!(error = %err, event, "could not reach the notification webhook");
+            }
         }
-        Ok(response) => tracing::warn!(
-            status = %response.status(),
-            event,
-            "the notification webhook responded with an error"
-        ),
-        Err(err) => tracing::warn!(error = %err, event, "could not reach the notification webhook"),
     }
 }
 
@@ -132,17 +160,13 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
     }
     // A threshold configured but no webhook to report through is the same as
     // the check being off — cheaper to notice here than to run the query and
-    // discard every result inside `send`.
-    if state
-        .open_vault()
-        .await
-        .ok()
-        .and_then(|vault| vault.get(secret_keys::NOTIFICATIONS_WEBHOOK_URL).ok())
-        .flatten()
-        .is_none()
-    {
+    // discard every result. Resolved once and reused for every quiet peer
+    // found: this used to open the vault here and then again inside `send` per
+    // peer, so an hourly pass with N quiet friends paid 1+N Argon2 derivations
+    // for a value already in hand.
+    let Some(webhook) = webhook(state).await else {
         return Ok(());
-    }
+    };
 
     let store = state.store().await?;
     let peers = store.list_peers().await.map_err(|err| err.to_string())?;
@@ -158,20 +182,24 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
         if now - last_seen < threshold {
             continue;
         }
-        if !state.quiet_notified().should_notify(peer.id, last_seen).await {
+        if !state
+            .quiet_notified()
+            .should_notify(peer.id, last_seen)
+            .await
+        {
             continue;
         }
 
-        send(
-            state,
-            "peer gone quiet",
-            &format!(
-                "{} has not been seen since {}",
-                peer.label,
-                crate::web::peers::ago(last_seen)
-            ),
-        )
-        .await;
+        webhook
+            .post(
+                "peer gone quiet",
+                &format!(
+                    "{} has not been seen since {}",
+                    peer.label,
+                    crate::web::peers::ago(last_seen)
+                ),
+            )
+            .await;
     }
 
     Ok(())

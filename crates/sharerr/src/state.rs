@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use sharerr_core::Config;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::AdvertisedEndpoint;
-use sharerr_store::{Store, Vault, master_key_from_env};
+use sharerr_store::{Store, Vault};
 use tokio::sync::{Notify, RwLock};
 
 use crate::gluetun::{GluetunStatus, GluetunTarget};
@@ -79,6 +79,12 @@ pub struct ServeState {
     /// `tracker_token` — loading it means opening the vault, and the pull side of
     /// gossip is asked on every friend's poll.
     gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
+    /// Each gluetun poller's control-server API key, cached like `tracker_token`
+    /// and for a sharper version of the same reason: the poller re-read it every
+    /// interval, so a default 60-second poll paid 1,440 Argon2 derivations a day,
+    /// and both pollers run. Cleared by [`Self::invalidate`], so a key saved
+    /// through Settings still takes effect on the next pass without a restart.
+    gluetun_api_keys: RwLock<[Option<Option<SecretString>>; 2]>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -145,6 +151,7 @@ impl ServeState {
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
             gossip_identity: RwLock::new(None),
+            gluetun_api_keys: RwLock::new([None, None]),
             wake: Notify::new(),
             endpoint,
             client_endpoint: Arc::new(AdvertisedEndpoint::new(None)),
@@ -261,13 +268,12 @@ impl ServeState {
     /// the web settings pages, the connection probes, and the tracker all come
     /// through here.
     pub async fn open_vault(&self) -> Result<Vault, String> {
-        let master = master_key_from_env().map_err(|err| err.to_string())?;
+        // Just the path, not a clone of the whole `Config` — this is called on
+        // every cache miss and every settings save.
         let path = self.config.read().await.vault_path();
-
-        tokio::task::spawn_blocking(move || Vault::open(&path, &master))
+        crate::secrets::open_vault_at(path)
             .await
-            .map_err(|_| "the vault task panicked".to_owned())?
-            .map_err(|err| format!("opening the vault: {err}"))
+            .map_err(|err| err.to_string())
     }
 
     /// The token the builtin tracker requires in announce URLs, if any.
@@ -291,6 +297,26 @@ impl ServeState {
 
         *self.tracker_token.write().await = Some(token.clone());
         token
+    }
+
+    /// A gluetun poller's control-server API key, cached after the first read.
+    ///
+    /// Same shape and same reasoning as [`Self::tracker_token`]: the outer
+    /// `None` means "not looked up yet", `Some(None)` means "looked up, and
+    /// there is none". The poller calls this every interval, so without the
+    /// cache each call was an Argon2 derivation on a timer.
+    pub async fn gluetun_api_key(&self, target: GluetunTarget) -> Option<SecretString> {
+        if let Some(cached) = &self.gluetun_api_keys.read().await[target.index()] {
+            return cached.clone();
+        }
+
+        let key = match self.open_vault().await {
+            Ok(vault) => vault.get(target.api_key_secret()).ok().flatten(),
+            Err(_) => None,
+        };
+
+        self.gluetun_api_keys.write().await[target.index()] = Some(key.clone());
+        key
     }
 
     /// This instance's gossip signing identity, cached after the first load.
@@ -345,18 +371,7 @@ impl ServeState {
     pub async fn replace_config(&self, config: Config) {
         // Only the static half is refreshed: the poller's observed endpoints are
         // still true regardless of what the operator just typed.
-        self.endpoint.set_static(
-            match sharerr_core::endpoint::advertised_base(
-                &config.tracker,
-                config.server.bind.port(),
-            ) {
-                Ok(base) => base,
-                Err(err) => {
-                    tracing::warn!(%err, "the saved advertised address is unusable");
-                    None
-                }
-            },
-        );
+        self.endpoint.set_static(static_base(&config));
         *self.config.write().await = config;
         *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;
@@ -375,6 +390,7 @@ impl ServeState {
         // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
         *self.gossip_identity.write().await = None;
+        *self.gluetun_api_keys.write().await = [None, None];
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.
@@ -462,19 +478,27 @@ impl ServeState {
     }
 }
 
-/// The endpoint as configuration alone resolves it, with an unusable address
-/// treated as unset rather than fatal — `serve` must come up either way, and the
-/// tracker provider reports the absence with the sentence that names the fix.
+/// The advertised base as configuration alone resolves it, with an unusable
+/// address treated as unset rather than fatal — `serve` must come up either way,
+/// and the tracker provider reports the absence with the sentence that names the
+/// fix.
+///
+/// One function for both the startup read and the post-save refresh: they used to
+/// be two copies of this match that differed only in the wording of the warning,
+/// which is one copy too many for a value this load-bearing.
+fn static_base(config: &Config) -> Option<url::Url> {
+    match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+        Ok(base) => base,
+        Err(err) => {
+            tracing::warn!(%err, "the advertised address is unusable");
+            None
+        }
+    }
+}
+
+/// The endpoint as configuration alone resolves it.
 fn static_endpoint(config: &Config) -> AdvertisedEndpoint {
-    let base =
-        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
-            Ok(base) => base,
-            Err(err) => {
-                tracing::warn!(%err, "the configured advertised address is unusable");
-                None
-            }
-        };
-    AdvertisedEndpoint::new(base)
+    AdvertisedEndpoint::new(static_base(config))
 }
 
 #[cfg(test)]

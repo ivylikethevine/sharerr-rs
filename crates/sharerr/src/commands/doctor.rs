@@ -17,7 +17,7 @@ use secrecy::SecretString;
 use sharerr_arr::Discovered;
 use sharerr_core::config::{ServiceConfig, TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
-use sharerr_store::{Store, Vault, master_key_from_env};
+use sharerr_store::{Store, Vault};
 use url::Url;
 
 /// How many individual problem files to name before summarising the rest. A
@@ -55,7 +55,11 @@ impl Report {
     }
 }
 
-pub async fn run(config: &Config, config_error: Option<&str>, args: &crate::cli::DoctorArgs) -> Result<()> {
+pub async fn run(
+    config: &Config,
+    config_error: Option<&str>,
+    args: &crate::cli::DoctorArgs,
+) -> Result<()> {
     let fix = args.fix;
     let mut report = Report::default();
 
@@ -83,8 +87,7 @@ pub async fn run(config: &Config, config_error: Option<&str>, args: &crate::cli:
             continue;
         };
         report.section(kind.as_str());
-        discovered
-            .extend(check_arr(kind, service, config, vault.as_ref(), fix, &mut report).await);
+        discovered.extend(check_arr(kind, service, config, vault.as_ref(), fix, &mut report).await);
     }
     for library in &config.library {
         report.section(&format!("library {}", library.path.display()));
@@ -113,7 +116,12 @@ pub async fn run(config: &Config, config_error: Option<&str>, args: &crate::cli:
 
     if args.suggest_paths {
         report.section("path suggestions");
-        suggest_paths(config, &discovered, args.search_root.as_deref(), &mut report);
+        suggest_paths(
+            config,
+            &discovered,
+            args.search_root.as_deref(),
+            &mut report,
+        );
     }
 
     println!();
@@ -135,22 +143,13 @@ pub async fn run(config: &Config, config_error: Option<&str>, args: &crate::cli:
 // ------------------------------------------------------------------ vault
 
 fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
-    let master = match master_key_from_env() {
-        Ok(master) => master,
-        Err(err) => {
-            report.fail(chain(&err));
-            return None;
-        }
-    };
-
-    let vault = match Vault::open(config.vault_path(), &master) {
+    let vault = match crate::secrets::open_vault(config) {
         Ok(vault) => vault,
         Err(err) => {
-            report.fail(format!(
-                "{} — {}",
-                config.vault_path().display(),
-                chain(&err)
-            ));
+            // `{:#}` renders anyhow's context chain, which already names the
+            // vault path for an open failure and correctly does not for a
+            // missing master key.
+            report.fail(format!("{err:#}"));
             return None;
         }
     };
@@ -325,9 +324,7 @@ async fn check_arr(
     // `TagMissing` is the one mechanical case `--fix` can close here: creating
     // the tag turns it into `TagUnused` (or `Ready`, if content already carries
     // it by the time this runs) without a restart or a second invocation.
-    if fix
-        && let ArrOutcome::TagMissing { .. } = &outcome
-    {
+    if fix && let ArrOutcome::TagMissing { .. } = &outcome {
         return fix_missing_tag(kind, service, config, api_key_for_fix, report).await;
     }
 

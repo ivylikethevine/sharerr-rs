@@ -6,13 +6,8 @@ use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
 use sharerr_core::Config;
 use sharerr_core::config::secret_keys;
-use sharerr_store::{Vault, master_key_from_env};
 
-fn open(config: &Config) -> Result<Vault> {
-    let master = master_key_from_env()?;
-    Vault::open(config.vault_path(), &master)
-        .with_context(|| format!("opening vault at {}", config.vault_path().display()))
-}
+use crate::secrets::open_vault;
 
 pub fn set(config: &Config, key: &str) -> Result<()> {
     // Others are allowed — a deployment may stash extra values — but a typo in one
@@ -25,7 +20,7 @@ pub fn set(config: &Config, key: &str) -> Result<()> {
     }
 
     let value = read_secret(key)?;
-    let mut vault = open(config)?;
+    let mut vault = open_vault(config)?;
     vault.put(key, &value)?;
 
     println!("stored {key:?} in {}", config.vault_path().display());
@@ -33,7 +28,7 @@ pub fn set(config: &Config, key: &str) -> Result<()> {
 }
 
 pub fn list(config: &Config) -> Result<()> {
-    let vault = open(config)?;
+    let vault = open_vault(config)?;
 
     if vault.is_empty() {
         println!("vault is empty ({})", config.vault_path().display());
@@ -50,7 +45,7 @@ pub fn list(config: &Config) -> Result<()> {
 }
 
 pub fn remove(config: &Config, key: &str) -> Result<()> {
-    let mut vault = open(config)?;
+    let mut vault = open_vault(config)?;
     if vault.remove(key)? {
         println!("removed {key:?}");
     } else {

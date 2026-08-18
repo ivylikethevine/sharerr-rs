@@ -95,10 +95,18 @@ impl GluetunTarget {
         }
     }
 
-    fn api_key_secret(self) -> &'static str {
+    pub(crate) fn api_key_secret(self) -> &'static str {
         match self {
             Self::Tracker => secret_keys::GLUETUN_API_KEY,
             Self::Client => secret_keys::GLUETUN_CLIENT_API_KEY,
+        }
+    }
+
+    /// Index into the per-target arrays `ServeState` keys by this enum.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Tracker => 0,
+            Self::Client => 1,
         }
     }
 }
@@ -199,18 +207,31 @@ struct ForwardedPort {
 }
 
 impl GluetunClient {
-    pub fn new(base: &Url, api_key: Option<SecretString>) -> Result<Self> {
-        let http = reqwest::Client::builder()
+    /// Build the HTTP client this type uses.
+    ///
+    /// Separate from [`Self::new`] so a caller that constructs a client
+    /// repeatedly — the poller, once per interval, forever — can build one and
+    /// keep it, rather than discarding a connection pool on every tick.
+    pub fn http_client() -> Result<reqwest::Client> {
+        reqwest::Client::builder()
             // The control server is on loopback in the intended topology; a
             // longer wait means something is wrong, not slow.
             .timeout(Duration::from_secs(10))
             .build()
-            .map_err(|e| GluetunError::Malformed(format!("building the HTTP client: {e}")))?;
-        Ok(Self {
+            .map_err(|e| GluetunError::Malformed(format!("building the HTTP client: {e}")))
+    }
+
+    pub fn new(base: &Url, api_key: Option<SecretString>) -> Result<Self> {
+        Ok(Self::with_http(Self::http_client()?, base, api_key))
+    }
+
+    /// Reuse an existing HTTP client — see [`Self::http_client`].
+    pub fn with_http(http: reqwest::Client, base: &Url, api_key: Option<SecretString>) -> Self {
+        Self {
             http,
             base: sharerr_client::normalise_base(base),
             api_key,
-        })
+        }
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &'static str) -> Result<T> {
@@ -321,18 +342,28 @@ pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
     let mut last_error: Option<String> = None;
     let status = state.gluetun_status(target);
     let endpoint = state.endpoint_for(target);
+    // Built once and reused for the life of the poller: a client per tick threw
+    // away its connection pool every interval, forever. `reqwest::Client` is an
+    // Arc internally, so cloning it per poll shares the pool rather than copying
+    // it. A build failure is kept rather than returned — this loop never returns,
+    // and reporting it once per poll is what the old per-poll construction did.
+    let http = GluetunClient::http_client().map_err(|err| err.to_string());
 
     loop {
         let config = state.config().await;
         let gluetun_cfg = target.config(&config);
         let interval = Duration::from_secs(gluetun_cfg.effective_poll_secs());
 
-        if !gluetun_cfg.enabled {
-            // Deliberately silent: a disabled poller is a choice, not a fault,
-            // and this loop still runs (to notice re-enabling) so it must not
-            // add a warning to the log every interval forever.
-        } else if let Some(control) = &gluetun_cfg.control_url {
-            let api_key = gluetun_api_key(&state, target).await;
+        // An inactive poller is deliberately silent: being turned off, or having
+        // no control server to ask, is a choice rather than a fault, and this
+        // loop still runs (to notice it being re-enabled) so it must not add a
+        // warning to the log every interval forever.
+        if let Some(control) = gluetun_cfg
+            .control_url
+            .as_ref()
+            .filter(|_| gluetun_cfg.is_active())
+        {
+            let api_key = state.gluetun_api_key(target).await;
 
             // gluetun's control server has required an API key by default since
             // v3.40; sending an unkeyed request just to learn that again, every
@@ -350,7 +381,13 @@ pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
                 // fallback.
                 let fallback_port = endpoint.current().and_then(|base| base.port());
 
-                match resolve_once(control, Some(api_key), fallback_port).await {
+                let resolved = match &http {
+                    Ok(http) => {
+                        resolve_once(http.clone(), control, Some(api_key), fallback_port).await
+                    }
+                    Err(err) => Err(GluetunError::Malformed(err.clone())),
+                };
+                match resolved {
                     Ok(base) => {
                         status.record_ok().await;
                         if last_error.take().is_some() {
@@ -398,21 +435,20 @@ pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
     }
 }
 
-/// `target`'s control server API key, if one is stored. A vault that will not
-/// open (no master key, none of the settings ever saved one) means an unkeyed
-/// request, same as before this key existed — the resulting `401` is what
-/// [`GluetunError::Unauthorized`] exists to explain.
-async fn gluetun_api_key(state: &ServeState, target: GluetunTarget) -> Option<SecretString> {
-    let vault = state.open_vault().await.ok()?;
-    vault.get(target.api_key_secret()).ok().flatten()
-}
-
+/// One resolve against `control`, reusing the caller's HTTP client.
+///
+/// The key comes from [`ServeState::gluetun_api_key`], which caches it. A vault
+/// that will not open (no master key, none of the settings ever saved one) means
+/// no key at all, and the poller skips the request rather than sending one whose
+/// only possible answer is the `401` that [`GluetunError::Unauthorized`] exists
+/// to explain.
 async fn resolve_once(
+    http: reqwest::Client,
     control: &Url,
     api_key: Option<SecretString>,
     fallback_port: Option<u16>,
 ) -> Result<Url> {
-    GluetunClient::new(control, api_key)?
+    GluetunClient::with_http(http, control, api_key)
         .resolve_base(fallback_port)
         .await
 }
@@ -560,7 +596,9 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/v1/openvpn/portforwarded"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "port": 41234 })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "port": 41234 })),
+            )
             .mount(&server)
             .await;
 

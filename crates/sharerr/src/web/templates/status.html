@@ -254,11 +254,12 @@
   <dl class="facts">
     <dt>*arr view</dt><dd><code>{{ sample.arr }}</code></dd>
     <dt>sharerr view</dt><dd><code>{{ sample.sharerr }}</code></dd>
-    <dt>qBittorrent view</dt><dd><code>{{ sample.qbit }}</code></dd>
+    <dt>{{ client_name }} view</dt><dd><code>{{ sample.qbit }}</code></dd>
   </dl>
   <p class="hint">
-    Only the sharerr view can be checked from here — the qBittorrent view is
-    another container's filesystem, so verify it against qBittorrent itself.
+    Only the sharerr view can be checked from here — the {{ client_name }} view
+    is another container's filesystem, so verify it against {{ client_name }}
+    itself.
   </p>
   {% endif %}
 
