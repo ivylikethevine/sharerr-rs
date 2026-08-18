@@ -67,6 +67,15 @@ pub mod secret_keys {
     /// ever needed, deserves an explicit re-pair flow rather than a text box.
     pub const IDENTITY_SIGNING_KEY: &str = "identity.signing_key";
 
+    /// The seed the embedded lighthouse derives its fabricated decoy answers
+    /// from, hex-encoded.
+    ///
+    /// Same reasoning as [`IDENTITY_SIGNING_KEY`], deliberately **not** in
+    /// [`ALL`]: generated on first use by [`super::LighthouseConfig`]'s
+    /// embedding path, not typed by an operator. Only present when
+    /// `[lighthouse] enabled = true` has actually been used at least once.
+    pub const LIGHTHOUSE_DECOY_SEED: &str = "lighthouse.decoy_seed";
+
     /// The vault key holding the API key a friend issued *us*, for pulling
     /// gossip from their sharerr. Per-peer and minted by them, so it cannot be a
     /// constant; also not in [`ALL`] — it is managed from the Friends page,
@@ -150,6 +159,13 @@ pub mod config_paths {
     pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
     pub const TRACKER_PORT: &str = "tracker.port";
 
+    /// Whether the lighthouse rendezvous service runs as extra routes on one
+    /// of this instance's own listeners — see [`super::LighthouseConfig`].
+    pub const LIGHTHOUSE_ENABLED: &str = "lighthouse.enabled";
+    /// Which listener: `"frontend"` or `"tracker"` — see
+    /// [`super::LighthouseMount`].
+    pub const LIGHTHOUSE_MOUNT: &str = "lighthouse.mount";
+
     pub const GLUETUN_ENABLED: &str = "gluetun.enabled";
     pub const GLUETUN_CONTROL_URL: &str = "gluetun.control_url";
     pub const GLUETUN_POLL_SECS: &str = "gluetun.poll_secs";
@@ -203,6 +219,8 @@ pub mod config_paths {
         TRACKER_ADVERTISED_HOST,
         TRACKER_ADVERTISED_URL,
         TRACKER_PORT,
+        LIGHTHOUSE_ENABLED,
+        LIGHTHOUSE_MOUNT,
         GLUETUN_ENABLED,
         GLUETUN_CONTROL_URL,
         GLUETUN_POLL_SECS,
@@ -242,6 +260,9 @@ pub struct Config {
     /// Only read when `torrent_backend` selects it.
     pub transmission: TransmissionConfig,
     pub tracker: TrackerConfig,
+    /// Embedding the lighthouse rendezvous service on one of this instance's
+    /// own listeners. Off by default — see [`LighthouseConfig`].
+    pub lighthouse: LighthouseConfig,
     /// Resolving the advertised endpoint from a gluetun VPN container's control
     /// server, for deployments with no stable public IP or forwarded port.
     pub gluetun: GluetunConfig,
@@ -280,6 +301,7 @@ impl Default for Config {
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
             tracker: TrackerConfig::default(),
+            lighthouse: LighthouseConfig::default(),
             gluetun: GluetunConfig::default(),
             gluetun_client: GluetunConfig::default(),
             sync: SyncConfig::default(),
@@ -556,6 +578,38 @@ pub struct TrackerConfig {
     /// default; `serve` merges everything onto [`ServerConfig::bind`] either
     /// way, and this adds a second listener rather than moving anything.
     pub bind: Option<SocketAddr>,
+}
+
+/// Which of sharerr's own listeners carries the embedded lighthouse, when
+/// [`LighthouseConfig::enabled`] is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LighthouseMount {
+    /// `server.bind` — the same port as the web UI and the Torznab feed.
+    #[default]
+    Frontend,
+    /// `tracker.bind` when it is set, otherwise `server.bind` — the port a
+    /// friend's torrent client already reaches for announces.
+    Tracker,
+}
+
+/// Running the lighthouse rendezvous service ([`sharerr_lighthouse`] in the
+/// workspace) as extra routes on one of sharerr's own listeners, instead of
+/// its own separate image and port.
+///
+/// The design brief in `docs/roadmap.md` wants the lighthouse to be a
+/// deliberately separate deployment — no shared process, no shared port — so
+/// that it can be self-hosted by anyone on neutral ground away from any
+/// particular library. This is the exception to that: a single operator
+/// running the lighthouse for their own circle of friends, who would rather
+/// not run a second container for it. Off by default; enabling it changes
+/// nothing about the standalone binary, which keeps working the same way for
+/// anyone who wants the separation.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LighthouseConfig {
+    pub enabled: bool,
+    pub mount: LighthouseMount,
 }
 
 /// Reject any `tracker.backend` value with the migration story.

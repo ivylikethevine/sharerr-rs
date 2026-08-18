@@ -79,6 +79,11 @@ pub struct ServeState {
     /// `tracker_token` — loading it means opening the vault, and the pull side of
     /// gossip is asked on every friend's poll.
     gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
+    /// The embedded lighthouse's state, built lazily the first time
+    /// `[lighthouse] enabled = true` is actually observed — see
+    /// [`Self::lighthouse_state`]. Same `Option<Option<_>>` shape as
+    /// `gossip_identity`: outer `None` is "not looked up yet".
+    lighthouse_state: RwLock<Option<Option<Arc<sharerr_lighthouse::LighthouseState>>>>,
     /// Each gluetun poller's control-server API key, cached like `tracker_token`
     /// and for a sharper version of the same reason: the poller re-read it every
     /// interval, so a default 60-second poll paid 1,440 Argon2 derivations a day,
@@ -151,6 +156,7 @@ impl ServeState {
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
             gossip_identity: RwLock::new(None),
+            lighthouse_state: RwLock::new(None),
             gluetun_api_keys: RwLock::new([None, None]),
             wake: Notify::new(),
             endpoint,
@@ -340,6 +346,34 @@ impl ServeState {
         identity
     }
 
+    /// The embedded lighthouse's state, built on first use and cached
+    /// thereafter — same reasoning as [`Self::gossip_identity`]: building it
+    /// means opening the vault to load or mint the decoy seed, and `lookup`
+    /// is answered on every friend's probe.
+    ///
+    /// `None` when `[lighthouse] enabled` is false, or when the vault cannot
+    /// be opened — an unconfigured instance still binds and serves
+    /// everything else, so a lighthouse that cannot get its seed yet is
+    /// simply absent rather than a startup failure.
+    pub async fn lighthouse_state(&self) -> Option<Arc<sharerr_lighthouse::LighthouseState>> {
+        if !self.config.read().await.lighthouse.enabled {
+            return None;
+        }
+        if let Some(cached) = &*self.lighthouse_state.read().await {
+            return cached.clone();
+        }
+
+        let state = match self.open_vault().await {
+            Ok(mut vault) => load_or_create_decoy_seed(&mut vault)
+                .ok()
+                .map(|seed| Arc::new(sharerr_lighthouse::LighthouseState::new(seed))),
+            Err(_) => None,
+        };
+
+        *self.lighthouse_state.write().await = Some(state.clone());
+        state
+    }
+
     /// Why reconciliation is not running, or `None` when it is.
     ///
     /// `Option` rather than a `(bool, String)` pair, whose `String` would be
@@ -499,6 +533,27 @@ fn static_base(config: &Config) -> Option<url::Url> {
 /// The endpoint as configuration alone resolves it.
 fn static_endpoint(config: &Config) -> AdvertisedEndpoint {
     AdvertisedEndpoint::new(static_base(config))
+}
+
+/// Load the embedded lighthouse's decoy seed from the vault, minting one on
+/// first use — same shape as [`crate::gossip::Identity::load_or_create`].
+fn load_or_create_decoy_seed(vault: &mut Vault) -> Result<[u8; 32], String> {
+    if let Ok(Some(stored)) = vault.get(secret_keys::LIGHTHOUSE_DECOY_SEED) {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(stored.expose_secret(), &mut bytes)
+            .map_err(|_| "the stored lighthouse seed is not 32 hex bytes".to_owned())?;
+        return Ok(bytes);
+    }
+
+    let seed = crate::secrets::random_bytes::<32>()
+        .map_err(|err| format!("generating a lighthouse decoy seed: {err}"))?;
+    vault
+        .put(
+            secret_keys::LIGHTHOUSE_DECOY_SEED,
+            &SecretString::from(hex::encode(seed)),
+        )
+        .map_err(|err| format!("storing the lighthouse decoy seed: {err}"))?;
+    Ok(seed)
 }
 
 #[cfg(test)]

@@ -33,6 +33,26 @@ use crate::gluetun::GluetunTarget;
 use crate::state::ServeState;
 use crate::tracker::TrackerState;
 
+/// Whether the embedded lighthouse belongs on the *frontend* listener rather
+/// than the tracker's.
+///
+/// [`sharerr_core::config::LighthouseMount::Tracker`] means "the port a
+/// friend's torrent client already reaches", which is `tracker_bind` when a
+/// dedicated tracker listener is configured — but when it is not, the main
+/// listener carries the tracker's routes too, so that is where the choice
+/// actually lands. Standalone so the two listeners built in `run` can share
+/// one decision instead of each re-deriving it from the config differently.
+fn lighthouse_belongs_on_frontend(
+    mount: sharerr_core::config::LighthouseMount,
+    tracker_bind: Option<SocketAddr>,
+) -> bool {
+    use sharerr_core::config::LighthouseMount;
+    match mount {
+        LighthouseMount::Frontend => true,
+        LighthouseMount::Tracker => tracker_bind.is_none(),
+    }
+}
+
 pub async fn run(config: &Config, config_path: &Path, config_error: Option<String>) -> Result<()> {
     let state = Arc::new(ServeState::new(
         config.clone(),
@@ -44,6 +64,15 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // would keep peers arriving on different listeners from meeting.
     let tracker = Arc::new(TrackerState::new(Arc::clone(&state)));
 
+    // The embedded lighthouse, if `[lighthouse] enabled = true` — see
+    // `sharerr_lighthouse` for the protocol and `ServeState::lighthouse_state`
+    // for why this can come back `None` even when enabled (an unopenable
+    // vault). `mount` decides which listener below actually carries the
+    // routes; building the router once here means both listeners share one
+    // `LighthouseState`, same reasoning as sharing one `Swarms` map.
+    let lighthouse_routes = state.lighthouse_state().await.map(sharerr_lighthouse::routes);
+    let lighthouse_mount = config.lighthouse.mount;
+
     // The probes keep their own state and stay outside the web UI's auth layer.
     // `/health` in particular is what the Dockerfile's HEALTHCHECK curls, with no
     // cookie and no intention of getting one. `/gluetun/refresh` and
@@ -53,7 +82,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // instead of the first (default, and the only choice before it existed) —
     // so there is nothing to protect beyond the private-address check both
     // handlers share.
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route(
@@ -65,6 +94,18 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         .merge(crate::tracker::routes(Arc::clone(&tracker)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
+
+    // The frontend listener carries the lighthouse either because that is
+    // literally what was chosen, or because "the tracker port" was chosen but
+    // there is no *dedicated* tracker listener below to put it on — the
+    // tracker's routes live here too in that case, so this is where a peer
+    // reaching "the tracker port" actually lands. See
+    // [`lighthouse_belongs_on_frontend`] for the standalone logic.
+    if lighthouse_belongs_on_frontend(lighthouse_mount, config.tracker.bind)
+        && let Some(routes) = lighthouse_routes.clone()
+    {
+        app = app.merge(routes);
+    }
 
     let listener = tokio::net::TcpListener::bind(config.server.bind)
         .await
@@ -110,8 +151,13 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     let tracker_serve = async {
         match tracker_listener {
             Some(listener) => {
-                let service = crate::tracker::routes(tracker)
-                    .into_make_service_with_connect_info::<SocketAddr>();
+                let mut router = crate::tracker::routes(tracker);
+                if !lighthouse_belongs_on_frontend(lighthouse_mount, config.tracker.bind)
+                    && let Some(routes) = lighthouse_routes
+                {
+                    router = router.merge(routes);
+                }
+                let service = router.into_make_service_with_connect_info::<SocketAddr>();
                 axum::serve(listener, service)
                     .await
                     .context("tracker listener failed")
@@ -283,6 +329,31 @@ mod tests {
 
     use super::*;
     use crate::state::fixtures::{unconfigured, unloadable};
+
+    /// `Frontend` always lands on the main listener; `Tracker` follows the
+    /// dedicated tracker listener when there is one, and falls back to the
+    /// main listener — which still carries the tracker's own routes — when
+    /// there is not.
+    #[test]
+    fn the_tracker_mount_falls_back_to_frontend_without_a_dedicated_listener() {
+        use sharerr_core::config::LighthouseMount;
+
+        let dedicated: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+
+        assert!(lighthouse_belongs_on_frontend(LighthouseMount::Frontend, None));
+        assert!(lighthouse_belongs_on_frontend(
+            LighthouseMount::Frontend,
+            Some(dedicated)
+        ));
+        assert!(lighthouse_belongs_on_frontend(
+            LighthouseMount::Tracker,
+            None
+        ));
+        assert!(!lighthouse_belongs_on_frontend(
+            LighthouseMount::Tracker,
+            Some(dedicated)
+        ));
+    }
 
     /// The regression that matters most: an unconfigured instance must still look
     /// alive, or the orchestrator restarts the container the operator is trying to

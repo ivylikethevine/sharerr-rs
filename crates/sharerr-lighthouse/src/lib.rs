@@ -1,0 +1,494 @@
+//! The lighthouse: semi-anonymous `key hash -> latest endpoint` rendezvous.
+//!
+//! See `docs/roadmap.md`'s "The lighthouse" for the design brief this
+//! implements. In short: two friends whose addresses both rotated while
+//! neither was watching have no path back to each other through gossip alone.
+//! The lighthouse is the fallback — a peer reports its current endpoint under
+//! the hash of the API key it issued a given friend, and that friend looks it
+//! up under the same hash, the one credential they already share.
+//!
+//! # Why this crate stands alone
+//!
+//! It is deliberately independent of the rest of the workspace — no
+//! `sharerr-core`, no `sharerr-store`, no database. It knows nothing but
+//! `key hash -> latest record`, so there is nothing here worth stealing and
+//! nothing here that assumes it is running next to an *arr stack. That
+//! independence is what lets it ship as this crate's own binary
+//! ([`bin/main.rs`](../src/main.rs)) on its own port, or be mounted as a
+//! handful of routes inside another axum app (which is how `sharerr serve`
+//! optionally embeds it — see `crates/sharerr/src/commands/serve.rs`).
+//!
+//! # The privacy property
+//!
+//! An unauthenticated prober cannot tell a real record from a decoy: a lookup
+//! for a key hash the lighthouse has never seen still returns 200 with a
+//! record of the same shape, its signature and public key fabricated by a
+//! keyed hash of the lighthouse's own secret and the queried key hash. That
+//! makes decoys stable across repeated probes (not fresh noise that would
+//! flag itself by changing) without ever confirming that a given key hash
+//! belongs to a real instance.
+//!
+//! A friend holding a valid key can tell the difference because a genuine
+//! record is *verifiable*: it is signed by the peer it describes with the
+//! same Ed25519 key gossip uses, and [`verify`] checks that signature. A
+//! decoy's signature is random bytes, indistinguishable on the wire from a
+//! real one to anyone without the peer's public key, and it never verifies
+//! for anyone.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
+
+// ---------------------------------------------------------------------------
+// Wire protocol
+// ---------------------------------------------------------------------------
+
+/// One address inside a record.
+///
+/// Field-for-field the same shape as gossip's `RecordEndpoint` (see
+/// `crates/sharerr/src/gossip.rs`) — the lighthouse relays the identical
+/// wire format rather than inventing a second one, per the design brief. The
+/// type is duplicated rather than shared because gossip's lives in the
+/// `sharerr` binary crate, which this crate deliberately does not depend on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordEndpoint {
+    pub kind: String,
+    pub addr: String,
+    pub observed_at: i64,
+}
+
+/// One peer's self-described endpoints, signed by them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointRecord {
+    /// Hex Ed25519 public key — the subject's identity.
+    pub pubkey: String,
+    pub endpoints: Vec<RecordEndpoint>,
+    /// Unix seconds. A record never replaces a stored one with a newer
+    /// `signed_at`, which is what stops a stale report rewinding an address.
+    pub signed_at: i64,
+    /// Hex Ed25519 signature over the same signable bytes gossip signs.
+    pub signature: String,
+}
+
+/// The bytes a record's signature covers — identical construction to
+/// gossip's `signable_bytes`, so a record signed for gossip verifies here
+/// unchanged and vice versa.
+fn signable_bytes(
+    pubkey: &str,
+    endpoints: &[RecordEndpoint],
+    signed_at: i64,
+) -> Result<Vec<u8>, serde_json::Error> {
+    #[derive(Serialize)]
+    struct Signable<'a> {
+        pubkey: &'a str,
+        endpoints: &'a [RecordEndpoint],
+        signed_at: i64,
+    }
+    serde_json::to_vec(&Signable {
+        pubkey,
+        endpoints,
+        signed_at,
+    })
+}
+
+/// Check a record's signature against the key it names.
+pub fn verify(record: &EndpointRecord) -> Result<(), &'static str> {
+    let mut key_bytes = [0u8; 32];
+    hex::decode_to_slice(&record.pubkey, &mut key_bytes)
+        .map_err(|_| "pubkey is not 32 hex bytes")?;
+    let key =
+        VerifyingKey::from_bytes(&key_bytes).map_err(|_| "pubkey is not a valid Ed25519 key")?;
+
+    let mut sig_bytes = [0u8; 64];
+    hex::decode_to_slice(&record.signature, &mut sig_bytes)
+        .map_err(|_| "signature is not 64 hex bytes")?;
+    let signature = Signature::from_bytes(&sig_bytes);
+
+    let bytes = signable_bytes(&record.pubkey, &record.endpoints, record.signed_at)
+        .map_err(|_| "record could not be serialised")?;
+    key.verify(&bytes, &signature)
+        .map_err(|_| "signature does not verify")
+}
+
+/// A key hash is a lowercase-hex SHA-256 digest — the form both sides derive
+/// from the shared API key without either needing to send it.
+fn valid_key_hash(key_hash: &str) -> bool {
+    key_hash.len() == 64 && key_hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+pub fn hash_key(raw_key: &str) -> String {
+    hex::encode(Sha256::digest(raw_key.as_bytes()))
+}
+
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+struct Stored {
+    record: EndpointRecord,
+}
+
+/// The whole lighthouse: a map of key hash to latest record, plus the secret
+/// that makes decoys deterministic.
+pub struct LighthouseState {
+    records: RwLock<HashMap<String, Stored>>,
+    decoy_secret: [u8; 32],
+}
+
+impl std::fmt::Debug for LighthouseState {
+    /// Hand-written so the decoy secret cannot reach a log — it is as
+    /// sensitive as any other server key, since holding it lets someone tell
+    /// decoys from real records without a peer's public key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LighthouseState").finish_non_exhaustive()
+    }
+}
+
+/// What a report attempt amounted to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportOutcome {
+    Accepted,
+    /// No newer than what is already stored under this key hash.
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportError {
+    BadKeyHash,
+    InvalidRecord,
+}
+
+impl LighthouseState {
+    pub fn new(decoy_secret: [u8; 32]) -> Self {
+        Self {
+            records: RwLock::new(HashMap::new()),
+            decoy_secret,
+        }
+    }
+
+    /// Store a peer-signed record under a key hash, unless it is no newer
+    /// than what is already there. Rejects anything that does not verify —
+    /// no unsigned garbage is ever stored, only ever fabricated on lookup.
+    pub async fn report(
+        &self,
+        key_hash: &str,
+        record: EndpointRecord,
+    ) -> Result<ReportOutcome, ReportError> {
+        if !valid_key_hash(key_hash) {
+            return Err(ReportError::BadKeyHash);
+        }
+        verify(&record).map_err(|_| ReportError::InvalidRecord)?;
+
+        let mut records = self.records.write().await;
+        if let Some(existing) = records.get(key_hash)
+            && existing.record.signed_at >= record.signed_at
+        {
+            return Ok(ReportOutcome::Stale);
+        }
+        records.insert(key_hash.to_owned(), Stored { record });
+        Ok(ReportOutcome::Accepted)
+    }
+
+    /// The record for a key hash: the real one if it has ever been reported,
+    /// otherwise a fabricated one of the same shape, stable across repeated
+    /// probes of the same key hash. Never fails and never distinguishes the
+    /// two cases in its return type — that is the entire privacy property.
+    pub async fn lookup(&self, key_hash: &str) -> EndpointRecord {
+        if let Some(stored) = self.records.read().await.get(key_hash) {
+            return stored.record.clone();
+        }
+        self.decoy(key_hash)
+    }
+
+    /// Every key hash currently held, for the standalone binary's own
+    /// diagnostics. Not exposed over HTTP — nothing should ever be able to
+    /// enumerate what the lighthouse knows about.
+    pub async fn known_key_hashes(&self) -> usize {
+        self.records.read().await.len()
+    }
+
+    fn decoy(&self, key_hash: &str) -> EndpointRecord {
+        let pubkey = hex::encode(self.derive(b"pubkey", key_hash));
+        let addr_bytes = self.derive(b"addr", key_hash);
+        // Clamp away 0.x, 10.x, 127.x and 255 so a decoy looks like a public
+        // unicast address rather than something a prober could dismiss as
+        // obviously synthetic on sight — it still never verifies, which is
+        // the actual defence.
+        let octet = |b: u8| -> u8 {
+            match b {
+                0 | 10 | 127 | 255 => 1,
+                other => other,
+            }
+        };
+        let addr = format!(
+            "{}.{}.{}.{}:{}",
+            octet(addr_bytes[0]),
+            addr_bytes[1],
+            addr_bytes[2],
+            addr_bytes[3],
+            1024 + (u16::from(addr_bytes[4]) << 8 | u16::from(addr_bytes[5])) % (65535 - 1024)
+        );
+
+        // Recent-looking but stable per key hash: derived offset within the
+        // last day rather than the real clock alone, so two probes minutes
+        // apart still get byte-identical answers.
+        let offset_bytes = self.derive(b"signed_at", key_hash);
+        let offset = i64::from(u32::from_be_bytes([
+            offset_bytes[0],
+            offset_bytes[1],
+            offset_bytes[2],
+            offset_bytes[3],
+        ]) % 86_400);
+        let signed_at = now_epoch() - offset;
+
+        let mut signature = self.derive(b"sig-a", key_hash).to_vec();
+        signature.extend_from_slice(&self.derive(b"sig-b", key_hash));
+
+        EndpointRecord {
+            pubkey,
+            endpoints: vec![RecordEndpoint {
+                kind: "tracker".to_owned(),
+                addr,
+                observed_at: signed_at,
+            }],
+            signed_at,
+            signature: hex::encode(signature),
+        }
+    }
+
+    /// One 32-byte keyed-hash output, domain-separated by `label` so the
+    /// pubkey, address, timestamp and both signature halves of one decoy
+    /// cannot be derived from each other.
+    fn derive(&self, label: &[u8], key_hash: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(self.decoy_secret);
+        hasher.update(label);
+        hasher.update(key_hash.as_bytes());
+        hasher.finalize().into()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP
+// ---------------------------------------------------------------------------
+
+/// `POST /lighthouse/v1/report/{key_hash}` — a peer publishing its current
+/// endpoint under the hash of the key it issued the friend who will look it
+/// up.
+///
+/// Always answers with the outcome rather than a generic success, since the
+/// caller here is the legitimate reporter's own sharerr, not an anonymous
+/// prober — there is nothing to hide from someone who can already produce a
+/// validly signed record.
+async fn report(
+    State(state): State<Arc<LighthouseState>>,
+    Path(key_hash): Path<String>,
+    axum::Json(record): axum::Json<EndpointRecord>,
+) -> Response {
+    match state.report(&key_hash, record).await {
+        Ok(ReportOutcome::Accepted) => (StatusCode::OK, "accepted").into_response(),
+        Ok(ReportOutcome::Stale) => (StatusCode::OK, "stale").into_response(),
+        Err(ReportError::BadKeyHash) => {
+            (StatusCode::BAD_REQUEST, "key hash must be 64 hex characters").into_response()
+        }
+        Err(ReportError::InvalidRecord) => {
+            (StatusCode::BAD_REQUEST, "record did not verify").into_response()
+        }
+    }
+}
+
+/// `GET /lighthouse/v1/lookup/{key_hash}` — always `200`, always the same
+/// JSON shape, real record or decoy. A malformed key hash still gets a
+/// decoy rather than a `400`: a probe that can distinguish "malformed" from
+/// "unknown" learns something it should not.
+async fn lookup(State(state): State<Arc<LighthouseState>>, Path(key_hash): Path<String>) -> Response {
+    let key_hash = key_hash.to_lowercase();
+    let key_hash = if valid_key_hash(&key_hash) {
+        key_hash
+    } else {
+        // Not a real lookup key, but still hashed through so the fabricated
+        // answer is deterministic for this input rather than falling back to
+        // some other shape of response.
+        hash_key(&key_hash)
+    };
+    axum::Json(state.lookup(&key_hash).await).into_response()
+}
+
+/// The lighthouse's routes, under `/lighthouse/v1/...` regardless of whether
+/// they are served by the standalone binary at the root of its own port or
+/// merged into another axum app — the URL a client builds is the same
+/// either way.
+pub fn routes(state: Arc<LighthouseState>) -> Router {
+    Router::new()
+        .route("/lighthouse/v1/report/{key_hash}", post(report))
+        .route("/lighthouse/v1/lookup/{key_hash}", get(lookup))
+        .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use ed25519_dalek::{Signer, SigningKey};
+    use tower::ServiceExt;
+
+    fn signed_record(seed: u8, addr: &str, signed_at: i64) -> EndpointRecord {
+        let signing = SigningKey::from_bytes(&[seed; 32]);
+        let pubkey = hex::encode(signing.verifying_key().to_bytes());
+        let endpoints = vec![RecordEndpoint {
+            kind: "tracker".to_owned(),
+            addr: addr.to_owned(),
+            observed_at: signed_at,
+        }];
+        let bytes = signable_bytes(&pubkey, &endpoints, signed_at).unwrap();
+        let signature = hex::encode(signing.sign(&bytes).to_bytes());
+        EndpointRecord {
+            pubkey,
+            endpoints,
+            signed_at,
+            signature,
+        }
+    }
+
+    fn state() -> Arc<LighthouseState> {
+        Arc::new(LighthouseState::new([7u8; 32]))
+    }
+
+    #[test]
+    fn a_signed_record_verifies_and_a_tampered_one_does_not() {
+        let record = signed_record(1, "203.0.113.9:41234", 1000);
+        assert!(verify(&record).is_ok());
+
+        let mut tampered = record.clone();
+        tampered.endpoints[0].addr = "attacker.example:1".to_owned();
+        assert!(verify(&tampered).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_valid_report_is_stored_and_a_stale_one_is_not() {
+        let state = state();
+        let key_hash = hash_key("friend-shared-secret");
+
+        let outcome = state
+            .report(&key_hash, signed_record(1, "203.0.113.9:41234", 1000))
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReportOutcome::Accepted);
+
+        let stale = state
+            .report(&key_hash, signed_record(1, "203.0.113.9:1", 500))
+            .await
+            .unwrap();
+        assert_eq!(stale, ReportOutcome::Stale);
+
+        let fresher = state
+            .report(&key_hash, signed_record(1, "203.0.113.9:2", 2000))
+            .await
+            .unwrap();
+        assert_eq!(fresher, ReportOutcome::Accepted);
+
+        let record = state.lookup(&key_hash).await;
+        assert_eq!(record.endpoints[0].addr, "203.0.113.9:2");
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_report_is_rejected() {
+        let state = state();
+        let mut record = signed_record(1, "203.0.113.9:1", 1000);
+        record.signature = "00".repeat(64);
+
+        let err = state
+            .report(&hash_key("k"), record)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ReportError::InvalidRecord);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_key_hash_gets_a_stable_decoy_that_never_verifies() {
+        let state = state();
+        let key_hash = hash_key("nobody-has-registered-this");
+
+        let first = state.lookup(&key_hash).await;
+        let second = state.lookup(&key_hash).await;
+        assert_eq!(first, second, "a repeated probe must see the same decoy");
+        assert!(
+            verify(&first).is_err(),
+            "a decoy must never verify for anyone"
+        );
+
+        // Different key hashes must not collide on the same fabricated answer.
+        let other = state.lookup(&hash_key("a-different-key")).await;
+        assert_ne!(first.endpoints[0].addr, other.endpoints[0].addr);
+    }
+
+    #[tokio::test]
+    async fn a_real_record_and_a_decoy_are_indistinguishable_on_status_code() {
+        let state = state();
+        let real_hash = hash_key("real");
+        state
+            .report(&real_hash, signed_record(1, "203.0.113.9:1", 1000))
+            .await
+            .unwrap();
+
+        let app = routes(state);
+        let real = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/lighthouse/v1/lookup/{real_hash}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(real.status(), StatusCode::OK);
+
+        let decoy = app
+            .oneshot(
+                Request::get(format!("/lighthouse/v1/lookup/{}", hash_key("unknown")))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decoy.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_report_route_rejects_a_bad_signature() {
+        let state = state();
+        let mut record = signed_record(1, "203.0.113.9:1", 1000);
+        record.signature = "00".repeat(64);
+
+        let response = routes(state)
+            .oneshot(
+                Request::post(format!("/lighthouse/v1/report/{}", hash_key("k")))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&record).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}

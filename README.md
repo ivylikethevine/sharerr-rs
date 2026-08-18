@@ -179,6 +179,35 @@ instances, and `tracker.bind` opens a second listener carrying only the tracker
 — for the topology where exactly one forwarded port exists and it has to be the
 tracker's, while the web UI stays on the LAN side.
 
+### The lighthouse (early)
+
+Gossip only helps a friend who can still reach *somebody* — two friends whose
+addresses both rotated while neither was watching have no path back to each
+other. The lighthouse is the rendezvous for that case: a `key hash -> latest
+endpoint` service, deliberately independent of the rest of sharerr, that a
+peer reports its endpoint to and a friend looks up under the API key that
+peer issued them. A request without a valid key still gets a plausible
+fabricated answer rather than an error, so scraping it yields only noise —
+see `docs/roadmap.md`'s "The lighthouse" for the full design.
+
+Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`)
+is meant to be self-hosted by anyone on neutral ground. For a single operator
+who would rather not run a second container, it can also run as extra routes
+on one of sharerr's own listeners:
+
+```toml
+[lighthouse]
+enabled = true
+mount = "tracker"   # or "frontend" — see below
+```
+
+`mount = "tracker"` puts it on the same port a friend's torrent client
+already reaches (`tracker.bind` if set, otherwise the main listener);
+`mount = "frontend"` puts it on the main listener regardless. Off by
+default, and only the embedding is implemented so far — a sharerr instance
+does not yet report itself to a lighthouse or query one for a quiet friend;
+that half is still on the roadmap.
+
 ## Sharing music, books, and more
 
 Each *arr app is its own optional section, and any combination works:
