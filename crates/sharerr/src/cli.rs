@@ -39,7 +39,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Check configuration, service reachability, tag presence, and path mappings.
-    Doctor,
+    Doctor(DoctorArgs),
 
     /// Run one reconciliation pass and exit.
     Sync(SyncArgs),
@@ -50,6 +50,16 @@ pub enum Command {
     /// Manage the encrypted credential vault.
     #[command(subcommand)]
     Vault(VaultCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Attempt to fix the mechanical problems this command can already name
+    /// precisely: create a missing *arr tag, or a qBittorrent category that
+    /// does not exist yet. Everything else — a wrong URL, a rejected
+    /// credential, a bad path mapping — still needs a person.
+    #[arg(long)]
+    pub fix: bool,
 }
 
 #[derive(Debug, Args)]

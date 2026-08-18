@@ -7,7 +7,7 @@ use crate::client::QbitClient;
 use crate::error::{QbitError, Result};
 use sharerr_client::AddRequest;
 
-use crate::models::{TorrentFile, TorrentInfo, TrackerEntry};
+use crate::models::{Category, TorrentFile, TorrentInfo, TrackerEntry};
 
 /// qBittorrent wants the part typed as a real torrent, not `application/octet-stream`.
 const TORRENT_MIME: &str = "application/x-bittorrent";
@@ -110,6 +110,27 @@ impl QbitClient {
             rb.form(&[("hashes", hash), ("deleteFiles", "false")])
         };
         self.send_ok(Method::POST, "torrents/delete", &build)
+            .await?;
+        Ok(())
+    }
+
+    /// `GET /api/v2/torrents/categories` — every category qBittorrent currently
+    /// knows, keyed by name. Used only by `sharerr doctor --fix` to tell "the
+    /// configured category does not exist yet" from "it does" before creating it.
+    pub async fn categories(&self) -> Result<std::collections::HashMap<String, Category>> {
+        self.send_json(Method::GET, "torrents/categories", &|rb| rb)
+            .await
+    }
+
+    /// `POST /api/v2/torrents/createCategory`.
+    ///
+    /// No `savePath` is sent: sharerr always adds torrents with `autoTMM=false`
+    /// and an explicit `savepath` (see [`Self::add_torrent`]), so nothing here
+    /// ever depends on a category's own save path — creating one is only about
+    /// making the category selectable at all.
+    pub async fn create_category(&self, name: &str) -> Result<()> {
+        let build = move |rb: reqwest::RequestBuilder| rb.form(&[("category", name)]);
+        self.send_ok(Method::POST, "torrents/createCategory", &build)
             .await?;
         Ok(())
     }

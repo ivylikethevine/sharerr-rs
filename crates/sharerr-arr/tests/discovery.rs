@@ -66,6 +66,46 @@ async fn a_missing_tag_is_a_named_error_listing_what_does_exist() {
     assert!(err.to_string().contains("sharerr"), "{err}");
 }
 
+/// `create_tag` — `sharerr doctor --fix`'s one write to a *arr app — sends the
+/// label as a JSON body, not a query string, since that is the shape `/tag`
+/// documents for creation.
+#[tokio::test]
+async fn create_tag_posts_the_label_as_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v3/tag"))
+        .and(wiremock::matchers::body_json(json!({ "label": "sharerr" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": 9, "label": "sharerr"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(MediaSource::Sonarr, &server)
+        .create_tag("sharerr")
+        .await
+        .unwrap();
+}
+
+/// A rejected key must be reported the same way every other call reports it,
+/// not swallowed as a generic failure.
+#[tokio::test]
+async fn create_tag_reports_a_rejected_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v3/tag"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let err = client(MediaSource::Sonarr, &server)
+        .create_tag("sharerr")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ArrError::Unauthorized { .. }), "{err:?}");
+}
+
 // --------------------------------------------------------------- transport
 
 #[tokio::test]
