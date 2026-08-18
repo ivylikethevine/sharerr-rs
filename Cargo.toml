@@ -34,7 +34,7 @@ askama = "0.16.0"
 async-trait = "0.1.92"
 # Transmission's RPC takes the .torrent as base64 in a JSON body, unlike
 # qBittorrent's multipart upload.
-base64 = "0.22.1"
+base64 = "0.23.1"
 axum = "0.8.9"
 axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
