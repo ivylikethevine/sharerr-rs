@@ -15,12 +15,6 @@ ordering is a judgement about value, not a schedule.
 
 ---
 
-## Compatibility
-
-sharerr sits in the middle of a stack it does not own, so most of its value comes
-from how many of that stack's normal shapes it tolerates. Grouped by where each
-piece plugs in, roughly in order of how much they would widen the audience.
-
 ### Library sources (where tagged content comes from)
 
 Today: **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
@@ -53,27 +47,13 @@ rotation).
 Today: **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
 **Sonarr/Radarr direct** (confirmed against a real Sonarr in the tier-2 suite).
 
-| Consumer                  | Notes                                                                                                                               |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| **Lidarr/Readarr direct** | Follows from library-source support, since the caps document gates what they will even ask for.                                     |
+| Consumer                  | Notes                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------- |
+| **Lidarr/Readarr direct** | Follows from library-source support, since the caps document gates what they will even ask for. |
 
 One earlier "should already work" assumption turned out not to (Sonarr direct
 rejected the feed over a missing `pubDate`) — worth remembering the next time
 something in this table looks done just because the shape matches.
-
-### Deployment shapes
-
-Today: single container, reverse-proxied (`tracker.advertised_url`), IPv6, and
-the gluetun namespace shape with a dynamically resolved endpoint (`[gluetun]`,
-`docker/deploy/`). One honest gap in the last of those: it is proven against a
-faked control server (tier 1) and a self-hosted WireGuard stack (tier 2), but
-not against a real forwarding provider — the test tunnel cannot grant a port.
-
-**Unraid / Synology templates.** Both communities install almost entirely from
-templates; publishing one is packaging work rather than code, and reaches an
-audience that will never run `docker run` by hand.
-
----
 
 ## Functionality
 
@@ -153,15 +133,3 @@ mistake for free. Resolving it from gluetun instead of asking still removes the
 guess entirely where that is available; that half remains.
 
 ---
-
-## Engineering
-
-Not user-facing, but load-bearing for everything above.
-
-- **`missing_docs` as an enforced lint.** The 44 primary public items (types,
-  traits, methods) are now documented. The lint itself is _not_ on, and the earlier
-  "roughly fifteen" estimate was wrong by twenty times: `missing_docs` also flags
-  every public struct field, which is 290 warnings across the workspace. Most are
-  self-describing config fields where a doc comment would be filler that makes the
-  code harder to read, not easier. Worth revisiting only if a way to scope it to
-  items rather than fields turns up.
