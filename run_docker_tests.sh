@@ -407,7 +407,7 @@ if ((VPN)); then
     # And the announce URL must describe the tunnel's exit rather than a container
     # address, or the torrents are unannounceable by anyone but this host.
     announce=$("${COMPOSE[@]}" exec -T sharerr sharerr doctor 2>&1 |
-        grep -i "embedded tracker" || true)
+        grep -i "advertised endpoint" || true)
     echo "vpn: ${announce:-no tracker line in doctor output}"
 
     # A VPN drop must not take sharerr down. gluetun's killswitch severs egress

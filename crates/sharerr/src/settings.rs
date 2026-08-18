@@ -143,7 +143,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
-    use sharerr_core::config::TrackerBackend;
 
     /// `Jail` gives each test an isolated cwd and environment, so these are safe
     /// to run in parallel despite touching process-global env vars.
@@ -153,8 +152,32 @@ mod tests {
             let cfg = load(&jail.directory().join("absent.toml")).expect("defaults load");
             assert_eq!(cfg.tag, "sharerr");
             assert_eq!(cfg.server.bind.port(), 8477);
-            assert_eq!(cfg.tracker.backend, TrackerBackend::QbittorrentEmbedded);
             assert!(!cfg.qbittorrent.skip_checking);
+            Ok(())
+        });
+    }
+
+    /// The breaking change the roadmap promised an exact error for: a config
+    /// still naming the removed `tracker.backend` must fail to load with the
+    /// migration story, not a generic "unknown field".
+    #[test]
+    fn a_config_naming_the_removed_tracker_backend_gets_the_migration_error() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "sharerr.toml",
+                "[tracker]\nbackend = \"qbittorrent-embedded\"\n",
+            )?;
+            let err = load(&jail.directory().join("sharerr.toml"))
+                .expect_err("the removed setting must be rejected");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("tracker.backend has been removed"),
+                "the error must say what changed: {rendered}"
+            );
+            assert!(
+                rendered.contains("qbittorrent-embedded"),
+                "the error should quote the stale value: {rendered}"
+            );
             Ok(())
         });
     }

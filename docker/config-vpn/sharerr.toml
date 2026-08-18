@@ -35,14 +35,13 @@ tag = "sharerr"
 skip_checking = false
 
 [tracker]
-backend = "qbittorrent-embedded"
 # The address a *peer* uses, which behind a VPN is the tunnel's exit — not this
 # machine, and not the container. In this stack every peer is the host, so
-# `localhost` and the port gluetun publishes are correct. In a real deployment this
+# `localhost` and sharerr's published port are correct. In a real deployment this
 # is the VPN's forwarded port, and getting it wrong silently produces torrents
 # nobody can announce to.
 advertised_host = "localhost"
-port = 29000
+port = 28477
 
 [sync]
 enabled = false

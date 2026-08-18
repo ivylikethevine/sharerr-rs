@@ -115,4 +115,63 @@
   </p>
   {% endif %}
 </div>
+
+{% if !peers.is_empty() %}
+<h2>Where friends are</h2>
+<p class="hint">
+  sharerr remembers the last few addresses each friend was seen at, and — when a
+  friend also runs sharerr — exchanges signed endpoint records with them, so one
+  friend noticing a moved address is enough for everyone who already knows them.
+  Records are signed by the friend they describe; nobody can rewrite anyone
+  else's address.
+</p>
+
+{% for peer in peers %}
+{% if !peer.revoked %}
+<div class="panel">
+  <h3>{{ peer.label }}</h3>
+  <dl class="facts">
+    <dt>Identity</dt>
+    <dd>
+      {% if let Some(pubkey) = peer.pubkey_short %}
+      <code>{{ pubkey }}</code>
+      {% else %}
+      <span class="hint">not yet introduced — their sharerr has not spoken to yours</span>
+      {% endif %}
+    </dd>
+    <dt>Seen at</dt>
+    <dd>
+      {% if peer.endpoints.is_empty() %}
+      <span class="hint">nowhere yet</span>
+      {% else %}
+      {% for endpoint in peer.endpoints %}
+      <code>{{ endpoint.addr }}</code>
+      <span class="hint">({{ endpoint.kind }}, {{ endpoint.seen }}, {{ endpoint.via }})</span><br>
+      {% endfor %}
+      {% endif %}
+    </dd>
+  </dl>
+
+  <form method="post" action="/peers/{{ peer.id }}/gossip">
+    <label for="gossip_url_{{ peer.id }}">Their sharerr URL</label>
+    <input id="gossip_url_{{ peer.id }}" name="url" value="{{ peer.gossip_url }}"
+           placeholder="https://their-address:8477 — leave empty if they only pull from you">
+
+    <label for="gossip_key_{{ peer.id }}">The key they issued you</label>
+    <input id="gossip_key_{{ peer.id }}" name="key" type="password" autocomplete="off"
+           placeholder="{% if peer.gossip_key_set %}stored — type to replace{% else %}not set{% endif %}">
+    {% if peer.gossip_key_set %}
+    <label class="hint"><input type="checkbox" name="clear_key" value="1"> Remove the stored key</label>
+    {% endif %}
+    <p class="hint">
+      Both fields describe <em>their</em> instance: the URL you reach their
+      sharerr on, and the key they generated for you on their Friends page. With
+      these set, your sharerr exchanges endpoint records with theirs directly.
+    </p>
+    <button type="submit">Save</button>
+  </form>
+</div>
+{% endif %}
+{% endfor %}
+{% endif %}
 {% endblock %}

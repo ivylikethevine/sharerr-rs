@@ -39,6 +39,11 @@ axum = "0.8.9"
 axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
 clap = "4.6.6"
+# Gossip records are signed by the peer they describe; Ed25519 because the keys
+# and signatures are small enough to travel in JSON and the verify cost is
+# nothing next to the HTTP request carrying it. `rand_core` stays off — key
+# material comes from the same `getrandom` path as every other secret.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 figment = "0.10.19"
 # The facade over the futures-util that reqwest and axum already pull in;
 # used for join_all over dynamically-sized sets of independent requests.
@@ -82,6 +87,7 @@ zeroize = "1.9.0"
 sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
 sharerr-client = { version = "0.1.0", path = "crates/sharerr-client" }
 sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
+sharerr-jellyfin = { version = "0.1.0", path = "crates/sharerr-jellyfin" }
 sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
 sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
 sharerr-transmission = { version = "0.1.0", path = "crates/sharerr-transmission" }

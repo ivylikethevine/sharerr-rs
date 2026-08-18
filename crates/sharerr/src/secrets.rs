@@ -23,6 +23,14 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(hex::encode(raw))
 }
 
+/// `N` raw bytes from the same entropy source, for key material that is not a
+/// pasteable secret — the gossip signing seed.
+pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
+    let mut raw = [0u8; N];
+    getrandom::fill(&mut raw).map_err(|err| format!("could not generate key material: {err}"))?;
+    Ok(raw)
+}
+
 /// Compare two secrets without short-circuiting on the first difference.
 ///
 /// A timing attack against a tracker token over a home connection is not a

@@ -43,6 +43,8 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
         // its button is the "library" one above.
         if kind == MediaSource::Directory {
             Outcome::Bad("Unknown service.".to_owned())
+        } else if kind == MediaSource::Jellyfin {
+            jellyfin_badge(&state, &config).await
         } else {
             arr_badge(kind, &state, &config).await
         }
@@ -124,6 +126,51 @@ async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outc
             items.len(),
             config.tag
         )),
+    }
+}
+
+/// The Jellyfin/Emby badge: reachability, the key, and how much the tag covers,
+/// which is the same three questions the *arr badges answer.
+async fn jellyfin_badge(state: &WebState, config: &Config) -> Outcome {
+    let Some(service) = &config.jellyfin else {
+        return Outcome::Bad("No URL configured. Save one first.".to_owned());
+    };
+    let api_key = match state.secret(secret_keys::JELLYFIN_API_KEY).await {
+        Ok(Some(key)) => key,
+        Ok(None) => return Outcome::Bad("No API key stored. Save one first.".to_owned()),
+        Err(reason) => return Outcome::Bad(reason),
+    };
+
+    let client = match sharerr_jellyfin::JellyfinClient::new(&service.url, api_key) {
+        Ok(client) => client,
+        Err(err) => return Outcome::Bad(err.to_string()),
+    };
+
+    let info = match client.system_info().await {
+        Ok(info) => info,
+        Err(sharerr_jellyfin::JellyfinError::AuthRejected) => {
+            return Outcome::Bad("Reached it, but the API key was rejected.".to_owned());
+        }
+        Err(sharerr_jellyfin::JellyfinError::Unreachable { detail, .. }) => {
+            return Outcome::Bad(format!("Could not reach it: {detail}"));
+        }
+        Err(err) => return Outcome::Bad(err.to_string()),
+    };
+
+    match client.discover(&config.tag).await {
+        Ok(items) if items.is_empty() => Outcome::Good(format!(
+            "Connected to {} {}; nothing carries the tag {:?} yet — tag a movie, \
+             series, album, or book there.",
+            info.server_name, info.version, config.tag
+        )),
+        Ok(items) => Outcome::Good(format!(
+            "Connected to {} {}; {} file(s) tagged {:?}.",
+            info.server_name,
+            info.version,
+            items.len(),
+            config.tag
+        )),
+        Err(err) => Outcome::Bad(format!("Connected, but the tag walk failed: {err}")),
     }
 }
 

@@ -50,14 +50,12 @@ pub struct TorrentFile {
     pub size: u64,
 }
 
-/// The subset of `app/preferences` sharerr reads.
+/// One entry from `torrents/trackers`.
 ///
-/// qBittorrent returns well over a hundred keys; the field names here match the
-/// wire format exactly, so no renaming is needed.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Preferences {
+/// qBittorrent lists its DHT/PEX/LSD sources here too, as pseudo-entries whose
+/// `url` starts with `**` — callers that mutate the list must skip those.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrackerEntry {
     #[serde(default)]
-    pub enable_embedded_tracker: bool,
-    #[serde(default)]
-    pub embedded_tracker_port: u16,
+    pub url: String,
 }

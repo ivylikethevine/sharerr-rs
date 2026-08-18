@@ -88,10 +88,6 @@ services:
       - ../tests/fixtures/media:/downloads:ro
     ports:
       - "127.0.0.1:18080:8080"
-      # The embedded tracker. Friends announce here, so it has to be reachable
-      # from outside the container — the detail most easily forgotten in a real
-      # deployment.
-      - "127.0.0.1:19000:9000"
 
   # Opt-in. Neither `run_docker_tests.sh` nor the e2e suite touches Prowlarr — it
   # exists for the manual "add a Generic Torznab indexer" exercise in README.md.

@@ -39,6 +39,10 @@ struct QbitState {
     torrents: Vec<AddedTorrent>,
     removed: Vec<String>,
     add_calls: usize,
+    /// Bodies of `torrents/addTrackers` calls, for the rotation assertions.
+    trackers_added: Vec<String>,
+    /// Bodies of `torrents/removeTrackers` calls.
+    trackers_removed: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +84,6 @@ struct FakeQbit {
 impl FakeQbit {
     async fn mount(&self, server: &MockServer) {
         sharerr_testkit::mock::mount_qbit_login(server).await;
-        sharerr_testkit::mock::mount_qbit_prefs(server, true, 9000).await;
 
         let state = Arc::clone(&self.state);
         Mock::given(method("POST"))
@@ -176,6 +179,40 @@ impl FakeQbit {
             })
             .mount(server)
             .await;
+
+        // The tracker-rotation surface: every torrent reports the harness's
+        // birth announce URL, so a rotated endpoint produces one add and one
+        // remove per torrent.
+        Mock::given(method("GET"))
+            .and(route("/api/v2/torrents/trackers"))
+            .respond_with(move |_: &Request| {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{ "url": STUB_ANNOUNCE, "status": 2 }]))
+            })
+            .mount(server)
+            .await;
+
+        let state = Arc::clone(&self.state);
+        Mock::given(method("POST"))
+            .and(route("/api/v2/torrents/addTrackers"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                state.lock().unwrap().trackers_added.push(body);
+                ResponseTemplate::new(200)
+            })
+            .mount(server)
+            .await;
+
+        let state = Arc::clone(&self.state);
+        Mock::given(method("POST"))
+            .and(route("/api/v2/torrents/removeTrackers"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                state.lock().unwrap().trackers_removed.push(body);
+                ResponseTemplate::new(200)
+            })
+            .mount(server)
+            .await;
     }
 
     fn snapshot(&self) -> QbitSnapshot {
@@ -189,6 +226,8 @@ impl FakeQbit {
                 .collect(),
             removed: state.removed.clone(),
             add_calls: state.add_calls,
+            trackers_added: state.trackers_added.clone(),
+            trackers_removed: state.trackers_removed.clone(),
         }
     }
 }
@@ -197,6 +236,8 @@ struct QbitSnapshot {
     live: Vec<AddedTorrent>,
     removed: Vec<String>,
     add_calls: usize,
+    trackers_added: Vec<String>,
+    trackers_removed: Vec<String>,
 }
 
 /// Pull `name="key"\r\n\r\nvalue` out of a multipart body.
@@ -222,16 +263,35 @@ fn form_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 
 // ------------------------------------------------------------------ harness
 
+/// The announce URL every harness torrent is born with.
+const STUB_ANNOUNCE: &str = "http://sharerr.example:9000/announce";
+
+/// A tracker whose announce URL the test can move, standing in for a gluetun
+/// endpoint rotation.
 #[derive(Debug)]
-struct StubTracker;
+struct StubTracker(Mutex<Url>);
+
+impl Default for StubTracker {
+    fn default() -> Self {
+        Self(Mutex::new(Url::parse(STUB_ANNOUNCE).unwrap()))
+    }
+}
+
+impl StubTracker {
+    fn rotate(&self, url: &str) {
+        *self.0.lock().unwrap() = Url::parse(url).unwrap();
+    }
+}
 
 #[async_trait]
 impl TrackerProvider for StubTracker {
     async fn ensure_ready(&self) -> sharerr_torrent::Result<()> {
         Ok(())
     }
-    async fn announce_url(&self) -> sharerr_torrent::Result<Url> {
-        Ok(Url::parse("http://sharerr.example:9000/announce").unwrap())
+    async fn announce_set(&self) -> sharerr_torrent::Result<sharerr_torrent::AnnounceSet> {
+        Ok(sharerr_torrent::AnnounceSet::single(
+            self.0.lock().unwrap().clone(),
+        ))
     }
 }
 
@@ -239,8 +299,10 @@ struct Harness {
     syncer: Syncer,
     qbit: FakeQbit,
     library: TvLibrary,
+    /// A handle on the syncer's tracker, so a test can rotate its endpoint.
+    tracker: Arc<StubTracker>,
     _media: tempfile::TempDir,
-    _torrents: tempfile::TempDir,
+    torrents: tempfile::TempDir,
     _sonarr: MockServer,
     _qbit_server: MockServer,
 }
@@ -313,11 +375,12 @@ async fn harness(series_json: Value) -> Harness {
         torrent_dir: torrents.path().to_path_buf(),
     };
 
+    let tracker = Arc::new(StubTracker::default());
     let syncer = Syncer::new(
         config,
         Store::open_in_memory().await.unwrap(),
         vec![Box::new(sonarr)],
-        Arc::new(StubTracker),
+        Arc::clone(&tracker) as Arc<dyn TrackerProvider>,
         seeder,
     );
 
@@ -325,8 +388,9 @@ async fn harness(series_json: Value) -> Harness {
         syncer,
         qbit: qbit_mock,
         library: lib,
+        tracker,
         _media: media,
-        _torrents: torrents,
+        torrents,
         _sonarr: sonarr_server,
         _qbit_server: qbit_server,
     }
@@ -363,6 +427,64 @@ fn file_identity(path: &Path) -> (u64, std::time::SystemTime, u64) {
 }
 
 // ------------------------------------------------------------------ tests
+
+/// The gluetun rotation story, end to end through the sync loop: when the
+/// advertised endpoint moves between passes, the next pass rewrites every cached
+/// `.torrent` to the new announce URL and repoints the client's tracker lists —
+/// without re-adding anything.
+#[tokio::test]
+async fn a_rotated_endpoint_rewrites_torrents_and_repoints_the_client() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    h.tracker.rotate("http://203.0.113.9:41234/announce");
+    let report = h.syncer.run(false).await.unwrap();
+
+    // Still a no-op as far as shares go: nothing added, nothing withdrawn.
+    assert_eq!(report.unchanged, 2);
+    assert_eq!(report.added, 0);
+    let snapshot = h.qbit.snapshot();
+    assert_eq!(snapshot.add_calls, 2, "rotation must not re-add torrents");
+
+    // The client's tracker lists were repointed: new URL added, old removed.
+    assert_eq!(snapshot.trackers_added.len(), 2);
+    assert!(
+        snapshot
+            .trackers_added
+            .iter()
+            .all(|body| body.contains("203.0.113.9")),
+        "{:?}",
+        snapshot.trackers_added
+    );
+    assert_eq!(snapshot.trackers_removed.len(), 2);
+    assert!(
+        snapshot
+            .trackers_removed
+            .iter()
+            .all(|body| body.contains("sharerr.example")),
+        "{:?}",
+        snapshot.trackers_removed
+    );
+
+    // And the cached .torrent files — what the feed serves a friend — carry the
+    // new endpoint.
+    let items = h.syncer.store().all_items().await.unwrap();
+    for item in &items {
+        let hash = item.info_hash.as_deref().unwrap();
+        let path = sharerr_torrent::torrent_file_path(h.torrents.path(), hash);
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(
+            sharerr_torrent::read_announce(&data).unwrap().as_deref(),
+            Some("http://203.0.113.9:41234/announce")
+        );
+    }
+
+    // A third pass changes nothing: the files already match, so no tracker
+    // calls are issued at all.
+    h.syncer.run(false).await.unwrap();
+    let settled = h.qbit.snapshot();
+    assert_eq!(settled.trackers_added.len(), 2, "rotation must be idempotent");
+}
 
 #[tokio::test]
 async fn a_first_sync_shares_every_tagged_file() {

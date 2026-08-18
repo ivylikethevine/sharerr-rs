@@ -6,7 +6,6 @@
 //! test's specific choreography (expected call counts, staged responses) stays
 //! with that test; only the plain building blocks live here.
 
-use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -41,17 +40,4 @@ pub async fn mount_qbit_login(server: &MockServer) {
         .respond_with(ResponseTemplate::new(204))
         .mount(server)
         .await;
-}
-
-/// qBittorrent's preferences endpoint, reporting the embedded tracker's state.
-pub async fn mount_qbit_prefs(server: &MockServer, tracker_enabled: bool, tracker_port: u16) {
-    mount_json(
-        server,
-        "/api/v2/app/preferences",
-        json!({
-            "enable_embedded_tracker": tracker_enabled,
-            "embedded_tracker_port": tracker_port,
-        }),
-    )
-    .await;
 }

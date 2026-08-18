@@ -134,12 +134,10 @@
 
 <h2>Tracker</h2>
 <form method="post" action="/settings/tracker" class="panel">
-  <label for="backend">Backend</label>
-  <select id="backend" name="backend" {% call lock_attr("tracker.backend") %}{% endcall %}>
-    <option value="qbittorrent-embedded" {% if !tracker_builtin %}selected{% endif %}>qBittorrent's embedded tracker</option>
-    <option value="builtin" {% if tracker_builtin %}selected{% endif %}>sharerr's builtin tracker (served by this instance)</option>
-  </select>
-  {% call locked("tracker.backend") %}{% endcall %}
+  <p class="hint">
+    sharerr serves announces itself, from this instance, whichever torrent client
+    seeds. It answers only for torrents sharerr made.
+  </p>
 
   <label for="advertised_host">Advertised host</label>
   <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
@@ -153,9 +151,19 @@
 
   <label for="tracker_port">Announce port</label>
   <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"
-         placeholder="default: whatever qBittorrent reports"
+         placeholder="default: this server's own port"
          {% call lock_attr("tracker.port") %}{% endcall %}>
   {% call locked("tracker.port") %}{% endcall %}
+
+  <label for="advertised_url">Advertised URL (advanced)</label>
+  <input id="advertised_url" name="advertised_url" value="{{ tracker_advertised_url }}"
+         placeholder="e.g. https://example.com/sharerr — overrides host and port"
+         {% call lock_attr("tracker.advertised_url") %}{% endcall %}>
+  {% call locked("tracker.advertised_url") %}{% endcall %}
+  <p class="hint">
+    For reverse-proxied or IPv6 setups: a full base URL with scheme and any path
+    prefix. When set, it wins over the host and port above.
+  </p>
 
   <label for="tracker_token">Tracker token</label>
   <input id="tracker_token" name="token" type="password" autocomplete="off"
@@ -165,23 +173,50 @@
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
   {% endif %}
   <p class="hint">
-    Only used by the builtin tracker. When set, it is embedded in every announce
-    URL, so holding the <code>.torrent</code> is what grants the right to announce.
-    Changing it invalidates torrents already published — leave it alone unless you
-    mean to cut off existing peers.
+    When set, the token is embedded in every announce URL, so holding the
+    <code>.torrent</code> is what grants the right to announce. Changing it
+    invalidates torrents already published — leave it alone unless you mean to
+    cut off existing peers.
   </p>
 
   <button type="submit">Save</button>
 </form>
 
-{% if tracker_builtin %}
 <form method="post" action="/settings/generate/tracker" class="panel">
   <p class="hint">sharerr is serving its own tracker on this instance.</p>
   <button type="submit" class="secondary" {% if !master_key_present %}disabled{% endif %}>
     {% if tracker_token_set %}Replace the announce token{% else %}Generate an announce token{% endif %}
   </button>
 </form>
-{% endif %}
+
+<h2>Gluetun</h2>
+<form method="post" action="/settings/gluetun" class="panel">
+  <p class="hint">
+    Behind a VPN with a forwarded port, the address friends reach you on changes
+    on every reconnect. Point this at gluetun's control server and sharerr
+    resolves its public IP and forwarded port from there, re-announcing and
+    rewriting torrents when they change — instead of trusting the static address
+    above.
+  </p>
+
+  <label for="gluetun_control_url">Control server URL</label>
+  <input id="gluetun_control_url" name="control_url" value="{{ gluetun_control_url }}"
+         placeholder="http://localhost:8000 — leave empty to disable"
+         {% call lock_attr("gluetun.control_url") %}{% endcall %}>
+  {% call locked("gluetun.control_url") %}{% endcall %}
+
+  <label for="gluetun_poll_secs">Poll interval (seconds)</label>
+  <input id="gluetun_poll_secs" name="poll_secs" value="{{ gluetun_poll_secs }}" inputmode="numeric"
+         {% call lock_attr("gluetun.poll_secs") %}{% endcall %}>
+  {% call locked("gluetun.poll_secs") %}{% endcall %}
+  <p class="hint">
+    The poll is the safety net; for reconnects to be picked up in seconds, set
+    gluetun's <code>VPN_PORT_FORWARDING_UP_COMMAND</code> to hit
+    <code>/gluetun/refresh</code> on this instance.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
 
 <h2>Indexer (Torznab)</h2>
 <div class="panel">

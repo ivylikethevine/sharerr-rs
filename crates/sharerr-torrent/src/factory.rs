@@ -3,8 +3,6 @@
 use std::path::{Path, PathBuf};
 
 use lava_torrent::torrent::v1::TorrentBuilder;
-use url::Url;
-
 use crate::error::{Result, TorrentError};
 
 /// What to build a torrent over.
@@ -18,8 +16,9 @@ use crate::error::{Result, TorrentError};
 pub struct TorrentRequest<'a> {
     /// The file to hash, as **sharerr** sees it (not the *arr or qBittorrent view).
     pub path: &'a Path,
-    /// Where peers announce. Every sharerr torrent has exactly one.
-    pub announce: &'a Url,
+    /// Where peers announce: the current endpoint first, then the recently held
+    /// ones as fallback tiers.
+    pub announce: &'a crate::AnnounceSet,
 }
 
 /// A finished torrent, in memory.
@@ -75,16 +74,21 @@ impl LavaTorrentFactory {
         let size = metadata.len();
         let piece_length = piece_length_for(size);
 
-        let torrent = TorrentBuilder::new(path, piece_length as i64)
-            .set_announce(Some(request.announce.to_string()))
+        let mut builder = TorrentBuilder::new(path, piece_length as i64)
+            .set_announce(Some(request.announce.primary.to_string()))
             // Friend-to-friend sharing must not leak into the public DHT or PEX.
             // This is the whole reason the tracker exists.
-            .set_privacy(true)
-            .build()
-            .map_err(|source| TorrentError::Build {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            .set_privacy(true);
+        // An announce *list* only when there is genuinely more than one endpoint:
+        // BEP 12 clients ignore `announce` the moment the list exists, so a
+        // one-entry list would only add bytes and change nothing.
+        if let Some(tiers) = request.announce.tier_list() {
+            builder = builder.set_announce_list(tiers);
+        }
+        let torrent = builder.build().map_err(|source| TorrentError::Build {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         let info_hash = torrent.info_hash();
         let data = torrent.encode().map_err(|source| TorrentError::Encode {
@@ -142,6 +146,34 @@ pub fn piece_length_for(size: u64) -> u64 {
 /// Where sharerr keeps a copy of each `.torrent` it has produced.
 pub fn torrent_file_path(dir: &Path, info_hash: &str) -> PathBuf {
     dir.join(format!("{info_hash}.torrent"))
+}
+
+/// The primary announce URL a stored `.torrent` carries.
+///
+/// This is what decides whether a rotation of the advertised endpoint has left a
+/// torrent pointing somewhere stale — see [`rewrite_announce`].
+pub fn read_announce(data: &[u8]) -> Result<Option<String>> {
+    let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
+        .map_err(|source| TorrentError::Reparse { source })?;
+    Ok(torrent.announce)
+}
+
+/// Rewrite a stored `.torrent`'s announce URL and tiers, leaving everything else
+/// — the info dictionary above all — untouched.
+///
+/// The announce fields live *outside* the info dictionary, so the info hash is
+/// unchanged: the rewritten file still describes the same torrent, every client
+/// already seeding it keeps its identity, and only where it announces moves. This
+/// is what makes a rotated gluetun port survivable — the feed serves the
+/// rewritten file, and a friend who re-downloads it gets the live endpoint.
+pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Vec<u8>> {
+    let mut torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
+        .map_err(|source| TorrentError::Reparse { source })?;
+
+    torrent.announce = Some(announce.primary.to_string());
+    torrent.announce_list = announce.tier_list();
+
+    torrent.encode().map_err(|source| TorrentError::Reencode { source })
 }
 
 #[cfg(test)]

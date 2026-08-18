@@ -417,6 +417,12 @@ fn imdb_matches(stored: Option<&str>, wanted: &str) -> bool {
 pub fn routes(serve: Arc<ServeState>) -> axum::Router {
     axum::Router::new()
         .route("/api", axum::routing::get(api))
+        // Gossip rides the same per-peer-key authentication as the feed — the
+        // whole point of putting it under /api rather than a second surface.
+        .route(
+            "/api/gossip/endpoints",
+            axum::routing::get(crate::gossip::pull).post(crate::gossip::push),
+        )
         .with_state(Arc::clone(&serve))
         // Jackett's URL shapes, both the Torznab one and the admin surface.
         .merge(crate::jackett::routes(serve))
@@ -546,11 +552,21 @@ async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Re
 /// authenticates nobody in particular, so it carries [`PeerScope::All`]; the
 /// Friends page warns while it is set that revoking a peer does not fully cut
 /// them off.
-pub(crate) struct Caller(PeerScope);
+pub(crate) struct Caller {
+    scope: PeerScope,
+    /// Which peer row authenticated, or `None` for the legacy shared key. The
+    /// gossip endpoints require a real peer — an anonymous key cannot take part
+    /// in an exchange whose whole point is knowing who said what.
+    peer_id: Option<i64>,
+}
 
 impl Caller {
     pub fn scope(&self) -> PeerScope {
-        self.0
+        self.scope
+    }
+
+    pub fn peer_id(&self) -> Option<i64> {
+        self.peer_id
     }
 }
 
@@ -576,7 +592,15 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
             .map(|query| query.0.apikey)
             .unwrap_or_default();
 
-        check_api_key(state, apikey.as_deref()).await
+        // The source address, when the server was built with connect-info —
+        // observed for peer endpoint memory, never required: authentication
+        // works the same without it.
+        let remote = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip());
+
+        check_api_key(state, apikey.as_deref(), remote).await
     }
 }
 
@@ -594,7 +618,11 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
 /// Neither present means the endpoint is closed rather than open: an indexer
 /// feed lists everything this instance shares, and defaulting to
 /// unauthenticated would publish the library to anyone who found the port.
-async fn check_api_key(state: &ServeState, supplied: Option<&str>) -> Result<Caller, Response> {
+async fn check_api_key(
+    state: &ServeState,
+    supplied: Option<&str>,
+    remote: Option<std::net::IpAddr>,
+) -> Result<Caller, Response> {
     let refused = || {
         xml_status(
             StatusCode::UNAUTHORIZED,
@@ -617,15 +645,44 @@ async fn check_api_key(state: &ServeState, supplied: Option<&str>) -> Result<Cal
                 // Recorded after authenticating, and failure to record is not
                 // failure to authenticate: a read-only or busy database should not
                 // take the feed down.
-                if let Err(err) = store.touch_peer(peer.id).await {
-                    tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
+                match store.touch_peer(peer.id).await {
+                    // The touch fired, so its five-minute throttle also gates the
+                    // endpoint observation — a Prowlarr RSS burst records one
+                    // sighting, not one per request.
+                    Ok(true) => {
+                        if let Some(remote) = remote {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            if let Err(err) = store
+                                .record_peer_endpoint(
+                                    peer.id,
+                                    sharerr_store::EndpointKind::Api,
+                                    &remote.to_string(),
+                                    now,
+                                    sharerr_store::ObservedVia::Direct,
+                                )
+                                .await
+                            {
+                                tracing::warn!(peer = %peer.label, error = %err, "could not record peer address");
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
+                    }
                 }
                 tracing::debug!(
                     peer = %peer.label,
                     scope = peer.scope.as_str(),
                     "torznab request authenticated"
                 );
-                return Ok(Caller(peer.scope));
+                return Ok(Caller {
+                    scope: peer.scope,
+                    peer_id: Some(peer.id),
+                });
             }
             Ok(None) => {}
             Err(err) => {
@@ -649,7 +706,10 @@ async fn check_api_key(state: &ServeState, supplied: Option<&str>) -> Result<Cal
         && crate::secrets::constant_time_eq(&stored, supplied)
     {
         tracing::debug!("torznab request authenticated with the shared key");
-        return Ok(Caller(PeerScope::All));
+        return Ok(Caller {
+            scope: PeerScope::All,
+            peer_id: None,
+        });
     }
 
     tracing::warn!("rejected a torznab request with a bad api key");

@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
-use sharerr_core::config::{TrackerBackend, config_paths, secret_keys};
+use sharerr_core::config::{config_paths, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
@@ -113,16 +113,18 @@ pub struct QbitForm {
 
 #[derive(Debug, Deserialize)]
 pub struct TrackerForm {
-    /// Strictly one of [`TrackerBackend`]'s kebab-case names. An unknown value
-    /// fails deserialization rather than silently falling back — the old
-    /// `_ => "qbittorrent-embedded"` arm meant a stale option value could
-    /// switch a Transmission setup's tracker out from under it.
-    backend: TrackerBackend,
     advertised_host: String,
     port: String,
+    advertised_url: String,
     token: String,
     #[serde(default)]
     clear_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GluetunForm {
+    control_url: String,
+    poll_secs: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -292,10 +294,10 @@ pub async fn save_tracker(
     }
 
     write_config(&state, "tracker", |file| {
-        let mut edits = vec![
-            Edit::str(config_paths::TRACKER_BACKEND, form.backend.as_str()),
-            Edit::str_or_unset(config_paths::TRACKER_ADVERTISED_HOST, &form.advertised_host),
-        ];
+        let mut edits = vec![Edit::str_or_unset(
+            config_paths::TRACKER_ADVERTISED_HOST,
+            &form.advertised_host,
+        )];
 
         let port = form.port.trim();
         if port.is_empty() {
@@ -307,7 +309,56 @@ pub async fn save_tracker(
             edits.push(Edit::int(config_paths::TRACKER_PORT, i64::from(parsed)));
         }
 
+        let advertised_url = form.advertised_url.trim();
+        if advertised_url.is_empty() {
+            edits.push(Edit::unset(config_paths::TRACKER_ADVERTISED_URL));
+        } else {
+            // Validated here rather than at the next sync: a URL that does not
+            // parse would otherwise store fine and surface later as torrents
+            // nobody can announce to.
+            edits.push(Edit::str(
+                config_paths::TRACKER_ADVERTISED_URL,
+                normalise_url(advertised_url)?,
+            ));
+        }
+
         file.apply(edits);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn save_gluetun(
+    State(state): State<WebState>,
+    Form(form): Form<GluetunForm>,
+) -> Response {
+    write_config(&state, "gluetun", |file| {
+        let url = form.control_url.trim();
+        if url.is_empty() {
+            file.apply([Edit::unset(config_paths::GLUETUN_CONTROL_URL)]);
+        } else {
+            file.apply([Edit::str(
+                config_paths::GLUETUN_CONTROL_URL,
+                normalise_url(url)?,
+            )]);
+        }
+
+        let poll = form.poll_secs.trim();
+        if !poll.is_empty() {
+            let secs: u64 = poll.parse().map_err(|_| {
+                anyhow::anyhow!("the poll interval must be a whole number of seconds")
+            })?;
+            if secs < sharerr_core::config::GluetunConfig::MIN_POLL_SECS {
+                anyhow::bail!(
+                    "the poll interval must be at least {} seconds",
+                    sharerr_core::config::GluetunConfig::MIN_POLL_SECS
+                );
+            }
+            file.apply([Edit::int(
+                config_paths::GLUETUN_POLL_SECS,
+                i64::try_from(secs).unwrap_or(60),
+            )]);
+        }
         Ok(())
     })
     .await
@@ -564,15 +615,16 @@ pub(super) fn title_case(name: &str) -> String {
 /// The example URL shown in each app's empty URL field: its documented default
 /// port, which is the strongest hint a placeholder can give.
 fn url_placeholder(source: MediaSource) -> &'static str {
-    use MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    use MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
     match source {
         Sonarr => "http://sonarr:8989",
         Radarr => "http://radarr:7878",
         Lidarr => "http://lidarr:8686",
         Readarr => "http://readarr:8787",
         Whisparr => "http://whisparr:6969",
-        // Never rendered — the page loops `MediaSource::ARRS` — but the match
-        // must stay total, and a directory has no URL to hint at.
+        Jellyfin => "http://jellyfin:8096",
+        // Never rendered — the page loops the URL-bearing sources — but the
+        // match must stay total, and a directory has no URL to hint at.
         Directory => "",
     }
 }
@@ -594,6 +646,10 @@ async fn build_page(
     let arrs = MediaSource::ARRS
         .iter()
         .copied()
+        // Jellyfin is not an *arr app, but it configures like one — a URL here,
+        // an API key in the vault — so it renders as one more section of the
+        // same loop rather than a hand-built copy of it.
+        .chain(std::iter::once(MediaSource::Jellyfin))
         .filter_map(|kind| {
             let url_path = config_paths::url_for(kind)?;
             let key = secret_keys::api_key_for(kind)?;
@@ -650,14 +706,27 @@ async fn build_page(
         qbit_tag: config.qbittorrent.tag.clone(),
         qbit_skip_checking: config.qbittorrent.skip_checking,
 
-        tracker_builtin: matches!(config.tracker.backend, TrackerBackend::Builtin),
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
         tracker_port: config
             .tracker
             .port
             .map(|p| p.to_string())
             .unwrap_or_default(),
+        tracker_advertised_url: config
+            .tracker
+            .advertised_url
+            .as_ref()
+            .map(url::Url::to_string)
+            .unwrap_or_default(),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
+        gluetun_control_url: config
+            .gluetun
+            .control_url
+            .as_ref()
+            .map(url::Url::to_string)
+            .unwrap_or_default(),
+        gluetun_poll_secs: config.gluetun.poll_secs,
+
         torznab_key_set: is_set(secret_keys::TORZNAB_API_KEY),
         torznab_url: format!("{}/api", config.public_base_url()),
         revealed: None,

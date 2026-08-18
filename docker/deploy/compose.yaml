@@ -18,12 +18,12 @@
 #     outside it. Here sharerr is inside too.)
 #   * **`ports:` belongs to gluetun.** Declaring `ports:` on a service that uses
 #     `network_mode: service:` is a compose error, not a no-op.
-#   * **One port space.** 8080, 8477, 9000, 6881 and gluetun's own 8000 control
+#   * **One port space.** 8080, 8477, 6881 and gluetun's own 8000 control
 #     server all have to be distinct, even though they belong to different
 #     containers. A collision here looks like a service that starts and then
 #     refuses connections.
 #
-# ## The five ports
+# ## The four ports
 #
 # Published to the host (the two WebUIs), bound to loopback — put a reverse proxy
 # in front of these rather than opening them to the LAN:
@@ -34,8 +34,8 @@
 # Reachable from the internet through the tunnel (`FIREWALL_VPN_INPUT_PORTS`):
 #
 #   6881  qBittorrent's BitTorrent listening port — inbound peer connections
-#   9000  qBittorrent's embedded tracker — where friends announce
-#   8477  sharerr's HTTP port — the Torznab feed friends' Prowlarr fetches
+#   8477  sharerr's HTTP port — where friends announce, and the Torznab feed
+#         their Prowlarr fetches
 #
 # 8477 appears in both lists on purpose. It is one listener with two audiences:
 # your browser arrives over the published docker port, a friend's indexer arrives
@@ -95,7 +95,7 @@ services:
       # Through the tunnel: the two things friends connect to, plus the peer
       # listener. This is the line that decides whether anyone outside can reach
       # what this instance shares.
-      FIREWALL_VPN_INPUT_PORTS: "6881,9000,8477"
+      FIREWALL_VPN_INPUT_PORTS: "6881,8477"
       # Through the default interface: the two WebUIs, arriving via the published
       # ports below. Without this the killswitch drops them and both UIs appear
       # dead from the host.
@@ -116,15 +116,19 @@ services:
       # --- provider port forwarding (optional) ------------------------------
       #
       # Uncomment for a provider that supports it. You get one port, chosen by
-      # them. The up-command hands it to qBittorrent so the listener follows it
-      # across reconnects — without that, a rotated port means no inbound peers
-      # and nothing says so.
+      # them, on an exit address that also rotates. sharerr's `[gluetun]` config
+      # section (see config/sharerr.toml) polls the control server on :8000 for
+      # both values and keeps every torrent's announce URL in step; the
+      # up-command below makes a reconnect picked up in seconds instead of at
+      # the next poll. sharerr is in this same namespace, so `localhost` is
+      # correct — and the endpoint only *nudges* sharerr to re-ask gluetun, it
+      # takes no value, so there is no port to template into it.
       #
       # VPN_PORT_FORWARDING: "on"
       # VPN_PORT_FORWARDING_PROVIDER: ${VPN_SERVICE_PROVIDER}
       # VPN_PORT_FORWARDING_STATUS_FILE: /gluetun/forwarded_port
       # VPN_PORT_FORWARDING_UP_COMMAND: >-
-      #   /bin/sh -c 'wget -qO- --header="Authorization: Bearer {{PORTS}}" ...'
+      #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/refresh'
 
       TZ: ${TZ:-Etc/UTC}
     ports:

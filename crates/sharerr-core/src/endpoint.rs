@@ -1,0 +1,419 @@
+//! The one resolver for this instance's externally reachable address.
+//!
+//! Before this module existed, `Config::public_base_url()` and the tracker
+//! provider each built the same `http://{host}:{port}` out of the same two config
+//! fields by different routes — a drift waiting to happen the moment the endpoint
+//! starts changing at runtime. Everything that needs "the URL a friend reaches
+//! this instance on" now comes through [`advertised_base`], and everything that
+//! appends a path to it goes through [`join_path`].
+//!
+//! The resolver is also where the endpoint became *expressive*: the old
+//! construction had no scheme, no path prefix, and no brackets for an IPv6
+//! literal, which is exactly where reverse-proxied and IPv6 self-hosted setups
+//! break. `tracker.advertised_url` carries all three; `advertised_host` stays for
+//! the plain case and gains the IPv6 bracketing it never had.
+
+use std::net::Ipv6Addr;
+use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use url::Url;
+
+use crate::config::TrackerConfig;
+
+/// What stops an advertised address becoming a URL.
+#[derive(Debug, thiserror::Error)]
+pub enum EndpointError {
+    #[error("could not build a URL from advertised host {host:?} port {port}: {source}")]
+    BadHost {
+        host: String,
+        port: u16,
+        #[source]
+        source: url::ParseError,
+    },
+}
+
+/// The configured base URL friends reach this instance on, or `None` when the
+/// operator has not said.
+///
+/// `tracker.advertised_url` wins when set — it is the expressive form, carrying
+/// scheme, port, and path prefix in one value. Otherwise `advertised_host` (plus
+/// `tracker.port`, falling back to `server_port`) builds the plain
+/// `http://host:port` every earlier version advertised. An IPv6 literal host is
+/// bracketed, which the old `format!` never did.
+pub fn advertised_base(tracker: &TrackerConfig, server_port: u16) -> Result<Option<Url>, EndpointError> {
+    if let Some(url) = &tracker.advertised_url {
+        return Ok(Some(url.clone()));
+    }
+
+    let Some(host) = tracker.advertised_host.as_deref() else {
+        return Ok(None);
+    };
+    let port = tracker.port.unwrap_or(server_port);
+    let host = bracket_ipv6(host);
+
+    Url::parse(&format!("http://{host}:{port}"))
+        .map(Some)
+        .map_err(|source| EndpointError::BadHost {
+            host: host.into_owned(),
+            port,
+            source,
+        })
+}
+
+/// A base URL rendered without its trailing slash, so `format!("{base}{path}")`
+/// composes correctly. `Url` prints a bare origin as `http://host:8477/`, and
+/// that slash would otherwise double up against every path constant.
+pub fn base_string(base: &Url) -> String {
+    let mut rendered = base.to_string();
+    while rendered.ends_with('/') {
+        rendered.pop();
+    }
+    rendered
+}
+
+/// `base` with `path` appended, keeping any path prefix the base carries.
+///
+/// Deliberately not `Url::join`: joining an absolute path *replaces* the base's
+/// path, which silently strips the `/sharerr` prefix a reverse-proxied setup
+/// depends on. `path` must start with `/`.
+pub fn join_path(base: &Url, path: &str) -> String {
+    debug_assert!(path.starts_with('/'), "join_path takes an absolute path");
+    format!("{}{path}", base_string(base))
+}
+
+/// Wrap a bare IPv6 literal in the brackets a URL authority requires.
+fn bracket_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
+    if !host.starts_with('[') && host.parse::<Ipv6Addr>().is_ok() {
+        std::borrow::Cow::Owned(format!("[{host}]"))
+    } else {
+        std::borrow::Cow::Borrowed(host)
+    }
+}
+
+/// How many dynamically observed endpoints are remembered.
+///
+/// Enough to span a few VPN reconnects — each one changes the forwarded port, and
+/// a torrent already sitting in a friend's client keeps whatever announce list it
+/// downloaded with. More would pad every `.torrent` with tiers that are almost
+/// certainly dead.
+const MAX_DYNAMIC_HISTORY: usize = 4;
+
+/// One dynamically observed base, with when it was last seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedBase {
+    pub base: Url,
+    /// Unix seconds of the most recent observation.
+    pub observed_at: i64,
+}
+
+/// The externally reachable endpoint, as a live value rather than a config field.
+///
+/// The deployment sharerr is built for — behind gluetun, on a provider-granted
+/// forwarded port — has neither a stable public IP nor a stable inbound port, so
+/// "the address friends reach this instance on" is *resolved*, not typed. This
+/// type is the one place that answer lives: the static base from configuration,
+/// plus whatever the gluetun poller (or its push nudge) has observed, most recent
+/// first.
+///
+/// A short history is kept on purpose. A reconnect that briefly returns an old
+/// exit is remembered rather than trusted alone, and the history becomes the
+/// announce *list* in every torrent built — so a rotated port leaves a friend's
+/// client with older tiers to fall back through instead of one dead address.
+///
+/// `std::sync::RwLock`, not tokio's: every operation is a few pointer moves, and
+/// no guard is ever held across an `.await`.
+#[derive(Debug)]
+pub struct AdvertisedEndpoint {
+    inner: RwLock<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
+    static_base: Option<Url>,
+    /// Most recent first.
+    dynamic: Vec<ObservedBase>,
+}
+
+impl AdvertisedEndpoint {
+    pub fn new(static_base: Option<Url>) -> Self {
+        Self {
+            inner: RwLock::new(Inner {
+                static_base,
+                dynamic: Vec::new(),
+            }),
+        }
+    }
+
+    /// Build from configuration, with no dynamic observations yet.
+    pub fn from_tracker(tracker: &TrackerConfig, server_port: u16) -> Result<Self, EndpointError> {
+        Ok(Self::new(advertised_base(tracker, server_port)?))
+    }
+
+    /// Adopt a rewritten configuration without losing the dynamic history.
+    ///
+    /// The settings page can change `advertised_host` while the poller has a
+    /// perfectly good observed endpoint; replacing this whole value would forget
+    /// it and briefly advertise the stale static address.
+    pub fn set_static(&self, static_base: Option<Url>) {
+        if let Ok(mut inner) = self.inner.write() {
+            inner.static_base = static_base;
+        }
+    }
+
+    /// The base URL to advertise right now: the most recent observation, or the
+    /// configured static base when nothing has been observed.
+    ///
+    /// Observation wins over configuration — the poller asked gluetun seconds
+    /// ago; the config field was typed once. An operator who wants the static
+    /// value to win simply does not configure the poller.
+    pub fn current(&self) -> Option<Url> {
+        let inner = self.inner.read().ok()?;
+        inner
+            .dynamic
+            .first()
+            .map(|o| o.base.clone())
+            .or_else(|| inner.static_base.clone())
+    }
+
+    /// Record an observed base. Returns `true` when this *changes* the current
+    /// endpoint — the signal to rewrite announce lists and wake the sync loop.
+    ///
+    /// Re-observing the current endpoint refreshes its timestamp and returns
+    /// `false`; re-observing an *older* one promotes it back to the front, the
+    /// way a reconnect that lands on a previous exit really does move the
+    /// reachable address back there.
+    pub fn observe(&self, base: Url) -> bool {
+        let Ok(mut inner) = self.inner.write() else {
+            return false;
+        };
+        let now = now_epoch();
+
+        if let Some(front) = inner.dynamic.first_mut()
+            && front.base == base
+        {
+            front.observed_at = now;
+            return false;
+        }
+
+        inner.dynamic.retain(|o| o.base != base);
+        inner.dynamic.insert(
+            0,
+            ObservedBase {
+                base,
+                observed_at: now,
+            },
+        );
+        inner.dynamic.truncate(MAX_DYNAMIC_HISTORY);
+        true
+    }
+
+    /// Every base worth announcing on, most current first: the dynamic history,
+    /// then the static base if it is not already among them. This is the announce
+    /// list a newly built torrent carries.
+    pub fn recent(&self) -> Vec<Url> {
+        let Ok(inner) = self.inner.read() else {
+            return Vec::new();
+        };
+        let mut bases: Vec<Url> = inner.dynamic.iter().map(|o| o.base.clone()).collect();
+        if let Some(static_base) = &inner.static_base
+            && !bases.contains(static_base)
+        {
+            bases.push(static_base.clone());
+        }
+        bases
+    }
+
+    /// The dynamic observations, most recent first, for status pages and doctor.
+    pub fn observations(&self) -> Vec<ObservedBase> {
+        self.inner
+            .read()
+            .map(|inner| inner.dynamic.clone())
+            .unwrap_or_default()
+    }
+}
+
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn tracker(host: Option<&str>, port: Option<u16>, url: Option<&str>) -> TrackerConfig {
+        TrackerConfig {
+            backend: (),
+            advertised_host: host.map(str::to_owned),
+            port,
+            advertised_url: url.map(|u| Url::parse(u).unwrap()),
+            bind: None,
+        }
+    }
+
+    #[test]
+    fn nothing_configured_resolves_to_nothing() {
+        assert!(
+            advertised_base(&tracker(None, None, None), 8477)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_plain_host_builds_the_classic_url() {
+        let base = advertised_base(&tracker(Some("sharerr.example"), None, None), 8477)
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_string(&base), "http://sharerr.example:8477");
+
+        let with_port = advertised_base(&tracker(Some("sharerr.example"), Some(9000), None), 8477)
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_string(&with_port), "http://sharerr.example:9000");
+    }
+
+    /// The failure the old `format!` shipped: `http://2001:db8::1:8477` is not a
+    /// URL anyone can parse, and nothing said so.
+    #[test]
+    fn an_ipv6_literal_gains_brackets() {
+        let base = advertised_base(&tracker(Some("2001:db8::1"), None, None), 8477)
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_string(&base), "http://[2001:db8::1]:8477");
+
+        // Already bracketed stays as it is.
+        let bracketed = advertised_base(&tracker(Some("[2001:db8::1]"), None, None), 8477)
+            .unwrap()
+            .unwrap();
+        assert_eq!(base_string(&bracketed), "http://[2001:db8::1]:8477");
+    }
+
+    /// The expressive form: scheme, non-default path prefix, and its own port —
+    /// exactly what a reverse-proxied deployment needs and the host field cannot
+    /// say.
+    #[test]
+    fn an_advertised_url_wins_and_keeps_its_prefix() {
+        let config = tracker(
+            // The host is deliberately also set: the URL must win, or two fields
+            // would fight and the loser would be silently ignored.
+            Some("ignored.example"),
+            Some(1234),
+            Some("https://proxy.example/sharerr"),
+        );
+        let base = advertised_base(&config, 8477).unwrap().unwrap();
+
+        assert_eq!(base_string(&base), "https://proxy.example/sharerr");
+        assert_eq!(
+            join_path(&base, "/announce"),
+            "https://proxy.example/sharerr/announce",
+            "Url::join would have replaced the prefix; this must append"
+        );
+    }
+
+    #[test]
+    fn join_path_survives_a_bare_origin() {
+        let base = Url::parse("http://sharerr.example:8477").unwrap();
+        assert_eq!(
+            join_path(&base, "/announce"),
+            "http://sharerr.example:8477/announce"
+        );
+    }
+
+    // ---------------------------------------------------- the live endpoint
+
+    fn url(raw: &str) -> Url {
+        Url::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn with_no_observations_the_static_base_is_current() {
+        let endpoint = AdvertisedEndpoint::new(Some(url("http://static.example:8477")));
+        assert_eq!(endpoint.current(), Some(url("http://static.example:8477")));
+        assert_eq!(endpoint.recent(), vec![url("http://static.example:8477")]);
+
+        let unset = AdvertisedEndpoint::new(None);
+        assert_eq!(unset.current(), None);
+        assert!(unset.recent().is_empty());
+    }
+
+    /// The core of the gluetun story: an observation beats the config field, and
+    /// the change is reported so the caller can react rather than waiting for the
+    /// next natural pass.
+    #[test]
+    fn an_observation_wins_over_the_static_base_and_reports_the_change() {
+        let endpoint = AdvertisedEndpoint::new(Some(url("http://static.example:8477")));
+
+        assert!(endpoint.observe(url("http://203.0.113.9:41234")));
+        assert_eq!(endpoint.current(), Some(url("http://203.0.113.9:41234")));
+
+        // Re-observing the same endpoint is the steady state, not a change.
+        assert!(!endpoint.observe(url("http://203.0.113.9:41234")));
+    }
+
+    /// The announce list a torrent gets: recent endpoints first, the static base
+    /// last, nothing repeated.
+    #[test]
+    fn recent_spans_the_history_and_ends_with_the_static_base() {
+        let endpoint = AdvertisedEndpoint::new(Some(url("http://static.example:8477")));
+        endpoint.observe(url("http://203.0.113.9:41234"));
+        endpoint.observe(url("http://203.0.113.9:52345"));
+
+        assert_eq!(
+            endpoint.recent(),
+            vec![
+                url("http://203.0.113.9:52345"),
+                url("http://203.0.113.9:41234"),
+                url("http://static.example:8477"),
+            ]
+        );
+    }
+
+    /// A reconnect that lands back on a previously held exit must promote it,
+    /// not duplicate it.
+    #[test]
+    fn reobserving_an_old_endpoint_promotes_it_without_duplication() {
+        let endpoint = AdvertisedEndpoint::new(None);
+        endpoint.observe(url("http://203.0.113.1:1000"));
+        endpoint.observe(url("http://203.0.113.2:2000"));
+
+        assert!(endpoint.observe(url("http://203.0.113.1:1000")));
+        assert_eq!(
+            endpoint.recent(),
+            vec![url("http://203.0.113.1:1000"), url("http://203.0.113.2:2000")]
+        );
+    }
+
+    #[test]
+    fn the_history_is_bounded() {
+        let endpoint = AdvertisedEndpoint::new(None);
+        for port in 1..=10u16 {
+            endpoint.observe(url(&format!("http://203.0.113.9:{port}")));
+        }
+        assert_eq!(endpoint.recent().len(), MAX_DYNAMIC_HISTORY);
+        assert_eq!(endpoint.current(), Some(url("http://203.0.113.9:10")));
+    }
+
+    /// A settings save must not wipe what the poller knows.
+    #[test]
+    fn replacing_the_static_base_keeps_the_dynamic_history() {
+        let endpoint = AdvertisedEndpoint::new(Some(url("http://old.example:8477")));
+        endpoint.observe(url("http://203.0.113.9:41234"));
+
+        endpoint.set_static(Some(url("http://new.example:8477")));
+
+        assert_eq!(endpoint.current(), Some(url("http://203.0.113.9:41234")));
+        assert_eq!(
+            endpoint.recent(),
+            vec![
+                url("http://203.0.113.9:41234"),
+                url("http://new.example:8477"),
+            ]
+        );
+    }
+}

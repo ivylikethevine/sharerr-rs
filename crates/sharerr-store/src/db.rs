@@ -77,7 +77,9 @@ impl Store {
 
     /// An ephemeral database, for tests.
     pub async fn open_in_memory() -> Result<Self> {
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?;
+        // Foreign keys on, matching the file-backed options — the peer-endpoint
+        // cascade is a property tests must exercise the way production runs it.
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
         // A single connection: each new connection to `:memory:` would otherwise
         // get its own empty database.
         Self::from_options(opts, 1).await
@@ -150,18 +152,22 @@ impl Store {
             .collect();
         let placeholders = vec!["?"; allowed.len()].join(", ");
 
-        // Directory items carry no app identity, so a narrow scope admits them
-        // by the declared kind in their spec instead — see
-        // `PeerScope::directory_kind`. Under `All` the source list already
-        // includes them and this clause is absent.
-        let directory_arm = match scope.directory_kind() {
-            Some(_) => " OR (source = ? AND json_extract(spec_json, '$.kind') = ?)",
-            None => "",
+        // Items from the kind-scoped sources (a directory, a Jellyfin server)
+        // carry no single app identity, so a narrow scope admits them by the
+        // declared kind in their spec instead — see `PeerScope::directory_kind`.
+        // Under `All` the source list already includes them and this clause is
+        // absent.
+        let kind_placeholders = vec!["?"; MediaSource::KIND_SCOPED.len()].join(", ");
+        let kind_arm = match scope.directory_kind() {
+            Some(_) => format!(
+                " OR (source IN ({kind_placeholders}) AND json_extract(spec_json, '$.kind') = ?)"
+            ),
+            None => String::new(),
         };
 
         let sql = format!(
             "{SELECT_COLUMNS} WHERE state = ? AND info_hash IS NOT NULL \
-             AND (source IN ({placeholders}){directory_arm}) \
+             AND (source IN ({placeholders}){kind_arm}) \
              ORDER BY created_at DESC, id DESC"
         );
         let mut query = sqlx::query(&sql).bind(ShareState::Seeding.as_str());
@@ -169,7 +175,10 @@ impl Store {
             query = query.bind(source);
         }
         if let Some(kind) = scope.directory_kind() {
-            query = query.bind(MediaSource::Directory.as_str()).bind(kind);
+            for source in MediaSource::KIND_SCOPED {
+                query = query.bind(source.as_str());
+            }
+            query = query.bind(kind);
         }
 
         let rows = query.fetch_all(&self.pool).await?;
@@ -899,6 +908,46 @@ mod tests {
 
         let all = store.seeding_items(crate::PeerScope::All).await.unwrap();
         assert_eq!(ids(all), vec![1, 2, 3, 4]);
+    }
+
+    /// Jellyfin is the other kind-scoped source: one server holds every kind at
+    /// once, so its items must be admitted by spec kind exactly the way
+    /// directory items are.
+    #[tokio::test]
+    async fn narrow_scopes_admit_jellyfin_items_by_spec_kind() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        let seeding = |mut item: SharedItem, hash: &str| {
+            item.info_hash = Some(hash.repeat(20));
+            item.state = ShareState::Seeding;
+            item
+        };
+
+        let jellyfin_episode = SharedItem {
+            source: MediaSource::Jellyfin,
+            ..seeding(episode(1), "aa")
+        };
+        store.upsert(&jellyfin_episode).await.unwrap();
+        let jellyfin_movie = SharedItem {
+            source: MediaSource::Jellyfin,
+            ..seeding(movie(2), "bb")
+        };
+        store.upsert(&jellyfin_movie).await.unwrap();
+
+        let ids = |items: Vec<SharedItem>| {
+            let mut ids: Vec<i64> = items.iter().map(|i| i.file_id).collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        let tv = store.seeding_items(crate::PeerScope::Tv).await.unwrap();
+        assert_eq!(ids(tv), vec![1]);
+
+        let movies = store.seeding_items(crate::PeerScope::Movies).await.unwrap();
+        assert_eq!(ids(movies), vec![2]);
+
+        let all = store.seeding_items(crate::PeerScope::All).await.unwrap();
+        assert_eq!(ids(all), vec![1, 2]);
     }
 
     #[tokio::test]

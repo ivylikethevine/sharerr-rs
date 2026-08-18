@@ -21,21 +21,28 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true, features = ["cookie", "form"] }
 clap = { workspace = true, features = ["derive", "env"] }
+ed25519-dalek = { workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
 futures = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
+# For the gluetun control-server client — the one HTTP client the binary owns
+# itself rather than through a service crate.
+reqwest = { workspace = true }
 rpassword = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 sharerr-arr = { workspace = true }
 sharerr-client = { workspace = true }
 sharerr-core = { workspace = true }
+sharerr-jellyfin = { workspace = true }
 sharerr-qbit = { workspace = true }
 sharerr-store = { workspace = true }
 sharerr-torrent = { workspace = true }
 sharerr-transmission = { workspace = true }
+thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml_edit = { workspace = true }

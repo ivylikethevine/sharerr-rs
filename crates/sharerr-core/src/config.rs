@@ -16,6 +16,7 @@ pub mod secret_keys {
     pub const LIDARR_API_KEY: &str = "lidarr.api_key";
     pub const READARR_API_KEY: &str = "readarr.api_key";
     pub const WHISPARR_API_KEY: &str = "whisparr.api_key";
+    pub const JELLYFIN_API_KEY: &str = "jellyfin.api_key";
 
     /// The vault key holding one *arr app's API key.
     ///
@@ -23,13 +24,14 @@ pub mod secret_keys {
     /// asks the same question, and a sixth app should mean editing one place.
     /// `None` for the directory source, which has no credential at all.
     pub fn api_key_for(source: crate::MediaSource) -> Option<&'static str> {
-        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => Some(SONARR_API_KEY),
             Radarr => Some(RADARR_API_KEY),
             Lidarr => Some(LIDARR_API_KEY),
             Readarr => Some(READARR_API_KEY),
             Whisparr => Some(WHISPARR_API_KEY),
+            Jellyfin => Some(JELLYFIN_API_KEY),
             Directory => None,
         }
     }
@@ -53,6 +55,23 @@ pub mod secret_keys {
     /// publish the library to anyone who found the port.
     pub const TORZNAB_API_KEY: &str = "torznab.api_key";
 
+    /// This instance's Ed25519 signing key for gossip records, hex-encoded.
+    ///
+    /// Deliberately **not** in [`ALL`]: that list is what the web UI offers as
+    /// editable fields, and a signing key is not a credential an operator types —
+    /// it is generated on first use, and "editing" it would silently break every
+    /// friendship whose peers pinned the old public key. Rotation, when it is
+    /// ever needed, deserves an explicit re-pair flow rather than a text box.
+    pub const IDENTITY_SIGNING_KEY: &str = "identity.signing_key";
+
+    /// The vault key holding the API key a friend issued *us*, for pulling
+    /// gossip from their sharerr. Per-peer and minted by them, so it cannot be a
+    /// constant; also not in [`ALL`] — it is managed from the Friends page,
+    /// beside the peer it belongs to, not from the settings page.
+    pub fn peer_gossip_key(peer_id: i64) -> String {
+        format!("peer.gossip.{peer_id}")
+    }
+
     /// Every key sharerr actually reads.
     ///
     /// One list, because both consumers ask the same question and used to answer
@@ -66,6 +85,7 @@ pub mod secret_keys {
         LIDARR_API_KEY,
         READARR_API_KEY,
         WHISPARR_API_KEY,
+        JELLYFIN_API_KEY,
         QBITTORRENT_PASSWORD,
         QBITTORRENT_API_KEY,
         TRANSMISSION_PASSWORD,
@@ -96,19 +116,21 @@ pub mod config_paths {
     pub const LIDARR_URL: &str = "lidarr.url";
     pub const READARR_URL: &str = "readarr.url";
     pub const WHISPARR_URL: &str = "whisparr.url";
+    pub const JELLYFIN_URL: &str = "jellyfin.url";
 
     /// The config path holding one *arr app's URL — the write-side counterpart
     /// of [`super::secret_keys::api_key_for`], for the same reason: every
     /// consumer asks the same question, and a sixth app should mean editing one
     /// function. `None` for the directory source, which has no URL.
     pub fn url_for(source: crate::MediaSource) -> Option<&'static str> {
-        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => Some(SONARR_URL),
             Radarr => Some(RADARR_URL),
             Lidarr => Some(LIDARR_URL),
             Readarr => Some(READARR_URL),
             Whisparr => Some(WHISPARR_URL),
+            Jellyfin => Some(JELLYFIN_URL),
             Directory => None,
         }
     }
@@ -124,9 +146,12 @@ pub mod config_paths {
     pub const TRANSMISSION_USERNAME: &str = "transmission.username";
     pub const TRANSMISSION_LABEL: &str = "transmission.label";
 
-    pub const TRACKER_BACKEND: &str = "tracker.backend";
     pub const TRACKER_ADVERTISED_HOST: &str = "tracker.advertised_host";
+    pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
     pub const TRACKER_PORT: &str = "tracker.port";
+
+    pub const GLUETUN_CONTROL_URL: &str = "gluetun.control_url";
+    pub const GLUETUN_POLL_SECS: &str = "gluetun.poll_secs";
 
     pub const SYNC_ENABLED: &str = "sync.enabled";
     pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
@@ -152,6 +177,7 @@ pub mod config_paths {
         LIDARR_URL,
         READARR_URL,
         WHISPARR_URL,
+        JELLYFIN_URL,
         QBITTORRENT_URL,
         QBITTORRENT_USERNAME,
         QBITTORRENT_CATEGORY,
@@ -161,9 +187,11 @@ pub mod config_paths {
         TRANSMISSION_URL,
         TRANSMISSION_USERNAME,
         TRANSMISSION_LABEL,
-        TRACKER_BACKEND,
         TRACKER_ADVERTISED_HOST,
+        TRACKER_ADVERTISED_URL,
         TRACKER_PORT,
+        GLUETUN_CONTROL_URL,
+        GLUETUN_POLL_SECS,
         SYNC_ENABLED,
         SYNC_INTERVAL_SECS,
     ];
@@ -189,12 +217,19 @@ pub struct Config {
     pub readarr: Option<ServiceConfig>,
     /// Adult content. Whisparr is Sonarr's codebase, so it walks identically.
     pub whisparr: Option<ServiceConfig>,
+    /// A Jellyfin or Emby media server, discovered by item tag. Not an *arr app —
+    /// the client speaks Jellyfin's own API — but configured the same way: a URL
+    /// here, an API key in the vault.
+    pub jellyfin: Option<ServiceConfig>,
     /// Which torrent client actually seeds. See [`TorrentBackend`].
     pub torrent_backend: TorrentBackend,
     pub qbittorrent: QbitConfig,
     /// Only read when `torrent_backend` selects it.
     pub transmission: TransmissionConfig,
     pub tracker: TrackerConfig,
+    /// Resolving the advertised endpoint from a gluetun VPN container's control
+    /// server, for deployments with no stable public IP or forwarded port.
+    pub gluetun: GluetunConfig,
     pub sync: SyncConfig,
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
@@ -217,10 +252,12 @@ impl Default for Config {
             lidarr: None,
             readarr: None,
             whisparr: None,
+            jellyfin: None,
             torrent_backend: TorrentBackend::default(),
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
             tracker: TrackerConfig::default(),
+            gluetun: GluetunConfig::default(),
             sync: SyncConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
@@ -249,13 +286,14 @@ impl Config {
     /// Every consumer wants this and none of them should carry a five-way match to
     /// get it — adding a sixth app should mean editing one function.
     pub fn service(&self, source: crate::MediaSource) -> Option<&ServiceConfig> {
-        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => self.sonarr.as_ref(),
             Radarr => self.radarr.as_ref(),
             Lidarr => self.lidarr.as_ref(),
             Readarr => self.readarr.as_ref(),
             Whisparr => self.whisparr.as_ref(),
+            Jellyfin => self.jellyfin.as_ref(),
             // A directory is configured through `library`, not a service section.
             Directory => None,
         }
@@ -277,27 +315,20 @@ impl Config {
         crate::paths::PathResolver::new(self.path_map.clone())
     }
 
-    /// The HTTP base URL a friend reaches this instance on.
+    /// The HTTP base URL a friend reaches this instance on, rendered for display
+    /// and for building feed links, without a trailing slash.
     ///
-    /// Built from `tracker.advertised_host`, the only address sharerr is told
-    /// that is known to work from outside — the bind address is usually
-    /// `0.0.0.0`, which is not a URL anyone can fetch. The port is this server's
-    /// own: `tracker.port` names where friends *announce*, which under the
-    /// qbittorrent-embedded backend is **qBittorrent's** port — using it here
-    /// once pointed every feed link at a BitTorrent announce endpoint. Only the
-    /// builtin backend, where the tracker is this same HTTP server, honours the
-    /// override.
+    /// One resolver decides this — [`crate::endpoint::advertised_base`] — and the
+    /// tracker's announce URLs come from the same place, so the two can no longer
+    /// drift. An unconfigured or unusable address falls back to `localhost` so
+    /// the settings page still has something to show.
     pub fn public_base_url(&self) -> String {
-        let host = self
-            .tracker
-            .advertised_host
-            .as_deref()
-            .unwrap_or("localhost");
-        let port = match self.tracker.backend {
-            TrackerBackend::Builtin => self.tracker.port.unwrap_or_else(|| self.server.bind.port()),
-            TrackerBackend::QbittorrentEmbedded => self.server.bind.port(),
-        };
-        format!("http://{host}:{port}")
+        match crate::endpoint::advertised_base(&self.tracker, self.server.bind.port()) {
+            Ok(Some(base)) => crate::endpoint::base_string(&base),
+            Ok(None) | Err(_) => {
+                format!("http://localhost:{}", self.server.bind.port())
+            }
+        }
     }
 
     /// The selected torrent client's connection and labelling settings.
@@ -417,10 +448,8 @@ impl Default for QbitConfig {
 /// Which torrent client sharerr drives.
 ///
 /// qBittorrent remains the default because it was the only option for the whole of
-/// M1–M5 and every existing config expects it. The choice matters beyond which HTTP
-/// API is spoken: qBittorrent has an embedded tracker and Transmission does not, so
-/// selecting Transmission means announce URLs have to point at sharerr's own
-/// tracker. `doctor` says so rather than leaving it to be discovered.
+/// M1–M5 and every existing config expects it. The choice is purely which HTTP API
+/// is spoken: sharerr's builtin tracker answers announces whichever client seeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TorrentBackend {
@@ -463,52 +492,106 @@ impl Default for TransmissionConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TrackerBackend {
-    /// qBittorrent's own embedded tracker. The default: sharerr turns it on and
-    /// nothing else is required.
-    QbittorrentEmbedded,
-    /// sharerr's own tracker, served from this process on [`ServerConfig::bind`].
-    /// Answers only for torrents sharerr made, and honours `tracker.token` when
-    /// one is stored.
-    Builtin,
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+/// The address peers reach sharerr's tracker on.
+///
+/// The tracker itself is always sharerr's own, served by this process. There used
+/// to be a `backend` choice here — qBittorrent's embedded tracker or sharerr's —
+/// and it was removed: two backends meant two independently built announce URLs,
+/// and every dynamic-endpoint change had to be made and tested twice. A config
+/// that still names one is rejected with the fix — see [`removed_tracker_backend`].
+pub struct TrackerConfig {
+    /// **Removed.** Present only so a `sharerr.toml` still setting it fails to
+    /// load with an error naming this exact change, rather than a generic
+    /// "unknown field". Never holds a value.
+    #[serde(skip_serializing, deserialize_with = "removed_tracker_backend")]
+    pub backend: (),
+    /// Hostname or IP friends will reach the tracker on. Required (unless
+    /// `advertised_url` is set) — sharerr cannot guess its own externally
+    /// reachable address, and a wrong guess silently produces torrents nobody can
+    /// announce to.
+    pub advertised_host: Option<String>,
+    /// Override the announce port, for the common case where a published docker
+    /// port differs from the internal one. Defaults to [`ServerConfig::bind`]'s
+    /// port.
+    pub port: Option<u16>,
+    /// The expressive form of the advertised address: a full base URL carrying
+    /// scheme, port, and any reverse-proxy path prefix — `https`, `/sharerr`,
+    /// a bracketed IPv6 literal. Wins over `advertised_host` and `port` when
+    /// set. See [`crate::endpoint::advertised_base`].
+    pub advertised_url: Option<Url>,
+    /// An extra listener carrying only the tracker (and the `.torrent`
+    /// downloads), for the deployment where exactly one port is forwarded —
+    /// gluetun grants one, and the port that has to be reachable is the
+    /// tracker's, not the web UI's. The default single-listener layout stays the
+    /// default; `serve` merges everything onto [`ServerConfig::bind`] either
+    /// way, and this adds a second listener rather than moving anything.
+    pub bind: Option<SocketAddr>,
 }
 
-impl TrackerBackend {
-    /// Both backends, in the order the UI offers them.
-    pub const ALL: &'static [Self] = &[Self::QbittorrentEmbedded, Self::Builtin];
+/// Reject any `tracker.backend` value with the migration story.
+///
+/// The backend choice was removed when the builtin tracker became the only one.
+/// `deny_unknown_fields` alone would say "unknown field `backend`", which reads
+/// like a typo; an operator whose working config just stopped loading deserves the
+/// sentence that says what changed and what to do.
+fn removed_tracker_backend<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Read the old value so the error can quote it; a non-string value still
+    // produces the same rejection.
+    let was = Option::<String>::deserialize(deserializer)
+        .ok()
+        .flatten()
+        .map(|value| format!(" (was {value:?})"))
+        .unwrap_or_default();
+    Err(serde::de::Error::custom(format!(
+        "tracker.backend has been removed{was}: sharerr's builtin tracker is now the \
+         only tracker, and qBittorrent's embedded tracker is no longer used. Delete \
+         the `backend` line from [tracker] and re-run sync so torrents announce to \
+         sharerr"
+    )))
+}
 
-    /// The kebab-case name, matching both the serde form and `sharerr.toml`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::QbittorrentEmbedded => "qbittorrent-embedded",
-            Self::Builtin => "builtin",
-        }
+/// Resolving the advertised endpoint from gluetun's control server.
+///
+/// A VPN provider that forwards a port grants a *different* port on every
+/// reconnect, on an exit address that also rotates — so the deployment this is
+/// for cannot type its endpoint into `tracker.advertised_host` at all. When
+/// `control_url` is set, `serve` polls `/v1/publicip/ip` and
+/// `/v1/openvpn/portforwarded` as the source of truth, and a small refresh
+/// endpoint accepts a nudge from `VPN_PORT_FORWARDING_UP_COMMAND` so a reconnect
+/// is reacted to in seconds rather than at the next poll. The poll is the floor
+/// that recovers a missed push; neither alone is enough.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GluetunConfig {
+    /// gluetun's control server, `http://localhost:8000` in the intended
+    /// topology (sharerr inside gluetun's network namespace). `None` disables
+    /// endpoint resolution entirely.
+    pub control_url: Option<Url>,
+    /// How often to poll the control server, in seconds.
+    pub poll_secs: u64,
+}
+
+impl GluetunConfig {
+    /// The floor for `poll_secs` — polling a loopback HTTP endpoint faster than
+    /// this buys nothing, and the push path covers the fast case.
+    pub const MIN_POLL_SECS: u64 = 10;
+
+    /// The configured interval with the floor applied.
+    pub fn effective_poll_secs(&self) -> u64 {
+        self.poll_secs.max(Self::MIN_POLL_SECS)
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-/// Which tracker announce URLs point at, and the address peers should use.
-pub struct TrackerConfig {
-    pub backend: TrackerBackend,
-    /// Hostname or IP friends will reach the tracker on. Required — sharerr cannot
-    /// guess its own externally reachable address, and a wrong guess silently
-    /// produces torrents nobody can announce to.
-    pub advertised_host: Option<String>,
-    /// Override the announce port. For the qBittorrent backend this defaults to
-    /// whatever `embedded_tracker_port` reports; for the builtin backend, to
-    /// [`ServerConfig::bind`]'s port.
-    pub port: Option<u16>,
-}
-
-impl Default for TrackerConfig {
+impl Default for GluetunConfig {
     fn default() -> Self {
         Self {
-            backend: TrackerBackend::QbittorrentEmbedded,
-            advertised_host: None,
-            port: None,
+            control_url: None,
+            poll_secs: 60,
         }
     }
 }
@@ -638,6 +721,7 @@ mod tests {
             lidarr: service("http://lidarr:8686"),
             readarr: service("http://readarr:8787"),
             whisparr: service("http://whisparr:6969"),
+            jellyfin: service("http://jellyfin:8096"),
             ..Config::default()
         };
         let document = serde_json::to_value(&config).unwrap();

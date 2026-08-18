@@ -7,7 +7,7 @@ use crate::client::QbitClient;
 use crate::error::{QbitError, Result};
 use sharerr_client::AddRequest;
 
-use crate::models::{TorrentFile, TorrentInfo};
+use crate::models::{TorrentFile, TorrentInfo, TrackerEntry};
 
 /// qBittorrent wants the part typed as a real torrent, not `application/octet-stream`.
 const TORRENT_MIME: &str = "application/x-bittorrent";
@@ -111,6 +111,54 @@ impl QbitClient {
         };
         self.send_ok(Method::POST, "torrents/delete", &build)
             .await?;
+        Ok(())
+    }
+
+    /// `GET /api/v2/torrents/trackers` — one torrent's tracker list.
+    pub async fn torrent_trackers(&self, hash: &str) -> Result<Vec<TrackerEntry>> {
+        let build = move |rb: reqwest::RequestBuilder| rb.query(&[("hash", hash)]);
+        self.send_json(Method::GET, "torrents/trackers", &build)
+            .await
+    }
+
+    /// Replace one torrent's tracker list with `urls`.
+    ///
+    /// Add-then-remove, in that order, so the torrent is never trackerless in
+    /// between — a client that announces during the gap would drop out of the
+    /// swarm. The `** [DHT] **`-style pseudo-entries qBittorrent lists are left
+    /// alone; they are not URLs and removing them is not possible anyway.
+    pub async fn set_torrent_trackers(&self, hash: &str, urls: &[String]) -> Result<()> {
+        let existing = self.torrent_trackers(hash).await?;
+
+        let additions: Vec<&str> = urls
+            .iter()
+            .map(String::as_str)
+            .filter(|url| !existing.iter().any(|t| t.url == *url))
+            .collect();
+        if !additions.is_empty() {
+            let joined = additions.join("\n");
+            let build = move |rb: reqwest::RequestBuilder| {
+                rb.form(&[("hash", hash), ("urls", joined.as_str())])
+            };
+            self.send_ok(Method::POST, "torrents/addTrackers", &build)
+                .await?;
+        }
+
+        let stale: Vec<&str> = existing
+            .iter()
+            .map(|t| t.url.as_str())
+            .filter(|url| !url.starts_with("**") && !urls.iter().any(|u| u == url))
+            .collect();
+        if !stale.is_empty() {
+            let joined = stale.join("|");
+            let build = move |rb: reqwest::RequestBuilder| {
+                rb.form(&[("hash", hash), ("urls", joined.as_str())])
+            };
+            self.send_ok(Method::POST, "torrents/removeTrackers", &build)
+                .await?;
+        }
+
+        tracing::info!(hash, trackers = urls.len(), "replaced tracker list");
         Ok(())
     }
 }

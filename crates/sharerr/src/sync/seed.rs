@@ -19,8 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
 use sharerr_core::paths::ResolvedPaths;
-use sharerr_torrent::{LavaTorrentFactory, TorrentRequest, torrent_file_path};
-use url::Url;
+use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, torrent_file_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedOutcome {
@@ -70,7 +69,7 @@ impl Seeder {
     pub async fn seed(
         &self,
         paths: &ResolvedPaths,
-        announce: &Url,
+        announce: &AnnounceSet,
         torrents: &[TorrentSummary],
     ) -> Result<SeedOutcome> {
         if let Some(existing) = self.find_existing(torrents, &paths.qbit).await? {
@@ -110,11 +109,62 @@ impl Seeder {
         })
     }
 
+    /// Bring one already-seeding torrent's announce URLs up to date, in both
+    /// places they live: the cached `.torrent` the feed serves, and the tracker
+    /// list inside the torrent client.
+    ///
+    /// Returns whether anything was stale. The client is updated **before** the
+    /// file is rewritten: the file's announce is what the next pass compares
+    /// against, so if the client update fails the comparison stays stale and the
+    /// whole step is retried — the opposite order would record success it did not
+    /// achieve.
+    pub async fn refresh_announce(
+        &self,
+        info_hash: &str,
+        announce: &AnnounceSet,
+    ) -> Result<bool> {
+        let path = torrent_file_path(&self.torrent_dir, info_hash);
+        let data = match tokio::fs::read(&path).await {
+            Ok(data) => data,
+            // Nothing cached means nothing to compare or serve; the torrent in
+            // the client still works, so this is not worth failing the item over.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading {}", path.display()));
+            }
+        };
+
+        let current = sharerr_torrent::read_announce(&data)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        if current.as_deref() == Some(announce.primary.as_str()) {
+            return Ok(false);
+        }
+
+        self.qbit
+            .set_trackers(info_hash, &announce.tiers)
+            .await
+            .with_context(|| format!("updating trackers in {}", self.qbit.kind()))?;
+
+        let rewritten = sharerr_torrent::rewrite_announce(&data, announce)
+            .with_context(|| format!("rewriting {}", path.display()))?;
+        tokio::fs::write(&path, &rewritten)
+            .await
+            .with_context(|| format!("writing {}", path.display()))?;
+
+        tracing::info!(
+            info_hash,
+            from = current.as_deref().unwrap_or("(none)"),
+            to = %announce.primary,
+            "announce URLs refreshed"
+        );
+        Ok(true)
+    }
+
     /// Build the `.torrent` and keep a copy on disk.
     async fn build(
         &self,
         paths: &ResolvedPaths,
-        announce: &Url,
+        announce: &AnnounceSet,
     ) -> Result<sharerr_torrent::BuiltTorrent> {
         let path = paths.sharerr.clone();
         let announce = announce.clone();

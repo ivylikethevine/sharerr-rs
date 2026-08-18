@@ -10,18 +10,24 @@ ordering is a judgement about value, not a schedule.
 
 | Milestone | Scope | Status |
 |---|---|---|
-| — | First-class gluetun support: dynamic public IP and forwarded port | Next |
-| — | Peer endpoint memory and gossip | Next |
-| — | Builtin tracker only (removes qBittorrent's embedded tracker) | Next |
-| — | Jellyfin/Emby as a library source | Next |
-
+| — | The interchange: semi-anonymous endpoint rendezvous, its own image and port | Next |
+| — | Ratio and bandwidth control | Next |
+| — | List view of shared items | Next |
+| — | Plex as a library source | Next |
 
 **Shipped, and removed from this list:** the core (M1), the builtin tracker and
 Torznab feed (M2), the web UI (M3), friend/peer management (M4), Jackett
 compatibility (M5), the plain tagged directory source (M6), per-friend selective
 sharing, Transmission support, Lidarr/Readarr/Whisparr
-support, the whole M3 follow-up backlog, and the second test stack behind gluetun. The code and `git log` are the record — carrying finished work here
-only makes the list harder to read.
+support, the whole M3 follow-up backlog, the second test stack behind gluetun,
+the removal of the qBittorrent-embedded tracker backend (builtin only now, one
+announce-URL resolver, a breaking `tracker.backend` config error that says so),
+first-class gluetun support (dynamic public IP and forwarded port, announce
+lists, torrent rewrite and client re-announce on rotation, the `/gluetun/refresh`
+push, `tracker.advertised_url` and `tracker.bind`, doctor reachability), peer
+endpoint memory and signed endpoint gossip, and Jellyfin/Emby as a library
+source. The code and `git log` are the record — carrying finished work here only
+makes the list harder to read.
 
 ---
 
@@ -43,10 +49,17 @@ declared kind, scanned behind the same `LibrarySource` seam the *arr clients now
 sit behind. As predicted it loses every external id — the release name is all a
 friend's app gets — and that seam is exactly where the remaining sources plug in.
 
+**Jellyfin / Emby** shipped behind the same seam: tag a movie, series, album, or
+book in Jellyfin and sharerr discovers it (`sharerr-jellyfin`, one client for
+both servers). The prediction held — `ProviderIds` are passed through but are
+only as good as Jellyfin's metadata match, there is no scene name, and a tag on
+an individual episode is deliberately not discovered: tag the series. Its items
+are scoped per item by kind, like directory items, because one Jellyfin holds
+every kind at once.
+
 | Service                      | Why                                                                                                                                                                                                                       | Difficulty |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| **Jellyfin / Emby**          | Not everyone runs the *arr apps. A media-server-backed source lets someone share a library they curate elsewhere — but tags are per-user and the external ids are weaker than Sonarr's, so releases match less reliably.  | Medium     |
-| **Plex**                     | Same idea, but the API is more awkward and its "collections" map badly onto a share tag.                                                                                                                                  | Medium     |
+| **Plex**                     | Same idea as Jellyfin, but the API is more awkward and its "collections" map badly onto a share tag.                                                                                                                       | Medium     |
 
 ### Torrent clients (what actually seeds)
 
@@ -64,11 +77,13 @@ answer honestly is whether it can remove a torrent *without* deleting the data.
 | **rTorrent / ruTorrent**          | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.                                                     |
 | **Transmission-compatible forks** | Anything speaking the Transmission RPC should already work — the client is the same. Untested, and cheap to confirm.                                   |
 
-The tracker constraint resolved itself in the simplest direction. Transmission has
-no embedded tracker at all; qBittorrent's was a second announce URL to keep in step
-with the first; sharerr's own tracker works regardless of client. So
-`tracker.backend` goes away and the builtin tracker becomes the only one, and no
-client below has to answer the question.
+The tracker constraint resolved itself in the simplest direction, and has now
+shipped that way: `tracker.backend` is gone, the builtin tracker is the only
+one, and no client below has to answer the question. (A config still naming the
+old backend fails to load with an error that says exactly this.) What a new
+client must still answer honestly: whether it can remove a torrent *without*
+deleting the data, and it now also implements `set_trackers` so a rotated
+endpoint can be repointed in place.
 
 ### Indexers (what consumes the feed)
 
@@ -86,28 +101,23 @@ the last one found a bug that made sharerr unusable as a direct indexer.
 
 ### Deployment shapes
 
-**VPN containers (gluetun and friends).** Partly covered:
+**VPN containers (gluetun and friends).** Shipped, both halves.
 `./run_docker_tests.sh --vpn` runs the whole suite with qBittorrent inside a VPN
-container's network namespace, and `docker/deploy/` describes the shape this is
-really aimed at — gluetun owning the namespace with both qBittorrent *and* sharerr
-inside it, reaching each other on `localhost` rather than by container name. What
-is not covered is everything dynamic about that topology: a real provider's
-forwarded port and its rotating exit address, which is what the endpoint work under
-_Functionality_ is for. That deployment should become a tracked, documented
-topology rather than an untracked directory. The self-hosted WireGuard endpoint the
-test stack terminates cannot grant a forwarded port, so proving any of this needs a
-faked gluetun control server in tier 1 and an opt-in tier-2 stack for the rest.
+container's network namespace, `docker/deploy/` documents the real shape —
+gluetun owning the namespace with qBittorrent *and* sharerr inside it — and the
+dynamic side landed as the `[gluetun]` config section: the control server is
+polled as the source of truth, `VPN_PORT_FORWARDING_UP_COMMAND` nudges
+`/gluetun/refresh` so a reconnect is reacted to in seconds, and the faked
+control server lives in tier 1 (wiremock) as predicted. Where the provider
+grants no port, sharerr says so and degrades to the static endpoint. Untested
+against a *real* forwarding provider — the self-hosted WireGuard endpoint in
+tier 2 cannot grant a port — so that last mile remains an honest gap.
 
-Provider breadth belongs here too. gluetun implements port forwarding for only some
-of the providers it supports, so sharerr should report which mechanism it is using
-and degrade cleanly — a statically configured endpoint — where no port is granted.
-
-**Reverse proxies and IPv6.** `tracker.advertised_host` is a single string, and the
-announce URL is a hard-coded `format!("http://{host}:{port}")` — no scheme, no path
-prefix, no brackets for an IPv6 literal. Announce URLs behind a proxy, on a
-non-default path prefix, or over IPv6 are exactly where self-hosted setups break.
-The change that makes the endpoint dynamic is the moment to make it expressive as
-well, since both rewrite the same construction.
+**Reverse proxies and IPv6.** Shipped alongside the dynamic endpoint, exactly
+because both rewrite the same construction: `tracker.advertised_url` carries
+scheme, port, and path prefix; a bare IPv6 `advertised_host` is bracketed; and
+one resolver (`sharerr_core::endpoint`) builds every advertised URL, so the feed
+links and the announce URLs can no longer drift.
 
 **Magnet links / DHT.** The feed serves `.torrent` files only. Magnet URIs are cheap
 to add and some clients prefer them.
@@ -120,50 +130,66 @@ audience that will never run `docker run` by hand.
 
 ## Functionality
 
-**Dynamic external endpoint.** `tracker.advertised_host` is one hand-typed string,
-and the deployment sharerr is actually built for has neither a stable public IP nor
-a stable inbound port. The endpoint should be *resolved* instead: poll gluetun's
-control server (`/v1/publicip/ip` and `/v1/openvpn/portforwarded`, on `:8000` by
-default) as the source of truth, and accept a push from
-`VPN_PORT_FORWARDING_UP_COMMAND` on a small sharerr endpoint so a reconnect is
-reacted to in seconds rather than at the next poll. The poll is the floor that
-recovers a missed push; neither alone is enough.
+**Dynamic external endpoint.** _Shipped_ — see the gluetun entry under
+Deployment shapes. Torrents carry an announce list spanning the recently held
+endpoints, and an endpoint change triggers an immediate pass that rewrites the
+cached `.torrent` files (the info hash is untouched — announce lives outside the
+info dictionary) and repoints the tracker lists inside the torrent client via
+the new `TorrentClient::set_trackers` operation.
 
-The expensive consequence is not the discovery, it is what the announce URL is
-already attached to. It is resolved once per reconciliation pass and baked into
-each `.torrent` at build time, so a rotated port leaves every torrent already
-sitting in a friend's client announcing to a dead address. Torrents therefore need
-an announce *list* spanning the recently held endpoints, and a change of endpoint
-has to trigger a re-announce and a rewrite of the affected `.torrent` files rather
-than waiting for the next natural pass.
+**Separate tracker port.** _Shipped_ as `tracker.bind`: an optional second
+listener carrying only the tracker routes, sharing one swarm map with the main
+listener, both with their connect-info service. The single-listener layout stays
+the default.
 
-**Separate tracker port.** `serve` merges the UI, the Torznab feed and the tracker
-into one router on one listener, which is the right default and stays the default.
-But gluetun forwards exactly one port, and the port that has to be reachable is the
-tracker's, not the web UI's. An optional `tracker.bind` gives the tracker its own
-listener on the forwarded port while the UI stays on 8477 behind the LAN. Whichever
-listener serves `/announce` must keep its connect-info service — the tracker
-resolves a peer's address from the real socket, and has nothing to fall back on.
+**Peer endpoint memory.** _Shipped_: `peer_endpoints` keeps a short, timestamped
+history per peer with the API, torrent-client, and tracker addresses recorded
+**separately** (the dual-VPN case), newest first and bounded, so a reconnect
+that briefly returns an old exit is remembered rather than trusted. Direct
+observations come from a feed pull's source address (throttled with the
+last-seen window); the client and tracker addresses arrive via gossip, because a
+tracker announce carries no peer identity — associating announces would need
+per-peer announce tokens, which remains open.
 
-**Peer endpoint memory.** A peer record is a credential — label, key hash, scope,
-last seen — and carries no address at all, so sharerr can say that a friend turned
-up but not where they are. Peers should keep a short, timestamped history of
-recently observed addresses, with the tracker address and the torrent client's
-address recorded **separately**: a friend on a dual-VPN setup has the two behind
-different exits while both belong to one sharerr. Observations come from a feed
-pull's source address, from a tracker announce, and from gossip. Keeping the last
-few, most recent first, means a reconnect that briefly returns an old exit is
-remembered rather than trusted.
+**Endpoint gossip.** _Shipped_: signed Ed25519 endpoint records ride the
+peer-authenticated `/api` (`GET`/`POST /api/gossip/endpoints`). A peer's pubkey
+is bound trust-on-first-use from their first self-record; records are signed by
+the peer they describe and carry `signed_at`, so an older sighting cannot
+overwrite a newer one and no friend can rewrite somebody else's address. Spread
+is scoped *stronger* than `PeerScope`: a pull names the pubkeys the caller
+already knows and gets only the intersection with ours, so nobody learns of a
+peer they are not already sharing with. The outbound half — their sharerr's URL
+and the key they issued us — is configured per friend on the Friends page.
 
-**Endpoint gossip.** If A, B and C share with each other at the same level and A's
-address changes, B noticing first should be enough for C to learn it — nobody
-should have to be reachable at their old address in order to advertise the new one.
-Friends already authenticate to `/api` with a per-peer key, so endpoint records
-ride that exchange rather than opening a second protocol surface. Records are
-timestamped and signed by the peer they describe, so an older sighting cannot
-overwrite a newer one and no friend can rewrite somebody else's address. Spread is
-scoped by `PeerScope`: gossip must not tell a friend about the existence, let alone
-the address, of a peer they are not already sharing with.
+**The interchange.** Gossip only helps peers who can still reach *somebody*; two
+friends whose addresses both rotated while neither was watching have no path back
+to each other. The interchange is the rendezvous for that case: a tiny separate
+service, deliberately knowing nothing but `key hash → latest IP and port`, that a
+sharerr instance reports its endpoint to and a friend queries with the API key
+that peer issued them. The privacy property is the point and shapes the whole
+design: a request without a valid key gets a *plausible fabricated* IP and port
+rather than an error, so an unauthenticated probe cannot be distinguished from a
+valid lookup — the interchange never confirms that an instance exists, and
+scraping it yields only noise. That makes semi-anonymous tracking of sharerr
+instances possible without any instance exposing its IP publicly. It ships as its
+own docker image on its own port — not another route on sharerr's listener — so
+it can be self-hosted by anyone, placed on neutral ground away from any
+particular library, and carries no database worth stealing: key hashes and
+last-seen addresses only. A sharerr instance treats it as one more observation
+source feeding peer endpoint memory, ranked below a direct sighting of the same
+peer.
+
+The fabricated answers create the opposite problem for the *legitimate* caller:
+a friend holding a valid key must be able to tell a real record from a decoy, or
+the noise defeats them too. So a genuine record is verifiable — the natural shape
+is the same signed endpoint record gossip uses, signed by the peer it describes
+when that peer reported in, so the interchange relays proof it could not forge
+and a JWT-style signature check separates record from decoy. A decoy carries
+random bytes where the signature would be: identical on the wire to an observer
+without the peer's public key, and never verifying for anyone. The deterministic
+fallback where signing is unavailable: derive the decoy from a keyed hash of the
+queried key hash, so decoys are at least stable across probes rather than fresh
+noise that flags itself by changing.
 
 **Ratio and bandwidth control.** No upload limits, no seeding goals. Sharing a
 library with no cap on what it costs you is a real deterrent to running this.
@@ -210,8 +236,9 @@ plainly say _n items shared, last sync 4 minutes ago, 2 peers connected_.
 
 **Better first-run defaults.** `tracker.advertised_host` has no default and a wrong
 value silently produces torrents nobody can announce to — detectable at save time.
-Resolving it from gluetun removes the guess entirely where that is available; where
-it is not, it is still a hand-typed value worth validating before it is saved.
+Resolving it from gluetun (now shipped) removes the guess entirely where that is
+available; where it is not, it is still a hand-typed value worth validating before
+it is saved.
 
 ---
 
@@ -228,20 +255,12 @@ Not user-facing, but load-bearing for everything above.
   items rather than fields turns up.
 - **Router-level coverage of the Torznab search handlers.** The tracker now has it;
   Torznab's own routes are covered by the Jackett tests but not exhaustively.
-- **Builtin tracker only.** Removing `TrackerBackend::QbittorrentEmbedded` takes
-  `QbitEmbeddedTracker` and `TorrentClient::embedded_tracker_port()` with it, which
-  reaches into `sharerr-qbit`, `sharerr-transmission`, `doctor`,
-  `docker/config-vpn/`, `docker/deploy/` and the README's "Which tracker" section.
-  It is a **breaking config change**: a `sharerr.toml` naming `qbittorrent-embedded`
-  will fail to load until it is edited, and the error should say precisely that. The
-  justification is the endpoint work above — two tracker backends mean two
-  independently built announce URLs, and every dynamic-endpoint change would have to
-  be made twice and tested twice.
-- **One announce-URL resolver.** `Config::public_base_url()` and the tracker
-  providers build the same URL out of the same two fields by different routes. They
-  have to collapse into a single resolver *before* the value starts changing at
-  runtime, or the two paths will drift the first time one of them is updated.
-- **Reachability in `doctor`.** The `tracker.advertised_host` check only warns when
-  the field is unset. It should compare the resolved endpoint against gluetun's
-  reported public IP and attempt an actual inbound connection, because from inside
-  the namespace a closed forwarded port and a quiet swarm look identical.
+- ~~**Builtin tracker only.**~~ _Shipped_, exactly as scoped: the breaking config
+  error names the change and the fix.
+- ~~**One announce-URL resolver.**~~ _Shipped_ as `sharerr_core::endpoint`,
+  before the value started changing at runtime.
+- ~~**Reachability in `doctor`.**~~ _Shipped_: doctor compares the advertised
+  address against gluetun's reported exit, reports the forwarded port and which
+  mechanism is in use, and attempts a TCP connection to the advertised endpoint
+  (a failure is a warning, because some networks cannot hairpin their own public
+  address even when it works from outside).

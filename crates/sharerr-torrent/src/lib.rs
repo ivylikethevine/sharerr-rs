@@ -21,9 +21,8 @@ pub mod tracker;
 pub use announce::{AnnounceError, AnnounceRequest, AnnounceResponse, Event, InfoHash, Swarms};
 pub use error::{Result, TorrentError};
 pub use factory::{
-    BuiltTorrent, LavaTorrentFactory, TorrentRequest, piece_length_for, torrent_file_path,
+    BuiltTorrent, LavaTorrentFactory, TorrentRequest, piece_length_for, read_announce,
+    rewrite_announce, torrent_file_path,
 };
 pub use title::{ParsedTitle, parse, resolve, synthesize};
-pub use tracker::{
-    ANNOUNCE_PATH, BuiltinTracker, QbitEmbeddedTracker, SCRAPE_PATH, TrackerProvider,
-};
+pub use tracker::{ANNOUNCE_PATH, AnnounceSet, BuiltinTracker, SCRAPE_PATH, TrackerProvider};

@@ -585,97 +585,86 @@ async fn remove_torrent_never_deletes_files() {
     client(&server).remove_torrent("aabbcc").await.unwrap();
 }
 
-// --------------------------------------------------------------- preferences
 
+// ----------------------------------------------------------------- trackers
+
+/// Replacing the tracker list adds the new URLs before removing the stale ones
+/// (never trackerless in between), and leaves qBittorrent's `**`-style DHT/PEX
+/// pseudo-entries alone.
 #[tokio::test]
-async fn ensure_embedded_tracker_is_a_no_op_when_already_enabled() {
+async fn set_torrent_trackers_adds_then_removes_and_skips_pseudo_entries() {
     let server = MockServer::start().await;
     mount_login(&server, 1).await;
+
     Mock::given(method("GET"))
-        .and(path("/api/v2/app/preferences"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "enable_embedded_tracker": true,
-            "embedded_tracker_port": 9000,
-            "save_path": "/downloads",
-        })))
+        .and(path("/api/v2/torrents/trackers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "url": "** [DHT] **", "status": 0 },
+            { "url": "http://old.example:9000/announce", "status": 2 },
+            { "url": "http://kept.example:8477/announce", "status": 2 },
+        ])))
         .expect(1)
         .mount(&server)
         .await;
-    // Writing preferences when nothing needs changing would rewrite settings
-    // sharerr does not model.
+
     Mock::given(method("POST"))
-        .and(path("/api/v2/app/preferences"))
+        .and(path("/api/v2/torrents/addTrackers"))
+        .and(body_string_contains("new.example"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/removeTrackers"))
+        .and(body_string_contains("old.example"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .set_torrent_trackers(
+            "aabbcc",
+            &[
+                "http://new.example:41234/announce".to_owned(),
+                "http://kept.example:8477/announce".to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+}
+
+/// When the list already matches, nothing is written at all — this runs on
+/// every sync pass, and a pass that changes nothing must issue no writes.
+#[tokio::test]
+async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
+    let server = MockServer::start().await;
+    mount_login(&server, 1).await;
+
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/trackers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "url": "http://current.example:8477/announce", "status": 2 },
+        ])))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/addTrackers"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/removeTrackers"))
         .respond_with(ResponseTemplate::new(200))
         .expect(0)
         .mount(&server)
         .await;
 
-    assert_eq!(
-        client(&server).ensure_embedded_tracker().await.unwrap(),
-        9000
-    );
-}
-
-#[tokio::test]
-async fn ensure_embedded_tracker_enables_it_then_rereads_the_port() {
-    let server = MockServer::start().await;
-    mount_login(&server, 1).await;
-
-    // First read: disabled, and the port qBittorrent reports is not yet meaningful.
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/preferences"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "enable_embedded_tracker": false,
-            "embedded_tracker_port": 0,
-        })))
-        .up_to_n_times(1)
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/api/v2/app/preferences"))
-        .and(body_string_contains("enable_embedded_tracker"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    // Second read: enabled, with the port qBittorrent chose.
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/preferences"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "enable_embedded_tracker": true,
-            "embedded_tracker_port": 9000,
-        })))
-        .mount(&server)
-        .await;
-
-    // The re-read is the point: assuming the port would produce announce URLs
-    // nobody can reach.
-    assert_eq!(
-        client(&server).ensure_embedded_tracker().await.unwrap(),
-        9000
-    );
-}
-
-#[tokio::test]
-async fn preferences_tolerates_the_hundred_keys_it_does_not_model() {
-    let server = MockServer::start().await;
-    mount_login(&server, 1).await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/preferences"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "enable_embedded_tracker": true,
-            "embedded_tracker_port": 9000,
-            "save_path": "/downloads",
-            "locale": "en",
-            "dht": true,
-            "some_future_key": { "nested": [1, 2, 3] },
-        })))
-        .mount(&server)
-        .await;
-
-    let prefs = client(&server).preferences().await.unwrap();
-    assert!(prefs.enable_embedded_tracker);
-    assert_eq!(prefs.embedded_tracker_port, 9000);
+    client(&server)
+        .set_torrent_trackers("aabbcc", &["http://current.example:8477/announce".to_owned()])
+        .await
+        .unwrap();
 }

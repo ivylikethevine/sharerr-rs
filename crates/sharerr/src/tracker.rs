@@ -50,13 +50,16 @@ impl TrackerState {
 
 /// Every route the tracker serves.
 ///
+/// Takes the state rather than building it, because the same `Swarms` may be
+/// mounted on *two* listeners — the main router and an optional dedicated
+/// `tracker.bind` — and two independent swarm maps would stop peers arriving on
+/// different listeners from ever being introduced to each other.
+///
 /// The token variants are separate routes rather than one optional path segment:
 /// axum resolves `/announce` and `/announce/{token}` as distinct patterns, and
 /// spelling them out keeps the tokenless case from depending on how an optional
 /// extractor behaves when the segment is missing.
-pub fn routes(serve: Arc<ServeState>) -> axum::Router {
-    let state = Arc::new(TrackerState::new(serve));
-
+pub fn routes(state: Arc<TrackerState>) -> axum::Router {
     // Mounted from the same constants `sharerr-torrent` writes into announce
     // URLs, so the two sides of the crate boundary cannot drift.
     axum::Router::new()
@@ -333,6 +336,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn get(state: &Arc<crate::state::ServeState>, uri: &str) -> (StatusCode, String) {
+        let state = Arc::new(TrackerState::new(Arc::clone(state)));
         let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
         // The announce handler records the address a peer actually reached us from,
         // which `serve` supplies via `into_make_service_with_connect_info`. Driving
@@ -346,7 +350,7 @@ mod tests {
                 51413,
             ))));
 
-        let response = routes(Arc::clone(state)).oneshot(request).await.unwrap();
+        let response = routes(state).oneshot(request).await.unwrap();
         let status = response.status();
         let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await

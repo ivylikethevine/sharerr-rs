@@ -186,13 +186,12 @@ All bound to `127.0.0.1` so the stack is not exposed on the network.
 | Sonarr | 18989 |
 | Radarr | 17878 |
 | qBittorrent WebUI | 18080 |
-| qBittorrent embedded tracker | 19000 |
 | Prowlarr | 19696 (opt-in — see below) |
 | sharerr | 18477 |
 
-The tracker port is the one most easily forgotten in a real deployment: friends
-announce to it directly, so it has to be reachable from outside the container, not
-just on the docker network.
+sharerr's port doubles as the tracker: friends announce to it directly, so in a
+real deployment it has to be reachable from outside the container, not just on
+the docker network.
 
 ## The Transmission stack
 
@@ -264,7 +263,6 @@ Offset from the plain stack so both can run at once.
 | Sonarr | 28989 |
 | Radarr | 27878 |
 | qBittorrent WebUI | 28080 (published by gluetun) |
-| qBittorrent embedded tracker | 29000 (published by gluetun) |
 | sharerr | 28477 |
 
 Tear it down with the same two halves as the plain stack, against the other file:
