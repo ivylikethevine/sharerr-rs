@@ -171,6 +171,9 @@ pub struct SettingsPage {
     pub qbit_url: String,
     pub qbit_username: String,
     pub qbit_password_set: bool,
+    /// Whether a qBittorrent API key is stored. When it is, the key authenticates
+    /// and the password is not read at all — the form says so.
+    pub qbit_api_key_set: bool,
     pub qbit_category: String,
     pub qbit_tag: String,
     pub qbit_skip_checking: bool,

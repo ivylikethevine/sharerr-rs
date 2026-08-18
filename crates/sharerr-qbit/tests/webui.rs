@@ -221,13 +221,157 @@ async fn a_persistent_403_is_reported_rather_than_retried_forever() {
 
     let err = client(&server).version().await.unwrap_err();
     match &err {
-        QbitError::Forbidden { path } => assert_eq!(path, "app/version"),
+        QbitError::Forbidden { status, path } => {
+            assert_eq!((*status, path.as_str()), (403, "app/version"));
+        }
         other => panic!("expected Forbidden, got {other:?}"),
     }
     assert!(
         err.to_string().contains("Referer"),
         "the message should name the likely cause: {err}"
     );
+}
+
+/// The regression this module exists for. qBittorrent 5.2 answers a *successful*
+/// login with `204 No Content` and an empty body; a client that insists on the
+/// literal `Ok.` of 5.1 and earlier calls a correct password wrong.
+#[tokio::test]
+async fn a_204_login_is_a_success_not_a_rejected_password() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/auth/login"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).login().await.unwrap();
+}
+
+/// The other half of the same change: 5.2 rejects credentials with 401 rather
+/// than `200 Fails.`, and the same 401 is what a Host-header port mismatch
+/// produces. Either way it must read as an auth failure, not a raw HTTP status.
+#[tokio::test]
+async fn a_401_login_is_an_auth_failure_that_names_both_causes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/auth/login"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).login().await.unwrap_err();
+    assert!(matches!(err, QbitError::Unauthorized), "{err:?}");
+    assert!(err.is_auth_failure(), "{err}");
+
+    let message = err.to_string();
+    assert!(message.contains("Host header"), "{message}");
+    assert!(message.contains("port"), "{message}");
+}
+
+/// `Fails.` on a 200 is still how 5.1 and earlier say no.
+#[tokio::test]
+async fn the_old_fails_body_is_still_a_rejection() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/auth/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Fails."))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).login().await.unwrap_err();
+    assert!(matches!(err, QbitError::LoginRejected), "{err:?}");
+    assert!(err.is_auth_failure());
+}
+
+/// 5.2 also moved session expiry from 403 to 401, so the one re-login and retry
+/// has to fire on both — otherwise a working setup breaks after an hour.
+#[tokio::test]
+async fn a_401_on_a_normal_call_triggers_one_relogin_and_a_retry() {
+    let server = MockServer::start().await;
+    mount_login(&server, 2).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(401))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+
+    assert_eq!(client(&server).version().await.unwrap(), "v5.2.3");
+}
+
+// --------------------------------------------------------------- api key
+
+const API_KEY: &str = "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86";
+
+fn key_client(server: &MockServer) -> QbitClient {
+    let base = Url::parse(&server.uri()).expect("wiremock uri is a valid url");
+    QbitClient::with_api_key(&base, SecretString::from(API_KEY)).expect("client builds")
+}
+
+/// The whole point of key auth: every call carries the bearer header and there is
+/// no `auth/login` round trip at all. qBittorrent rejects a key sent to the auth
+/// endpoints, so calling login would be worse than merely wasteful.
+#[tokio::test]
+async fn an_api_key_client_sends_a_bearer_header_and_never_logs_in() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/auth/login"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+        .mount(&server)
+        .await;
+
+    let client = key_client(&server);
+    // A no-op that must still succeed, so callers do not have to know which mode
+    // they are in before probing.
+    client.login().await.unwrap();
+    assert_eq!(client.version().await.unwrap(), "v5.2.3");
+
+    let sent = requests_to(&server, "/app/version").await;
+    let header = sent[0]
+        .headers
+        .get("authorization")
+        .expect("the key rides on every request")
+        .to_str()
+        .expect("ascii");
+    assert_eq!(header, format!("Bearer {API_KEY}"));
+}
+
+/// A rejected key must not be retried. There is no login to redo, and repeating
+/// the call only walks towards qBittorrent's ban counter.
+#[tokio::test]
+async fn a_rejected_api_key_is_reported_without_a_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let err = key_client(&server).version().await.unwrap_err();
+    assert!(matches!(err, QbitError::ApiKeyRejected), "{err:?}");
+    assert!(err.is_auth_failure(), "{err}");
+}
+
+/// A password pasted into the key box is caught where it is entered, not hours
+/// later as a puzzling rejection from the middle of a sync.
+#[tokio::test]
+async fn a_value_that_is_not_key_shaped_is_refused_up_front() {
+    let base = Url::parse("http://localhost:8080").expect("literal url");
+    let err = QbitClient::with_api_key(&base, SecretString::from("hunter2")).unwrap_err();
+    assert!(matches!(err, QbitError::MalformedApiKey), "{err:?}");
 }
 
 // --------------------------------------------------------------- torrents

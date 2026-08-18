@@ -31,12 +31,14 @@ pub async fn mount_json_status(
 
 /// A qBittorrent login endpoint that always succeeds.
 ///
-/// The `Ok.` body matters: qBittorrent reports a rejected login as HTTP 200
-/// with a different body, so the client checks the text, not the status.
+/// Answers in qBittorrent 5.2's shape — `204 No Content`, empty body — because
+/// that is what current releases send and what the client used to mistake for a
+/// rejected password. The older `200 Ok.` / `200 Fails.` protocol is covered by
+/// `sharerr-qbit`'s own tests, so both stay exercised.
 pub async fn mount_qbit_login(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/api/v2/auth/login"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .respond_with(ResponseTemplate::new(204))
         .mount(server)
         .await;
 }

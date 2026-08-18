@@ -612,20 +612,29 @@ fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option
 
 /// Construct whichever torrent client the configuration selects.
 ///
-/// Both branches read their password from the vault under their own key, so an
+/// Both branches read their credential from the vault under their own keys, so an
 /// operator switching backends does not silently keep authenticating with the other
-/// client's credential.
+/// client's credential. Where the client supports one, a stored API key is used in
+/// preference to the password — see `TorrentCredential::choose`.
 fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>> {
     let client = config.torrent_client();
-    let password = vault
-        .get(client.password_key)?
-        .with_context(|| format!("no {} in the vault", client.password_key))?;
+
+    let api_key = match client.api_key_key {
+        Some(key) => vault.get(key)?,
+        None => None,
+    };
+    let credential =
+        crate::checks::TorrentCredential::choose(api_key, vault.get(client.password_key)?)
+            .with_context(|| match client.api_key_key {
+                Some(api) => format!("no {} or {} in the vault", api, client.password_key),
+                None => format!("no {} in the vault", client.password_key),
+            })?;
 
     crate::checks::build_torrent_client(
         config.torrent_backend,
         client.url,
         client.username,
-        password,
+        credential,
     )
     .map_err(|reason| anyhow::anyhow!(reason))
 }

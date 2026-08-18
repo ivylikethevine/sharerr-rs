@@ -89,9 +89,8 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
     }
     if sources.is_empty() && config.library.is_empty() {
         report.section("library sources");
-        report.fail(
-            "no *arr app or [[library]] directory is configured — there is nothing to share",
-        );
+        report
+            .fail("no *arr app or [[library]] directory is configured — there is nothing to share");
     }
 
     report.section(config.torrent_backend.as_str());
@@ -148,15 +147,18 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     // The password key follows the *configured* client. Demanding qBittorrent's
     // regardless was a check that failed on a perfectly good Transmission setup —
     // and told the operator to go and set a credential nothing would ever read.
-    let mut expected = vec![config.torrent_client().password_key];
-    expected.extend(
-        config
-            .configured_sources()
-            .into_iter()
-            .filter_map(secret_keys::api_key_for),
-    );
+    // The torrent client is satisfied by *either* of its credentials, so it is
+    // checked as a pair rather than as two independent keys — demanding both would
+    // fail an operator who moved to an API key and, correctly, cleared the
+    // password they no longer use.
+    let client = config.torrent_client();
+    check_torrent_credential(&vault, client.api_key_key, client.password_key, report);
 
-    for key in expected {
+    for key in config
+        .configured_sources()
+        .into_iter()
+        .filter_map(secret_keys::api_key_for)
+    {
         match vault.get(key) {
             Ok(Some(_)) => report.ok(format!("{key} is set")),
             Ok(None) => report.fail(format!("{key} is missing — {}", fix_hint(key))),
@@ -178,12 +180,60 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     Some(vault)
 }
 
+/// Report on the credential the configured torrent client will authenticate with.
+///
+/// One report line, not two, because the keys are alternatives: whichever is
+/// present is the one that will be used, and only the absence of *both* is a
+/// problem worth failing on.
+fn check_torrent_credential(
+    vault: &Vault,
+    api_key_key: Option<&'static str>,
+    password_key: &'static str,
+    report: &mut Report,
+) {
+    let api_key = match api_key_key {
+        Some(key) => match vault.get(key) {
+            Ok(value) => value.map(|_| key),
+            Err(err) => {
+                report.fail(format!("{key} could not be read: {err}"));
+                None
+            }
+        },
+        None => None,
+    };
+
+    if let Some(key) = api_key {
+        report.ok(format!(
+            "{key} is set — it takes precedence over {password_key}"
+        ));
+        return;
+    }
+
+    match vault.get(password_key) {
+        Ok(Some(_)) => report.ok(format!("{password_key} is set")),
+        Ok(None) => report.fail(format!(
+            "{password_key} is missing — {}",
+            fix_hint(password_key)
+        )),
+        Err(err) => report.fail(format!("{password_key} could not be read: {err}")),
+    }
+}
+
 /// How to supply a missing secret.
 ///
 /// Names the web UI first and the CLI second, which is the order of least effort
 /// since the UI needs no shell inside the container. Both write the same vault.
 fn fix_hint(key: &str) -> String {
     format!("set it in Settings on the web UI, or run: sharerr vault set {key}")
+}
+
+/// Fetch an *optional* secret without reporting its absence.
+///
+/// For credentials that are alternatives rather than requirements: a missing API
+/// key is not a fault when a password is configured, and saying so would turn a
+/// correct setup into a failing report.
+fn quiet_secret(vault: Option<&Vault>, key: &str) -> Option<SecretString> {
+    vault?.get(key).ok().flatten()
 }
 
 /// Fetch a secret, reporting the precise reason it is unavailable — **exactly
@@ -373,9 +423,21 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
     let settings = config.torrent_client();
     let (url, key, label) = (settings.url, settings.password_key, settings.category);
 
-    let Some(password) = secret(vault, key, report) else {
-        return;
+    // An API key, when stored, is what will authenticate — so it is what `doctor`
+    // must test. Read quietly: its absence is the ordinary case and the password
+    // check below is the one that reports.
+    let api_key = settings
+        .api_key_key
+        .and_then(|key| quiet_secret(vault, key));
+
+    let credential = match api_key {
+        Some(api_key) => checks::TorrentCredential::ApiKey(api_key),
+        None => match secret(vault, key, report) {
+            Some(password) => checks::TorrentCredential::Password(password),
+            None => return,
+        },
     };
+    let noun = credential.noun();
 
     // Shared with the web UI's "Test connection" button — see `crate::checks`. The
     // client comes back on success so the checks below do not re-authenticate.
@@ -383,7 +445,7 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
         config.torrent_backend,
         url,
         settings.username,
-        Ok(Some(password)),
+        Ok(Some(credential)),
     )
     .await
     {
@@ -396,9 +458,12 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
             client
         }
         QbitOutcome::AuthRejected => {
-            report.fail(format!(
-                "{url} rejected the username or password — check {key}"
-            ));
+            let checked = if noun == "API key" {
+                settings.api_key_key.unwrap_or(key)
+            } else {
+                key
+            };
+            report.fail(format!("{url} rejected the {noun} — check {checked}"));
             return;
         }
         QbitOutcome::Unreachable(reason) => {

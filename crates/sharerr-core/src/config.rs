@@ -34,6 +34,14 @@ pub mod secret_keys {
         }
     }
     pub const QBITTORRENT_PASSWORD: &str = "qbittorrent.password";
+    /// A qBittorrent 5.2+ WebUI API key, used *instead of* the username and
+    /// password when present.
+    ///
+    /// A separate key rather than a flag beside the password, because the two are
+    /// different credentials with different lifetimes: rotating the key in
+    /// qBittorrent must not silently fall back to a stale password, and clearing
+    /// the key must put the password back in charge without retyping it.
+    pub const QBITTORRENT_API_KEY: &str = "qbittorrent.api_key";
     /// The Transmission RPC password, when Transmission is the selected backend.
     pub const TRANSMISSION_PASSWORD: &str = "transmission.password";
     /// Shared secret embedded in builtin-tracker announce URLs.
@@ -59,6 +67,7 @@ pub mod secret_keys {
         READARR_API_KEY,
         WHISPARR_API_KEY,
         QBITTORRENT_PASSWORD,
+        QBITTORRENT_API_KEY,
         TRANSMISSION_PASSWORD,
         TRACKER_TOKEN,
         TORZNAB_API_KEY,
@@ -303,6 +312,7 @@ impl Config {
                 url: &self.qbittorrent.url,
                 username: &self.qbittorrent.username,
                 password_key: secret_keys::QBITTORRENT_PASSWORD,
+                api_key_key: Some(secret_keys::QBITTORRENT_API_KEY),
                 category: &self.qbittorrent.category,
                 tag: &self.qbittorrent.tag,
                 skip_checking: self.qbittorrent.skip_checking,
@@ -311,6 +321,9 @@ impl Config {
                 url: &self.transmission.url,
                 username: &self.transmission.username,
                 password_key: secret_keys::TRANSMISSION_PASSWORD,
+                // Transmission's RPC has no key auth — only a username and
+                // password — so there is nothing for a caller to prefer.
+                api_key_key: None,
                 // Transmission has only labels, so the category and tag collapse
                 // into one value, and there is no skip-check switch to honour.
                 category: &self.transmission.label,
@@ -329,6 +342,11 @@ pub struct TorrentClientConfig<'a> {
     pub username: &'a str,
     /// Vault key holding this client's password.
     pub password_key: &'static str,
+    /// Vault key holding this client's API key, for clients that have one.
+    ///
+    /// `Some` does not mean a key is stored — only that this client can use one.
+    /// When a value is present under it, it takes precedence over the password.
+    pub api_key_key: Option<&'static str>,
     /// The grouping applied to torrents sharerr creates: qBittorrent's category,
     /// or Transmission's label.
     pub category: &'a str,
