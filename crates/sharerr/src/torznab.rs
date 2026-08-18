@@ -611,16 +611,13 @@ async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Re
 /// The scope has to come back from authentication, because it is a property of
 /// the *caller* rather than of the query — and a caller cannot be trusted to say
 /// who they are. Returning `()` and looking the peer up again inside the search
-/// would mean two lookups that could disagree. The legacy shared key
-/// authenticates nobody in particular, so it carries [`PeerScope::All`]; the
-/// Friends page warns while it is set that revoking a peer does not fully cut
-/// them off.
+/// would mean two lookups that could disagree.
 pub(crate) struct Caller {
     scope: PeerScope,
-    /// Which peer row authenticated, or `None` for the legacy shared key. The
-    /// gossip endpoints require a real peer — an anonymous key cannot take part
-    /// in an exchange whose whole point is knowing who said what.
-    peer_id: Option<i64>,
+    /// Which peer row authenticated. Every caller is a real peer now that the
+    /// legacy shared key is gone, so the gossip endpoints — which require one,
+    /// to know who said what — can always resolve it.
+    peer_id: i64,
 }
 
 impl Caller {
@@ -628,7 +625,7 @@ impl Caller {
         self.scope
     }
 
-    pub fn peer_id(&self) -> Option<i64> {
+    pub fn peer_id(&self) -> i64 {
         self.peer_id
     }
 }
@@ -669,18 +666,13 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
 
 /// Decide who an `apikey` belongs to.
 ///
-/// Two things can satisfy it, in this order:
+/// Only one thing can satisfy it: a peer's own key. Each friend holds a
+/// different key, so one can be revoked without disturbing the others, and the
+/// request records who made it.
 ///
-/// 1. **A peer's own key.** The normal case since M4 — each friend holds a
-///    different key, so one can be revoked without disturbing the others, and
-///    the request records who made it.
-/// 2. **The shared `torznab.api_key` from the vault.** Kept working so that
-///    upgrading does not silently break a friend who was set up before peers
-///    existed.
-///
-/// Neither present means the endpoint is closed rather than open: an indexer
-/// feed lists everything this instance shares, and defaulting to
-/// unauthenticated would publish the library to anyone who found the port.
+/// No match means the endpoint is closed rather than open: an indexer feed
+/// lists everything this instance shares, and defaulting to unauthenticated
+/// would publish the library to anyone who found the port.
 async fn check_api_key(
     state: &ServeState,
     supplied: Option<&str>,
@@ -700,8 +692,7 @@ async fn check_api_key(
         return Err(refused());
     };
 
-    // Peers first. This is one indexed lookup on a SHA-256, so it costs nothing
-    // even when the shared key is what ends up matching.
+    // One indexed lookup on a SHA-256 of the supplied key.
     if let Ok(store) = state.store().await {
         match store.peer_by_key(&SecretString::from(supplied)).await {
             Ok(Some(peer)) => {
@@ -744,7 +735,7 @@ async fn check_api_key(
                 );
                 return Ok(Caller {
                     scope: peer.scope,
-                    peer_id: Some(peer.id),
+                    peer_id: peer.id,
                 });
             }
             Ok(None) => {}
@@ -759,20 +750,6 @@ async fn check_api_key(
                 ));
             }
         }
-    }
-
-    // Fall back to the single shared key, for setups that predate peers. Read
-    // through the cache: opening the vault is an Argon2 derivation, and this
-    // branch runs for every legacy-key request *and every wrong key anyone
-    // sends* — uncached, that was an unauthenticated CPU amplifier.
-    if let Some(stored) = state.torznab_shared_key().await
-        && crate::secrets::constant_time_eq(&stored, supplied)
-    {
-        tracing::debug!("torznab request authenticated with the shared key");
-        return Ok(Caller {
-            scope: PeerScope::All,
-            peer_id: None,
-        });
     }
 
     tracing::warn!("rejected a torznab request with a bad api key");

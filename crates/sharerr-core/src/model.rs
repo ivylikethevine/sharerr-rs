@@ -19,12 +19,6 @@ pub enum MediaSource {
     /// no external ids. Everything URL-or-API-key shaped iterates
     /// [`Self::ARRS`] instead of [`Self::ALL`] to leave this variant out.
     Directory,
-    /// A Jellyfin (or Emby — same API) media server, discovered by item tag.
-    /// Has a URL and an API key like an *arr app, but not the *arr API — so it
-    /// is deliberately outside [`Self::ARRS`], and like [`Self::Directory`] its
-    /// items are scoped by their declared kind rather than by the app they came
-    /// from, because one Jellyfin holds every kind at once.
-    Jellyfin,
 }
 
 impl MediaSource {
@@ -37,7 +31,6 @@ impl MediaSource {
             Self::Readarr => "readarr",
             Self::Whisparr => "whisparr",
             Self::Directory => "directory",
-            Self::Jellyfin => "jellyfin",
         }
     }
 
@@ -51,11 +44,11 @@ impl MediaSource {
         match self {
             Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",
             Self::Lidarr | Self::Readarr => "v1",
-            // Neither of these speaks the *arr API; only `ArrClient` reads
-            // this, and one is never built for them. The arms exist because
-            // the function is total, and panicking here would let a future
-            // caller take the whole process down over a label.
-            Self::Directory | Self::Jellyfin => "none",
+            // Directory does not speak the *arr API; only `ArrClient` reads
+            // this, and one is never built for it. The arm exists because the
+            // function is total, and panicking here would let a future caller
+            // take the whole process down over a label.
+            Self::Directory => "none",
         }
     }
 
@@ -67,15 +60,13 @@ impl MediaSource {
         Self::Readarr,
         Self::Whisparr,
         Self::Directory,
-        Self::Jellyfin,
     ];
 
     /// The sources whose items are admitted to a narrow peer scope by the
     /// declared kind in their spec rather than by which app produced them —
-    /// because these sources have no single kind: a directory is whatever the
-    /// operator declared, and one Jellyfin holds films, series, and music at
-    /// once.
-    pub const KIND_SCOPED: &'static [Self] = &[Self::Directory, Self::Jellyfin];
+    /// because a directory has no single kind: it is whatever the operator
+    /// declared in `[[library]]`.
+    pub const KIND_SCOPED: &'static [Self] = &[Self::Directory];
 
     /// Only the *arr apps — the sources that have a URL, an API key, and a
     /// settings section shaped like one. Everything that loops "the configured
@@ -107,7 +98,6 @@ impl MediaSource {
             Self::Readarr => "Readarr",
             Self::Whisparr => "Whisparr",
             Self::Directory => "Directory",
-            Self::Jellyfin => "Jellyfin",
         }
     }
 }
@@ -381,9 +371,8 @@ mod tests {
     #[test]
     fn arrs_is_all_without_the_non_arr_sources() {
         assert!(!MediaSource::ARRS.contains(&MediaSource::Directory));
-        assert!(!MediaSource::ARRS.contains(&MediaSource::Jellyfin));
         let mut expected: Vec<MediaSource> = MediaSource::ALL.to_vec();
-        expected.retain(|s| *s != MediaSource::Directory && *s != MediaSource::Jellyfin);
+        expected.retain(|s| *s != MediaSource::Directory);
         assert_eq!(MediaSource::ARRS, expected.as_slice());
     }
 

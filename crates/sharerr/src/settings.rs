@@ -191,15 +191,15 @@ mod tests {
                 tag = "from-file"
                 [qbittorrent]
                 url = "http://qbit:8080"
-                username = "from-file"
+                category = "from-file"
                 "#,
             )?;
-            jail.set_env("SHARERR_QBITTORRENT__USERNAME", "from-env");
+            jail.set_env("SHARERR_QBITTORRENT__CATEGORY", "from-env");
 
             let cfg = load(&jail.directory().join("sharerr.toml")).expect("layered load");
             assert_eq!(cfg.tag, "from-file", "file overrides default");
             assert_eq!(cfg.qbittorrent.url.as_str(), "http://qbit:8080/");
-            assert_eq!(cfg.qbittorrent.username, "from-env", "env overrides file");
+            assert_eq!(cfg.qbittorrent.category, "from-env", "env overrides file");
             Ok(())
         });
     }

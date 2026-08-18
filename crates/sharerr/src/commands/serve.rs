@@ -6,11 +6,11 @@
 //! port — whatever makes 8477 reachable makes all of it reachable.
 //!
 //! Serving is deliberately decoupled from being *configured*. An instance whose
-//! vault has no `qbittorrent.password` in it yet still binds, still answers
+//! vault has no `qbittorrent.api_key` in it yet still binds, still answers
 //! `/health`, and reports the reason on `/ready`. The fix for that state is the
 //! web UI (or `sharerr vault set` inside the running container), and a process
 //! that exits during startup can never be reached by either — it just
-//! restart-loops, and the operator has nowhere to type the password.
+//! restart-loops, and the operator has nowhere to type the key.
 //!
 //! The state all of this shares lives in [`crate::state`], not here: the tracker,
 //! the feed, and the web UI need it too, and they are general layers rather than

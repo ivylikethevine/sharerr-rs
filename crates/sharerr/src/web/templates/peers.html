@@ -33,15 +33,6 @@
 </div>
 {% endif %}
 
-{% if shared_key_set %}
-<p class="error" role="alert">
-  A shared <code>torznab.api_key</code> is still set. Anyone holding it can read the
-  feed regardless of the friends listed below, so revoking someone here does not
-  fully cut them off until it is cleared under
-  <a href="/settings">Settings&nbsp;→&nbsp;Indexer</a>.
-</p>
-{% endif %}
-
 <h2>Add a friend</h2>
 <form method="post" action="/peers" class="panel">
   <label for="label">Name</label>
@@ -97,6 +88,7 @@
         <td>{{ peer.last_seen }}</td>
         <td class="actions">
           {% if !peer.revoked %}
+          <a href="/peers/{{ peer.id }}/feed">Preview feed</a>
           <form method="post" action="/peers/{{ peer.id }}/revoke" class="inline">
             <button type="submit" class="link">Revoke</button>
           </form>

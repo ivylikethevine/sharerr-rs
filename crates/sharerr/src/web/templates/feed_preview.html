@@ -1,0 +1,45 @@
+{% extends "layout.html" %}
+{% block title %}{{ peer_label }}'s feed — sharerr{% endblock %}
+
+{% block content %}
+<h1>{{ peer_label }}'s feed</h1>
+
+<p class="hint">
+  Exactly what {{ peer_label }}'s Torznab client would see right now — their
+  scope ({{ peer_scope_label }}), their links. Content outside their scope is
+  never listed here, the same as it is never listed for them.
+</p>
+
+<p class="hint"><a href="/peers">&larr; back to Friends</a></p>
+
+<div class="panel">
+  {% if items.is_empty() %}
+  <p class="hint">
+    Nothing is visible to {{ peer_label }} right now — either nothing is seeding
+    yet, or nothing seeding falls within their scope.
+  </p>
+  {% else %}
+  <p class="hint">{{ total }} release(s).</p>
+  <table>
+    <thead>
+      <tr><th>Title</th><th>Category</th><th>Size</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.title }}</td>
+        <td>{{ item.category }}</td>
+        <td>{{ item.size }}</td>
+        <td>
+          <a href="{{ item.download_url }}">.torrent</a>
+          {% if !item.magnet_url.is_empty() %}
+          &middot; <a href="{{ item.magnet_url }}">magnet</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endblock %}

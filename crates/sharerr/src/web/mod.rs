@@ -16,6 +16,7 @@
 pub mod auth;
 pub mod config_io;
 pub mod diagnostics;
+pub mod items;
 pub mod peers;
 pub mod probe;
 pub mod settings;
@@ -92,11 +93,13 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     let protected = Router::new()
         .route("/", get(status_page))
         .route("/diagnostics", get(diagnostics::page))
+        .route("/items", get(items::page))
         .route("/peers", get(peers::page).post(peers::add))
         .route("/peers/{id}/scope", post(peers::set_scope))
         .route("/peers/{id}/gossip", post(peers::set_gossip))
         .route("/peers/{id}/revoke", post(peers::revoke))
         .route("/peers/{id}/delete", post(peers::delete))
+        .route("/peers/{id}/feed", get(peers::feed_preview))
         .route("/settings", get(settings::page))
         .route("/settings/general", post(settings::save_general))
         .route("/settings/arr/{source}", post(settings::save_arr))
@@ -404,7 +407,7 @@ mod tests {
     /// would not notice.
     #[tokio::test]
     async fn every_protected_route_refuses_an_anonymous_visitor() {
-        let protected_gets = ["/", "/settings", "/diagnostics", "/peers"];
+        let protected_gets = ["/", "/settings", "/diagnostics", "/items", "/peers", "/peers/1/feed"];
         let protected_posts = [
             "/settings/general",
             "/settings/arr/sonarr",
@@ -414,7 +417,7 @@ mod tests {
             "/settings/libraries",
             "/settings/paths",
             "/settings/sync",
-            "/settings/generate/torznab",
+            "/settings/generate/tracker",
             "/settings/test/sonarr",
             "/settings/account/password",
             "/peers",

@@ -56,8 +56,7 @@ impl std::fmt::Debug for ArrClient {
 impl ArrClient {
     pub fn new(kind: MediaSource, base: &Url, api_key: SecretString) -> Result<Self> {
         // Only the *arr apps speak this API. The directory source has no HTTP
-        // API at all and Jellyfin has its own client crate — refusing here
-        // keeps every later call total.
+        // API at all — refusing here keeps every later call total.
         if !MediaSource::ARRS.contains(&kind) {
             return Err(ArrError::NotAnApp { service: kind });
         }
@@ -193,9 +192,7 @@ impl ArrClient {
             MediaSource::Readarr => readarr::discover(self, tag_id).await,
             // Unreachable: `Self::new` refuses to build a client for anything
             // that does not speak the *arr API.
-            MediaSource::Directory | MediaSource::Jellyfin => {
-                Err(ArrError::NotAnApp { service: self.kind })
-            }
+            MediaSource::Directory => Err(ArrError::NotAnApp { service: self.kind }),
         }
     }
 }

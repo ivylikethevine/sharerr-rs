@@ -12,33 +12,13 @@ pub enum QbitError {
     },
 
     #[error(
-        "qBittorrent rejected the credentials. Check the qbittorrent.password entry \
-         in the vault and the qbittorrent.username setting"
-    )]
-    LoginRejected,
-
-    #[error(
-        "qBittorrent refused to accept a login (HTTP 403). Repeated failures ban the \
-         client IP for a few minutes — wait, or clear the ban in Options -> Web UI"
-    )]
-    LoginBanned,
-
-    #[error(
-        "qBittorrent answered 401 Unauthorized to the login. Either the credentials \
-         are wrong, or qBittorrent rejected the request before it ever read them: it \
-         validates the Host header's port against its own WebUI port, so reaching it \
-         through a remapped docker port or a reverse proxy on a different port fails \
-         this way with a perfectly correct password. Check qbittorrent.url names the \
-         port qBittorrent itself listens on, or turn off Options -> Web UI -> \
-         'Validate Host header'"
-    )]
-    Unauthorized,
-
-    #[error(
         "qBittorrent rejected the API key. Check the qbittorrent.api_key entry in the \
          vault matches the key in Options -> Web UI -> API key — rotating the key \
-         there invalidates the old one immediately. API keys need qBittorrent 5.2 or \
-         newer; on an older build, use a username and password instead"
+         there invalidates the old one immediately. This could also be a Host-header \
+         port mismatch: qBittorrent validates the Host header's port against its own \
+         WebUI port, so reaching it through a remapped docker port or a reverse proxy \
+         on a different port is rejected the same way. API keys need qBittorrent 5.2 \
+         or newer"
     )]
     ApiKeyRejected,
 
@@ -48,13 +28,6 @@ pub enum QbitError {
          -> API key"
     )]
     MalformedApiKey,
-
-    #[error(
-        "qBittorrent returned {status} for {path} even after re-authenticating. The \
-         most common cause is a Referer or Host that does not match the configured \
-         WebUI address"
-    )]
-    Forbidden { status: u16, path: String },
 
     #[error("qBittorrent returned HTTP {status} for {path}: {body}")]
     Status {
@@ -93,13 +66,6 @@ impl QbitError {
     /// Whether this is a rejected credential rather than an unreachable service —
     /// the two have different fixes and must be reported differently.
     pub fn is_auth_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::LoginRejected
-                | Self::LoginBanned
-                | Self::Unauthorized
-                | Self::ApiKeyRejected
-                | Self::MalformedApiKey
-        )
+        matches!(self, Self::ApiKeyRejected | Self::MalformedApiKey)
     }
 }

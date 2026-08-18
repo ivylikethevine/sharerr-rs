@@ -83,19 +83,14 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
         report.section(kind.as_str());
         discovered.extend(check_arr(kind, service, config, vault.as_ref(), &mut report).await);
     }
-    if config.jellyfin.is_some() {
-        report.section("jellyfin");
-        discovered.extend(check_jellyfin(config, vault.as_ref(), &mut report).await);
-    }
     for library in &config.library {
         report.section(&format!("library {}", library.path.display()));
         discovered.extend(check_library(library, &mut report));
     }
-    if sources.is_empty() && config.jellyfin.is_none() && config.library.is_empty() {
+    if sources.is_empty() && config.library.is_empty() {
         report.section("library sources");
         report.fail(
-            "no *arr app, jellyfin server, or [[library]] directory is configured — \
-             there is nothing to share",
+            "no *arr app or [[library]] directory is configured — there is nothing to share",
         );
     }
 
@@ -178,17 +173,6 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
         }
     }
 
-    // A warning, not a failure: an instance can reconcile and seed perfectly well
-    // without ever publishing a feed. It just cannot be found by a friend.
-    match vault.get(secret_keys::TORZNAB_API_KEY) {
-        Ok(Some(_)) => report.ok(format!("{} is set", secret_keys::TORZNAB_API_KEY)),
-        Ok(None) => report.warn(
-            "no torznab.api_key — the indexer feed is closed, so no friend can \
-             find what this instance shares. Generate one in Settings.",
-        ),
-        Err(err) => report.fail(format!("torznab.api_key could not be read: {err}")),
-    }
-
     Some(vault)
 }
 
@@ -200,7 +184,7 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
 fn check_torrent_credential(
     vault: &Vault,
     api_key_key: Option<&'static str>,
-    password_key: &'static str,
+    password_key: Option<&'static str>,
     report: &mut Report,
 ) {
     let api_key = match api_key_key {
@@ -215,11 +199,23 @@ fn check_torrent_credential(
     };
 
     if let Some(key) = api_key {
-        report.ok(format!(
-            "{key} is set — it takes precedence over {password_key}"
-        ));
+        match password_key {
+            Some(password_key) => report.ok(format!(
+                "{key} is set — it takes precedence over {password_key}"
+            )),
+            None => report.ok(format!("{key} is set")),
+        }
         return;
     }
+
+    // No password concept for this backend either — qBittorrent authenticates by
+    // API key alone, so a missing key here is the whole story.
+    let Some(password_key) = password_key else {
+        if let Some(key) = api_key_key {
+            report.fail(format!("{key} is missing — {}", fix_hint(key)));
+        }
+        return;
+    };
 
     match vault.get(password_key) {
         Ok(Some(_)) => report.ok(format!("{password_key} is set")),
@@ -433,7 +429,7 @@ fn check_library(
 /// resolved together rather than assuming qBittorrent's.
 async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report) {
     let settings = config.torrent_client();
-    let (url, key, label) = (settings.url, settings.password_key, settings.category);
+    let (url, label) = (settings.url, settings.category);
 
     // An API key, when stored, is what will authenticate — so it is what `doctor`
     // must test. Read quietly: its absence is the ordinary case and the password
@@ -444,9 +440,17 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
 
     let credential = match api_key {
         Some(api_key) => checks::TorrentCredential::ApiKey(api_key),
-        None => match secret(vault, key, report) {
-            Some(password) => checks::TorrentCredential::Password(password),
-            None => return,
+        None => match settings.password_key {
+            Some(password_key) => match secret(vault, password_key, report) {
+                Some(password) => checks::TorrentCredential::Password(password),
+                None => return,
+            },
+            None => {
+                if let Some(key) = settings.api_key_key {
+                    report.fail(format!("{key} is missing — {}", fix_hint(key)));
+                }
+                return;
+            }
         },
     };
     let noun = credential.noun();
@@ -471,11 +475,14 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
         }
         QbitOutcome::AuthRejected => {
             let checked = if noun == "API key" {
-                settings.api_key_key.unwrap_or(key)
+                settings.api_key_key
             } else {
-                key
+                settings.password_key
             };
-            report.fail(format!("{url} rejected the {noun} — check {checked}"));
+            report.fail(format!(
+                "{url} rejected the {noun} — check {}",
+                checked.unwrap_or("the stored credential")
+            ));
             return;
         }
         QbitOutcome::Unreachable(reason) => {
@@ -498,75 +505,6 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
             torrents.len()
         )),
         Err(err) => report.warn(format!("could not list torrents: {err}")),
-    }
-}
-
-// ------------------------------------------------------------------ jellyfin
-
-/// The same three questions the *arr checks answer — reachable, key accepted,
-/// tag in use — against the Jellyfin API. Returns what the tag covers, so the
-/// path checks below include Jellyfin's files.
-async fn check_jellyfin(
-    config: &Config,
-    vault: Option<&Vault>,
-    report: &mut Report,
-) -> Vec<Discovered> {
-    // Guarded by the caller; the arm exists because the function is total.
-    let Some(service) = &config.jellyfin else {
-        return Vec::new();
-    };
-
-    let api_key = match vault.map(|v| v.get(secret_keys::JELLYFIN_API_KEY)) {
-        Some(Ok(Some(key))) => key,
-        Some(Ok(None)) | None => {
-            report.fail(format!(
-                "jellyfin is configured but {} is not in the vault",
-                secret_keys::JELLYFIN_API_KEY
-            ));
-            return Vec::new();
-        }
-        Some(Err(err)) => {
-            report.fail(format!("reading the vault: {err}"));
-            return Vec::new();
-        }
-    };
-
-    let client = match sharerr_jellyfin::JellyfinClient::new(&service.url, api_key) {
-        Ok(client) => client,
-        Err(err) => {
-            report.fail(err.to_string());
-            return Vec::new();
-        }
-    };
-
-    match client.system_info().await {
-        Ok(info) => report.ok(format!(
-            "{} responded ({} {})",
-            service.url, info.server_name, info.version
-        )),
-        Err(err) => {
-            report.fail(format!("{}: {err}", service.url));
-            return Vec::new();
-        }
-    }
-
-    match client.discover(&config.tag).await {
-        Ok(items) if items.is_empty() => {
-            report.warn(format!(
-                "nothing in Jellyfin carries the tag {:?} — tag a movie, series, \
-                 album, or book there, or nothing will be shared from it",
-                config.tag
-            ));
-            Vec::new()
-        }
-        Ok(items) => {
-            report.ok(format!("{} file(s) tagged {:?}", items.len(), config.tag));
-            items
-        }
-        Err(err) => {
-            report.fail(format!("the tag walk failed: {err}"));
-            Vec::new()
-        }
     }
 }
 
@@ -795,12 +733,18 @@ fn print_config_summary(config: &Config) {
     // The configured client, not always qBittorrent's — printing the unused
     // section's URL is how an operator ends up debugging the wrong service.
     let client = config.torrent_client();
-    println!(
-        "  client:    {} {} (user {})",
-        config.torrent_backend.as_str(),
-        client.url,
-        client.username
-    );
+    match client.username {
+        Some(username) => println!(
+            "  client:    {} {} (user {username})",
+            config.torrent_backend.as_str(),
+            client.url,
+        ),
+        None => println!(
+            "  client:    {} {}",
+            config.torrent_backend.as_str(),
+            client.url,
+        ),
+    }
     println!(
         "  tracker:   builtin, advertised as {}",
         match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {

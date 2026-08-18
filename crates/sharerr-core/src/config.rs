@@ -16,7 +16,6 @@ pub mod secret_keys {
     pub const LIDARR_API_KEY: &str = "lidarr.api_key";
     pub const READARR_API_KEY: &str = "readarr.api_key";
     pub const WHISPARR_API_KEY: &str = "whisparr.api_key";
-    pub const JELLYFIN_API_KEY: &str = "jellyfin.api_key";
 
     /// The vault key holding one *arr app's API key.
     ///
@@ -24,36 +23,24 @@ pub mod secret_keys {
     /// asks the same question, and a sixth app should mean editing one place.
     /// `None` for the directory source, which has no credential at all.
     pub fn api_key_for(source: crate::MediaSource) -> Option<&'static str> {
-        use crate::MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => Some(SONARR_API_KEY),
             Radarr => Some(RADARR_API_KEY),
             Lidarr => Some(LIDARR_API_KEY),
             Readarr => Some(READARR_API_KEY),
             Whisparr => Some(WHISPARR_API_KEY),
-            Jellyfin => Some(JELLYFIN_API_KEY),
             Directory => None,
         }
     }
-    pub const QBITTORRENT_PASSWORD: &str = "qbittorrent.password";
-    /// A qBittorrent 5.2+ WebUI API key, used *instead of* the username and
-    /// password when present.
-    ///
-    /// A separate key rather than a flag beside the password, because the two are
-    /// different credentials with different lifetimes: rotating the key in
-    /// qBittorrent must not silently fall back to a stale password, and clearing
-    /// the key must put the password back in charge without retyping it.
+    /// The sole qBittorrent credential: a WebUI API key (5.2+), sent as a bearer
+    /// token. qBittorrent has no username/password support here — nothing has
+    /// shipped against an older build, so there is no legacy setup to preserve.
     pub const QBITTORRENT_API_KEY: &str = "qbittorrent.api_key";
     /// The Transmission RPC password, when Transmission is the selected backend.
     pub const TRANSMISSION_PASSWORD: &str = "transmission.password";
     /// Shared secret embedded in builtin-tracker announce URLs.
     pub const TRACKER_TOKEN: &str = "tracker.token";
-    /// The `apikey` a friend's Prowlarr sends to the Torznab endpoint.
-    ///
-    /// Its absence closes the endpoint rather than opening it: the feed lists
-    /// everything this instance shares, so defaulting to unauthenticated would
-    /// publish the library to anyone who found the port.
-    pub const TORZNAB_API_KEY: &str = "torznab.api_key";
 
     /// This instance's Ed25519 signing key for gossip records, hex-encoded.
     ///
@@ -85,12 +72,9 @@ pub mod secret_keys {
         LIDARR_API_KEY,
         READARR_API_KEY,
         WHISPARR_API_KEY,
-        JELLYFIN_API_KEY,
-        QBITTORRENT_PASSWORD,
         QBITTORRENT_API_KEY,
         TRANSMISSION_PASSWORD,
         TRACKER_TOKEN,
-        TORZNAB_API_KEY,
     ];
 }
 
@@ -116,27 +100,24 @@ pub mod config_paths {
     pub const LIDARR_URL: &str = "lidarr.url";
     pub const READARR_URL: &str = "readarr.url";
     pub const WHISPARR_URL: &str = "whisparr.url";
-    pub const JELLYFIN_URL: &str = "jellyfin.url";
 
     /// The config path holding one *arr app's URL — the write-side counterpart
     /// of [`super::secret_keys::api_key_for`], for the same reason: every
     /// consumer asks the same question, and a sixth app should mean editing one
     /// function. `None` for the directory source, which has no URL.
     pub fn url_for(source: crate::MediaSource) -> Option<&'static str> {
-        use crate::MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => Some(SONARR_URL),
             Radarr => Some(RADARR_URL),
             Lidarr => Some(LIDARR_URL),
             Readarr => Some(READARR_URL),
             Whisparr => Some(WHISPARR_URL),
-            Jellyfin => Some(JELLYFIN_URL),
             Directory => None,
         }
     }
 
     pub const QBITTORRENT_URL: &str = "qbittorrent.url";
-    pub const QBITTORRENT_USERNAME: &str = "qbittorrent.username";
     pub const QBITTORRENT_CATEGORY: &str = "qbittorrent.category";
     pub const QBITTORRENT_TAG: &str = "qbittorrent.tag";
     pub const QBITTORRENT_SKIP_CHECKING: &str = "qbittorrent.skip_checking";
@@ -177,9 +158,7 @@ pub mod config_paths {
         LIDARR_URL,
         READARR_URL,
         WHISPARR_URL,
-        JELLYFIN_URL,
         QBITTORRENT_URL,
-        QBITTORRENT_USERNAME,
         QBITTORRENT_CATEGORY,
         QBITTORRENT_TAG,
         QBITTORRENT_SKIP_CHECKING,
@@ -217,10 +196,6 @@ pub struct Config {
     pub readarr: Option<ServiceConfig>,
     /// Adult content. Whisparr is Sonarr's codebase, so it walks identically.
     pub whisparr: Option<ServiceConfig>,
-    /// A Jellyfin or Emby media server, discovered by item tag. Not an *arr app —
-    /// the client speaks Jellyfin's own API — but configured the same way: a URL
-    /// here, an API key in the vault.
-    pub jellyfin: Option<ServiceConfig>,
     /// Which torrent client actually seeds. See [`TorrentBackend`].
     pub torrent_backend: TorrentBackend,
     pub qbittorrent: QbitConfig,
@@ -252,7 +227,6 @@ impl Default for Config {
             lidarr: None,
             readarr: None,
             whisparr: None,
-            jellyfin: None,
             torrent_backend: TorrentBackend::default(),
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
@@ -286,14 +260,13 @@ impl Config {
     /// Every consumer wants this and none of them should carry a five-way match to
     /// get it — adding a sixth app should mean editing one function.
     pub fn service(&self, source: crate::MediaSource) -> Option<&ServiceConfig> {
-        use crate::MediaSource::{Directory, Jellyfin, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
         match source {
             Sonarr => self.sonarr.as_ref(),
             Radarr => self.radarr.as_ref(),
             Lidarr => self.lidarr.as_ref(),
             Readarr => self.readarr.as_ref(),
             Whisparr => self.whisparr.as_ref(),
-            Jellyfin => self.jellyfin.as_ref(),
             // A directory is configured through `library`, not a service section.
             Directory => None,
         }
@@ -341,8 +314,11 @@ impl Config {
         match self.torrent_backend {
             TorrentBackend::Qbittorrent => TorrentClientConfig {
                 url: &self.qbittorrent.url,
-                username: &self.qbittorrent.username,
-                password_key: secret_keys::QBITTORRENT_PASSWORD,
+                // qBittorrent authenticates by API key alone — see
+                // `secret_keys::QBITTORRENT_API_KEY`. There is no username/password
+                // fallback to resolve here.
+                username: None,
+                password_key: None,
                 api_key_key: Some(secret_keys::QBITTORRENT_API_KEY),
                 category: &self.qbittorrent.category,
                 tag: &self.qbittorrent.tag,
@@ -350,8 +326,8 @@ impl Config {
             },
             TorrentBackend::Transmission => TorrentClientConfig {
                 url: &self.transmission.url,
-                username: &self.transmission.username,
-                password_key: secret_keys::TRANSMISSION_PASSWORD,
+                username: Some(&self.transmission.username),
+                password_key: Some(secret_keys::TRANSMISSION_PASSWORD),
                 // Transmission's RPC has no key auth — only a username and
                 // password — so there is nothing for a caller to prefer.
                 api_key_key: None,
@@ -370,9 +346,12 @@ impl Config {
 #[derive(Debug, Clone, Copy)]
 pub struct TorrentClientConfig<'a> {
     pub url: &'a Url,
-    pub username: &'a str,
-    /// Vault key holding this client's password.
-    pub password_key: &'static str,
+    /// `None` for a client with no username/password credential — qBittorrent,
+    /// which authenticates by API key alone.
+    pub username: Option<&'a str>,
+    /// Vault key holding this client's password, or `None` for a client with no
+    /// password credential.
+    pub password_key: Option<&'static str>,
     /// Vault key holding this client's API key, for clients that have one.
     ///
     /// `Some` does not mean a key is stored — only that this client can use one.
@@ -413,11 +392,10 @@ pub struct ServiceConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-/// How to reach qBittorrent, and what to label what sharerr puts there. The
-/// password is in the vault, not here.
+/// How to reach qBittorrent, and what to label what sharerr puts there. The API
+/// key is in the vault, not here — see `secret_keys::QBITTORRENT_API_KEY`.
 pub struct QbitConfig {
     pub url: Url,
-    pub username: String,
     /// Category applied to torrents sharerr creates, so they are easy to find.
     pub category: String,
     /// Tag applied alongside the category.
@@ -437,7 +415,6 @@ impl Default for QbitConfig {
     fn default() -> Self {
         Self {
             url: Url::parse("http://localhost:8080").expect("valid literal url"),
-            username: "admin".to_owned(),
             category: "sharerr".to_owned(),
             tag: "sharerr".to_owned(),
             skip_checking: false,
@@ -721,7 +698,6 @@ mod tests {
             lidarr: service("http://lidarr:8686"),
             readarr: service("http://readarr:8787"),
             whisparr: service("http://whisparr:6969"),
-            jellyfin: service("http://jellyfin:8096"),
             ..Config::default()
         };
         let document = serde_json::to_value(&config).unwrap();

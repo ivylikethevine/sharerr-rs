@@ -200,10 +200,8 @@ pub struct SettingsPage {
     pub secondary_arr_configured: bool,
 
     pub qbit_url: String,
-    pub qbit_username: String,
-    pub qbit_password_set: bool,
-    /// Whether a qBittorrent API key is stored. When it is, the key authenticates
-    /// and the password is not read at all — the form says so.
+    /// Whether a qBittorrent API key is stored — the sole credential qBittorrent
+    /// authenticates with; there is no username/password fallback.
     pub qbit_api_key_set: bool,
     pub qbit_category: String,
     pub qbit_tag: String,
@@ -220,9 +218,6 @@ pub struct SettingsPage {
     pub gluetun_control_url: String,
     pub gluetun_poll_secs: u64,
 
-    pub torznab_key_set: bool,
-    /// The `/api` URL a friend pastes into Prowlarr, built from the advertised host.
-    pub torznab_url: String,
     /// A freshly minted secret, shown exactly once on the response that created it.
     /// Never populated by an ordinary page load.
     pub revealed: Option<String>,
@@ -277,9 +272,9 @@ pub struct ArrSection {
     /// a precomputed "is it locked" flag here would hide these fields from the
     /// test that proves every lock key in the template is a real config path.
     pub url_path: &'static str,
-    /// Whether the section renders in the always-visible group. Sonarr, Radarr
-    /// and Jellyfin are what most instances run; the rest fold into a
-    /// disclosure so the page is not a wall of identical forms.
+    /// Whether the section renders in the always-visible group. Sonarr and
+    /// Radarr are what most instances run; the rest fold into a disclosure so
+    /// the page is not a wall of identical forms.
     pub primary: bool,
 }
 
@@ -389,15 +384,99 @@ pub struct PeersPage {
     pub revealed: Option<RevealedPeer>,
     /// The feed URL a friend pastes alongside their key.
     pub feed_url: String,
-    /// Whether the legacy single shared key is still set. While it is, revoking a
-    /// peer does not fully cut them off, so the page has to say so.
-    pub shared_key_set: bool,
 }
 
 #[derive(Debug)]
 pub struct RevealedPeer {
     pub label: String,
     pub key: String,
+}
+
+/// One release as this friend's Torznab client would receive it.
+#[derive(Debug)]
+pub struct FeedPreviewRow {
+    pub title: String,
+    pub category: &'static str,
+    pub size: String,
+    pub download_url: String,
+    /// Empty until the release has an info hash, same as the real feed.
+    pub magnet_url: String,
+}
+
+/// A friend's feed, rendered with their own scope and their own links — the
+/// honest test of scoping, run from the operator's browser instead of a
+/// hand-crafted Torznab query.
+#[derive(Debug, Template)]
+#[template(path = "feed_preview.html")]
+pub struct FeedPreviewPage {
+    pub signed_in: bool,
+    pub peer_label: String,
+    pub peer_scope_label: &'static str,
+    pub total: usize,
+    pub items: Vec<FeedPreviewRow>,
+}
+
+/// One `<option>` in the items page's source/state filters.
+#[derive(Debug)]
+pub struct FilterOption {
+    pub value: &'static str,
+    pub label: String,
+}
+
+/// One column header on the items page, pre-rendered as a link that toggles
+/// direction on the next click — the template has no scripting to do this
+/// itself.
+#[derive(Debug)]
+pub struct SortLink {
+    pub label: &'static str,
+    pub href: String,
+    /// Whether this is the column the list is currently sorted by.
+    pub active: bool,
+    /// "asc" / "desc" when active, empty otherwise — the template renders it
+    /// as a small arrow.
+    pub dir: &'static str,
+}
+
+/// One row of the items list — every file this instance has ever discovered,
+/// in whatever state it is in.
+#[derive(Debug)]
+pub struct ItemRow {
+    pub title: String,
+    /// `episode` / `movie` / `track` / `book`, for the small kind badge.
+    pub kind: &'static str,
+    pub source_label: String,
+    /// Pre-rendered human size (`"1.5 GiB"`) — see `web::items::human_size`.
+    pub size: String,
+    pub state_label: String,
+    /// Which friends' scopes admit this item, joined for display — empty
+    /// unless the item is actually seeding, since nothing else reaches a
+    /// friend's feed.
+    pub visible_to: String,
+    pub since: String,
+    /// A truncated info hash, or `None` before a torrent exists.
+    pub info_hash_short: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// Every file sharerr has discovered, sortable and filterable — the page
+/// `docs/roadmap.md` used to describe as the thing "an operator asks for after
+/// setup and the last thing they can currently get".
+#[derive(Debug, Template)]
+#[template(path = "items.html")]
+pub struct ItemsPage {
+    pub signed_in: bool,
+    pub error: Option<String>,
+    pub items: Vec<ItemRow>,
+    /// Rows before filtering — so "12 of 340" is answerable without a second
+    /// query.
+    pub total: usize,
+    pub shown: usize,
+    pub source_options: Vec<FilterOption>,
+    pub state_options: Vec<FilterOption>,
+    pub source_filter: String,
+    pub state_filter: String,
+    pub q: String,
+    pub sort_links: Vec<SortLink>,
 }
 
 #[cfg(test)]

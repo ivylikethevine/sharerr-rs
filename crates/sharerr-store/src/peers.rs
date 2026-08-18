@@ -84,10 +84,9 @@ impl PeerScope {
             Self::All => true,
             // Whisparr's files are episodes structurally, but sharing adult content
             // with someone scoped to "TV" would be a surprise of the worst kind, so
-            // it is deliberately not included. The kind-scoped sources (a plain
-            // directory, a Jellyfin server) are also excluded here: they have no
-            // single kind, and their items are admitted per item by
-            // [`Self::directory_kind`] instead.
+            // it is deliberately not included. The kind-scoped directory source is
+            // also excluded here: it has no single kind, and its items are admitted
+            // per item by [`Self::directory_kind`] instead.
             Self::Tv => source == MediaSource::Sonarr,
             Self::Movies => source == MediaSource::Radarr,
             Self::Music => source == MediaSource::Lidarr,
@@ -100,17 +99,17 @@ impl PeerScope {
     /// source anyway.
     ///
     /// [`Self::allows`] keys on where an item *came from*, which for a
-    /// `[[library]]` directory or a Jellyfin server says nothing about what it
-    /// *is* — the declared or detected kind of the item, not the source, is
-    /// what says whether its files are television or music. The values are
+    /// `[[library]]` directory says nothing about what it *is* — the declared
+    /// kind of the item, not the source, is what says whether its files are
+    /// television or music. The values are
     /// `MediaSpec`'s serde tags, compared against
     /// `json_extract(spec_json, '$.kind')` in `Store::seeding_items` for every
     /// source in [`MediaSource::KIND_SCOPED`].
     pub fn directory_kind(self) -> Option<&'static str> {
         match self {
             Self::All => None,
-            // No Whisparr concern here: a directory declared `kind = "tv"` or a
-            // Jellyfin episode is explicitly television.
+            // No Whisparr concern here: a directory declared `kind = "tv"` is
+            // explicitly television.
             Self::Tv => Some("episode"),
             Self::Movies => Some("movie"),
             Self::Music => Some("track"),
