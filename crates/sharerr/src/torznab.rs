@@ -221,6 +221,35 @@ pub struct FeedItem<'a> {
     pub item: &'a SharedItem,
     /// Absolute URL the friend's client fetches the `.torrent` from.
     pub download_url: String,
+    /// The same release as a magnet URI, for the clients that prefer one.
+    /// Empty when it could not be built (no info hash, which a seeding item
+    /// never lacks) — an empty attribute is simply not emitted.
+    pub magnet_url: String,
+}
+
+/// Render a magnet URI for one release.
+///
+/// `xt` is the identity, `dn` the display name, `xl` the exact length, and one
+/// `tr` per announce tier — the same tiers the `.torrent` itself carries, so a
+/// client arriving by magnet announces to the same tracker. Worth stating
+/// honestly: sharerr's torrents are private, and some clients refuse metadata
+/// exchange on private torrents, so the `.torrent` enclosure stays the primary
+/// path and the magnet is the convenience.
+pub(crate) fn magnet_uri(info_hash: &str, title: &str, size: u64, announces: &[String]) -> String {
+    // Query-string escaping via form_urlencoded: magnet consumers parse the
+    // tail as a query string, and `+` for space is the convention there.
+    let encode = |value: &str| {
+        url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+    };
+
+    let mut out = format!("magnet:?xt=urn:btih:{info_hash}&dn={}", encode(title));
+    if size > 0 {
+        let _ = write!(out, "&xl={size}");
+    }
+    for announce in announces {
+        let _ = write!(out, "&tr={}", encode(announce));
+    }
+    out
 }
 
 /// Render the RSS feed.
@@ -272,6 +301,14 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
             down_factor = DOWNLOAD_VOLUME_FACTOR,
             up_factor = UPLOAD_VOLUME_FACTOR,
         );
+
+        if !entry.magnet_url.is_empty() {
+            let _ = writeln!(
+                out,
+                "      <torznab:attr name=\"magneturl\" value=\"{}\"/>",
+                escape(&entry.magnet_url)
+            );
+        }
 
         // The ids are what let the far end match a release to a known series or
         // film rather than parsing the title and hoping.
@@ -459,6 +496,9 @@ pub(crate) struct Matched {
     pub items: Vec<SharedItem>,
     /// Absolute base URL a client fetches `.torrent` files from.
     pub base: String,
+    /// The announce URLs a magnet carries, current endpoint first — the same
+    /// tiers freshly built torrents get.
+    pub announces: Vec<String>,
     /// How many items were considered, before filtering.
     pub total: usize,
 }
@@ -471,6 +511,14 @@ impl Matched {
             self.base,
             crate::tracker::torrent_download_path(item.info_hash.as_deref().unwrap_or_default())
         )
+    }
+
+    /// The same release as a magnet URI, or empty when there is no info hash.
+    pub fn magnet_url(&self, item: &SharedItem) -> String {
+        match item.info_hash.as_deref() {
+            Some(hash) => magnet_uri(hash, &item.release_title, item.size, &self.announces),
+            None => String::new(),
+        }
     }
 }
 
@@ -512,9 +560,23 @@ pub(crate) async fn collect(
         .filter(|item| query.matches_with(needle.as_deref(), item))
         .collect();
 
+    // The magnet's `tr` tiers: every recently held endpoint, the same list a
+    // freshly built torrent carries, with the announce token when one is set —
+    // the magnet is an alternative to the `.torrent`, so it must grant the same
+    // right to announce.
+    let token = state.tracker_token().await;
+    let announces = state
+        .endpoint()
+        .recent()
+        .iter()
+        .filter_map(|base| sharerr_torrent::announce_url(base, token.as_deref()).ok())
+        .map(|url| url.to_string())
+        .collect();
+
     Ok(Matched {
         items: matched,
         base: config.public_base_url(),
+        announces,
         total,
     })
 }
@@ -531,6 +593,7 @@ async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Re
         .map(|item| FeedItem {
             item,
             download_url: matched.download_url(item),
+            magnet_url: matched.magnet_url(item),
         })
         .collect();
 
@@ -787,6 +850,12 @@ mod tests {
         feed_xml(&[FeedItem {
             item,
             download_url: "http://seed.example:8477/torrents/x.torrent".to_owned(),
+            magnet_url: magnet_uri(
+                item.info_hash.as_deref().unwrap_or_default(),
+                &item.release_title,
+                item.size,
+                &["http://seed.example:8477/announce".to_owned()],
+            ),
         }])
     }
 
@@ -915,6 +984,63 @@ mod tests {
             xml.contains(r#"<enclosure url="http://seed.example:8477/torrents/x.torrent" length="2147483648" type="application/x-bittorrent"/>"#),
             "{xml}"
         );
+    }
+
+    /// The magnet is the whole release in one URI: identity, display name,
+    /// exact length, and the same announce tiers the `.torrent` carries — and
+    /// it must arrive XML-escaped, because `&` separates its every parameter.
+    #[test]
+    fn the_magnet_carries_identity_name_size_and_tracker() {
+        let item = episode("Lanternwick.Hollow.S02E04.1080p.WEB-DL.x264-FAKEGRP", 2, 4);
+        let magnet = magnet_uri(
+            item.info_hash.as_deref().unwrap(),
+            &item.release_title,
+            item.size,
+            &["http://seed.example:8477/announce".to_owned()],
+        );
+
+        assert!(
+            magnet.starts_with(&format!(
+                "magnet:?xt=urn:btih:{}",
+                item.info_hash.as_deref().unwrap()
+            )),
+            "{magnet}"
+        );
+        assert!(
+            magnet.contains("&dn=Lanternwick.Hollow.S02E04.1080p.WEB-DL.x264-FAKEGRP"),
+            "{magnet}"
+        );
+        assert!(magnet.contains("&xl=2147483648"), "{magnet}");
+        assert!(
+            magnet.contains("&tr=http%3A%2F%2Fseed.example%3A8477%2Fannounce"),
+            "the announce URL must be percent-encoded: {magnet}"
+        );
+
+        let xml = render(&item);
+        assert!(
+            xml.contains(r#"<torznab:attr name="magneturl" value="magnet:?xt=urn:btih:"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("&amp;dn="),
+            "the magnet's ampersands must be XML-escaped: {xml}"
+        );
+    }
+
+    /// A rotated endpoint means multiple tiers, all of them in the magnet.
+    #[test]
+    fn the_magnet_spans_every_announce_tier() {
+        let magnet = magnet_uri(
+            "ab".repeat(20).as_str(),
+            "X",
+            0,
+            &[
+                "http://203.0.113.9:41234/announce".to_owned(),
+                "http://static.example:8477/announce".to_owned(),
+            ],
+        );
+        assert_eq!(magnet.matches("&tr=").count(), 2, "{magnet}");
+        assert!(!magnet.contains("&xl="), "a zero size is not advertised");
     }
 
     #[test]
@@ -1342,6 +1468,29 @@ mod tests {
     }
 
     /// The feature: two friends, two different libraries, one instance.
+    /// The assembled feed carries a magnet per item — the attribute a client
+    /// that prefers magnets looks for, next to the `.torrent` enclosure.
+    #[tokio::test]
+    async fn the_feed_offers_a_magnet_alongside_the_torrent() {
+        let (_dir, state) = with_both_kinds().await;
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        let feed = feed_for(&state, "sam-key").await;
+        assert_eq!(
+            feed.matches("magneturl").count(),
+            2,
+            "every item gets one: {feed}"
+        );
+        assert!(
+            feed.contains("magnet:?xt=urn:btih:aaaaaaaaaa"),
+            "the magnet must carry the item's own hash: {feed}"
+        );
+    }
+
     #[tokio::test]
     async fn each_friend_sees_only_what_their_scope_allows() {
         let (_dir, state) = with_both_kinds().await;

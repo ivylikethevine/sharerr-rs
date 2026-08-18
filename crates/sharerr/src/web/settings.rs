@@ -663,9 +663,16 @@ async fn build_page(
                 key_set: is_set(key),
                 placeholder: url_placeholder(kind),
                 url_path,
+                primary: matches!(
+                    kind,
+                    MediaSource::Sonarr | MediaSource::Radarr | MediaSource::Jellyfin
+                ),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let secondary_arr_configured = arrs
+        .iter()
+        .any(|arr| !arr.primary && (!arr.url.is_empty() || arr.key_set));
 
     // The one state where what is on disk and what the page renders disagree, so
     // the operator has to be told which of the two a save keeps — and where the
@@ -697,6 +704,7 @@ async fn build_page(
         tag: config.tag.clone(),
 
         arrs,
+        secondary_arr_configured,
 
         qbit_url: config.qbittorrent.url.to_string(),
         qbit_username: config.qbittorrent.username.clone(),

@@ -9,6 +9,28 @@
 {%- endmacro %}
 {%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
 
+{% macro arr_section(arr) %}
+<form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
+  <label for="{{ arr.source }}_url">URL</label>
+  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
+         {% call lock_attr(arr.url_path) %}{% endcall %}>
+  {% call locked(arr.url_path) %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
+
+  <label for="{{ arr.source }}_key">API key</label>
+  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if arr.key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
+  <span id="test-{{ arr.source }}"></span>
+</form>
+{% endmacro %}
+
 
 {% block content %}
 <h1>Settings</h1>
@@ -330,27 +352,24 @@
 </form>
 
 {% for arr in arrs %}
+{% if arr.primary %}
 <h2>{{ arr.title }}</h2>
-<form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
-  <label for="{{ arr.source }}_url">URL</label>
-  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
-         {% call lock_attr(arr.url_path) %}{% endcall %}>
-  {% call locked(arr.url_path) %}{% endcall %}
-  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
-
-  <label for="{{ arr.source }}_key">API key</label>
-  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if arr.key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-  {% endif %}
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
-  <span id="test-{{ arr.source }}"></span>
-</form>
+{% call arr_section(arr) %}{% endcall %}
+{% endif %}
 {% endfor %}
+
+{# The long tail of *arr apps, folded so the page is not a wall of identical
+   forms. Starts open whenever one of them is configured — a configured service
+   disappearing behind a fold reads as it having vanished. #}
+<details class="fold" {% if secondary_arr_configured %}open{% endif %}>
+  <summary>More *arr apps — Lidarr (music), Readarr (books), Whisparr</summary>
+  {% for arr in arrs %}
+  {% if !arr.primary %}
+  <h3>{{ arr.title }}</h3>
+  {% call arr_section(arr) %}{% endcall %}
+  {% endif %}
+  {% endfor %}
+</details>
 
 <h2>Your account</h2>
 <form method="post" action="/settings/account/password" class="panel">

@@ -81,6 +81,18 @@ a { color: var(--accent); }
 
 h1 { font-size: 1.5rem; letter-spacing: -0.015em; margin: 0 0 0.5rem; }
 h2 { font-size: 1.1rem; letter-spacing: -0.01em; margin: 2rem 0 0.35rem; }
+h3 { font-size: 1rem; letter-spacing: -0.01em; margin: 1.25rem 0 0.35rem; }
+
+/* The disclosure the secondary service sections fold into. The summary is
+   styled to sit in the heading rhythm, so closed it reads as one more section
+   title rather than a widget. */
+details.fold > summary {
+  cursor: pointer;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 2rem 0 0.35rem;
+}
 
 .lede, .hint { color: var(--muted); }
 .hint { font-size: 0.9rem; }

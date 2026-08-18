@@ -91,6 +91,10 @@ impl LoginPage {
 #[template(path = "status.html")]
 pub struct StatusPage {
     pub signed_in: bool,
+    /// The one-glance answer to "is it working?" — n items shared, last sync,
+    /// friends seen, peers in swarms. `None` only when the database itself is
+    /// unavailable, which the banners below already explain.
+    pub glance: Option<Glance>,
     /// Why reconciliation is not running, or `None` when it is. Carries the same
     /// string `/ready` reports, so the page and the probe cannot drift apart.
     pub blocked: Option<String>,
@@ -111,6 +115,29 @@ pub struct StatusPage {
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
     pub config_path: String,
+}
+
+/// The numbers an operator actually came to check, in one strip.
+#[derive(Debug)]
+pub struct Glance {
+    /// Items currently seeding.
+    pub items_shared: i64,
+    /// Rendered relative time of the last finished sync, or `None` for never.
+    pub last_sync: Option<String>,
+    /// What that sync amounted to — "3 added, 1 failed" — or empty when it was
+    /// an uneventful pass. The error string when the run failed outright.
+    pub last_sync_note: String,
+    /// Whether the note is a failure, so the template can colour it honestly.
+    pub last_sync_failed: bool,
+    /// Friends whose key was used within the last hour — the working proxy for
+    /// "connected", since a healthy Prowlarr polls well inside that.
+    pub friends_recent: usize,
+    pub friends_total: usize,
+    /// Live peers across the tracker's swarms right now, and how many of them
+    /// have the whole file. First-hand data, not an estimate — this process is
+    /// the tracker.
+    pub swarm_peers: usize,
+    pub swarm_seeders: usize,
 }
 
 /// One row of the path-mapping table.
@@ -167,6 +194,10 @@ pub struct SettingsPage {
     /// The template renders these with a single loop, so a new app appears on
     /// this page without anyone editing HTML.
     pub arrs: Vec<ArrSection>,
+    /// Whether any non-primary app is actually configured — the disclosure the
+    /// secondary sections live in starts open in that case, because hiding a
+    /// configured service behind a fold reads as it having vanished.
+    pub secondary_arr_configured: bool,
 
     pub qbit_url: String,
     pub qbit_username: String,
@@ -246,6 +277,10 @@ pub struct ArrSection {
     /// a precomputed "is it locked" flag here would hide these fields from the
     /// test that proves every lock key in the template is a real config path.
     pub url_path: &'static str,
+    /// Whether the section renders in the always-visible group. Sonarr, Radarr
+    /// and Jellyfin are what most instances run; the rest fold into a
+    /// disclosure so the page is not a wall of identical forms.
+    pub primary: bool,
 }
 
 /// One service's contribution to the scan behind the diagnostics page.

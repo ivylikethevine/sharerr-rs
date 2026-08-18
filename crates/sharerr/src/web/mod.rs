@@ -140,6 +140,7 @@ async fn status_page(State(state): State<WebState>) -> Response {
 
     render(&StatusPage {
         signed_in: true,
+        glance: glance(&state).await,
         blocked: state.serve.blocked_reason().await,
         config_error: state.serve.config_error().await,
         recovery_secs: RECOVERY_INTERVAL.as_secs(),
@@ -166,6 +167,74 @@ async fn status_page(State(state): State<WebState>) -> Response {
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
         config_path: state.serve.config_path().display().to_string(),
+    })
+}
+
+/// The one-glance numbers, gathered from the store and the live swarms.
+///
+/// `None` when the database is unavailable — the page's existing banners
+/// already name that problem, and a strip of zeros next to them would claim
+/// "nothing shared" when the truth is "cannot tell".
+async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
+    let store = state.serve.store().await.ok()?;
+
+    let items_shared = store.count_seeding().await.unwrap_or(0);
+
+    // The most recent *finished* run. An in-flight run has no outcome yet, and
+    // "last sync: just now" while it still churns would overpromise.
+    let last_run = store
+        .recent_runs(1)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .filter(|run| run.finished_at.is_some());
+    let (last_sync, last_sync_note, last_sync_failed) = match &last_run {
+        Some(run) => {
+            let when = run.finished_at.map(peers::ago);
+            match &run.summary.error {
+                Some(error) => (when, error.clone(), true),
+                None => {
+                    // Only the counts worth acting on; a quiet pass reads as
+                    // just the timestamp.
+                    let mut parts = Vec::new();
+                    if run.summary.added > 0 {
+                        parts.push(format!("{} added", run.summary.added));
+                    }
+                    if run.summary.unshared > 0 {
+                        parts.push(format!("{} unshared", run.summary.unshared));
+                    }
+                    if run.summary.failed > 0 {
+                        parts.push(format!("{} failed", run.summary.failed));
+                    }
+                    (when, parts.join(", "), run.summary.failed > 0)
+                }
+            }
+        }
+        None => (None, String::new(), false),
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let peers = store.list_peers().await.unwrap_or_default();
+    let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
+    let friends_recent = active
+        .iter()
+        .filter(|p| p.last_seen_at.is_some_and(|at| now - at < 3600))
+        .count();
+
+    let swarm = state.serve.swarms().stats().await;
+
+    Some(crate::web::templates::Glance {
+        items_shared,
+        last_sync,
+        last_sync_note,
+        last_sync_failed,
+        friends_recent,
+        friends_total: active.len(),
+        swarm_peers: swarm.peers,
+        swarm_seeders: swarm.seeders,
     })
 }
 
@@ -236,6 +305,95 @@ mod tests {
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("")
+    }
+
+    /// The one-glance numbers, checked against a store with known contents.
+    #[tokio::test]
+    async fn the_glance_counts_items_friends_and_runs() {
+        use sharerr_core::model::ShareState;
+
+        let (_dir, serve) = unconfigured();
+        let store = serve.store().await.unwrap();
+
+        // One seeding item, one that is not there yet — only the first counts.
+        let mut item = sharerr_core::SharedItem {
+            id: None,
+            source: sharerr_core::MediaSource::Sonarr,
+            source_id: 7,
+            file_id: 1,
+            spec: sharerr_core::MediaSpec::Episode {
+                series_title: "Lanternwick Hollow".to_owned(),
+                season: 1,
+                episode: 1,
+            },
+            release_title: "Lanternwick.Hollow.S01E01".to_owned(),
+            arr_path: std::path::PathBuf::from("/tv/x.mkv"),
+            size: 1024,
+            ids: sharerr_core::ExternalIds::default(),
+            info_hash: None,
+            state: ShareState::Pending,
+            last_error: None,
+            created_at: None,
+        };
+        store.upsert(&item).await.unwrap();
+        store
+            .set_info_hash(item.source, item.file_id, &"aa".repeat(20))
+            .await
+            .unwrap();
+        store
+            .set_state(item.source, item.file_id, ShareState::Seeding, None)
+            .await
+            .unwrap();
+        item.file_id = 2;
+        store.upsert(&item).await.unwrap();
+
+        // One friend seen just now, one never — "1 of 2".
+        let sam = store
+            .create_peer(
+                "Sam",
+                &secrecy::SecretString::from("sam-key"),
+                sharerr_store::PeerScope::All,
+            )
+            .await
+            .unwrap();
+        store.touch_peer(sam.id).await.unwrap();
+        store
+            .create_peer(
+                "Alex",
+                &secrecy::SecretString::from("alex-key"),
+                sharerr_store::PeerScope::All,
+            )
+            .await
+            .unwrap();
+
+        // A finished run with something to report.
+        let run = store.begin_run().await.unwrap();
+        store
+            .finish_run(
+                run,
+                &sharerr_store::RunSummary {
+                    discovered: 2,
+                    added: 1,
+                    unshared: 0,
+                    failed: 0,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let state = WebState {
+            serve,
+            sessions: Arc::new(Sessions::default()),
+        };
+        let glance = glance(&state).await.expect("the store is available");
+
+        assert_eq!(glance.items_shared, 1);
+        assert_eq!((glance.friends_recent, glance.friends_total), (1, 2));
+        assert_eq!(glance.last_sync.as_deref(), Some("just now"));
+        assert_eq!(glance.last_sync_note, "1 added");
+        assert!(!glance.last_sync_failed);
+        assert_eq!(glance.swarm_peers, 0, "nobody has announced");
     }
 
     /// Every protected route must refuse an anonymous caller.

@@ -303,8 +303,9 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
 ///
 /// Relative rather than absolute because the question is always "recently?", never
 /// "at what o'clock?" — and a relative string needs no timezone, which a container
-/// usually does not have configured.
-fn ago(epoch_secs: i64) -> String {
+/// usually does not have configured. `pub(crate)` because the status page's
+/// one-glance line answers the same "recently?" question.
+pub(crate) fn ago(epoch_secs: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
