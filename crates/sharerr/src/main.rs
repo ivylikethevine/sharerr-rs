@@ -1,6 +1,8 @@
 mod checks;
 mod cli;
 mod commands;
+mod gluetun;
+mod gossip;
 mod jackett;
 mod library;
 mod secrets;

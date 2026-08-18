@@ -13,6 +13,7 @@ use std::time::Duration;
 use secrecy::ExposeSecret;
 use sharerr_core::Config;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_store::{Store, Vault, master_key_from_env};
 use tokio::sync::{Notify, RwLock};
 
@@ -88,6 +89,15 @@ pub struct ServeState {
     /// fifteen seconds. `notify_one` stores a permit, so an invalidation that
     /// lands mid-sync is not lost.
     wake: Notify,
+    /// The live externally reachable endpoint. One value for the whole process:
+    /// the syncer's tracker provider reads it, the gluetun poller updates it,
+    /// and a settings save refreshes only its static half — so the poller's
+    /// observations survive both a config change and a syncer rebuild.
+    endpoint: Arc<AdvertisedEndpoint>,
+    /// Raised by the gluetun push endpoint so the poller re-asks the control
+    /// server *now* instead of at the next tick — the "reacted to in seconds"
+    /// half of the endpoint story.
+    endpoint_refresh: Notify,
 }
 
 impl ServeState {
@@ -96,6 +106,7 @@ impl ServeState {
         config_path: impl Into<PathBuf>,
         config_error: Option<String>,
     ) -> Self {
+        let endpoint = Arc::new(static_endpoint(&config));
         Self {
             config: RwLock::new(config),
             config_path: config_path.into(),
@@ -109,7 +120,31 @@ impl ServeState {
             tracker_token: RwLock::new(None),
             torznab_shared_key: RwLock::new(None),
             wake: Notify::new(),
+            endpoint,
+            endpoint_refresh: Notify::new(),
         }
+    }
+
+    /// The live advertised endpoint this whole process shares.
+    pub fn endpoint(&self) -> Arc<AdvertisedEndpoint> {
+        Arc::clone(&self.endpoint)
+    }
+
+    /// Ask the background loop to run a pass soon, without invalidating the
+    /// syncer. Used when something the syncer reads *through a shared handle*
+    /// changed — the advertised endpoint above — so a rebuild would be waste.
+    pub fn request_sync(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Ask the gluetun poller to re-resolve the endpoint now.
+    pub fn nudge_endpoint(&self) {
+        self.endpoint_refresh.notify_one();
+    }
+
+    /// Park until [`Self::nudge_endpoint`] is called.
+    pub async fn endpoint_refresh_requested(&self) {
+        self.endpoint_refresh.notified().await;
     }
 
     /// A snapshot of the current configuration.
@@ -236,6 +271,19 @@ impl ServeState {
     /// `settings::validate` accepted the document it just wrote, so whatever was
     /// wrong with the file on disk no longer is.
     pub async fn replace_config(&self, config: Config) {
+        // Only the static half is refreshed: the poller's observed endpoints are
+        // still true regardless of what the operator just typed.
+        self.endpoint
+            .set_static(match sharerr_core::endpoint::advertised_base(
+                &config.tracker,
+                config.server.bind.port(),
+            ) {
+                Ok(base) => base,
+                Err(err) => {
+                    tracing::warn!(%err, "the saved advertised address is unusable");
+                    None
+                }
+            });
         *self.config.write().await = config;
         *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;
@@ -316,7 +364,7 @@ impl ServeState {
         }
 
         let config = self.config().await;
-        match Syncer::build(&config).await {
+        match Syncer::build(&config, self.endpoint()).await {
             Ok(syncer) => {
                 let syncer = Arc::new(syncer);
                 tracing::info!("credentials accepted; reconciliation is available");
@@ -339,6 +387,21 @@ impl ServeState {
             }
         }
     }
+}
+
+/// The endpoint as configuration alone resolves it, with an unusable address
+/// treated as unset rather than fatal — `serve` must come up either way, and the
+/// tracker provider reports the absence with the sentence that names the fix.
+fn static_endpoint(config: &Config) -> AdvertisedEndpoint {
+    let base =
+        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+            Ok(base) => base,
+            Err(err) => {
+                tracing::warn!(%err, "the configured advertised address is unusable");
+                None
+            }
+        };
+    AdvertisedEndpoint::new(base)
 }
 
 #[cfg(test)]

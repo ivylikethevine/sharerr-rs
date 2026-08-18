@@ -32,11 +32,6 @@ username = "admin"
 label = "sharerr"
 
 [tracker]
-# **Not `qbittorrent-embedded`.** Transmission has no embedded tracker, so there is
-# nothing for announce URLs to point at; sharerr has to serve them itself. Leaving
-# the default here produces torrents that look perfect and that nobody can announce
-# to — `doctor` fails with exactly that sentence, and this stack proves it.
-backend = "builtin"
 advertised_host = "localhost"
 port = 38477
 

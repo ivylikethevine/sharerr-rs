@@ -55,9 +55,10 @@ impl std::fmt::Debug for ArrClient {
 
 impl ArrClient {
     pub fn new(kind: MediaSource, base: &Url, api_key: SecretString) -> Result<Self> {
-        // The directory source is a `MediaSource` for storage and scoping, but
-        // it has no HTTP API — refusing here keeps every later call total.
-        if kind == MediaSource::Directory {
+        // Only the *arr apps speak this API. The directory source has no HTTP
+        // API at all and Jellyfin has its own client crate — refusing here
+        // keeps every later call total.
+        if !MediaSource::ARRS.contains(&kind) {
             return Err(ArrError::NotAnApp { service: kind });
         }
         let http = reqwest::Client::builder()
@@ -190,8 +191,11 @@ impl ArrClient {
             MediaSource::Radarr => radarr::discover(self, tag_id).await,
             MediaSource::Lidarr => lidarr::discover(self, tag_id).await,
             MediaSource::Readarr => readarr::discover(self, tag_id).await,
-            // Unreachable: `Self::new` refuses to build a Directory client.
-            MediaSource::Directory => Err(ArrError::NotAnApp { service: self.kind }),
+            // Unreachable: `Self::new` refuses to build a client for anything
+            // that does not speak the *arr API.
+            MediaSource::Directory | MediaSource::Jellyfin => {
+                Err(ArrError::NotAnApp { service: self.kind })
+            }
         }
     }
 }

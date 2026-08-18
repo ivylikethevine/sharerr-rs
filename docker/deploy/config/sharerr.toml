@@ -31,23 +31,29 @@ tag = "sharerr"
 skip_checking = false
 
 [tracker]
-backend = "qbittorrent-embedded"
-
 # What *friends* resolve this instance as — the VPN exit's public address, not
 # the host's and not the container's. Everything else can be wrong and produce a
 # loud failure; this one produces torrents that look perfect and that nobody can
 # announce to.
 #
-# Find it with:
-#   docker compose exec gluetun wget -qO- http://localhost:8000/v1/publicip/ip
-#
-# Use a DNS name if the exit's address is dynamic — a bare IP here means every
-# torrent built before a reconnect points at an address you no longer hold.
+# With the [gluetun] section below enabled, this becomes the *fallback*: the
+# live exit address and forwarded port are resolved from gluetun's control
+# server and win over these two fields. Keep a DNS name here if you have one —
+# it rides along in every torrent's announce list as an extra tier.
 advertised_host = "CHANGE-ME.example.com"
 
-# The port friends announce to. Under the qbittorrent-embedded backend this is
-# qBittorrent's embedded tracker, forwarded through the tunnel.
-port = 9000
+# The port friends announce to: sharerr's own tracker on its HTTP port,
+# forwarded through the tunnel.
+port = 8477
+
+[gluetun]
+# gluetun's control server, on localhost because sharerr shares its network
+# namespace. With this set, sharerr polls /v1/publicip/ip and
+# /v1/openvpn/portforwarded as the source of truth for its own address, and a
+# changed answer triggers a re-announce and a rewrite of every .torrent —
+# instead of every torrent announcing to yesterday's port until someone notices.
+control_url = "http://localhost:8000"
+poll_secs = 60
 
 [sync]
 enabled = true

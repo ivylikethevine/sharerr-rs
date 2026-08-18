@@ -15,7 +15,7 @@ use anyhow::{Result, bail};
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome, chain};
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
-use sharerr_core::config::{ServiceConfig, TrackerBackend, secret_keys};
+use sharerr_core::config::{ServiceConfig, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Store, Vault, master_key_from_env};
 
@@ -83,21 +83,33 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
         report.section(kind.as_str());
         discovered.extend(check_arr(kind, service, config, vault.as_ref(), &mut report).await);
     }
+    if config.jellyfin.is_some() {
+        report.section("jellyfin");
+        discovered.extend(check_jellyfin(config, vault.as_ref(), &mut report).await);
+    }
     for library in &config.library {
         report.section(&format!("library {}", library.path.display()));
         discovered.extend(check_library(library, &mut report));
     }
-    if sources.is_empty() && config.library.is_empty() {
+    if sources.is_empty() && config.jellyfin.is_none() && config.library.is_empty() {
         report.section("library sources");
-        report
-            .fail("no *arr app or [[library]] directory is configured — there is nothing to share");
+        report.fail(
+            "no *arr app, jellyfin server, or [[library]] directory is configured — \
+             there is nothing to share",
+        );
     }
 
     report.section(config.torrent_backend.as_str());
     check_qbit(config, vault.as_ref(), &mut report).await;
 
+    if config.gluetun.control_url.is_some() {
+        report.section("gluetun");
+        check_gluetun(config, &mut report).await;
+    }
+
     report.section("tracker");
     check_tracker(config, &mut report);
+    check_reachability(config, &mut report).await;
 
     report.section("paths");
     check_paths(config, &discovered, &mut report);
@@ -487,27 +499,73 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
         )),
         Err(err) => report.warn(format!("could not list torrents: {err}")),
     }
+}
 
-    if config.tracker.backend == TrackerBackend::QbittorrentEmbedded {
-        match client.embedded_tracker_port().await {
-            Ok(Some(port)) if port > 0 => {
-                report.ok(format!("embedded tracker on, port {port}"));
-                report.info(format!(
-                    "port {port} must be reachable by friends, not just on the docker network"
-                ));
-            }
-            Ok(Some(_)) => {
-                report.warn("embedded tracker is off — sharerr will enable it on first sync");
-            }
-            // The configuration mistake this whole abstraction exists to catch:
-            // a client with no embedded tracker, selected as the tracker backend.
-            // Every torrent built would announce to a port nothing listens on.
-            Ok(None) => report.fail(format!(
-                "{} has no embedded tracker — set tracker.backend to \"builtin\" so \
-                 sharerr serves announces itself",
-                client.kind()
-            )),
-            Err(err) => report.fail(format!("reading the tracker state: {err}")),
+// ------------------------------------------------------------------ jellyfin
+
+/// The same three questions the *arr checks answer — reachable, key accepted,
+/// tag in use — against the Jellyfin API. Returns what the tag covers, so the
+/// path checks below include Jellyfin's files.
+async fn check_jellyfin(
+    config: &Config,
+    vault: Option<&Vault>,
+    report: &mut Report,
+) -> Vec<Discovered> {
+    // Guarded by the caller; the arm exists because the function is total.
+    let Some(service) = &config.jellyfin else {
+        return Vec::new();
+    };
+
+    let api_key = match vault.map(|v| v.get(secret_keys::JELLYFIN_API_KEY)) {
+        Some(Ok(Some(key))) => key,
+        Some(Ok(None)) | None => {
+            report.fail(format!(
+                "jellyfin is configured but {} is not in the vault",
+                secret_keys::JELLYFIN_API_KEY
+            ));
+            return Vec::new();
+        }
+        Some(Err(err)) => {
+            report.fail(format!("reading the vault: {err}"));
+            return Vec::new();
+        }
+    };
+
+    let client = match sharerr_jellyfin::JellyfinClient::new(&service.url, api_key) {
+        Ok(client) => client,
+        Err(err) => {
+            report.fail(err.to_string());
+            return Vec::new();
+        }
+    };
+
+    match client.system_info().await {
+        Ok(info) => report.ok(format!(
+            "{} responded ({} {})",
+            service.url, info.server_name, info.version
+        )),
+        Err(err) => {
+            report.fail(format!("{}: {err}", service.url));
+            return Vec::new();
+        }
+    }
+
+    match client.discover(&config.tag).await {
+        Ok(items) if items.is_empty() => {
+            report.warn(format!(
+                "nothing in Jellyfin carries the tag {:?} — tag a movie, series, \
+                 album, or book there, or nothing will be shared from it",
+                config.tag
+            ));
+            Vec::new()
+        }
+        Ok(items) => {
+            report.ok(format!("{} file(s) tagged {:?}", items.len(), config.tag));
+            items
+        }
+        Err(err) => {
+            report.fail(format!("the tag walk failed: {err}"));
+            Vec::new()
         }
     }
 }
@@ -515,34 +573,120 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
 // ------------------------------------------------------------------ tracker
 
 fn check_tracker(config: &Config, report: &mut Report) {
-    match config.tracker.backend {
-        TrackerBackend::QbittorrentEmbedded => {
-            report.ok(format!(
-                "backend: {}",
-                TrackerBackend::QbittorrentEmbedded.as_str()
-            ));
+    // The one way the builtin tracker can look configured and still not work:
+    // `doctor` and `sync` are one-shot commands, and the announce endpoint
+    // only exists while `serve` is running.
+    report.info(
+        "announces are answered by `sharerr serve`; a one-shot sync builds \
+         correct torrents whose announces fail until it is running",
+    );
+
+    match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+        Ok(Some(base)) => report.ok(format!(
+            "advertised endpoint: {}",
+            sharerr_core::endpoint::base_string(&base)
+        )),
+        Ok(None) if config.gluetun.control_url.is_some() => report.info(
+            "no static advertised address — the endpoint is resolved from gluetun, \
+             see the gluetun section above",
+        ),
+        Ok(None) => report.fail(
+            "neither tracker.advertised_host nor tracker.advertised_url is set. sharerr \
+             cannot guess the address friends reach it on, and a wrong guess produces \
+             torrents nobody can announce to",
+        ),
+        Err(err) => report.fail(err.to_string()),
+    }
+}
+
+/// What gluetun's control server says the world sees, next to what the config
+/// advertises — the mismatch this catches is a hand-typed address the tunnel no
+/// longer holds.
+async fn check_gluetun(config: &Config, report: &mut Report) {
+    // Guarded by the caller; the arm exists because the function is total.
+    let Some(control) = &config.gluetun.control_url else {
+        return;
+    };
+
+    let client = match crate::gluetun::GluetunClient::new(control) {
+        Ok(client) => client,
+        Err(err) => {
+            report.fail(format!("{err}"));
+            return;
         }
-        TrackerBackend::Builtin => {
-            report.ok(format!(
-                "backend: {} — sharerr serves /announce itself",
-                TrackerBackend::Builtin.as_str()
-            ));
-            // The one way this backend can look configured and still not work:
-            // `doctor` and `sync` are one-shot commands, and the announce endpoint
-            // only exists while `serve` is running.
-            report.info(
-                "announces are answered by `sharerr serve`; a one-shot sync builds \
-                 correct torrents whose announces fail until it is running",
-            );
+    };
+
+    let ip = match client.public_ip().await {
+        Ok(ip) => {
+            report.ok(format!("public IP per {control}: {ip}"));
+            Some(ip)
         }
+        Err(err) => {
+            report.fail(format!("{err}"));
+            None
+        }
+    };
+
+    match client.forwarded_port().await {
+        Ok(port) => report.ok(format!(
+            "forwarded port: {port} — the endpoint is resolved dynamically"
+        )),
+        Err(err) => report.warn(format!("{err}")),
     }
 
-    match &config.tracker.advertised_host {
-        Some(host) => report.ok(format!("advertised host: {host}")),
-        None => report.fail(
-            "tracker.advertised_host is unset. sharerr cannot guess the address friends \
-             reach it on, and a wrong guess produces torrents nobody can announce to",
-        ),
+    // The mismatch worth naming: a static advertised host that is not the
+    // tunnel's exit. A DNS name cannot be compared without resolving it, so only
+    // literal addresses are checked.
+    if let Some(ip) = ip
+        && let Some(host) = config.tracker.advertised_host.as_deref()
+        && let Ok(advertised) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
+        && advertised != ip
+    {
+        report.warn(format!(
+            "tracker.advertised_host is {advertised}, but the tunnel's exit is {ip} — \
+             torrents built with the static address cannot be announced to"
+        ));
+    }
+}
+
+/// Try to actually connect to the advertised endpoint.
+///
+/// From inside the namespace a closed forwarded port and a quiet swarm look
+/// identical, so an answer either way is information: a completed TCP connect
+/// proves the address routes back in, and a refused or timed-out one is worth a
+/// warning rather than a failure — some networks cannot hairpin their own
+/// public address even when it works from outside.
+async fn check_reachability(config: &Config, report: &mut Report) {
+    let base =
+        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+            Ok(Some(base)) => base,
+            // Already reported by check_tracker.
+            _ => return,
+        };
+
+    let Some(host) = base.host_str() else {
+        return;
+    };
+    let Some(port) = base.port_or_known_default() else {
+        return;
+    };
+    let target = format!("{}:{port}", host.trim_matches(['[', ']']));
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&target),
+    )
+    .await
+    {
+        Ok(Ok(_)) => report.ok(format!("{target} accepts TCP connections from here")),
+        Ok(Err(err)) => report.warn(format!(
+            "could not connect to {target}: {err}. If this instance cannot reach its \
+             own public address (common behind NAT), verify the port from outside"
+        )),
+        Err(_) => report.warn(format!(
+            "connecting to {target} timed out. If this instance cannot reach its own \
+             public address (common behind NAT), verify the port from outside"
+        )),
     }
 }
 
@@ -658,13 +802,12 @@ fn print_config_summary(config: &Config) {
         client.username
     );
     println!(
-        "  tracker:   {} advertised_host={}",
-        config.tracker.backend.as_str(),
-        config
-            .tracker
-            .advertised_host
-            .as_deref()
-            .unwrap_or("(unset)")
+        "  tracker:   builtin, advertised as {}",
+        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+            Ok(Some(base)) => sharerr_core::endpoint::base_string(&base),
+            Ok(None) => "(unset)".to_owned(),
+            Err(err) => format!("(invalid: {err})"),
+        }
     );
     if config.path_map.is_empty() {
         println!("  path map:  (none — all three views assumed identical)");

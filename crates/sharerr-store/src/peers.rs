@@ -84,7 +84,10 @@ impl PeerScope {
             Self::All => true,
             // Whisparr's files are episodes structurally, but sharing adult content
             // with someone scoped to "TV" would be a surprise of the worst kind, so
-            // it is deliberately not included.
+            // it is deliberately not included. The kind-scoped sources (a plain
+            // directory, a Jellyfin server) are also excluded here: they have no
+            // single kind, and their items are admitted per item by
+            // [`Self::directory_kind`] instead.
             Self::Tv => source == MediaSource::Sonarr,
             Self::Movies => source == MediaSource::Radarr,
             Self::Music => source == MediaSource::Lidarr,
@@ -92,20 +95,22 @@ impl PeerScope {
         }
     }
 
-    /// The `spec_json` kind tag a directory item must carry to be visible
-    /// under this scope, or `None` when the scope admits every source anyway.
+    /// The `spec_json` kind tag an item from a kind-scoped source must carry to
+    /// be visible under this scope, or `None` when the scope admits every
+    /// source anyway.
     ///
     /// [`Self::allows`] keys on where an item *came from*, which for a
-    /// `[[library]]` directory is always [`MediaSource::Directory`] — the
-    /// declared kind of the library, not the source, is what says whether its
-    /// files are television or music. The values are `MediaSpec`'s serde tags,
-    /// compared against `json_extract(spec_json, '$.kind')` in
-    /// `Store::seeding_items`.
+    /// `[[library]]` directory or a Jellyfin server says nothing about what it
+    /// *is* — the declared or detected kind of the item, not the source, is
+    /// what says whether its files are television or music. The values are
+    /// `MediaSpec`'s serde tags, compared against
+    /// `json_extract(spec_json, '$.kind')` in `Store::seeding_items` for every
+    /// source in [`MediaSource::KIND_SCOPED`].
     pub fn directory_kind(self) -> Option<&'static str> {
         match self {
             Self::All => None,
-            // No Whisparr concern here: an operator who declares a directory
-            // `kind = "tv"` has said explicitly that it is television.
+            // No Whisparr concern here: a directory declared `kind = "tv"` or a
+            // Jellyfin episode is explicitly television.
             Self::Tv => Some("episode"),
             Self::Movies => Some("movie"),
             Self::Music => Some("track"),
@@ -138,6 +143,13 @@ pub struct Peer {
     pub revoked_at: Option<i64>,
     /// What this friend is allowed to see.
     pub scope: PeerScope,
+    /// Their gossip identity: hex Ed25519 public key, bound trust-on-first-use
+    /// from the first self-record they present. `None` until their sharerr has
+    /// spoken to ours.
+    pub pubkey: Option<String>,
+    /// Where *their* sharerr can be pulled from, for outbound gossip. `None`
+    /// means we only ever answer.
+    pub gossip_url: Option<String>,
 }
 
 impl Peer {
@@ -173,6 +185,8 @@ fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
         last_seen_at: row.try_get("last_seen_at")?,
         revoked_at: row.try_get("revoked_at")?,
         scope: PeerScope::parse(&row.try_get::<String, _>("scope")?),
+        pubkey: row.try_get("pubkey")?,
+        gossip_url: row.try_get("gossip_url")?,
     })
 }
 
@@ -195,7 +209,7 @@ impl Store {
         // racing would both pass a check-then-insert.
         let row = sqlx::query(
             "INSERT INTO peers (label, key_hash, created_at, scope) VALUES (?1, ?2, ?3, ?4) \
-             RETURNING id, label, created_at, last_seen_at, revoked_at, scope",
+             RETURNING id, label, created_at, last_seen_at, revoked_at, scope, pubkey, gossip_url",
         )
         .bind(&label)
         .bind(hash_key(key))
@@ -220,7 +234,7 @@ impl Store {
     /// like a bug.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
         let rows = sqlx::query(
-            "SELECT id, label, created_at, last_seen_at, revoked_at, scope FROM peers \
+            "SELECT id, label, created_at, last_seen_at, revoked_at, scope, pubkey, gossip_url FROM peers \
              ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(self.pool())
@@ -236,7 +250,7 @@ impl Store {
     /// the operator's benefit, not to keep letting its key in.
     pub async fn peer_by_key(&self, key: &SecretString) -> Result<Option<Peer>> {
         let row = sqlx::query(
-            "SELECT id, label, created_at, last_seen_at, revoked_at, scope FROM peers \
+            "SELECT id, label, created_at, last_seen_at, revoked_at, scope, pubkey, gossip_url FROM peers \
              WHERE key_hash = ?1 AND revoked_at IS NULL",
         )
         .bind(hash_key(key))
@@ -256,16 +270,21 @@ impl Store {
     /// per-day granularity, so a Prowlarr RSS burst refreshing it every few
     /// seconds was pure write contention against the sync loop. Five minutes of
     /// slack keeps the answer to "recently?" honest at zero cost.
-    pub async fn touch_peer(&self, id: i64) -> Result<()> {
+    ///
+    /// Returns whether the row was actually updated — i.e. whether the throttle
+    /// window had passed. Endpoint observation piggybacks on the same window, so
+    /// the answer is worth having.
+    pub async fn touch_peer(&self, id: i64) -> Result<bool> {
         let now = now_epoch();
-        sqlx::query(
+        let affected = sqlx::query(
             "UPDATE peers SET last_seen_at = ?1              WHERE id = ?2 AND (last_seen_at IS NULL OR last_seen_at < ?1 - 300)",
         )
         .bind(now)
         .bind(id)
         .execute(self.pool())
-        .await?;
-        Ok(())
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
     }
 
     /// Stop honouring a peer's key. Returns whether anything changed.

@@ -395,11 +395,24 @@ impl TorrentClient for TransmissionClient {
         .map(|_| ())
     }
 
-    async fn embedded_tracker_port(&self) -> Result<Option<u16>> {
-        // Transmission has no embedded tracker, which is not a defect — it means
-        // announce URLs must point at sharerr's own tracker. `None` says exactly
-        // that, and the tracker provider turns it into an actionable message.
-        Ok(None)
+    async fn set_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
+        // `trackerList` (RPC 17, Transmission 4.0+): announce URLs one per line,
+        // a blank line between tiers — so one URL per tier is a blank line
+        // between every pair. Older daemons reject the argument outright, which
+        // surfaces as an API error the caller logs; the alternative
+        // (trackerAdd/trackerRemove by id) needs a read-modify-write against
+        // per-torrent tracker ids and is not worth carrying for EOL versions.
+        let list = urls
+            .iter()
+            .map(Url::to_string)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.rpc(
+            "torrent-set",
+            json!({ "ids": [hash], "trackerList": list }),
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -591,18 +604,43 @@ mod tests {
         assert_eq!(filtered[0].hash, "aa");
     }
 
-    /// Transmission has no embedded tracker. That is not a failure — it is the
-    /// reason sharerr has one of its own.
+    /// Replacing trackers goes through `torrent-set`'s `trackerList`: one URL per
+    /// line, a blank line between tiers — so one-URL-per-tier means a blank line
+    /// between every pair.
     #[tokio::test]
-    async fn there_is_no_embedded_tracker_and_that_is_not_an_error() {
+    async fn set_trackers_sends_a_tiered_tracker_list() {
         let server = MockServer::start().await;
-        mount_handshake_then(&server, ok_body(json!({}))).await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(
+                ResponseTemplate::new(409).insert_header(SESSION_HEADER, "session-token-1"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
 
-        assert_eq!(
-            client(&server).embedded_tracker_port().await.unwrap(),
-            None,
-            "reporting a port would send announces somewhere nothing is listening"
-        );
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .and(wiremock::matchers::body_string_contains("torrent-set"))
+            .and(wiremock::matchers::body_string_contains(
+                "http://new.example:41234/announce\\n\\nhttp://old.example:8477/announce",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(json!({}))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .set_trackers(
+                "aabbcc",
+                &[
+                    Url::parse("http://new.example:41234/announce").unwrap(),
+                    Url::parse("http://old.example:8477/announce").unwrap(),
+                ],
+            )
+            .await
+            .unwrap();
     }
 
     /// A reverse-proxy subpath must survive: `join` would otherwise replace the

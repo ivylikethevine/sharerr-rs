@@ -10,14 +10,8 @@
 //! So the surface here is deliberately six operations wide. That narrowness is what
 //! makes a second client tractable at all: qBittorrent, Transmission, Deluge and
 //! rTorrent disagree about almost everything *except* "add this torrent, with the
-//! data already at this path".
-//!
-//! # The one thing that is not universal
-//!
-//! [`TorrentClient::embedded_tracker_port`] returns an `Option`, because qBittorrent
-//! has a built-in tracker and most clients do not. A client without one is not
-//! broken — it just means sharerr's own tracker has to be the backend, which is
-//! precisely why that tracker exists.
+//! data already at this path". Announces always go to sharerr's own tracker, so a
+//! client needs no tracker of its own.
 
 use std::fmt::Debug;
 
@@ -303,12 +297,14 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// sharerr knowing about it.
     async fn remove(&self, hash: &str) -> Result<()>;
 
-    /// Turn on the client's embedded tracker and report its port, if it has one.
+    /// Replace an existing torrent's tracker list with `urls`, one tier each,
+    /// most-preferred first.
     ///
-    /// `None` means the client has no embedded tracker — the normal case outside
-    /// qBittorrent. That is not an error: it means announce URLs have to point at
-    /// sharerr's own tracker instead.
-    async fn embedded_tracker_port(&self) -> Result<Option<u16>>;
+    /// This is what keeps an already-added torrent announcing somewhere alive
+    /// after the advertised endpoint rotates — without it, every torrent added
+    /// before a VPN reconnect keeps announcing to the dead address until it is
+    /// removed and re-added.
+    async fn set_trackers(&self, hash: &str, urls: &[Url]) -> Result<()>;
 }
 
 #[cfg(test)]

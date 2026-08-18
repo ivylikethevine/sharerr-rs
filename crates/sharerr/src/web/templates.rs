@@ -178,12 +178,16 @@ pub struct SettingsPage {
     pub qbit_tag: String,
     pub qbit_skip_checking: bool,
 
-    /// Flattened to a bool for the template's benefit — there are exactly two
-    /// backends, and a `<select>` with two options needs no more than this.
-    pub tracker_builtin: bool,
     pub tracker_advertised_host: String,
     pub tracker_port: String,
+    /// The expressive alternative to host+port: a full base URL with scheme and
+    /// path prefix. Empty when unset.
+    pub tracker_advertised_url: String,
     pub tracker_token_set: bool,
+
+    /// gluetun's control server URL, or empty when endpoint resolution is off.
+    pub gluetun_control_url: String,
+    pub gluetun_poll_secs: u64,
 
     pub torznab_key_set: bool,
     /// The `/api` URL a friend pastes into Prowlarr, built from the advertised host.
@@ -309,6 +313,26 @@ pub struct PeerRow {
     /// set up?", which nothing could report before peers existed.
     pub last_seen: String,
     pub revoked: bool,
+    /// A truncated render of their gossip identity, or `None` until their
+    /// sharerr has introduced itself.
+    pub pubkey_short: Option<String>,
+    /// Where their sharerr can be pulled from, or empty.
+    pub gossip_url: String,
+    /// Whether the key *they* issued us is stored in the vault.
+    pub gossip_key_set: bool,
+    /// Recently observed addresses, newest first.
+    pub endpoints: Vec<PeerEndpointView>,
+}
+
+/// One observed address, rendered for the friends page.
+#[derive(Debug)]
+pub struct PeerEndpointView {
+    pub kind: &'static str,
+    pub addr: String,
+    pub seen: String,
+    /// "direct" or "gossip" — worth showing, because a first-hand sighting and a
+    /// relayed one deserve different confidence.
+    pub via: &'static str,
 }
 
 /// Friends this instance shares with, and the key each one holds.

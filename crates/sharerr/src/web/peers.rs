@@ -25,7 +25,9 @@ use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
 use super::settings::title_case;
-use super::templates::{PeerRow, PeersPage, RevealedPeer, ScopeOption, render};
+use super::templates::{
+    PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render,
+};
 
 pub async fn page(State(state): State<WebState>) -> Response {
     render(&build(&state, None, None).await)
@@ -117,6 +119,62 @@ pub async fn set_scope(
     Ok(applied(&state, result, "change that").await)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct GossipForm {
+    url: String,
+    key: String,
+    #[serde(default)]
+    clear_key: Option<String>,
+}
+
+/// Configure the outbound half of a friendship: where their sharerr is, and the
+/// key they issued us. The URL lands in the database; the key in the vault —
+/// unlike our own peers' key *hashes*, it is a secret sharerr replays.
+pub async fn set_gossip(
+    State(state): State<WebState>,
+    Path(id): Path<i64>,
+    Form(form): Form<GossipForm>,
+) -> Result<Response, Response> {
+    let store = state.store_or_503().await?;
+
+    let url = form.url.trim();
+    let url = if url.is_empty() {
+        None
+    } else {
+        match url::Url::parse(url) {
+            Ok(parsed) => Some(parsed.to_string()),
+            Err(err) => {
+                return Ok(rejected(&state, &format!("{url:?} is not a valid URL: {err}")).await);
+            }
+        }
+    };
+
+    // The key is optional and write-only, same rules as every stored secret:
+    // blank means leave alone, the checkbox means clear.
+    let key = form.key.trim();
+    if !key.is_empty() || form.clear_key.is_some() {
+        let mut vault = match state.serve.open_vault().await {
+            Ok(vault) => vault,
+            Err(reason) => return Ok(rejected(&state, &reason).await),
+        };
+        let vault_key = secret_keys::peer_gossip_key(id);
+        let result = if form.clear_key.is_some() {
+            vault.remove(&vault_key).map(|_| ())
+        } else {
+            vault.put(&vault_key, &SecretString::from(key.to_owned()))
+        };
+        if let Err(err) = result {
+            return Ok(rejected(&state, &format!("could not store the key: {err}")).await);
+        }
+    }
+
+    let result = store.set_peer_gossip_url(id, url.as_deref()).await;
+    if result.is_ok() {
+        tracing::info!(peer_id = id, "updated a friend's gossip settings");
+    }
+    Ok(applied(&state, result, "save that").await)
+}
+
 /// Remove a friend entirely, freeing the name for reuse.
 pub async fn delete(
     State(state): State<WebState>,
@@ -156,12 +214,23 @@ async fn build(
 ) -> PeersPage {
     let config = state.serve.config().await;
 
-    let (peers, list_error) = match state.serve.store().await {
+    let (peers, endpoints, list_error) = match state.serve.store().await {
         Ok(store) => match store.list_peers().await {
-            Ok(peers) => (peers, None),
-            Err(err) => (Vec::new(), Some(format!("could not list friends: {err}"))),
+            Ok(peers) => {
+                // One extra query per friend; the list is people, not rows.
+                let mut endpoints = Vec::with_capacity(peers.len());
+                for peer in &peers {
+                    endpoints.push(store.peer_endpoints(peer.id).await.unwrap_or_default());
+                }
+                (peers, endpoints, None)
+            }
+            Err(err) => (
+                Vec::new(),
+                Vec::new(),
+                Some(format!("could not list friends: {err}")),
+            ),
         },
-        Err(reason) => (Vec::new(), Some(reason)),
+        Err(reason) => (Vec::new(), Vec::new(), Some(reason)),
     };
 
     // Whether the legacy shared key is still set. While it is, revoking a peer
@@ -169,9 +238,8 @@ async fn build(
     // lying about a security control. Read from the key names on disk, the way
     // the settings page does — presence needs no Argon2 derivation, and a vault
     // that will not open is still *holding* the key.
-    let shared_key_set = super::settings::secrets_present(&config)
-        .await
-        .contains(secret_keys::TORZNAB_API_KEY);
+    let stored_secrets = super::settings::secrets_present(&config).await;
+    let shared_key_set = stored_secrets.contains(secret_keys::TORZNAB_API_KEY);
 
     PeersPage {
         signed_in: true,
@@ -182,7 +250,14 @@ async fn build(
                 label: title_case(scope.label()),
             })
             .collect(),
-        peers: peers.iter().map(row).collect(),
+        peers: peers
+            .iter()
+            .zip(&endpoints)
+            .map(|(peer, endpoints)| {
+                let key_set = stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id));
+                row(peer, endpoints, key_set)
+            })
+            .collect(),
         error: error.or(list_error),
         revealed,
         feed_url: format!("{}/api", config.public_base_url()),
@@ -190,7 +265,7 @@ async fn build(
     }
 }
 
-fn row(peer: &Peer) -> PeerRow {
+fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: bool) -> PeerRow {
     PeerRow {
         id: peer.id,
         label: peer.label.clone(),
@@ -204,6 +279,23 @@ fn row(peer: &Peer) -> PeerRow {
             None => "never".to_owned(),
         },
         revoked: peer.is_revoked(),
+        // Truncated: this is a recogniser, not a copy source — the full key
+        // travels peer-to-peer inside signed records, never through this page.
+        pubkey_short: peer
+            .pubkey
+            .as_deref()
+            .map(|pk| format!("{}…", &pk[..pk.len().min(12)])),
+        gossip_url: peer.gossip_url.clone().unwrap_or_default(),
+        gossip_key_set,
+        endpoints: endpoints
+            .iter()
+            .map(|e| PeerEndpointView {
+                kind: e.kind.as_str(),
+                addr: e.addr.clone(),
+                seen: ago(e.observed_at),
+                via: e.via.as_str(),
+            })
+            .collect(),
     }
 }
 
@@ -267,10 +359,12 @@ mod tests {
             last_seen_at: None,
             revoked_at: None,
             scope: PeerScope::All,
+            pubkey: None,
+            gossip_url: None,
         };
 
-        assert_eq!(row(&peer).last_seen, "never");
-        assert!(!row(&peer).revoked);
+        assert_eq!(row(&peer, &[], false).last_seen, "never");
+        assert!(!row(&peer, &[], false).revoked);
     }
 
     #[test]
@@ -282,8 +376,10 @@ mod tests {
             last_seen_at: Some(0),
             revoked_at: Some(1),
             scope: PeerScope::Tv,
+            pubkey: None,
+            gossip_url: None,
         };
 
-        assert!(row(&peer).revoked);
+        assert!(row(&peer, &[], false).revoked);
     }
 }

@@ -94,9 +94,10 @@ services:
       # Without this the killswitch also blocks the stack's own traffic, and
       # sharerr could not reach qBittorrent's WebUI at all.
       FIREWALL_OUTBOUND_SUBNETS: 172.31.66.0/24
-      # Inbound to the WebUI and the embedded tracker. gluetun blocks everything
-      # not listed, which is the behaviour being relied on.
-      FIREWALL_INPUT_PORTS: "8080,9000"
+      # Inbound to the WebUI. gluetun blocks everything not listed, which is the
+      # behaviour being relied on. Announces go to sharerr's own tracker, which
+      # lives outside this namespace in the test stack.
+      FIREWALL_INPUT_PORTS: "8080"
       # Docker's embedded resolver, so `sonarr` and `radarr` still resolve from
       # inside the tunnel's namespace.
       DNS_ADDRESS: 127.0.0.11
@@ -105,10 +106,9 @@ services:
       HEALTH_TARGET_ADDRESS: 10.13.13.1:8000
       TZ: Etc/UTC
     ports:
-      # qBittorrent's ports live here, because qBittorrent has no network of its
-      # own. This is the detail that surprises people.
+      # qBittorrent's WebUI port lives here, because qBittorrent has no network
+      # of its own. This is the detail that surprises people.
       - "127.0.0.1:28080:8080"
-      - "127.0.0.1:29000:9000"
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:5.0.4

@@ -19,11 +19,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
-use sharerr_core::config::{TrackerBackend, secret_keys};
+use sharerr_core::config::secret_keys;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
 use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
-use sharerr_torrent::{BuiltinTracker, QbitEmbeddedTracker, TrackerProvider, title};
+use sharerr_core::endpoint::AdvertisedEndpoint;
+use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
+
+use sharerr_jellyfin::JellyfinClient;
 
 use crate::library::DirectoryScanner;
 use seed::{SeedOutcome, Seeder};
@@ -65,6 +68,22 @@ impl LibrarySource for ArrClient {
         Ok(SourceScan {
             items: ArrClient::discover(self, tag).await?,
             // An *arr answer is its whole database: there is no partial success.
+            complete: true,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LibrarySource for sharerr_jellyfin::JellyfinClient {
+    fn kind(&self) -> MediaSource {
+        MediaSource::Jellyfin
+    }
+
+    async fn discover(&self, tag: &str) -> Result<SourceScan> {
+        Ok(SourceScan {
+            items: JellyfinClient::discover(self, tag).await?,
+            // The walk either lists everything the tag covers or errors — there
+            // is no partial success to report.
             complete: true,
         })
     }
@@ -185,7 +204,12 @@ struct Discovery {
 
 impl Syncer {
     /// Wire everything from configuration and the vault.
-    pub async fn build(config: &Config) -> Result<Self> {
+    ///
+    /// `endpoint` is the *live* advertised endpoint, shared with whatever keeps
+    /// it fresh — `serve` hands in the one its gluetun poller updates, so a
+    /// rotated forwarded port reaches the next announce URL without rebuilding
+    /// the syncer. One-shot commands build a static one from configuration.
+    pub async fn build(config: &Config, endpoint: Arc<AdvertisedEndpoint>) -> Result<Self> {
         let master = master_key_from_env()?;
 
         // Off the runtime: opening the vault derives its key with Argon2, ~16ms of
@@ -212,18 +236,21 @@ impl Syncer {
                 sources.push(Box::new(client));
             }
         }
+        if let Some(client) = build_jellyfin(config, &vault)? {
+            sources.push(Box::new(client));
+        }
         if !config.library.is_empty() {
             sources.push(Box::new(DirectoryScanner::new(config.library.clone())));
         }
         if sources.is_empty() {
             bail!(
                 "no library source is configured — there is nothing to share. Set at \
-                 least one of sonarr, radarr, lidarr, readarr or whisparr, or a \
-                 [[library]] directory."
+                 least one of sonarr, radarr, lidarr, readarr or whisparr, a jellyfin \
+                 server, or a [[library]] directory."
             );
         }
 
-        let tracker = build_tracker(config, &vault, Arc::clone(&qbit))?;
+        let tracker = build_tracker(endpoint, &vault)?;
 
         // Resolved here rather than inside the seeder, which should not have to
         // know which client it is driving.
@@ -305,7 +332,7 @@ impl Syncer {
 
         // Refuse early rather than building torrents that announce into the void.
         self.tracker.ensure_ready().await?;
-        let announce = self.tracker.announce_url().await?;
+        let announce = self.tracker.announce_set().await?;
 
         // Three independent reads, overlapped: the *arr walk is the long pole,
         // and the torrent list plus the store snapshot ride under it instead of
@@ -442,19 +469,32 @@ impl Syncer {
     async fn share(
         &self,
         item: &Discovered,
-        announce: &url::Url,
+        announce: &AnnounceSet,
         live: &HashSet<String>,
         torrents: &[sharerr_client::TorrentSummary],
         known: Option<&SharedItem>,
         dry_run: bool,
     ) -> Result<Step> {
         // Already seeding, and qBittorrent agrees. This is the branch that makes a
-        // repeat run a no-op.
+        // repeat run a no-op — except when the advertised endpoint has moved
+        // since the torrent was built, in which case its announce URLs are
+        // brought up to date in place. Failure there is a warning, not a failed
+        // item: the torrent is still seeding, just announcing to a stale
+        // address, and the comparison stays stale so the next pass retries.
         if let Some(known) = known
             && known.state == ShareState::Seeding
             && let Some(hash) = &known.info_hash
             && live.contains(&hash.to_ascii_lowercase())
         {
+            if !dry_run
+                && let Err(err) = self.seeder.refresh_announce(hash, announce).await
+            {
+                tracing::warn!(
+                    item = %item.spec,
+                    error = format!("{err:#}"),
+                    "could not refresh announce URLs"
+                );
+            }
             return Ok(Step::Unchanged);
         }
 
@@ -595,6 +635,23 @@ enum Step {
     Unchanged,
 }
 
+fn build_jellyfin(config: &Config, vault: &Vault) -> Result<Option<JellyfinClient>> {
+    let Some(service) = &config.jellyfin else {
+        return Ok(None);
+    };
+    let api_key = vault
+        .get(secret_keys::JELLYFIN_API_KEY)?
+        .with_context(|| {
+            format!(
+                "jellyfin is configured but {} is not in the vault",
+                secret_keys::JELLYFIN_API_KEY
+            )
+        })?;
+    Ok(Some(
+        JellyfinClient::new(&service.url, api_key).map_err(|err| anyhow::anyhow!("{err}"))?,
+    ))
+}
+
 fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option<ArrClient>> {
     let Some(service) = config.service(kind) else {
         return Ok(None);
@@ -640,24 +697,10 @@ fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>
 }
 
 fn build_tracker(
-    config: &Config,
+    endpoint: Arc<AdvertisedEndpoint>,
     vault: &Vault,
-    qbit: Arc<dyn TorrentClient>,
 ) -> Result<Arc<dyn TrackerProvider>> {
-    let host = config.tracker.advertised_host.as_deref();
-
-    Ok(match config.tracker.backend {
-        TrackerBackend::QbittorrentEmbedded => {
-            Arc::new(QbitEmbeddedTracker::new(qbit, host, config.tracker.port)?)
-        }
-        TrackerBackend::Builtin => {
-            let token = vault.get(secret_keys::TRACKER_TOKEN)?;
-            let token = token.as_ref().map(secrecy::ExposeSecret::expose_secret);
-            let port = config
-                .tracker
-                .port
-                .unwrap_or_else(|| config.server.bind.port());
-            Arc::new(BuiltinTracker::new(host, port, token)?)
-        }
-    })
+    let token = vault.get(secret_keys::TRACKER_TOKEN)?;
+    let token = token.as_ref().map(secrecy::ExposeSecret::expose_secret);
+    Ok(Arc::new(BuiltinTracker::new(endpoint, token)))
 }

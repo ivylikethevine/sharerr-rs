@@ -6,11 +6,14 @@ use std::path::Path;
 
 use lava_torrent::torrent::v1::Torrent;
 use sharerr_testkit::{deterministic_bytes, write_media_file};
-use sharerr_torrent::{LavaTorrentFactory, TorrentError, TorrentRequest, piece_length_for};
+use sharerr_torrent::{
+    AnnounceSet, LavaTorrentFactory, TorrentError, TorrentRequest, piece_length_for,
+    read_announce, rewrite_announce,
+};
 use url::Url;
 
-fn announce() -> Url {
-    Url::parse("http://sharerr.example:9000/announce").unwrap()
+fn announce() -> AnnounceSet {
+    AnnounceSet::single(Url::parse("http://sharerr.example:9000/announce").unwrap())
 }
 
 fn build(path: &Path) -> sharerr_torrent::BuiltTorrent {
@@ -21,6 +24,14 @@ fn build(path: &Path) -> sharerr_torrent::BuiltTorrent {
             announce: &announce,
         })
         .unwrap()
+}
+
+fn tiered(urls: &[&str]) -> AnnounceSet {
+    let tiers: Vec<Url> = urls.iter().map(|u| Url::parse(u).unwrap()).collect();
+    AnnounceSet {
+        primary: tiers[0].clone(),
+        tiers,
+    }
 }
 
 #[test]
@@ -192,4 +203,83 @@ fn piece_length_scales_with_file_size() {
         large > small,
         "a 40 GiB file should use larger pieces than a 100 MiB one"
     );
+}
+
+// ------------------------------------------------------- announce rotation
+
+/// More than one endpoint must become a BEP 12 announce-list, one URL per tier,
+/// current endpoint first — that ordering is what lets a client fall back
+/// through recently held addresses after a VPN reconnect.
+#[test]
+fn multiple_endpoints_become_ordered_announce_tiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file.mkv");
+    write_media_file(&path, 4096, 1).unwrap();
+
+    let announce = tiered(&[
+        "http://203.0.113.9:41234/announce",
+        "http://static.example:8477/announce",
+    ]);
+    let built = LavaTorrentFactory
+        .create(&TorrentRequest {
+            path: &path,
+            announce: &announce,
+        })
+        .unwrap();
+
+    let decoded = Torrent::read_from_bytes(&built.data).unwrap();
+    assert_eq!(
+        decoded.announce.as_deref(),
+        Some("http://203.0.113.9:41234/announce")
+    );
+    assert_eq!(
+        decoded.announce_list,
+        Some(vec![
+            vec!["http://203.0.113.9:41234/announce".to_owned()],
+            vec!["http://static.example:8477/announce".to_owned()],
+        ])
+    );
+}
+
+/// The property the whole rotation story rests on: rewriting the announce
+/// fields must not change the info hash, because that hash is the torrent's
+/// identity in every client already seeding it.
+#[test]
+fn rewriting_the_announce_keeps_the_info_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file.mkv");
+    write_media_file(&path, 768 * 1024, 7).unwrap();
+
+    let built = build(&path);
+    assert_eq!(
+        read_announce(&built.data).unwrap().as_deref(),
+        Some("http://sharerr.example:9000/announce")
+    );
+
+    let rotated = tiered(&[
+        "http://203.0.113.9:52345/announce",
+        "http://sharerr.example:9000/announce",
+    ]);
+    let rewritten = rewrite_announce(&built.data, &rotated).unwrap();
+
+    let decoded = Torrent::read_from_bytes(&rewritten).unwrap();
+    assert_eq!(
+        decoded.info_hash(),
+        built.info_hash,
+        "the info dictionary must be untouched"
+    );
+    assert_eq!(
+        decoded.announce.as_deref(),
+        Some("http://203.0.113.9:52345/announce")
+    );
+    assert_eq!(decoded.announce_list.as_ref().map(Vec::len), Some(2));
+    assert!(decoded.is_private(), "the private flag must survive");
+}
+
+/// Garbage in must be an error, not a panic — the torrent directory is on disk
+/// and anything could have happened to it.
+#[test]
+fn rewriting_garbage_is_an_error() {
+    let err = rewrite_announce(b"not a torrent", &announce()).unwrap_err();
+    assert!(matches!(err, TorrentError::Reparse { .. }), "got {err:?}");
 }

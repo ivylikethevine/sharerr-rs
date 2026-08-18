@@ -5,11 +5,10 @@
 # Transmission is the second torrent client sharerr supports, and it differs from
 # qBittorrent in two ways that matter far more than the shape of the API:
 #
-#   * **No embedded tracker.** qBittorrent's is the default announce backend and
-#     there is nothing equivalent here, so `tracker.backend` must be `builtin` and
-#     sharerr serves announces itself. That is not a workaround — it is the reason
-#     the builtin tracker was written. `doctor` fails with that sentence if the
-#     configuration says otherwise, and this stack is what proves it.
+#   * **No embedded tracker.** This constraint is what killed the tracker-backend
+#     choice: sharerr's builtin tracker is now the only one, whichever client
+#     seeds, and this stack proves announces work without the client bringing a
+#     tracker of its own.
 #   * **No categories.** Transmission has one flat list of labels per torrent, so
 #     sharerr's category and tag both collapse into a label.
 #

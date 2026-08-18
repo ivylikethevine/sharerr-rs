@@ -16,18 +16,20 @@
 //! the feed, and the web UI need it too, and they are general layers rather than
 //! CLI verbs.
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use sharerr_core::Config;
 
 use crate::state::ServeState;
+use crate::tracker::TrackerState;
 
 pub async fn run(config: &Config, config_path: &Path, config_error: Option<String>) -> Result<()> {
     let state = Arc::new(ServeState::new(
@@ -36,14 +38,26 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         config_error.clone(),
     ));
 
+    // One tracker state for however many listeners carry it — two swarm maps
+    // would keep peers arriving on different listeners from meeting.
+    let tracker = Arc::new(TrackerState::new(Arc::clone(&state)));
+
     // The probes keep their own state and stay outside the web UI's auth layer.
     // `/health` in particular is what the Dockerfile's HEALTHCHECK curls, with no
-    // cookie and no intention of getting one.
+    // cookie and no intention of getting one. `/gluetun/refresh` sits here too:
+    // gluetun's VPN_PORT_FORWARDING_UP_COMMAND is a bare wget with no cookie jar,
+    // and the endpoint only nudges the poller to re-ask the control server — it
+    // takes no value from the caller, so there is nothing to protect beyond the
+    // private-address check in the handler.
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
+        .route(
+            "/gluetun/refresh",
+            get(gluetun_refresh).post(gluetun_refresh),
+        )
         .with_state(Arc::clone(&state))
-        .merge(crate::tracker::routes(Arc::clone(&state)))
+        .merge(crate::tracker::routes(Arc::clone(&tracker)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
 
@@ -51,6 +65,20 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         .await
         .with_context(|| format!("binding {}", config.server.bind))?;
     tracing::info!(bind = %config.server.bind, "http server listening");
+
+    // The optional dedicated tracker listener, for the topology where exactly
+    // one port is forwarded and it has to be the tracker's. The main listener
+    // keeps serving the tracker too — this adds a door, it does not move one.
+    let tracker_listener = match config.tracker.bind {
+        Some(bind) => {
+            let listener = tokio::net::TcpListener::bind(bind)
+                .await
+                .with_context(|| format!("binding tracker listener {bind}"))?;
+            tracing::info!(%bind, "dedicated tracker listener");
+            Some(listener)
+        }
+        None => None,
+    };
 
     // Stated at startup rather than from inside the loop: it is true regardless of
     // whether any credentials load, and an operator reading the first few lines of
@@ -64,18 +92,62 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         tracing::info!("periodic sync is disabled; serving http only");
     }
 
-    // Run both until the *server* stops. A sync that fails — or a syncer that
-    // cannot be built at all — is logged and retried rather than taking the process
-    // down; the HTTP endpoint staying up is what lets an operator see and repair
-    // the problem.
+    // Run everything until the *server* stops. A sync that fails — or a syncer
+    // that cannot be built at all — is logged and retried rather than taking the
+    // process down; the HTTP endpoint staying up is what lets an operator see and
+    // repair the problem.
     // `into_make_service_with_connect_info` rather than a bare service: the
     // tracker records the address a peer actually reached us from, because a
     // client behind NAT reports a private address that no other peer can dial.
-    let service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    // Both listeners get it — whichever serves /announce has nothing else to
+    // fall back on.
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
+    let tracker_serve = async {
+        match tracker_listener {
+            Some(listener) => {
+                let service = crate::tracker::routes(tracker)
+                    .into_make_service_with_connect_info::<SocketAddr>();
+                axum::serve(listener, service)
+                    .await
+                    .context("tracker listener failed")
+            }
+            // No dedicated listener: park forever so the select below never
+            // resolves on this arm.
+            None => std::future::pending().await,
+        }
+    };
 
     tokio::select! {
         result = axum::serve(listener, service) => result.context("http server failed"),
-        () = background(state) => Ok(()),
+        result = tracker_serve => result,
+        () = background(Arc::clone(&state)) => Ok(()),
+        () = crate::gluetun::poll_loop(Arc::clone(&state)) => Ok(()),
+        () = crate::gossip::exchange_loop(state) => Ok(()),
+    }
+}
+
+/// `GET|POST /gluetun/refresh` — the push half of endpoint resolution.
+///
+/// Only nudges the poller; the control server stays the source of truth, so a
+/// caller can make sharerr ask a question sooner but can never feed it an
+/// answer. Refused from non-private addresses: the legitimate caller is
+/// gluetun's up-command inside the same namespace (loopback) or a container
+/// neighbour, never the internet side of the tunnel.
+async fn gluetun_refresh(
+    State(state): State<Arc<ServeState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> (StatusCode, &'static str) {
+    if !is_private(remote.ip()) {
+        return (StatusCode::FORBIDDEN, "refused");
+    }
+    state.nudge_endpoint();
+    (StatusCode::OK, "refreshing")
+}
+
+fn is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 
@@ -190,6 +262,23 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(body.starts_with("configuration invalid:"), "got {body:?}");
         assert!(body.contains("taag"), "got {body:?}");
+    }
+
+    /// The refresh nudge is reachable to gluetun's up-command (loopback, docker
+    /// neighbours) and to nothing on the internet side of the tunnel — the
+    /// endpoint takes no input, but an open one would let strangers drive the
+    /// poll timer.
+    #[tokio::test]
+    async fn the_gluetun_refresh_nudge_is_private_only() {
+        let (_dir, state) = unconfigured();
+
+        let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
+        let (status, _) = gluetun_refresh(State(Arc::clone(&state)), private).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let public = ConnectInfo(std::net::SocketAddr::from(([203, 0, 113, 9], 40000)));
+        let (status, _) = gluetun_refresh(State(state), public).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

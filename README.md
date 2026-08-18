@@ -24,7 +24,7 @@ design is built around.
 | Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr** | ✅ |
 | Torrent construction, files never moved | ✅ |
 | Seeding through qBittorrent **or Transmission** | ✅ |
-| qBittorrent embedded tracker, or sharerr's own | ✅ |
+| Builtin BitTorrent tracker, served by sharerr itself | ✅ |
 | Torznab feed for Prowlarr | ✅ |
 | Jackett compatibility: URLs, indexer list, JSON results | ✅ |
 | Web UI: setup, settings, connection tests | ✅ |
@@ -32,7 +32,10 @@ design is built around.
 | Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
 | Per-friend scoping: this friend sees TV, that one films | ✅ |
 | Plain directory sharing, no *arr app at all | ✅ |
-| Jellyfin / Plex as library sources | ❌ |
+| Jellyfin / Emby as a library source | ✅ |
+| Dynamic endpoint from gluetun: rotating exit IP and forwarded port | ✅ |
+| Peer endpoint memory and signed endpoint gossip between friends | ✅ |
+| Plex as a library source | ❌ |
 
 ## Quickstart
 
@@ -118,24 +121,54 @@ The feed URL is built from `tracker.advertised_host`, so that has to be an addre
 your friend can reach. Everything here is a single HTTP port; whatever you do to
 make port 8477 reachable also makes the tracker and the feed reachable.
 
-### Which tracker
+### The tracker
 
-**qBittorrent's embedded tracker** is the default and needs nothing from you. It is
-only available when qBittorrent is the client — Transmission has none, so the
-builtin tracker below is required there, and `doctor` says so rather than leaving
-you with torrents nobody can announce to.
+sharerr serves `/announce` and `/scrape` from its own process, whichever torrent
+client seeds, and it answers only for torrents sharerr made — it will not act as
+a tracker for anything else, whoever asks. Optionally generate an announce token
+under Settings → Tracker: it is embedded in the announce URL of every torrent
+built afterwards, so holding the `.torrent` is what grants the right to announce.
+Note that changing the token invalidates torrents already published.
 
-**sharerr's builtin tracker** is the alternative, selected under Settings →
-Tracker. It serves `/announce` and `/scrape` from the sharerr process itself, and
-it answers only for torrents sharerr made — it will not act as a tracker for
-anything else, whoever asks. Optionally generate an announce token: it is embedded
-in the announce URL of every torrent built afterwards, so holding the `.torrent` is
-what grants the right to announce. Note that changing the token invalidates
-torrents already published.
+(There used to be a second option here — qBittorrent's embedded tracker — and it
+was removed: two tracker backends meant two independently built announce URLs,
+and every improvement to endpoint handling had to be made twice. A `sharerr.toml`
+still naming `tracker.backend` fails to load with an error saying exactly this;
+delete the line.)
 
-One caveat with the builtin tracker: the announce endpoint is part of
-`sharerr serve`, so a one-shot `sharerr sync` produces correct torrents whose
-announces fail until `serve` is running.
+One caveat: the announce endpoint is part of `sharerr serve`, so a one-shot
+`sharerr sync` produces correct torrents whose announces fail until `serve` is
+running.
+
+### A dynamic endpoint (gluetun)
+
+Behind a VPN with provider port forwarding there is no stable address to type
+into `tracker.advertised_host` — the exit IP and the granted port both change on
+reconnect. Point sharerr at gluetun's control server instead:
+
+```toml
+[gluetun]
+control_url = "http://localhost:8000"   # sharerr inside gluetun's namespace
+poll_secs = 60
+```
+
+sharerr polls `/v1/publicip/ip` and `/v1/openvpn/portforwarded` as the source of
+truth, and torrents carry an announce *list* spanning the recently held
+endpoints, so a friend's client falls back through older tiers after a rotation.
+When the endpoint changes, sharerr rewrites every cached `.torrent` (the info
+hash is untouched — announce lives outside the info dictionary) and repoints the
+tracker lists inside the torrent client, immediately rather than at the next
+scheduled sync. For reconnects to be picked up in seconds, set gluetun's
+`VPN_PORT_FORWARDING_UP_COMMAND` to `wget -qO- http://localhost:8477/gluetun/refresh`
+— the push only nudges sharerr to re-ask the control server, so nothing pushed is
+trusted. Where the provider grants no port, sharerr says so and degrades to the
+statically configured endpoint. `docker/deploy/` wires all of this up.
+
+Two related settings for constrained setups: `tracker.advertised_url` takes a
+full base URL (scheme, path prefix, bracketed IPv6) for reverse-proxied
+instances, and `tracker.bind` opens a second listener carrying only the tracker
+— for the topology where exactly one forwarded port exists and it has to be the
+tracker's, while the web UI stays on the LAN side.
 
 ## Sharing music, books, and more
 
@@ -164,6 +197,50 @@ Notes that are easy to trip over:
 - **Whisparr content is categorised as XXX**, not TV, and a friend scoped to "TV
   only" does **not** receive it. Only an unscoped friend does, which has to be
   chosen deliberately.
+
+## Sharing from Jellyfin or Emby
+
+Not everyone runs the *arr apps. Point sharerr at a Jellyfin (or Emby — same
+API) server and tag content there instead:
+
+```toml
+[jellyfin]
+url = "http://localhost:8096"
+```
+
+Then store an API key (Dashboard → API Keys in Jellyfin):
+`printf %s "$KEY" | sharerr vault set jellyfin.api_key`.
+
+Tag the **container**: a movie, a series, an album, or a book. A tagged series
+shares every episode with a file; a tagged album shares every track. Tags on
+individual episodes or tracks are deliberately not discovered — "tag the
+series" is an easier rule to act on than a partial one.
+
+Two honest caveats: releases from this source match less reliably on a friend's
+end than Sonarr-sourced ones (Jellyfin's external ids are only as good as its
+metadata match, and there is no scene name), and a friend scoped to "TV only"
+sees Jellyfin's episodes but not its films — items are scoped by what they are,
+since one server holds every kind at once.
+
+## Friends finding each other
+
+A peer used to be only a credential; sharerr now also remembers *where* each
+friend was recently seen — the last few addresses, timestamped, with their feed
+traffic and their torrent client recorded separately (a dual-VPN friend has the
+two behind different exits). Sightings come from authenticated feed pulls and
+from **gossip**: when a friend also runs sharerr, the two instances exchange
+signed endpoint records over the same per-friend key the feed uses, so one
+friend noticing a moved address is enough for everyone who already knows them.
+
+The trust model is worth stating plainly: every record is Ed25519-signed by the
+peer it describes, so a friend can relay it but never rewrite it; an older
+record never overwrites a newer one; a peer's identity key is pinned on first
+use; and a gossip pull returns only records for peers the caller proves they
+already know — nobody learns of a peer they are not already sharing with.
+
+Set it up per friend on the Friends page: their sharerr's URL, and the key they
+issued you (from *their* Friends page). Leave both empty and your instance still
+answers their pulls and accepts their pushes; it just never initiates.
 
 ## Sharing a plain directory, no *arr app at all
 
@@ -242,18 +319,12 @@ username = "transmission"
 # Transmission has no categories, only a flat list of labels per torrent, so this
 # one value stands in for qBittorrent's category and tag.
 label = "sharerr"
-
-[tracker]
-# Required: Transmission has no embedded tracker.
-backend = "builtin"
 ```
 
 Then store the password: `printf %s "$PW" | sharerr vault set transmission.password`.
 
-Two differences worth knowing, both enforced rather than documented-and-hoped:
+One difference worth knowing, enforced rather than documented-and-hoped:
 
-- **No embedded tracker.** `tracker.backend` must be `builtin`, so sharerr serves
-  announces itself. `doctor` fails with that sentence if it is not.
 - **No skip-checking.** qBittorrent can be told to trust the data on disk;
   Transmission cannot, so it always verifies. That is slower on a large library the
   first time and is not something sharerr can fake safely — claiming completeness
@@ -319,6 +390,7 @@ bytes. No real content is involved anywhere.
 | `sharerr` | The binary: CLI, web UI, Torznab, tracker, reconciliation |
 | `sharerr-core` | Domain types, layered config, path mapping. No I/O |
 | `sharerr-arr` | Sonarr/Radarr clients and tagged-content discovery |
+| `sharerr-jellyfin` | Jellyfin/Emby client and its tagged-content discovery |
 | `sharerr-qbit` | qBittorrent WebUI client |
 | `sharerr-store` | Encrypted vault + SQLite store |
 | `sharerr-torrent` | Torrent construction and tracker resolution |

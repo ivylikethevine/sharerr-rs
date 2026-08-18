@@ -104,12 +104,10 @@ impl TorrentClient for QbitClient {
             .map_err(|e| self.translate(e))
     }
 
-    async fn embedded_tracker_port(&self) -> Result<Option<u16>> {
-        // qBittorrent is the one client in this project that *has* one, which is
-        // why the trait's return type is an Option at all.
-        self.ensure_embedded_tracker()
+    async fn set_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
+        let urls: Vec<String> = urls.iter().map(url::Url::to_string).collect();
+        self.set_torrent_trackers(hash, &urls)
             .await
-            .map(Some)
             .map_err(|e| self.translate(e))
     }
 }
