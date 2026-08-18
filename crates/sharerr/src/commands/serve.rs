@@ -137,18 +137,11 @@ async fn gluetun_refresh(
     State(state): State<Arc<ServeState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
 ) -> (StatusCode, &'static str) {
-    if !is_private(remote.ip()) {
+    if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
         return (StatusCode::FORBIDDEN, "refused");
     }
     state.nudge_endpoint();
     (StatusCode::OK, "refreshing")
-}
-
-fn is_private(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
-    }
 }
 
 /// Keeps the syncer alive and reconciles on a timer.

@@ -8,21 +8,10 @@ ordering is a judgement about value, not a schedule.
 
 ## Status
 
-| Milestone | Scope | Status |
-|---|---|---|
-| — | The interchange: semi-anonymous endpoint rendezvous, its own image and port | Next |
-| — | Ratio and bandwidth control | Next |
-
-**Shipped, and removed from this list:** the core, the builtin tracker and
-Torznab feed, the web UI, friend/peer management, Jackett compatibility, the
-plain tagged directory source, per-friend selective sharing, Transmission
-support, Lidarr/Readarr/Whisparr support, the test stacks (plain, Transmission,
-and behind gluetun), the removal of the qBittorrent-embedded tracker backend,
-first-class gluetun support with a dynamically resolved endpoint, peer endpoint
-memory and signed endpoint gossip, magnet links in the feed, the one-glance
-status summary, the list view of shared items, and the per-peer feed preview.
-The code and `git log` are the record — carrying finished work here only makes
-the list harder to read.
+| Milestone | Scope                                                                       | Status |
+| --------- | --------------------------------------------------------------------------- | ------ |
+| —         | The interchange: semi-anonymous endpoint rendezvous, its own image and port | Next   |
+| —         | Ratio and bandwidth control                                                 | Next   |
 
 ---
 
@@ -50,30 +39,27 @@ this torrent, with the data already at this path". Announces always go to
 sharerr's own tracker, so a client needs no tracker of its own.
 
 Adding a third is now mostly writing one file. What a new client must answer
-honestly: whether it can remove a torrent *without* deleting the data, and how
+honestly: whether it can remove a torrent _without_ deleting the data, and how
 it replaces a torrent's tracker list in place (`set_trackers`, for endpoint
 rotation).
 
-| Client                            | Notes                                                                                                                                                  |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Deluge**                        | JSON-RPC, plus the `label` plugin standing in for qBittorrent's category.                                                                              |
-| **rTorrent / ruTorrent**          | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.                                                     |
-| **Transmission-compatible forks** | Anything speaking the Transmission RPC should already work — the client is the same. Untested, and cheap to confirm.                                   |
+| Client                            | Notes                                                                                                                |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **rTorrent / ruTorrent**          | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.                   |
+| **Transmission-compatible forks** | Anything speaking the Transmission RPC should already work — the client is the same. Untested, and cheap to confirm. |
 
 ### Indexers (what consumes the feed)
 
 Today: **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
 **Sonarr/Radarr direct** (confirmed against a real Sonarr in the tier-2 suite).
 
-| Consumer                  | Notes                                                                                                                                                 |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **NZBHydra2**             | Aggregates Torznab indexers; should already work, but has never been tested against sharerr. Worth confirming rather than assuming.                   |
-| **Lidarr/Readarr direct** | Follows from library-source support, since the caps document gates what they will even ask for.                                                       |
+| Consumer                  | Notes                                                                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **Lidarr/Readarr direct** | Follows from library-source support, since the caps document gates what they will even ask for.                                     |
 
-One earlier "should already work" row turned out not to (Sonarr direct rejected
-the feed over a missing `pubDate`). Confirming NZBHydra2 is still cheap and
-still worth more than another feature — the last confirmation found a bug that
-made sharerr unusable as a direct indexer.
+One earlier "should already work" assumption turned out not to (Sonarr direct
+rejected the feed over a missing `pubDate`) — worth remembering the next time
+something in this table looks done just because the shape matches.
 
 ### Deployment shapes
 
@@ -91,13 +77,13 @@ audience that will never run `docker run` by hand.
 
 ## Functionality
 
-**The interchange.** Gossip only helps peers who can still reach *somebody*; two
+**The interchange.** Gossip only helps peers who can still reach _somebody_; two
 friends whose addresses both rotated while neither was watching have no path back
 to each other. The interchange is the rendezvous for that case: a tiny separate
 service, deliberately knowing nothing but `key hash → latest IP and port`, that a
 sharerr instance reports its endpoint to and a friend queries with the API key
 that peer issued them. The privacy property is the point and shapes the whole
-design: a request without a valid key gets a *plausible fabricated* IP and port
+design: a request without a valid key gets a _plausible fabricated_ IP and port
 rather than an error, so an unauthenticated probe cannot be distinguished from a
 valid lookup — the interchange never confirms that an instance exists, and
 scraping it yields only noise. That makes semi-anonymous tracking of sharerr
@@ -109,7 +95,7 @@ last-seen addresses only. A sharerr instance treats it as one more observation
 source feeding peer endpoint memory, ranked below a direct sighting of the same
 peer.
 
-The fabricated answers create the opposite problem for the *legitimate* caller:
+The fabricated answers create the opposite problem for the _legitimate_ caller:
 a friend holding a valid key must be able to tell a real record from a decoy, or
 the noise defeats them too. So a genuine record is verifiable — the natural shape
 is the same signed endpoint record gossip uses, signed by the peer it describes
@@ -160,11 +146,11 @@ single most error-prone configuration step.
 
 **`sharerr doctor --fix`** for the mechanical cases (missing tag, wrong category).
 
-**Better first-run defaults.** `tracker.advertised_host` has no default and a wrong
-value silently produces torrents nobody can announce to — detectable at save time.
-Resolving it from gluetun removes the guess entirely where that is available;
-where it is not, it is still a hand-typed value worth validating before it is
-saved.
+**Better first-run defaults.** `tracker.advertised_host` has no default. The
+save-time half is done — a loopback, private, or `localhost` value is refused
+before it reaches `sharerr.toml`, catching the copy-paste-from-`server.bind`
+mistake for free. Resolving it from gluetun instead of asking still removes the
+guess entirely where that is available; that half remains.
 
 ---
 
@@ -173,14 +159,9 @@ saved.
 Not user-facing, but load-bearing for everything above.
 
 - **`missing_docs` as an enforced lint.** The 44 primary public items (types,
-  traits, methods) are now documented. The lint itself is *not* on, and the earlier
+  traits, methods) are now documented. The lint itself is _not_ on, and the earlier
   "roughly fifteen" estimate was wrong by twenty times: `missing_docs` also flags
   every public struct field, which is 290 warnings across the workspace. Most are
   self-describing config fields where a doc comment would be filler that makes the
   code harder to read, not easier. Worth revisiting only if a way to scope it to
   items rather than fields turns up.
-- **Router-level coverage of the Torznab search handlers.** The tracker now has it;
-  Torznab's own routes are covered by the Jackett tests but not exhaustively.
-- **Gluetun against a real provider.** The one untested mile of the endpoint
-  work: a commercial VPN whose forwarded port actually rotates. Needs an account
-  and a manual session rather than code.

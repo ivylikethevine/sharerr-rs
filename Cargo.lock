@@ -2617,6 +2617,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sharerr-client",
+ "sharerr-testkit",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

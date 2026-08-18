@@ -68,11 +68,11 @@ impl QbitClient {
                 .text("savepath", request.save_path.to_owned())
                 // Never configurable. See the doc comment above.
                 .text("autoTMM", "false")
-                .text("skip_checking", bool_str(request.skip_checking))
-                .text("stopped", bool_str(request.stopped))
+                .text("skip_checking", request.skip_checking.to_string())
+                .text("stopped", request.stopped.to_string())
                 // `paused` is the pre-5.0 spelling of `stopped`; sending both keeps
                 // one client working across the versions people actually run.
-                .text("paused", bool_str(request.stopped));
+                .text("paused", request.stopped.to_string());
 
             if let Some(category) = request.category {
                 form = form.text("category", category.to_owned());
@@ -135,39 +135,31 @@ impl QbitClient {
             .map(String::as_str)
             .filter(|url| !existing.iter().any(|t| t.url == *url))
             .collect();
-        if !additions.is_empty() {
-            let joined = additions.join("\n");
-            let build = move |rb: reqwest::RequestBuilder| {
-                rb.form(&[("hash", hash), ("urls", joined.as_str())])
-            };
-            self.send_ok(Method::POST, "torrents/addTrackers", &build)
-                .await?;
-        }
+        self.post_tracker_urls(hash, "torrents/addTrackers", &additions, "\n")
+            .await?;
 
         let stale: Vec<&str> = existing
             .iter()
             .map(|t| t.url.as_str())
             .filter(|url| !url.starts_with("**") && !urls.iter().any(|u| u == url))
             .collect();
-        if !stale.is_empty() {
-            let joined = stale.join("|");
-            let build = move |rb: reqwest::RequestBuilder| {
-                rb.form(&[("hash", hash), ("urls", joined.as_str())])
-            };
-            self.send_ok(Method::POST, "torrents/removeTrackers", &build)
-                .await?;
-        }
+        self.post_tracker_urls(hash, "torrents/removeTrackers", &stale, "|")
+            .await?;
 
         tracing::info!(hash, trackers = urls.len(), "replaced tracker list");
         Ok(())
     }
-}
 
-/// qBittorrent parses these as strings, not JSON booleans.
-fn bool_str(value: bool) -> String {
-    if value {
-        "true".to_owned()
-    } else {
-        "false".to_owned()
+    /// Shared body of the add/remove halves of [`set_torrent_trackers`]: they
+    /// differ only in endpoint and how qBittorrent wants the URL list joined.
+    /// A no-op when `urls` is empty, so callers don't need to check first.
+    async fn post_tracker_urls(&self, hash: &str, endpoint: &str, urls: &[&str], sep: &str) -> Result<()> {
+        if urls.is_empty() {
+            return Ok(());
+        }
+        let joined = urls.join(sep);
+        let build = move |rb: reqwest::RequestBuilder| rb.form(&[("hash", hash), ("urls", joined.as_str())]);
+        self.send_ok(Method::POST, endpoint, &build).await?;
+        Ok(())
     }
 }

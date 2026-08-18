@@ -140,7 +140,7 @@ async fn a_long_non_ascii_body_does_not_panic() {
 
 #[tokio::test]
 async fn an_unreachable_host_is_reported_as_such() {
-    let base = Url::parse("http://127.0.0.1:1").unwrap();
+    let base = Url::parse(&format!("http://127.0.0.1:{}", sharerr_testkit::net::closed_port())).unwrap();
     let qbit = QbitClient::with_api_key(&base, SecretString::from(API_KEY)).unwrap();
 
     let err = qbit.version().await.unwrap_err();

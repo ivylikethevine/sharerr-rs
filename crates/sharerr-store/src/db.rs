@@ -9,6 +9,7 @@ use std::str::FromStr;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
+use sharerr_core::endpoint::now_epoch;
 use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -216,14 +217,8 @@ impl Store {
     /// make an item look newly shared.
     pub async fn upsert(&self, item: &SharedItem) -> Result<i64> {
         let now = now_epoch();
-        let spec_json = serde_json::to_string(&item.spec).map_err(|e| StoreError::Malformed {
-            id: 0,
-            detail: e.to_string(),
-        })?;
-        let ids_json = serde_json::to_string(&item.ids).map_err(|e| StoreError::Malformed {
-            id: 0,
-            detail: e.to_string(),
-        })?;
+        let spec_json = encode_json(&item.spec)?;
+        let ids_json = encode_json(&item.ids)?;
 
         let row = sqlx::query(
             r#"
@@ -457,6 +452,14 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     })
 }
 
+/// Serialise a column value to JSON, wrapping a failure as [`StoreError::Malformed`].
+fn encode_json(value: &impl serde::Serialize) -> Result<String> {
+    serde_json::to_string(value).map_err(|e| StoreError::Malformed {
+        id: 0,
+        detail: e.to_string(),
+    })
+}
+
 /// Trim and bound a human-entered name, with the caller's own messages.
 ///
 /// Usernames and peer labels share the same rule — non-blank, at most 64
@@ -475,13 +478,6 @@ pub(crate) fn validate_name(
         return Err(StoreError::InvalidUser(long_msg));
     }
     Ok(trimmed.to_owned())
-}
-
-pub(crate) fn now_epoch() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

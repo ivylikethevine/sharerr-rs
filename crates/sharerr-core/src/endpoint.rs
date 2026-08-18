@@ -13,11 +13,24 @@
 //! break. `tracker.advertised_url` carries all three; `advertised_host` stays for
 //! the plain case and gains the IPv6 bracketing it never had.
 
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use url::Url;
+
+/// Whether `ip` is loopback, link-local, or otherwise private — an address no
+/// friend outside this network could ever reach.
+///
+/// Used both to refuse the gluetun refresh nudge from anywhere but a private
+/// neighbour, and to catch a hand-typed `tracker.advertised_host` that could
+/// never work for anyone outside the operator's own network.
+pub fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
 
 use crate::config::TrackerConfig;
 
@@ -223,20 +236,15 @@ impl AdvertisedEndpoint {
         }
         bases
     }
-
-    /// The dynamic observations, most recent first, for status pages and doctor.
-    pub fn observations(&self) -> Vec<ObservedBase> {
-        self.inner
-            .read()
-            .map(|inner| inner.dynamic.clone())
-            .unwrap_or_default()
-    }
 }
 
-fn now_epoch() -> i64 {
+/// Current Unix time in seconds, saturating to `0` if the clock is somehow
+/// before the epoch. The one place this is computed; reused wherever a
+/// timestamp is stamped onto a row or a record.
+pub fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
 

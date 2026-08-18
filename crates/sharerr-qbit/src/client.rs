@@ -165,7 +165,7 @@ impl QbitClient {
             .await
             .map_err(|source| QbitError::Unreachable {
                 url: url.to_string(),
-                source,
+                detail: sharerr_client::error_chain(&source),
             })?;
 
         // A rejected key never becomes accepted by asking again, and there is no

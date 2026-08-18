@@ -1620,4 +1620,126 @@ mod tests {
             "the narrowed scope must apply to the very next request"
         );
     }
+
+    // ------------------------------------------- search filters over /api itself
+    //
+    // `matches_with` is exhaustively unit-tested as a pure function above, but
+    // that never proves axum's `Query<SearchQuery>` extractor actually parses
+    // `season`, `ep`, and `imdbid` off a real URL and threads them through to a
+    // real search — only the Jackett-shaped paths were ever asked this. These
+    // hit the plain `/api` route Prowlarr and a direct Sonarr/Radarr use.
+
+    async fn xml_body(state: &std::sync::Arc<ServeState>, uri: &str) -> String {
+        let response = routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn tvsearch_filters_by_season_and_episode_through_the_router() {
+        let (_dir, state) = with_peer().await;
+        let store = state.store().await.unwrap();
+
+        for (file_id, hash, season, ep) in [(1_i64, "aa", 1, 1), (2_i64, "bb", 1, 2)] {
+            let mut item = episode("Lanternwick.Hollow.SXXEXX.WEB-DL.x264-SHARERR", season, ep);
+            item.file_id = file_id;
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Sonarr, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Sonarr, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        let xml = xml_body(&state, "/api?t=tvsearch&season=1&ep=2&apikey=sam-key").await;
+        assert!(xml.contains(&"bb".repeat(20)), "{xml}");
+        assert!(!xml.contains(&"aa".repeat(20)), "{xml}");
+    }
+
+    #[tokio::test]
+    async fn moviesearch_filters_by_imdbid_through_the_router() {
+        let (_dir, state) = with_peer().await;
+        let store = state.store().await.unwrap();
+
+        for (file_id, hash, title, imdb) in [
+            (1_i64, "aa", "Harborlight.2019.WEB-DL.x264-SHARERR", "tt1112223"),
+            (2_i64, "bb", "Otherfilm.2020.WEB-DL.x264-SHARERR", "tt9998887"),
+        ] {
+            let mut item = movie(title);
+            item.source = MediaSource::Radarr;
+            item.file_id = file_id;
+            item.ids.imdb = Some(imdb.to_owned());
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Radarr, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Radarr, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        let xml = xml_body(&state, "/api?t=movie-search&imdbid=tt9998887&apikey=sam-key").await;
+        assert!(xml.contains(&"bb".repeat(20)), "{xml}");
+        assert!(!xml.contains(&"aa".repeat(20)), "{xml}");
+    }
+
+    /// The plain text query, not just the structured filters — the shape a
+    /// client falls back to when it has no id for the release at all.
+    #[tokio::test]
+    async fn a_text_query_filters_through_the_router_too() {
+        let (_dir, state) = with_peer().await;
+        let store = state.store().await.unwrap();
+
+        for (file_id, hash, title, series_title) in [
+            (
+                1_i64,
+                "aa",
+                "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR",
+                "Lanternwick Hollow",
+            ),
+            (
+                2_i64,
+                "bb",
+                "Otherfilm.S01E01.WEB-DL.x264-SHARERR",
+                "Otherfilm",
+            ),
+        ] {
+            let mut item = episode(title, 1, 1);
+            item.file_id = file_id;
+            item.spec = MediaSpec::Episode {
+                series_title: series_title.to_owned(),
+                season: 1,
+                episode: 1,
+            };
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Sonarr, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Sonarr, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        let xml = xml_body(&state, "/api?t=search&q=Lanternwick&apikey=sam-key").await;
+        assert!(xml.contains(&"aa".repeat(20)), "{xml}");
+        assert!(!xml.contains(&"bb".repeat(20)), "{xml}");
+    }
 }
