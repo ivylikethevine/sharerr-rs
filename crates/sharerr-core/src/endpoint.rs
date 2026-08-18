@@ -224,6 +224,19 @@ impl AdvertisedEndpoint {
         true
     }
 
+    /// Forget every dynamically observed base, falling back to the static one
+    /// (if any) until the next successful resolve.
+    ///
+    /// Used when gluetun says the forwarded port has gone away
+    /// (`VPN_PORT_FORWARDING_DOWN_COMMAND`): the most recent observation is
+    /// known-dead, not merely stale, so it must not survive as a fallback port
+    /// for the next resolve that can only refresh the exit address.
+    pub fn forget_dynamic(&self) {
+        if let Ok(mut inner) = self.inner.write() {
+            inner.dynamic.clear();
+        }
+    }
+
     /// Every base worth announcing on, most current first: the dynamic history,
     /// then the static base if it is not already among them. This is the announce
     /// list a newly built torrent carries.
@@ -411,6 +424,19 @@ mod tests {
         }
         assert_eq!(endpoint.recent().len(), MAX_DYNAMIC_HISTORY);
         assert_eq!(endpoint.current(), Some(url("http://203.0.113.9:10")));
+    }
+
+    /// The down-command path: a dead observation must not linger as `current()`
+    /// or as a fallback for the next resolve, but the static base still stands.
+    #[test]
+    fn forgetting_dynamic_state_falls_back_to_the_static_base() {
+        let endpoint = AdvertisedEndpoint::new(Some(url("http://static.example:8477")));
+        endpoint.observe(url("http://203.0.113.9:41234"));
+
+        endpoint.forget_dynamic();
+
+        assert_eq!(endpoint.current(), Some(url("http://static.example:8477")));
+        assert_eq!(endpoint.recent(), vec![url("http://static.example:8477")]);
     }
 
     /// A settings save must not wipe what the poller knows.

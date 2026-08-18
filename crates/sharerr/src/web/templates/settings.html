@@ -232,7 +232,11 @@
   <p class="hint">
     The poll is the safety net; for reconnects to be picked up in seconds, set
     gluetun's <code>VPN_PORT_FORWARDING_UP_COMMAND</code> to hit
-    <code>/gluetun/refresh</code> on this instance.
+    <code>/gluetun/refresh</code> on this instance. Setting
+    <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> to hit
+    <code>/gluetun/down</code> too means a port that just went away is dropped
+    immediately rather than kept as a stale fallback until the next poll finds
+    out on its own.
   </p>
 
   <button type="submit">Save</button>
