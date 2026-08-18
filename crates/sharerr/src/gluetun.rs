@@ -12,10 +12,25 @@
 //! * **The poll** ([`poll_loop`]) asks on a timer. It is the floor — it recovers
 //!   a missed push and needs nothing configured on the gluetun side.
 //! * **The push** is gluetun's `VPN_PORT_FORWARDING_UP_COMMAND` hitting
-//!   `/gluetun/refresh` on this server, which only *nudges* the poller to ask
-//!   now. The control server stays the single source of truth; nothing pushed is
-//!   trusted directly, so the refresh endpoint needs no authentication beyond
-//!   being reachable — it can only cause a question to be asked sooner.
+//!   `/gluetun/refresh`, and `VPN_PORT_FORWARDING_DOWN_COMMAND` hitting
+//!   `/gluetun/down`, on this server. Both only *nudge* the poller — the up
+//!   command asks it to resolve now instead of at the next tick, and the down
+//!   command additionally forgets the dynamic history first
+//!   ([`AdvertisedEndpoint::forget_dynamic`]), since the port it names is about
+//!   to stop working and must not linger as a fallback for a resolve that can
+//!   only refresh the exit address. The control server stays the single source
+//!   of truth; nothing pushed is trusted directly, so neither endpoint needs
+//!   authentication beyond being reachable — they can only cause a question to
+//!   be asked sooner.
+//!
+//! The two lookups the poll makes are not equally reliable in practice: gluetun's
+//! route-scoped auth config can grant a key access to `/v1/publicip/ip` and not
+//! `/v1/openvpn/portforwarded` (or the reverse), and one can fail transiently
+//! without the other. [`GluetunClient::resolve_base`] treats only the exit
+//! address as load-bearing — a port lookup that fails falls back to the last
+//! known port rather than blocking the whole resolve, so a VPN reconnect that
+//! changes the exit address still gets advertised even when the port call is
+//! stuck failing.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -156,9 +171,29 @@ impl GluetunClient {
 
     /// The base URL friends can currently reach this instance on: the exit
     /// address plus the forwarded port.
-    pub async fn resolve_base(&self) -> Result<Url> {
+    ///
+    /// `fallback_port`, when given, stands in for a forwarded-port lookup that
+    /// fails — a mis-scoped API key (the roles in gluetun's own auth config can
+    /// grant `/v1/publicip/ip` and not `/v1/openvpn/portforwarded`
+    /// independently) or a transient error should not stop the exit address
+    /// from being kept in step, or every reconnect would wait on the one call
+    /// least likely to be reliable. Only a failed `public_ip` call is fatal —
+    /// there is no address to build a base from at all without it.
+    pub async fn resolve_base(&self, fallback_port: Option<u16>) -> Result<Url> {
         let (ip, port) = tokio::join!(self.public_ip(), self.forwarded_port());
-        let (ip, port) = (ip?, port?);
+        let ip = ip?;
+        let port = match (port, fallback_port) {
+            (Ok(port), _) => port,
+            (Err(err), Some(fallback)) => {
+                tracing::warn!(
+                    error = %err,
+                    fallback_port = fallback,
+                    "could not refresh the forwarded port; keeping the last known one"
+                );
+                fallback
+            }
+            (Err(err), None) => return Err(err),
+        };
 
         let raw = match ip {
             IpAddr::V4(v4) => format!("http://{v4}:{port}"),
@@ -187,26 +222,52 @@ pub async fn poll_loop(state: Arc<ServeState>) {
 
         if let Some(control) = &config.gluetun.control_url {
             let api_key = gluetun_api_key(&state).await;
-            match resolve_once(control, api_key).await {
-                Ok(base) => {
-                    if last_error.take().is_some() {
-                        tracing::info!(%base, "gluetun endpoint resolution recovered");
+
+            // gluetun's control server has required an API key by default since
+            // v3.40; sending an unkeyed request just to learn that again, every
+            // interval, forever, on a deployment that has not been fixed yet is
+            // a wasted round trip whose only possible answer is the same 401.
+            // The config is re-read every iteration, so the moment a key is
+            // saved through Settings, polling resumes on the next pass with no
+            // restart needed.
+            if let Some(api_key) = api_key {
+                // A fallback for a forwarded-port lookup that fails on its own
+                // — see `resolve_base` — read from what is currently
+                // advertised rather than cached separately, so
+                // `/gluetun/down` forgetting the dynamic history (a
+                // known-dead port, not a flaky lookup) also clears this
+                // fallback.
+                let fallback_port = state.endpoint().current().and_then(|base| base.port());
+
+                match resolve_once(control, Some(api_key), fallback_port).await {
+                    Ok(base) => {
+                        if last_error.take().is_some() {
+                            tracing::info!(%base, "gluetun endpoint resolution recovered");
+                        }
+                        if state.endpoint().observe(base.clone()) {
+                            tracing::info!(
+                                %base,
+                                "advertised endpoint changed — waking the sync loop to \
+                                 re-announce and rewrite torrents"
+                            );
+                            state.request_sync();
+                        }
                     }
-                    if state.endpoint().observe(base.clone()) {
-                        tracing::info!(
-                            %base,
-                            "advertised endpoint changed — waking the sync loop to \
-                             re-announce and rewrite torrents"
-                        );
-                        state.request_sync();
+                    Err(err) => {
+                        let rendered = err.to_string();
+                        if last_error.as_deref() != Some(&rendered) {
+                            tracing::warn!(error = %rendered, "could not resolve the endpoint from gluetun");
+                            last_error = Some(rendered);
+                        }
                     }
                 }
-                Err(err) => {
-                    let rendered = err.to_string();
-                    if last_error.as_deref() != Some(&rendered) {
-                        tracing::warn!(error = %rendered, "could not resolve the endpoint from gluetun");
-                        last_error = Some(rendered);
-                    }
+            } else {
+                let rendered = "no gluetun.api_key configured — skipping the poll rather \
+                                 than sending a request that would only come back 401"
+                    .to_owned();
+                if last_error.as_deref() != Some(&rendered) {
+                    tracing::warn!("{rendered}");
+                    last_error = Some(rendered);
                 }
             }
         }
@@ -232,8 +293,14 @@ async fn gluetun_api_key(state: &ServeState) -> Option<SecretString> {
         .flatten()
 }
 
-async fn resolve_once(control: &Url, api_key: Option<SecretString>) -> Result<Url> {
-    GluetunClient::new(control, api_key)?.resolve_base().await
+async fn resolve_once(
+    control: &Url,
+    api_key: Option<SecretString>,
+    fallback_port: Option<u16>,
+) -> Result<Url> {
+    GluetunClient::new(control, api_key)?
+        .resolve_base(fallback_port)
+        .await
 }
 
 #[cfg(test)]
@@ -274,7 +341,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            client(&server).resolve_base().await.unwrap().as_str(),
+            client(&server).resolve_base(None).await.unwrap().as_str(),
             "http://203.0.113.9:41234/"
         );
     }
@@ -290,7 +357,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            client(&server).resolve_base().await.unwrap().as_str(),
+            client(&server).resolve_base(None).await.unwrap().as_str(),
             "http://[2001:db8::9]:41234/"
         );
     }
@@ -307,8 +374,85 @@ mod tests {
         .await;
 
         assert!(matches!(
-            client(&server).resolve_base().await.unwrap_err(),
+            client(&server).resolve_base(None).await.unwrap_err(),
             GluetunError::NoForwardedPort
+        ));
+    }
+
+    /// The resiliency the mis-scoped-API-key report called for: a port lookup
+    /// that fails must not stop the exit address from being kept in step, as
+    /// long as a fallback port is available.
+    #[tokio::test]
+    async fn a_failed_port_lookup_falls_back_to_the_last_known_port() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "public_ip": "203.0.113.9" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/openvpn/portforwarded"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw("Unauthorized\n", "text/plain"))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client(&server)
+                .resolve_base(Some(41234))
+                .await
+                .unwrap()
+                .as_str(),
+            "http://203.0.113.9:41234/"
+        );
+    }
+
+    /// Without a fallback, a failed port lookup is still fatal — there is
+    /// nothing to build a base with otherwise.
+    #[tokio::test]
+    async fn a_failed_port_lookup_without_a_fallback_is_still_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "public_ip": "203.0.113.9" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/openvpn/portforwarded"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw("Unauthorized\n", "text/plain"))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client(&server).resolve_base(None).await.unwrap_err(),
+            GluetunError::Unauthorized { .. }
+        ));
+    }
+
+    /// A failed exit-address lookup is fatal even with a fallback port — there
+    /// is no address to build a base from at all.
+    #[tokio::test]
+    async fn a_failed_ip_lookup_is_fatal_even_with_a_fallback_port() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(ResponseTemplate::new(401).set_body_raw("Unauthorized\n", "text/plain"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/openvpn/portforwarded"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "port": 41234 })))
+            .mount(&server)
+            .await;
+
+        assert!(matches!(
+            client(&server).resolve_base(Some(9999)).await.unwrap_err(),
+            GluetunError::Unauthorized { .. }
         ));
     }
 

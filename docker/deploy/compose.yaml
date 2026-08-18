@@ -120,15 +120,23 @@ services:
       # section (see config/sharerr.toml) polls the control server on :8000 for
       # both values and keeps every torrent's announce URL in step; the
       # up-command below makes a reconnect picked up in seconds instead of at
-      # the next poll. sharerr is in this same namespace, so `localhost` is
-      # correct — and the endpoint only *nudges* sharerr to re-ask gluetun, it
-      # takes no value, so there is no port to template into it.
+      # the next poll, and the down-command means a port going away is dropped
+      # immediately rather than kept as a stale fallback until the next poll
+      # finds out on its own. sharerr is in this same namespace, so `localhost`
+      # is correct — and neither endpoint takes a value, they only *nudge*
+      # sharerr to re-ask gluetun, so there is no port to template into either.
+      # Also set gluetun.api_key in sharerr's Settings (or `CONTROL_SERVER_AUTH`
+      # here) — gluetun's control server has required one since v3.40, and
+      # sharerr skips its poll entirely rather than send a request that would
+      # only come back 401.
       #
       # VPN_PORT_FORWARDING: "on"
       # VPN_PORT_FORWARDING_PROVIDER: ${VPN_SERVICE_PROVIDER}
       # VPN_PORT_FORWARDING_STATUS_FILE: /gluetun/forwarded_port
       # VPN_PORT_FORWARDING_UP_COMMAND: >-
       #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/refresh'
+      # VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/down'
 
       TZ: ${TZ:-Etc/UTC}
     ports:

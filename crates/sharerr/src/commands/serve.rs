@@ -44,11 +44,13 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
 
     // The probes keep their own state and stay outside the web UI's auth layer.
     // `/health` in particular is what the Dockerfile's HEALTHCHECK curls, with no
-    // cookie and no intention of getting one. `/gluetun/refresh` sits here too:
-    // gluetun's VPN_PORT_FORWARDING_UP_COMMAND is a bare wget with no cookie jar,
-    // and the endpoint only nudges the poller to re-ask the control server — it
-    // takes no value from the caller, so there is nothing to protect beyond the
-    // private-address check in the handler.
+    // cookie and no intention of getting one. `/gluetun/refresh` and
+    // `/gluetun/down` sit here too: gluetun's VPN_PORT_FORWARDING_UP_COMMAND and
+    // VPN_PORT_FORWARDING_DOWN_COMMAND are bare wgets with no cookie jar, and
+    // neither endpoint takes a value from the caller — one nudges the poller to
+    // re-ask the control server, the other additionally forgets the dynamic
+    // endpoint history first — so there is nothing to protect beyond the
+    // private-address check both handlers share.
     let app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
@@ -56,6 +58,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
             "/gluetun/refresh",
             get(gluetun_refresh).post(gluetun_refresh),
         )
+        .route("/gluetun/down", get(gluetun_down).post(gluetun_down))
         .with_state(Arc::clone(&state))
         .merge(crate::tracker::routes(Arc::clone(&tracker)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
@@ -142,6 +145,28 @@ async fn gluetun_refresh(
     }
     state.nudge_endpoint();
     (StatusCode::OK, "refreshing")
+}
+
+/// `GET|POST /gluetun/down` — for `VPN_PORT_FORWARDING_DOWN_COMMAND`.
+///
+/// The port gluetun is about to report as gone must not linger as the fallback
+/// a resolve falls back to when the port lookup itself fails (see
+/// [`crate::gluetun::GluetunClient::resolve_base`]) — that fallback exists for a
+/// lookup that is merely *flaky*, and this is gluetun saying the port is
+/// authoritatively dead. Forgetting the dynamic history first, then nudging the
+/// poller the same way `/gluetun/refresh` does, means the very next resolve
+/// either finds a fresh port or degrades cleanly to the static endpoint rather
+/// than keep advertising one that no longer works.
+async fn gluetun_down(
+    State(state): State<Arc<ServeState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> (StatusCode, &'static str) {
+    if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
+        return (StatusCode::FORBIDDEN, "refused");
+    }
+    state.endpoint().forget_dynamic();
+    state.nudge_endpoint();
+    (StatusCode::OK, "acknowledged")
 }
 
 /// Keeps the syncer alive and reconciles on a timer.

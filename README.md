@@ -159,9 +159,19 @@ hash is untouched — announce lives outside the info dictionary) and repoints t
 tracker lists inside the torrent client, immediately rather than at the next
 scheduled sync. For reconnects to be picked up in seconds, set gluetun's
 `VPN_PORT_FORWARDING_UP_COMMAND` to `wget -qO- http://localhost:8477/gluetun/refresh`
-— the push only nudges sharerr to re-ask the control server, so nothing pushed is
-trusted. Where the provider grants no port, sharerr says so and degrades to the
-statically configured endpoint. `docker/deploy/` wires all of this up.
+and, so a port going away is dropped immediately instead of lingering as a stale
+fallback until the next poll, `VPN_PORT_FORWARDING_DOWN_COMMAND` to
+`wget -qO- http://localhost:8477/gluetun/down` — both pushes only nudge sharerr to
+re-ask the control server, so nothing pushed is trusted. gluetun's own control
+server has required an API key (`gluetun.api_key` in Settings, or
+`CONTROL_SERVER_AUTH` on gluetun's side) since v3.40; without one, sharerr skips
+the poll rather than send a request that can only come back `401`. The exit
+address and the forwarded port are also resolved independently — since the
+routes in gluetun's own auth config can grant one without the other, a port
+lookup that fails falls back to the last known port rather than blocking an exit
+address change on it. Where the provider grants no port at all, sharerr says so
+and degrades to the statically configured endpoint. `docker/deploy/` wires all of
+this up.
 
 Two related settings for constrained setups: `tracker.advertised_url` takes a
 full base URL (scheme, path prefix, bracketed IPv6) for reverse-proxied

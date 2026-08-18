@@ -543,9 +543,10 @@ where
 /// reconnect, on an exit address that also rotates — so the deployment this is
 /// for cannot type its endpoint into `tracker.advertised_host` at all. When
 /// `control_url` is set, `serve` polls `/v1/publicip/ip` and
-/// `/v1/openvpn/portforwarded` as the source of truth, and a small refresh
-/// endpoint accepts a nudge from `VPN_PORT_FORWARDING_UP_COMMAND` so a reconnect
-/// is reacted to in seconds rather than at the next poll. The poll is the floor
+/// `/v1/openvpn/portforwarded` as the source of truth, and two small endpoints
+/// accept a nudge from `VPN_PORT_FORWARDING_UP_COMMAND` and
+/// `VPN_PORT_FORWARDING_DOWN_COMMAND` so a reconnect (or a port going away) is
+/// reacted to in seconds rather than at the next poll. The poll is the floor
 /// that recovers a missed push; neither alone is enough.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]

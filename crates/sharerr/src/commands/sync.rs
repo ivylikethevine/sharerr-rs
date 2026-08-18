@@ -19,7 +19,10 @@ pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
     if let Some(control) = &config.gluetun.control_url {
         let api_key = gluetun_api_key(config).await;
         match crate::gluetun::GluetunClient::new(control, api_key) {
-            Ok(client) => match client.resolve_base().await {
+            // No prior observation exists in a one-shot run, so there is no
+            // fallback port to offer — a failed port lookup is fatal here the
+            // same way it always was before the poller gained one.
+            Ok(client) => match client.resolve_base(None).await {
                 Ok(base) => {
                     endpoint.observe(base);
                 }
