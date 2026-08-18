@@ -1,4 +1,5 @@
-//! The diagnostics page: does the library actually resolve?
+//! The health checks folded into the combined status/diagnostics page: does
+//! the library actually resolve?
 //!
 //! `doctor` has always answered this from a shell. The settings page's "Test
 //! connection" buttons deliberately do not — they answer a one-line question about
@@ -7,10 +8,10 @@
 //! nothing" was the one an operator who never opens a terminal could not run.
 //!
 //! The checking is shared with `doctor` via [`crate::checks`]; this module only
-//! gathers and renders.
+//! gathers. [`gather`] used to render its own page — until that page and Status
+//! merged, on the grounds that both answered "is this instance healthy" at two
+//! levels of detail a person had to know to click through between.
 
-use axum::extract::State;
-use axum::response::Response;
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
 use sharerr_core::config::secret_keys;
@@ -19,7 +20,7 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use super::peers::ago;
-use super::templates::{DiagnosticsPage, EndpointStatus, RunRow, SampleRow, ServiceLine, render};
+use super::templates::{DiagnosticsData, EndpointStatus, RunRow, SampleRow, ServiceLine};
 use crate::checks::{self, ArrOutcome, DirOutcome};
 use crate::gluetun::GluetunTarget;
 
@@ -35,7 +36,9 @@ const MAX_LISTED: usize = 20;
 /// like a log dump.
 const RECENT_RUNS: i64 = 10;
 
-pub async fn page(State(state): State<WebState>) -> Response {
+/// Run every health check and return the results, unrendered — [`super::status_page`]
+/// folds this into the combined page alongside the glance and the banners.
+pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     let config = state.serve.config().await;
 
     // One vault open for the whole page. Opening it derives the key with Argon2 —
@@ -124,7 +127,7 @@ pub async fn page(State(state): State<WebState>) -> Response {
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
     let swarm = state.serve.swarms().stats().await;
-    let runs = recent_run_rows(&state).await;
+    let runs = recent_run_rows(state).await;
     let gluetun = vec![
         endpoint_status(
             "Tracker/feed",
@@ -142,8 +145,7 @@ pub async fn page(State(state): State<WebState>) -> Response {
         .await,
     ];
 
-    render(&DiagnosticsPage {
-        signed_in: true,
+    DiagnosticsData {
         services,
         scanned,
         rules: paths.rules,
@@ -168,7 +170,7 @@ pub async fn page(State(state): State<WebState>) -> Response {
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
         runs,
-    })
+    }
 }
 
 /// The last few sync runs, newest first — "is the last one healthy" is the

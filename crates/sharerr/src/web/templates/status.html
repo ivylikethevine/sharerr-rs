@@ -71,14 +71,197 @@
 </p>
 {% endif %}
 
+{% if scanned %}
+{% if healthy %}
+<p class="ok" role="status">
+  All {{ readable }} tagged file(s) resolve to somewhere sharerr can read.
+</p>
+{% else %}
+<p class="error" role="alert">
+  {{ readable }} of {{ checked }} tagged file(s) resolve. The rest are not being
+  shared — see Path mapping below.
+</p>
+{% endif %}
+{% endif %}
+
 <dl class="facts">
   <dt>Tag watched</dt><dd><code>{{ tag }}</code></dd>
-  {% for service in services %}
-  <dt>{{ service.title }}</dt><dd>{% if let Some(url) = service.url %}<code>{{ url }}</code>{% else %}not configured{% endif %}</dd>
-  {% endfor %}
   <dt>{{ client_name }}</dt><dd><code>{{ client_url }}</code></dd>
   <dt>Periodic sync</dt>
   <dd>{% if sync_enabled %}every {{ sync_interval_secs }}s{% else %}disabled{% endif %}</dd>
   <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>
 </dl>
+
+<h2>Recent syncs</h2>
+<div class="panel">
+  {% if runs.is_empty() %}
+  <p class="hint">No completed sync yet.</p>
+  {% else %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>When</th><th>Result</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.when }}</td>
+        <td>
+          {% if run.failed %}
+          <span class="error">{{ run.summary }}</span>
+          {% else %}
+          {{ run.summary }}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+
+<h2>Networking</h2>
+<div class="panel">
+  <dl class="facts">
+    <dt>Swarm</dt>
+    <dd>{{ swarm_peers }} peer(s) connected, {{ swarm_seeders }} seeding</dd>
+  </dl>
+  {% for row in gluetun %}
+  <h3>{{ row.label }}</h3>
+  <dl class="facts">
+    <dt>Poller</dt>
+    <dd>
+      {% if !row.configured %}
+      <span class="hint">not configured</span>
+      {% else if row.enabled %}
+      <span class="ok">enabled</span>
+      {% else %}
+      <span class="hint">paused (control server URL is kept)</span>
+      {% endif %}
+    </dd>
+    <dt>Currently advertised</dt>
+    <dd>
+      {% if let Some(current) = row.current %}
+      <code>{{ current }}</code>
+      {% else %}
+      <span class="hint">nothing configured or observed yet</span>
+      {% endif %}
+    </dd>
+    <dt>Last observed from gluetun</dt>
+    <dd>
+      {% if let Some(observed) = row.last_observed %}
+      <code>{{ observed }}</code>
+      {% else %}
+      <span class="hint">never</span>
+      {% endif %}
+    </dd>
+    {% if let Some(poll) = row.last_poll %}
+    <dt>Last poll</dt>
+    <dd>{{ poll }}{% if let Some(success) = row.last_success %}, last succeeded {{ success }}{% endif %}</dd>
+    {% endif %}
+    {% if let Some(error) = row.last_error %}
+    <dt>Last error</dt>
+    <dd><span class="error">{{ error }}</span></dd>
+    {% endif %}
+  </dl>
+  {% endfor %}
+  <p class="hint">
+    Configure either poller under <a href="/settings">Settings</a> → Gluetun.
+    The torrent client's own tunnel only applies to the split-VPN deployment in
+    <code>docker/deploy/dual-vpn/</code> — most instances leave it unconfigured.
+  </p>
+</div>
+
+<h2>Services</h2>
+<div class="panel">
+  {% if services.is_empty() %}
+  <p class="hint">Neither Sonarr nor Radarr is configured, so there is nothing to scan.</p>
+  {% else %}
+  <dl class="facts">
+    {% for service in services %}
+    <dt>{{ service.name }}</dt>
+    <dd class="{% if service.ok %}ok{% else %}error{% endif %}">{{ service.message }}</dd>
+    {% endfor %}
+  </dl>
+  {% endif %}
+</div>
+
+<h2>Path mapping</h2>
+<div class="panel">
+  <p class="hint">
+    The settings page's <em>Test connection</em> buttons answer "can I reach it".
+    This answers the harder question: do the tagged files actually resolve to
+    somewhere sharerr can read them? A mapping that looks right and resolves to
+    nothing is the most common reason sharerr appears to do nothing at all.
+  </p>
+
+  {% if !scanned %}
+  <p class="hint">
+    No tagged files were found, so there are no paths to resolve. Tag something in
+    Sonarr or Radarr and reload.
+  </p>
+  {% else %}
+
+  {% if rules == 0 %}
+  <p class="hint">
+    No <code>[[path_map]]</code> rules are configured, so all three views are
+    assumed identical.
+  </p>
+  {% else %}
+  <p class="hint">{{ rules }} mapping rule(s) configured.</p>
+  {% endif %}
+
+  {% if missing.is_empty() && invalid.is_empty() %}
+  <p class="ok">All {{ checked }} tagged file(s) are readable by sharerr.</p>
+  {% else %}
+  <p class="error">
+    {{ missing.len() }} of {{ checked }} tagged file(s) do not exist at the path
+    sharerr resolved them to. sharerr cannot build a torrent for a file it cannot
+    open, so these are not being shared.
+  </p>
+  <ul class="paths">
+    {% for path in missing %}
+    <li><code>{{ path }}</code></li>
+    {% endfor %}
+  </ul>
+  {% if more_missing > 0 %}
+  <p class="hint">… and {{ more_missing }} more.</p>
+  {% endif %}
+  <p class="hint">
+    Fix the path mappings under <a href="/settings">Settings</a> so the *arr view
+    maps onto the directory sharerr has mounted.
+  </p>
+  {% endif %}
+
+  {% if !invalid.is_empty() %}
+  <p class="error">{{ invalid.len() }} path(s) could not be resolved at all:</p>
+  <ul class="paths">
+    {% for reason in invalid %}
+    <li>{{ reason }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if unmapped > 0 && rules > 0 %}
+  <p class="error">
+    {{ unmapped }} of {{ checked }} file(s) matched no mapping rule and passed
+    through unchanged.
+  </p>
+  {% endif %}
+
+  {% if let Some(sample) = sample %}
+  <h3>Example resolution</h3>
+  <p class="hint">One of the {{ checked }} file(s), traced through all three views.</p>
+  <dl class="facts">
+    <dt>*arr view</dt><dd><code>{{ sample.arr }}</code></dd>
+    <dt>sharerr view</dt><dd><code>{{ sample.sharerr }}</code></dd>
+    <dt>qBittorrent view</dt><dd><code>{{ sample.qbit }}</code></dd>
+  </dl>
+  <p class="hint">
+    Only the sharerr view can be checked from here — the qBittorrent view is
+    another container's filesystem, so verify it against qBittorrent itself.
+  </p>
+  {% endif %}
+
+  {% endif %}
+</div>
 {% endblock %}

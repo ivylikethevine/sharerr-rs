@@ -87,6 +87,11 @@ impl LoginPage {
     }
 }
 
+/// The one page a signed-in operator lands on: what is working, what is not,
+/// and why. Merges what used to be two pages — Status and Diagnostics — since
+/// they answered the same underlying question ("is this instance healthy")
+/// at two different levels of detail, and a person chasing "why isn't this
+/// working" had to know to click through to the second one.
 #[derive(Debug, Template)]
 #[template(path = "status.html")]
 pub struct StatusPage {
@@ -104,9 +109,6 @@ pub struct StatusPage {
     pub recovery_secs: u64,
     pub master_key_present: bool,
     pub tag: String,
-    /// One row per *arr app, configured or not, in `MediaSource::ARRS` order,
-    /// then one per `[[library]]` directory.
-    pub services: Vec<ServiceUrl>,
     /// The *configured* torrent client — showing the unused section's URL on the
     /// "what is this instance using" page sent operators debugging the wrong
     /// service.
@@ -115,6 +117,44 @@ pub struct StatusPage {
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
     pub config_path: String,
+
+    // ------------------------------------------------------ former Diagnostics
+    /// Live connectivity + tag/path checks, one line per *arr app and per
+    /// `[[library]]` directory — only for what is actually configured. Shared
+    /// with `doctor` via `crate::checks`, so the two cannot disagree about
+    /// what they found.
+    pub services: Vec<ServiceLine>,
+    /// Whether any tagged file was found at all. Distinguishes "everything
+    /// resolves" from "there was nothing to resolve", which look identical if you
+    /// only count failures.
+    pub scanned: bool,
+    pub rules: usize,
+    pub checked: usize,
+    pub unmapped: usize,
+    /// Capped for display; `more_missing` carries the remainder.
+    pub missing: Vec<String>,
+    pub more_missing: usize,
+    pub invalid: Vec<String>,
+    pub sample: Option<SampleRow>,
+    /// Files that resolved to something sharerr can actually open.
+    pub readable: usize,
+    /// Whether anything here stops a file being shared. Drives the one-line verdict
+    /// at the top, so the answer is visible without reading the whole page.
+    pub healthy: bool,
+    /// One row per gluetun poller (tracker, then client) — what each is
+    /// pointed at, what it last saw, and what it last failed with. See
+    /// `docs/roadmap.md`'s "gluetun observability" and "a peer with two
+    /// addresses".
+    pub gluetun: Vec<EndpointStatus>,
+    /// Live swarm counts from the tracker's own bookkeeping — not a config
+    /// check like the rest of the page, but the other half of "is networking
+    /// actually working": credentials can all be green while no peer has
+    /// ever announced.
+    pub swarm_peers: usize,
+    pub swarm_seeders: usize,
+    /// The last few sync runs, newest first — the glance above only shows the
+    /// single latest one.
+    pub runs: Vec<RunRow>,
 }
 
 /// The numbers an operator actually came to check, in one strip.
@@ -275,13 +315,6 @@ pub struct ScopeOption {
     pub label: String,
 }
 
-/// One *arr app's row on the status page.
-#[derive(Debug)]
-pub struct ServiceUrl {
-    pub title: String,
-    pub url: Option<String>,
-}
-
 /// One *arr app's section on the settings page.
 #[derive(Debug)]
 pub struct ArrSection {
@@ -320,50 +353,25 @@ pub struct SampleRow {
     pub qbit: String,
 }
 
-/// The check that used to be reachable only from a shell.
-///
-/// `doctor` resolves the path mappings and reports what it finds; the web UI's
-/// per-service "Test connection" buttons deliberately do not, because they answer a
-/// one-line question and this needs a library walk. So the check most likely to
-/// explain "nothing is shared" was the one an operator using only the browser could
-/// never run.
-#[derive(Debug, Template)]
-#[template(path = "diagnostics.html")]
-pub struct DiagnosticsPage {
-    pub signed_in: bool,
+/// The gathered results of the checks folded into [`StatusPage`] — everything
+/// the former Diagnostics page computed, kept as one bundle so `diagnostics`'s
+/// gathering function has a single return type instead of an eleven-tuple.
+#[derive(Debug)]
+pub struct DiagnosticsData {
     pub services: Vec<ServiceLine>,
-    /// Whether any tagged file was found at all. Distinguishes "everything
-    /// resolves" from "there was nothing to resolve", which look identical if you
-    /// only count failures.
     pub scanned: bool,
     pub rules: usize,
     pub checked: usize,
     pub unmapped: usize,
-    /// Capped for display; `more_missing` carries the remainder.
     pub missing: Vec<String>,
     pub more_missing: usize,
     pub invalid: Vec<String>,
     pub sample: Option<SampleRow>,
-    /// Files that resolved to something sharerr can actually open.
     pub readable: usize,
-    /// Whether anything here stops a file being shared. Drives the one-line verdict
-    /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
-
-    /// One row per gluetun poller (tracker, then client) — what each is
-    /// pointed at, what it last saw, and what it last failed with. See
-    /// `docs/roadmap.md`'s "gluetun observability" and "a peer with two
-    /// addresses".
     pub gluetun: Vec<EndpointStatus>,
-    /// Live swarm counts from the tracker's own bookkeeping — not a config
-    /// check like the rest of the page, but the other half of "is networking
-    /// actually working": credentials can all be green while no peer has
-    /// ever announced.
     pub swarm_peers: usize,
     pub swarm_seeders: usize,
-
-    /// The last few sync runs, newest first — history the status page's
-    /// glance never showed beyond the single latest one.
     pub runs: Vec<RunRow>,
 }
 

@@ -28,7 +28,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::middleware;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use sharerr_store::master_key_from_env;
 
@@ -92,7 +92,9 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     // endpoint that writes to the vault.
     let protected = Router::new()
         .route("/", get(status_page))
-        .route("/diagnostics", get(diagnostics::page))
+        // Diagnostics merged into the page above; kept as a redirect so an old
+        // bookmark or a link in an issue still lands somewhere useful.
+        .route("/diagnostics", get(|| async { Redirect::to("/") }))
         .route("/items", get(items::page))
         .route("/peers", get(peers::page).post(peers::add))
         .route("/peers/{id}/scope", post(peers::set_scope))
@@ -145,9 +147,13 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .with_state(state)
 }
 
-/// The one page a signed-in operator lands on: what is working, and what is not.
+/// The one page a signed-in operator lands on: what is working, what is not,
+/// and why. Used to be two pages — this one's glance, and Diagnostics' deeper
+/// checks — merged because both answered "is this instance healthy" and a
+/// person chasing a problem had to know a second page existed at all.
 async fn status_page(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
+    let diag = diagnostics::gather(&state).await;
 
     render(&StatusPage {
         signed_in: true,
@@ -159,28 +165,27 @@ async fn status_page(State(state): State<WebState>) -> Response {
         // restart, and this banner is how the operator learns that is still needed.
         master_key_present: master_key_from_env().is_ok(),
         tag: config.tag.clone(),
-        services: sharerr_core::MediaSource::ARRS
-            .iter()
-            .copied()
-            .map(|kind| crate::web::templates::ServiceUrl {
-                title: settings::title_case(kind.as_str()),
-                url: config.service(kind).map(|s| s.url.to_string()),
-            })
-            .chain(
-                config
-                    .library
-                    .iter()
-                    .map(|library| crate::web::templates::ServiceUrl {
-                        title: format!("Library ({})", library.kind.as_str()),
-                        url: Some(library.path.display().to_string()),
-                    }),
-            )
-            .collect(),
         client_name: config.torrent_backend.as_str(),
         client_url: config.torrent_client().url.to_string(),
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
         config_path: state.serve.config_path().display().to_string(),
+
+        services: diag.services,
+        scanned: diag.scanned,
+        rules: diag.rules,
+        checked: diag.checked,
+        unmapped: diag.unmapped,
+        missing: diag.missing,
+        more_missing: diag.more_missing,
+        invalid: diag.invalid,
+        sample: diag.sample,
+        readable: diag.readable,
+        healthy: diag.healthy,
+        gluetun: diag.gluetun,
+        swarm_peers: diag.swarm_peers,
+        swarm_seeders: diag.swarm_seeders,
+        runs: diag.runs,
     })
 }
 
