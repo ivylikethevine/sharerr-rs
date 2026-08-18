@@ -17,9 +17,22 @@ targets = [
 
 [advisories]
 version = 2
-# No blanket ignores. An advisory that genuinely does not apply gets its id listed
-# here with a comment saying why — never a silent global downgrade.
-ignore = []
+# No blanket ignores. An advisory that cannot be acted on gets its id listed here
+# with a comment saying why — never a silent global downgrade.
+ignore = [
+    # `custom_derive` is unmaintained. It is three levels down and not reachable
+    # from anything sharerr calls:
+    #
+    #   custom_derive <- conv <- lava_torrent <- sharerr-torrent
+    #
+    # Unmaintained is not a vulnerability, and there is no fix to take: the only
+    # route off it is replacing `lava_torrent`, which is itself in maintenance mode
+    # and is already behind the `TorrentFactory` trait for exactly that reason. So
+    # this is a known, bounded exposure rather than something to fix today.
+    #
+    # Revisit when the factory grows a second implementation.
+    "RUSTSEC-2025-0058",
+]
 
 [licenses]
 version = 2

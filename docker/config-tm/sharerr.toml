@@ -1,0 +1,52 @@
+# Configuration for the Transmission compose test stack.
+#
+# Identical to docker/config/sharerr.toml except for the three things choosing a
+# different torrent client actually changes. All three are the mistakes this stack
+# exists to catch.
+#
+# Secrets are deliberately absent: they live in the encrypted vault, loaded once
+# the stack is up. See docker/README.md.
+
+data_dir = "/data"
+tag = "sharerr"
+
+# **The choice that drives everything below.** Without this sharerr would build a
+# qBittorrent client, point it at Transmission's port, and fail with a confusing
+# error about an unexpected response rather than a wrong setting.
+torrent_backend = "transmission"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"
+
+[transmission]
+url = "http://transmission:9091"
+username = "admin"
+# Transmission has no categories — only a flat list of labels per torrent — so this
+# one value stands in for qBittorrent's category *and* its tag.
+label = "sharerr"
+
+[tracker]
+advertised_host = "localhost"
+port = 38477
+
+[sync]
+enabled = false
+interval_secs = 900
+
+# The same deliberately-disagreeing mounts as the plain stack: Sonarr says /tv,
+# sharerr reads /media/tv, Transmission is told /downloads/tv.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"

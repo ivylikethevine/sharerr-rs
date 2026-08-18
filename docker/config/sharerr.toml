@@ -28,11 +28,11 @@ tag = "sharerr"
 skip_checking = false
 
 [tracker]
-backend = "qbittorrent-embedded"
 # Whatever friends resolve this instance as. `localhost` only works because every
-# peer in this test stack is the same machine.
+# peer in this test stack is the same machine. The port is sharerr's own published
+# port — the builtin tracker rides the same listener as the web UI and the feed.
 advertised_host = "localhost"
-port = 19000
+port = 18477
 
 [sync]
 enabled = false

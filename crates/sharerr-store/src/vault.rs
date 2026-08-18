@@ -144,6 +144,11 @@ struct Record {
     ciphertext: Vec<u8>,
 }
 
+/// The encrypted credential store.
+///
+/// Holds the secrets sharerr must *replay* to other services, which is why they
+/// are recoverable rather than hashed. Opening one costs an Argon2 derivation, so
+/// callers should open it once and reuse it.
 pub struct Vault {
     path: PathBuf,
     salt: [u8; SALT_LEN],
@@ -170,8 +175,7 @@ impl Vault {
         let raw = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let mut salt = [0u8; SALT_LEN];
-                getrandom::fill(&mut salt)
+                let salt = crate::random_array::<SALT_LEN>()
                     .map_err(|e| VaultError::Kdf(format!("salt generation failed: {e}")))?;
                 let cipher = derive_cipher(master, &salt)?;
                 return Ok(Self {
@@ -242,6 +246,7 @@ impl Vault {
         Ok(existed)
     }
 
+    /// Every key stored, sorted. Never the values.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.records.keys().map(String::as_str)
     }
@@ -273,40 +278,13 @@ impl Vault {
         Ok(parse(&raw)?.1.into_keys().collect())
     }
 
+    /// Whether anything is stored yet — true on a fresh instance.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
-    /// Re-encrypt every record under a new master key, with a fresh salt.
-    pub fn rotate_master_key(&mut self, new_master: &SecretString) -> Result<()> {
-        // Decrypt everything under the old key first; if any record fails we
-        // abort before touching disk.
-        let mut plaintexts: Vec<(String, SecretString)> = Vec::new();
-        for key in self.records.keys().cloned().collect::<Vec<_>>() {
-            let value = self
-                .get(&key)?
-                .ok_or(VaultError::Corrupt("record vanished mid-rotation"))?;
-            plaintexts.push((key, value));
-        }
-
-        let mut salt = [0u8; SALT_LEN];
-        getrandom::fill(&mut salt)
-            .map_err(|e| VaultError::Kdf(format!("salt generation failed: {e}")))?;
-        let cipher = derive_cipher(new_master, &salt)?;
-
-        self.salt = salt;
-        self.cipher = cipher;
-        self.records.clear();
-        for (key, value) in plaintexts {
-            let record = self.seal(&key, value.expose_secret().as_bytes())?;
-            self.records.insert(key, record);
-        }
-        self.persist()
-    }
-
     fn seal(&self, key: &str, plaintext: &[u8]) -> Result<Record> {
-        let mut nonce = [0u8; NONCE_LEN];
-        getrandom::fill(&mut nonce)
+        let nonce = crate::random_array::<NONCE_LEN>()
             .map_err(|e| VaultError::Kdf(format!("nonce generation failed: {e}")))?;
 
         let ciphertext = self
@@ -615,36 +593,6 @@ mod tests {
         assert!(
             vault_in(&dir, "master").get("k").unwrap().is_none(),
             "removal persisted"
-        );
-    }
-
-    #[test]
-    fn rotating_the_master_key_reencrypts_everything() {
-        let dir = TempDir::new().unwrap();
-        let mut vault = vault_in(&dir, "old master");
-        vault.put("a", &secret("value-a")).unwrap();
-        vault.put("b", &secret("value-b")).unwrap();
-        let salt_before = vault.salt;
-
-        vault.rotate_master_key(&secret("new master")).unwrap();
-        assert_ne!(salt_before, vault.salt, "rotation must use a fresh salt");
-
-        assert!(
-            matches!(
-                Vault::open(dir.path().join("vault.bin"), &secret("old master")),
-                Err(VaultError::WrongKey)
-            ),
-            "old master key must stop working"
-        );
-
-        let rotated = vault_in(&dir, "new master");
-        assert_eq!(
-            rotated.get("a").unwrap().unwrap().expose_secret(),
-            "value-a"
-        );
-        assert_eq!(
-            rotated.get("b").unwrap().unwrap().expose_secret(),
-            "value-b"
         );
     }
 

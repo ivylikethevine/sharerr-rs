@@ -1,0 +1,21 @@
+-- What each friend is allowed to see.
+--
+-- The `sharerr` tag was all-or-nothing: everything tagged went into one feed and
+-- every peer got the same feed. Now that peers are distinguishable (0003), "this
+-- friend sees the TV library, that one sees films" is expressible, and it is the
+-- thing most obviously missing the moment more than one friend exists.
+--
+-- ## Why a column rather than a join table
+--
+-- The scope is one value per peer drawn from a closed set, not a set of rows. A
+-- join table would be the right shape for arbitrary per-tag or per-series rules —
+-- and if this ever grows into that, it becomes one. Modelling for that now would
+-- add a table, a migration and two queries to express a choice between three
+-- options.
+--
+-- ## Why the default is `all`
+--
+-- Existing peers were created when the feed had no scoping at all, so they can see
+-- everything today. A migration that silently narrowed what an established friend
+-- could reach would look exactly like sharerr breaking.
+ALTER TABLE peers ADD COLUMN scope TEXT NOT NULL DEFAULT 'all';

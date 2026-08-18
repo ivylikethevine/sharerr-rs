@@ -5,9 +5,11 @@
 //! `sharerr-arr` / `sharerr-qbit`, persistence in `sharerr-store`.
 
 pub mod config;
+pub mod endpoint;
 pub mod model;
 pub mod paths;
 
 pub use config::Config;
-pub use model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+pub use endpoint::EndpointError;
+pub use model::{Discovered, ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
 pub use paths::{PathError, PathResolver};

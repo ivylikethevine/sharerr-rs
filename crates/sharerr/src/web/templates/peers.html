@@ -1,0 +1,169 @@
+{% extends "layout.html" %}
+{% block title %}Friends — sharerr{% endblock %}
+
+{% block content %}
+<h1>Friends</h1>
+
+<p class="hint">
+  Each friend gets their own key. That is what makes it possible to see who is
+  actually using the feed, and to cut one person off without disturbing anyone
+  else.
+</p>
+
+{% if let Some(message) = error %}
+<p class="error" role="alert">{{ message }}</p>
+{% endif %}
+
+{% if let Some(new) = revealed %}
+<div class="ok" role="status">
+  <h2>{{ new.label }}'s key</h2>
+  <p class="error">
+    Copy it now — this is the only time it is shown. sharerr stores only a hash of
+    it and cannot show it again. If it is lost, delete this friend and add them
+    back.
+  </p>
+  <p><code>{{ new.key }}</code></p>
+  <p class="hint">
+    In their Prowlarr: add a <em>Generic Torznab</em> indexer with this URL and
+    this key.
+  </p>
+  <dl class="facts">
+    <dt>Feed URL</dt><dd><code>{{ feed_url }}</code></dd>
+  </dl>
+</div>
+{% endif %}
+
+<h2>Add a friend</h2>
+<form method="post" action="/peers" class="panel">
+  <label for="label">Name</label>
+  <input id="label" name="label" required maxlength="64" autocomplete="off"
+         placeholder="Sam">
+  <p class="hint">Just for you — it is how you will recognise them in this list.</p>
+
+  <label for="scope">Can see</label>
+  <select id="scope" name="scope">
+    {% for option in scope_options %}
+    <option value="{{ option.value }}">{{ option.label }}</option>
+    {% endfor %}
+  </select>
+  <p class="hint">
+    Applies to the feed itself, not just what they are shown — content outside the
+    scope is never listed and never offered.
+  </p>
+
+  <button type="submit">Generate a key</button>
+</form>
+
+<h2>Sharing with {{ peers.len() }} friend(s)</h2>
+<div class="panel">
+  {% if peers.is_empty() %}
+  <p class="hint">
+    Nobody yet. Add a friend above to generate the key they will paste into their
+    Prowlarr.
+  </p>
+  {% else %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>Can see</th><th>Added</th><th>Last seen</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for peer in peers %}
+      <tr{% if peer.revoked %} class="revoked"{% endif %}>
+        <td>{{ peer.label }}{% if peer.revoked %} <span class="error">(revoked)</span>{% endif %}</td>
+        <td>
+          {% if peer.revoked %}
+          {{ peer.scope_label }}
+          {% else %}
+          <form method="post" action="/peers/{{ peer.id }}/scope" class="inline">
+            <select name="scope" onchange="this.form.submit()" aria-label="What {{ peer.label }} can see">
+              {% for option in scope_options %}
+              <option value="{{ option.value }}"{% if peer.scope == option.value %} selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+            <noscript><button type="submit" class="link">Set</button></noscript>
+          </form>
+          {% endif %}
+        </td>
+        <td>{{ peer.created }}</td>
+        <td>{{ peer.last_seen }}</td>
+        <td class="actions">
+          {% if !peer.revoked %}
+          <a href="/peers/{{ peer.id }}/feed">Preview feed</a>
+          <form method="post" action="/peers/{{ peer.id }}/revoke" class="inline">
+            <button type="submit" class="link">Revoke</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/peers/{{ peer.id }}/delete" class="inline">
+            <button type="submit" class="link">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">
+    <strong>Revoke</strong> stops the key working but keeps the row, so you can see
+    it happened. <strong>Delete</strong> removes it entirely and frees the name.
+  </p>
+  {% endif %}
+</div>
+
+{% if !peers.is_empty() %}
+<h2>Where friends are</h2>
+<p class="hint">
+  sharerr remembers the last few addresses each friend was seen at, and — when a
+  friend also runs sharerr — exchanges signed endpoint records with them, so one
+  friend noticing a moved address is enough for everyone who already knows them.
+  Records are signed by the friend they describe; nobody can rewrite anyone
+  else's address.
+</p>
+
+{% for peer in peers %}
+{% if !peer.revoked %}
+<div class="panel">
+  <h3>{{ peer.label }}</h3>
+  <dl class="facts">
+    <dt>Identity</dt>
+    <dd>
+      {% if let Some(pubkey) = peer.pubkey_short %}
+      <code>{{ pubkey }}</code>
+      {% else %}
+      <span class="hint">not yet introduced — their sharerr has not spoken to yours</span>
+      {% endif %}
+    </dd>
+    <dt>Seen at</dt>
+    <dd>
+      {% if peer.endpoints.is_empty() %}
+      <span class="hint">nowhere yet</span>
+      {% else %}
+      {% for endpoint in peer.endpoints %}
+      <code>{{ endpoint.addr }}</code>
+      <span class="hint">({{ endpoint.kind }}, {{ endpoint.seen }}, {{ endpoint.via }})</span><br>
+      {% endfor %}
+      {% endif %}
+    </dd>
+  </dl>
+
+  <form method="post" action="/peers/{{ peer.id }}/gossip">
+    <label for="gossip_url_{{ peer.id }}">Their sharerr URL</label>
+    <input id="gossip_url_{{ peer.id }}" name="url" value="{{ peer.gossip_url }}"
+           placeholder="https://their-address:8477 — leave empty if they only pull from you">
+
+    <label for="gossip_key_{{ peer.id }}">The key they issued you</label>
+    <input id="gossip_key_{{ peer.id }}" name="key" type="password" autocomplete="off"
+           placeholder="{% if peer.gossip_key_set %}stored — type to replace{% else %}not set{% endif %}">
+    {% if peer.gossip_key_set %}
+    <label class="hint"><input type="checkbox" name="clear_key" value="1"> Remove the stored key</label>
+    {% endif %}
+    <p class="hint">
+      Both fields describe <em>their</em> instance: the URL you reach their
+      sharerr on, and the key they generated for you on their Friends page. With
+      these set, your sharerr exchanges endpoint records with theirs directly.
+    </p>
+    <button type="submit">Save</button>
+  </form>
+</div>
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endblock %}

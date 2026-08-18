@@ -1,0 +1,16 @@
+[package]
+name = "sharerr-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The narrow contract sharerr needs from a torrent client, and the types it speaks in."
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }

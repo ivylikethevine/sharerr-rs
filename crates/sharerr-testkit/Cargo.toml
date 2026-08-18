@@ -19,6 +19,10 @@ serde_json = { workspace = true }
 # with sharerr-store, so the tree resolves a single libsqlite3-sys.
 sqlx = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# The shared `mock` module owns the wiremock stubs more than one crate's tests
+# were writing by hand; the dependency is fine here because this crate is
+# dev-dependency-only by design.
+wiremock = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

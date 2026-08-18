@@ -19,7 +19,7 @@ use sharerr_core::{Config, MediaSource, ShareState};
 use sharerr_qbit::QbitClient;
 use sharerr_store::Store;
 use sharerr_testkit::library::{self, TvLibrary};
-use sharerr_torrent::{LavaTorrentFactory, TrackerProvider};
+use sharerr_torrent::TrackerProvider;
 use url::Url;
 use wiremock::matchers::{method, path as route};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -39,6 +39,10 @@ struct QbitState {
     torrents: Vec<AddedTorrent>,
     removed: Vec<String>,
     add_calls: usize,
+    /// Bodies of `torrents/addTrackers` calls, for the rotation assertions.
+    trackers_added: Vec<String>,
+    /// Bodies of `torrents/removeTrackers` calls.
+    trackers_removed: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,21 +83,6 @@ struct FakeQbit {
 
 impl FakeQbit {
     async fn mount(&self, server: &MockServer) {
-        Mock::given(method("POST"))
-            .and(route("/api/v2/auth/login"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-            .mount(server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(route("/api/v2/app/preferences"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "enable_embedded_tracker": true,
-                "embedded_tracker_port": 9000,
-            })))
-            .mount(server)
-            .await;
-
         let state = Arc::clone(&self.state);
         Mock::given(method("POST"))
             .and(route("/api/v2/torrents/add"))
@@ -188,6 +177,40 @@ impl FakeQbit {
             })
             .mount(server)
             .await;
+
+        // The tracker-rotation surface: every torrent reports the harness's
+        // birth announce URL, so a rotated endpoint produces one add and one
+        // remove per torrent.
+        Mock::given(method("GET"))
+            .and(route("/api/v2/torrents/trackers"))
+            .respond_with(move |_: &Request| {
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{ "url": STUB_ANNOUNCE, "status": 2 }]))
+            })
+            .mount(server)
+            .await;
+
+        let state = Arc::clone(&self.state);
+        Mock::given(method("POST"))
+            .and(route("/api/v2/torrents/addTrackers"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                state.lock().unwrap().trackers_added.push(body);
+                ResponseTemplate::new(200)
+            })
+            .mount(server)
+            .await;
+
+        let state = Arc::clone(&self.state);
+        Mock::given(method("POST"))
+            .and(route("/api/v2/torrents/removeTrackers"))
+            .respond_with(move |request: &Request| {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                state.lock().unwrap().trackers_removed.push(body);
+                ResponseTemplate::new(200)
+            })
+            .mount(server)
+            .await;
     }
 
     fn snapshot(&self) -> QbitSnapshot {
@@ -201,6 +224,8 @@ impl FakeQbit {
                 .collect(),
             removed: state.removed.clone(),
             add_calls: state.add_calls,
+            trackers_added: state.trackers_added.clone(),
+            trackers_removed: state.trackers_removed.clone(),
         }
     }
 }
@@ -209,6 +234,8 @@ struct QbitSnapshot {
     live: Vec<AddedTorrent>,
     removed: Vec<String>,
     add_calls: usize,
+    trackers_added: Vec<String>,
+    trackers_removed: Vec<String>,
 }
 
 /// Pull `name="key"\r\n\r\nvalue` out of a multipart body.
@@ -234,16 +261,35 @@ fn form_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
 
 // ------------------------------------------------------------------ harness
 
+/// The announce URL every harness torrent is born with.
+const STUB_ANNOUNCE: &str = "http://sharerr.example:9000/announce";
+
+/// A tracker whose announce URL the test can move, standing in for a gluetun
+/// endpoint rotation.
 #[derive(Debug)]
-struct StubTracker;
+struct StubTracker(Mutex<Url>);
+
+impl Default for StubTracker {
+    fn default() -> Self {
+        Self(Mutex::new(Url::parse(STUB_ANNOUNCE).unwrap()))
+    }
+}
+
+impl StubTracker {
+    fn rotate(&self, url: &str) {
+        *self.0.lock().unwrap() = Url::parse(url).unwrap();
+    }
+}
 
 #[async_trait]
 impl TrackerProvider for StubTracker {
     async fn ensure_ready(&self) -> sharerr_torrent::Result<()> {
         Ok(())
     }
-    async fn announce_url(&self) -> sharerr_torrent::Result<Url> {
-        Ok(Url::parse("http://sharerr.example:9000/announce").unwrap())
+    async fn announce_set(&self) -> sharerr_torrent::Result<sharerr_torrent::AnnounceSet> {
+        Ok(sharerr_torrent::AnnounceSet::single(
+            self.0.lock().unwrap().clone(),
+        ))
     }
 }
 
@@ -251,8 +297,10 @@ struct Harness {
     syncer: Syncer,
     qbit: FakeQbit,
     library: TvLibrary,
+    /// A handle on the syncer's tracker, so a test can rotate its endpoint.
+    tracker: Arc<StubTracker>,
     _media: tempfile::TempDir,
-    _torrents: tempfile::TempDir,
+    torrents: tempfile::TempDir,
     _sonarr: MockServer,
     _qbit_server: MockServer,
 }
@@ -292,11 +340,12 @@ async fn harness(series_json: Value) -> Harness {
     )
     .unwrap();
 
-    let qbit = Arc::new(
-        QbitClient::new(
+    // Typed as the trait object, because that is what the syncer holds now — the
+    // concrete client is one implementation of it.
+    let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(
+        QbitClient::with_api_key(
             &Url::parse(&qbit_server.uri()).unwrap(),
-            "admin",
-            SecretString::from("password"),
+            SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
         )
         .unwrap(),
     );
@@ -317,20 +366,18 @@ async fn harness(series_json: Value) -> Harness {
 
     let seeder = Seeder {
         qbit: Arc::clone(&qbit),
-        factory: Arc::new(LavaTorrentFactory),
         category: "sharerr".to_owned(),
         tag: "sharerr".to_owned(),
         skip_checking: false,
         torrent_dir: torrents.path().to_path_buf(),
     };
 
+    let tracker = Arc::new(StubTracker::default());
     let syncer = Syncer::new(
         config,
         Store::open_in_memory().await.unwrap(),
-        Some(sonarr),
-        None,
-        Arc::clone(&qbit),
-        Arc::new(StubTracker),
+        vec![Box::new(sonarr)],
+        Arc::clone(&tracker) as Arc<dyn TrackerProvider>,
         seeder,
     );
 
@@ -338,8 +385,9 @@ async fn harness(series_json: Value) -> Harness {
         syncer,
         qbit: qbit_mock,
         library: lib,
+        tracker,
         _media: media,
-        _torrents: torrents,
+        torrents,
         _sonarr: sonarr_server,
         _qbit_server: qbit_server,
     }
@@ -376,6 +424,68 @@ fn file_identity(path: &Path) -> (u64, std::time::SystemTime, u64) {
 }
 
 // ------------------------------------------------------------------ tests
+
+/// The gluetun rotation story, end to end through the sync loop: when the
+/// advertised endpoint moves between passes, the next pass rewrites every cached
+/// `.torrent` to the new announce URL and repoints the client's tracker lists —
+/// without re-adding anything.
+#[tokio::test]
+async fn a_rotated_endpoint_rewrites_torrents_and_repoints_the_client() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    h.tracker.rotate("http://203.0.113.9:41234/announce");
+    let report = h.syncer.run(false).await.unwrap();
+
+    // Still a no-op as far as shares go: nothing added, nothing withdrawn.
+    assert_eq!(report.unchanged, 2);
+    assert_eq!(report.added, 0);
+    let snapshot = h.qbit.snapshot();
+    assert_eq!(snapshot.add_calls, 2, "rotation must not re-add torrents");
+
+    // The client's tracker lists were repointed: new URL added, old removed.
+    assert_eq!(snapshot.trackers_added.len(), 2);
+    assert!(
+        snapshot
+            .trackers_added
+            .iter()
+            .all(|body| body.contains("203.0.113.9")),
+        "{:?}",
+        snapshot.trackers_added
+    );
+    assert_eq!(snapshot.trackers_removed.len(), 2);
+    assert!(
+        snapshot
+            .trackers_removed
+            .iter()
+            .all(|body| body.contains("sharerr.example")),
+        "{:?}",
+        snapshot.trackers_removed
+    );
+
+    // And the cached .torrent files — what the feed serves a friend — carry the
+    // new endpoint.
+    let items = h.syncer.store().all_items().await.unwrap();
+    for item in &items {
+        let hash = item.info_hash.as_deref().unwrap();
+        let path = sharerr_torrent::torrent_file_path(h.torrents.path(), hash);
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(
+            sharerr_torrent::read_announce(&data).unwrap().as_deref(),
+            Some("http://203.0.113.9:41234/announce")
+        );
+    }
+
+    // A third pass changes nothing: the files already match, so no tracker
+    // calls are issued at all.
+    h.syncer.run(false).await.unwrap();
+    let settled = h.qbit.snapshot();
+    assert_eq!(
+        settled.trackers_added.len(),
+        2,
+        "rotation must be idempotent"
+    );
+}
 
 #[tokio::test]
 async fn a_first_sync_shares_every_tagged_file() {
@@ -749,6 +859,239 @@ async fn a_file_inside_a_pre_existing_season_pack_is_detected() {
     );
 }
 
+// ------------------------------------------------- directory libraries
+
+/// Give the harness a `[[library]]` directory of movies alongside its Sonarr.
+fn with_movie_library(h: &mut Harness) -> tempfile::TempDir {
+    use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+    let extras = tempfile::tempdir().unwrap();
+    sharerr_testkit::media::write_media_file(
+        &extras.path().join("The.Gilded.Ferry.2019.mkv"),
+        4096,
+        77,
+    )
+    .unwrap();
+
+    h.syncer
+        .sources
+        .push(Box::new(crate::library::DirectoryScanner::new(vec![
+            LibraryConfig {
+                path: extras.path().to_path_buf(),
+                kind: LibraryKind::Movie,
+            },
+        ])));
+    extras
+}
+
+/// The zero-dependency source: a plain directory shares alongside a Sonarr,
+/// idempotently, and its filename becomes the release title.
+#[tokio::test]
+async fn a_directory_library_shares_alongside_sonarr() {
+    let mut h = tagged_harness().await;
+    let _extras = with_movie_library(&mut h);
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(
+        report.discovered, 3,
+        "two episodes plus the directory movie"
+    );
+    assert_eq!(report.added, 3);
+    assert_eq!(report.sources_failed, 0);
+
+    let items = h.syncer.store().all_items().await.unwrap();
+    let movie = items
+        .iter()
+        .find(|i| i.source == MediaSource::Directory)
+        .expect("the directory item should be recorded");
+    assert_eq!(movie.state, ShareState::Seeding);
+    assert_eq!(
+        movie.release_title, "The.Gilded.Ferry.2019",
+        "a parseable filename is its own release title"
+    );
+    assert_eq!(movie.ids, sharerr_core::ExternalIds::default());
+
+    let second = h.syncer.run(false).await.unwrap();
+    assert_eq!(second.added, 0, "a repeat run must change nothing");
+    assert_eq!(second.unchanged, 3);
+}
+
+/// Deleting a file from the directory is the tag being removed: the torrent is
+/// withdrawn and nothing on disk is touched.
+#[tokio::test]
+async fn a_file_removed_from_the_directory_is_withdrawn() {
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    // A second file, so removing the first leaves a mounted, non-empty root —
+    // an *emptied* root is the failed-mount signature and refuses to scan.
+    sharerr_testkit::media::write_media_file(
+        &extras.path().join("Bramble.Gate.2022.mkv"),
+        4096,
+        78,
+    )
+    .unwrap();
+    h.syncer.run(false).await.unwrap();
+
+    std::fs::remove_file(extras.path().join("The.Gilded.Ferry.2019.mkv")).unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.unshared, 1, "the vanished file must be withdrawn");
+    assert_eq!(
+        h.qbit.snapshot().removed.len(),
+        1,
+        "its torrent should have been removed"
+    );
+}
+
+/// An emptied root is indistinguishable from a bind mount that has not come
+/// up: the source fails and the shares survive to the next pass, instead of
+/// every directory torrent being torn down in one sweep.
+#[tokio::test]
+async fn an_emptied_library_root_never_causes_withdrawals() {
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.run(false).await.unwrap();
+
+    std::fs::remove_file(extras.path().join("The.Gilded.Ferry.2019.mkv")).unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.sources_failed, 1);
+    assert_eq!(report.unshared, 0, "an empty root must not withdraw");
+    assert!(h.qbit.snapshot().removed.is_empty());
+    let movie_state = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.source == MediaSource::Directory)
+        .unwrap()
+        .state;
+    assert_eq!(
+        movie_state,
+        ShareState::Seeding,
+        "the item must be untouched"
+    );
+}
+
+/// A `[[path_map]]` rule is written for an *arr app's view of the library. One
+/// whose prefix happens to match a `[[library]]` path on disk must not rewrite
+/// the directory item's path — it is already the sharerr view.
+#[tokio::test]
+async fn a_path_map_rule_never_rewrites_a_directory_item() {
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.resolver = sharerr_core::paths::PathResolver::new(vec![
+        // Correct for some *arr app, catastrophic if applied to the directory.
+        PathMapping {
+            arr: extras.path().to_path_buf(),
+            sharerr: PathBuf::from("/nonexistent"),
+            qbit: None,
+        },
+        // The harness's own Sonarr mapping, unchanged.
+        PathMapping {
+            arr: PathBuf::from(library::ARR_TV_PREFIX),
+            sharerr: h._media.path().join("tv"),
+            qbit: Some(PathBuf::from(QBIT_PREFIX)),
+        },
+    ]);
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(
+        report.failed, 0,
+        "the directory item must resolve to itself"
+    );
+    assert_eq!(report.added, 3);
+}
+
+/// One unreadable subdirectory must not stop the readable files from sharing —
+/// and must not read as "everything in it was deleted" either.
+#[tokio::test]
+#[cfg(unix)]
+async fn an_incomplete_directory_scan_shares_but_never_withdraws() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    sharerr_testkit::media::write_media_file(
+        &extras.path().join("deep/Bramble.Gate.2022.mkv"),
+        4096,
+        78,
+    )
+    .unwrap();
+    h.syncer.run(false).await.unwrap();
+
+    let locked = extras.path().join("deep");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let report = h.syncer.run(false).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = report.unwrap();
+
+    assert_eq!(report.sources_failed, 0, "an incomplete scan still answers");
+    assert_eq!(
+        report.unshared, 0,
+        "a file behind an unreadable directory must not be withdrawn"
+    );
+    assert!(h.qbit.snapshot().removed.is_empty());
+}
+
+/// A library that cannot be scanned is a silent source, and silence never
+/// withdraws — same contract as an *arr app that did not answer.
+#[tokio::test]
+async fn an_unscannable_directory_never_causes_withdrawals() {
+    use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+    let mut h = tagged_harness().await;
+    let extras = with_movie_library(&mut h);
+    h.syncer.run(false).await.unwrap();
+
+    // Replace the scanner with one whose directory does not exist.
+    h.syncer.sources.pop();
+    h.syncer
+        .sources
+        .push(Box::new(crate::library::DirectoryScanner::new(vec![
+            LibraryConfig {
+                path: extras.path().join("vanished"),
+                kind: LibraryKind::Movie,
+            },
+        ])));
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.sources_failed, 1);
+    assert_eq!(report.unshared, 0, "a silent source must not withdraw");
+    assert!(h.qbit.snapshot().removed.is_empty());
+
+    let movie_state = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.source == MediaSource::Directory)
+        .unwrap()
+        .state;
+    assert_eq!(
+        movie_state,
+        ShareState::Seeding,
+        "the item must be untouched"
+    );
+}
+
+/// A dry run against a directory library reports without writing.
+#[tokio::test]
+async fn a_directory_dry_run_writes_nothing() {
+    let mut h = tagged_harness().await;
+    let _extras = with_movie_library(&mut h);
+
+    let report = h.syncer.run(true).await.unwrap();
+    assert_eq!(report.discovered, 3);
+    assert_eq!(report.added, 3, "a dry run reports what it would add");
+    assert_eq!(h.qbit.snapshot().add_calls, 0, "nothing must reach qbit");
+    assert!(h.syncer.store().all_items().await.unwrap().is_empty());
+}
+
 // ------------------------------------------------- multi-app resilience
 
 /// Attach a Radarr that fails every request to an otherwise-healthy harness.
@@ -760,14 +1103,14 @@ async fn with_broken_radarr(h: &mut Harness) -> MockServer {
         .mount(&radarr)
         .await;
 
-    h.syncer.radarr = Some(
+    h.syncer.sources.push(Box::new(
         sharerr_arr::ArrClient::new(
             MediaSource::Radarr,
             &Url::parse(&radarr.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    );
+    ));
     radarr
 }
 
@@ -819,6 +1162,7 @@ async fn a_broken_arr_app_never_causes_its_shares_to_be_withdrawn() {
         info_hash: Some("radarrhash0000000000000000000000000000aa".to_owned()),
         state: ShareState::Seeding,
         last_error: None,
+        created_at: None,
     };
     h.syncer.store().upsert(&movie).await.unwrap();
 
@@ -864,17 +1208,18 @@ async fn a_pass_with_no_reachable_arr_app_changes_nothing() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&broken)
         .await;
-    h.syncer.sonarr = Some(
+    // Replace the only *arr client with a broken one.
+    h.syncer.sources = vec![Box::new(
         sharerr_arr::ArrClient::new(
             MediaSource::Sonarr,
             &Url::parse(&broken.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    );
+    )];
 
     let err = h.syncer.run(false).await.unwrap_err();
-    assert!(err.to_string().contains("no *arr app"), "got {err:#}");
+    assert!(err.to_string().contains("no library source"), "got {err:#}");
 
     let after = h.qbit.snapshot();
     assert!(
@@ -897,14 +1242,15 @@ async fn a_failed_pass_records_its_reason() {
         .respond_with(ResponseTemplate::new(500))
         .mount(&broken)
         .await;
-    h.syncer.sonarr = Some(
+    // Replace the only *arr client with a broken one.
+    h.syncer.sources = vec![Box::new(
         sharerr_arr::ArrClient::new(
             MediaSource::Sonarr,
             &Url::parse(&broken.uri()).unwrap(),
             SecretString::from("test-key"),
         )
         .unwrap(),
-    );
+    )];
 
     h.syncer.run(false).await.unwrap_err();
 

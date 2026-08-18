@@ -1,6 +1,6 @@
 # Roadmap
 
-Where sharerr is and where it is going. Status is honest: *Done* means implemented
+Where sharerr is and where it is going. Status is honest: _Done_ means implemented
 and covered by tests, not merely written.
 
 sharerr is **experimental**. Nothing below is a release commitment, and the
@@ -8,147 +8,96 @@ ordering is a judgement about value, not a schedule.
 
 ## Status
 
-| Milestone | Scope | Status |
-|---|---|---|
-| M1 | Core: config, encrypted vault, SQLite store, Sonarr/Radarr + qBittorrent clients, `doctor`, torrent construction, seeding, reconciliation loop | **Done** |
-| M2 | Builtin tracker + Torznab feed | **Done** |
-| M3 | Web UI: setup/login, settings, per-service connection tests, status page | **Done** |
-| M4 | Friend/peer management | Next |
-| M5 | Full Jackett API compatibility | Planned |
-| M6 | A second test stack, behind gluetun | Planned |
-| M7+ | Everything below | Backlog |
-
-The M3 follow-up backlog is now cleared: the checks `doctor` and the web UI run are
-shared rather than duplicated, path-mapping diagnostics have a page of their own,
-an operator can change their own password, the recovery loop backs off, config paths
-are constants with tests on both sides, `ServeState` no longer lives in the CLI
-layer, and the router is covered by tests that drive the real middleware stack.
+| Milestone | Scope                                                                       | Status |
+| --------- | --------------------------------------------------------------------------- | ------ |
+| —         | The interchange: semi-anonymous endpoint rendezvous, its own image and port | Next   |
+| —         | Ratio and bandwidth control                                                 | Next   |
 
 ---
-
-## M4 — Friend/peer management
-
-The one milestone that changes the trust model. Today the Torznab feed is guarded
-by a **single shared `torznab.api_key`**, so every friend holds the same secret:
-there is no way to tell them apart, and revoking one revokes all of them. A friend
-is wired up entirely by hand, by pasting a URL and that key into their Prowlarr.
-
-1. **Peers table + migration.** A peer is a label, a per-peer API key (hashed, the
-   way `users` stores passwords), created/last-seen timestamps, and revoked state.
-2. **Per-peer Torznab auth.** Replace the single-key comparison with a peer lookup,
-   keeping the shared key working so existing setups do not break. Record last-seen
-   on each query.
-3. **Peers page.** Add, label, revoke. Reveal the key once on creation, reusing the
-   existing reveal-once flow.
-4. **Per-peer feed URL**, generated ready to paste — that is the actual handoff.
-5. **Per-peer announce tokens.** `tracker.token` is likewise one shared secret; the
-   same idea applied to the builtin tracker.
-
-**Why it matters:** without it, "stop sharing with one person" is not expressible.
-
----
-
-## M5 — Full Jackett API compatibility
-
-sharerr serves Torznab on `/api`, which is what Prowlarr's *Generic Torznab*
-indexer speaks. Jackett-configured clients expect a different URL shape for the
-same query grammar, so most of this is routing over the existing search path.
-
-Staged, because the two halves differ enormously in size:
-
-- **Search half** (small, high value) — `/api/v2.0/indexers/{id}/results/torznab/api`
-  including the `all` aggregate indexer, and Jackett-shaped download links lining up
-  with the existing `.torrent` serving. Delivers "a Jackett-configured
-  Prowlarr/Sonarr/Radarr just works". Verify against the real Prowlarr already in
-  the test stack.
-- **Admin half** (large) — `/api/v2.0/indexers` CRUD, server config, indexer
-  definitions. Mostly describes a multi-indexer aggregator that sharerr is not.
-  Decide from real client behaviour how much is actually called.
-
-Generic Torznab on `/api` keeps working unchanged throughout.
-
----
-
-## Compatibility
-
-sharerr sits in the middle of a stack it does not own, so most of its value comes
-from how many of that stack's normal shapes it tolerates. Grouped by where each
-piece plugs in, roughly in order of how much they would widen the audience.
 
 ### Library sources (where tagged content comes from)
 
-Today: **Sonarr** and **Radarr**, via tag-driven discovery.
-
-| Service | Why | Difficulty |
-|---|---|---|
-| **Lidarr** (music) | `MediaSource` is already an enum and the v1 API is close to the *arr v3 shape. The Torznab caps document currently advertises `music-search` as unavailable, so the feed side is a one-line change once discovery exists. | Low |
-| **Readarr** (books) | Same shape again. Note upstream Readarr is no longer actively maintained, so weigh it against its forks. | Low |
-| **Whisparr** | Same *arr codebase; would come almost free alongside Lidarr. | Low |
-| **Jellyfin / Emby** | Not everyone runs the *arr apps. A media-server-backed source lets someone share a library they curate elsewhere — but tags are per-user and the external ids are weaker than Sonarr's, so releases match less reliably. | Medium |
-| **Plex** | Same idea, but the API is more awkward and its "collections" map badly onto a share tag. | Medium |
-| **A plain tagged directory** | The escape hatch: point sharerr at a folder and share what is in it, no *arr app at all. Loses every external id, so a friend's Sonarr falls back to parsing the release name. Worth having as the zero-dependency path. | Low |
+Today: **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
+tag-driven discovery, and the **plain tagged directory** (`[[library]]`). Both
+shapes sit behind the `LibrarySource` seam, which is where a future source would
+plug in — none is currently planned. A media-server-backed source (Jellyfin,
+Emby, Plex) was tried and removed: the *arr apps and a plain directory cover
+the two shapes of "where content lives" this project actually wants to support.
 
 ### Torrent clients (what actually seeds)
 
-Today: **qBittorrent**, via the WebUI v2 API. This is the hardest deployment
-prerequisite sharerr imposes, and the interface it needs is narrow — add a torrent
-by file, pin its save path, never move the data — so most clients can satisfy it.
+Today: **qBittorrent** and **Transmission**, behind the `TorrentClient` trait in
+`sharerr-client`. That trait is deliberately narrow, which is what made the
+second client tractable — clients disagree about almost everything except "add
+this torrent, with the data already at this path". Announces always go to
+sharerr's own tracker, so a client needs no tracker of its own.
 
-| Client | Notes |
-|---|---|
-| **Transmission** | RPC API is simple and well documented; `download-dir` per-torrent covers the never-move requirement. The most requested alternative in this ecosystem. |
-| **Deluge** | JSON-RPC, plus the `label` plugin standing in for qBittorrent's category. |
-| **rTorrent / ruTorrent** | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library. |
-| **Transmission-compatible forks** | Anything speaking the Transmission RPC comes free with the above. |
+Adding a third is now mostly writing one file. What a new client must answer
+honestly: whether it can remove a torrent _without_ deleting the data, and how
+it replaces a torrent's tracker list in place (`set_trackers`, for endpoint
+rotation).
 
-The one real constraint is the tracker: sharerr currently relies on qBittorrent's
-*embedded tracker* as the default backend. Every client above would have to use
-sharerr's own builtin tracker instead — which already exists, and is the reason it
-was built.
+| Client                            | Notes                                                                                                                |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **rTorrent / ruTorrent**          | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.                   |
+| **Transmission-compatible forks** | Anything speaking the Transmission RPC should already work — the client is the same. Untested, and cheap to confirm. |
 
 ### Indexers (what consumes the feed)
 
-Today: **Prowlarr**, via *Generic Torznab*, and **Jackett** compatibility is M5.
+Today: **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
+**Sonarr/Radarr direct** (confirmed against a real Sonarr in the tier-2 suite).
 
-| Consumer | Notes |
-|---|---|
-| **NZBHydra2** | Aggregates Torznab indexers; should already work, but has never been tested against sharerr. Worth confirming rather than assuming. |
-| **Sonarr/Radarr direct** | They speak Torznab themselves, so a friend can skip Prowlarr entirely and add sharerr as an indexer directly. Likely already works — again, untested. |
-| **Lidarr/Readarr direct** | Follows from library-source support above, since the caps document gates what they will even ask for. |
+| Consumer                  | Notes                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------- |
+| **Lidarr/Readarr direct** | Follows from library-source support, since the caps document gates what they will even ask for. |
 
-Confirming the two "should already work" rows is cheap and would let the README
-state them, which is worth more than another feature.
-
-### Deployment shapes
-
-**VPN containers (gluetun and friends).** See the test-suite item below — this is
-the shape most likely to break sharerr today, and the least covered.
-
-**Reverse proxies and IPv6.** `tracker.advertised_host` is a single string.
-Announce URLs behind a proxy, on a non-default path prefix, or over IPv6 are exactly
-where self-hosted setups break, and sharerr cannot currently express most of them.
-
-**Magnet links / DHT.** The feed serves `.torrent` files only. Magnet URIs are cheap
-to add and some clients prefer them.
-
-**Unraid / Synology templates.** Both communities install almost entirely from
-templates; publishing one is packaging work rather than code, and reaches an
-audience that will never run `docker run` by hand.
-
----
+One earlier "should already work" assumption turned out not to (Sonarr direct
+rejected the feed over a missing `pubDate`) — worth remembering the next time
+something in this table looks done just because the shape matches.
 
 ## Functionality
 
-**Selective sharing.** The `sharerr` tag is all-or-nothing. Per-peer scoping —
-this friend sees the TV library, that one sees films — is the natural pairing with
-M4's per-peer identity, and is the feature most likely to be asked for the moment
-peers exist.
+**The interchange.** Gossip only helps peers who can still reach _somebody_; two
+friends whose addresses both rotated while neither was watching have no path back
+to each other. The interchange is the rendezvous for that case: a tiny separate
+service, deliberately knowing nothing but `key hash → latest IP and port`, that a
+sharerr instance reports its endpoint to and a friend queries with the API key
+that peer issued them. The privacy property is the point and shapes the whole
+design: a request without a valid key gets a _plausible fabricated_ IP and port
+rather than an error, so an unauthenticated probe cannot be distinguished from a
+valid lookup — the interchange never confirms that an instance exists, and
+scraping it yields only noise. That makes semi-anonymous tracking of sharerr
+instances possible without any instance exposing its IP publicly. It ships as its
+own docker image on its own port — not another route on sharerr's listener — so
+it can be self-hosted by anyone, placed on neutral ground away from any
+particular library, and carries no database worth stealing: key hashes and
+last-seen addresses only. A sharerr instance treats it as one more observation
+source feeding peer endpoint memory, ranked below a direct sighting of the same
+peer.
+
+The fabricated answers create the opposite problem for the _legitimate_ caller:
+a friend holding a valid key must be able to tell a real record from a decoy, or
+the noise defeats them too. So a genuine record is verifiable — the natural shape
+is the same signed endpoint record gossip uses, signed by the peer it describes
+when that peer reported in, so the interchange relays proof it could not forge
+and a JWT-style signature check separates record from decoy. A decoy carries
+random bytes where the signature would be: identical on the wire to an observer
+without the peer's public key, and never verifying for anyone. The deterministic
+fallback where signing is unavailable: derive the decoy from a keyed hash of the
+queried key hash, so decoys are at least stable across probes rather than fresh
+noise that flags itself by changing.
+
+**Per-peer announce tokens.** The tracker's announce token is one shared secret,
+so an announce carries no peer identity — which is why peer endpoint memory
+cannot attribute a torrent client's address from a direct announce and has to
+learn it from gossip instead. Per-peer tokens would close that gap and make
+"cut this friend off" reach the tracker too, not just the feed.
 
 **Ratio and bandwidth control.** No upload limits, no seeding goals. Sharing a
 library with no cap on what it costs you is a real deterrent to running this.
 
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
-*request* content. Today discovery is one-way: they find what you already share.
+_request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
 
 **Cross-seed awareness.** The brief called for preserving existing torrents rather
@@ -157,8 +106,8 @@ torrent, sharerr should recognise it rather than adding a second entry for the s
 bytes.
 
 **Health and history in the UI.** The store already records run history
-(`recent_runs`), and the status page shows very little of it. Per-item state — why
-*this* file is not shared — is the question the UI cannot currently answer.
+(`recent_runs`), and the status page shows only the latest runs. Per-item state —
+why _this_ file is not shared — is the question the UI cannot currently answer.
 
 **Notifications.** Webhook/Discord/Apprise on sync failure or a peer going quiet.
 Standard for the *arr ecosystem this lives in.
@@ -177,69 +126,10 @@ single most error-prone configuration step.
 
 **`sharerr doctor --fix`** for the mechanical cases (missing tag, wrong category).
 
-**One-glance "is it working?"** The status page reports readiness; it does not
-plainly say *n items shared, last sync 4 minutes ago, 2 peers connected*.
-
-**Better first-run defaults.** `tracker.advertised_host` has no default and a wrong
-value silently produces torrents nobody can announce to — detectable at save time.
-
----
-
-## A second test stack, behind gluetun
-
-**The gap this closes.** The README's own assumptions say the user "may or may not
-be using a VPN, or a VPN container such as gluetun" — and that is the single most
-common shape in this ecosystem. The existing `docker/compose.test.yml` does not
-reproduce it at all: every service sits on a plain bridge network with its own
-address and its own published ports. So the deployment most people actually run is
-the one nothing has ever exercised.
-
-**Why it is a genuinely different test, not a variation.** Putting qBittorrent
-behind gluetun means `network_mode: "service:gluetun"`, and that changes the things
-sharerr is most fragile about:
-
-- **qBittorrent stops having its own address.** It shares gluetun's network
-  namespace, so sharerr must reach it at `http://gluetun:8080`, not
-  `http://qbittorrent:8080`. Anything that assumed the service name equals the
-  hostname breaks here.
-- **Ports must be published on gluetun**, not on the container that listens. A port
-  declared on a `network_mode: service:` container is a compose error, which is
-  exactly the kind of thing a test should catch once instead of every user
-  discovering separately.
-- **The announce address is no longer the host's.** This is the important one.
-  Peers reach the swarm through the VPN's exit address, so `tracker.advertised_host`
-  and the embedded tracker's port have to describe the *tunnel*, not the machine. A
-  wrong value here produces torrents that look perfect and that nobody can announce
-  to — silent, and precisely the failure mode sharerr exists to prevent.
-- **Killswitch behaviour.** When the tunnel drops, gluetun severs egress. sharerr
-  should degrade legibly — `/ready` explaining itself, the recovery loop backing off
-  and picking itself up when the tunnel returns — rather than wedging or
-  restart-looping. Nothing tests that path today.
-
-**Shape.** A second file, `docker/compose.vpn.yml`, alongside the existing one
-rather than replacing it — the current stack is the fast, dependency-free tier and
-should stay that way. Gluetun would run in a loopback or self-hosted-WireGuard mode
-so the suite needs no VPN subscription and no real egress; the point is the
-*topology*, not the tunnel. Driven by `run_docker_tests.sh --vpn`, reusing the same
-fixtures, seeding, and e2e assertions, plus new ones for the announce URL and the
-killswitch. Opt-in and local, like the existing tier — it must never become a CI
-dependency.
-
-**Why it is worth the weight:** it is the only way to prove the announce-address
-logic against a topology where the naive answer is wrong. Every other test in the
-project runs somewhere the host address happens to be correct.
+**Better first-run defaults.** `tracker.advertised_host` has no default. The
+save-time half is done — a loopback, private, or `localhost` value is refused
+before it reaches `sharerr.toml`, catching the copy-paste-from-`server.bind`
+mistake for free. Resolving it from gluetun instead of asking still removes the
+guess entirely where that is available; that half remains.
 
 ---
-
-## Engineering
-
-Not user-facing, but load-bearing for everything above.
-
-- **`missing_docs` on the library crates.** Module docs are excellent; a number of
-  primary public items (`ArrClient::new`, `Vault`, the `AddTorrent` builder) carry
-  none. Turning the lint on would surface roughly fifteen.
-- **A dedicated MSRV job.** Today an MSRV break surfaces as a Docker build failure
-  inside the multi-arch matrix rather than as a named, fast-failing job.
-- **Dependabot or renovate.** Nothing currently proposes dependency updates.
-- **Coverage of the tracker and Torznab handlers**, which have unit tests but no
-  router-level tests of the kind `web/` now has.

@@ -6,6 +6,12 @@
 //! They live here so the *properties* — a single entropy source, and a comparison
 //! that does not short-circuit — hold everywhere rather than per call site.
 
+/// The entropy of every secret sharerr mints: 160 bits, hex encoded. Long
+/// enough that guessing is not a strategy, short enough to paste into another
+/// application's settings box. One constant, so peer keys and the Torznab and
+/// tracker secrets cannot quietly diverge in strength.
+pub const KEY_BYTES: usize = 20;
+
 /// A fresh secret: `bytes` bytes of entropy, hex encoded.
 ///
 /// Same source the vault uses for its salts and nonces. Hex rather than base64 so
@@ -15,6 +21,14 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     let mut raw = vec![0u8; bytes];
     getrandom::fill(&mut raw).map_err(|err| format!("could not generate a secret: {err}"))?;
     Ok(hex::encode(raw))
+}
+
+/// `N` raw bytes from the same entropy source, for key material that is not a
+/// pasteable secret — the gossip signing seed.
+pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
+    let mut raw = [0u8; N];
+    getrandom::fill(&mut raw).map_err(|err| format!("could not generate key material: {err}"))?;
+    Ok(raw)
 }
 
 /// Compare two secrets without short-circuiting on the first difference.

@@ -4,6 +4,42 @@
 {% block content %}
 <h1>Status</h1>
 
+{% if let Some(glance) = glance %}
+<div class="panel">
+  <dl class="facts">
+    <dt>Shared</dt>
+    <dd><strong>{{ glance.items_shared }}</strong> item(s) seeding</dd>
+    <dt>Last sync</dt>
+    <dd>
+      {% if let Some(when) = glance.last_sync %}
+      {{ when }}{% if !glance.last_sync_note.is_empty() %} —
+        {% if glance.last_sync_failed %}<span class="error">{{ glance.last_sync_note }}</span>
+        {% else %}{{ glance.last_sync_note }}{% endif %}
+      {% endif %}
+      {% else %}
+      never
+      {% endif %}
+    </dd>
+    <dt>Friends</dt>
+    <dd>
+      {% if glance.friends_total == 0 %}
+      none yet — add one on the <a href="/peers">Friends</a> page
+      {% else %}
+      <strong>{{ glance.friends_recent }}</strong> of {{ glance.friends_total }} seen in the last hour
+      {% endif %}
+    </dd>
+    <dt>Swarms</dt>
+    <dd>
+      {% if glance.swarm_peers == 0 %}
+      no peers announcing right now
+      {% else %}
+      <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
+      {% endif %}
+    </dd>
+  </dl>
+</div>
+{% endif %}
+
 {# The config error replaces the blocked banner rather than joining it: while the
    file will not load, `blocked` is relaying this same sentence. #}
 {% if let Some(reason) = config_error %}
@@ -37,9 +73,10 @@
 
 <dl class="facts">
   <dt>Tag watched</dt><dd><code>{{ tag }}</code></dd>
-  <dt>Sonarr</dt><dd>{% if let Some(url) = sonarr_url %}<code>{{ url }}</code>{% else %}not configured{% endif %}</dd>
-  <dt>Radarr</dt><dd>{% if let Some(url) = radarr_url %}<code>{{ url }}</code>{% else %}not configured{% endif %}</dd>
-  <dt>qBittorrent</dt><dd><code>{{ qbit_url }}</code></dd>
+  {% for service in services %}
+  <dt>{{ service.title }}</dt><dd>{% if let Some(url) = service.url %}<code>{{ url }}</code>{% else %}not configured{% endif %}</dd>
+  {% endfor %}
+  <dt>{{ client_name }}</dt><dd><code>{{ client_url }}</code></dd>
   <dt>Periodic sync</dt>
   <dd>{% if sync_enabled %}every {{ sync_interval_secs }}s{% else %}disabled{% endif %}</dd>
   <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>

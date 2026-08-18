@@ -36,41 +36,45 @@ const BENCODE: &str = "text/plain; charset=utf-8";
 #[derive(Debug)]
 pub struct TrackerState {
     pub serve: Arc<ServeState>,
-    pub swarms: Swarms,
+    /// Borrowed from [`ServeState`], not owned: the status page reads the same
+    /// swarms this router writes.
+    pub swarms: Arc<Swarms>,
 }
 
 impl TrackerState {
     pub fn new(serve: Arc<ServeState>) -> Self {
         Self {
+            swarms: serve.swarms(),
             serve,
-            swarms: Swarms::default(),
         }
-    }
-
-    /// The token an announce must carry, if one is configured.
-    ///
-    /// Read from the running syncer rather than the vault directly: the syncer
-    /// already holds it, and going to the vault here would mean an Argon2
-    /// derivation on every announce.
-    async fn required_token(&self) -> Option<String> {
-        self.serve.tracker_token().await
     }
 }
 
 /// Every route the tracker serves.
 ///
+/// Takes the state rather than building it, because the same `Swarms` may be
+/// mounted on *two* listeners — the main router and an optional dedicated
+/// `tracker.bind` — and two independent swarm maps would stop peers arriving on
+/// different listeners from ever being introduced to each other.
+///
 /// The token variants are separate routes rather than one optional path segment:
 /// axum resolves `/announce` and `/announce/{token}` as distinct patterns, and
 /// spelling them out keeps the tokenless case from depending on how an optional
 /// extractor behaves when the segment is missing.
-pub fn routes(serve: Arc<ServeState>) -> axum::Router {
-    let state = Arc::new(TrackerState::new(serve));
-
+pub fn routes(state: Arc<TrackerState>) -> axum::Router {
+    // Mounted from the same constants `sharerr-torrent` writes into announce
+    // URLs, so the two sides of the crate boundary cannot drift.
     axum::Router::new()
-        .route("/announce", axum::routing::get(announce))
-        .route("/announce/{token}", axum::routing::get(announce_with_token))
-        .route("/scrape", axum::routing::get(scrape))
-        .route("/scrape/{token}", axum::routing::get(scrape_with_token))
+        .route(sharerr_torrent::ANNOUNCE_PATH, axum::routing::get(announce))
+        .route(
+            &format!("{}/{{token}}", sharerr_torrent::ANNOUNCE_PATH),
+            axum::routing::get(announce_with_token),
+        )
+        .route(sharerr_torrent::SCRAPE_PATH, axum::routing::get(scrape))
+        .route(
+            &format!("{}/{{token}}", sharerr_torrent::SCRAPE_PATH),
+            axum::routing::get(scrape_with_token),
+        )
         .route("/torrents/{name}", axum::routing::get(torrent_file))
         .with_state(state)
 }
@@ -120,7 +124,10 @@ async fn handle_announce(
     remote: SocketAddr,
     query: &[u8],
 ) -> Result<Vec<u8>, AnnounceError> {
-    check_token(state.required_token().await.as_deref(), token.as_deref())?;
+    check_token(
+        state.serve.tracker_token().await.as_deref(),
+        token.as_deref(),
+    )?;
 
     let request = AnnounceRequest::parse(query)?;
     if !is_served(state, &request.info_hash).await {
@@ -131,7 +138,7 @@ async fn handle_announce(
     let response = state.swarms.announce(&request, addr).await;
 
     tracing::debug!(
-        info_hash = %hex(&request.info_hash),
+        info_hash = %hex::encode(request.info_hash),
         peer = %addr,
         event = ?request.event,
         peers = response.peers.len(),
@@ -160,7 +167,10 @@ async fn handle_scrape(
     token: Option<String>,
     query: Option<String>,
 ) -> Response {
-    if let Err(err) = check_token(state.required_token().await.as_deref(), token.as_deref()) {
+    if let Err(err) = check_token(
+        state.serve.tracker_token().await.as_deref(),
+        token.as_deref(),
+    ) {
         return bencode(failure_bencode(&err.to_string()));
     }
 
@@ -200,7 +210,7 @@ async fn is_served(state: &TrackerState, info_hash: &InfoHash) -> bool {
         return false;
     };
 
-    match store.is_shared(&hex(info_hash)).await {
+    match store.is_shared(&hex::encode(info_hash)).await {
         Ok(served) => served,
         Err(err) => {
             tracing::warn!(error = %err, "could not check whether a torrent is shared");
@@ -224,15 +234,16 @@ fn check_token(required: Option<&str>, supplied: Option<&str>) -> Result<(), Ann
     }
 }
 
-/// Lowercase hex, matching exactly what the store holds in `info_hash`.
-fn hex(bytes: &InfoHash) -> String {
-    hex::encode(bytes)
-}
-
 fn bencode(body: Vec<u8>) -> Response {
     // Always 200, even for a refusal. Many clients treat a non-2xx as a transport
     // failure and retry forever without ever showing the operator the reason.
     ([(header::CONTENT_TYPE, BENCODE)], body).into_response()
+}
+
+/// The URL path one torrent is served under — the shape [`torrent_file`] parses
+/// back apart. Kept beside the route so the feed's links cannot drift from it.
+pub(crate) fn torrent_download_path(info_hash: &str) -> String {
+    format!("/torrents/{info_hash}.torrent")
 }
 
 /// `GET /torrents/{info_hash}.torrent` — the file itself.
@@ -258,7 +269,7 @@ pub async fn torrent_file(
     }
 
     let config = state.serve.config().await;
-    let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex(&info_hash));
+    let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex::encode(info_hash));
 
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
@@ -266,7 +277,10 @@ pub async fn torrent_file(
                 (header::CONTENT_TYPE, "application/x-bittorrent".to_owned()),
                 (
                     header::CONTENT_DISPOSITION,
-                    format!("attachment; filename=\"{}.torrent\"", hex(&info_hash)),
+                    format!(
+                        "attachment; filename=\"{}.torrent\"",
+                        hex::encode(info_hash)
+                    ),
                 ),
             ],
             bytes,
@@ -316,9 +330,99 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hashes_render_as_lowercase_hex_matching_what_the_store_holds() {
-        assert_eq!(hex(&[0x0a; 20]), "0a".repeat(20));
-        assert_eq!(hex(&[0xff; 20]), "ff".repeat(20));
+    // ------------------------------------------------- router-level coverage
+
+    use crate::state::fixtures::unconfigured;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get(state: &Arc<crate::state::ServeState>, uri: &str) -> (StatusCode, String) {
+        let state = Arc::new(TrackerState::new(Arc::clone(state)));
+        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        // The announce handler records the address a peer actually reached us from,
+        // which `serve` supplies via `into_make_service_with_connect_info`. Driving
+        // the router directly skips that, and the extractor then fails with a 500
+        // that looks like a handler bug — so the test provides it the way the real
+        // server does.
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [203, 0, 113, 7],
+                51413,
+            ))));
+
+        let response = routes(state).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// The admission rule, asserted over the assembled router rather than the
+    /// helper. This is what stops sharerr becoming an open tracker that strangers
+    /// can register swarms on, and it is a property of what `routes()` wires up.
+    #[tokio::test]
+    async fn the_tracker_refuses_an_info_hash_it_is_not_sharing() {
+        let (_dir, state) = unconfigured();
+
+        // 20 bytes, percent-encoded the way a real client sends them.
+        let hash = "%00".repeat(20);
+        let (status, body) = get(
+            &state,
+            &format!("/announce?info_hash={hash}&peer_id={hash}&port=6881"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "trackers report refusals in-band");
+        assert!(
+            body.contains("failure reason"),
+            "an unknown hash must be refused, not introduced to peers: {body}"
+        );
+    }
+
+    /// Every route the tracker claims to serve must actually be wired up. A handler
+    /// that exists but was never routed is exactly the class of bug router-level
+    /// tests exist to catch.
+    #[tokio::test]
+    async fn every_tracker_route_is_reachable() {
+        let (_dir, state) = unconfigured();
+        let hash = "%00".repeat(20);
+
+        for uri in [
+            format!("/announce?info_hash={hash}&peer_id={hash}&port=6881"),
+            format!("/announce/sometoken?info_hash={hash}&peer_id={hash}&port=6881"),
+            "/scrape".to_owned(),
+            "/scrape/sometoken".to_owned(),
+        ] {
+            let (status, _) = get(&state, &uri).await;
+            assert_ne!(status, StatusCode::NOT_FOUND, "{uri} is not routed");
+        }
+    }
+
+    /// A `.torrent` sharerr did not make must not be served, whoever asks — the
+    /// same admission rule as the announce endpoint, one layer along.
+    #[tokio::test]
+    async fn an_unknown_torrent_file_is_not_served() {
+        let (_dir, state) = unconfigured();
+
+        let (status, _) = get(&state, "/torrents/deadbeef.torrent").await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "serving an arbitrary name would be a file-read primitive"
+        );
+    }
+
+    /// A path that tries to climb out of the torrent directory must not be honoured.
+    #[tokio::test]
+    async fn a_traversing_torrent_name_is_refused() {
+        let (_dir, state) = unconfigured();
+
+        for name in ["..%2f..%2fetc%2fpasswd", "....//etc/passwd"] {
+            let (status, _) = get(&state, &format!("/torrents/{name}")).await;
+            assert_ne!(status, StatusCode::OK, "{name} was served");
+        }
     }
 }

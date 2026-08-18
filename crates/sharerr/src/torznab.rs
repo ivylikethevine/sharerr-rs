@@ -27,15 +27,108 @@ use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use sharerr_core::config::secret_keys;
-use sharerr_core::model::{MediaSpec, SharedItem};
+use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
+
+use secrecy::SecretString;
+
+use sharerr_store::PeerScope;
 
 use crate::state::ServeState;
 
 /// Newznab category numbers. Sonarr and Radarr filter on these, and a release in
 /// the wrong one is invisible to the app that wants it.
-const CAT_TV: u32 = 5000;
-const CAT_MOVIES: u32 = 2000;
+pub(crate) const CAT_TV: u32 = 5000;
+pub(crate) const CAT_MOVIES: u32 = 2000;
+pub(crate) const CAT_AUDIO: u32 = 3000;
+pub(crate) const CAT_XXX: u32 = 6000;
+pub(crate) const CAT_BOOKS: u32 = 7000;
+
+/// Every category with its display name, in the order the caps document lists
+/// them. The one table behind [`caps_xml`], Jackett's capability list, and
+/// Jackett's per-result category names — which used to be three hand-written
+/// copies that could disagree about what this instance shares.
+pub(crate) const CATEGORIES: &[(u32, &str)] = &[
+    (CAT_MOVIES, "Movies"),
+    (CAT_TV, "TV"),
+    (CAT_AUDIO, "Audio"),
+    (CAT_XXX, "XXX"),
+    (CAT_BOOKS, "Books"),
+];
+
+/// The swarm figures every renderer advertises: one seeder — this instance —
+/// and free downloads. Constants rather than tracker truth because Prowlarr
+/// drops releases with zero seeders, and the tracker legitimately knows of none
+/// until a peer announces — a truthful zero would hide every release nobody has
+/// taken yet. The XML feed and Jackett's JSON both read these, because the two
+/// renderers disagreeing about the same release is a known failure mode here.
+pub(crate) const ADVERTISED_SEEDERS: u32 = 1;
+pub(crate) const ADVERTISED_PEERS: u32 = 1;
+pub(crate) const DOWNLOAD_VOLUME_FACTOR: f32 = 0.0;
+pub(crate) const UPLOAD_VOLUME_FACTOR: f32 = 1.0;
+
+/// The display name for a category id.
+pub(crate) fn category_name(id: u32) -> &'static str {
+    CATEGORIES
+        .iter()
+        .find(|(cat, _)| *cat == id)
+        .map_or("Other", |(_, name)| name)
+}
+
+/// Every search function the API answers, with the `t=` aliases it is requested
+/// under and the parameters the caps document advertises for it.
+///
+/// One table generates both the `<searching>` block and the dispatcher's accepted
+/// set, because they used to be edited independently: caps advertised
+/// `music-search` while the dispatcher answered `t=music` with "no such function"
+/// — precisely the query a friend's Lidarr sends. Music and book searches
+/// advertise only `q`: [`SearchQuery`] has no artist/album/author fields, and
+/// claiming params that serde drops makes a filtered search match everything.
+const SEARCH_FUNCTIONS: &[(&str, &[&str], &str)] = &[
+    ("search", &["search"], "q"),
+    (
+        "tv-search",
+        &["tvsearch", "tv-search"],
+        "q,season,ep,tvdbid,imdbid",
+    ),
+    (
+        "movie-search",
+        &["movie", "moviesearch", "movie-search"],
+        "q,imdbid,tmdbid",
+    ),
+    (
+        "music-search",
+        &["music", "musicsearch", "music-search"],
+        "q",
+    ),
+    (
+        "audio-search",
+        &["audio", "audiosearch", "audio-search"],
+        "q",
+    ),
+    ("book-search", &["book", "booksearch", "book-search"], "q"),
+];
+
+/// Whether `t` names a search function this API answers.
+fn is_search_function(t: &str) -> bool {
+    SEARCH_FUNCTIONS
+        .iter()
+        .any(|(_, aliases, _)| aliases.contains(&t))
+}
+
+/// The Torznab category one item belongs in.
+///
+/// Derived from the *source* as well as the spec, because Whisparr's files are
+/// episodes structurally and adult content categorically — a friend's app filters
+/// on the category, so putting them in 5000 would offer them to Sonarr.
+pub(crate) fn category_for(item: &SharedItem) -> u32 {
+    match (item.source, &item.spec) {
+        (MediaSource::Whisparr, _) => CAT_XXX,
+        (_, MediaSpec::Episode { .. }) => CAT_TV,
+        (_, MediaSpec::Movie { .. }) => CAT_MOVIES,
+        (_, MediaSpec::Track { .. }) => CAT_AUDIO,
+        (_, MediaSpec::Book { .. }) => CAT_BOOKS,
+    }
+}
 
 /// Torznab's own error format. Prowlarr surfaces the description verbatim, which
 /// makes it the only place a misconfiguration can be explained to the person
@@ -79,25 +172,47 @@ fn escape(raw: &str) -> String {
 /// what makes Sonarr search by id instead of by free text, which is the difference
 /// between a reliable match and a fuzzy one.
 pub fn caps_xml() -> String {
-    format!(
+    let mut out = String::from(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <caps>
   <server title="sharerr"/>
   <limits max="500" default="100"/>
   <searching>
-    <search available="yes" supportedParams="q"/>
-    <tv-search available="yes" supportedParams="q,season,ep,tvdbid,imdbid"/>
-    <movie-search available="yes" supportedParams="q,imdbid,tmdbid"/>
-    <music-search available="no" supportedParams="q"/>
-    <audio-search available="no" supportedParams="q"/>
-    <book-search available="no" supportedParams="q"/>
-  </searching>
-  <categories>
-    <category id="{CAT_MOVIES}" name="Movies"/>
-    <category id="{CAT_TV}" name="TV"/>
-  </categories>
-</caps>"#
-    )
+"#,
+    );
+    for (element, _, params) in SEARCH_FUNCTIONS {
+        let _ = writeln!(
+            out,
+            r#"    <{element} available="yes" supportedParams="{params}"/>"#
+        );
+    }
+    out.push_str("  </searching>\n  <categories>\n");
+    for (id, name) in CATEGORIES {
+        let _ = writeln!(out, r#"    <category id="{id}" name="{name}"/>"#);
+    }
+    out.push_str("  </categories>\n</caps>");
+    out
+}
+
+/// Render a Unix timestamp as RFC 2822, the only date format RSS accepts.
+///
+/// **Not cosmetic.** Sonarr and Radarr reject an entire feed whose items have no
+/// `pubDate` — "Each item in the RSS feed must have a pubDate element with a valid
+/// publish date" — so a feed without this cannot be added as an indexer at all.
+/// That was true of every feed sharerr served until a real Sonarr was pointed at
+/// one; the caps document and the item XML both looked fine in isolation.
+///
+/// An item with no stored timestamp falls back to the Unix epoch rather than being
+/// omitted. A wrong-but-valid date costs an ordering quirk; a missing one costs the
+/// whole feed.
+fn rfc2822(created_at: Option<i64>) -> String {
+    let stamp = created_at
+        .and_then(|secs| time::OffsetDateTime::from_unix_timestamp(secs).ok())
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+
+    stamp
+        .format(&time::format_description::well_known::Rfc2822)
+        .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 +0000".to_owned())
 }
 
 /// One release, as the feed publishes it.
@@ -106,8 +221,34 @@ pub struct FeedItem<'a> {
     pub item: &'a SharedItem,
     /// Absolute URL the friend's client fetches the `.torrent` from.
     pub download_url: String,
-    pub seeders: usize,
-    pub leechers: usize,
+    /// The same release as a magnet URI, for the clients that prefer one.
+    /// Empty when it could not be built (no info hash, which a seeding item
+    /// never lacks) — an empty attribute is simply not emitted.
+    pub magnet_url: String,
+}
+
+/// Render a magnet URI for one release.
+///
+/// `xt` is the identity, `dn` the display name, `xl` the exact length, and one
+/// `tr` per announce tier — the same tiers the `.torrent` itself carries, so a
+/// client arriving by magnet announces to the same tracker. Worth stating
+/// honestly: sharerr's torrents are private, and some clients refuse metadata
+/// exchange on private torrents, so the `.torrent` enclosure stays the primary
+/// path and the magnet is the convenience.
+pub(crate) fn magnet_uri(info_hash: &str, title: &str, size: u64, announces: &[String]) -> String {
+    // Query-string escaping via form_urlencoded: magnet consumers parse the
+    // tail as a query string, and `+` for space is the convention there.
+    let encode =
+        |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+
+    let mut out = format!("magnet:?xt=urn:btih:{info_hash}&dn={}", encode(title));
+    if size > 0 {
+        let _ = write!(out, "&xl={size}");
+    }
+    for announce in announces {
+        let _ = write!(out, "&tr={}", encode(announce));
+    }
+    out
 }
 
 /// Render the RSS feed.
@@ -124,13 +265,12 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
 
     for entry in items {
         let item = entry.item;
-        let category = match item.spec {
-            MediaSpec::Episode { .. } => CAT_TV,
-            MediaSpec::Movie { .. } => CAT_MOVIES,
-        };
+        let category = category_for(item);
         // Unwrapped safely: `seeding_items` guarantees an info hash, and an item
         // without one is filtered out before it reaches here.
         let info_hash = item.info_hash.as_deref().unwrap_or_default();
+
+        // See ADVERTISED_SEEDERS for why these are constants, not tracker truth.
 
         let _ = write!(
             out,
@@ -138,6 +278,7 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
       <title>{title}</title>
       <guid isPermaLink="false">{hash}</guid>
       <link>{link}</link>
+      <pubDate>{pub_date}</pubDate>
       <size>{size}</size>
       <category>{category}</category>
       <enclosure url="{link}" length="{size}" type="application/x-bittorrent"/>
@@ -145,18 +286,28 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
       <torznab:attr name="seeders" value="{seeders}"/>
       <torznab:attr name="peers" value="{peers}"/>
       <torznab:attr name="infohash" value="{hash}"/>
-      <torznab:attr name="downloadvolumefactor" value="0"/>
-      <torznab:attr name="uploadvolumefactor" value="1"/>
+      <torznab:attr name="downloadvolumefactor" value="{down_factor}"/>
+      <torznab:attr name="uploadvolumefactor" value="{up_factor}"/>
 "#,
             // The release title, never `info.name`. See the module header.
             title = escape(&item.release_title),
             hash = escape(info_hash),
             link = escape(&entry.download_url),
+            pub_date = rfc2822(item.created_at),
             size = item.size,
-            seeders = entry.seeders,
-            // Torznab's "peers" is the total, not the leecher count.
-            peers = entry.seeders + entry.leechers,
+            seeders = ADVERTISED_SEEDERS,
+            peers = ADVERTISED_PEERS,
+            down_factor = DOWNLOAD_VOLUME_FACTOR,
+            up_factor = UPLOAD_VOLUME_FACTOR,
         );
+
+        if !entry.magnet_url.is_empty() {
+            let _ = writeln!(
+                out,
+                "      <torznab:attr name=\"magneturl\" value=\"{}\"/>",
+                escape(&entry.magnet_url)
+            );
+        }
 
         // The ids are what let the far end match a release to a known series or
         // film rather than parsing the title and hoping.
@@ -201,7 +352,6 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
 pub struct SearchQuery {
     #[serde(default)]
     pub t: String,
-    pub apikey: Option<String>,
     pub q: Option<String>,
     pub season: Option<u32>,
     pub ep: Option<u32>,
@@ -211,12 +361,30 @@ pub struct SearchQuery {
 }
 
 impl SearchQuery {
-    /// Whether an item satisfies every constraint the query set.
+    /// The free-text needle, normalised, or `None` when the query has no usable
+    /// one. Computed once per request by [`collect`] — it is constant across
+    /// every candidate item.
+    pub fn needle(&self) -> Option<String> {
+        self.q
+            .as_deref()
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| !q.is_empty())
+    }
+
+    /// [`Self::matches_with`] normalising the needle itself; a convenience for
+    /// tests, where one call has one item.
+    #[cfg(test)]
+    fn matches(&self, item: &SharedItem) -> bool {
+        self.matches_with(self.needle().as_deref(), item)
+    }
+
+    /// Whether an item satisfies every constraint the query set, given the
+    /// needle [`Self::needle`] normalised once for the whole request.
     ///
     /// Filters are ANDed and an absent filter matches everything, which is what
     /// makes a bare `t=tvsearch` return the whole library — the behaviour Prowlarr
     /// relies on for its "test" button and for RSS sync.
-    pub fn matches(&self, item: &SharedItem) -> bool {
+    pub fn matches_with(&self, needle: Option<&str>, item: &SharedItem) -> bool {
         if let Some(tvdbid) = self.tvdbid
             && item.ids.tvdb != Some(tvdbid)
         {
@@ -244,34 +412,38 @@ impl SearchQuery {
                     return false;
                 }
             }
-            MediaSpec::Movie { .. } => {
-                // A season or episode filter cannot be satisfied by a film.
+            // A season or episode filter cannot be satisfied by anything that is
+            // not an episode, so asking for one excludes films, music and books
+            // rather than silently ignoring the filter.
+            MediaSpec::Movie { .. } | MediaSpec::Track { .. } | MediaSpec::Book { .. } => {
                 if self.season.is_some() || self.ep.is_some() {
                     return false;
                 }
             }
         }
 
-        match &self.q {
+        match needle {
             None => true,
-            Some(q) => {
-                let needle = q.trim().to_lowercase();
-                needle.is_empty()
-                    || item.release_title.to_lowercase().contains(&needle)
-                    || item.spec.title().to_lowercase().contains(&needle)
+            Some(needle) => {
+                item.release_title.to_lowercase().contains(needle)
+                    // Music and books are searched by creator far more than film
+                    // and television are, so an artist or author name has to match.
+                    || item
+                        .spec
+                        .creator()
+                        .is_some_and(|c| c.to_lowercase().contains(needle))
+                    || item.spec.title().to_lowercase().contains(needle)
             }
         }
     }
 }
 
-/// Compare IMDb ids tolerantly.
+/// Compare IMDb ids tolerantly, via [`ExternalIds::imdb_bare`] on both sides.
 ///
-/// Sonarr sends `1234567`, Radarr sends `tt1234567`, and the *arr APIs return
-/// either depending on the endpoint. Comparing them literally means an id search
-/// silently matches nothing, which looks exactly like "the friend has none of this".
+/// Comparing them literally means an id search silently matches nothing, which
+/// looks exactly like "the friend has none of this".
 fn imdb_matches(stored: Option<&str>, wanted: &str) -> bool {
-    let normalise = |raw: &str| raw.trim().trim_start_matches("tt").to_owned();
-    stored.is_some_and(|stored| normalise(stored) == normalise(wanted))
+    stored.is_some_and(|stored| ExternalIds::imdb_bare(stored) == ExternalIds::imdb_bare(wanted))
 }
 
 // ---------------------------------------------------------------------------
@@ -281,143 +453,310 @@ fn imdb_matches(stored: Option<&str>, wanted: &str) -> bool {
 pub fn routes(serve: Arc<ServeState>) -> axum::Router {
     axum::Router::new()
         .route("/api", axum::routing::get(api))
-        .with_state(serve)
+        // Gossip rides the same per-peer-key authentication as the feed — the
+        // whole point of putting it under /api rather than a second surface.
+        .route(
+            "/api/gossip/endpoints",
+            axum::routing::get(crate::gossip::pull).post(crate::gossip::push),
+        )
+        .with_state(Arc::clone(&serve))
+        // Jackett's URL shapes, both the Torznab one and the admin surface.
+        .merge(crate::jackett::routes(serve))
 }
 
 /// `GET /api?t=...`
 pub async fn api(
     State(state): State<Arc<ServeState>>,
+    caller: Caller,
     Query(query): Query<SearchQuery>,
 ) -> Response {
-    if let Err(response) = check_api_key(&state, query.apikey.as_deref()).await {
-        return response;
-    }
-
-    match query.t.as_str() {
-        // `caps` is fetched before the key is ever configured in Prowlarr, but
-        // requiring the key here too is deliberate: it is one fewer endpoint that
-        // says anything at all to an unauthenticated caller.
-        "caps" => xml(caps_xml()),
-        "search" | "tvsearch" | "tv-search" | "movie" | "moviesearch" | "movie-search" => {
-            search(&state, &query).await
-        }
-        other => xml_status(
+    // `caps` is fetched before the key is ever configured in Prowlarr, but
+    // requiring the key here too is deliberate: it is one fewer endpoint that
+    // says anything at all to an unauthenticated caller.
+    if query.t == "caps" {
+        xml(caps_xml())
+    } else if is_search_function(&query.t) {
+        search(&state, &query, caller.scope()).await
+    } else {
+        xml_status(
             StatusCode::BAD_REQUEST,
-            error_xml(202, &format!("no such function: {other}")),
-        ),
+            error_xml(202, &format!("no such function: {}", query.t)),
+        )
     }
 }
 
-async fn search(state: &ServeState, query: &SearchQuery) -> Response {
-    let store = match state.store().await {
-        Ok(store) => store,
-        Err(reason) => {
-            return xml_status(
-                StatusCode::SERVICE_UNAVAILABLE,
-                error_xml(900, &format!("sharerr is not ready: {reason}")),
-            );
-        }
-    };
+/// What a search matched, owned so more than one renderer can use it.
+///
+/// Torznab answers in XML and Jackett's own API answers the *same search* in JSON.
+/// Running the query twice, once per renderer, is how the two would drift into
+/// disagreeing about what this instance shares — the same mistake `doctor` and the
+/// web UI's probes made before `crate::checks` existed.
+pub(crate) struct Matched {
+    pub items: Vec<SharedItem>,
+    /// Absolute base URL a client fetches `.torrent` files from.
+    pub base: String,
+    /// The announce URLs a magnet carries, current endpoint first — the same
+    /// tiers freshly built torrents get.
+    pub announces: Vec<String>,
+    /// How many items were considered, before filtering.
+    pub total: usize,
+}
 
-    let items = match store.seeding_items().await {
-        Ok(items) => items,
-        Err(err) => {
-            tracing::error!(error = %err, "torznab search failed");
-            return xml_status(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                error_xml(900, "could not read the library"),
-            );
+impl Matched {
+    /// The URL for one item's `.torrent`.
+    pub fn download_url(&self, item: &SharedItem) -> String {
+        format!(
+            "{}{}",
+            self.base,
+            crate::tracker::torrent_download_path(item.info_hash.as_deref().unwrap_or_default())
+        )
+    }
+
+    /// The same release as a magnet URI, or empty when there is no info hash.
+    pub fn magnet_url(&self, item: &SharedItem) -> String {
+        match item.info_hash.as_deref() {
+            Some(hash) => magnet_uri(hash, &item.release_title, item.size, &self.announces),
+            None => String::new(),
         }
-    };
+    }
+}
+
+/// Run a search, or return the error response to send instead.
+///
+/// The error side is already a `Response` because both renderers want the failure
+/// reported in their own content type, and there is exactly one caller of each.
+pub(crate) async fn collect(
+    state: &ServeState,
+    query: &SearchQuery,
+    scope: PeerScope,
+) -> Result<Matched, (StatusCode, String)> {
+    let store = state.store().await.map_err(|reason| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("sharerr is not ready: {reason}"),
+        )
+    })?;
+
+    // The scope is applied by the store itself, in SQL, before any row is
+    // decoded. What a friend may see is not a search filter they could widen —
+    // it is decided by who they are, and it never reaches this function's query
+    // logic at all.
+    let items = store.seeding_items(scope).await.map_err(|err| {
+        tracing::error!(error = %err, "torznab search failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read the library".to_owned(),
+        )
+    })?;
 
     let config = state.config().await;
-    let base = public_base_url(&config);
+    let total = items.len();
+    // The needle is constant across the whole request, so it is normalised once
+    // here rather than once per candidate item.
+    let needle = query.needle();
+    let matched = items
+        .into_iter()
+        .filter(|item| query.matches_with(needle.as_deref(), item))
+        .collect();
 
-    let matched: Vec<_> = items.iter().filter(|item| query.matches(item)).collect();
+    // The magnet's `tr` tiers: every recently held endpoint, the same list a
+    // freshly built torrent carries, with the announce token when one is set —
+    // the magnet is an alternative to the `.torrent`, so it must grant the same
+    // right to announce.
+    let token = state.tracker_token().await;
+    let announces = state
+        .endpoint()
+        .recent()
+        .iter()
+        .filter_map(|base| sharerr_torrent::announce_url(base, token.as_deref()).ok())
+        .map(|url| url.to_string())
+        .collect();
+
+    Ok(Matched {
+        items: matched,
+        base: config.public_base_url(),
+        announces,
+        total,
+    })
+}
+
+async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Response {
+    let matched = match collect(state, query, scope).await {
+        Ok(matched) => matched,
+        Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
+    };
+
     let entries: Vec<FeedItem<'_>> = matched
+        .items
         .iter()
         .map(|item| FeedItem {
             item,
-            download_url: format!(
-                "{base}/torrents/{}.torrent",
-                item.info_hash.as_deref().unwrap_or_default()
-            ),
-            // Reported as one seeder — this instance — rather than from the swarm.
-            // Prowlarr drops releases with zero seeders, and the tracker legitimately
-            // knows of none until a peer announces, so a truthful zero would hide
-            // every release that nobody has downloaded yet.
-            seeders: 1,
-            leechers: 0,
+            download_url: matched.download_url(item),
+            magnet_url: matched.magnet_url(item),
         })
         .collect();
 
     tracing::debug!(
         function = %query.t,
         returned = entries.len(),
-        of = items.len(),
+        of = matched.total,
         "torznab search"
     );
     xml(feed_xml(&entries))
 }
 
-/// The URL a friend reaches this instance on.
+/// An authenticated caller, carrying what they are allowed to see.
 ///
-/// Built from `tracker.advertised_host`, which is the only address sharerr is told
-/// about that is known to work from outside. The bind address is deliberately not
-/// consulted: it is usually `0.0.0.0`, which is not a URL anyone can fetch.
-pub fn public_base_url(config: &sharerr_core::Config) -> String {
-    let host = config
-        .tracker
-        .advertised_host
-        .as_deref()
-        .unwrap_or("localhost");
-    let port = config
-        .tracker
-        .port
-        .unwrap_or_else(|| config.server.bind.port());
-    format!("http://{host}:{port}")
+/// The scope has to come back from authentication, because it is a property of
+/// the *caller* rather than of the query — and a caller cannot be trusted to say
+/// who they are. Returning `()` and looking the peer up again inside the search
+/// would mean two lookups that could disagree.
+pub(crate) struct Caller {
+    scope: PeerScope,
+    /// Which peer row authenticated. Every caller is a real peer now that the
+    /// legacy shared key is gone, so the gossip endpoints — which require one,
+    /// to know who said what — can always resolve it.
+    peer_id: i64,
 }
 
-/// Torznab authenticates with an `apikey` query parameter.
-///
-/// Absent from the vault means the endpoint is closed rather than open: an
-/// indexer feed lists everything this instance shares, and defaulting to
-/// unauthenticated would publish the library to anyone who found the port.
-async fn check_api_key(state: &ServeState, supplied: Option<&str>) -> Result<(), Response> {
-    let stored = state
-        .open_vault()
-        .await
-        .ok()
-        .and_then(|vault| vault.get(secret_keys::TORZNAB_API_KEY).ok().flatten());
+impl Caller {
+    pub fn scope(&self) -> PeerScope {
+        self.scope
+    }
 
-    let Some(stored) = stored else {
-        return Err(xml_status(
-            StatusCode::SERVICE_UNAVAILABLE,
-            error_xml(
-                100,
-                "this sharerr instance has no Torznab API key yet — generate one in Settings",
-            ),
-        ));
-    };
-
-    let stored = secrecy::ExposeSecret::expose_secret(&stored);
-    if crate::secrets::constant_time_eq(stored, supplied.unwrap_or_default()) {
-        Ok(())
-    } else {
-        tracing::warn!("rejected a torznab request with a bad api key");
-        Err(xml_status(
-            StatusCode::UNAUTHORIZED,
-            error_xml(100, "incorrect user credentials"),
-        ))
+    pub fn peer_id(&self) -> i64 {
+        self.peer_id
     }
 }
 
+/// Authentication as an extractor: a feed handler that wants to answer at all
+/// declares `caller: Caller` and cannot compile without it, where a hand-invoked
+/// check is one forgotten call away from an open endpoint. The rejection is the
+/// same XML error every feed surface has always sent.
+impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &Arc<ServeState>,
+    ) -> Result<Self, Self::Rejection> {
+        #[derive(Deserialize)]
+        struct Key {
+            apikey: Option<String>,
+        }
+
+        // A query string too malformed to parse cannot be carrying a valid key,
+        // so it is treated as an absent one rather than a different error.
+        let apikey = axum::extract::Query::<Key>::try_from_uri(&parts.uri)
+            .map(|query| query.0.apikey)
+            .unwrap_or_default();
+
+        // The source address, when the server was built with connect-info —
+        // observed for peer endpoint memory, never required: authentication
+        // works the same without it.
+        let remote = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip());
+
+        check_api_key(state, apikey.as_deref(), remote).await
+    }
+}
+
+/// Decide who an `apikey` belongs to.
+///
+/// Only one thing can satisfy it: a peer's own key. Each friend holds a
+/// different key, so one can be revoked without disturbing the others, and the
+/// request records who made it.
+///
+/// No match means the endpoint is closed rather than open: an indexer feed
+/// lists everything this instance shares, and defaulting to unauthenticated
+/// would publish the library to anyone who found the port.
+async fn check_api_key(
+    state: &ServeState,
+    supplied: Option<&str>,
+    remote: Option<std::net::IpAddr>,
+) -> Result<Caller, Response> {
+    let refused = || {
+        xml_status(
+            StatusCode::UNAUTHORIZED,
+            error_xml(100, "incorrect user credentials"),
+        )
+    };
+
+    // An absent key is refused the same way a wrong one is. Saying "this instance
+    // has no key configured" to an unauthenticated caller would confirm the port
+    // belongs to sharerr.
+    let Some(supplied) = supplied.filter(|key| !key.is_empty()) else {
+        return Err(refused());
+    };
+
+    // One indexed lookup on a SHA-256 of the supplied key.
+    if let Ok(store) = state.store().await {
+        match store.peer_by_key(&SecretString::from(supplied)).await {
+            Ok(Some(peer)) => {
+                // Recorded after authenticating, and failure to record is not
+                // failure to authenticate: a read-only or busy database should not
+                // take the feed down.
+                match store.touch_peer(peer.id).await {
+                    // The touch fired, so its five-minute throttle also gates the
+                    // endpoint observation — a Prowlarr RSS burst records one
+                    // sighting, not one per request.
+                    Ok(true) => {
+                        if let Some(remote) = remote {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            if let Err(err) = store
+                                .record_peer_endpoint(
+                                    peer.id,
+                                    sharerr_store::EndpointKind::Api,
+                                    &remote.to_string(),
+                                    now,
+                                    sharerr_store::ObservedVia::Direct,
+                                )
+                                .await
+                            {
+                                tracing::warn!(peer = %peer.label, error = %err, "could not record peer address");
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
+                    }
+                }
+                tracing::debug!(
+                    peer = %peer.label,
+                    scope = peer.scope.as_str(),
+                    "torznab request authenticated"
+                );
+                return Ok(Caller {
+                    scope: peer.scope,
+                    peer_id: peer.id,
+                });
+            }
+            Ok(None) => {}
+            Err(err) => {
+                // A database that will not answer must not silently fall through to
+                // a comparison that might pass — but it also must not be reported as
+                // bad credentials, which would send the operator to the wrong place.
+                tracing::error!(error = %err, "could not check peer keys");
+                return Err(xml_status(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error_xml(900, "could not check credentials"),
+                ));
+            }
+        }
+    }
+
+    tracing::warn!("rejected a torznab request with a bad api key");
+    Err(refused())
+}
+
 fn xml(body: String) -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
-        body,
-    )
-        .into_response()
+    xml_status(StatusCode::OK, body)
 }
 
 fn xml_status(status: StatusCode, body: String) -> Response {
@@ -434,7 +773,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use sharerr_core::model::{ExternalIds, MediaSource, ShareState};
+    use sharerr_core::model::{MediaSource, ShareState};
     use std::path::PathBuf;
 
     fn episode(title: &str, season: u32, ep: u32) -> SharedItem {
@@ -456,10 +795,12 @@ mod tests {
                 tmdb: None,
                 tvmaze: Some(4242),
                 imdb: Some("tt7654321".to_owned()),
+                ..ExternalIds::default()
             },
             info_hash: Some("ab".repeat(20)),
             state: ShareState::Seeding,
             last_error: None,
+            created_at: None,
         }
     }
 
@@ -475,6 +816,7 @@ mod tests {
                 tmdb: Some(555),
                 tvmaze: None,
                 imdb: Some("tt1112223".to_owned()),
+                ..ExternalIds::default()
             },
             ..episode(title, 1, 1)
         }
@@ -484,8 +826,12 @@ mod tests {
         feed_xml(&[FeedItem {
             item,
             download_url: "http://seed.example:8477/torrents/x.torrent".to_owned(),
-            seeders: 1,
-            leechers: 0,
+            magnet_url: magnet_uri(
+                item.info_hash.as_deref().unwrap_or_default(),
+                &item.release_title,
+                item.size,
+                &["http://seed.example:8477/announce".to_owned()],
+            ),
         }])
     }
 
@@ -568,6 +914,44 @@ mod tests {
         assert!(!xml.contains(r#"name="season""#), "a film has no season");
     }
 
+    /// The bug a real Sonarr found. Sonarr and Radarr refuse an entire feed whose
+    /// items have no `pubDate` — "Each item in the RSS feed must have a pubDate
+    /// element with a valid publish date" — so a friend could not add sharerr as an
+    /// indexer at all. Every other part of the document looked correct in
+    /// isolation, which is why nothing caught it until a real client was pointed at
+    /// it.
+    #[test]
+    fn every_item_has_a_pubdate_or_sonarr_rejects_the_whole_feed() {
+        let mut item = episode("Lanternwick.Hollow.S02E01", 2, 1);
+        item.created_at = Some(1_700_000_000);
+        let xml = render(&item);
+
+        assert_eq!(
+            xml.matches("<pubDate>").count(),
+            1,
+            "every item needs one: {xml}"
+        );
+        // RFC 2822, the only format RSS accepts.
+        assert!(
+            xml.contains("<pubDate>Tue, 14 Nov 2023 22:13:20 +0000</pubDate>"),
+            "{xml}"
+        );
+    }
+
+    /// An item with no stored timestamp still gets a valid date. A wrong-but-valid
+    /// one costs an ordering quirk; a missing one costs the whole feed.
+    #[test]
+    fn an_item_without_a_timestamp_still_gets_a_valid_pubdate() {
+        let mut item = episode("Lanternwick.Hollow.S02E01", 2, 1);
+        item.created_at = None;
+        let xml = render(&item);
+
+        assert!(
+            xml.contains("<pubDate>Thu, 01 Jan 1970 00:00:00 +0000</pubDate>"),
+            "{xml}"
+        );
+    }
+
     #[test]
     fn the_enclosure_and_size_are_what_a_client_downloads() {
         let xml = render(&episode("X.S01E01", 1, 1));
@@ -576,6 +960,63 @@ mod tests {
             xml.contains(r#"<enclosure url="http://seed.example:8477/torrents/x.torrent" length="2147483648" type="application/x-bittorrent"/>"#),
             "{xml}"
         );
+    }
+
+    /// The magnet is the whole release in one URI: identity, display name,
+    /// exact length, and the same announce tiers the `.torrent` carries — and
+    /// it must arrive XML-escaped, because `&` separates its every parameter.
+    #[test]
+    fn the_magnet_carries_identity_name_size_and_tracker() {
+        let item = episode("Lanternwick.Hollow.S02E04.1080p.WEB-DL.x264-FAKEGRP", 2, 4);
+        let magnet = magnet_uri(
+            item.info_hash.as_deref().unwrap(),
+            &item.release_title,
+            item.size,
+            &["http://seed.example:8477/announce".to_owned()],
+        );
+
+        assert!(
+            magnet.starts_with(&format!(
+                "magnet:?xt=urn:btih:{}",
+                item.info_hash.as_deref().unwrap()
+            )),
+            "{magnet}"
+        );
+        assert!(
+            magnet.contains("&dn=Lanternwick.Hollow.S02E04.1080p.WEB-DL.x264-FAKEGRP"),
+            "{magnet}"
+        );
+        assert!(magnet.contains("&xl=2147483648"), "{magnet}");
+        assert!(
+            magnet.contains("&tr=http%3A%2F%2Fseed.example%3A8477%2Fannounce"),
+            "the announce URL must be percent-encoded: {magnet}"
+        );
+
+        let xml = render(&item);
+        assert!(
+            xml.contains(r#"<torznab:attr name="magneturl" value="magnet:?xt=urn:btih:"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("&amp;dn="),
+            "the magnet's ampersands must be XML-escaped: {xml}"
+        );
+    }
+
+    /// A rotated endpoint means multiple tiers, all of them in the magnet.
+    #[test]
+    fn the_magnet_spans_every_announce_tier() {
+        let magnet = magnet_uri(
+            "ab".repeat(20).as_str(),
+            "X",
+            0,
+            &[
+                "http://203.0.113.9:41234/announce".to_owned(),
+                "http://static.example:8477/announce".to_owned(),
+            ],
+        );
+        assert_eq!(magnet.matches("&tr=").count(), 2, "{magnet}");
+        assert!(!magnet.contains("&xl="), "a zero size is not advertised");
     }
 
     #[test]
@@ -594,6 +1035,28 @@ mod tests {
         ));
         assert!(caps.contains(r#"name="Movies""#));
         assert!(caps.ends_with("</caps>"));
+    }
+
+    /// Advertising a function the dispatcher refuses is exactly the drift that
+    /// once answered a friend's Lidarr `t=music` with "no such function" while
+    /// caps claimed `music-search`. Clients derive `t=` from the caps element
+    /// name, both with and without the dash, so every entry must accept both.
+    #[test]
+    fn every_advertised_search_function_is_dispatched() {
+        for (element, aliases, _) in SEARCH_FUNCTIONS {
+            assert!(
+                is_search_function(element) || *element == "search",
+                "caps advertises <{element}> but the dispatcher refuses t={element}"
+            );
+            assert!(
+                is_search_function(&element.replace('-', "")),
+                "the dashless t={} must be accepted",
+                element.replace('-', "")
+            );
+            for alias in *aliases {
+                assert!(is_search_function(alias), "alias t={alias} is refused");
+            }
+        }
     }
 
     #[test]
@@ -722,5 +1185,575 @@ mod tests {
         let xml = error_xml(100, r#"bad <key> & "stuff""#);
         assert!(xml.contains(r#"code="100""#));
         assert!(xml.contains("&lt;key&gt; &amp; &quot;stuff&quot;"), "{xml}");
+    }
+
+    // ---------------------------------------------------------------- peer auth
+
+    use crate::state::fixtures::unconfigured;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use secrecy::SecretString;
+    use tower::ServiceExt;
+
+    /// Ask the real router, so the answer covers routing and extraction too.
+    async fn caps_with_key(state: &std::sync::Arc<ServeState>, key: Option<&str>) -> StatusCode {
+        let uri = match key {
+            Some(key) => format!("/api?t=caps&apikey={key}"),
+            None => "/api?t=caps".to_owned(),
+        };
+        routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// The point of M4: a friend's own key opens the feed.
+    #[tokio::test]
+    async fn a_peers_key_authenticates_the_feed() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        assert_eq!(caps_with_key(&state, Some("sam-key")).await, StatusCode::OK);
+    }
+
+    /// And the other half of the point: revoking one friend cuts off exactly that
+    /// friend. Under the old single shared key this was not expressible at all.
+    #[tokio::test]
+    async fn revoking_one_peer_closes_the_feed_only_for_them() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store
+            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        store.revoke_peer(sam.id).await.unwrap();
+
+        assert_eq!(
+            caps_with_key(&state, Some("sam-key")).await,
+            StatusCode::UNAUTHORIZED,
+            "a revoked key must stop working"
+        );
+        assert_eq!(
+            caps_with_key(&state, Some("alex-key")).await,
+            StatusCode::OK,
+            "revoking Sam must not affect Alex"
+        );
+    }
+
+    /// A key nobody was issued, and no key at all, are refused the same way — and
+    /// neither gets a message confirming what this port is.
+    #[tokio::test]
+    async fn an_unknown_or_absent_key_is_refused() {
+        let (_dir, state) = unconfigured();
+        state.store().await.unwrap();
+
+        assert_eq!(
+            caps_with_key(&state, Some("guessed")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(caps_with_key(&state, None).await, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            caps_with_key(&state, Some("")).await,
+            StatusCode::UNAUTHORIZED,
+            "an empty key must not be treated as absent-and-therefore-fine"
+        );
+    }
+
+    /// Using the feed is what proves a friend is actually set up, so it has to be
+    /// recorded — that column is the whole answer to "did Sam get it working?".
+    #[tokio::test]
+    async fn a_successful_request_records_that_the_peer_was_seen() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.list_peers().await.unwrap()[0].last_seen_at,
+            None,
+            "nobody has used the key yet"
+        );
+
+        assert_eq!(caps_with_key(&state, Some("sam-key")).await, StatusCode::OK);
+
+        assert!(
+            store.list_peers().await.unwrap()[0].last_seen_at.is_some(),
+            "an authenticated request must record the peer as seen"
+        );
+    }
+
+    // ------------------------------------------------------------- jackett shape
+
+    async fn get(state: &std::sync::Arc<ServeState>, uri: &str) -> StatusCode {
+        routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    async fn body(state: &std::sync::Arc<ServeState>, uri: &str) -> String {
+        let response = routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    async fn with_peer() -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
+        let (dir, state) = unconfigured();
+        state
+            .store()
+            .await
+            .unwrap()
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        (dir, state)
+    }
+
+    /// The three shapes a Jackett-configured client actually requests. All of them
+    /// have to work, because which one you get depends on whether the client
+    /// appends `/api` to a base URL that may or may not already end in a slash.
+    #[tokio::test]
+    async fn the_jackett_paths_serve_the_same_feed() {
+        let (_dir, state) = with_peer().await;
+
+        for uri in [
+            "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps&apikey=sam-key",
+            "/api/v2.0/indexers/sharerr/results/torznab/?t=caps&apikey=sam-key",
+            "/api/v2.0/indexers/sharerr/results/torznab?t=caps&apikey=sam-key",
+        ] {
+            assert_eq!(get(&state, uri).await, StatusCode::OK, "{uri}");
+        }
+    }
+
+    /// Jackett proxies many trackers and names each one in the path. sharerr is the
+    /// only thing it serves, so any id — including Jackett's `all` aggregate, and
+    /// whatever id someone had in their old config — means this feed.
+    #[tokio::test]
+    async fn any_indexer_id_reaches_the_same_feed() {
+        let (_dir, state) = with_peer().await;
+
+        for id in ["sharerr", "all", "some-old-jackett-id"] {
+            let uri = format!("/api/v2.0/indexers/{id}/results/torznab/api?t=caps&apikey=sam-key");
+            assert_eq!(get(&state, &uri).await, StatusCode::OK, "{uri}");
+        }
+    }
+
+    /// Byte-identical to `/api`, or the two paths would drift into describing
+    /// different capabilities to different clients.
+    #[tokio::test]
+    async fn the_jackett_path_returns_the_same_document_as_the_plain_one() {
+        let (_dir, state) = with_peer().await;
+
+        let plain = body(&state, "/api?t=caps&apikey=sam-key").await;
+        let jackett = body(
+            &state,
+            "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps&apikey=sam-key",
+        )
+        .await;
+
+        assert_eq!(plain, jackett);
+        assert!(plain.contains("<caps>"), "{plain}");
+    }
+
+    /// The Jackett path must not be a way around authentication.
+    #[tokio::test]
+    async fn the_jackett_path_is_authenticated_too() {
+        let (_dir, state) = with_peer().await;
+
+        assert_eq!(
+            get(
+                &state,
+                "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps"
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            get(
+                &state,
+                "/api/v2.0/indexers/sharerr/results/torznab/api?t=caps&apikey=wrong"
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    // ------------------------------------------------------------ scoped feeds
+
+    /// Seed one TV item and one film, so scoping has something to distinguish.
+    async fn with_both_kinds() -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
+        use sharerr_core::model::ShareState;
+
+        let (dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        for (source, file_id, hash) in [
+            (MediaSource::Sonarr, 1_i64, "aa"),
+            (MediaSource::Radarr, 2_i64, "bb"),
+        ] {
+            let mut item = episode("Something.S01E01", 1, 1);
+            item.source = source;
+            item.file_id = file_id;
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(source, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(source, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+        (dir, state)
+    }
+
+    async fn feed_for(state: &std::sync::Arc<ServeState>, key: &str) -> String {
+        let response = routes(std::sync::Arc::clone(state))
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api?t=search&apikey={key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The feature: two friends, two different libraries, one instance.
+    /// The assembled feed carries a magnet per item — the attribute a client
+    /// that prefers magnets looks for, next to the `.torrent` enclosure.
+    #[tokio::test]
+    async fn the_feed_offers_a_magnet_alongside_the_torrent() {
+        let (_dir, state) = with_both_kinds().await;
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        let feed = feed_for(&state, "sam-key").await;
+        assert_eq!(
+            feed.matches("magneturl").count(),
+            2,
+            "every item gets one: {feed}"
+        );
+        assert!(
+            feed.contains("magnet:?xt=urn:btih:aaaaaaaaaa"),
+            "the magnet must carry the item's own hash: {feed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_friend_sees_only_what_their_scope_allows() {
+        let (_dir, state) = with_both_kinds().await;
+        let store = state.store().await.unwrap();
+        store
+            .create_peer("Tv", &SecretString::from("tv-key"), PeerScope::Tv)
+            .await
+            .unwrap();
+        store
+            .create_peer("Films", &SecretString::from("film-key"), PeerScope::Movies)
+            .await
+            .unwrap();
+        store
+            .create_peer("Both", &SecretString::from("both-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            feed_for(&state, "tv-key").await.matches("<item>").count(),
+            1
+        );
+        assert_eq!(
+            feed_for(&state, "film-key").await.matches("<item>").count(),
+            1
+        );
+        assert_eq!(
+            feed_for(&state, "both-key").await.matches("<item>").count(),
+            2,
+            "an unscoped friend still sees everything"
+        );
+    }
+
+    /// Directory items reach the feed like any other item — categorised by
+    /// their spec, since the source carries no media kind — and a narrow scope
+    /// admits them by their declared kind rather than by source.
+    #[tokio::test]
+    async fn directory_items_reach_the_feed_and_honour_scope() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        let seed = [
+            (
+                41_i64,
+                "cc",
+                episode("Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR", 2, 1),
+            ),
+            (42_i64, "dd", movie("Harborlight.2019.WEB-DL.x264-SHARERR")),
+        ];
+        for (file_id, hash, mut item) in seed {
+            item.source = MediaSource::Directory;
+            item.file_id = file_id;
+            // What the scanner actually produces: no ids, nothing seeding yet.
+            item.ids = ExternalIds::default();
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Directory, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Directory, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        store
+            .create_peer("Tv", &SecretString::from("tv-key"), PeerScope::Tv)
+            .await
+            .unwrap();
+        store
+            .create_peer("All", &SecretString::from("all-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        let everything = feed_for(&state, "all-key").await;
+        assert_eq!(everything.matches("<item>").count(), 2, "{everything}");
+        assert!(
+            everything.contains(&CAT_TV.to_string())
+                && everything.contains(&CAT_MOVIES.to_string()),
+            "the categories must come from each item's spec: {everything}"
+        );
+
+        let tv = feed_for(&state, "tv-key").await;
+        assert_eq!(tv.matches("<item>").count(), 1, "{tv}");
+        assert!(tv.contains("Lanternwick"), "{tv}");
+        assert!(
+            !tv.contains("Harborlight"),
+            "a tv-scoped friend must not see a directory movie: {tv}"
+        );
+    }
+
+    /// Scope is decided by *who is asking*, not by the query — so a friend cannot
+    /// widen it by searching the other category.
+    #[tokio::test]
+    async fn a_scoped_friend_cannot_search_their_way_out_of_it() {
+        let (_dir, state) = with_both_kinds().await;
+        state
+            .store()
+            .await
+            .unwrap()
+            .create_peer("Tv", &SecretString::from("tv-key"), PeerScope::Tv)
+            .await
+            .unwrap();
+
+        // Asking explicitly for movies must still return only what TV scope allows.
+        let response = routes(std::sync::Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .uri("/api?t=movie-search&apikey=tv-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let xml = String::from_utf8_lossy(&bytes);
+
+        assert!(
+            !xml.contains(&"bb".repeat(20)),
+            "a TV-scoped friend was served a film: {xml}"
+        );
+    }
+
+    /// Changing the scope takes effect on the next request — an operator who
+    /// narrows a friend expects that to be true immediately, not after a restart.
+    #[tokio::test]
+    async fn narrowing_a_scope_takes_effect_at_once() {
+        let (_dir, state) = with_both_kinds().await;
+        let store = state.store().await.unwrap();
+        let peer = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            feed_for(&state, "sam-key").await.matches("<item>").count(),
+            2
+        );
+
+        store
+            .set_peer_scope(peer.id, PeerScope::Movies)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            feed_for(&state, "sam-key").await.matches("<item>").count(),
+            1,
+            "the narrowed scope must apply to the very next request"
+        );
+    }
+
+    // ------------------------------------------- search filters over /api itself
+    //
+    // `matches_with` is exhaustively unit-tested as a pure function above, but
+    // that never proves axum's `Query<SearchQuery>` extractor actually parses
+    // `season`, `ep`, and `imdbid` off a real URL and threads them through to a
+    // real search — only the Jackett-shaped paths were ever asked this. These
+    // hit the plain `/api` route Prowlarr and a direct Sonarr/Radarr use.
+
+    async fn xml_body(state: &std::sync::Arc<ServeState>, uri: &str) -> String {
+        let response = routes(std::sync::Arc::clone(state))
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn tvsearch_filters_by_season_and_episode_through_the_router() {
+        let (_dir, state) = with_peer().await;
+        let store = state.store().await.unwrap();
+
+        for (file_id, hash, season, ep) in [(1_i64, "aa", 1, 1), (2_i64, "bb", 1, 2)] {
+            let mut item = episode("Lanternwick.Hollow.SXXEXX.WEB-DL.x264-SHARERR", season, ep);
+            item.file_id = file_id;
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Sonarr, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Sonarr, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        let xml = xml_body(&state, "/api?t=tvsearch&season=1&ep=2&apikey=sam-key").await;
+        assert!(xml.contains(&"bb".repeat(20)), "{xml}");
+        assert!(!xml.contains(&"aa".repeat(20)), "{xml}");
+    }
+
+    #[tokio::test]
+    async fn moviesearch_filters_by_imdbid_through_the_router() {
+        let (_dir, state) = with_peer().await;
+        let store = state.store().await.unwrap();
+
+        for (file_id, hash, title, imdb) in [
+            (
+                1_i64,
+                "aa",
+                "Harborlight.2019.WEB-DL.x264-SHARERR",
+                "tt1112223",
+            ),
+            (
+                2_i64,
+                "bb",
+                "Otherfilm.2020.WEB-DL.x264-SHARERR",
+                "tt9998887",
+            ),
+        ] {
+            let mut item = movie(title);
+            item.source = MediaSource::Radarr;
+            item.file_id = file_id;
+            item.ids.imdb = Some(imdb.to_owned());
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Radarr, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Radarr, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        let xml = xml_body(
+            &state,
+            "/api?t=movie-search&imdbid=tt9998887&apikey=sam-key",
+        )
+        .await;
+        assert!(xml.contains(&"bb".repeat(20)), "{xml}");
+        assert!(!xml.contains(&"aa".repeat(20)), "{xml}");
+    }
+
+    /// The plain text query, not just the structured filters — the shape a
+    /// client falls back to when it has no id for the release at all.
+    #[tokio::test]
+    async fn a_text_query_filters_through_the_router_too() {
+        let (_dir, state) = with_peer().await;
+        let store = state.store().await.unwrap();
+
+        for (file_id, hash, title, series_title) in [
+            (
+                1_i64,
+                "aa",
+                "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR",
+                "Lanternwick Hollow",
+            ),
+            (
+                2_i64,
+                "bb",
+                "Otherfilm.S01E01.WEB-DL.x264-SHARERR",
+                "Otherfilm",
+            ),
+        ] {
+            let mut item = episode(title, 1, 1);
+            item.file_id = file_id;
+            item.spec = MediaSpec::Episode {
+                series_title: series_title.to_owned(),
+                season: 1,
+                episode: 1,
+            };
+            item.info_hash = None;
+            item.state = ShareState::Pending;
+            store.upsert(&item).await.unwrap();
+            store
+                .set_info_hash(MediaSource::Sonarr, file_id, &hash.repeat(20))
+                .await
+                .unwrap();
+            store
+                .set_state(MediaSource::Sonarr, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+        }
+
+        let xml = xml_body(&state, "/api?t=search&q=Lanternwick&apikey=sam-key").await;
+        assert!(xml.contains(&"aa".repeat(20)), "{xml}");
+        assert!(!xml.contains(&"bb".repeat(20)), "{xml}");
     }
 }

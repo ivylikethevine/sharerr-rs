@@ -14,20 +14,13 @@ workspace = true
 async-trait = { workspace = true }
 hex = { workspace = true }
 lava_torrent = { workspace = true }
-serde = { workspace = true }
-serde_bencode = { workspace = true }
-sha1 = { workspace = true }
 sharerr-core = { workspace = true }
-sharerr-qbit = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-secrecy = { workspace = true }
-serde_json = { workspace = true }
 sharerr-testkit = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-wiremock = { workspace = true }

@@ -190,6 +190,14 @@ struct Peer {
     last_seen: Instant,
 }
 
+impl Peer {
+    /// Whether this peer is still inside its TTL as of `now` — the single
+    /// liveness check `announce`, `stats`, and `scrape` all apply.
+    fn is_live(&self, now: Instant) -> bool {
+        now.duration_since(self.last_seen) < PEER_TTL
+    }
+}
+
 /// Every swarm this tracker is serving, keyed by info hash.
 ///
 /// In memory only. A restart loses the peer lists, and every client re-announces
@@ -199,6 +207,17 @@ struct Peer {
 #[derive(Debug, Default)]
 pub struct Swarms {
     inner: RwLock<HashMap<InfoHash, Swarm>>,
+}
+
+/// Live totals across every swarm this tracker serves right now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SwarmStats {
+    /// Swarms with at least one live peer.
+    pub swarms: usize,
+    /// Live peers across all swarms, seeders included.
+    pub peers: usize,
+    /// The subset of those with the whole thing.
+    pub seeders: usize,
 }
 
 /// The answer to one announce.
@@ -220,7 +239,7 @@ impl Swarms {
 
         // Expiry happens here rather than on a timer: a swarm nobody announces to
         // is a swarm nobody is asking about, and sweeping it costs nothing to defer.
-        swarm.retain(|_, peer| now.duration_since(peer.last_seen) < PEER_TTL);
+        swarm.retain(|_, peer| peer.is_live(now));
 
         if request.event == Event::Stopped {
             swarm.remove(&request.peer_id);
@@ -262,6 +281,33 @@ impl Swarms {
         }
     }
 
+    /// Live totals across every swarm, for the status page's one-glance line.
+    ///
+    /// Counts only peers inside their TTL — the map itself is swept lazily on
+    /// announce, so entries past their TTL may still be present and must not be
+    /// reported as connected.
+    pub async fn stats(&self) -> SwarmStats {
+        let swarms = self.inner.read().await;
+        let now = Instant::now();
+
+        let mut stats = SwarmStats::default();
+        for swarm in swarms.values() {
+            let live = swarm.values().filter(|peer| peer.is_live(now));
+            let mut any = false;
+            for peer in live {
+                any = true;
+                stats.peers += 1;
+                if peer.left == 0 {
+                    stats.seeders += 1;
+                }
+            }
+            if any {
+                stats.swarms += 1;
+            }
+        }
+        stats
+    }
+
     /// Seeder and leecher counts for one hash, for `/scrape`.
     pub async fn scrape(&self, info_hash: &InfoHash) -> (usize, usize) {
         let swarms = self.inner.read().await;
@@ -270,25 +316,22 @@ impl Swarms {
         };
 
         let now = Instant::now();
-        swarm
-            .values()
-            .filter(|peer| now.duration_since(peer.last_seen) < PEER_TTL)
-            .fold((0, 0), |(complete, incomplete), peer| {
+        swarm.values().filter(|peer| peer.is_live(now)).fold(
+            (0, 0),
+            |(complete, incomplete), peer| {
                 if peer.left == 0 {
                     (complete + 1, incomplete)
                 } else {
                     (complete, incomplete + 1)
                 }
-            })
+            },
+        )
     }
 
-    /// How many swarms are currently tracked. For the status page.
-    pub async fn len(&self) -> usize {
+    /// How many swarms are currently tracked.
+    #[cfg(test)]
+    async fn len(&self) -> usize {
         self.inner.read().await.len()
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.len().await == 0
     }
 }
 
@@ -302,6 +345,10 @@ impl Swarms {
 /// the one that matters — `peers` as a byte string of packed addresses, not a
 /// UTF-8 string — is precisely the thing a serde derive makes awkward.
 impl AnnounceResponse {
+    /// Render as the bencoded response a BitTorrent client expects.
+    ///
+    /// `compact` selects the packed 6-bytes-per-peer form, which is what modern
+    /// clients ask for.
     pub fn to_bencode(&self, compact: bool) -> Vec<u8> {
         let mut out = Vec::with_capacity(128);
         out.push(b'd');
@@ -318,14 +365,7 @@ impl AnnounceResponse {
 
         put_key(&mut out, "peers");
         if compact {
-            let mut packed = Vec::with_capacity(v4.len() * 6);
-            for addr in &v4 {
-                if let IpAddr::V4(ip) = addr.ip() {
-                    packed.extend_from_slice(&ip.octets());
-                    packed.extend_from_slice(&addr.port().to_be_bytes());
-                }
-            }
-            put_bytes(&mut out, &packed);
+            put_bytes(&mut out, &pack_compact(&v4));
         } else {
             out.push(b'l');
             for addr in &v4 {
@@ -342,15 +382,8 @@ impl AnnounceResponse {
         // Only emitted when there is something to put in it. An empty `peers6` is
         // harmless but some older clients are happier without the key at all.
         if compact && !v6.is_empty() {
-            let mut packed = Vec::with_capacity(v6.len() * 18);
-            for addr in &v6 {
-                if let IpAddr::V6(ip) = addr.ip() {
-                    packed.extend_from_slice(&ip.octets());
-                    packed.extend_from_slice(&addr.port().to_be_bytes());
-                }
-            }
             put_key(&mut out, "peers6");
-            put_bytes(&mut out, &packed);
+            put_bytes(&mut out, &pack_compact(&v6));
         }
 
         out.push(b'e');
@@ -479,6 +512,22 @@ fn percent_decode(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Pack peers in BEP 23/7 compact form: address octets then a big-endian port,
+/// 6 bytes per IPv4 peer and 18 per IPv6. The caller partitions by family —
+/// `peers` and `peers6` are separate keys — and this packs whichever list it is
+/// handed.
+fn pack_compact(addrs: &[&SocketAddr]) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(addrs.len() * 18);
+    for addr in addrs {
+        match addr.ip() {
+            IpAddr::V4(ip) => packed.extend_from_slice(&ip.octets()),
+            IpAddr::V6(ip) => packed.extend_from_slice(&ip.octets()),
+        }
+        packed.extend_from_slice(&addr.port().to_be_bytes());
+    }
+    packed
+}
+
 const fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -489,16 +538,9 @@ const fn hex_nibble(byte: u8) -> Option<u8> {
 }
 
 /// Parse a hex info hash — the form sharerr stores and the Torznab feed publishes.
-pub fn info_hash_from_hex(hex: &str) -> Option<InfoHash> {
-    if hex.len() != HASH_LEN * 2 {
-        return None;
-    }
-
+pub fn info_hash_from_hex(raw: &str) -> Option<InfoHash> {
     let mut out = [0u8; HASH_LEN];
-    for (byte, pair) in out.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
-        let (hi, lo) = (hex_nibble(pair[0])?, hex_nibble(pair[1])?);
-        *byte = (hi << 4) | lo;
-    }
+    hex::decode_to_slice(raw, &mut out).ok()?;
     Some(out)
 }
 

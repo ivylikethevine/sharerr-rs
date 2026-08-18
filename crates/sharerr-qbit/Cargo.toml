@@ -11,6 +11,7 @@ description = "qBittorrent WebUI API v2 client, shaped so that adding a share ne
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 # Adds to the workspace feature set rather than replacing it: `form` and
 # `multipart` are what post the .torrent file, and `cookies` carries qBittorrent's
 # session between the login call and everything after it.
@@ -18,12 +19,13 @@ reqwest = { workspace = true, features = ["form", "multipart", "cookies"] }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sharerr-core = { workspace = true }
+sharerr-client = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+sharerr-testkit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 wiremock = { workspace = true }

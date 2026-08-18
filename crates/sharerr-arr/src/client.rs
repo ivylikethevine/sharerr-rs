@@ -13,14 +13,25 @@ use url::Url;
 
 use crate::error::{ArrError, Result};
 use crate::models::{SystemStatus, Tag};
-use crate::{Discovered, radarr, sonarr};
+use crate::{Discovered, lidarr, radarr, readarr, sonarr};
 
-const API_PREFIX: &str = "api/v3/";
+/// The API prefix is per-source: Sonarr, Radarr and Whisparr are on `v3`, Lidarr
+/// and Readarr on `v1`. See [`MediaSource::api_version`].
+fn api_prefix(kind: MediaSource) -> &'static str {
+    // Static rather than formatted: this runs on every single HTTP call.
+    match kind.api_version() {
+        "v1" => "api/v1/",
+        _ => "api/v3/",
+    }
+}
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Enough of an error body to identify the problem, bounded so a stray HTML error
-/// page from a misconfigured reverse proxy does not flood the logs.
-const MAX_ERROR_BODY: usize = 400;
 
+use sharerr_client::clamp_body;
+
+/// A Sonarr or Radarr v3 client.
+///
+/// One transport for both, because the two APIs are near-identical; [`Self::kind`]
+/// is what decides the resource walk.
 pub struct ArrClient {
     kind: MediaSource,
     /// Always ends in `/`, so `Url::join` appends rather than replacing the last
@@ -44,45 +55,31 @@ impl std::fmt::Debug for ArrClient {
 
 impl ArrClient {
     pub fn new(kind: MediaSource, base: &Url, api_key: SecretString) -> Result<Self> {
+        // Only the *arr apps speak this API. The directory source has no HTTP
+        // API at all — refusing here keeps every later call total.
+        if !MediaSource::ARRS.contains(&kind) {
+            return Err(ArrError::NotAnApp { service: kind });
+        }
         let http = reqwest::Client::builder()
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(ArrError::Client)?;
-        Self::with_http(kind, base, api_key, http)
-    }
-
-    /// Same as [`Self::new`] but with a caller-supplied client, so tests can point
-    /// several clients at one wiremock server without rebuilding TLS state.
-    pub fn with_http(
-        kind: MediaSource,
-        base: &Url,
-        api_key: SecretString,
-        http: reqwest::Client,
-    ) -> Result<Self> {
-        let mut base = base.clone();
-        if !base.path().ends_with('/') {
-            let with_slash = format!("{}/", base.path());
-            base.set_path(&with_slash);
-        }
         Ok(Self {
             kind,
-            base,
+            base: sharerr_client::normalise_base(base),
             api_key,
             http,
         })
     }
 
+    /// Whether this client talks to Sonarr or Radarr.
     pub fn kind(&self) -> MediaSource {
         self.kind
     }
 
-    pub fn base_url(&self) -> &Url {
-        &self.base
-    }
-
     fn endpoint(&self, path: &str) -> Result<Url> {
         self.base
-            .join(API_PREFIX)
+            .join(api_prefix(self.kind))
             .and_then(|u| u.join(path))
             .map_err(|source| ArrError::Url {
                 service: self.kind,
@@ -92,7 +89,11 @@ impl ArrClient {
 
     /// The only place the API key is read. Everything else goes through here, so
     /// there is exactly one line to audit.
-    async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
+    pub(crate) async fn get<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T> {
         let url = self.endpoint(path)?;
 
         let response = self
@@ -105,7 +106,7 @@ impl ArrClient {
             .map_err(|source| ArrError::Unreachable {
                 service: self.kind,
                 url: url.to_string(),
-                source,
+                detail: sharerr_client::error_chain(&source),
             })?;
 
         let status = response.status();
@@ -134,7 +135,7 @@ impl ArrClient {
             .map_err(|source| ArrError::Unreachable {
                 service: self.kind,
                 url: url.to_string(),
-                source,
+                detail: sharerr_client::error_chain(&source),
             })?;
 
         serde_json::from_slice(&bytes).map_err(|source| ArrError::Decode {
@@ -142,14 +143,6 @@ impl ArrClient {
             path: path.to_owned(),
             source,
         })
-    }
-
-    pub(crate) async fn get_list<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        query: &[(&str, String)],
-    ) -> Result<Vec<T>> {
-        self.get(path, query).await
     }
 
     /// Cheap liveness + auth probe for `doctor`.
@@ -183,19 +176,23 @@ impl ArrClient {
     /// advice and look identical from the outside.
     pub async fn discover(&self, tag_label: &str) -> Result<Vec<Discovered>> {
         let tag_id = self.tag_id(tag_label).await?;
+        self.discover_with_tag_id(tag_id).await
+    }
+
+    /// [`Self::discover`] for a caller that already resolved the tag id — the
+    /// health checks do, and re-resolving here cost every probe a duplicate
+    /// `/tag` round trip.
+    pub async fn discover_with_tag_id(&self, tag_id: i64) -> Result<Vec<Discovered>> {
         match self.kind {
-            MediaSource::Sonarr => sonarr::discover(self, tag_id).await,
+            // Whisparr is Sonarr's codebase with a different catalogue, so it walks
+            // series and episode files identically — the same code, not a copy.
+            MediaSource::Sonarr | MediaSource::Whisparr => sonarr::discover(self, tag_id).await,
             MediaSource::Radarr => radarr::discover(self, tag_id).await,
+            MediaSource::Lidarr => lidarr::discover(self, tag_id).await,
+            MediaSource::Readarr => readarr::discover(self, tag_id).await,
+            // Unreachable: `Self::new` refuses to build a client for anything
+            // that does not speak the *arr API.
+            MediaSource::Directory => Err(ArrError::NotAnApp { service: self.kind }),
         }
     }
-}
-
-/// Clamp an error body for inclusion in a message.
-///
-/// Bounded by **characters, not bytes**: `String::truncate` panics outright if the
-/// byte index lands inside a multi-byte character, and error bodies are exactly
-/// where non-ASCII shows up — a localized error page from a reverse proxy, or a
-/// title quoted back in the message.
-fn clamp_body(body: &str) -> String {
-    body.chars().take(MAX_ERROR_BODY).collect()
 }

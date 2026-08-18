@@ -18,7 +18,7 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use super::templates::{DiagnosticsPage, SampleRow, ServiceLine, render};
-use crate::checks::{self, ArrOutcome};
+use crate::checks::{self, ArrOutcome, DirOutcome};
 
 /// How many problem paths to name before summarising the rest.
 ///
@@ -29,39 +29,95 @@ const MAX_LISTED: usize = 20;
 pub async fn page(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
 
+    // One vault open for the whole page. Opening it derives the key with Argon2 —
+    // ~16ms of solid CPU, more on ARM — so paying that once per configured
+    // service turned this into the most expensive page in the UI.
+    let vault = state.serve.open_vault().await;
+    let api_key = |key: &'static str| -> Result<Option<SecretString>, String> {
+        match &vault {
+            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
+            Err(reason) => Err(reason.clone()),
+        }
+    };
+
+    // The services are independent, so the page waits for the slowest of them
+    // rather than the sum of all five.
+    let outcomes = futures::future::join_all(
+        config
+            .configured_sources()
+            .into_iter()
+            // `configured_sources` yields only *arr apps, each of which has a key.
+            .filter_map(|kind| secret_keys::api_key_for(kind).map(|key| (kind, key)))
+            .map(|(kind, key)| {
+                let api_key = api_key(key);
+                let config = &config;
+                async move {
+                    let url = config.service(kind).map(|s| &s.url);
+                    (
+                        kind,
+                        checks::check_arr(kind, url, api_key, &config.tag).await,
+                    )
+                }
+            }),
+    )
+    .await;
+
     let mut services = Vec::new();
     let mut discovered: Vec<Discovered> = Vec::new();
-
-    for kind in [MediaSource::Sonarr, MediaSource::Radarr] {
-        let (service, key) = match kind {
-            MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
-            MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
-        };
-
-        // An unconfigured service is not a fault to report — plenty of instances
-        // run only one of the two.
-        if service.is_none() {
-            continue;
-        }
-
-        let outcome = checks::check_arr(
-            kind,
-            service.map(|s| &s.url),
-            secret(&state, key).await,
-            &config.tag,
-        )
-        .await;
+    for (kind, outcome) in outcomes {
         services.push(describe(kind, &config, &outcome));
         discovered.extend(outcome.into_items());
     }
 
-    let paths = checks::check_paths(&config, &discovered);
+    // The directory scans are filesystem-bound; off the async loop for the same
+    // reason as `check_paths` below.
+    let libraries = config.library.clone();
+    let library_lines = match tokio::task::spawn_blocking(move || {
+        libraries
+            .iter()
+            .map(|library| {
+                let outcome = checks::check_library(library);
+                (describe_library(library, &outcome), outcome.into_items())
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(lines) => lines,
+        // A panicked scan must not make a configured [[library]] install look
+        // identical to one with no libraries at all.
+        Err(err) => vec![(
+            ServiceLine {
+                name: "library".to_owned(),
+                message: format!("the scan did not complete: {err}"),
+                ok: false,
+            },
+            Vec::new(),
+        )],
+    };
+    for (line, items) in library_lines {
+        services.push(line);
+        discovered.extend(items);
+    }
+
+    // `check_paths` stats every discovered file. On a container pinned to one
+    // CPU there is exactly one worker thread, so running it inline would stall
+    // /health and every other request for the duration of the walk.
+    let scanned = !discovered.is_empty();
+    let paths = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || checks::check_paths(&config, &discovered))
+            .await
+            // A panicked walk renders as an empty report rather than a 500; the
+            // service lines above still carry the useful half of the page.
+            .unwrap_or_default()
+    };
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
     render(&DiagnosticsPage {
         signed_in: true,
         services,
-        scanned: !discovered.is_empty(),
+        scanned,
         rules: paths.rules,
         checked: paths.checked,
         unmapped: paths.unmapped,
@@ -81,15 +137,6 @@ pub async fn page(State(state): State<WebState>) -> Response {
             qbit: sample.qbit.display().to_string(),
         }),
     })
-}
-
-async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretString>, String> {
-    state
-        .serve
-        .open_vault()
-        .await?
-        .get(key)
-        .map_err(|err| err.to_string())
 }
 
 /// One line per service, saying whether it contributed anything to the scan.
@@ -131,6 +178,40 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
 
     ServiceLine {
         name: kind.as_str().to_owned(),
+        message,
+        ok,
+    }
+}
+
+/// One line per `[[library]]` directory, in this page's voice.
+fn describe_library(
+    library: &sharerr_core::config::LibraryConfig,
+    outcome: &DirOutcome,
+) -> ServiceLine {
+    let (ok, message) = match outcome {
+        DirOutcome::Ready { skipped: 0, items } => (
+            true,
+            format!("{} {} file(s)", items.len(), library.kind.as_str()),
+        ),
+        DirOutcome::Ready { skipped, items } => (
+            true,
+            format!(
+                "{} {} file(s); {skipped} skipped — their names could not be classified",
+                items.len(),
+                library.kind.as_str()
+            ),
+        ),
+        DirOutcome::Empty => (true, "empty — nothing to share yet".to_owned()),
+        DirOutcome::Missing => (
+            false,
+            "does not exist as sharerr sees it — check the mount".to_owned(),
+        ),
+        DirOutcome::NotADirectory => (false, "not a directory".to_owned()),
+        DirOutcome::Unreadable(reason) => (false, format!("could not scan: {reason}")),
+    };
+
+    ServiceLine {
+        name: format!("library {}", library.path.display()),
         message,
         ok,
     }

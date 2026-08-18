@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use sharerr_core::Config;
-use sharerr_core::config::PathMapping;
+use sharerr_core::config::{LibraryConfig, LibraryKind, PathMapping};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// One field the UI is allowed to write, addressed by its dotted config path.
@@ -174,6 +174,26 @@ impl ConfigFile {
         }
 
         self.doc["path_map"] = Item::ArrayOfTables(tables);
+    }
+
+    /// Replace the whole `library` array — wholesale for the same reason as
+    /// [`Self::set_path_map`]: the form submits every row on every save, and an
+    /// empty list means "no directories", which must remove the array.
+    pub fn set_libraries(&mut self, libraries: &[LibraryConfig]) {
+        if libraries.is_empty() {
+            self.doc.remove("library");
+            return;
+        }
+
+        let mut tables = ArrayOfTables::new();
+        for library in libraries {
+            let mut table = Table::new();
+            table["path"] = value(library.path.to_string_lossy().as_ref());
+            table["kind"] = value(library.kind.as_str());
+            tables.push(table);
+        }
+
+        self.doc["library"] = Item::ArrayOfTables(tables);
     }
 
     /// Render the document as it would be written.
@@ -354,6 +374,46 @@ pub fn parse_path_map(rows: &[(String, String, String)]) -> Result<Vec<PathMappi
     Ok(mappings)
 }
 
+/// Parse the library rows a form submitted: `(path, kind)` per row.
+///
+/// Rows with a blank path are dropped — the spare empty row the page renders for
+/// adding one — and an unknown kind is an error rather than a guess, because the
+/// kind decides which feed category every file in the directory lands in.
+pub fn parse_libraries(rows: &[(String, String)]) -> Result<Vec<LibraryConfig>> {
+    let mut libraries = Vec::new();
+
+    for (index, (path, kind)) in rows.iter().enumerate() {
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        let Some(kind) = LibraryKind::parse(kind.trim()) else {
+            bail!(
+                "library {} has no valid kind — pick tv, movie, music or book",
+                index + 1
+            );
+        };
+        let path = PathBuf::from(path);
+        // A relative path would scan fine against the working directory and
+        // then fail at share time, when the path resolver refuses it.
+        if !path.is_absolute() {
+            bail!("library {} must be an absolute path", path.display());
+        }
+        libraries.push(LibraryConfig { path, kind });
+    }
+
+    if let Some((a, b)) = crate::library::overlapping_roots(&libraries) {
+        bail!(
+            "library directories overlap: {} and {} — a file reachable from both \
+             would be shared under whichever kind came last",
+            a.display(),
+            b.display()
+        );
+    }
+
+    Ok(libraries)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -482,6 +542,34 @@ username = "admin"
 
         file.set_path_map(&[]);
         assert!(!file.to_toml().contains("path_map"));
+    }
+
+    /// `[[library]]` behaves exactly like `[[path_map]]`: replaced wholesale,
+    /// removed when empty, blank rows dropped, and a bad kind refused.
+    #[test]
+    fn library_rows_round_trip_and_reject_a_bad_kind() {
+        let mut file = doc("[[library]]\npath = \"/stale\"\nkind = \"movie\"\n");
+
+        let libraries = parse_libraries(&[
+            ("/media/extras".to_owned(), "movie".to_owned()),
+            ("/media/tapes".to_owned(), "tv".to_owned()),
+            (String::new(), "movie".to_owned()),
+        ])
+        .unwrap();
+        file.set_libraries(&libraries);
+
+        let config = crate::settings::validate(&file.to_toml()).expect("valid");
+        assert_eq!(config.library.len(), 2);
+        assert_eq!(config.library[0].kind, LibraryKind::Movie);
+        assert_eq!(config.library[1].path, Path::new("/media/tapes"));
+        assert!(!file.to_toml().contains("/stale"), "stale rows must go");
+
+        file.set_libraries(&[]);
+        assert!(!file.to_toml().contains("library"));
+
+        let err = parse_libraries(&[("/media/x".to_owned(), "anime".to_owned())])
+            .expect_err("an unknown kind must be refused");
+        assert!(format!("{err:#}").contains("library 1"), "{err:#}");
     }
 
     #[test]
@@ -644,6 +732,28 @@ username = "admin"
         let reopened = ConfigFile::open(&path).unwrap();
         assert!(reopened.to_toml().contains("# keep me"));
         assert!(reopened.to_toml().contains(r#"tag = "second""#));
+    }
+
+    /// The two transforms are inverses over every writable path, which is what
+    /// lets `load_or_recover` derive `SHARERR_DATA_DIR` from the same constant
+    /// the UI writes through — a renamed field breaks this test instead of
+    /// silently breaking recovery.
+    #[test]
+    fn env_var_names_round_trip_through_the_override_scan() {
+        use sharerr_core::config::config_paths;
+
+        let vars = config_paths::ALL
+            .iter()
+            .map(|path| (config_paths::env_var(path), "x".to_owned()));
+        let found = collect_overrides(vars);
+
+        for path in config_paths::ALL {
+            assert_eq!(
+                found.get(*path).map(String::as_str),
+                Some(config_paths::env_var(path).as_str()),
+                "{path:?} did not survive the env round-trip"
+            );
+        }
     }
 
     #[test]

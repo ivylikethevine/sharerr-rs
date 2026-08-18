@@ -32,11 +32,22 @@ anyhow = "1.0.104"
 argon2 = "0.5.3"
 askama = "0.16.0"
 async-trait = "0.1.92"
+# Transmission's RPC takes the .torrent as base64 in a JSON body, unlike
+# qBittorrent's multipart upload.
+base64 = "0.22.1"
 axum = "0.8.9"
 axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
 clap = "4.6.6"
+# Gossip records are signed by the peer they describe; Ed25519 because the keys
+# and signatures are small enough to travel in JSON and the verify cost is
+# nothing next to the HTTP request carrying it. `rand_core` stays off — key
+# material comes from the same `getrandom` path as every other secret.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
 figment = "0.10.19"
+# The facade over the futures-util that reqwest and axum already pull in;
+# used for join_all over dynamically-sized sets of independent requests.
+futures = "0.3.31"
 getrandom = "0.4.3"
 hex = "0.4.3"
 lava_torrent = "0.11.1"
@@ -46,16 +57,19 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "q
 rpassword = "7.5.4"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_bencode = "0.2.4"
 serde_json = "1.0.151"
 sha1 = "0.11.0"
+# Peer API keys are hashed with SHA-256, not Argon2 — they are 160 bits of CSPRNG
+# output rather than a human password, and the lookup has to be an indexed
+# equality on every Torznab request. See migrations/0003_peers.sql.
+sha2 = "0.10.9"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
 sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
-time = { version = "0.3.45", features = ["serde", "formatting", "parsing"] }
+time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
 tokio = "1.53.1"
 toml_edit = "0.22"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
@@ -70,10 +84,12 @@ zeroize = "1.9.0"
 
 # The workspace's own crates, so a version bump is one edit rather than five.
 sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
+sharerr-client = { version = "0.1.0", path = "crates/sharerr-client" }
 sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
 sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
 sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
-sharerr-testkit = { path = "crates/sharerr-testkit" }
+sharerr-transmission = { version = "0.1.0", path = "crates/sharerr-transmission" }
+sharerr-testkit = { version = "0.1.0", path = "crates/sharerr-testkit" }
 sharerr-torrent = { version = "0.1.0", path = "crates/sharerr-torrent" }
 
 [workspace.lints.rust]

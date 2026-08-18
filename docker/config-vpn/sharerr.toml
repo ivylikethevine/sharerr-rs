@@ -1,0 +1,60 @@
+# Configuration for the VPN compose test stack.
+#
+# Identical to docker/config/sharerr.toml except for the two things routing
+# qBittorrent through gluetun actually changes. Both are the mistakes this stack
+# exists to catch.
+#
+# Secrets are deliberately absent: they live in the encrypted vault, loaded once
+# the stack is up. See docker/README.md.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"
+
+[qbittorrent]
+# **Not** `http://qbittorrent:8080`. qBittorrent runs with
+# `network_mode: service:gluetun`, so it has no network of its own and no DNS name
+# of its own — that hostname does not resolve at all. It is reached at the name of
+# the container whose namespace it shares.
+#
+# This is the single most likely thing to get wrong when putting a torrent client
+# behind a VPN container, and it fails as "connection refused"/"no such host"
+# rather than as anything that names the cause.
+url = "http://gluetun:8080"
+username = "admin"
+category = "sharerr"
+tag = "sharerr"
+skip_checking = false
+
+[tracker]
+# The address a *peer* uses, which behind a VPN is the tunnel's exit — not this
+# machine, and not the container. In this stack every peer is the host, so
+# `localhost` and sharerr's published port are correct. In a real deployment this
+# is the VPN's forwarded port, and getting it wrong silently produces torrents
+# nobody can announce to.
+advertised_host = "localhost"
+port = 28477
+
+[sync]
+enabled = false
+interval_secs = 900
+
+# The same deliberately-disagreeing mounts as the plain stack: Sonarr says /tv,
+# sharerr reads /media/tv, qBittorrent is told /downloads/tv.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"
