@@ -311,7 +311,7 @@ scripted deployment or a secrets manager wants:
 |---|---|
 | `sharerr serve` | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs. |
 | `sharerr sync` | One reconciliation pass, then exit. |
-| `sharerr doctor` | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the UI's **Diagnostics** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; everything else still needs a person. |
+| `sharerr doctor` | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
 | `sharerr vault set <key>` | Reads a secret from stdin into the encrypted vault. |
 
 ```bash

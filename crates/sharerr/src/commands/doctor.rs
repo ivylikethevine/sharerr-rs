@@ -55,7 +55,8 @@ impl Report {
     }
 }
 
-pub async fn run(config: &Config, config_error: Option<&str>, fix: bool) -> Result<()> {
+pub async fn run(config: &Config, config_error: Option<&str>, args: &crate::cli::DoctorArgs) -> Result<()> {
+    let fix = args.fix;
     let mut report = Report::default();
 
     report.section("configuration");
@@ -109,6 +110,11 @@ pub async fn run(config: &Config, config_error: Option<&str>, fix: bool) -> Resu
 
     report.section("paths");
     check_paths(config, &discovered, &mut report);
+
+    if args.suggest_paths {
+        report.section("path suggestions");
+        suggest_paths(config, &discovered, args.search_root.as_deref(), &mut report);
+    }
 
     println!();
     match (report.failures, report.warnings) {
@@ -821,6 +827,71 @@ fn check_paths(config: &Config, discovered: &[Discovered], report: &mut Report) 
         }
         report.info("fix the [[path_map]] rules so the arr view maps onto sharerr's mount");
     }
+}
+
+/// `--suggest-paths`: propose `[[path_map]]` rules by matching tagged files
+/// against what actually exists under `search_root` (default `/media`), by
+/// name and size. See `crate::pathsuggest` for the algorithm and why it never
+/// searches anywhere the operator has not named.
+fn suggest_paths(
+    config: &Config,
+    discovered: &[Discovered],
+    search_root: Option<&std::path::Path>,
+    report: &mut Report,
+) {
+    let default_root = std::path::Path::new("/media");
+    let root = search_root.unwrap_or(default_root);
+
+    if !root.is_dir() {
+        report.fail(format!(
+            "{} is not a directory sharerr can see — pass --search-root, or mount \
+             the library there",
+            root.display()
+        ));
+        return;
+    }
+    if discovered.is_empty() {
+        report.info("nothing tagged, so there is nothing to match against");
+        return;
+    }
+
+    let existing: std::collections::HashSet<(&std::path::Path, &std::path::Path)> = config
+        .path_map
+        .iter()
+        .map(|m| (m.arr.as_path(), m.sharerr.as_path()))
+        .collect();
+
+    let suggestions: Vec<_> = crate::pathsuggest::suggest(discovered, root)
+        .into_iter()
+        .filter(|s| !existing.contains(&(s.arr.as_path(), s.sharerr.as_path())))
+        .collect();
+
+    if suggestions.is_empty() {
+        report.info(format!(
+            "no new mapping found under {} — every match either already has a rule, \
+             or nothing tagged matched a file there by name and size",
+            root.display()
+        ));
+        return;
+    }
+
+    for s in &suggestions {
+        report.ok(format!(
+            "{} -> {} ({} file(s) agree)",
+            s.arr.display(),
+            s.sharerr.display(),
+            s.agreement
+        ));
+        report.info(format!(
+            "  add as: arr = \"{}\", sharerr = \"{}\"",
+            s.arr.display(),
+            s.sharerr.display()
+        ));
+    }
+    report.info(
+        "proposals only — nothing was written; add the ones that look right under \
+         Settings or in [[path_map]]",
+    );
 }
 
 // ------------------------------------------------------------------ summary

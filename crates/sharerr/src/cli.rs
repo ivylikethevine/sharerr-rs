@@ -60,6 +60,19 @@ pub struct DoctorArgs {
     /// credential, a bad path mapping — still needs a person.
     #[arg(long)]
     pub fix: bool,
+
+    /// Propose `[[path_map]]` rules instead of asking you to derive them:
+    /// matches tagged files against what actually exists under
+    /// `--search-root` by name and size. Proposals only — nothing is written
+    /// to `sharerr.toml`.
+    #[arg(long)]
+    pub suggest_paths: bool,
+
+    /// Where to look for the actual files when `--suggest-paths` is set.
+    /// Defaults to `/media`, the mount point every deployment example in this
+    /// repository uses for sharerr's own view of the library.
+    #[arg(long)]
+    pub search_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

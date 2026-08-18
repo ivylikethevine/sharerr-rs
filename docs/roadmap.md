@@ -83,10 +83,6 @@ bytes.
 paths, then tracker, validating each step — matches how the *arr apps onboard and
 would catch misconfiguration at the point it is introduced.
 
-**Auto-detect path mappings.** sharerr knows what Sonarr reports and what it can
-see; proposing the mapping instead of asking the operator to derive it removes the
-single most error-prone configuration step.
-
 ---
 
 ## The lighthouse
