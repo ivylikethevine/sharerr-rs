@@ -254,6 +254,13 @@ pub struct SettingsPage {
     pub tracker_advertised_url: String,
     pub tracker_token_set: bool,
 
+    /// Whether the embedded lighthouse (`crates/sharerr-lighthouse`, run as
+    /// extra routes on one of this instance's own listeners) is on.
+    pub lighthouse_enabled: bool,
+    /// `"frontend"` or `"tracker"` — see
+    /// [`sharerr_core::config::LighthouseMount`].
+    pub lighthouse_mount: &'static str,
+
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,
     pub gluetun_enabled: bool,

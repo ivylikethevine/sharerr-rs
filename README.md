@@ -190,10 +190,22 @@ peer issued them. A request without a valid key still gets a plausible
 fabricated answer rather than an error, so scraping it yields only noise —
 see `docs/roadmap.md`'s "The lighthouse" for the full design.
 
-Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`)
-is meant to be self-hosted by anyone on neutral ground. For a single operator
-who would rather not run a second container, it can also run as extra routes
-on one of sharerr's own listeners:
+Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`,
+built from `Dockerfile.lighthouse`) is meant to be self-hosted by anyone on
+neutral ground:
+
+```bash
+docker build -f Dockerfile.lighthouse -t sharerr-lighthouse .
+docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
+```
+
+`/data` holds nothing but the decoy secret — losing it just reshuffles
+fabricated answers after a restart, not a credential. There is no published
+image for it yet; building locally is the only way to run it today.
+
+For a single operator who would rather not run a second container, it can
+also run as extra routes on one of sharerr's own listeners — under
+**Settings → Lighthouse**, or directly in `sharerr.toml`:
 
 ```toml
 [lighthouse]
@@ -342,6 +354,8 @@ scripted deployment or a secrets manager wants:
 | `sharerr sync` | One reconciliation pass, then exit. |
 | `sharerr doctor` | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
 | `sharerr vault set <key>` | Reads a secret from stdin into the encrypted vault. |
+| `sharerr vault list` | Lists which secret keys are currently set, without their values. |
+| `sharerr vault remove <key>` | Deletes a secret from the vault. |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -391,9 +405,12 @@ bytes. No real content is involved anywhere.
 | `sharerr` | The binary: CLI, web UI, Torznab, tracker, reconciliation |
 | `sharerr-core` | Domain types, layered config, path mapping. No I/O |
 | `sharerr-arr` | Sonarr/Radarr clients and tagged-content discovery |
+| `sharerr-client` | The narrow trait a torrent client backend implements |
 | `sharerr-qbit` | qBittorrent WebUI client |
+| `sharerr-transmission` | Transmission RPC client |
 | `sharerr-store` | Encrypted vault + SQLite store |
 | `sharerr-torrent` | Torrent construction and tracker resolution |
+| `sharerr-lighthouse` | The lighthouse rendezvous service — its own binary too |
 | `sharerr-testkit` | Synthetic fixtures. Never in a release build |
 
 The original design brief, and the two corrections the implementation forced on

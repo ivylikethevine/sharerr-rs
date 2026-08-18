@@ -215,6 +215,46 @@
   </button>
 </form>
 
+<h2>Lighthouse</h2>
+<form method="post" action="/settings/lighthouse" class="panel">
+  <p class="hint">
+    Rendezvous for a friend whose address rotated while yours did too, so
+    gossip alone has no path back — see <code>docs/roadmap.md</code>'s "The
+    lighthouse". This runs the lighthouse service itself as extra routes on
+    one of sharerr's own listeners, for an operator who would rather not run
+    a second container; sharerr does not yet report itself to a lighthouse or
+    query one for a quiet friend, so enabling this only makes the service
+    available, not yet used.
+  </p>
+
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if lighthouse_enabled %}checked{% endif %}
+           {% call lock_attr("lighthouse.enabled") %}{% endcall %}>
+    Run the lighthouse on this instance
+  </label>
+  {% call locked("lighthouse.enabled") %}{% endcall %}
+
+  <label for="lighthouse_mount">Listener</label>
+  <select id="lighthouse_mount" name="mount" {% call lock_attr("lighthouse.mount") %}{% endcall %}>
+    <option value="frontend" {% if lighthouse_mount == "frontend" %}selected{% endif %}>
+      Frontend — this server's own port
+    </option>
+    <option value="tracker" {% if lighthouse_mount == "tracker" %}selected{% endif %}>
+      Tracker — the dedicated tracker listener if set, otherwise the frontend port
+    </option>
+  </select>
+  {% call locked("lighthouse.mount") %}{% endcall %}
+  <p class="hint">
+    Which port carries the lighthouse's routes. Its own image and port
+    (<code>sharerr-lighthouse</code>) is the deployment the design is built
+    for — self-hosted by anyone, on neutral ground away from any particular
+    library — so prefer that unless running a second container is genuinely
+    not worth it here.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
+
 <h2>Gluetun</h2>
 <form method="post" action="/settings/gluetun" class="panel">
   <p class="hint">

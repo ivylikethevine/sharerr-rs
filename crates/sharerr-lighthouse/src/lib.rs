@@ -331,12 +331,22 @@ async fn lookup(State(state): State<Arc<LighthouseState>>, Path(key_hash): Path<
     axum::Json(state.lookup(&key_hash).await).into_response()
 }
 
+/// `GET /lighthouse/v1/health` — liveness only, no state consulted. Under the
+/// same `/lighthouse/v1/...` prefix as everything else here rather than a
+/// bare `/health`, deliberately: `sharerr serve` already owns that path on
+/// whichever listener it embeds these routes onto, and a second `/health`
+/// registration on the same router panics at merge time.
+async fn health() -> &'static str {
+    "ok"
+}
+
 /// The lighthouse's routes, under `/lighthouse/v1/...` regardless of whether
 /// they are served by the standalone binary at the root of its own port or
 /// merged into another axum app — the URL a client builds is the same
 /// either way.
 pub fn routes(state: Arc<LighthouseState>) -> Router {
     Router::new()
+        .route("/lighthouse/v1/health", get(health))
         .route("/lighthouse/v1/report/{key_hash}", post(report))
         .route("/lighthouse/v1/lookup/{key_hash}", get(lookup))
         .with_state(state)

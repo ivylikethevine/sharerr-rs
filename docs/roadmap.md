@@ -8,10 +8,10 @@ ordering is a judgement about value, not a schedule.
 
 ## Status
 
-| Milestone | Scope                                                                       | Status |
-| --------- | --------------------------------------------------------------------------- | ------ |
-| —         | The lighthouse: semi-anonymous endpoint rendezvous, its own image and port  | Next   |
-| —         | Ratio and bandwidth control                                                 | Next   |
+| Milestone | Scope                                                                       | Status      |
+| --------- | --------------------------------------------------------------------------- | ----------- |
+| —         | The lighthouse: semi-anonymous endpoint rendezvous, its own image and port  | In progress |
+| —         | Ratio and bandwidth control                                                 | Next        |
 
 ---
 
@@ -70,11 +70,6 @@ library with no cap on what it costs you is a real deterrent to running this.
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
 
-**Cross-seed awareness.** The brief called for preserving existing torrents rather
-than creating duplicates. If a file is already seeding in qBittorrent under another
-torrent, sharerr should recognise it rather than adding a second entry for the same
-bytes.
-
 ---
 
 ## Ease of use
@@ -86,6 +81,17 @@ would catch misconfiguration at the point it is introduced.
 ---
 
 ## The lighthouse
+
+**Where this stands:** the rendezvous service described below is implemented —
+`crates/sharerr-lighthouse` — as its own binary and image (`Dockerfile.lighthouse`)
+with report/lookup routes, signed-record verification, and the deterministic decoy
+fabrication the privacy property depends on. sharerr can also run it embedded on
+its own frontend or tracker port, toggled from Settings → Lighthouse or via
+`[lighthouse]` in `sharerr.toml` directly, for an operator who would rather not run
+a second container. Not yet built: the other half, a sharerr instance actually
+reporting its own endpoint to a lighthouse or querying one for a quiet friend —
+today nothing feeds a lighthouse observation into peer endpoint memory. The rest
+of this section is the target design, implemented and not.
 
 Gossip only helps peers who can still reach _somebody_; two friends whose
 addresses both rotated while neither was watching have no path back to each

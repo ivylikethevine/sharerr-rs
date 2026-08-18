@@ -89,11 +89,11 @@ docker compose -f docker/compose.test.yml --profile indexer up -d prowlarr
 Then add a *Generic Torznab* indexer pointing at `http://sharerr:8477/api` with
 that key.
 
-To exercise sharerr's own tracker rather than qBittorrent's, set
-`backend = "builtin"` under `[tracker]` in `docker/config/sharerr.toml` and
-re-sync. `/announce` refuses any info hash the instance is not sharing, so a
-`d14:failure reason...` response to a made-up hash is the expected result, not a
-fault.
+sharerr's own tracker is the only one — there used to be a `[tracker] backend`
+choice between it and qBittorrent's embedded tracker, and it was removed; a
+`sharerr.toml` still naming `backend` now fails to load. `/announce` refuses
+any info hash the instance is not sharing, so a `d14:failure reason...`
+response to a made-up hash is the expected result, not a fault.
 
 ## The opt-in test suite
 
@@ -205,15 +205,15 @@ mocking establishes:
 
 | | qBittorrent | Transmission |
 |---|---|---|
-| Embedded tracker | yes, and it is the default announce backend | **none** — `tracker.backend` must be `builtin` |
+| Tracker | sharerr's own, same as every other client — see "Exercising the indexer and the tracker" above | same |
 | Categories | a category plus tags | one flat list of labels; both collapse into it |
 | Skip hash check | supported | not supported; it always verifies |
 | Credentials | a temporary password printed to the log on first start | given up front by compose |
 
-The first row is the one that matters. A Transmission setup left on the default
-tracker backend produces torrents that look perfect and that nobody can announce
-to — so `doctor` fails with a sentence naming the fix, and the run asserts that the
-built torrents carry an announce URL from sharerr's own tracker.
+Neither client has a tracker of its own to fall back on any more — sharerr's
+builtin tracker is the only one wired up, regardless of `torrent_backend` —
+so this run asserts the same thing the plain stack does: built torrents carry
+an announce URL from sharerr's own tracker.
 
 Ports are offset again (38989, 37878, 39091, 38477) so all three stacks can run at
 once.

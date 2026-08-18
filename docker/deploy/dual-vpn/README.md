@@ -62,12 +62,12 @@ port, and `sharerr/.env`'s is where friends reach the tracker and feed over
 HTTP. Either tunnel can reconnect and get handed a new exit or a new forwarded
 port without the other noticing, and the two exits are never the same address.
 
-sharerr does not yet track its **own** two addresses independently — see the
-"peer with two addresses" item in `docs/roadmap.md`. Today's `[gluetun]`
-poller and `AdvertisedEndpoint` assume one gluetun, one exit, one forwarded
-port. Point `[gluetun].control_url` at `sharerr`'s own gluetun
-(`http://sharerr-gluetun:8000` from inside this stack, or `localhost:8000`
-since sharerr shares its namespace) — that keeps the tracker/feed address
-correct. qBittorrent's own listening port, forwarded by `media-gluetun`, is
-not something sharerr currently polls or reasons about at all; it is
-qBittorrent's problem alone until that roadmap item lands.
+sharerr tracks its own two addresses independently via a second, separate
+poller: `[gluetun]` for the tracker/feed address, and `[gluetun_client]` for
+the torrent client's own address. Point `[gluetun].control_url` at
+`sharerr`'s own gluetun (`http://sharerr-gluetun:8000` from inside this
+stack, or `localhost:8000` since sharerr shares its namespace) — that keeps
+the tracker/feed address correct. Point `[gluetun_client].control_url` at
+`media-gluetun:8000` — reachable over `sharerr-shared`, the same as
+qBittorrent's WebUI — so sharerr also resolves qBittorrent's own forwarded
+port and exit, independently and on its own schedule.

@@ -593,6 +593,26 @@ pub enum LighthouseMount {
     Tracker,
 }
 
+impl LighthouseMount {
+    pub const ALL: &'static [Self] = &[Self::Frontend, Self::Tracker];
+
+    /// The value stored in `lighthouse.mount` and rendered by the settings
+    /// page's `<select>` — the same spelling serde's `rename_all = "snake_case"`
+    /// already produces, named explicitly so the web UI does not have to
+    /// round-trip through serde to render a `<select>` option.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Frontend => "frontend",
+            Self::Tracker => "tracker",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.as_str() == value)
+    }
+}
+
 /// Running the lighthouse rendezvous service ([`sharerr_lighthouse`] in the
 /// workspace) as extra routes on one of sharerr's own listeners, instead of
 /// its own separate image and port.

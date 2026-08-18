@@ -75,7 +75,10 @@ the existing file and seeds it in place.
 
 **Secrets never go in `sharerr.toml`.** They live in the encrypted vault, keyed by
 the constants in `sharerr_core::config::secret_keys`. Adding a secret means adding
-it to `secret_keys::ALL`, or the web UI silently will not manage it.
+it to `secret_keys::ALL` (or `commands/vault.rs`'s `vault set`/`vault list` silently
+reject it) *and* wiring the constant into the relevant handler in `web/settings.rs`
+(which does not consult `ALL` at all — each settings section names its secret
+explicitly), or the web UI silently will not manage it.
 
 **The config file is rewritten in place by the web UI**, comments and all, via
 `toml_edit`. A settings path is a hand-typed string in more than one place; check

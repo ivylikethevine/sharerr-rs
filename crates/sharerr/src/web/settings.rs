@@ -116,6 +116,13 @@ pub struct TrackerForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LighthouseForm {
+    #[serde(default)]
+    enabled: Option<String>,
+    mount: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct GluetunForm {
     #[serde(default)]
     enabled: Option<String>,
@@ -328,6 +335,28 @@ pub async fn save_tracker(
         }
 
         file.apply(edits);
+        Ok(())
+    })
+    .await
+}
+
+/// The embedded lighthouse: on/off, plus which of sharerr's own listeners
+/// carries it when on. No secret involved — the decoy seed behind it is
+/// minted and stored by [`crate::state::ServeState::lighthouse_state`] on
+/// first use, not typed by an operator.
+pub async fn save_lighthouse(
+    State(state): State<WebState>,
+    Form(form): Form<LighthouseForm>,
+) -> Response {
+    let Some(mount) = sharerr_core::config::LighthouseMount::parse(&form.mount) else {
+        return reject(&state, "That is not a valid lighthouse listener choice.").await;
+    };
+
+    write_config(&state, "lighthouse", move |file| {
+        file.apply([
+            Edit::bool(config_paths::LIGHTHOUSE_ENABLED, checked(&form.enabled)),
+            Edit::str(config_paths::LIGHTHOUSE_MOUNT, mount.as_str()),
+        ]);
         Ok(())
     })
     .await
@@ -862,6 +891,8 @@ async fn build_page(
             .map(url::Url::to_string)
             .unwrap_or_default(),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
+        lighthouse_enabled: config.lighthouse.enabled,
+        lighthouse_mount: config.lighthouse.mount.as_str(),
         gluetun_control_url: config
             .gluetun
             .control_url
