@@ -5,6 +5,7 @@ mod gluetun;
 mod gossip;
 mod jackett;
 mod library;
+mod notify;
 mod secrets;
 mod settings;
 mod state;

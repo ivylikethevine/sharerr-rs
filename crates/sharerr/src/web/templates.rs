@@ -245,6 +245,12 @@ pub struct SettingsPage {
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
 
+    /// Whether a webhook URL is stored — see
+    /// `secret_keys::NOTIFICATIONS_WEBHOOK_URL`.
+    pub notifications_webhook_set: bool,
+    pub notifications_kind: &'static str,
+    pub notifications_peer_quiet_secs: u64,
+
     /// One row per `[[library]]` directory, plus a spare blank row.
     pub libraries: Vec<LibraryRow>,
 

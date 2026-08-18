@@ -128,6 +128,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = background(Arc::clone(&state)) => Ok(()),
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Tracker) => Ok(()),
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Client) => Ok(()),
+        () = crate::notify::quiet_peers_loop(Arc::clone(&state)) => Ok(()),
         () = crate::gossip::exchange_loop(state) => Ok(()),
     }
 }
@@ -220,7 +221,11 @@ async fn background(state: Arc<ServeState>) {
 
         match syncer.run(false).await {
             Ok(report) => tracing::info!(%report, "sync complete"),
-            Err(err) => tracing::error!(error = format!("{err:#}"), "sync failed"),
+            Err(err) => {
+                let reason = format!("{err:#}");
+                tracing::error!(error = reason, "sync failed");
+                crate::notify::send(&state, "sync failed", &reason).await;
+            }
         }
 
         // Sleeping after the pass rather than on a fixed schedule, so a slow sync is

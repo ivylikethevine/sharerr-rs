@@ -133,6 +133,15 @@ pub struct SyncForm {
     interval_secs: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct NotificationsForm {
+    webhook_url: String,
+    #[serde(default)]
+    clear_webhook_url: Option<String>,
+    kind: String,
+    peer_quiet_secs: String,
+}
+
 /// Repeated inputs, one entry per row. `axum_extra`'s `Form` is what makes this
 /// work — axum's own uses `serde_urlencoded`, which cannot decode repeated keys
 /// into a `Vec`.
@@ -427,6 +436,50 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
                 i64::try_from(interval).unwrap_or(900),
             ),
         ]);
+        Ok(())
+    })
+    .await
+}
+
+/// A webhook fired on sync failure or a peer going quiet.
+///
+/// The URL is a vault secret — see
+/// [`sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL`] for why —
+/// so this is two writes, same shape as [`save_gluetun`]: a secret and a
+/// config section.
+pub async fn save_notifications(
+    State(state): State<WebState>,
+    Form(form): Form<NotificationsForm>,
+) -> Response {
+    let webhook = form.webhook_url.trim();
+    if !webhook.is_empty() && url::Url::parse(webhook).is_err() {
+        return reject(&state, "That does not look like a valid webhook URL.").await;
+    }
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+        webhook,
+        form.clear_webhook_url,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    write_config(&state, "notifications", |file| {
+        let Some(kind) = sharerr_core::config::NotifyKind::parse(form.kind.trim()) else {
+            anyhow::bail!("{:?} is not a known notification kind", form.kind);
+        };
+        file.apply([Edit::str(config_paths::NOTIFICATIONS_KIND, kind.as_str())]);
+
+        let secs: u64 = form.peer_quiet_secs.trim().parse().map_err(|_| {
+            anyhow::anyhow!("the peer-quiet threshold must be a whole number of seconds")
+        })?;
+        file.apply([Edit::int(
+            config_paths::NOTIFICATIONS_PEER_QUIET_SECS,
+            i64::try_from(secs).unwrap_or(604_800),
+        )]);
         Ok(())
     })
     .await
@@ -834,6 +887,10 @@ async fn build_page(
 
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
+
+        notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),
+        notifications_kind: config.notifications.kind.as_str(),
+        notifications_peer_quiet_secs: config.notifications.peer_quiet_secs,
 
         // A spare blank row so "add a library" needs no JavaScript, same as
         // the path map below.

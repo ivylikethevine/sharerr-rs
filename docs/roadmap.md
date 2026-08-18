@@ -79,9 +79,6 @@ bytes.
 (`recent_runs`), and the status page shows only the latest runs. Per-item state —
 why _this_ file is not shared — is the question the UI cannot currently answer.
 
-**Notifications.** Webhook/Discord/Apprise on sync failure or a peer going quiet.
-Standard for the *arr ecosystem this lives in.
-
 ---
 
 ## Ease of use

@@ -395,6 +395,47 @@
   <button type="submit">Save</button>
 </form>
 
+<h2>Notifications</h2>
+<form method="post" action="/settings/notifications" class="panel">
+  <p class="hint">
+    A webhook fired when a sync fails outright, or when a friend has not been
+    seen in a while. Leave the URL blank to turn this off entirely.
+  </p>
+
+  <label for="notifications_webhook_url">Webhook URL</label>
+  <input id="notifications_webhook_url" name="webhook_url" type="password" autocomplete="off"
+         placeholder="{% call stored(notifications_webhook_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if notifications_webhook_set %}
+  <label class="hint"><input type="checkbox" name="clear_webhook_url" value="1"> Remove the stored URL</label>
+  {% endif %}
+  <p class="hint">
+    Kept in the vault, not <code>sharerr.toml</code> — a Discord webhook URL
+    carries its own bearer token in the path, so this is a credential like any
+    other stored here.
+  </p>
+
+  <label for="notifications_kind">Shape</label>
+  <select id="notifications_kind" name="kind" {% call lock_attr("notifications.kind") %}{% endcall %}>
+    <option value="generic" {% if notifications_kind == "generic" %}selected{% endif %}>Generic JSON webhook</option>
+    <option value="discord" {% if notifications_kind == "discord" %}selected{% endif %}>Discord</option>
+    <option value="apprise" {% if notifications_kind == "apprise" %}selected{% endif %}>Apprise API server</option>
+  </select>
+  {% call locked("notifications.kind") %}{% endcall %}
+
+  <label for="notifications_peer_quiet_secs">Peer-quiet threshold (seconds)</label>
+  <input id="notifications_peer_quiet_secs" name="peer_quiet_secs" value="{{ notifications_peer_quiet_secs }}" inputmode="numeric"
+         {% call lock_attr("notifications.peer_quiet_secs") %}{% endcall %}>
+  {% call locked("notifications.peer_quiet_secs") %}{% endcall %}
+  <p class="hint">
+    How long a friend must go unseen before this fires — once per quiet spell,
+    not on a repeat. <code>0</code> turns just this check off; sync-failure
+    notifications still fire as long as a webhook URL is set.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
+
 <hr>
 <p class="hint">
   Everything above is what sharerr needs to run. Below is where it finds media to

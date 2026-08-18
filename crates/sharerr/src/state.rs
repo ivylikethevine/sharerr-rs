@@ -18,6 +18,7 @@ use sharerr_store::{Store, Vault, master_key_from_env};
 use tokio::sync::{Notify, RwLock};
 
 use crate::gluetun::{GluetunStatus, GluetunTarget};
+use crate::notify::QuietNotified;
 use crate::sync::Syncer;
 
 /// How soon to retry building the syncer after the first failure.
@@ -121,6 +122,8 @@ pub struct ServeState {
     /// because two consumers need one copy: however many listeners carry
     /// `/announce`, and the status page's "n peers connected" line.
     swarms: Arc<sharerr_torrent::Swarms>,
+    /// Dedupe for the peer-quiet notification — see [`crate::notify`].
+    quiet_notified: Arc<QuietNotified>,
 }
 
 impl ServeState {
@@ -150,6 +153,7 @@ impl ServeState {
             gluetun_status: Arc::new(GluetunStatus::default()),
             gluetun_client_status: Arc::new(GluetunStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
+            quiet_notified: Arc::new(QuietNotified::default()),
         }
     }
 
@@ -157,6 +161,11 @@ impl ServeState {
     /// page alike.
     pub fn swarms(&self) -> Arc<sharerr_torrent::Swarms> {
         Arc::clone(&self.swarms)
+    }
+
+    /// Dedupe state for the peer-quiet notification.
+    pub fn quiet_notified(&self) -> Arc<QuietNotified> {
+        Arc::clone(&self.quiet_notified)
     }
 
     /// The live advertised endpoint this whole process shares — where friends

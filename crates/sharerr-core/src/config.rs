@@ -50,6 +50,14 @@ pub mod secret_keys {
     /// [`super::GluetunConfig`] and `[gluetun_client]`.
     pub const GLUETUN_CLIENT_API_KEY: &str = "gluetun_client.api_key";
 
+    /// Where a sync-failure or peer-quiet notification is POSTed.
+    ///
+    /// In the vault, not `[notifications]` in `sharerr.toml`, even though it is
+    /// not credential-shaped at a glance: a Discord webhook URL embeds its own
+    /// bearer token in the path, so this is exactly the kind of value this
+    /// project treats as a secret everywhere else.
+    pub const NOTIFICATIONS_WEBHOOK_URL: &str = "notifications.webhook_url";
+
     /// This instance's Ed25519 signing key for gossip records, hex-encoded.
     ///
     /// Deliberately **not** in [`ALL`]: that list is what the web UI offers as
@@ -85,6 +93,7 @@ pub mod secret_keys {
         TRACKER_TOKEN,
         GLUETUN_API_KEY,
         GLUETUN_CLIENT_API_KEY,
+        NOTIFICATIONS_WEBHOOK_URL,
     ];
 }
 
@@ -156,6 +165,12 @@ pub mod config_paths {
     pub const SYNC_ENABLED: &str = "sync.enabled";
     pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
 
+    /// Which webhook shape to send — see [`super::NotifyKind`]. The URL itself
+    /// is a vault secret, [`super::secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
+    pub const NOTIFICATIONS_KIND: &str = "notifications.kind";
+    /// How long a peer must go unseen before "gone quiet" fires, in seconds.
+    pub const NOTIFICATIONS_PEER_QUIET_SECS: &str = "notifications.peer_quiet_secs";
+
     /// The `SHARERR_*` variable that overrides a dotted config path — the inverse
     /// of the env scan's lowercase-and-`__`-to-`.` transform. Kept beside the
     /// paths so a consumer that needs the variable's name derives it from the
@@ -196,6 +211,8 @@ pub mod config_paths {
         GLUETUN_CLIENT_POLL_SECS,
         SYNC_ENABLED,
         SYNC_INTERVAL_SECS,
+        NOTIFICATIONS_KIND,
+        NOTIFICATIONS_PEER_QUIET_SECS,
     ];
 }
 
@@ -235,6 +252,9 @@ pub struct Config {
     /// `gluetun` above already covers it.
     pub gluetun_client: GluetunConfig,
     pub sync: SyncConfig,
+    /// A webhook fired on sync failure or a peer going quiet. The URL itself is
+    /// a vault secret — see [`secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
+    pub notifications: NotificationsConfig,
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
     pub path_map: Vec<PathMapping>,
@@ -263,6 +283,7 @@ impl Default for Config {
             gluetun: GluetunConfig::default(),
             gluetun_client: GluetunConfig::default(),
             sync: SyncConfig::default(),
+            notifications: NotificationsConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
         }
@@ -642,6 +663,71 @@ impl Default for SyncConfig {
             enabled: true,
             interval_secs: 900,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+/// A webhook fired on sync failure or a peer going quiet — standard for the
+/// *arr ecosystem this lives in. The URL itself is not here: see
+/// [`secret_keys::NOTIFICATIONS_WEBHOOK_URL`] for why it is a vault secret
+/// rather than a plain config field. Whether notifications are active at all
+/// is therefore decided by whether that secret is set, the same way gluetun
+/// polling is decided by whether `control_url` is set.
+pub struct NotificationsConfig {
+    /// Which webhook shape to send.
+    pub kind: NotifyKind,
+    /// How long a peer must go unseen before "gone quiet" fires, in seconds.
+    /// `0` turns the peer-quiet check off without touching sync-failure
+    /// notifications, which are unconditional once a webhook is configured.
+    pub peer_quiet_secs: u64,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            kind: NotifyKind::default(),
+            // A week. Long enough that a friend's ordinary quiet week (they are
+            // travelling, their box is off) is not a false alarm; short enough
+            // that "did Sam's instance die" is answered before it has been true
+            // for a month.
+            peer_quiet_secs: 7 * 24 * 3600,
+        }
+    }
+}
+
+/// The payload shape a notification is sent in — one per service this project
+/// names explicitly, because each expects a different JSON body at the same
+/// "POST a webhook URL" mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotifyKind {
+    /// `{"event": ..., "message": ...}` — for anything that takes a plain
+    /// JSON webhook, including a custom receiver.
+    #[default]
+    Generic,
+    /// `{"content": ...}` — a Discord webhook URL.
+    Discord,
+    /// `{"title": ..., "body": ...}` — an Apprise API server's `/notify`
+    /// endpoint, which fans a single call out to whatever Apprise itself is
+    /// configured to reach.
+    Apprise,
+}
+
+impl NotifyKind {
+    pub const ALL: &'static [Self] = &[Self::Generic, Self::Discord, Self::Apprise];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Discord => "discord",
+            Self::Apprise => "apprise",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == value)
     }
 }
 

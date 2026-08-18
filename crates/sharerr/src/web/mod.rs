@@ -114,6 +114,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/paths", post(settings::save_paths))
         .route("/settings/sync", post(settings::save_sync))
         .route(
+            "/settings/notifications",
+            post(settings::save_notifications),
+        )
+        .route(
             "/settings/generate/{field}",
             post(settings::generate_secret),
         )
@@ -433,6 +437,7 @@ mod tests {
             "/settings/libraries",
             "/settings/paths",
             "/settings/sync",
+            "/settings/notifications",
             "/settings/generate/tracker",
             "/settings/test/sonarr",
             "/settings/account/password",
