@@ -2,10 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use lava_torrent::torrent::v1::TorrentBuilder;
-use url::Url;
-
 use crate::error::{Result, TorrentError};
+use lava_torrent::torrent::v1::TorrentBuilder;
 
 /// What to build a torrent over.
 ///
@@ -18,41 +16,41 @@ use crate::error::{Result, TorrentError};
 pub struct TorrentRequest<'a> {
     /// The file to hash, as **sharerr** sees it (not the *arr or qBittorrent view).
     pub path: &'a Path,
-    /// Where peers announce. Every sharerr torrent has exactly one.
-    pub announce: &'a Url,
+    /// Where peers announce: the current endpoint first, then the recently held
+    /// ones as fallback tiers.
+    pub announce: &'a crate::AnnounceSet,
 }
 
 /// A finished torrent, in memory.
+///
+/// The filename inside the torrent equals the on-disk basename by design; it is
+/// not carried here because nothing reads it back — the `.torrent` itself is the
+/// record.
 #[derive(Debug, Clone)]
 pub struct BuiltTorrent {
     /// Hex-encoded SHA-1 of the info dictionary — the identity qBittorrent uses.
     pub info_hash: String,
     /// The bencoded `.torrent`, ready to hand to a client.
     pub data: Vec<u8>,
-    /// The filename inside the torrent. Equals the on-disk basename, by design.
-    pub name: String,
-    pub piece_length: u64,
     pub size: u64,
 }
 
-/// Creates torrents.
-///
-/// A trait because `lava_torrent` is in maintenance mode; swapping it for
-/// hand-rolled `serde_bencode` + `sha1` should cost one impl and no call sites.
-///
-/// **Synchronous on purpose.** Building a torrent means SHA-1 over the entire
-/// file, which for a media library is gigabytes of CPU-bound work. An `async fn`
-/// here would invite callers to run it directly on the runtime and stall every
-/// other task. Callers offload it with `tokio::task::spawn_blocking`.
-pub trait TorrentFactory: Send + Sync + std::fmt::Debug {
-    fn create(&self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent>;
-}
-
 #[derive(Debug, Default, Clone, Copy)]
+/// Creates torrents, backed by `lava_torrent`.
+///
+/// `lava_torrent` is in maintenance mode; swapping it for hand-rolled bencoding
+/// and hashing should cost only this type's one method and no call sites.
 pub struct LavaTorrentFactory;
 
-impl TorrentFactory for LavaTorrentFactory {
-    fn create(&self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent> {
+impl LavaTorrentFactory {
+    /// Build a torrent describing the file exactly where it already sits,
+    /// without moving, renaming, or rewriting anything.
+    ///
+    /// **Synchronous on purpose.** Building a torrent means SHA-1 over the entire
+    /// file, which for a media library is gigabytes of CPU-bound work. An `async
+    /// fn` here would invite callers to run it directly on the runtime and stall
+    /// every other task. Callers offload it with `tokio::task::spawn_blocking`.
+    pub fn create(self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent> {
         let path = request.path;
 
         let metadata = std::fs::metadata(path).map_err(|source| TorrentError::Unreadable {
@@ -65,27 +63,32 @@ impl TorrentFactory for LavaTorrentFactory {
             });
         }
 
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| TorrentError::NoFileName {
+        // A path with no printable filename cannot name the file inside the
+        // torrent, so it is rejected before any hashing starts.
+        if path.file_name().and_then(|n| n.to_str()).is_none() {
+            return Err(TorrentError::NoFileName {
                 path: path.to_path_buf(),
-            })?
-            .to_owned();
+            });
+        }
 
         let size = metadata.len();
         let piece_length = piece_length_for(size);
 
-        let torrent = TorrentBuilder::new(path, piece_length as i64)
-            .set_announce(Some(request.announce.to_string()))
+        let mut builder = TorrentBuilder::new(path, piece_length as i64)
+            .set_announce(Some(request.announce.primary.to_string()))
             // Friend-to-friend sharing must not leak into the public DHT or PEX.
             // This is the whole reason the tracker exists.
-            .set_privacy(true)
-            .build()
-            .map_err(|source| TorrentError::Build {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            .set_privacy(true);
+        // An announce *list* only when there is genuinely more than one endpoint:
+        // BEP 12 clients ignore `announce` the moment the list exists, so a
+        // one-entry list would only add bytes and change nothing.
+        if let Some(tiers) = request.announce.tier_list() {
+            builder = builder.set_announce_list(tiers);
+        }
+        let torrent = builder.build().map_err(|source| TorrentError::Build {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
         let info_hash = torrent.info_hash();
         let data = torrent.encode().map_err(|source| TorrentError::Encode {
@@ -104,8 +107,6 @@ impl TorrentFactory for LavaTorrentFactory {
         Ok(BuiltTorrent {
             info_hash,
             data,
-            name,
-            piece_length,
             size,
         })
     }
@@ -145,6 +146,36 @@ pub fn piece_length_for(size: u64) -> u64 {
 /// Where sharerr keeps a copy of each `.torrent` it has produced.
 pub fn torrent_file_path(dir: &Path, info_hash: &str) -> PathBuf {
     dir.join(format!("{info_hash}.torrent"))
+}
+
+/// The primary announce URL a stored `.torrent` carries.
+///
+/// This is what decides whether a rotation of the advertised endpoint has left a
+/// torrent pointing somewhere stale — see [`rewrite_announce`].
+pub fn read_announce(data: &[u8]) -> Result<Option<String>> {
+    let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
+        .map_err(|source| TorrentError::Reparse { source })?;
+    Ok(torrent.announce)
+}
+
+/// Rewrite a stored `.torrent`'s announce URL and tiers, leaving everything else
+/// — the info dictionary above all — untouched.
+///
+/// The announce fields live *outside* the info dictionary, so the info hash is
+/// unchanged: the rewritten file still describes the same torrent, every client
+/// already seeding it keeps its identity, and only where it announces moves. This
+/// is what makes a rotated gluetun port survivable — the feed serves the
+/// rewritten file, and a friend who re-downloads it gets the live endpoint.
+pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Vec<u8>> {
+    let mut torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
+        .map_err(|source| TorrentError::Reparse { source })?;
+
+    torrent.announce = Some(announce.primary.to_string());
+    torrent.announce_list = announce.tier_list();
+
+    torrent
+        .encode()
+        .map_err(|source| TorrentError::Reencode { source })
 }
 
 #[cfg(test)]

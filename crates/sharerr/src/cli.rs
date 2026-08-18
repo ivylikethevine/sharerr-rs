@@ -63,7 +63,7 @@ pub struct SyncArgs {
 pub enum VaultCommand {
     /// Store a secret. The value is read from a prompt, or stdin when piped.
     Set {
-        /// e.g. sonarr.api_key, radarr.api_key, qbittorrent.password
+        /// e.g. sonarr.api_key, radarr.api_key, qbittorrent.api_key
         key: String,
     },
     /// List the keys held in the vault. Never prints values.

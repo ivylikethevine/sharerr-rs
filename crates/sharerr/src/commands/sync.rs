@@ -1,12 +1,41 @@
 //! `sharerr sync` — run one reconciliation pass and report what changed.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use sharerr_core::Config;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 
 use crate::sync::Syncer;
 
 pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
-    let syncer = Syncer::build(config).await?;
+    let endpoint = Arc::new(AdvertisedEndpoint::new(
+        sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port())?,
+    ));
+
+    // One-shot resolve from the same source of truth `serve`'s poller uses, so a
+    // manual sync inside a gluetun namespace builds torrents that announce to
+    // the live forwarded port rather than yesterday's.
+    if let Some(control) = &config.gluetun.control_url {
+        let api_key = gluetun_api_key(config).await;
+        match crate::gluetun::GluetunClient::new(control, api_key) {
+            // No prior observation exists in a one-shot run, so there is no
+            // fallback port to offer — a failed port lookup is fatal here the
+            // same way it always was before the poller gained one.
+            Ok(client) => match client.resolve_base(None).await {
+                Ok(base) => {
+                    endpoint.observe(base);
+                }
+                Err(err) => tracing::warn!(
+                    %err,
+                    "continuing with the statically configured endpoint"
+                ),
+            },
+            Err(err) => tracing::warn!(%err, "could not build a gluetun client"),
+        }
+    }
+
+    let syncer = Syncer::build(config, endpoint).await?;
 
     if dry_run {
         println!("dry run — nothing will be created, changed, or removed\n");
@@ -29,4 +58,20 @@ pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Best-effort lookup, mirroring [`crate::gluetun::poll_loop`]'s: a vault that
+/// will not open (no master key set for this run) means an unkeyed request,
+/// same as before this key existed, and any resulting `401` explains itself.
+async fn gluetun_api_key(config: &Config) -> Option<secrecy::SecretString> {
+    let master = sharerr_store::master_key_from_env().ok()?;
+    let path = config.vault_path();
+    let vault =
+        tokio::task::spawn_blocking(move || sharerr_store::Vault::open(&path, &master)).await;
+    vault
+        .ok()?
+        .ok()?
+        .get(sharerr_core::config::secret_keys::GLUETUN_API_KEY)
+        .ok()
+        .flatten()
 }

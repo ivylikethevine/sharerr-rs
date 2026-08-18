@@ -68,8 +68,11 @@ Torznab* indexer speaks, and a better fit anyway, since Torznab carries the
 TVDB/TMDb/IMDb ids that let a release match a known series or film instead of being
 parsed from its name.
 
-qBittorrent's *embedded tracker* is real and is used. Only the feed half of the
-original plan had to change.
+qBittorrent's *embedded tracker* is real and was used for a while. It has since
+been removed as a backend: two trackers meant two independently built announce
+URLs, and the dynamic-endpoint work made that untenable — sharerr's builtin
+tracker is now the only one. So in the end *both* halves of the original plan's
+point 2 changed, the feed first and the tracker later.
 
 ### The no-egress requirement is not enforced by the test stack
 

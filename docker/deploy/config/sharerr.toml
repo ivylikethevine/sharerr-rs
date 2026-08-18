@@ -1,0 +1,85 @@
+# sharerr, sharing a network namespace with qBittorrent behind gluetun.
+#
+# Secrets are deliberately absent. The qBittorrent API key (or password), the
+# *arr API keys, and the Torznab key live in the encrypted vault, not here — set
+# them in the web UI under Settings, or pipe them in:
+#
+#   docker compose exec sharerr \
+#     sh -c 'printf %s "$KEY" | sharerr vault set qbittorrent.api_key'
+#
+# The web UI rewrites this file in place, comments and all, when you save.
+
+data_dir = "/data"
+
+# Content carrying this tag in Sonarr/Radarr is what gets shared.
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[qbittorrent]
+# `localhost`, not `qbittorrent`. Both containers are in gluetun's namespace, so
+# they share one loopback and there is no name to resolve. This is the single
+# line most likely to be wrong if you adapted this from a non-VPN stack.
+url = "http://localhost:8080"
+username = "admin"
+category = "sharerr"
+tag = "sharerr"
+# Let qBittorrent verify the files it already has and go straight to seeding.
+# `true` is faster on a large library and will happily seed mismatched data if a
+# path mapping is wrong, so leave it off until the mappings are proven.
+skip_checking = false
+
+[tracker]
+# What *friends* resolve this instance as — the VPN exit's public address, not
+# the host's and not the container's. Everything else can be wrong and produce a
+# loud failure; this one produces torrents that look perfect and that nobody can
+# announce to.
+#
+# With the [gluetun] section below enabled, this becomes the *fallback*: the
+# live exit address and forwarded port are resolved from gluetun's control
+# server and win over these two fields. Keep a DNS name here if you have one —
+# it rides along in every torrent's announce list as an extra tier.
+advertised_host = "CHANGE-ME.example.com"
+
+# The port friends announce to: sharerr's own tracker on its HTTP port,
+# forwarded through the tunnel.
+port = 8477
+
+[gluetun]
+# gluetun's control server, on localhost because sharerr shares its network
+# namespace. With this set, sharerr polls /v1/publicip/ip and
+# /v1/openvpn/portforwarded as the source of truth for its own address, and a
+# changed answer triggers a re-announce and a rewrite of every .torrent —
+# instead of every torrent announcing to yesterday's port until someone notices.
+control_url = "http://localhost:8000"
+poll_secs = 60
+
+[sync]
+enabled = true
+interval_secs = 900
+
+# The three views of one library, which is the whole reason path mapping exists.
+# Sonarr reports /tv, sharerr reads /media/tv, qBittorrent is told /downloads/tv.
+# Add a [[path_map]] per root, and check them with `sharerr doctor` — a wrong
+# mapping is the most common reason nothing is shared.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"
+
+# Sonarr and Radarr, if you run them. They sit on a normal bridge network
+# outside this stack; sharerr reaches them by name because gluetun's
+# FIREWALL_OUTBOUND_SUBNETS permits the docker subnet and DNS_ADDRESS points at
+# docker's resolver. Uncomment and set the URLs, then add the API keys in the UI.
+#
+# [sonarr]
+# url = "http://sonarr:8989"
+#
+# [radarr]
+# url = "http://radarr:7878"

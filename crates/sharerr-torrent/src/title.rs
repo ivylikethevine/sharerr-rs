@@ -63,7 +63,15 @@ impl ParsedTitle {
             (Self::Movie { title, year }, MediaSpec::Movie { title: t, year: y }) => {
                 loose_eq(title, t) && (year.is_none() || y.is_none() || year == y)
             }
-            _ => false,
+            // Spelled out rather than a catch-all: `Track` and `Book` have no
+            // `ParsedTitle` counterpart, so filename reuse never applies to music
+            // or books — and a new `MediaSpec` variant must fail to compile here
+            // instead of silently losing that step of `resolve`.
+            (Self::Unparseable, _)
+            | (Self::Episode { .. } | Self::Movie { .. }, MediaSpec::Track { .. })
+            | (Self::Episode { .. } | Self::Movie { .. }, MediaSpec::Book { .. })
+            | (Self::Episode { .. }, MediaSpec::Movie { .. })
+            | (Self::Movie { .. }, MediaSpec::Episode { .. }) => false,
         }
     }
 }
@@ -119,6 +127,26 @@ pub fn synthesize(spec: &MediaSpec) -> String {
             Some(year) => format!("{}.{year}.WEB-DL.x264-{GROUP}", dotted(title)),
             None => format!("{}.WEB-DL.x264-{GROUP}", dotted(title)),
         },
+        // Music convention is `Artist-Album-FORMAT-GROUP`, hyphen-separated rather
+        // than dotted, and with an audio format instead of a video codec. A music
+        // release named like a TV episode is rejected by the profiles that matter.
+        MediaSpec::Track {
+            artist,
+            album,
+            track,
+        } => match track {
+            Some(track) => format!(
+                "{}-{}-{track:02}-FLAC-{GROUP}",
+                dotted(artist),
+                dotted(album)
+            ),
+            None => format!("{}-{}-FLAC-{GROUP}", dotted(artist), dotted(album)),
+        },
+        // Books have no scene convention worth imitating; author and title are what
+        // a reader and a parser both look for.
+        MediaSpec::Book { author, title } => {
+            format!("{}-{}-EPUB-{GROUP}", dotted(author), dotted(title))
+        }
     }
 }
 

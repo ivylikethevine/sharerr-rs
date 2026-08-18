@@ -18,24 +18,91 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use sharerr_arr::{ArrClient, Discovered};
-use sharerr_core::config::{TrackerBackend, secret_keys};
+use sharerr_client::TorrentClient;
+use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
-use sharerr_qbit::QbitClient;
 use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
-use sharerr_torrent::{
-    BuiltinTracker, LavaTorrentFactory, QbitEmbeddedTracker, TrackerProvider, title,
-};
+use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
+use crate::library::DirectoryScanner;
 use seed::{SeedOutcome, Seeder};
+
+/// Anything that can answer "which files should be shared right now?".
+///
+/// The *arr clients and the directory scanner disagree about everything except
+/// that question, which is why the trait is one method wide plus a label. The
+/// label matters to the loop: [`Discovery::scanned`] records which sources
+/// answered, and only an answering source may have items withdrawn.
+#[async_trait::async_trait]
+pub trait LibrarySource: Send + Sync {
+    /// Which [`MediaSource`] this source's items carry.
+    fn kind(&self) -> MediaSource;
+    /// Every file this source currently wants shared. The tag is the *arr
+    /// share marker; sources without tags ignore it.
+    async fn discover(&self, tag: &str) -> Result<SourceScan>;
+}
+
+/// What one source's discovery produced.
+#[derive(Debug)]
+pub struct SourceScan {
+    pub items: Vec<Discovered>,
+    /// Whether every corner of the source was listed. `false` — a directory
+    /// walk that could not read one subtree — means the items are still shared,
+    /// because sharing is additive, but nothing may be withdrawn on this
+    /// source's behalf: an absent item may simply have been in the part that
+    /// was not seen.
+    pub complete: bool,
+}
+
+#[async_trait::async_trait]
+impl LibrarySource for ArrClient {
+    fn kind(&self) -> MediaSource {
+        ArrClient::kind(self)
+    }
+
+    async fn discover(&self, tag: &str) -> Result<SourceScan> {
+        Ok(SourceScan {
+            items: ArrClient::discover(self, tag).await?,
+            // An *arr answer is its whole database: there is no partial success.
+            complete: true,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LibrarySource for DirectoryScanner {
+    fn kind(&self) -> MediaSource {
+        MediaSource::Directory
+    }
+
+    async fn discover(&self, _tag: &str) -> Result<SourceScan> {
+        // A directory has no tag — being in it is the tag. The walk is
+        // filesystem-bound, so it runs off the async loop; a library on a slow
+        // or remote mount must not stall /health while it is listed.
+        let scanner = self.clone();
+        let outcome = tokio::task::spawn_blocking(move || scanner.scan_all()).await??;
+        Ok(SourceScan {
+            items: outcome.items,
+            complete: outcome.incomplete == 0,
+        })
+    }
+}
 
 pub struct Syncer {
     config: Config,
     store: Store,
-    sonarr: Option<ArrClient>,
-    radarr: Option<ArrClient>,
-    qbit: Arc<QbitClient>,
+    /// Every configured library source — the *arr apps, then the directory
+    /// scanner when any `[[library]]` is set — in a stable order.
+    ///
+    /// A list rather than one field per source: five named `Option`s would mean
+    /// five places to edit for a sixth, and the discovery loop treats them
+    /// identically anyway — the differences live behind [`LibrarySource`].
+    sources: Vec<Box<dyn LibrarySource>>,
     tracker: Arc<dyn TrackerProvider>,
+    /// Owns the torrent client too — the syncer reads it through
+    /// [`Seeder::client`], so there is exactly one handle to keep consistent.
     seeder: Seeder,
     resolver: PathResolver,
 }
@@ -44,8 +111,10 @@ impl std::fmt::Debug for Syncer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Syncer")
             .field("tag", &self.config.tag)
-            .field("sonarr", &self.sonarr.is_some())
-            .field("radarr", &self.radarr.is_some())
+            .field(
+                "sources",
+                &self.sources.iter().map(|s| s.kind()).collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -60,8 +129,9 @@ pub struct SyncReport {
     pub unchanged: usize,
     pub unshared: usize,
     pub failed: usize,
-    /// *arr apps that could not be scanned at all. Their existing shares are left
-    /// untouched, so this is a gap in coverage rather than a set of failed items.
+    /// Library sources that could not be scanned at all. Their existing shares
+    /// are left untouched, so this is a gap in coverage rather than a set of
+    /// failed items.
     pub sources_failed: usize,
 }
 
@@ -92,7 +162,7 @@ impl std::fmt::Display for SyncReport {
         if self.sources_failed > 0 {
             write!(
                 f,
-                " ({} *arr app(s) could not be scanned; their shares were left alone)",
+                " ({} source(s) could not be scanned; their shares were left alone)",
                 self.sources_failed
             )?;
         }
@@ -100,19 +170,28 @@ impl std::fmt::Display for SyncReport {
     }
 }
 
-/// The outcome of asking every configured *arr app what carries the tag.
+/// The outcome of asking every configured library source what carries the tag.
 #[derive(Debug, Default)]
 struct Discovery {
     items: Vec<Discovered>,
-    /// Apps that answered. **Only these may have items withdrawn** — see
-    /// [`Syncer::withdraw_untagged`].
+    /// Sources that answered at all — the pass is abandoned when this is empty.
     scanned: HashSet<MediaSource>,
+    /// Sources that answered *completely*. **Only these may have items
+    /// withdrawn** — see [`Syncer::withdraw_untagged`]. A source that answered
+    /// but could not list part of itself shares what it found and withdraws
+    /// nothing.
+    withdrawable: HashSet<MediaSource>,
     failures: usize,
 }
 
 impl Syncer {
     /// Wire everything from configuration and the vault.
-    pub async fn build(config: &Config) -> Result<Self> {
+    ///
+    /// `endpoint` is the *live* advertised endpoint, shared with whatever keeps
+    /// it fresh — `serve` hands in the one its gluetun poller updates, so a
+    /// rotated forwarded port reaches the next announce URL without rebuilding
+    /// the syncer. One-shot commands build a static one from configuration.
+    pub async fn build(config: &Config, endpoint: Arc<AdvertisedEndpoint>) -> Result<Self> {
         let master = master_key_from_env()?;
 
         // Off the runtime: opening the vault derives its key with Argon2, ~16ms of
@@ -131,29 +210,35 @@ impl Syncer {
         // connection pool, and runs the migrations. Ordering it after the cheap
         // lookups keeps a not-yet-configured instance from doing that work — and
         // from materialising sharerr.db — every time round the loop.
-        let qbit_password = vault
-            .get(secret_keys::QBITTORRENT_PASSWORD)?
-            .with_context(|| format!("no {} in the vault", secret_keys::QBITTORRENT_PASSWORD))?;
-        let qbit = Arc::new(QbitClient::new(
-            &config.qbittorrent.url,
-            &config.qbittorrent.username,
-            qbit_password,
-        )?);
+        let qbit = build_client(config, &vault)?;
 
-        let sonarr = build_arr(MediaSource::Sonarr, config, &vault)?;
-        let radarr = build_arr(MediaSource::Radarr, config, &vault)?;
-        if sonarr.is_none() && radarr.is_none() {
-            bail!("neither sonarr nor radarr is configured — there is nothing to share");
+        let mut sources: Vec<Box<dyn LibrarySource>> = Vec::new();
+        for source in MediaSource::ARRS.iter().copied() {
+            if let Some(client) = build_arr(source, config, &vault)? {
+                sources.push(Box::new(client));
+            }
+        }
+        if !config.library.is_empty() {
+            sources.push(Box::new(DirectoryScanner::new(config.library.clone())));
+        }
+        if sources.is_empty() {
+            bail!(
+                "no library source is configured — there is nothing to share. Set at \
+                 least one of sonarr, radarr, lidarr, readarr or whisparr, or a \
+                 [[library]] directory."
+            );
         }
 
-        let tracker = build_tracker(config, &vault, Arc::clone(&qbit))?;
+        let tracker = build_tracker(endpoint, &vault)?;
 
+        // Resolved here rather than inside the seeder, which should not have to
+        // know which client it is driving.
+        let client_config = config.torrent_client();
         let seeder = Seeder {
             qbit: Arc::clone(&qbit),
-            factory: Arc::new(LavaTorrentFactory),
-            category: config.qbittorrent.category.clone(),
-            tag: config.qbittorrent.tag.clone(),
-            skip_checking: config.qbittorrent.skip_checking,
+            category: client_config.category.to_owned(),
+            tag: client_config.tag.to_owned(),
+            skip_checking: client_config.skip_checking,
             torrent_dir: config.torrent_dir(),
         };
 
@@ -161,15 +246,7 @@ impl Syncer {
             .await
             .with_context(|| format!("opening {}", config.database_path().display()))?;
 
-        Ok(Self::new(
-            config.clone(),
-            store,
-            sonarr,
-            radarr,
-            qbit,
-            tracker,
-            seeder,
-        ))
+        Ok(Self::new(config.clone(), store, sources, tracker, seeder))
     }
 
     /// Assemble from already-built parts.
@@ -180,9 +257,7 @@ impl Syncer {
     pub(crate) fn new(
         config: Config,
         store: Store,
-        sonarr: Option<ArrClient>,
-        radarr: Option<ArrClient>,
-        qbit: Arc<QbitClient>,
+        sources: Vec<Box<dyn LibrarySource>>,
         tracker: Arc<dyn TrackerProvider>,
         seeder: Seeder,
     ) -> Self {
@@ -190,9 +265,7 @@ impl Syncer {
             resolver: config.resolver(),
             config,
             store,
-            sonarr,
-            radarr,
-            qbit,
+            sources,
             tracker,
             seeder,
         }
@@ -238,9 +311,21 @@ impl Syncer {
 
         // Refuse early rather than building torrents that announce into the void.
         self.tracker.ensure_ready().await?;
-        let announce = self.tracker.announce_url().await?;
+        let announce = self.tracker.announce_set().await?;
 
-        let discovery = self.discover().await;
+        // Three independent reads, overlapped: the *arr walk is the long pole,
+        // and the torrent list plus the store snapshot ride under it instead of
+        // queueing behind it. The torrent list is fetched once for the whole
+        // pass — the hash set answers "is it still live", and the summaries feed
+        // the seeder's cross-seed search, which once refetched this same list
+        // per item. This is also what makes the loop self-healing: a torrent
+        // removed behind sharerr's back is simply absent here and gets re-added.
+        let (discovery, torrents, known_items) = tokio::join!(
+            self.discover(),
+            self.seeder.qbit.list(None),
+            self.store.all_items()
+        );
+
         let discovered = &discovery.items;
         report.discovered = discovered.len();
         report.sources_failed = discovery.failures;
@@ -249,32 +334,30 @@ impl Syncer {
         // library because Sonarr happened to be restarting would be far worse than
         // doing nothing, so this is the one failure that stops the pass.
         if discovery.scanned.is_empty() {
-            bail!("no *arr app could be scanned — nothing was changed");
+            bail!("no library source could be scanned — nothing was changed");
         }
 
-        // One call, then membership tests are free. This is also what makes the
-        // loop self-healing: a torrent removed behind sharerr's back is simply
-        // absent here and gets re-added.
-        let live: HashSet<String> = self
-            .qbit
-            .torrents_info(None, None)
-            .await
-            .context("listing torrents in qBittorrent")?
-            .into_iter()
+        let torrents = torrents.context("listing torrents in qBittorrent")?;
+        let live: HashSet<String> = torrents
+            .iter()
             .map(|t| t.hash.to_ascii_lowercase())
             .collect();
 
-        let known: HashMap<(MediaSource, i64), SharedItem> = self
-            .store
-            .all_items()
-            .await?
+        let known: HashMap<(MediaSource, i64), SharedItem> = known_items?
             .into_iter()
             .map(|item| (item.key(), item))
             .collect();
 
         for item in discovered {
             match self
-                .share(item, &announce, &live, known.get(&item.key()), dry_run)
+                .share(
+                    item,
+                    &announce,
+                    &live,
+                    &torrents,
+                    known.get(&item.key()),
+                    dry_run,
+                )
                 .await
             {
                 Ok(Step::Added) => report.added += 1,
@@ -307,36 +390,52 @@ impl Syncer {
 
         let tagged: HashSet<(MediaSource, i64)> = discovered.iter().map(Discovered::key).collect();
         report.unshared = self
-            .withdraw_untagged(&known, &tagged, &discovery.scanned, dry_run)
+            .withdraw_untagged(&known, &tagged, &discovery.withdrawable, dry_run)
             .await;
 
         Ok(report)
     }
 
-    /// Ask every configured *arr app what carries the tag.
+    /// Ask every configured library source what carries the tag.
     ///
-    /// One app failing does not abort the pass — the module's whole contract is
-    /// that a healthy library is not held hostage by a broken neighbour, and
+    /// One source failing does not abort the pass — the module's whole contract
+    /// is that a healthy library is not held hostage by a broken neighbour, and
     /// "Sonarr has the tag, Radarr does not" is a routine setup that surfaces as a
     /// hard error from [`sharerr_arr::ArrError::TagNotFound`].
     async fn discover(&self) -> Discovery {
-        let mut discovery = Discovery::default();
+        // The sources are independent, so scan them concurrently: the phase
+        // costs the slowest source's walk rather than the sum of all of them.
+        // `join_all` preserves input order, which keeps the fold — and the log
+        // lines — as stable as the sequential loop was.
+        let results = futures::future::join_all(
+            self.sources
+                .iter()
+                .map(|source| async { (source.kind(), source.discover(&self.config.tag).await) }),
+        )
+        .await;
 
-        for client in [self.sonarr.as_ref(), self.radarr.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            match client.discover(&self.config.tag).await {
-                Ok(found) => {
-                    discovery.scanned.insert(client.kind());
-                    discovery.items.extend(found);
+        let mut discovery = Discovery::default();
+        for (kind, result) in results {
+            match result {
+                Ok(scan) => {
+                    discovery.scanned.insert(kind);
+                    if scan.complete {
+                        discovery.withdrawable.insert(kind);
+                    } else {
+                        tracing::warn!(
+                            service = %kind,
+                            "the scan was incomplete — new files are still shared, but \
+                             nothing is withdrawn until the whole library can be listed"
+                        );
+                    }
+                    discovery.items.extend(scan.items);
                 }
                 Err(err) => {
                     discovery.failures += 1;
                     tracing::error!(
-                        service = %client.kind(),
+                        service = %kind,
                         error = format!("{err:#}"),
-                        "discovery failed — everything already shared from this app \
+                        "discovery failed — everything already shared from this source \
                          will be left exactly as it is"
                     );
                 }
@@ -349,43 +448,72 @@ impl Syncer {
     async fn share(
         &self,
         item: &Discovered,
-        announce: &url::Url,
+        announce: &AnnounceSet,
         live: &HashSet<String>,
+        torrents: &[sharerr_client::TorrentSummary],
         known: Option<&SharedItem>,
         dry_run: bool,
     ) -> Result<Step> {
         // Already seeding, and qBittorrent agrees. This is the branch that makes a
-        // repeat run a no-op.
+        // repeat run a no-op — except when the advertised endpoint has moved
+        // since the torrent was built, in which case its announce URLs are
+        // brought up to date in place. Failure there is a warning, not a failed
+        // item: the torrent is still seeding, just announcing to a stale
+        // address, and the comparison stays stale so the next pass retries.
         if let Some(known) = known
             && known.state == ShareState::Seeding
             && let Some(hash) = &known.info_hash
             && live.contains(&hash.to_ascii_lowercase())
         {
+            if !dry_run && let Err(err) = self.seeder.refresh_announce(hash, announce).await {
+                tracing::warn!(
+                    item = %item.spec,
+                    error = format!("{err:#}"),
+                    "could not refresh announce URLs"
+                );
+            }
             return Ok(Step::Unchanged);
         }
 
-        let paths = self
-            .resolver
-            .resolve(&item.arr_path)
-            .with_context(|| format!("resolving {}", item.arr_path.display()))?;
+        // A directory item's path is already sharerr's own view — running it
+        // through the arr-side rules would let a [[path_map]] meant for Sonarr
+        // rewrite it into a path that exists nowhere. Only the sharerr→qbit
+        // half of a mapping can apply to it.
+        let paths = if item.source == MediaSource::Directory {
+            self.resolver.resolve_sharerr(&item.arr_path)
+        } else {
+            self.resolver.resolve(&item.arr_path)
+        }
+        .with_context(|| format!("resolving {}", item.arr_path.display()))?;
 
         // Checked before hashing: discovering a missing file only after SHA-1ing
         // gigabytes would be a needlessly expensive way to find out.
         let missing = || {
-            anyhow::anyhow!(
-                "{} does not exist as sharerr sees it (reported by {} as {}). Check [[path_map]]",
-                paths.sharerr.display(),
-                item.source,
-                paths.arr.display()
-            )
+            if item.source == MediaSource::Directory {
+                // No mapping was involved, so pointing at [[path_map]] would
+                // send the operator to the wrong setting.
+                anyhow::anyhow!(
+                    "{} does not exist as sharerr sees it — check the [[library]] mount",
+                    paths.sharerr.display()
+                )
+            } else {
+                anyhow::anyhow!(
+                    "{} does not exist as sharerr sees it (reported by {} as {}). Check [[path_map]]",
+                    paths.sharerr.display(),
+                    item.source,
+                    paths.arr.display()
+                )
+            }
         };
 
         // Resolution only reads the path, never the file, so it works even for a
         // file that is missing — which is what lets the row below be complete.
         let release_title = title::resolve(&item.spec, item.scene_name.as_deref(), &paths.sharerr);
 
+        // `try_exists` rather than a blocking `exists()`: this runs per item on
+        // the async loop, against a mount that may be remote.
         if dry_run {
-            if !paths.sharerr.exists() {
+            if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
                 return Err(missing());
             }
             tracing::info!(
@@ -405,16 +533,13 @@ impl Syncer {
         let record = item.clone().into_shared_item(release_title);
         self.store.upsert(&record).await?;
 
-        if !paths.sharerr.exists() {
+        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
             return Err(missing());
         }
 
-        let outcome = self.seeder.seed(&paths, announce).await?;
+        let outcome = self.seeder.seed(&paths, announce, torrents).await?;
         self.store
-            .set_info_hash(item.source, item.file_id, outcome.info_hash())
-            .await?;
-        self.store
-            .set_state(item.source, item.file_id, ShareState::Seeding, None)
+            .set_seeding(item.source, item.file_id, outcome.info_hash())
             .await?;
 
         Ok(match outcome {
@@ -431,15 +556,16 @@ impl Syncer {
         &self,
         known: &HashMap<(MediaSource, i64), SharedItem>,
         tagged: &HashSet<(MediaSource, i64)>,
-        scanned: &HashSet<MediaSource>,
+        withdrawable: &HashSet<MediaSource>,
         dry_run: bool,
     ) -> usize {
         let stale = known.values().filter(|item| {
-            // Only withdraw on behalf of an app that actually answered. An app
-            // that failed to respond has said nothing about what it still carries,
-            // and reading its silence as "untagged everything" would tear down a
-            // working library because a container was restarting.
-            scanned.contains(&item.source)
+            // Only withdraw on behalf of a source that answered completely. One
+            // that failed to respond — or listed only part of itself — has said
+            // nothing certain about what it still carries, and reading that
+            // silence as "untagged everything" would tear down a working library
+            // because a container was restarting.
+            withdrawable.contains(&item.source)
                 && !tagged.contains(&item.key())
                 && matches!(
                     item.state,
@@ -456,7 +582,7 @@ impl Syncer {
             }
 
             if let Some(hash) = &item.info_hash
-                && let Err(err) = self.qbit.remove_torrent(hash).await
+                && let Err(err) = self.seeder.qbit.remove(hash).await
             {
                 // Worth continuing: marking the row Unshared is still correct, and
                 // the torrent can be cleaned up by hand.
@@ -487,12 +613,11 @@ enum Step {
 }
 
 fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option<ArrClient>> {
-    let (service, key_name) = match kind {
-        MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
-        MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
+    let Some(service) = config.service(kind) else {
+        return Ok(None);
     };
-
-    let Some(service) = service else {
+    // Only called over `MediaSource::ARRS`, and every *arr app has a vault key.
+    let Some(key_name) = secret_keys::api_key_for(kind) else {
         return Ok(None);
     };
     let api_key = vault
@@ -502,25 +627,47 @@ fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option
     Ok(Some(ArrClient::new(kind, &service.url, api_key)?))
 }
 
-fn build_tracker(
-    config: &Config,
-    vault: &Vault,
-    qbit: Arc<QbitClient>,
-) -> Result<Arc<dyn TrackerProvider>> {
-    let host = config.tracker.advertised_host.as_deref();
+/// Construct whichever torrent client the configuration selects.
+///
+/// Both branches read their credential from the vault under their own keys, so an
+/// operator switching backends does not silently keep authenticating with the other
+/// client's credential. Where the client supports one, a stored API key is used in
+/// preference to the password — see `TorrentCredential::choose`.
+fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>> {
+    let client = config.torrent_client();
 
-    Ok(match config.tracker.backend {
-        TrackerBackend::QbittorrentEmbedded => {
-            Arc::new(QbitEmbeddedTracker::new(qbit, host, config.tracker.port)?)
-        }
-        TrackerBackend::Builtin => {
-            let token = vault.get(secret_keys::TRACKER_TOKEN)?;
-            let token = token.as_ref().map(secrecy::ExposeSecret::expose_secret);
-            let port = config
-                .tracker
-                .port
-                .unwrap_or_else(|| config.server.bind.port());
-            Arc::new(BuiltinTracker::new(host, port, token)?)
-        }
-    })
+    let api_key = match client.api_key_key {
+        Some(key) => vault.get(key)?,
+        None => None,
+    };
+    let password = match client.password_key {
+        Some(key) => vault.get(key)?,
+        None => None,
+    };
+    let credential =
+        crate::checks::TorrentCredential::choose(api_key, password).with_context(|| {
+            match (client.api_key_key, client.password_key) {
+                (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
+                (Some(api), None) => format!("no {api} in the vault"),
+                (None, Some(password)) => format!("no {password} in the vault"),
+                (None, None) => "no credential configured for this torrent client".to_owned(),
+            }
+        })?;
+
+    crate::checks::build_torrent_client(
+        config.torrent_backend,
+        client.url,
+        client.username,
+        credential,
+    )
+    .map_err(|reason| anyhow::anyhow!(reason))
+}
+
+fn build_tracker(
+    endpoint: Arc<AdvertisedEndpoint>,
+    vault: &Vault,
+) -> Result<Arc<dyn TrackerProvider>> {
+    let token = vault.get(secret_keys::TRACKER_TOKEN)?;
+    let token = token.as_ref().map(secrecy::ExposeSecret::expose_secret);
+    Ok(Arc::new(BuiltinTracker::new(endpoint, token)))
 }

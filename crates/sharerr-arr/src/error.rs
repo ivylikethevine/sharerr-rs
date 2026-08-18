@@ -11,12 +11,11 @@ pub type Result<T> = std::result::Result<T, ArrError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArrError {
-    #[error("could not reach {service} at {url}: {source}")]
+    #[error("could not reach {service} at {url}: {detail}")]
     Unreachable {
         service: MediaSource,
         url: String,
-        #[source]
-        source: reqwest::Error,
+        detail: String,
     },
 
     #[error(
@@ -61,6 +60,9 @@ pub enum ArrError {
 
     #[error("could not build the HTTP client: {0}")]
     Client(#[source] reqwest::Error),
+
+    #[error("{service} is not an *arr app and has no HTTP API to call")]
+    NotAnApp { service: MediaSource },
 }
 
 impl ArrError {
@@ -70,6 +72,8 @@ impl ArrError {
         matches!(self, Self::Unreachable { .. })
     }
 
+    /// Whether the service rejected the API key, as opposed to being unreachable.
+    /// The fixes differ, so the caller must be able to tell them apart.
     pub fn is_auth_failure(&self) -> bool {
         matches!(self, Self::Unauthorized { .. })
     }

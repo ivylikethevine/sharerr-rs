@@ -28,35 +28,28 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
-use sharerr_core::Config;
 use sharerr_core::config::{config_paths, secret_keys};
+use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
 use super::WebState;
-use super::config_io::{ConfigFile, Edit, parse_path_map};
-use super::templates::{PathRow, SettingsPage, render};
-use crate::torznab::public_base_url;
+use super::config_io::{ConfigFile, Edit, parse_libraries, parse_path_map};
+use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
 
 /// Mint a fresh secret and show it once.
 ///
-/// The Torznab API key is unlike every other secret on this page: it has to be
-/// *copied into a friend's Prowlarr*, so a write-only field that can never be read
-/// back would make it unusable. Generating server-side and revealing the value on
-/// exactly the response that created it is the compromise — the key is never in a
-/// URL, never in a redirect, and never re-readable. Lose it and generate another.
+/// Only the tracker token is minted this way now — a friend's own key, generated
+/// on the Friends page, is what opens the Torznab feed to them.
 pub async fn generate_secret(
     State(state): State<WebState>,
     axum::extract::Path(field): axum::extract::Path<String>,
 ) -> Response {
     let key = match field.as_str() {
-        "torznab" => secret_keys::TORZNAB_API_KEY,
         "tracker" => secret_keys::TRACKER_TOKEN,
         _ => return reject(&state, "There is no such secret to generate.").await,
     };
 
-    // 160 bits: long enough that guessing is not a strategy, short enough to
-    // paste into another app's settings box.
-    let generated = match crate::secrets::random_hex(20) {
+    let generated = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
         Ok(generated) => generated,
         Err(reason) => return reject(&state, &reason).await,
     };
@@ -101,10 +94,9 @@ pub struct ArrForm {
 #[derive(Debug, Deserialize)]
 pub struct QbitForm {
     url: String,
-    username: String,
-    password: String,
+    api_key: String,
     #[serde(default)]
-    clear_password: Option<String>,
+    clear_api_key: Option<String>,
     category: String,
     tag: String,
     #[serde(default)]
@@ -113,12 +105,21 @@ pub struct QbitForm {
 
 #[derive(Debug, Deserialize)]
 pub struct TrackerForm {
-    backend: String,
     advertised_host: String,
     port: String,
+    advertised_url: String,
     token: String,
     #[serde(default)]
     clear_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GluetunForm {
+    control_url: String,
+    api_key: String,
+    #[serde(default)]
+    clear_api_key: Option<String>,
+    poll_secs: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +140,15 @@ pub struct PathsForm {
     sharerr: Vec<String>,
     #[serde(default)]
     qbit: Vec<String>,
+}
+
+/// The `[[library]]` rows, same repeated-input shape as [`PathsForm`].
+#[derive(Debug, Deserialize)]
+pub struct LibrariesForm {
+    #[serde(default)]
+    path: Vec<String>,
+    #[serde(default)]
+    kind: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,37 +175,24 @@ pub async fn save_general(
     .await
 }
 
-pub async fn save_sonarr(State(state): State<WebState>, Form(form): Form<ArrForm>) -> Response {
-    save_arr(
-        state,
-        form,
-        config_paths::SONARR_URL,
-        secret_keys::SONARR_API_KEY,
-    )
-    .await
-}
-
-pub async fn save_radarr(State(state): State<WebState>, Form(form): Form<ArrForm>) -> Response {
-    save_arr(
-        state,
-        form,
-        config_paths::RADARR_URL,
-        secret_keys::RADARR_API_KEY,
-    )
-    .await
-}
-
-async fn save_arr(
-    state: WebState,
-    form: ArrForm,
-    url_path: &'static str,
-    secret_key: &'static str,
+/// One handler for all five *arr apps: the path segment parses straight to a
+/// [`MediaSource`], and the config path and vault key both come from the same
+/// per-source accessors every other consumer uses — adding a sixth app touches
+/// neither this function nor the template's `{% for %}` block.
+pub async fn save_arr(
+    State(state): State<WebState>,
+    axum::extract::Path(source): axum::extract::Path<MediaSource>,
+    Form(form): Form<ArrForm>,
 ) -> Response {
-    // Both halves come from the path the caller already had in hand. Deriving one
-    // from the other by string comparison would mean a third *arr app silently
-    // writing to whichever branch it fell through to. Subslicing a `&'static str`
-    // stays `'static`, which is what `Edit` requires.
-    let section = url_path.trim_end_matches(".url");
+    // The directory source parses as a `MediaSource` but has neither a URL nor
+    // an API key; its settings live in the Libraries section.
+    let (Some(url_path), Some(secret_key)) = (
+        config_paths::url_for(source),
+        secret_keys::api_key_for(source),
+    ) else {
+        return reject(&state, "There is no such service to configure.").await;
+    };
+    let section = source.as_str();
 
     if let Err(message) = apply_secret(&state, secret_key, &form.api_key, form.clear_api_key).await
     {
@@ -205,7 +202,7 @@ async fn save_arr(
     write_config(&state, section, |file| {
         let url = form.url.trim();
         if url.is_empty() {
-            // Removing the whole table, not just the URL: `sonarr` is
+            // Removing the whole table, not just the URL: each *arr section is
             // `Option<ServiceConfig>`, and a table with no `url` fails to parse
             // where an absent table correctly means "not configured".
             file.apply([Edit::unset(section)]);
@@ -221,11 +218,24 @@ pub async fn save_qbittorrent(
     State(state): State<WebState>,
     Form(form): Form<QbitForm>,
 ) -> Response {
+    // Checked here rather than at the first sync, because a key pasted with a
+    // missing character otherwise stores fine and surfaces hours later as a
+    // rejected credential with no hint that the *shape* is wrong.
+    let api_key = form.api_key.trim();
+    if !api_key.is_empty() && !sharerr_qbit::looks_like_api_key(api_key) {
+        return reject(
+            &state,
+            "That does not look like a qBittorrent API key. Keys are 32 characters: \
+             `qbt_` followed by 28 letters and digits, from Options -> Web UI -> API key.",
+        )
+        .await;
+    }
+
     if let Err(message) = apply_secret(
         &state,
-        secret_keys::QBITTORRENT_PASSWORD,
-        &form.password,
-        form.clear_password,
+        secret_keys::QBITTORRENT_API_KEY,
+        &form.api_key,
+        form.clear_api_key,
     )
     .await
     {
@@ -239,7 +249,6 @@ pub async fn save_qbittorrent(
         }
         file.apply([
             Edit::str(config_paths::QBITTORRENT_URL, normalise_url(url)?),
-            Edit::str(config_paths::QBITTORRENT_USERNAME, form.username.trim()),
             Edit::str(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
             Edit::str(config_paths::QBITTORRENT_TAG, form.tag.trim()),
             Edit::bool(
@@ -268,18 +277,19 @@ pub async fn save_tracker(
     }
 
     write_config(&state, "tracker", |file| {
-        let backend = match form.backend.as_str() {
-            // Matched against a fixed set rather than written through: this lands
-            // in a `deny_unknown_fields` enum, and an unrecognised string would be
-            // a config file that will not load.
-            "builtin" => "builtin",
-            _ => "qbittorrent-embedded",
-        };
+        let host = form.advertised_host.trim();
+        if !host.is_empty() {
+            // Wrong at save time is loud; wrong after the fact is a torrent nobody
+            // can announce to. Doctor already catches this against a *running*
+            // instance, but a hand-typed loopback or private address is knowable
+            // right here, for free.
+            validate_advertised_host(host)?;
+        }
 
-        let mut edits = vec![
-            Edit::str(config_paths::TRACKER_BACKEND, backend),
-            Edit::str_or_unset(config_paths::TRACKER_ADVERTISED_HOST, &form.advertised_host),
-        ];
+        let mut edits = vec![Edit::str_or_unset(
+            config_paths::TRACKER_ADVERTISED_HOST,
+            &form.advertised_host,
+        )];
 
         let port = form.port.trim();
         if port.is_empty() {
@@ -291,7 +301,67 @@ pub async fn save_tracker(
             edits.push(Edit::int(config_paths::TRACKER_PORT, i64::from(parsed)));
         }
 
+        let advertised_url = form.advertised_url.trim();
+        if advertised_url.is_empty() {
+            edits.push(Edit::unset(config_paths::TRACKER_ADVERTISED_URL));
+        } else {
+            // Validated here rather than at the next sync: a URL that does not
+            // parse would otherwise store fine and surface later as torrents
+            // nobody can announce to.
+            edits.push(Edit::str(
+                config_paths::TRACKER_ADVERTISED_URL,
+                normalise_url(advertised_url)?,
+            ));
+        }
+
         file.apply(edits);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn save_gluetun(
+    State(state): State<WebState>,
+    Form(form): Form<GluetunForm>,
+) -> Response {
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::GLUETUN_API_KEY,
+        &form.api_key,
+        form.clear_api_key,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    write_config(&state, "gluetun", |file| {
+        let url = form.control_url.trim();
+        if url.is_empty() {
+            file.apply([Edit::unset(config_paths::GLUETUN_CONTROL_URL)]);
+        } else {
+            file.apply([Edit::str(
+                config_paths::GLUETUN_CONTROL_URL,
+                normalise_url(url)?,
+            )]);
+        }
+
+        let poll = form.poll_secs.trim();
+        if !poll.is_empty() {
+            let secs: u64 = poll.parse().map_err(|_| {
+                anyhow::anyhow!("the poll interval must be a whole number of seconds")
+            })?;
+            if secs < sharerr_core::config::GluetunConfig::MIN_POLL_SECS {
+                anyhow::bail!(
+                    "the poll interval must be at least {} seconds",
+                    sharerr_core::config::GluetunConfig::MIN_POLL_SECS
+                );
+            }
+            file.apply([Edit::int(
+                config_paths::GLUETUN_POLL_SECS,
+                i64::try_from(secs).unwrap_or(60),
+            )]);
+        }
         Ok(())
     })
     .await
@@ -322,15 +392,44 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
     .await
 }
 
+pub async fn save_libraries(
+    State(state): State<WebState>,
+    Form(form): Form<LibrariesForm>,
+) -> Response {
+    // Rows arrive as two parallel lists; index them from `path` the way
+    // `save_paths` does, so a malformed submission cannot pair the wrong kind
+    // with a directory.
+    let rows: Vec<(String, String)> = form
+        .path
+        .iter()
+        .enumerate()
+        .map(|(i, path)| (path.clone(), form.kind.get(i).cloned().unwrap_or_default()))
+        .collect();
+
+    let libraries = match parse_libraries(&rows) {
+        Ok(libraries) => libraries,
+        Err(err) => return reject(&state, &format!("{err:#}")).await,
+    };
+
+    write_config(&state, "libraries", |file| {
+        file.set_libraries(&libraries);
+        Ok(())
+    })
+    .await
+}
+
 pub async fn save_paths(State(state): State<WebState>, Form(form): Form<PathsForm>) -> Response {
     // Rows arrive as three parallel lists; a short one means a malformed submission
     // rather than an empty field, and zipping blindly would silently pair the wrong
     // paths together — which is the single most damaging thing this page can get
     // wrong, because it makes qBittorrent seed the wrong file.
-    let rows: Vec<(String, String, String)> = (0..form.arr.len())
-        .map(|i| {
+    let rows: Vec<(String, String, String)> = form
+        .arr
+        .iter()
+        .enumerate()
+        .map(|(i, arr)| {
             (
-                form.arr[i].clone(),
+                arr.clone(),
                 form.sharerr.get(i).cloned().unwrap_or_default(),
                 form.qbit.get(i).cloned().unwrap_or_default(),
             )
@@ -464,7 +563,7 @@ async fn apply_secret(
 /// It also means the page tells the truth when the master key is missing or wrong:
 /// a secret that cannot currently be decrypted is still stored, and reporting it
 /// as unset would invite the operator to overwrite it.
-async fn secrets_present(config: &Config) -> BTreeSet<String> {
+pub(super) async fn secrets_present(config: &Config) -> BTreeSet<String> {
     let path = config.vault_path();
     tokio::task::spawn_blocking(move || Vault::key_names(&path))
         .await
@@ -490,6 +589,32 @@ fn checked(field: &Option<String>) -> bool {
     field.is_some()
 }
 
+/// Reject a `tracker.advertised_host` that could never work for anyone outside
+/// this machine or network.
+///
+/// A DNS name is let through unchecked — resolving one means a network call this
+/// handler has no business making, and `doctor` already flags a mismatch against
+/// a running instance. What is catchable for free is a literal address: a
+/// loopback or private IP, or `localhost` itself, is never reachable by a friend
+/// on another network, and typing one is almost always a copy-paste of the
+/// `server.bind` value instead.
+fn validate_advertised_host(host: &str) -> anyhow::Result<()> {
+    if host.eq_ignore_ascii_case("localhost") {
+        anyhow::bail!(
+            "{host:?} only resolves on this machine — a friend elsewhere could never reach it"
+        );
+    }
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
+        && sharerr_core::endpoint::is_private_ip(ip)
+    {
+        anyhow::bail!(
+            "{host:?} is a loopback or private address — a friend outside this network could \
+             never reach it"
+        );
+    }
+    Ok(())
+}
+
 /// Accept `qbit:8080` as well as `http://qbit:8080`.
 ///
 /// `Url::parse` rejects a bare host, and "relative URL without a base" is not a
@@ -506,6 +631,32 @@ fn normalise_url(raw: &str) -> anyhow::Result<String> {
         .map_err(|err| anyhow::anyhow!("{raw:?} is not a valid URL: {err}"))
 }
 
+/// How the app's name is written, for headings — `as_str` is the lowercase
+/// wire/storage form.
+pub(super) fn title_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The example URL shown in each app's empty URL field: its documented default
+/// port, which is the strongest hint a placeholder can give.
+fn url_placeholder(source: MediaSource) -> &'static str {
+    use MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+    match source {
+        Sonarr => "http://sonarr:8989",
+        Radarr => "http://radarr:7878",
+        Lidarr => "http://lidarr:8686",
+        Readarr => "http://readarr:8787",
+        Whisparr => "http://whisparr:6969",
+        // Never rendered — the page loops the URL-bearing sources — but the
+        // match must stay total, and a directory has no URL to hint at.
+        Directory => "",
+    }
+}
+
 async fn build_page(
     state: &WebState,
     saved: Option<String>,
@@ -514,12 +665,41 @@ async fn build_page(
     let config = state.serve.config().await;
     let secrets = secrets_present(&config).await;
     let is_set = |key: &str| secrets.contains(key);
+    let locks = super::config_io::env_overrides();
+
+    // One section per app, from the same list everything else iterates — the
+    // settings page used to be the one surface that hand-enumerated two of the
+    // five and silently could not configure the rest. `ARRS`, not `ALL`: the
+    // directory source has no URL or key and gets the Libraries section below.
+    let arrs = MediaSource::ARRS
+        .iter()
+        .copied()
+        .filter_map(|kind| {
+            let url_path = config_paths::url_for(kind)?;
+            let key = secret_keys::api_key_for(kind)?;
+            Some(ArrSection {
+                source: kind.as_str(),
+                title: title_case(kind.as_str()),
+                url: config
+                    .service(kind)
+                    .map(|s| s.url.to_string())
+                    .unwrap_or_default(),
+                key_set: is_set(key),
+                placeholder: url_placeholder(kind),
+                url_path,
+                primary: matches!(kind, MediaSource::Sonarr | MediaSource::Radarr),
+            })
+        })
+        .collect::<Vec<_>>();
+    let secondary_arr_configured = arrs
+        .iter()
+        .any(|arr| !arr.primary && (!arr.url.is_empty() || arr.key_set));
 
     // The one state where what is on disk and what the page renders disagree, so
     // the operator has to be told which of the two a save keeps — and where the
     // other one goes.
     let config_error = state.serve.config_error().await;
-    let config_notice = config_error.as_ref().and_then(|_| {
+    let config_notice = if config_error.is_some() {
         ConfigFile::replacing(state.serve.config_path())
             .backup_path()
             .map(|aside| {
@@ -529,7 +709,9 @@ async fn build_page(
                     aside.display()
                 )
             })
-    });
+    } else {
+        None
+    };
 
     SettingsPage {
         signed_in: true,
@@ -538,51 +720,57 @@ async fn build_page(
         config_error,
         config_notice,
         master_key_present: master_key_from_env().is_ok(),
-        locks: super::config_io::env_overrides(),
+        locks,
 
         tag: config.tag.clone(),
 
-        sonarr_url: config
-            .sonarr
-            .as_ref()
-            .map(|s| s.url.to_string())
-            .unwrap_or_default(),
-        sonarr_key_set: is_set(secret_keys::SONARR_API_KEY),
-        radarr_url: config
-            .radarr
-            .as_ref()
-            .map(|r| r.url.to_string())
-            .unwrap_or_default(),
-        radarr_key_set: is_set(secret_keys::RADARR_API_KEY),
+        arrs,
+        secondary_arr_configured,
 
         qbit_url: config.qbittorrent.url.to_string(),
-        qbit_username: config.qbittorrent.username.clone(),
-        qbit_password_set: is_set(secret_keys::QBITTORRENT_PASSWORD),
+        qbit_api_key_set: is_set(secret_keys::QBITTORRENT_API_KEY),
         qbit_category: config.qbittorrent.category.clone(),
         qbit_tag: config.qbittorrent.tag.clone(),
         qbit_skip_checking: config.qbittorrent.skip_checking,
 
-        tracker_builtin: matches!(
-            config.tracker.backend,
-            sharerr_core::config::TrackerBackend::Builtin
-        ),
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
         tracker_port: config
             .tracker
             .port
             .map(|p| p.to_string())
             .unwrap_or_default(),
+        tracker_advertised_url: config
+            .tracker
+            .advertised_url
+            .as_ref()
+            .map(url::Url::to_string)
+            .unwrap_or_default(),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
-        torznab_key_set: is_set(secret_keys::TORZNAB_API_KEY),
-        torznab_url: format!("{}/api", public_base_url(&config)),
-        tracker_builtin_selected: matches!(
-            config.tracker.backend,
-            sharerr_core::config::TrackerBackend::Builtin
-        ),
+        gluetun_control_url: config
+            .gluetun
+            .control_url
+            .as_ref()
+            .map(url::Url::to_string)
+            .unwrap_or_default(),
+        gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
+        gluetun_poll_secs: config.gluetun.poll_secs,
+
         revealed: None,
 
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
+
+        // A spare blank row so "add a library" needs no JavaScript, same as
+        // the path map below.
+        libraries: config
+            .library
+            .iter()
+            .map(|library| LibraryRow {
+                path: library.path.display().to_string(),
+                kind: library.kind.as_str(),
+            })
+            .chain(std::iter::once(LibraryRow::default()))
+            .collect(),
 
         // A spare blank row so "add a mapping" needs no JavaScript — the form
         // simply has one more row than there are mappings, and blank rows are
@@ -639,5 +827,35 @@ mod tests {
         assert!(!checked(&None));
         // Browsers send "on"; the value is irrelevant, presence is the signal.
         assert!(checked(&Some("on".to_owned())));
+    }
+
+    #[test]
+    fn a_loopback_or_private_advertised_host_is_refused() {
+        for host in [
+            "127.0.0.1",
+            "localhost",
+            "LocalHost",
+            "::1",
+            "10.0.0.5",
+            "192.168.1.20",
+        ] {
+            let err = validate_advertised_host(host).expect_err(host);
+            assert!(
+                format!("{err:#}").contains(host) || host.eq_ignore_ascii_case("localhost"),
+                "{err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bracketed_ipv6_literal_is_checked_the_same_way() {
+        assert!(validate_advertised_host("[::1]").is_err());
+        assert!(validate_advertised_host("[2001:db8::1]").is_ok());
+    }
+
+    #[test]
+    fn a_public_address_or_hostname_is_accepted() {
+        assert!(validate_advertised_host("203.0.113.9").is_ok());
+        assert!(validate_advertised_host("sharerr.example").is_ok());
     }
 }

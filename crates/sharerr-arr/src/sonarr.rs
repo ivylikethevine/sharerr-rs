@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
+use sharerr_core::{ExternalIds, MediaSpec};
 
 use crate::Discovered;
 use crate::client::ArrClient;
@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::models::{Episode, EpisodeFile, Series, non_empty, non_zero};
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let series: Vec<Series> = client.get_list("series", &[]).await?;
+    let series: Vec<Series> = client.get("series", &[]).await?;
     let tagged: Vec<&Series> = series.iter().filter(|s| s.tags.contains(&tag_id)).collect();
 
     tracing::debug!(
@@ -32,17 +32,18 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
     let mut discovered = Vec::new();
     for show in tagged {
         let series_id = show.id.to_string();
-        let files: Vec<EpisodeFile> = client
-            .get_list("episodefile", &[("seriesId", series_id.clone())])
-            .await?;
+        // Independent lookups, so they run concurrently — per tagged series this
+        // halves the round trips paid in sequence.
+        let by_series = [("seriesId", series_id)];
+        let (files, episodes) = tokio::try_join!(
+            client.get::<Vec<EpisodeFile>>("episodefile", &by_series),
+            client.get::<Vec<Episode>>("episode", &by_series),
+        )?;
         if files.is_empty() {
             tracing::debug!(series = %show.title, "tagged but has no files on disk");
             continue;
         }
 
-        let episodes: Vec<Episode> = client
-            .get_list("episode", &[("seriesId", series_id)])
-            .await?;
         let numbering = numbering_by_file(&episodes);
 
         let ids = ExternalIds {
@@ -50,6 +51,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             tmdb: None,
             tvmaze: non_zero(show.tv_maze_id),
             imdb: non_empty(show.imdb_id.clone()),
+            ..ExternalIds::default()
         };
 
         for file in files {
@@ -66,7 +68,10 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             };
 
             discovered.push(Discovered {
-                source: MediaSource::Sonarr,
+                // `client.kind()`, not a hardcoded Sonarr: Whisparr shares this
+                // walk, and mislabelling its items would put adult content in the
+                // TV category and hand it to a friend scoped to TV.
+                source: client.kind(),
                 source_id: show.id,
                 file_id: file.id,
                 spec: MediaSpec::Episode {

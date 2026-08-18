@@ -10,10 +10,10 @@ use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 use crate::Discovered;
 use crate::client::ArrClient;
 use crate::error::Result;
-use crate::models::{Movie, MovieFile, non_empty, non_zero, non_zero_year};
+use crate::models::{Movie, MovieFile, non_empty, non_zero};
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let movies: Vec<Movie> = client.get_list("movie", &[]).await?;
+    let movies: Vec<Movie> = client.get("movie", &[]).await?;
     let tagged: Vec<&Movie> = movies.iter().filter(|m| m.tags.contains(&tag_id)).collect();
 
     tracing::debug!(
@@ -35,7 +35,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             file_id: file.id,
             spec: MediaSpec::Movie {
                 title: movie.title.clone(),
-                year: non_zero_year(movie.year),
+                year: non_zero(movie.year),
             },
             arr_path: PathBuf::from(&file.path),
             size: file.size,
@@ -44,6 +44,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 tmdb: non_zero(movie.tmdb_id),
                 tvmaze: None,
                 imdb: non_empty(movie.imdb_id.clone()),
+                ..ExternalIds::default()
             },
             scene_name: non_empty(file.scene_name),
         });
@@ -64,7 +65,7 @@ async fn movie_file(client: &ArrClient, movie: &Movie) -> Result<Option<MovieFil
     }
 
     let files: Vec<MovieFile> = client
-        .get_list("moviefile", &[("movieId", movie.id.to_string())])
+        .get("moviefile", &[("movieId", movie.id.to_string())])
         .await?;
     Ok(files.into_iter().next())
 }

@@ -13,6 +13,8 @@
 
 pub mod library;
 pub mod media;
+pub mod mock;
+pub mod net;
 
 pub use library::{TvLibrary, movie_library, tv_library};
 pub use media::{deterministic_bytes, write_media_file};

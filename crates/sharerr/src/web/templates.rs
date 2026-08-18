@@ -91,6 +91,10 @@ impl LoginPage {
 #[template(path = "status.html")]
 pub struct StatusPage {
     pub signed_in: bool,
+    /// The one-glance answer to "is it working?" — n items shared, last sync,
+    /// friends seen, peers in swarms. `None` only when the database itself is
+    /// unavailable, which the banners below already explain.
+    pub glance: Option<Glance>,
     /// Why reconciliation is not running, or `None` when it is. Carries the same
     /// string `/ready` reports, so the page and the probe cannot drift apart.
     pub blocked: Option<String>,
@@ -100,12 +104,40 @@ pub struct StatusPage {
     pub recovery_secs: u64,
     pub master_key_present: bool,
     pub tag: String,
-    pub sonarr_url: Option<String>,
-    pub radarr_url: Option<String>,
-    pub qbit_url: String,
+    /// One row per *arr app, configured or not, in `MediaSource::ARRS` order,
+    /// then one per `[[library]]` directory.
+    pub services: Vec<ServiceUrl>,
+    /// The *configured* torrent client — showing the unused section's URL on the
+    /// "what is this instance using" page sent operators debugging the wrong
+    /// service.
+    pub client_name: &'static str,
+    pub client_url: String,
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
     pub config_path: String,
+}
+
+/// The numbers an operator actually came to check, in one strip.
+#[derive(Debug)]
+pub struct Glance {
+    /// Items currently seeding.
+    pub items_shared: i64,
+    /// Rendered relative time of the last finished sync, or `None` for never.
+    pub last_sync: Option<String>,
+    /// What that sync amounted to — "3 added, 1 failed" — or empty when it was
+    /// an uneventful pass. The error string when the run failed outright.
+    pub last_sync_note: String,
+    /// Whether the note is a failure, so the template can colour it honestly.
+    pub last_sync_failed: bool,
+    /// Friends whose key was used within the last hour — the working proxy for
+    /// "connected", since a healthy Prowlarr polls well inside that.
+    pub friends_recent: usize,
+    pub friends_total: usize,
+    /// Live peers across the tracker's swarms right now, and how many of them
+    /// have the whole file. First-hand data, not an estimate — this process is
+    /// the tracker.
+    pub swarm_peers: usize,
+    pub swarm_seeders: usize,
 }
 
 /// One row of the path-mapping table.
@@ -118,6 +150,24 @@ pub struct PathRow {
     pub arr: String,
     pub sharerr: String,
     pub qbit: String,
+}
+
+/// One row of the `[[library]]` table — form state, same as [`PathRow`].
+#[derive(Debug, Clone)]
+pub struct LibraryRow {
+    pub path: String,
+    /// The selected kind's lowercase name; the blank spare row defaults to the
+    /// first option the `<select>` offers.
+    pub kind: &'static str,
+}
+
+impl Default for LibraryRow {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            kind: sharerr_core::config::LibraryKind::Tv.as_str(),
+        }
+    }
 }
 
 #[derive(Debug, Template)]
@@ -140,37 +190,44 @@ pub struct SettingsPage {
 
     pub tag: String,
 
-    pub sonarr_url: String,
-    pub sonarr_key_set: bool,
-    pub radarr_url: String,
-    pub radarr_key_set: bool,
+    /// One section per *arr app, in [`sharerr_core::MediaSource::ARRS`] order.
+    /// The template renders these with a single loop, so a new app appears on
+    /// this page without anyone editing HTML.
+    pub arrs: Vec<ArrSection>,
+    /// Whether any non-primary app is actually configured — the disclosure the
+    /// secondary sections live in starts open in that case, because hiding a
+    /// configured service behind a fold reads as it having vanished.
+    pub secondary_arr_configured: bool,
 
     pub qbit_url: String,
-    pub qbit_username: String,
-    pub qbit_password_set: bool,
+    /// Whether a qBittorrent API key is stored — the sole credential qBittorrent
+    /// authenticates with; there is no username/password fallback.
+    pub qbit_api_key_set: bool,
     pub qbit_category: String,
     pub qbit_tag: String,
     pub qbit_skip_checking: bool,
 
-    /// Flattened to a bool for the template's benefit — there are exactly two
-    /// backends, and a `<select>` with two options needs no more than this.
-    pub tracker_builtin: bool,
     pub tracker_advertised_host: String,
     pub tracker_port: String,
+    /// The expressive alternative to host+port: a full base URL with scheme and
+    /// path prefix. Empty when unset.
+    pub tracker_advertised_url: String,
     pub tracker_token_set: bool,
 
-    pub torznab_key_set: bool,
-    /// The `/api` URL a friend pastes into Prowlarr, built from the advertised host.
-    pub torznab_url: String,
-    /// Whether the builtin tracker is the selected backend, which is what makes the
-    /// announce endpoint on this instance the one in use.
-    pub tracker_builtin_selected: bool,
+    /// gluetun's control server URL, or empty when endpoint resolution is off.
+    pub gluetun_control_url: String,
+    pub gluetun_api_key_set: bool,
+    pub gluetun_poll_secs: u64,
+
     /// A freshly minted secret, shown exactly once on the response that created it.
     /// Never populated by an ordinary page load.
     pub revealed: Option<String>,
 
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
+
+    /// One row per `[[library]]` directory, plus a spare blank row.
+    pub libraries: Vec<LibraryRow>,
 
     pub path_map: Vec<PathRow>,
 
@@ -184,6 +241,42 @@ pub struct SettingsPage {
     pub data_dir: String,
     pub bind: String,
     pub config_path: String,
+}
+
+/// One `<option>` in a peer-scope selector.
+#[derive(Debug)]
+pub struct ScopeOption {
+    pub value: &'static str,
+    pub label: String,
+}
+
+/// One *arr app's row on the status page.
+#[derive(Debug)]
+pub struct ServiceUrl {
+    pub title: String,
+    pub url: Option<String>,
+}
+
+/// One *arr app's section on the settings page.
+#[derive(Debug)]
+pub struct ArrSection {
+    /// The lowercase name, used in ids, routes and test-button targets.
+    pub source: &'static str,
+    /// The heading form of the name.
+    pub title: String,
+    /// The configured URL, or empty when the app is not set up.
+    pub url: String,
+    pub key_set: bool,
+    /// Example URL with the app's documented default port.
+    pub placeholder: &'static str,
+    /// The config path of the URL field, for the template's shared lock macros —
+    /// a precomputed "is it locked" flag here would hide these fields from the
+    /// test that proves every lock key in the template is a real config path.
+    pub url_path: &'static str,
+    /// Whether the section renders in the always-visible group. Sonarr and
+    /// Radarr are what most instances run; the rest fold into a disclosure so
+    /// the page is not a wall of identical forms.
+    pub primary: bool,
 }
 
 /// One service's contribution to the scan behind the diagnostics page.
@@ -231,6 +324,160 @@ pub struct DiagnosticsPage {
     /// Whether anything here stops a file being shared. Drives the one-line verdict
     /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
+}
+
+/// One friend, as the peers page lists them.
+///
+/// Timestamps arrive pre-rendered as strings: the template has no clock and no
+/// formatter, and "never" is a legitimate value for `last_seen` that a number
+/// cannot express.
+#[derive(Debug)]
+pub struct PeerRow {
+    pub id: i64,
+    pub label: String,
+    /// The stored scope value (`all`/`tv`/`movies`), for pre-selecting the control.
+    pub scope: &'static str,
+    /// How to say it to a person — "everything", "TV only", "films only".
+    pub scope_label: &'static str,
+    pub created: String,
+    /// Rendered relative time, or "never" — the answer to "is my friend actually
+    /// set up?", which nothing could report before peers existed.
+    pub last_seen: String,
+    pub revoked: bool,
+    /// A truncated render of their gossip identity, or `None` until their
+    /// sharerr has introduced itself.
+    pub pubkey_short: Option<String>,
+    /// Where their sharerr can be pulled from, or empty.
+    pub gossip_url: String,
+    /// Whether the key *they* issued us is stored in the vault.
+    pub gossip_key_set: bool,
+    /// Recently observed addresses, newest first.
+    pub endpoints: Vec<PeerEndpointView>,
+}
+
+/// One observed address, rendered for the friends page.
+#[derive(Debug)]
+pub struct PeerEndpointView {
+    pub kind: &'static str,
+    pub addr: String,
+    pub seen: String,
+    /// "direct" or "gossip" — worth showing, because a first-hand sighting and a
+    /// relayed one deserve different confidence.
+    pub via: &'static str,
+}
+
+/// Friends this instance shares with, and the key each one holds.
+#[derive(Debug, Template)]
+#[template(path = "peers.html")]
+pub struct PeersPage {
+    /// One row per [`sharerr_store::PeerScope`], in `ALL` order, so both
+    /// `<select>`s render from the enum — a scope added there appears here
+    /// without editing HTML, and the strict form decoder can never 400 on a
+    /// value this page itself offered.
+    pub scope_options: Vec<ScopeOption>,
+    pub signed_in: bool,
+    pub peers: Vec<PeerRow>,
+    pub error: Option<String>,
+    /// A freshly minted peer key, shown exactly once on the response that created
+    /// it — the same reveal-once rule the Torznab key follows, and for the same
+    /// reason: it has to be copied into someone else's Prowlarr, but it is never
+    /// readable again.
+    pub revealed: Option<RevealedPeer>,
+    /// The feed URL a friend pastes alongside their key.
+    pub feed_url: String,
+}
+
+#[derive(Debug)]
+pub struct RevealedPeer {
+    pub label: String,
+    pub key: String,
+}
+
+/// One release as this friend's Torznab client would receive it.
+#[derive(Debug)]
+pub struct FeedPreviewRow {
+    pub title: String,
+    pub category: &'static str,
+    pub size: String,
+    pub download_url: String,
+    /// Empty until the release has an info hash, same as the real feed.
+    pub magnet_url: String,
+}
+
+/// A friend's feed, rendered with their own scope and their own links — the
+/// honest test of scoping, run from the operator's browser instead of a
+/// hand-crafted Torznab query.
+#[derive(Debug, Template)]
+#[template(path = "feed_preview.html")]
+pub struct FeedPreviewPage {
+    pub signed_in: bool,
+    pub peer_label: String,
+    pub peer_scope_label: &'static str,
+    pub total: usize,
+    pub items: Vec<FeedPreviewRow>,
+}
+
+/// One `<option>` in the items page's source/state filters.
+#[derive(Debug)]
+pub struct FilterOption {
+    pub value: &'static str,
+    pub label: String,
+}
+
+/// One column header on the items page, pre-rendered as a link that toggles
+/// direction on the next click — the template has no scripting to do this
+/// itself.
+#[derive(Debug)]
+pub struct SortLink {
+    pub label: &'static str,
+    pub href: String,
+    /// Whether this is the column the list is currently sorted by.
+    pub active: bool,
+    /// "asc" / "desc" when active, empty otherwise — the template renders it
+    /// as a small arrow.
+    pub dir: &'static str,
+}
+
+/// One row of the items list — every file this instance has ever discovered,
+/// in whatever state it is in.
+#[derive(Debug)]
+pub struct ItemRow {
+    pub title: String,
+    /// `episode` / `movie` / `track` / `book`, for the small kind badge.
+    pub kind: &'static str,
+    pub source_label: String,
+    /// Pre-rendered human size (`"1.5 GiB"`) — see `web::items::human_size`.
+    pub size: String,
+    pub state_label: String,
+    /// Which friends' scopes admit this item, joined for display — empty
+    /// unless the item is actually seeding, since nothing else reaches a
+    /// friend's feed.
+    pub visible_to: String,
+    pub since: String,
+    /// A truncated info hash, or `None` before a torrent exists.
+    pub info_hash_short: Option<String>,
+    pub last_error: Option<String>,
+}
+
+/// Every file sharerr has discovered, sortable and filterable — the page
+/// `docs/roadmap.md` used to describe as the thing "an operator asks for after
+/// setup and the last thing they can currently get".
+#[derive(Debug, Template)]
+#[template(path = "items.html")]
+pub struct ItemsPage {
+    pub signed_in: bool,
+    pub error: Option<String>,
+    pub items: Vec<ItemRow>,
+    /// Rows before filtering — so "12 of 340" is answerable without a second
+    /// query.
+    pub total: usize,
+    pub shown: usize,
+    pub source_options: Vec<FilterOption>,
+    pub state_options: Vec<FilterOption>,
+    pub source_filter: String,
+    pub state_filter: String,
+    pub q: String,
+    pub sort_links: Vec<SortLink>,
 }
 
 #[cfg(test)]

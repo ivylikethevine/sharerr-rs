@@ -1,85 +1,103 @@
-//! Transport and session handling for the qBittorrent WebUI API v2.
+//! Transport for the qBittorrent WebUI API v2.
 //!
-//! # The two things that break naive clients
+//! # The one thing that breaks naive clients
 //!
-//! 1. **`Referer` is mandatory.** qBittorrent's CSRF check rejects any request
-//!    whose `Referer`/`Origin` host does not match the WebUI address. A client that
-//!    omits it authenticates fine and then 403s on everything afterwards. It is set
-//!    in [`QbitClient::dispatch`] and nowhere else, so no call site can forget.
-//! 2. **A failed login is an HTTP 200.** `auth/login` answers `Ok.` or `Fails.` in
-//!    the body with a success status either way. Checking only the status code
-//!    yields a client that appears logged in and fails later, far from the cause.
+//! **`Referer` is mandatory.** qBittorrent's CSRF check rejects any request whose
+//! `Referer`/`Origin` host does not match the WebUI address. A client that omits it
+//! authenticates fine and then fails on everything afterwards. It is set in
+//! [`QbitClient::dispatch`] and nowhere else, so no call site can forget.
 //!
-//! Sessions expire, so any 403 on a normal call triggers exactly one re-login and
-//! one retry. A second 403 is reported rather than retried — at that point the
-//! cause is configuration, and looping would only turn it into a ban.
+//! # Authentication is an API key, not a session
+//!
+//! This client speaks only qBittorrent 5.2's WebUI API key
+//! (`Options -> Web UI -> API key`), sent as `Authorization: Bearer` on every
+//! request. There is no `auth/login` round trip and nothing to renew — a rejected
+//! key is reported immediately, with no retry, because there is no session for a
+//! retry to recover.
+//!
+//! # The 401 that is not a wrong key
+//!
+//! qBittorrent validates the `Host` header's **port** against the port it listens
+//! on, and answers `401 Unauthorized` when they differ — before it ever looks at
+//! the key. A docker port remap (`-p 18080:8080`) or a reverse proxy on a different
+//! port therefore makes a correct key look rejected. [`QbitError::ApiKeyRejected`]
+//! says so, because no amount of rotating the key fixes it.
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderValue, REFERER};
+use reqwest::header::{AUTHORIZATION, HeaderValue, REFERER};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
-use tokio::sync::Mutex;
 use url::Url;
 
 use crate::error::{QbitError, Result};
 
 const API_PREFIX: &str = "api/v2/";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_ERROR_BODY: usize = 400;
+
+/// The prefix every qBittorrent-issued API key carries. Keys are `qbt_` followed
+/// by 28 alphanumeric characters, 32 in total.
+pub const API_KEY_PREFIX: &str = "qbt_";
+
+/// The full length of a qBittorrent API key, prefix included.
+pub const API_KEY_LEN: usize = 32;
+
+pub(crate) use sharerr_client::clamp_body;
 
 /// Builds the per-request body. A closure rather than a prepared builder because
 /// `multipart::Form` cannot be cloned, and a retry needs a fresh one.
 pub(crate) type BuildRequest<'a> = &'a (dyn Fn(RequestBuilder) -> RequestBuilder + Send + Sync);
 
+/// A qBittorrent WebUI client, authenticated by API key.
 pub struct QbitClient {
     /// Always ends in `/` so `Url::join` appends rather than replaces.
     base: Url,
-    username: String,
-    password: SecretString,
+    /// A key from Options → Web UI → API key, sent as `Authorization: Bearer`.
+    /// Requires qBittorrent 5.2 or newer; older builds have no such feature.
+    ///
+    /// Stored pre-rendered as the header it becomes: building it once means the
+    /// per-request path cannot fail, and `HeaderValue::set_sensitive` keeps the key
+    /// out of anything that prints the header map.
+    bearer: HeaderValue,
     http: reqwest::Client,
     /// Sent on every request. Must match the WebUI host and port.
     referer: HeaderValue,
-    /// `true` once `auth/login` has succeeded. Guarded so that concurrent callers
-    /// on a cold client perform one login between them, not one each.
-    session: Mutex<bool>,
 }
 
 impl std::fmt::Debug for QbitClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QbitClient")
             .field("base", &self.base.as_str())
-            .field("username", &self.username)
-            .field("password", &"<redacted>")
+            .field("api_key", &"<redacted>")
             .finish()
     }
 }
 
 impl QbitClient {
-    pub fn new(base: &Url, username: &str, password: SecretString) -> Result<Self> {
+    /// A client that authenticates with a qBittorrent API key.
+    ///
+    /// The key is the one qBittorrent generates under Options → Web UI → API key.
+    /// It needs no username: the key identifies the WebUI account by itself, and
+    /// there is no login round trip to make.
+    pub fn with_api_key(base: &Url, api_key: SecretString) -> Result<Self> {
+        let key = api_key.expose_secret();
+        if !looks_like_api_key(key) {
+            return Err(QbitError::MalformedApiKey);
+        }
+
+        // `looks_like_api_key` has just established the value is `qbt_` plus ASCII
+        // alphanumerics, so this cannot fail; the fallible form is kept rather than
+        // unwrapped so a future loosening of that check cannot turn into a panic.
+        let mut bearer = HeaderValue::from_str(&format!("Bearer {key}"))
+            .map_err(|_| QbitError::MalformedApiKey)?;
+        bearer.set_sensitive(true);
+
         let http = reqwest::Client::builder()
             .timeout(DEFAULT_TIMEOUT)
-            // The SID cookie qBittorrent hands back at login rides on this.
-            .cookie_store(true)
             .build()
             .map_err(QbitError::Client)?;
-        Self::with_http(base, username, password, http)
-    }
-
-    /// Same as [`Self::new`] with a caller-supplied client. The client **must**
-    /// have a cookie store enabled or every call after login will 403.
-    pub fn with_http(
-        base: &Url,
-        username: &str,
-        password: SecretString,
-        http: reqwest::Client,
-    ) -> Result<Self> {
-        let mut base = base.clone();
-        if !base.path().ends_with('/') {
-            let with_slash = format!("{}/", base.path());
-            base.set_path(&with_slash);
-        }
+        let base = sharerr_client::normalise_base(base);
 
         // Origin only — scheme, host, and port, no path. That is what qBittorrent
         // compares against, and a path would just be noise in its logs.
@@ -92,14 +110,13 @@ impl QbitClient {
 
         Ok(Self {
             base,
-            username: username.to_owned(),
-            password,
+            bearer,
             http,
             referer,
-            session: Mutex::new(false),
         })
     }
 
+    /// The instance this client talks to, for error messages that name it.
     pub fn base_url(&self) -> &Url {
         &self.base
     }
@@ -111,66 +128,10 @@ impl QbitClient {
             .map_err(|source| QbitError::Url { source })
     }
 
-    // ------------------------------------------------------------ auth
-
-    /// Authenticate, replacing any existing session.
-    ///
-    /// Public because `doctor` wants to probe credentials without side effects.
+    /// Nothing to establish: the key is stateless and `auth/login` rejects it
+    /// outright, so this always succeeds and leaves proving the key to the first
+    /// real call. [`Self::version`] is that call for every caller in this tree.
     pub async fn login(&self) -> Result<()> {
-        let mut session = self.session.lock().await;
-        self.login_inner().await?;
-        *session = true;
-        Ok(())
-    }
-
-    async fn login_inner(&self) -> Result<()> {
-        let url = self.endpoint("auth/login")?;
-        let response = self
-            .http
-            .post(url.clone())
-            .header(REFERER, self.referer.clone())
-            .form(&[
-                ("username", self.username.as_str()),
-                ("password", self.password.expose_secret()),
-            ])
-            .send()
-            .await
-            .map_err(|source| QbitError::Unreachable {
-                url: url.to_string(),
-                source,
-            })?;
-
-        // qBittorrent bans an IP after repeated failures and answers 403 here.
-        if response.status() == StatusCode::FORBIDDEN {
-            return Err(QbitError::LoginBanned);
-        }
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = clamp_body(&response.text().await.unwrap_or_default());
-            return Err(QbitError::Status {
-                status: status.as_u16(),
-                path: "auth/login".to_owned(),
-                body,
-            });
-        }
-
-        // The body, not the status, carries the verdict.
-        let body = response.text().await.unwrap_or_default();
-        if body.trim() != "Ok." {
-            return Err(QbitError::LoginRejected);
-        }
-
-        tracing::debug!(user = %self.username, "authenticated to qBittorrent");
-        Ok(())
-    }
-
-    async fn ensure_session(&self) -> Result<()> {
-        let mut session = self.session.lock().await;
-        if !*session {
-            self.login_inner().await?;
-            *session = true;
-        }
         Ok(())
     }
 
@@ -178,11 +139,16 @@ impl QbitClient {
 
     fn dispatch(&self, method: Method, url: Url, build: BuildRequest<'_>) -> RequestBuilder {
         // The one place `Referer` is attached. Do not set it anywhere else.
-        build(
-            self.http
-                .request(method, url)
-                .header(REFERER, self.referer.clone()),
-        )
+        // Attached per request rather than as a default header on the
+        // `reqwest::Client`, so the secret lives in one place and `Debug` on the
+        // client cannot leak it through the header map.
+        let request = self
+            .http
+            .request(method, url)
+            .header(REFERER, self.referer.clone())
+            .header(AUTHORIZATION, self.bearer.clone());
+
+        build(request)
     }
 
     pub(crate) async fn send(
@@ -191,41 +157,25 @@ impl QbitClient {
         path: &str,
         build: BuildRequest<'_>,
     ) -> Result<Response> {
-        self.ensure_session().await?;
         let url = self.endpoint(path)?;
 
-        let unreachable = |source: reqwest::Error| QbitError::Unreachable {
-            url: url.to_string(),
-            source,
-        };
-
         let response = self
-            .dispatch(method.clone(), url.clone(), build)
-            .send()
-            .await
-            .map_err(unreachable)?;
-
-        if response.status() != StatusCode::FORBIDDEN {
-            return Ok(response);
-        }
-
-        // The session expired. Re-authenticate and retry once — never more, or a
-        // misconfigured Referer turns into a login-failure ban.
-        tracing::debug!(path, "qBittorrent session expired; re-authenticating");
-        self.login().await?;
-
-        let retried = self
             .dispatch(method, url.clone(), build)
             .send()
             .await
-            .map_err(unreachable)?;
+            .map_err(|source| QbitError::Unreachable {
+                url: url.to_string(),
+                detail: sharerr_client::error_chain(&source),
+            })?;
 
-        if retried.status() == StatusCode::FORBIDDEN {
-            return Err(QbitError::Forbidden {
-                path: path.to_owned(),
-            });
+        // A rejected key never becomes accepted by asking again, and there is no
+        // session to renew — retrying would only walk towards qBittorrent's ban
+        // counter for nothing.
+        if is_auth_rejection(response.status()) {
+            return Err(QbitError::ApiKeyRejected);
         }
-        Ok(retried)
+
+        Ok(response)
     }
 
     /// Send and require a 2xx, discarding the body.
@@ -264,18 +214,81 @@ impl QbitClient {
     }
 
     /// `GET /api/v2/app/version` — cheapest possible liveness probe.
+    ///
+    /// Also the proof that the key works, since key auth has no login step.
     pub async fn version(&self) -> Result<String> {
         let body = self.send_ok(Method::GET, "app/version", &|rb| rb).await?;
         Ok(body.trim().to_owned())
     }
 }
 
-/// Clamp an error body for inclusion in a message.
+/// Whether a status means "the key was not accepted".
 ///
-/// Bounded by **characters, not bytes**: `String::truncate` panics outright if the
-/// byte index lands inside a multi-byte character, and error bodies are exactly
-/// where non-ASCII shows up — a localized error page from a reverse proxy, or a
-/// title quoted back in the message.
-pub(crate) fn clamp_body(body: &str) -> String {
-    body.chars().take(MAX_ERROR_BODY).collect()
+/// Both, and not one: qBittorrent answers a rejected bearer token with either
+/// 401 or 403 depending on the reason, and treating only one as rejection would
+/// silently ignore the other.
+fn is_auth_rejection(status: StatusCode) -> bool {
+    status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED
+}
+
+/// Whether a string has the shape of a qBittorrent API key.
+///
+/// Checked at construction rather than on the first request, so a pasted password
+/// or a truncated key is named as such instead of arriving as a puzzling 403 from
+/// somewhere deep in a sync.
+pub fn looks_like_api_key(candidate: &str) -> bool {
+    candidate.len() == API_KEY_LEN
+        && candidate.starts_with(API_KEY_PREFIX)
+        && candidate[API_KEY_PREFIX.len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_generated_key_is_recognised() {
+        // The shape qBittorrent documents: `qbt_` plus 28 alphanumerics.
+        assert!(looks_like_api_key("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"));
+    }
+
+    #[test]
+    fn a_password_pasted_into_the_key_box_is_not_a_key() {
+        assert!(!looks_like_api_key("correct-horse-battery-staple"));
+        assert!(!looks_like_api_key("qbt_short"));
+        // Right length and prefix, wrong alphabet.
+        assert!(!looks_like_api_key("qbt_jCGn3V76XutJwQpsXgIm6A9NLB8-"));
+    }
+
+    #[test]
+    fn both_statuses_that_mean_the_key_was_rejected_are_treated_alike() {
+        assert!(is_auth_rejection(StatusCode::UNAUTHORIZED));
+        assert!(is_auth_rejection(StatusCode::FORBIDDEN));
+        assert!(!is_auth_rejection(StatusCode::OK));
+        assert!(!is_auth_rejection(StatusCode::NOT_FOUND));
+    }
+
+    #[test]
+    fn debug_never_prints_the_key() {
+        let base = Url::parse("http://localhost:8080").unwrap();
+
+        let key = QbitClient::with_api_key(
+            &base,
+            SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+        )
+        .expect("builds");
+        let rendered = format!("{key:?}");
+        assert!(!rendered.contains("jCGn3V76"), "{rendered}");
+    }
+
+    #[test]
+    fn a_malformed_key_is_rejected_at_construction() {
+        let base = Url::parse("http://localhost:8080").unwrap();
+        let err = QbitClient::with_api_key(&base, SecretString::from("not-a-key")).unwrap_err();
+        assert!(matches!(err, QbitError::MalformedApiKey), "{err:?}");
+    }
 }

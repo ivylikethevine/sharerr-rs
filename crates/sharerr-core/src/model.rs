@@ -5,19 +5,99 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Which *arr app a shared item came from.
+/// Where a shared item was discovered: one of the *arr apps, or a plain
+/// tagged directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaSource {
     Sonarr,
     Radarr,
+    Lidarr,
+    Readarr,
+    Whisparr,
+    /// A `[[library]]` directory scanned straight from disk — no app, no API,
+    /// no external ids. Everything URL-or-API-key shaped iterates
+    /// [`Self::ARRS`] instead of [`Self::ALL`] to leave this variant out.
+    Directory,
 }
 
 impl MediaSource {
+    /// The lowercase name used in the database and in log output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sonarr => "sonarr",
             Self::Radarr => "radarr",
+            Self::Lidarr => "lidarr",
+            Self::Readarr => "readarr",
+            Self::Whisparr => "whisparr",
+            Self::Directory => "directory",
+        }
+    }
+
+    /// Which version of the *arr HTTP API this app speaks.
+    ///
+    /// Not cosmetic: Sonarr, Radarr and Whisparr are on `v3` while Lidarr and
+    /// Readarr are on `v1`. Hardcoding one prefix is why the client could only ever
+    /// have talked to the first two, and getting it wrong presents as a 404 that
+    /// looks like a wrong URL rather than a wrong version.
+    pub fn api_version(self) -> &'static str {
+        match self {
+            Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",
+            Self::Lidarr | Self::Readarr => "v1",
+            // Directory does not speak the *arr API; only `ArrClient` reads
+            // this, and one is never built for it. The arm exists because the
+            // function is total, and panicking here would let a future caller
+            // take the whole process down over a label.
+            Self::Directory => "none",
+        }
+    }
+
+    /// Every source sharerr can discover from.
+    pub const ALL: &'static [Self] = &[
+        Self::Sonarr,
+        Self::Radarr,
+        Self::Lidarr,
+        Self::Readarr,
+        Self::Whisparr,
+        Self::Directory,
+    ];
+
+    /// The sources whose items are admitted to a narrow peer scope by the
+    /// declared kind in their spec rather than by which app produced them —
+    /// because a directory has no single kind: it is whatever the operator
+    /// declared in `[[library]]`.
+    pub const KIND_SCOPED: &'static [Self] = &[Self::Directory];
+
+    /// Only the *arr apps — the sources that have a URL, an API key, and a
+    /// settings section shaped like one. Everything that loops "the configured
+    /// apps" iterates this; [`Self::ALL`] additionally carries
+    /// [`Self::Directory`], which has none of those.
+    pub const ARRS: &'static [Self] = &[
+        Self::Sonarr,
+        Self::Radarr,
+        Self::Lidarr,
+        Self::Readarr,
+        Self::Whisparr,
+    ];
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    ///
+    /// This is *the* decoder for stored and URL-borne source names; a local
+    /// string match at a call site is how the database once lost every Lidarr
+    /// row to an "unknown source" error.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|s| s.as_str() == value)
+    }
+
+    /// The name as a heading or label writes it — `as_str` capitalised.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Sonarr => "Sonarr",
+            Self::Radarr => "Radarr",
+            Self::Lidarr => "Lidarr",
+            Self::Readarr => "Readarr",
+            Self::Whisparr => "Whisparr",
+            Self::Directory => "Directory",
         }
     }
 }
@@ -38,6 +118,33 @@ pub struct ExternalIds {
     pub tmdb: Option<i64>,
     pub tvmaze: Option<i64>,
     pub imdb: Option<String>,
+    /// MusicBrainz release-group id, for music. A string rather than a number
+    /// because MusicBrainz ids are UUIDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musicbrainz: Option<String>,
+    /// Goodreads work id, for books.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goodreads: Option<String>,
+    /// ISBN, for books. Kept alongside Goodreads because indexers match on either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+}
+
+impl ExternalIds {
+    /// Any IMDb id spelling reduced to the bare number.
+    ///
+    /// Sonarr sends `1234567`, Radarr sends `tt1234567`, and the *arr APIs
+    /// return either depending on the endpoint — so every comparison and every
+    /// renderer that wants the bare number goes through here rather than
+    /// restating the rule.
+    pub fn imdb_bare(raw: &str) -> &str {
+        raw.trim().trim_start_matches("tt")
+    }
+
+    /// The stored IMDb id as [`Self::imdb_bare`] renders it, if one is known.
+    pub fn imdb_numeric(&self) -> Option<&str> {
+        self.imdb.as_deref().map(Self::imdb_bare)
+    }
 }
 
 /// What a shared file actually contains.
@@ -53,13 +160,44 @@ pub enum MediaSpec {
         title: String,
         year: Option<u16>,
     },
+    /// One music file. Lidarr's unit of import is a *track file*, which may hold a
+    /// whole album, so the album is the thing named and the track is optional.
+    Track {
+        artist: String,
+        album: String,
+        /// `None` when the file is the whole album rather than one track.
+        track: Option<u32>,
+    },
+    /// One book file.
+    Book {
+        author: String,
+        title: String,
+    },
 }
 
 impl MediaSpec {
+    /// The title a searcher would look for: the series, film, album, or book.
+    ///
+    /// For music this is the *album*, not the artist — that is what a friend's
+    /// Lidarr searches on, the same way a series title is what Sonarr searches on.
     pub fn title(&self) -> &str {
         match self {
             Self::Episode { series_title, .. } => series_title,
             Self::Movie { title, .. } => title,
+            Self::Track { album, .. } => album,
+            Self::Book { title, .. } => title,
+        }
+    }
+
+    /// The credited artist or author, when the medium has one.
+    ///
+    /// Music and books are searched by *creator* far more than film and television
+    /// are, so this is carried separately rather than folded into the title.
+    pub fn creator(&self) -> Option<&str> {
+        match self {
+            Self::Track { artist, .. } => Some(artist),
+            Self::Book { author, .. } => Some(author),
+            Self::Episode { .. } | Self::Movie { .. } => None,
         }
     }
 }
@@ -79,6 +217,13 @@ impl fmt::Display for MediaSpec {
                 year: Some(y),
             } => write!(f, "{title} ({y})"),
             Self::Movie { title, year: None } => write!(f, "{title}"),
+            Self::Track {
+                artist,
+                album,
+                track: Some(n),
+            } => write!(f, "{artist} - {album} [{n:02}]"),
+            Self::Track { artist, album, .. } => write!(f, "{artist} - {album}"),
+            Self::Book { author, title } => write!(f, "{author} - {title}"),
         }
     }
 }
@@ -98,6 +243,10 @@ pub enum ShareState {
 }
 
 impl ShareState {
+    /// Every lifecycle state, for iteration and round-trip tests.
+    pub const ALL: &'static [Self] = &[Self::Pending, Self::Seeding, Self::Unshared, Self::Failed];
+
+    /// The lowercase name used in the database and in log output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -105,6 +254,11 @@ impl ShareState {
             Self::Unshared => "unshared",
             Self::Failed => "failed",
         }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|s| s.as_str() == value)
     }
 }
 
@@ -128,6 +282,13 @@ pub struct SharedItem {
     pub info_hash: Option<String>,
     pub state: ShareState,
     pub last_error: Option<String>,
+    /// When sharerr first recorded this file, as a Unix timestamp.
+    ///
+    /// Carried out of the store because the Torznab feed has to publish it: Sonarr
+    /// and Radarr **reject an entire feed** whose items have no `pubDate`, so this
+    /// is not decoration — without it a friend cannot add sharerr as an indexer at
+    /// all. `None` on an item that has not been stored yet.
+    pub created_at: Option<i64>,
 }
 
 impl SharedItem {
@@ -135,5 +296,91 @@ impl SharedItem {
     /// database id. Used to diff discovery output against stored state.
     pub fn key(&self) -> (MediaSource, i64) {
         (self.source, self.file_id)
+    }
+}
+
+/// One tagged file, as its library source describes it.
+///
+/// This is everything discovery can know. The fields a [`SharedItem`] adds — the
+/// database id, the info hash, the share state — belong to sharerr, not to the
+/// source, and are filled in by the reconciliation loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovered {
+    pub source: MediaSource,
+    /// Series or movie id within the *arr app; for a directory, a stable hash
+    /// of the library root.
+    pub source_id: i64,
+    /// `episodeFile` / `movieFile` id — the natural key sharerr diffs against.
+    /// For a directory, a stable hash of the file's path.
+    pub file_id: i64,
+    pub spec: MediaSpec,
+    /// The path **exactly as the source reported it**, before any mapping is
+    /// applied. Stored verbatim so that changing a path mapping later does not
+    /// orphan existing rows.
+    pub arr_path: PathBuf,
+    pub size: u64,
+    pub ids: ExternalIds,
+    /// The original scene release name, when the file was imported from one. This
+    /// is the best possible release title — it is already known to parse.
+    pub scene_name: Option<String>,
+}
+
+impl Discovered {
+    /// Stable identity of the underlying file, matching [`SharedItem::key`].
+    pub fn key(&self) -> (MediaSource, i64) {
+        (self.source, self.file_id)
+    }
+
+    /// Promote to a storable item. The release title is resolved separately
+    /// because it needs rules this crate does not own.
+    pub fn into_shared_item(self, release_title: String) -> SharedItem {
+        SharedItem {
+            id: None,
+            source: self.source,
+            source_id: self.source_id,
+            file_id: self.file_id,
+            spec: self.spec,
+            release_title,
+            arr_path: self.arr_path,
+            size: self.size,
+            ids: self.ids,
+            info_hash: None,
+            state: ShareState::Pending,
+            last_error: None,
+            // Assigned by the store on insert; a discovered item has not been
+            // recorded yet, so it has no publication date to report.
+            created_at: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_source_names_round_trip() {
+        for source in MediaSource::ALL {
+            assert_eq!(MediaSource::parse(source.as_str()), Some(*source));
+        }
+        assert_eq!(MediaSource::parse("plex"), None);
+    }
+
+    /// `ARRS` is `ALL` minus the sources that do not speak the *arr API — the
+    /// loops that build `ArrClient`s depend on that being exact.
+    #[test]
+    fn arrs_is_all_without_the_non_arr_sources() {
+        assert!(!MediaSource::ARRS.contains(&MediaSource::Directory));
+        let mut expected: Vec<MediaSource> = MediaSource::ALL.to_vec();
+        expected.retain(|s| *s != MediaSource::Directory);
+        assert_eq!(MediaSource::ARRS, expected.as_slice());
+    }
+
+    #[test]
+    fn share_state_names_round_trip() {
+        for state in ShareState::ALL {
+            assert_eq!(ShareState::parse(state.as_str()), Some(*state));
+        }
+        assert_eq!(ShareState::parse("paused"), None);
     }
 }

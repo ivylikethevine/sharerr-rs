@@ -9,6 +9,28 @@
 {%- endmacro %}
 {%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
 
+{% macro arr_section(arr) %}
+<form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
+  <label for="{{ arr.source }}_url">URL</label>
+  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
+         {% call lock_attr(arr.url_path) %}{% endcall %}>
+  {% call locked(arr.url_path) %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
+
+  <label for="{{ arr.source }}_key">API key</label>
+  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if arr.key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
+  <span id="test-{{ arr.source }}"></span>
+</form>
+{% endmacro %}
+
 
 {% block content %}
 <h1>Settings</h1>
@@ -69,48 +91,6 @@
   <button type="submit">Save</button>
 </form>
 
-<h2>Sonarr</h2>
-<form method="post" action="/settings/sonarr" class="panel">
-  <label for="sonarr_url">URL</label>
-  <input id="sonarr_url" name="url" value="{{ sonarr_url }}" placeholder="http://sonarr:8989"
-         {% call lock_attr("sonarr.url") %}{% endcall %}>
-  {% call locked("sonarr.url") %}{% endcall %}
-  <p class="hint">Leave blank if this instance has no Sonarr.</p>
-
-  <label for="sonarr_key">API key</label>
-  <input id="sonarr_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(sonarr_key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if sonarr_key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-  {% endif %}
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/sonarr" hx-target="#test-sonarr" hx-swap="innerHTML">Test connection</button>
-  <span id="test-sonarr"></span>
-</form>
-
-<h2>Radarr</h2>
-<form method="post" action="/settings/radarr" class="panel">
-  <label for="radarr_url">URL</label>
-  <input id="radarr_url" name="url" value="{{ radarr_url }}" placeholder="http://radarr:7878"
-         {% call lock_attr("radarr.url") %}{% endcall %}>
-  {% call locked("radarr.url") %}{% endcall %}
-  <p class="hint">Leave blank if this instance has no Radarr.</p>
-
-  <label for="radarr_key">API key</label>
-  <input id="radarr_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(radarr_key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if radarr_key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-  {% endif %}
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/radarr" hx-target="#test-radarr" hx-swap="innerHTML">Test connection</button>
-  <span id="test-radarr"></span>
-</form>
-
 <h2>qBittorrent</h2>
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>
@@ -118,18 +98,19 @@
          {% call lock_attr("qbittorrent.url") %}{% endcall %}>
   {% call locked("qbittorrent.url") %}{% endcall %}
 
-  <label for="qbit_username">Username</label>
-  <input id="qbit_username" name="username" value="{{ qbit_username }}" autocomplete="off"
-         {% call lock_attr("qbittorrent.username") %}{% endcall %}>
-  {% call locked("qbittorrent.username") %}{% endcall %}
-
-  <label for="qbit_password">Password</label>
-  <input id="qbit_password" name="password" type="password" autocomplete="off"
-         placeholder="{% call stored(qbit_password_set) %}{% endcall %}"
+  <label for="qbit_api_key">API key</label>
+  <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
-  {% if qbit_password_set %}
-  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% if qbit_api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
   {% endif %}
+  <p class="hint">
+    Generate one under Options &rarr; Web UI &rarr; API key (qBittorrent 5.2 or
+    newer). This is the only credential sharerr uses to sign in — it does not
+    expire the way a session does, and rotating the key in qBittorrent
+    invalidates the old one immediately.
+  </p>
 
   <label for="qbit_category">Category for sharerr's torrents</label>
   <input id="qbit_category" name="category" value="{{ qbit_category }}"
@@ -159,12 +140,10 @@
 
 <h2>Tracker</h2>
 <form method="post" action="/settings/tracker" class="panel">
-  <label for="backend">Backend</label>
-  <select id="backend" name="backend" {% call lock_attr("tracker.backend") %}{% endcall %}>
-    <option value="qbittorrent-embedded" {% if !tracker_builtin %}selected{% endif %}>qBittorrent's embedded tracker</option>
-    <option value="builtin" {% if tracker_builtin %}selected{% endif %}>sharerr's builtin tracker (served by this instance)</option>
-  </select>
-  {% call locked("tracker.backend") %}{% endcall %}
+  <p class="hint">
+    sharerr serves announces itself, from this instance, whichever torrent client
+    seeds. It answers only for torrents sharerr made.
+  </p>
 
   <label for="advertised_host">Advertised host</label>
   <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
@@ -178,9 +157,19 @@
 
   <label for="tracker_port">Announce port</label>
   <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"
-         placeholder="default: whatever qBittorrent reports"
+         placeholder="default: this server's own port"
          {% call lock_attr("tracker.port") %}{% endcall %}>
   {% call locked("tracker.port") %}{% endcall %}
+
+  <label for="advertised_url">Advertised URL (advanced)</label>
+  <input id="advertised_url" name="advertised_url" value="{{ tracker_advertised_url }}"
+         placeholder="e.g. https://example.com/sharerr — overrides host and port"
+         {% call lock_attr("tracker.advertised_url") %}{% endcall %}>
+  {% call locked("tracker.advertised_url") %}{% endcall %}
+  <p class="hint">
+    For reverse-proxied or IPv6 setups: a full base URL with scheme and any path
+    prefix. When set, it wins over the host and port above.
+  </p>
 
   <label for="tracker_token">Tracker token</label>
   <input id="tracker_token" name="token" type="password" autocomplete="off"
@@ -190,48 +179,68 @@
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
   {% endif %}
   <p class="hint">
-    Only used by the builtin tracker. When set, it is embedded in every announce
-    URL, so holding the <code>.torrent</code> is what grants the right to announce.
-    Changing it invalidates torrents already published — leave it alone unless you
-    mean to cut off existing peers.
+    When set, the token is embedded in every announce URL, so holding the
+    <code>.torrent</code> is what grants the right to announce. Changing it
+    invalidates torrents already published — leave it alone unless you mean to
+    cut off existing peers.
   </p>
 
   <button type="submit">Save</button>
 </form>
 
-{% if tracker_builtin_selected %}
 <form method="post" action="/settings/generate/tracker" class="panel">
   <p class="hint">sharerr is serving its own tracker on this instance.</p>
   <button type="submit" class="secondary" {% if !master_key_present %}disabled{% endif %}>
     {% if tracker_token_set %}Replace the announce token{% else %}Generate an announce token{% endif %}
   </button>
 </form>
-{% endif %}
 
-<h2>Indexer (Torznab)</h2>
-<div class="panel">
+<h2>Gluetun</h2>
+<form method="post" action="/settings/gluetun" class="panel">
   <p class="hint">
-    This is how a friend finds what you share. In their Prowlarr, add a
-    <em>Generic Torznab</em> indexer with the URL and API key below; their Sonarr
-    and Radarr then reach it through Prowlarr.
+    Behind a VPN with a forwarded port, the address friends reach you on changes
+    on every reconnect. Point this at gluetun's control server and sharerr
+    resolves its public IP and forwarded port from there, re-announcing and
+    rewriting torrents when they change — instead of trusting the static address
+    above.
   </p>
 
-  <dl class="facts">
-    <dt>Feed URL</dt><dd><code>{{ torznab_url }}</code></dd>
-    <dt>API key</dt>
-    <dd>{% if torznab_key_set %}stored{% else %}<strong>not set — the feed is closed until you generate one</strong>{% endif %}</dd>
-  </dl>
+  <label for="gluetun_control_url">Control server URL</label>
+  <input id="gluetun_control_url" name="control_url" value="{{ gluetun_control_url }}"
+         placeholder="http://localhost:8000 — leave empty to disable"
+         {% call lock_attr("gluetun.control_url") %}{% endcall %}>
+  {% call locked("gluetun.control_url") %}{% endcall %}
 
-  <form method="post" action="/settings/generate/torznab">
-    <button type="submit" {% if !master_key_present %}disabled{% endif %}>
-      {% if torznab_key_set %}Replace the API key{% else %}Generate an API key{% endif %}
-    </button>
-  </form>
+  <label for="gluetun_api_key">Control server API key</label>
+  <input id="gluetun_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(gluetun_api_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if gluetun_api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
   <p class="hint">
-    The feed URL uses the tracker's advertised host, so set that first if it looks
-    wrong. Replacing the key immediately stops any Prowlarr still using the old one.
+    Required since gluetun v3.40, which made <code>apikey</code> the default
+    control server auth — an unkeyed request now gets a bare <code>401</code>.
+    Find or set it in gluetun's own config under <code>CONTROL_SERVER_AUTH</code>
+    (or the roles section of its auth config file).
   </p>
-</div>
+
+  <label for="gluetun_poll_secs">Poll interval (seconds)</label>
+  <input id="gluetun_poll_secs" name="poll_secs" value="{{ gluetun_poll_secs }}" inputmode="numeric"
+         {% call lock_attr("gluetun.poll_secs") %}{% endcall %}>
+  {% call locked("gluetun.poll_secs") %}{% endcall %}
+  <p class="hint">
+    The poll is the safety net; for reconnects to be picked up in seconds, set
+    gluetun's <code>VPN_PORT_FORWARDING_UP_COMMAND</code> to hit
+    <code>/gluetun/refresh</code> on this instance. Setting
+    <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> to hit
+    <code>/gluetun/down</code> too means a port that just went away is dropped
+    immediately rather than kept as a stale fallback until the next poll finds
+    out on its own.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
 
 <h2>Path mappings</h2>
 <form method="post" action="/settings/paths" class="panel">
@@ -276,6 +285,68 @@
 
   <button type="submit">Save</button>
 </form>
+
+<hr>
+<p class="hint">
+  Everything above is what sharerr needs to run. Below is where it finds media to
+  share: plain directories, *arr apps, or both — configure whichever you use and
+  leave the rest blank.
+</p>
+
+<h2>Library directories</h2>
+<form method="post" action="/settings/libraries" class="panel">
+  <p class="hint">
+    Plain folders shared without any *arr app — everything in each one is shared,
+    treated as the kind you pick. No external ids travel with these, so a
+    friend's app matches them by release name alone. Blank rows are ignored, so
+    use the spare row at the bottom to add one.
+  </p>
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr><th>Directory as sharerr sees it</th><th>Kind</th></tr>
+    </thead>
+    <tbody>
+      {% for row in libraries %}
+      <tr>
+        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
+        <td>
+          <select name="kind">
+            <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
+            <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
+            <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
+            <option value="book" {% if row.kind == "book" %}selected{% endif %}>Books</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/library" hx-target="#test-library" hx-swap="innerHTML">Test directories</button>
+  <span id="test-library"></span>
+</form>
+
+{% for arr in arrs %}
+{% if arr.primary %}
+<h2>{{ arr.title }}</h2>
+{% call arr_section(arr) %}{% endcall %}
+{% endif %}
+{% endfor %}
+
+{# The long tail of *arr apps, folded so the page is not a wall of identical
+   forms. Starts open whenever one of them is configured — a configured service
+   disappearing behind a fold reads as it having vanished. #}
+<details class="fold" {% if secondary_arr_configured %}open{% endif %}>
+  <summary>More *arr apps — Lidarr (music), Readarr (books), Whisparr</summary>
+  {% for arr in arrs %}
+  {% if !arr.primary %}
+  <h3>{{ arr.title }}</h3>
+  {% call arr_section(arr) %}{% endcall %}
+  {% endif %}
+  {% endfor %}
+</details>
 
 <h2>Your account</h2>
 <form method="post" action="/settings/account/password" class="panel">

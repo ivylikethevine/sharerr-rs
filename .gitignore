@@ -11,6 +11,8 @@
 # Sonarr's and Radarr's own config and databases in the compose test stack. Bind
 # mounted rather than named volumes so `seed-arr` can write to them from the host.
 /docker/state
+/docker/state-vpn
+/docker/state-tm
 
 # Never commit a master key.
 .env

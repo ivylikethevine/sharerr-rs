@@ -4,30 +4,26 @@ pub type Result<T> = std::result::Result<T, QbitError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QbitError {
-    #[error("could not reach qBittorrent at {url}: {source}")]
-    Unreachable {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
+    #[error("could not reach qBittorrent at {url}: {detail}")]
+    Unreachable { url: String, detail: String },
 
     #[error(
-        "qBittorrent rejected the credentials. Check the qbittorrent.password entry \
-         in the vault and the qbittorrent.username setting"
+        "qBittorrent rejected the API key. Check the qbittorrent.api_key entry in the \
+         vault matches the key in Options -> Web UI -> API key — rotating the key \
+         there invalidates the old one immediately. This could also be a Host-header \
+         port mismatch: qBittorrent validates the Host header's port against its own \
+         WebUI port, so reaching it through a remapped docker port or a reverse proxy \
+         on a different port is rejected the same way. API keys need qBittorrent 5.2 \
+         or newer"
     )]
-    LoginRejected,
+    ApiKeyRejected,
 
     #[error(
-        "qBittorrent refused to accept a login (HTTP 403). Repeated failures ban the \
-         client IP for a few minutes — wait, or clear the ban in Options -> Web UI"
+        "that does not look like a qBittorrent API key. Keys are 32 characters: \
+         `qbt_` followed by 28 letters and digits, generated under Options -> Web UI \
+         -> API key"
     )]
-    LoginBanned,
-
-    #[error(
-        "qBittorrent returned 403 for {path} even after re-authenticating. The most \
-         common cause is a Referer that does not match the configured WebUI address"
-    )]
-    Forbidden { path: String },
+    MalformedApiKey,
 
     #[error("qBittorrent returned HTTP {status} for {path}: {body}")]
     Status {
@@ -63,7 +59,9 @@ impl QbitError {
         matches!(self, Self::Unreachable { .. })
     }
 
+    /// Whether this is a rejected credential rather than an unreachable service —
+    /// the two have different fixes and must be reported differently.
     pub fn is_auth_failure(&self) -> bool {
-        matches!(self, Self::LoginRejected | Self::LoginBanned)
+        matches!(self, Self::ApiKeyRejected | Self::MalformedApiKey)
     }
 }

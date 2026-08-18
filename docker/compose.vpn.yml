@@ -1,0 +1,176 @@
+# The same stack, with qBittorrent behind a VPN container.
+#
+#   ./run_docker_tests.sh --vpn
+#
+# ## Why this exists as a second stack
+#
+# `compose.test.yml` gives every service its own address and its own published
+# ports. That is the *simple* deployment, and it is not the common one: the README's
+# own assumptions note that a user "may or may not be using a VPN, or a VPN
+# container such as gluetun", and routing the torrent client through one is close to
+# standard practice in this ecosystem. Nothing exercised that shape until this file.
+#
+# It is a genuinely different topology rather than a variation, and it breaks the
+# things sharerr is most fragile about:
+#
+#   * **qBittorrent has no address of its own.** `network_mode: service:gluetun`
+#     puts it in gluetun's network namespace, so it is reached at `gluetun:8080`.
+#     A config pointing at `qbittorrent:8080` does not merely fail to connect — the
+#     name does not resolve at all.
+#   * **Ports are published on gluetun, not on the container that listens.**
+#     Declaring `ports:` on a service that uses `network_mode: service:` is a
+#     compose error, so they move to the namespace owner.
+#   * **The announce address is not the machine's.** Peers reach the swarm through
+#     the tunnel's exit, so `tracker.advertised_host` describes that, not the host.
+#     Getting this wrong produces torrents that look perfect and that nobody can
+#     announce to — silent, and exactly what sharerr exists to prevent.
+#
+# ## Why there is a WireGuard server in here
+#
+# So the suite needs no VPN subscription, no credentials, and no egress. `vpn`
+# terminates a real tunnel that gluetun really connects to; both ends are inside
+# this stack. gluetun is doing genuine WireGuard work, which is what makes the
+# namespace, routing, and firewall behaviour real — the tunnel simply does not go
+# anywhere. See docker/wireguard/wg0.conf.
+#
+# ## Standalone, not an override
+#
+# This does not layer on top of compose.test.yml with a second `-f`. Compose
+# *appends* list fields like `ports`, so an override could not remove qBittorrent's
+# published ports — and a service with both `ports:` and `network_mode: service:` is
+# rejected. Duplicating the four unchanged services is the cheaper honesty.
+#
+# Ports are all offset from compose.test.yml so both stacks can be up at once.
+
+name: sharerr-vpn-test
+
+x-puid: &puid "${SHARERR_TEST_UID:-1000}"
+x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
+
+networks:
+  vpn:
+    ipam:
+      config:
+        # Fixed so the WireGuard endpoint can be an address rather than a name:
+        # gluetun resolves its endpoint before the tunnel — and therefore before
+        # its own DNS — is up.
+        - subnet: 172.31.66.0/24
+
+services:
+  # The far end of the tunnel. Not a service sharerr knows or cares about; it
+  # exists so gluetun has something real to connect to.
+  vpn:
+    image: lscr.io/linuxserver/wireguard:1.0.20250521
+    container_name: sharerr-vpn-test-wg
+    networks:
+      vpn:
+        ipv4_address: 172.31.66.10
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+    volumes:
+      - ./wireguard:/config/wg_confs:ro
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+
+  gluetun:
+    image: qmcgaw/gluetun:v3.40.0
+    container_name: sharerr-vpn-test-gluetun
+    depends_on: [vpn]
+    networks: [vpn]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      VPN_SERVICE_PROVIDER: custom
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: eIzCt6HUi9Lycm6dtYDUsjJGe7aBlIsDfos+M4xg2n4=
+      WIREGUARD_PUBLIC_KEY: OqcT5cKPoa1HP4pI8VOqVx13qXiUD98SOyYxUu4PgS0=
+      WIREGUARD_ENDPOINT_IP: 172.31.66.10
+      WIREGUARD_ENDPOINT_PORT: "51820"
+      WIREGUARD_ADDRESSES: 10.13.13.2/32
+      # Without this the killswitch also blocks the stack's own traffic, and
+      # sharerr could not reach qBittorrent's WebUI at all.
+      FIREWALL_OUTBOUND_SUBNETS: 172.31.66.0/24
+      # Inbound to the WebUI. gluetun blocks everything not listed, which is the
+      # behaviour being relied on. Announces go to sharerr's own tracker, which
+      # lives outside this namespace in the test stack.
+      FIREWALL_INPUT_PORTS: "8080"
+      # Docker's embedded resolver, so `sonarr` and `radarr` still resolve from
+      # inside the tunnel's namespace.
+      DNS_ADDRESS: 127.0.0.11
+      # The default target is on the internet. Pointed at the listener parked on
+      # the far side of the tunnel instead — see docker/wireguard/wg0.conf.
+      HEALTH_TARGET_ADDRESS: 10.13.13.1:8000
+      TZ: Etc/UTC
+    ports:
+      # qBittorrent's WebUI port lives here, because qBittorrent has no network
+      # of its own. This is the detail that surprises people.
+      - "127.0.0.1:28080:8080"
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.0.4
+    container_name: sharerr-vpn-test-qbittorrent
+    # The whole point of this stack. No `networks:`, and no `ports:` — both belong
+    # to gluetun now, and declaring either here is an error.
+    network_mode: "service:gluetun"
+    depends_on: [gluetun]
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+      WEBUI_PORT: "8080"
+    volumes:
+      - qbit-config:/config
+      - ../tests/fixtures/media:/downloads:ro
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.15
+    container_name: sharerr-vpn-test-sonarr
+    networks: [vpn]
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-vpn/sonarr:/config
+      - ../tests/fixtures/media/tv:/tv:ro
+    ports:
+      - "127.0.0.1:28989:8989"
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.14.0
+    container_name: sharerr-vpn-test-radarr
+    networks: [vpn]
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-vpn/radarr:/config
+      - ../tests/fixtures/media/movies:/movies:ro
+    ports:
+      - "127.0.0.1:27878:7878"
+
+  sharerr:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sharerr-vpn-test-sharerr
+    networks: [vpn]
+    depends_on: [sonarr, radarr, qbittorrent]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      - ./config-vpn:/config
+      - sharerr-data:/data
+      - ../tests/fixtures/media:/media:ro
+    ports:
+      - "127.0.0.1:28477:8477"
+
+volumes:
+  qbit-config:
+  sharerr-data:

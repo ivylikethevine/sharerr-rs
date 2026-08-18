@@ -22,35 +22,19 @@
 //! only `doctor` currently does it — folding it in would mean this module growing a
 //! second shape for one caller.
 
+use std::sync::Arc;
+
 use secrecy::SecretString;
 use sharerr_arr::{ArrClient, Discovered};
+use sharerr_client::{ClientKind, TorrentClient};
+use sharerr_core::config::TorrentBackend;
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_core::{Config, MediaSource};
 use sharerr_qbit::QbitClient;
+use sharerr_transmission::TransmissionClient;
 use url::Url;
 
-/// Render an error together with its cause chain.
-///
-/// The distinction matters: reqwest's own `Display` is just "error sending request
-/// for url (...)", and the part an operator actually needs — `Connection refused`,
-/// `dns error`, `operation timed out` — lives further down the chain.
-pub fn chain(err: &dyn std::error::Error) -> String {
-    let mut rendered = err.to_string();
-    let mut cause = err.source();
-
-    while let Some(next) = cause {
-        let text = next.to_string();
-        // `#[source]` fields are often interpolated into the parent's message
-        // already; only append what is genuinely new.
-        if !rendered.contains(&text) {
-            rendered.push_str(": ");
-            rendered.push_str(&text);
-        }
-        cause = next.source();
-    }
-
-    rendered
-}
+pub use sharerr_client::error_chain as chain;
 
 /// What a Sonarr or Radarr instance turned out to be.
 ///
@@ -143,12 +127,13 @@ pub async fn check_arr(
     };
 
     // Both tag questions are asked, every time. Previously each caller asked only
-    // one of them and reported the other's condition in its wording.
-    if client.tag_id(tag).await.is_err() {
+    // one of them and reported the other's condition in its wording. The id from
+    // the first answers feeds the walk, so the `/tag` list is fetched once.
+    let Ok(tag_id) = client.tag_id(tag).await else {
         return ArrOutcome::TagMissing { version };
-    }
+    };
 
-    match client.discover(tag).await {
+    match client.discover_with_tag_id(tag_id).await {
         Ok(items) if items.is_empty() => ArrOutcome::TagUnused { version },
         Ok(items) => ArrOutcome::Ready {
             version,
@@ -217,9 +202,20 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
 
     let resolver = config.resolver();
     for item in discovered {
-        match resolver.resolve(&item.arr_path) {
+        // Directory items are scanned from sharerr's own view, so only the
+        // sharerr→qbit half of a mapping may apply to them — an arr-side rule
+        // must not rewrite a path that was never an *arr's to report.
+        let resolved = if item.source == MediaSource::Directory {
+            resolver.resolve_sharerr(&item.arr_path)
+        } else {
+            resolver.resolve(&item.arr_path)
+        };
+        match resolved {
             Ok(paths) => {
-                if !paths.mapping_applied {
+                // "Matched no rule" is the normal case for a directory item,
+                // not the warning sign it is for a path another container
+                // reported.
+                if !paths.mapping_applied && item.source != MediaSource::Directory {
                     report.unmapped += 1;
                 }
                 if !paths.sharerr.exists() {
@@ -236,7 +232,72 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
     report
 }
 
-/// What the qBittorrent instance turned out to be.
+/// What a `[[library]]` directory turned out to be.
+///
+/// The same decide-once contract as [`ArrOutcome`]: `doctor`, the settings
+/// probe, and the diagnostics page each word these their own way, but cannot
+/// disagree about which condition they found.
+#[derive(Debug)]
+pub enum DirOutcome {
+    /// The path does not exist as sharerr sees it.
+    Missing,
+    /// The path exists but is not a directory.
+    NotADirectory,
+    /// The walk failed partway — permissions, usually. Carries the reason.
+    Unreadable(String),
+    /// A perfectly good directory with nothing shareable in it.
+    Empty,
+    /// Scanned. `skipped` counts media files whose names could not be
+    /// classified; they are reported rather than shared.
+    Ready {
+        skipped: usize,
+        items: Vec<Discovered>,
+    },
+}
+
+impl DirOutcome {
+    /// The discovered files, if the scan got that far — same honest-empty
+    /// contract as [`ArrOutcome::into_items`].
+    pub fn into_items(self) -> Vec<Discovered> {
+        match self {
+            Self::Ready { items, .. } => items,
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// Scan one `[[library]]` directory and establish what sharerr would share.
+pub fn check_library(library: &sharerr_core::config::LibraryConfig) -> DirOutcome {
+    match std::fs::metadata(&library.path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return DirOutcome::Missing,
+        Err(err) => return DirOutcome::Unreadable(err.to_string()),
+        Ok(meta) if !meta.is_dir() => return DirOutcome::NotADirectory,
+        Ok(_) => {}
+    }
+
+    // `scan` refuses an empty root — it is what an unmounted bind mount looks
+    // like, and scanning it to nothing would withdraw everything. Classified
+    // here first so the probes report "empty" rather than a scan failure.
+    match std::fs::read_dir(&library.path) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                return DirOutcome::Empty;
+            }
+        }
+        Err(err) => return DirOutcome::Unreadable(err.to_string()),
+    }
+
+    match crate::library::scan(library) {
+        Ok(outcome) if outcome.items.is_empty() && outcome.skipped == 0 => DirOutcome::Empty,
+        Ok(outcome) => DirOutcome::Ready {
+            skipped: outcome.skipped,
+            items: outcome.items,
+        },
+        Err(err) => DirOutcome::Unreadable(format!("{err:#}")),
+    }
+}
+
+/// What the torrent client turned out to be.
 #[derive(Debug)]
 pub enum QbitOutcome {
     NoCredential,
@@ -250,29 +311,112 @@ pub enum QbitOutcome {
     /// authenticate a second one.
     Ready {
         version: String,
-        client: Box<QbitClient>,
+        /// Which client answered, so a message can name it.
+        kind: ClientKind,
+        client: Arc<dyn TorrentClient>,
     },
 }
 
-/// Sign in to qBittorrent and read its version.
+/// Sign in to the configured torrent client and read its version.
 ///
 /// The login is explicit rather than left to the first real call, because "reached
 /// it but the password is wrong" and "could not reach it" have different fixes and
 /// an implicit login reports them identically.
-pub async fn check_qbit(
+///
+/// Which client this talks to is a configuration choice, and the caller passes the
+/// already-resolved backend rather than guessing from the URL — two clients can
+/// perfectly well live on the same host.
+/// Construct whichever torrent client `backend` selects.
+///
+/// The one place the backend→constructor decision lives: the reconciliation
+/// loop and every health probe build their client through here, so a change to
+/// how one is constructed cannot leave `doctor` testing a different thing from
+/// what actually seeds.
+pub fn build_torrent_client(
+    backend: TorrentBackend,
     url: &Url,
-    username: &str,
-    password: Result<Option<SecretString>, String>,
+    username: Option<&str>,
+    credential: TorrentCredential,
+) -> Result<Arc<dyn TorrentClient>, String> {
+    Ok(match (backend, credential) {
+        // Unreachable in practice: qBittorrent's `password_key` is `None`, so
+        // nothing ever resolves a `TorrentCredential::Password` for it. Reported
+        // rather than matched away, in case that ever changes.
+        (TorrentBackend::Qbittorrent, TorrentCredential::Password(_)) => {
+            return Err(
+                "qBittorrent no longer authenticates with a username and password — set an \
+                 API key instead (Options -> Web UI -> API key, qBittorrent 5.2+)."
+                    .to_owned(),
+            );
+        }
+        (TorrentBackend::Qbittorrent, TorrentCredential::ApiKey(key)) => {
+            Arc::new(QbitClient::with_api_key(url, key).map_err(|e| chain(&e))?)
+        }
+        (TorrentBackend::Transmission, TorrentCredential::Password(password)) => {
+            let username = username.unwrap_or_default();
+            Arc::new(TransmissionClient::new(url, username, password).map_err(|e| chain(&e))?)
+        }
+        // Reported rather than silently ignored: an operator who stored a key for
+        // Transmission believes it is in use, and falling back to the password
+        // would leave them debugging why rotating the key changed nothing.
+        (TorrentBackend::Transmission, TorrentCredential::ApiKey(_)) => {
+            return Err(
+                "Transmission has no API key — its RPC authenticates with a username and \
+                 password. Clear transmission's API key, or select qBittorrent."
+                    .to_owned(),
+            );
+        }
+    })
+}
+
+/// How sharerr proves itself to the torrent client.
+///
+/// Kept as one value rather than two optional arguments so that "which credential
+/// is in play" is decided once, by [`TorrentCredential::choose`], instead of at
+/// every call site — three of which resolve secrets from three different places.
+#[derive(Debug)]
+pub enum TorrentCredential {
+    Password(SecretString),
+    /// A qBittorrent 5.2+ WebUI API key.
+    ApiKey(SecretString),
+}
+
+impl TorrentCredential {
+    /// Pick the credential to use, preferring an API key when one is stored.
+    ///
+    /// The key wins because storing one is a deliberate act: an operator who
+    /// generated a key and saved it expects it to be what authenticates, even
+    /// though the password they set up first is still sitting in the vault.
+    pub fn choose(api_key: Option<SecretString>, password: Option<SecretString>) -> Option<Self> {
+        api_key
+            .map(Self::ApiKey)
+            .or_else(|| password.map(Self::Password))
+    }
+
+    /// The word to use for this credential in a message aimed at an operator.
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Self::Password(_) => "username or password",
+            Self::ApiKey(_) => "API key",
+        }
+    }
+}
+
+pub async fn check_qbit(
+    backend: TorrentBackend,
+    url: &Url,
+    username: Option<&str>,
+    credential: Result<Option<TorrentCredential>, String>,
 ) -> QbitOutcome {
-    let password = match password {
-        Ok(Some(password)) => password,
+    let credential = match credential {
+        Ok(Some(credential)) => credential,
         Ok(None) => return QbitOutcome::NoCredential,
         Err(reason) => return QbitOutcome::CredentialUnreadable(reason),
     };
 
-    let client = match QbitClient::new(url, username, password) {
+    let client = match build_torrent_client(backend, url, username, credential) {
         Ok(client) => client,
-        Err(err) => return QbitOutcome::BadUrl(chain(&err)),
+        Err(reason) => return QbitOutcome::BadUrl(reason),
     };
 
     if let Err(err) = client.login().await {
@@ -288,7 +432,8 @@ pub async fn check_qbit(
     match client.version().await {
         Ok(version) => QbitOutcome::Ready {
             version,
-            client: Box::new(client),
+            kind: client.kind(),
+            client,
         },
         Err(err) => QbitOutcome::Failed(chain(&err)),
     }
@@ -300,8 +445,7 @@ mod tests {
 
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::MockServer;
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 
@@ -309,20 +453,13 @@ mod tests {
         Ok(Some(SecretString::from(API_KEY)))
     }
 
-    async fn mount(server: &MockServer, route: &str, status: u16, body: serde_json::Value) {
-        Mock::given(method("GET"))
-            .and(path(route))
-            .respond_with(ResponseTemplate::new(status).set_body_json(body))
-            .mount(server)
-            .await;
-    }
+    use sharerr_testkit::mock::mount_json_status as mount;
 
     async fn mount_status(server: &MockServer) {
-        mount(
+        sharerr_testkit::mock::mount_json(
             server,
             "/api/v3/system/status",
-            200,
-            json!({ "version": "4.0.15", "appName": "Sonarr" }),
+            sharerr_testkit::library::system_status_json("Sonarr"),
         )
         .await;
     }
@@ -395,14 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        // Bind a port, learn its number, then drop the listener — that leaves an
-        // address where the connection is refused outright, which is what a service
-        // being down actually looks like. A dropped `MockServer` is not equivalent:
-        // its port gets reused and answers 404, which is a *reachable* service.
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
+        let port = sharerr_testkit::net::closed_port();
         let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
 
         let outcome = check_arr(MediaSource::Sonarr, Some(&url), key(), "sharerr").await;
@@ -420,6 +550,86 @@ mod tests {
             matches!(outcome, ArrOutcome::NotConfigured),
             "got {outcome:?}"
         );
+    }
+
+    /// Each directory condition maps to its own outcome — the wording differs
+    /// per caller, the finding must not.
+    #[test]
+    fn library_conditions_map_to_distinct_outcomes() {
+        use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = |path: std::path::PathBuf| LibraryConfig {
+            path,
+            kind: LibraryKind::Movie,
+        };
+
+        let missing = check_library(&library(dir.path().join("nope")));
+        assert!(matches!(missing, DirOutcome::Missing), "got {missing:?}");
+
+        let file_path = dir.path().join("plain.mkv");
+        std::fs::write(&file_path, b"x").unwrap();
+        let not_dir = check_library(&library(file_path));
+        assert!(
+            matches!(not_dir, DirOutcome::NotADirectory),
+            "got {not_dir:?}"
+        );
+
+        let empty_dir = dir.path().join("empty");
+        std::fs::create_dir(&empty_dir).unwrap();
+        let empty = check_library(&library(empty_dir));
+        assert!(matches!(empty, DirOutcome::Empty), "got {empty:?}");
+
+        let full_dir = dir.path().join("full");
+        std::fs::create_dir(&full_dir).unwrap();
+        std::fs::write(full_dir.join("Gilded.Ferry.2019.mkv"), b"xx").unwrap();
+        let ready = check_library(&library(full_dir));
+        match ready {
+            DirOutcome::Ready { skipped, items } => {
+                assert_eq!(skipped, 0);
+                assert_eq!(items.len(), 1);
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// A directory item resolving through no rule is by design, not a
+    /// misconfiguration — the warning is reserved for paths another container
+    /// reported.
+    #[test]
+    fn directory_items_are_not_counted_as_unmapped() {
+        use sharerr_core::config::PathMapping;
+        use sharerr_core::{ExternalIds, MediaSpec};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Gilded.Ferry.2019.mkv");
+        std::fs::write(&file, b"xx").unwrap();
+
+        let config = Config {
+            path_map: vec![PathMapping {
+                arr: "/tv".into(),
+                sharerr: dir.path().to_path_buf(),
+                qbit: None,
+            }],
+            ..Config::default()
+        };
+        let item = sharerr_core::Discovered {
+            source: MediaSource::Directory,
+            source_id: 1,
+            file_id: 2,
+            spec: MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: file,
+            size: 2,
+            ids: ExternalIds::default(),
+            scene_name: None,
+        };
+
+        let report = check_paths(&config, &[item]);
+        assert_eq!(report.unmapped, 0);
+        assert!(report.missing.is_empty());
     }
 
     /// "No key stored yet" and "the vault would not open" have different fixes —
@@ -446,62 +656,5 @@ mod tests {
             matches!(unreadable, ArrOutcome::CredentialUnreadable(_)),
             "got {unreadable:?}"
         );
-    }
-
-    /// The cause chain is the whole reason this helper exists: reqwest's own
-    /// `Display` stops before the part that names what went wrong.
-    #[test]
-    fn the_cause_chain_is_appended_without_repeating_itself() {
-        #[derive(Debug)]
-        struct Inner;
-        impl std::fmt::Display for Inner {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "connection refused")
-            }
-        }
-        impl std::error::Error for Inner {}
-
-        #[derive(Debug)]
-        struct Outer;
-        impl std::fmt::Display for Outer {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "error sending request")
-            }
-        }
-        impl std::error::Error for Outer {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&Inner)
-            }
-        }
-
-        assert_eq!(chain(&Outer), "error sending request: connection refused");
-    }
-
-    /// A parent that already interpolates its source must not say it twice.
-    #[test]
-    fn an_already_interpolated_cause_is_not_repeated() {
-        #[derive(Debug)]
-        struct Inner;
-        impl std::fmt::Display for Inner {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "refused")
-            }
-        }
-        impl std::error::Error for Inner {}
-
-        #[derive(Debug)]
-        struct Outer;
-        impl std::fmt::Display for Outer {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "sending request: refused")
-            }
-        }
-        impl std::error::Error for Outer {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&Inner)
-            }
-        }
-
-        assert_eq!(chain(&Outer), "sending request: refused");
     }
 }

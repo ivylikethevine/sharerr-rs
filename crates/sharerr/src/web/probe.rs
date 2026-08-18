@@ -18,12 +18,13 @@
 
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
-use secrecy::SecretString;
 use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
-use crate::checks::{ArrOutcome, QbitOutcome, check_arr, check_qbit};
+use crate::checks::{
+    ArrOutcome, DirOutcome, QbitOutcome, TorrentCredential, check_arr, check_library, check_qbit,
+};
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
 ///
@@ -33,11 +34,20 @@ use crate::checks::{ArrOutcome, QbitOutcome, check_arr, check_qbit};
 pub async fn test(State(state): State<WebState>, Path(service): Path<String>) -> Response {
     let config = state.serve.config().await;
 
-    let outcome = match service.as_str() {
-        "sonarr" => arr_badge(MediaSource::Sonarr, &state, &config).await,
-        "radarr" => arr_badge(MediaSource::Radarr, &state, &config).await,
-        "qbittorrent" => qbit_badge(&state, &config).await,
-        _ => Outcome::Bad("Unknown service.".to_owned()),
+    let outcome = if service == "qbittorrent" {
+        qbit_badge(&state, &config).await
+    } else if service == "library" {
+        library_badge(&config).await
+    } else if let Some(kind) = MediaSource::parse(&service) {
+        // "directory" parses as a MediaSource but is not a probeable service;
+        // its button is the "library" one above.
+        if kind == MediaSource::Directory {
+            Outcome::Bad("Unknown service.".to_owned())
+        } else {
+            arr_badge(kind, &state, &config).await
+        }
+    } else {
+        Outcome::Bad("Unknown service.".to_owned())
     };
 
     outcome.into_fragment()
@@ -69,27 +79,14 @@ impl Outcome {
     }
 }
 
-/// Fetch one stored secret.
-///
-/// Returns `Ok(None)` for "not stored yet", which is a different message from "the
-/// vault will not open" — the first is a field to fill in, the second is a missing
-/// environment variable.
-async fn secret(state: &WebState, key: &'static str) -> Result<Option<SecretString>, String> {
-    state
-        .serve
-        .open_vault()
-        .await?
-        .get(key)
-        .map_err(|err| err.to_string())
-}
-
 async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
-    let (service, key) = match kind {
-        MediaSource::Sonarr => (config.sonarr.as_ref(), secret_keys::SONARR_API_KEY),
-        MediaSource::Radarr => (config.radarr.as_ref(), secret_keys::RADARR_API_KEY),
+    let service = config.service(kind);
+    // The caller filtered Directory out, and every *arr app has a vault key.
+    let Some(key) = secret_keys::api_key_for(kind) else {
+        return Outcome::Bad("Unknown service.".to_owned());
     };
 
-    let api_key = secret(state, key).await;
+    let api_key = state.secret(key).await;
     let outcome = check_arr(
         kind,
         service.map(|service| &service.url),
@@ -130,12 +127,92 @@ async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outc
     }
 }
 
+/// One badge summarising every `[[library]]` directory: the counts when all is
+/// well, or the first problem — the operator fixes one thing at a time anyway.
+async fn library_badge(config: &Config) -> Outcome {
+    if config.library.is_empty() {
+        return Outcome::Bad("No library directories configured. Save one first.".to_owned());
+    }
+
+    let libraries = config.library.clone();
+    // The scans stat every file; off the async loop so a slow mount cannot
+    // stall the single worker thread this may be running on.
+    let outcomes = match tokio::task::spawn_blocking(move || {
+        libraries
+            .iter()
+            .map(|library| (library.clone(), check_library(library)))
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(outcomes) => outcomes,
+        // A panicked or cancelled scan must not render as a green "0 folders
+        // found" badge asserting the configuration is fine.
+        Err(err) => return Outcome::Bad(format!("The scan did not complete: {err}")),
+    };
+
+    let (mut folders, mut files, mut skipped) = (0usize, 0usize, 0usize);
+    for (library, outcome) in outcomes {
+        let path = library.path.display();
+        match outcome {
+            DirOutcome::Missing => {
+                return Outcome::Bad(format!(
+                    "{path} does not exist as sharerr sees it — check the mount."
+                ));
+            }
+            DirOutcome::NotADirectory => {
+                return Outcome::Bad(format!("{path} is not a directory."));
+            }
+            DirOutcome::Unreadable(reason) => {
+                return Outcome::Bad(format!("Could not scan {path}: {reason}"));
+            }
+            DirOutcome::Empty => folders += 1,
+            DirOutcome::Ready {
+                skipped: s,
+                ref items,
+            } => {
+                folders += 1;
+                files += items.len();
+                skipped += s;
+            }
+        }
+    }
+
+    let mut message = format!("{folders} folder(s), {files} media file(s) found.");
+    if skipped > 0 {
+        message.push_str(&format!(
+            " {skipped} file(s) skipped — their names could not be classified."
+        ));
+    }
+    Outcome::Good(message)
+}
+
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    let password = secret(state, secret_keys::QBITTORRENT_PASSWORD).await;
+    // Which client, and therefore which URL and which vault key, is a configuration
+    // choice — the button cannot infer it from the URL, because two clients can
+    // live on the same host.
+    let client = config.torrent_client();
+
+    // Both secrets are read before choosing, so that an unreadable vault is
+    // reported as such rather than as a missing credential.
+    let api_key = match client.api_key_key {
+        Some(key) => state.secret(key).await,
+        None => Ok(None),
+    };
+    let password = match client.password_key {
+        Some(key) => state.secret(key).await,
+        None => Ok(None),
+    };
+    let credential = match (api_key, password) {
+        (Err(reason), _) | (_, Err(reason)) => Err(reason),
+        (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),
+    };
+
     let outcome = check_qbit(
-        &config.qbittorrent.url,
-        &config.qbittorrent.username,
-        password,
+        config.torrent_backend,
+        client.url,
+        client.username,
+        credential,
     )
     .await;
 
@@ -146,11 +223,11 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
         }
         QbitOutcome::Unreachable(reason) => Outcome::Bad(format!("Could not reach it: {reason}")),
         QbitOutcome::AuthRejected => {
-            Outcome::Bad("Reached it, but the username or password was rejected.".to_owned())
+            Outcome::Bad("Reached it, but the credential was rejected.".to_owned())
         }
         QbitOutcome::Failed(reason) => Outcome::Bad(format!("Signed in, but: {reason}")),
-        QbitOutcome::Ready { version, .. } => {
-            Outcome::Good(format!("Signed in to qBittorrent {version}."))
+        QbitOutcome::Ready { version, kind, .. } => {
+            Outcome::Good(format!("Signed in to {kind} {version}."))
         }
     }
 }

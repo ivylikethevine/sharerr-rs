@@ -1,0 +1,221 @@
+# sharerr and qBittorrent sharing one VPN exit, via gluetun.
+#
+#   cd docker/deploy && cp .env.example .env && $EDITOR .env sharerr.toml
+#   docker compose up -d
+#
+# ## The topology
+#
+# gluetun owns the network namespace. qBittorrent and sharerr both join it with
+# `network_mode: service:gluetun`, so all three containers share one address, one
+# routing table, and one flat port space. Three consequences drive everything
+# below, and each one is a thing that silently does not work if you get it wrong:
+#
+#   * **The containers reach each other on `localhost`, not by name.** sharerr's
+#     config says `http://localhost:8080` for qBittorrent. `http://qbittorrent:8080`
+#     does not resolve — there is no such network alias, because qBittorrent has no
+#     network of its own. (If you have seen a gluetun stack that says `gluetun:8080`,
+#     that is the *other* shape: the client in the namespace, everything else
+#     outside it. Here sharerr is inside too.)
+#   * **`ports:` belongs to gluetun.** Declaring `ports:` on a service that uses
+#     `network_mode: service:` is a compose error, not a no-op.
+#   * **One port space.** 8080, 8477, 6881 and gluetun's own 8000 control
+#     server all have to be distinct, even though they belong to different
+#     containers. A collision here looks like a service that starts and then
+#     refuses connections.
+#
+# ## The four ports
+#
+# Published to the host (the two WebUIs), bound to loopback — put a reverse proxy
+# in front of these rather than opening them to the LAN:
+#
+#   8080  qBittorrent WebUI
+#   8477  sharerr WebUI
+#
+# Reachable from the internet through the tunnel (`FIREWALL_VPN_INPUT_PORTS`):
+#
+#   6881  qBittorrent's BitTorrent listening port — inbound peer connections
+#   8477  sharerr's HTTP port — where friends announce, and the Torznab feed
+#         their Prowlarr fetches
+#
+# 8477 appears in both lists on purpose. It is one listener with two audiences:
+# your browser arrives over the published docker port, a friend's indexer arrives
+# through the tunnel. See "one port, three services" below before deciding you are
+# comfortable with that.
+#
+# ## Read this before assuming the three inbound ports work
+#
+# Inbound through a commercial VPN needs port forwarding, and almost every
+# provider that offers it gives you **one** port, **assigned by them**, often
+# changing on reconnect. Three ports of your choosing is not something a typical
+# subscription can do, whatever this file asks for.
+#
+# Two ways out, both real:
+#
+#   * **Your own WireGuard endpoint** — a VPS, a seedbox, a box at another site.
+#     You control its firewall, so all three ports forward and stay put. This is
+#     the setup the file is written for and the only one where it works as drawn.
+#   * **Provider port forwarding**, in the `VPN_PORT_FORWARDING` block below. You
+#     get one port. Give it to qBittorrent's listener, since inbound peers are
+#     what actually needs it, and accept that the tracker and the feed are then
+#     reachable only if you publish them some other way — a reverse proxy on the
+#     host, or a tunnel like Cloudflare/Tailscale that does not depend on the VPN.
+#
+# `sharerr doctor` will not catch this: a closed inbound port looks identical to a
+# quiet swarm from the inside.
+
+name: sharerr-vpn
+
+services:
+  # ------------------------------------------------------------------ gluetun
+  #
+  # The namespace owner. Everything else in this file is a passenger.
+  gluetun:
+    image: qmcgaw/gluetun:v3.40.0
+    container_name: gluetun
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      # --- the tunnel -----------------------------------------------------
+      #
+      # As written: a WireGuard endpoint you control. For a commercial provider
+      # set VPN_SERVICE_PROVIDER to its name and drop the WIREGUARD_ENDPOINT_*
+      # pair — gluetun supplies the server list itself. See
+      # https://github.com/qdm12/gluetun-wiki
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set this in .env}
+      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:?set this in .env}
+      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:?set this in .env}
+      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-51820}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set this in .env}
+
+      # --- what may come in ------------------------------------------------
+      #
+      # Through the tunnel: the two things friends connect to, plus the peer
+      # listener. This is the line that decides whether anyone outside can reach
+      # what this instance shares.
+      FIREWALL_VPN_INPUT_PORTS: "6881,8477"
+      # Through the default interface: the two WebUIs, arriving via the published
+      # ports below. Without this the killswitch drops them and both UIs appear
+      # dead from the host.
+      FIREWALL_INPUT_PORTS: "8080,8477"
+
+      # --- what may go out -------------------------------------------------
+      #
+      # Your LAN and docker's own subnets, so the published ports can answer and
+      # so sharerr can reach any *arr apps you run outside this stack. Must NOT
+      # overlap WIREGUARD_ADDRESSES — an overlap breaks port forwarding in ways
+      # that look like a flaky provider.
+      FIREWALL_OUTBOUND_SUBNETS: ${LAN_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8}
+
+      # Docker's embedded resolver, so container names outside this stack still
+      # resolve from inside the tunnel's namespace.
+      DNS_ADDRESS: 127.0.0.11
+
+      # --- provider port forwarding (optional) ------------------------------
+      #
+      # Uncomment for a provider that supports it. You get one port, chosen by
+      # them, on an exit address that also rotates. sharerr's `[gluetun]` config
+      # section (see config/sharerr.toml) polls the control server on :8000 for
+      # both values and keeps every torrent's announce URL in step; the
+      # up-command below makes a reconnect picked up in seconds instead of at
+      # the next poll, and the down-command means a port going away is dropped
+      # immediately rather than kept as a stale fallback until the next poll
+      # finds out on its own. sharerr is in this same namespace, so `localhost`
+      # is correct — and neither endpoint takes a value, they only *nudge*
+      # sharerr to re-ask gluetun, so there is no port to template into either.
+      # Also set gluetun.api_key in sharerr's Settings (or `CONTROL_SERVER_AUTH`
+      # here) — gluetun's control server has required one since v3.40, and
+      # sharerr skips its poll entirely rather than send a request that would
+      # only come back 401.
+      #
+      # VPN_PORT_FORWARDING: "on"
+      # VPN_PORT_FORWARDING_PROVIDER: ${VPN_SERVICE_PROVIDER}
+      # VPN_PORT_FORWARDING_STATUS_FILE: /gluetun/forwarded_port
+      # VPN_PORT_FORWARDING_UP_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/refresh'
+      # VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/down'
+
+      TZ: ${TZ:-Etc/UTC}
+    ports:
+      # Both WebUIs. They live here because neither container that serves them
+      # has a network of its own — the detail that surprises people.
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8477:8477"
+    volumes:
+      - gluetun-config:/gluetun
+    restart: unless-stopped
+    healthcheck:
+      # gluetun ships its own check; naming it here is what lets the two
+      # passengers wait for a *working tunnel* rather than a started container.
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # -------------------------------------------------------------- qbittorrent
+  #
+  # 5.2 or newer, so sharerr can authenticate with an API key instead of a
+  # password — stateless, no session to expire. Generate one under
+  # Options -> Web UI -> API key once the stack is up.
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
+    container_name: qbittorrent
+    # No `networks:` and no `ports:`. Both belong to gluetun now.
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: "6881"
+    volumes:
+      - qbittorrent-config:/config
+      # Read-only on purpose. sharerr never moves, renames, or re-links media,
+      # and qBittorrent only ever needs to *read* these files to seed them —
+      # so nothing in this stack has a reason to write here.
+      - ${MEDIA_PATH:?set this in .env}:/downloads:ro
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ sharerr
+  #
+  # In the namespace too, which is the point: it announces from the same public
+  # address as the swarm traffic, so a friend sees one host rather than two.
+  sharerr:
+    image: ghcr.io/ivyduggan/sharerr-rs:main
+    container_name: sharerr
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      qbittorrent:
+        condition: service_started
+    environment:
+      # The one thing that cannot come from the UI, because it encrypts the vault
+      # the UI writes into. Generate with `openssl rand -base64 32` and keep it:
+      # losing it means losing every stored credential.
+      SHARERR_MASTER_KEY: ${SHARERR_MASTER_KEY:?set this in .env}
+      RUST_LOG: ${RUST_LOG:-sharerr=info,warn}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # sharerr.toml, rewritten in place by the UI when you save.
+      - ./config:/config
+      # The vault, the database, and the generated .torrent files.
+      - sharerr-data:/data
+      # The same media, at sharerr's own path. It differs from qBittorrent's
+      # /downloads deliberately: the path mappings in sharerr.toml are what
+      # translate between the two, and identical mounts would hide a mapping bug
+      # here that then bites on a real deployment.
+      - ${MEDIA_PATH}:/media:ro
+    restart: unless-stopped
+
+volumes:
+  gluetun-config:
+  qbittorrent-config:
+  sharerr-data:

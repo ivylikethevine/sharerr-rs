@@ -13,6 +13,7 @@ use std::time::Duration;
 use secrecy::ExposeSecret;
 use sharerr_core::Config;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_store::{Store, Vault, master_key_from_env};
 use tokio::sync::{Notify, RwLock};
 
@@ -72,6 +73,10 @@ pub struct ServeState {
     /// there is no token". Cleared by [`Self::invalidate`], so changing it through
     /// the UI takes effect without a restart.
     tracker_token: RwLock<Option<Option<String>>>,
+    /// This instance's gossip signing identity, cached for the same reason as
+    /// `tracker_token` — loading it means opening the vault, and the pull side of
+    /// gossip is asked on every friend's poll.
+    gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -82,6 +87,19 @@ pub struct ServeState {
     /// fifteen seconds. `notify_one` stores a permit, so an invalidation that
     /// lands mid-sync is not lost.
     wake: Notify,
+    /// The live externally reachable endpoint. One value for the whole process:
+    /// the syncer's tracker provider reads it, the gluetun poller updates it,
+    /// and a settings save refreshes only its static half — so the poller's
+    /// observations survive both a config change and a syncer rebuild.
+    endpoint: Arc<AdvertisedEndpoint>,
+    /// Raised by the gluetun push endpoint so the poller re-asks the control
+    /// server *now* instead of at the next tick — the "reacted to in seconds"
+    /// half of the endpoint story.
+    endpoint_refresh: Notify,
+    /// The tracker's live swarms. Owned here rather than by the tracker router
+    /// because two consumers need one copy: however many listeners carry
+    /// `/announce`, and the status page's "n peers connected" line.
+    swarms: Arc<sharerr_torrent::Swarms>,
 }
 
 impl ServeState {
@@ -90,6 +108,7 @@ impl ServeState {
         config_path: impl Into<PathBuf>,
         config_error: Option<String>,
     ) -> Self {
+        let endpoint = Arc::new(static_endpoint(&config));
         Self {
             config: RwLock::new(config),
             config_path: config_path.into(),
@@ -101,8 +120,40 @@ impl ServeState {
             syncer: RwLock::new(Err("still starting up".to_owned())),
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
+            gossip_identity: RwLock::new(None),
             wake: Notify::new(),
+            endpoint,
+            endpoint_refresh: Notify::new(),
+            swarms: Arc::new(sharerr_torrent::Swarms::default()),
         }
+    }
+
+    /// The tracker's live swarms — one copy for every listener and the status
+    /// page alike.
+    pub fn swarms(&self) -> Arc<sharerr_torrent::Swarms> {
+        Arc::clone(&self.swarms)
+    }
+
+    /// The live advertised endpoint this whole process shares.
+    pub fn endpoint(&self) -> Arc<AdvertisedEndpoint> {
+        Arc::clone(&self.endpoint)
+    }
+
+    /// Ask the background loop to run a pass soon, without invalidating the
+    /// syncer. Used when something the syncer reads *through a shared handle*
+    /// changed — the advertised endpoint above — so a rebuild would be waste.
+    pub fn request_sync(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Ask the gluetun poller to re-resolve the endpoint now.
+    pub fn nudge_endpoint(&self) {
+        self.endpoint_refresh.notify_one();
+    }
+
+    /// Park until [`Self::nudge_endpoint`] is called.
+    pub async fn endpoint_refresh_requested(&self) {
+        self.endpoint_refresh.notified().await;
     }
 
     /// A snapshot of the current configuration.
@@ -179,6 +230,27 @@ impl ServeState {
         token
     }
 
+    /// This instance's gossip signing identity, cached after the first load.
+    ///
+    /// Loading means opening the vault — an Argon2 derivation — and `self_record`
+    /// used to pay that on every pull request a friend made. Cached the same way
+    /// as `tracker_token`, for the same reason.
+    pub async fn gossip_identity(&self) -> Option<Arc<crate::gossip::Identity>> {
+        if let Some(cached) = &*self.gossip_identity.read().await {
+            return cached.clone();
+        }
+
+        let identity = match self.open_vault().await {
+            Ok(mut vault) => crate::gossip::Identity::load_or_create(&mut vault)
+                .ok()
+                .map(Arc::new),
+            Err(_) => None,
+        };
+
+        *self.gossip_identity.write().await = Some(identity.clone());
+        identity
+    }
+
     /// Why reconciliation is not running, or `None` when it is.
     ///
     /// `Option` rather than a `(bool, String)` pair, whose `String` would be
@@ -208,6 +280,20 @@ impl ServeState {
     /// `settings::validate` accepted the document it just wrote, so whatever was
     /// wrong with the file on disk no longer is.
     pub async fn replace_config(&self, config: Config) {
+        // Only the static half is refreshed: the poller's observed endpoints are
+        // still true regardless of what the operator just typed.
+        self.endpoint.set_static(
+            match sharerr_core::endpoint::advertised_base(
+                &config.tracker,
+                config.server.bind.port(),
+            ) {
+                Ok(base) => base,
+                Err(err) => {
+                    tracing::warn!(%err, "the saved advertised address is unusable");
+                    None
+                }
+            },
+        );
         *self.config.write().await = config;
         *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;
@@ -222,9 +308,10 @@ impl ServeState {
     pub async fn invalidate(&self, reason: &str) {
         tracing::info!(reason, "rebuilding the syncer");
         *self.syncer.write().await = Err(format!("reloading — {reason}"));
-        // The token is a vault value too, so a credential change has to drop it or
-        // the tracker keeps enforcing the old one.
+        // These are vault values too, so a credential change has to drop them or
+        // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
+        *self.gossip_identity.write().await = None;
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.
@@ -287,7 +374,7 @@ impl ServeState {
         }
 
         let config = self.config().await;
-        match Syncer::build(&config).await {
+        match Syncer::build(&config, self.endpoint()).await {
             Ok(syncer) => {
                 let syncer = Arc::new(syncer);
                 tracing::info!("credentials accepted; reconciliation is available");
@@ -310,6 +397,21 @@ impl ServeState {
             }
         }
     }
+}
+
+/// The endpoint as configuration alone resolves it, with an unusable address
+/// treated as unset rather than fatal — `serve` must come up either way, and the
+/// tracker provider reports the absence with the sentence that names the fix.
+fn static_endpoint(config: &Config) -> AdvertisedEndpoint {
+    let base =
+        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+            Ok(base) => base,
+            Err(err) => {
+                tracing::warn!(%err, "the configured advertised address is unusable");
+                None
+            }
+        };
+    AdvertisedEndpoint::new(base)
 }
 
 #[cfg(test)]

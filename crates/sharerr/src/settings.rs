@@ -11,8 +11,8 @@ use anyhow::{Context, Result};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use sharerr_core::Config;
+use sharerr_core::config::config_paths;
 use sharerr_store::vault::{ENV_MASTER_KEY, ENV_MASTER_KEY_FILE};
-use toml_edit::Item;
 
 /// `SHARERR_`-prefixed variables that are *not* config fields.
 ///
@@ -30,6 +30,7 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     // field has to be listed here — that cost is the price of `deny_unknown_fields`
     // turning a typo into an error instead of a setting that silently does nothing.
     "E2E_MEDIA",
+    "E2E_COMPOSE",
 ];
 
 const fn strip_prefix(var: &str) -> &str {
@@ -74,31 +75,43 @@ pub fn load_or_recover(path: &Path) -> (Config, Option<String>) {
     let mut config = Config::default();
 
     // Same order figment uses: the document first, then the environment on top.
+    // Both reads address the fields through `config_paths`, so renaming a config
+    // field breaks this in the same compile/test as everything else — the salvage
+    // quietly falling back to defaults is precisely the failure it exists to
+    // prevent.
     if let Ok(text) = std::fs::read_to_string(path)
         && let Ok(doc) = text.parse::<toml_edit::DocumentMut>()
     {
-        if let Some(dir) = doc.get("data_dir").and_then(Item::as_str) {
+        if let Some(dir) = doc_str(&doc, config_paths::DATA_DIR) {
             config.data_dir = PathBuf::from(dir);
         }
-        if let Some(bind) = doc
-            .get("server")
-            .and_then(Item::as_table_like)
-            .and_then(|server| server.get("bind"))
-            .and_then(Item::as_str)
+        if let Some(bind) = doc_str(&doc, config_paths::SERVER_BIND)
             && let Ok(addr) = bind.parse()
         {
             config.server.bind = addr;
         }
     }
 
-    if let Ok(dir) = std::env::var("SHARERR_DATA_DIR") {
+    if let Ok(dir) = std::env::var(config_paths::env_var(config_paths::DATA_DIR)) {
         config.data_dir = PathBuf::from(dir);
     }
-    if let Ok(Ok(addr)) = std::env::var("SHARERR_SERVER__BIND").map(|bind| bind.parse()) {
+    if let Ok(Ok(addr)) =
+        std::env::var(config_paths::env_var(config_paths::SERVER_BIND)).map(|bind| bind.parse())
+    {
         config.server.bind = addr;
     }
 
     (config, Some(error))
+}
+
+/// Walk a dotted `config_paths` path through a TOML document to a string value.
+fn doc_str<'a>(doc: &'a toml_edit::DocumentMut, path: &str) -> Option<&'a str> {
+    let mut segments = path.split('.');
+    let mut item = doc.get(segments.next()?)?;
+    for segment in segments {
+        item = item.as_table_like()?.get(segment)?;
+    }
+    item.as_str()
 }
 
 /// Load from TOML held in memory rather than on disk.
@@ -130,7 +143,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
-    use sharerr_core::config::TrackerBackend;
 
     /// `Jail` gives each test an isolated cwd and environment, so these are safe
     /// to run in parallel despite touching process-global env vars.
@@ -140,8 +152,32 @@ mod tests {
             let cfg = load(&jail.directory().join("absent.toml")).expect("defaults load");
             assert_eq!(cfg.tag, "sharerr");
             assert_eq!(cfg.server.bind.port(), 8477);
-            assert_eq!(cfg.tracker.backend, TrackerBackend::QbittorrentEmbedded);
             assert!(!cfg.qbittorrent.skip_checking);
+            Ok(())
+        });
+    }
+
+    /// The breaking change the roadmap promised an exact error for: a config
+    /// still naming the removed `tracker.backend` must fail to load with the
+    /// migration story, not a generic "unknown field".
+    #[test]
+    fn a_config_naming_the_removed_tracker_backend_gets_the_migration_error() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "sharerr.toml",
+                "[tracker]\nbackend = \"qbittorrent-embedded\"\n",
+            )?;
+            let err = load(&jail.directory().join("sharerr.toml"))
+                .expect_err("the removed setting must be rejected");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("tracker.backend has been removed"),
+                "the error must say what changed: {rendered}"
+            );
+            assert!(
+                rendered.contains("qbittorrent-embedded"),
+                "the error should quote the stale value: {rendered}"
+            );
             Ok(())
         });
     }
@@ -155,15 +191,15 @@ mod tests {
                 tag = "from-file"
                 [qbittorrent]
                 url = "http://qbit:8080"
-                username = "from-file"
+                category = "from-file"
                 "#,
             )?;
-            jail.set_env("SHARERR_QBITTORRENT__USERNAME", "from-env");
+            jail.set_env("SHARERR_QBITTORRENT__CATEGORY", "from-env");
 
             let cfg = load(&jail.directory().join("sharerr.toml")).expect("layered load");
             assert_eq!(cfg.tag, "from-file", "file overrides default");
             assert_eq!(cfg.qbittorrent.url.as_str(), "http://qbit:8080/");
-            assert_eq!(cfg.qbittorrent.username, "from-env", "env overrides file");
+            assert_eq!(cfg.qbittorrent.category, "from-env", "env overrides file");
             Ok(())
         });
     }
