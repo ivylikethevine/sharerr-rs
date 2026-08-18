@@ -62,7 +62,7 @@ sha1 = "0.11.0"
 # Peer API keys are hashed with SHA-256, not Argon2 — they are 160 bits of CSPRNG
 # output rather than a human password, and the lookup has to be an indexed
 # equality on every Torznab request. See migrations/0003_peers.sql.
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
