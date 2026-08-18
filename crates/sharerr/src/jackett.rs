@@ -239,6 +239,9 @@ struct JsonResult {
     peers: u32,
     #[serde(rename = "InfoHash")]
     info_hash: String,
+    /// Jackett serialises the key even when null, and clients read it that way.
+    #[serde(rename = "MagnetUri")]
+    magnet_uri: Option<String>,
     #[serde(rename = "DownloadVolumeFactor")]
     download_volume_factor: f32,
     #[serde(rename = "UploadVolumeFactor")]
@@ -321,6 +324,7 @@ async fn json_results(
             let category = crate::torznab::category_for(item);
             let link = matched.download_url(item);
             let info_hash = item.info_hash.clone().unwrap_or_default();
+            let magnet = matched.magnet_url(item);
 
             JsonResult {
                 tracker: "sharerr",
@@ -337,6 +341,7 @@ async fn json_results(
                 seeders: crate::torznab::ADVERTISED_SEEDERS,
                 peers: crate::torznab::ADVERTISED_PEERS,
                 info_hash,
+                magnet_uri: (!magnet.is_empty()).then_some(magnet),
                 download_volume_factor: crate::torznab::DOWNLOAD_VOLUME_FACTOR,
                 upload_volume_factor: crate::torznab::UPLOAD_VOLUME_FACTOR,
                 // Jackett's JSON carries the IMDb id as a bare number, without the

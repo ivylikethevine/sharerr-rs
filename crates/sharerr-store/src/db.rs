@@ -185,6 +185,19 @@ impl Store {
         rows.iter().map(row_to_item).collect()
     }
 
+    /// How many items are currently seeding — the "n items shared" number, as a
+    /// COUNT rather than a full decode of every row, because the status page
+    /// asks on every load.
+    pub async fn count_seeding(&self) -> Result<i64> {
+        let count = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM shared_items WHERE state = ?1 AND info_hash IS NOT NULL",
+        )
+        .bind(ShareState::Seeding.as_str())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     /// One item by its stable identity. The pair is the key — `file_id` alone is not
     /// unique across the two *arr apps.
     pub async fn get(&self, source: MediaSource, file_id: i64) -> Result<Option<SharedItem>> {

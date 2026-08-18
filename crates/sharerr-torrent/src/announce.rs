@@ -201,6 +201,17 @@ pub struct Swarms {
     inner: RwLock<HashMap<InfoHash, Swarm>>,
 }
 
+/// Live totals across every swarm this tracker serves right now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SwarmStats {
+    /// Swarms with at least one live peer.
+    pub swarms: usize,
+    /// Live peers across all swarms, seeders included.
+    pub peers: usize,
+    /// The subset of those with the whole thing.
+    pub seeders: usize,
+}
+
 /// The answer to one announce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnounceResponse {
@@ -260,6 +271,35 @@ impl Swarms {
             complete,
             incomplete,
         }
+    }
+
+    /// Live totals across every swarm, for the status page's one-glance line.
+    ///
+    /// Counts only peers inside their TTL — the map itself is swept lazily on
+    /// announce, so entries past their TTL may still be present and must not be
+    /// reported as connected.
+    pub async fn stats(&self) -> SwarmStats {
+        let swarms = self.inner.read().await;
+        let now = Instant::now();
+
+        let mut stats = SwarmStats::default();
+        for swarm in swarms.values() {
+            let live = swarm
+                .values()
+                .filter(|peer| now.duration_since(peer.last_seen) < PEER_TTL);
+            let mut any = false;
+            for peer in live {
+                any = true;
+                stats.peers += 1;
+                if peer.left == 0 {
+                    stats.seeders += 1;
+                }
+            }
+            if any {
+                stats.swarms += 1;
+            }
+        }
+        stats
     }
 
     /// Seeder and leecher counts for one hash, for `/scrape`.

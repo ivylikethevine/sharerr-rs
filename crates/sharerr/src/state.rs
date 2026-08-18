@@ -98,6 +98,10 @@ pub struct ServeState {
     /// server *now* instead of at the next tick — the "reacted to in seconds"
     /// half of the endpoint story.
     endpoint_refresh: Notify,
+    /// The tracker's live swarms. Owned here rather than by the tracker router
+    /// because two consumers need one copy: however many listeners carry
+    /// `/announce`, and the status page's "n peers connected" line.
+    swarms: Arc<sharerr_torrent::Swarms>,
 }
 
 impl ServeState {
@@ -122,7 +126,14 @@ impl ServeState {
             wake: Notify::new(),
             endpoint,
             endpoint_refresh: Notify::new(),
+            swarms: Arc::new(sharerr_torrent::Swarms::default()),
         }
+    }
+
+    /// The tracker's live swarms — one copy for every listener and the status
+    /// page alike.
+    pub fn swarms(&self) -> Arc<sharerr_torrent::Swarms> {
+        Arc::clone(&self.swarms)
     }
 
     /// The live advertised endpoint this whole process shares.

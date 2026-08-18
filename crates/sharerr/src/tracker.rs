@@ -36,14 +36,16 @@ const BENCODE: &str = "text/plain; charset=utf-8";
 #[derive(Debug)]
 pub struct TrackerState {
     pub serve: Arc<ServeState>,
-    pub swarms: Swarms,
+    /// Borrowed from [`ServeState`], not owned: the status page reads the same
+    /// swarms this router writes.
+    pub swarms: Arc<Swarms>,
 }
 
 impl TrackerState {
     pub fn new(serve: Arc<ServeState>) -> Self {
         Self {
+            swarms: serve.swarms(),
             serve,
-            swarms: Swarms::default(),
         }
     }
 }

@@ -25,7 +25,7 @@ design is built around.
 | Torrent construction, files never moved | ✅ |
 | Seeding through qBittorrent **or Transmission** | ✅ |
 | Builtin BitTorrent tracker, served by sharerr itself | ✅ |
-| Torznab feed for Prowlarr | ✅ |
+| Torznab feed for Prowlarr, with magnet links | ✅ |
 | Jackett compatibility: URLs, indexer list, JSON results | ✅ |
 | Web UI: setup, settings, connection tests | ✅ |
 | Path-mapping diagnostics in the browser | ✅ |
