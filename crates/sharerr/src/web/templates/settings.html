@@ -147,13 +147,28 @@
 
   <label for="advertised_host">Advertised host</label>
   <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
-         placeholder="the name or IP your friends reach you on"
+         placeholder="{% if !gluetun_control_url.is_empty() && gluetun_enabled %}optional — gluetun below resolves this{% else %}the name or IP your friends reach you on{% endif %}"
          {% call lock_attr("tracker.advertised_host") %}{% endcall %}>
   {% call locked("tracker.advertised_host") %}{% endcall %}
+  {% if !gluetun_control_url.is_empty() && gluetun_enabled %}
+  <p class="hint">
+    Not required here: the Gluetun section below is configured to resolve this
+    dynamically instead, and a live observation always wins over whatever this
+    field holds.
+    {% if let Some(observed) = gluetun_last_observed %}
+    It currently advertises <code>{{ observed }}</code>.
+    {% else %}
+    It has not resolved anything yet — leave this set as a fallback until it has.
+    {% endif %}
+  </p>
+  {% else %}
   <p class="hint">
     Required. sharerr cannot guess its own externally reachable address, and a
-    wrong value silently produces torrents nobody can announce to.
+    wrong value silently produces torrents nobody can announce to. Behind
+    gluetun with a forwarded port, configure the Gluetun section below instead
+    of typing one here — it resolves and keeps this in step automatically.
   </p>
+  {% endif %}
 
   <label for="tracker_port">Announce port</label>
   <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"

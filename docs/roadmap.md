@@ -94,12 +94,6 @@ would catch misconfiguration at the point it is introduced.
 see; proposing the mapping instead of asking the operator to derive it removes the
 single most error-prone configuration step.
 
-**Better first-run defaults.** `tracker.advertised_host` has no default. The
-save-time half is done — a loopback, private, or `localhost` value is refused
-before it reaches `sharerr.toml`, catching the copy-paste-from-`server.bind`
-mistake for free. Resolving it from gluetun instead of asking still removes the
-guess entirely where that is available; that half remains.
-
 ---
 
 ## The lighthouse
