@@ -194,6 +194,43 @@ trade-offs to know:
 - **One file, one torrent.** An album is shared per track file, not as a folder.
 - The directory is never modified — same rule as everywhere else in sharerr.
 
+## Authenticating to qBittorrent
+
+By default sharerr signs in with the WebUI username and password:
+
+```
+printf %s "$PW" | sharerr vault set qbittorrent.password
+```
+
+**qBittorrent 5.2 and newer also accept an API key**, which is stateless — no
+session to expire, no re-login — and is the better choice where it is available.
+Generate one under Options → Web UI → API key, then:
+
+```
+printf %s "$KEY" | sharerr vault set qbittorrent.api_key
+```
+
+When a key is stored it is used *instead of* the username and password, so you can
+clear the password afterwards. Rotating the key in qBittorrent invalidates the old
+one immediately, so store the new one at the same time.
+
+### If a correct password is rejected
+
+Two causes, and neither is the password:
+
+- **qBittorrent 5.2 changed the login response.** Success moved from `200 Ok.` to
+  `204 No Content`, and a rejection from `200 Fails.` to `401`. Clients that check
+  for the literal `Ok.` — sharerr included, before this was fixed — report a
+  perfectly good login as a wrong password. Update sharerr.
+- **qBittorrent validates the `Host` header's port** against the port it listens
+  on, and answers `401` before it ever reads the credentials when they differ. A
+  remapped docker port (`-p 18080:8080`) or a reverse proxy on another port trips
+  this. Either point `qbittorrent.url` at the port qBittorrent itself listens on,
+  or turn off Options → Web UI → *Validate Host header*.
+
+`sharerr doctor` names both, rather than reporting "rejected the password" and
+leaving you to retype a password that was never wrong.
+
 ## Using Transmission instead of qBittorrent
 
 ```toml

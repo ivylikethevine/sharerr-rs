@@ -22,7 +22,9 @@ use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
-use crate::checks::{ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_library, check_qbit};
+use crate::checks::{
+    ArrOutcome, DirOutcome, QbitOutcome, TorrentCredential, check_arr, check_library, check_qbit,
+};
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
 ///
@@ -191,12 +193,22 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
     // live on the same host.
     let client = config.torrent_client();
 
-    let password = state.secret(client.password_key).await;
+    // Both secrets are read before choosing, so that an unreadable vault is
+    // reported as such rather than as a missing credential.
+    let api_key = match client.api_key_key {
+        Some(key) => state.secret(key).await,
+        None => Ok(None),
+    };
+    let credential = match (api_key, state.secret(client.password_key).await) {
+        (Err(reason), _) | (_, Err(reason)) => Err(reason),
+        (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),
+    };
+
     let outcome = check_qbit(
         config.torrent_backend,
         client.url,
         client.username,
-        password,
+        credential,
     )
     .await;
 

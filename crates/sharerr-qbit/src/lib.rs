@@ -32,7 +32,7 @@ mod models;
 mod prefs;
 mod torrents;
 
-pub use client::QbitClient;
+pub use client::{API_KEY_LEN, API_KEY_PREFIX, QbitClient, looks_like_api_key};
 pub use error::{QbitError, Result};
 pub use models::{Preferences, TorrentFile, TorrentInfo};
 // Re-exported because [`QbitClient::add_torrent`] takes it directly.

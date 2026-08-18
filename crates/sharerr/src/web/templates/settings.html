@@ -69,70 +69,26 @@
   <button type="submit">Save</button>
 </form>
 
-{% for arr in arrs %}
-<h2>{{ arr.title }}</h2>
-<form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
-  <label for="{{ arr.source }}_url">URL</label>
-  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
-         {% call lock_attr(arr.url_path) %}{% endcall %}>
-  {% call locked(arr.url_path) %}{% endcall %}
-  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
-
-  <label for="{{ arr.source }}_key">API key</label>
-  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if arr.key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-  {% endif %}
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
-  <span id="test-{{ arr.source }}"></span>
-</form>
-{% endfor %}
-
-<h2>Library directories</h2>
-<form method="post" action="/settings/libraries" class="panel">
-  <p class="hint">
-    Plain folders shared without any *arr app — everything in each one is shared,
-    treated as the kind you pick. No external ids travel with these, so a
-    friend's app matches them by release name alone. Blank rows are ignored, so
-    use the spare row at the bottom to add one.
-  </p>
-  <div style="overflow-x:auto">
-  <table>
-    <thead>
-      <tr><th>Directory as sharerr sees it</th><th>Kind</th></tr>
-    </thead>
-    <tbody>
-      {% for row in libraries %}
-      <tr>
-        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
-        <td>
-          <select name="kind">
-            <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
-            <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
-            <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
-            <option value="book" {% if row.kind == "book" %}selected{% endif %}>Books</option>
-          </select>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/library" hx-target="#test-library" hx-swap="innerHTML">Test directories</button>
-  <span id="test-library"></span>
-</form>
-
 <h2>qBittorrent</h2>
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>
   <input id="qbit_url" name="url" value="{{ qbit_url }}" required
          {% call lock_attr("qbittorrent.url") %}{% endcall %}>
   {% call locked("qbittorrent.url") %}{% endcall %}
+
+  <label for="qbit_api_key">API key</label>
+  <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if qbit_api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
+  {% endif %}
+  <p class="hint">
+    Optional, and needs qBittorrent 5.2 or newer: generate one under
+    Options &rarr; Web UI &rarr; API key. When set it is used <em>instead of</em>
+    the username and password below, and it does not expire the way a session
+    does. Rotating the key in qBittorrent invalidates the old one immediately.
+  </p>
 
   <label for="qbit_username">Username</label>
   <input id="qbit_username" name="username" value="{{ qbit_username }}" autocomplete="off"
@@ -145,6 +101,9 @@
          {% if !master_key_present %}disabled{% endif %}>
   {% if qbit_password_set %}
   <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+  {% if qbit_api_key_set %}
+  <p class="hint">Ignored while an API key is stored.</p>
   {% endif %}
 
   <label for="qbit_category">Category for sharerr's torrents</label>
@@ -292,6 +251,71 @@
 
   <button type="submit">Save</button>
 </form>
+
+<hr>
+<p class="hint">
+  Everything above is what sharerr needs to run. Below is where it finds media to
+  share: plain directories, *arr apps, or both — configure whichever you use and
+  leave the rest blank.
+</p>
+
+<h2>Library directories</h2>
+<form method="post" action="/settings/libraries" class="panel">
+  <p class="hint">
+    Plain folders shared without any *arr app — everything in each one is shared,
+    treated as the kind you pick. No external ids travel with these, so a
+    friend's app matches them by release name alone. Blank rows are ignored, so
+    use the spare row at the bottom to add one.
+  </p>
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr><th>Directory as sharerr sees it</th><th>Kind</th></tr>
+    </thead>
+    <tbody>
+      {% for row in libraries %}
+      <tr>
+        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
+        <td>
+          <select name="kind">
+            <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
+            <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
+            <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
+            <option value="book" {% if row.kind == "book" %}selected{% endif %}>Books</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/library" hx-target="#test-library" hx-swap="innerHTML">Test directories</button>
+  <span id="test-library"></span>
+</form>
+
+{% for arr in arrs %}
+<h2>{{ arr.title }}</h2>
+<form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
+  <label for="{{ arr.source }}_url">URL</label>
+  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
+         {% call lock_attr(arr.url_path) %}{% endcall %}>
+  {% call locked(arr.url_path) %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
+
+  <label for="{{ arr.source }}_key">API key</label>
+  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if arr.key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
+  <span id="test-{{ arr.source }}"></span>
+</form>
+{% endfor %}
 
 <h2>Your account</h2>
 <form method="post" action="/settings/account/password" class="panel">

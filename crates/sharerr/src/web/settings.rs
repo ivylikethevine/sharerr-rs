@@ -102,6 +102,9 @@ pub struct QbitForm {
     password: String,
     #[serde(default)]
     clear_password: Option<String>,
+    api_key: String,
+    #[serde(default)]
+    clear_api_key: Option<String>,
     category: String,
     tag: String,
     #[serde(default)]
@@ -218,6 +221,30 @@ pub async fn save_qbittorrent(
     State(state): State<WebState>,
     Form(form): Form<QbitForm>,
 ) -> Response {
+    // Checked here rather than at the first sync, because a key pasted with a
+    // missing character otherwise stores fine and surfaces hours later as a
+    // rejected credential with no hint that the *shape* is wrong.
+    let api_key = form.api_key.trim();
+    if !api_key.is_empty() && !sharerr_qbit::looks_like_api_key(api_key) {
+        return reject(
+            &state,
+            "That does not look like a qBittorrent API key. Keys are 32 characters: \
+             `qbt_` followed by 28 letters and digits, from Options -> Web UI -> API key.",
+        )
+        .await;
+    }
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::QBITTORRENT_API_KEY,
+        &form.api_key,
+        form.clear_api_key,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
     if let Err(message) = apply_secret(
         &state,
         secret_keys::QBITTORRENT_PASSWORD,
@@ -618,6 +645,7 @@ async fn build_page(
         qbit_url: config.qbittorrent.url.to_string(),
         qbit_username: config.qbittorrent.username.clone(),
         qbit_password_set: is_set(secret_keys::QBITTORRENT_PASSWORD),
+        qbit_api_key_set: is_set(secret_keys::QBITTORRENT_API_KEY),
         qbit_category: config.qbittorrent.category.clone(),
         qbit_tag: config.qbittorrent.tag.clone(),
         qbit_skip_checking: config.qbittorrent.skip_checking,

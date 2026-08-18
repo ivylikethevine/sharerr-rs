@@ -336,31 +336,77 @@ pub fn build_torrent_client(
     backend: TorrentBackend,
     url: &Url,
     username: &str,
-    password: SecretString,
+    credential: TorrentCredential,
 ) -> Result<Arc<dyn TorrentClient>, String> {
-    Ok(match backend {
-        TorrentBackend::Qbittorrent => {
+    Ok(match (backend, credential) {
+        (TorrentBackend::Qbittorrent, TorrentCredential::Password(password)) => {
             Arc::new(QbitClient::new(url, username, password).map_err(|e| chain(&e))?)
         }
-        TorrentBackend::Transmission => {
+        (TorrentBackend::Qbittorrent, TorrentCredential::ApiKey(key)) => {
+            Arc::new(QbitClient::with_api_key(url, key).map_err(|e| chain(&e))?)
+        }
+        (TorrentBackend::Transmission, TorrentCredential::Password(password)) => {
             Arc::new(TransmissionClient::new(url, username, password).map_err(|e| chain(&e))?)
         }
+        // Reported rather than silently ignored: an operator who stored a key for
+        // Transmission believes it is in use, and falling back to the password
+        // would leave them debugging why rotating the key changed nothing.
+        (TorrentBackend::Transmission, TorrentCredential::ApiKey(_)) => {
+            return Err(
+                "Transmission has no API key — its RPC authenticates with a username and \
+                 password. Clear transmission's API key, or select qBittorrent."
+                    .to_owned(),
+            );
+        }
     })
+}
+
+/// How sharerr proves itself to the torrent client.
+///
+/// Kept as one value rather than two optional arguments so that "which credential
+/// is in play" is decided once, by [`TorrentCredential::choose`], instead of at
+/// every call site — three of which resolve secrets from three different places.
+#[derive(Debug)]
+pub enum TorrentCredential {
+    Password(SecretString),
+    /// A qBittorrent 5.2+ WebUI API key.
+    ApiKey(SecretString),
+}
+
+impl TorrentCredential {
+    /// Pick the credential to use, preferring an API key when one is stored.
+    ///
+    /// The key wins because storing one is a deliberate act: an operator who
+    /// generated a key and saved it expects it to be what authenticates, even
+    /// though the password they set up first is still sitting in the vault.
+    pub fn choose(api_key: Option<SecretString>, password: Option<SecretString>) -> Option<Self> {
+        api_key
+            .map(Self::ApiKey)
+            .or_else(|| password.map(Self::Password))
+    }
+
+    /// The word to use for this credential in a message aimed at an operator.
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Self::Password(_) => "username or password",
+            Self::ApiKey(_) => "API key",
+        }
+    }
 }
 
 pub async fn check_qbit(
     backend: TorrentBackend,
     url: &Url,
     username: &str,
-    password: Result<Option<SecretString>, String>,
+    credential: Result<Option<TorrentCredential>, String>,
 ) -> QbitOutcome {
-    let password = match password {
-        Ok(Some(password)) => password,
+    let credential = match credential {
+        Ok(Some(credential)) => credential,
         Ok(None) => return QbitOutcome::NoCredential,
         Err(reason) => return QbitOutcome::CredentialUnreadable(reason),
     };
 
-    let client = match build_torrent_client(backend, url, username, password) {
+    let client = match build_torrent_client(backend, url, username, credential) {
         Ok(client) => client,
         Err(reason) => return QbitOutcome::BadUrl(reason),
     };
