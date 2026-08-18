@@ -43,7 +43,7 @@ clap = "4.6.6"
 # and signatures are small enough to travel in JSON and the verify cost is
 # nothing next to the HTTP request carrying it. `rand_core` stays off — key
 # material comes from the same `getrandom` path as every other secret.
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
 figment = "0.10.19"
 # The facade over the futures-util that reqwest and axum already pull in;
 # used for join_all over dynamically-sized sets of independent requests.
