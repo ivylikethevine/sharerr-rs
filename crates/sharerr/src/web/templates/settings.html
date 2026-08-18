@@ -8,6 +8,11 @@
 {%- endif %}
 {%- endmacro %}
 {%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
+{%- macro field_status(is_set) %}
+{%- if is_set %}<span class="field-status field-status--set">&#10003; set</span>
+{%- else %}<span class="field-status field-status--unset">not set</span>
+{%- endif %}
+{%- endmacro %}
 
 {% macro arr_section(arr) %}
 <form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
@@ -17,7 +22,7 @@
   {% call locked(arr.url_path) %}{% endcall %}
   <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
 
-  <label for="{{ arr.source }}_key">API key</label>
+  <label for="{{ arr.source }}_key">API key {% call field_status(arr.key_set) %}{% endcall %}</label>
   <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
          placeholder="{% call stored(arr.key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
@@ -98,7 +103,7 @@
          {% call lock_attr("qbittorrent.url") %}{% endcall %}>
   {% call locked("qbittorrent.url") %}{% endcall %}
 
-  <label for="qbit_api_key">API key</label>
+  <label for="qbit_api_key">API key {% call field_status(qbit_api_key_set) %}{% endcall %}</label>
   <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
          placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
@@ -186,7 +191,7 @@
     prefix. When set, it wins over the host and port above.
   </p>
 
-  <label for="tracker_token">Tracker token</label>
+  <label for="tracker_token">Tracker token {% call field_status(tracker_token_set) %}{% endcall %}</label>
   <input id="tracker_token" name="token" type="password" autocomplete="off"
          placeholder="{% call stored(tracker_token_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
@@ -237,7 +242,7 @@
          {% call lock_attr("gluetun.control_url") %}{% endcall %}>
   {% call locked("gluetun.control_url") %}{% endcall %}
 
-  <label for="gluetun_api_key">Control server API key</label>
+  <label for="gluetun_api_key">Control server API key {% call field_status(gluetun_api_key_set) %}{% endcall %}</label>
   <input id="gluetun_api_key" name="api_key" type="password" autocomplete="off"
          placeholder="{% call stored(gluetun_api_key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
@@ -310,7 +315,7 @@
            {% call lock_attr("gluetun_client.control_url") %}{% endcall %}>
     {% call locked("gluetun_client.control_url") %}{% endcall %}
 
-    <label for="gluetun_client_api_key">Control server API key</label>
+    <label for="gluetun_client_api_key">Control server API key {% call field_status(gluetun_client_api_key_set) %}{% endcall %}</label>
     <input id="gluetun_client_api_key" name="api_key" type="password" autocomplete="off"
            placeholder="{% call stored(gluetun_client_api_key_set) %}{% endcall %}"
            {% if !master_key_present %}disabled{% endif %}>
@@ -402,7 +407,7 @@
     seen in a while. Leave the URL blank to turn this off entirely.
   </p>
 
-  <label for="notifications_webhook_url">Webhook URL</label>
+  <label for="notifications_webhook_url">Webhook URL {% call field_status(notifications_webhook_set) %}{% endcall %}</label>
   <input id="notifications_webhook_url" name="webhook_url" type="password" autocomplete="off"
          placeholder="{% call stored(notifications_webhook_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>

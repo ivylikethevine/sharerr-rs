@@ -280,6 +280,13 @@ pub struct SharedItem {
     pub size: u64,
     pub ids: ExternalIds,
     pub info_hash: Option<String>,
+    /// A short fingerprint of the announce token this item's torrent was last
+    /// *confirmed* to be announcing with — set at creation, and refreshed each
+    /// time a sync pass verifies (or fixes) it. `None` before a torrent exists,
+    /// or if it predates this field. Compared against the currently configured
+    /// token to answer "is this specific torrent still using it" — see
+    /// `sharerr_torrent::token_from_announce_url`.
+    pub announce_token_fp: Option<String>,
     pub state: ShareState,
     pub last_error: Option<String>,
     /// When sharerr first recorded this file, as a Unix timestamp.
@@ -345,6 +352,7 @@ impl Discovered {
             size: self.size,
             ids: self.ids,
             info_hash: None,
+            announce_token_fp: None,
             state: ShareState::Pending,
             last_error: None,
             // Assigned by the store on insert; a discovered item has not been

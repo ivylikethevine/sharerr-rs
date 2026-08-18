@@ -25,6 +25,33 @@
 {% endif %}
 {% endif %}
 
+<h2>Recent syncs</h2>
+<div class="panel">
+  {% if runs.is_empty() %}
+  <p class="hint">No completed sync yet.</p>
+  {% else %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>When</th><th>Result</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.when }}</td>
+        <td>
+          {% if run.failed %}
+          <span class="error">{{ run.summary }}</span>
+          {% else %}
+          {{ run.summary }}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+
 <h2>Networking</h2>
 <div class="panel">
   <dl class="facts">

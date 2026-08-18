@@ -361,6 +361,19 @@ pub struct DiagnosticsPage {
     /// ever announced.
     pub swarm_peers: usize,
     pub swarm_seeders: usize,
+
+    /// The last few sync runs, newest first — history the status page's
+    /// glance never showed beyond the single latest one.
+    pub runs: Vec<RunRow>,
+}
+
+/// One past sync run, pre-rendered for display.
+#[derive(Debug)]
+pub struct RunRow {
+    pub when: String,
+    /// Either the run's own error, or a summary of what it did.
+    pub summary: String,
+    pub failed: bool,
 }
 
 /// One gluetun-tracked endpoint's state, pre-rendered for display.
@@ -483,6 +496,12 @@ pub struct ItemRow {
     /// Pre-rendered human size (`"1.5 GiB"`) — see `web::items::human_size`.
     pub size: String,
     pub state_label: String,
+    /// A short explanation for a state that would otherwise read as a dead
+    /// end — `Pending` with no `last_error` looks identical whether it is
+    /// mid-sync or has been stuck since a crash, and `Unshared` gives no hint
+    /// that it is not a fault at all. `None` for `Seeding` and `Failed`,
+    /// which already explain themselves (the second via `last_error`).
+    pub state_hint: Option<&'static str>,
     /// Which friends' scopes admit this item, joined for display — empty
     /// unless the item is actually seeding, since nothing else reaches a
     /// friend's feed.
@@ -495,7 +514,50 @@ pub struct ItemRow {
     /// whatever the endpoint currently resolves to. `None` before a torrent
     /// exists, or when nothing is configured to announce to.
     pub announce_url: Option<String>,
+    /// A short fingerprint of the token this item's torrent was last confirmed
+    /// to announce with, and whether it still matches the currently configured
+    /// one — see `sync::token_fingerprint`. `None` alongside
+    /// [`TokenStatus::None`] before a torrent exists.
+    pub token_fp: Option<String>,
+    pub token_status: TokenStatus,
     pub last_error: Option<String>,
+}
+
+/// Whether an item's confirmed announce-token fingerprint still matches the
+/// currently configured token. Three states, not two: "no token in use" is
+/// not a fault the way "used to match and no longer does" is, and collapsing
+/// them would make an instance that has never set a tracker token look
+/// exactly like one whose token just rotated out from under every torrent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenStatus {
+    /// No token configured, currently or as last recorded — nothing to check.
+    None,
+    /// Matches the currently configured token.
+    Valid,
+    /// Does not — either the token rotated since this item's torrent was last
+    /// confirmed, or it has never been confirmed at all.
+    Stale,
+}
+
+impl TokenStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "no token",
+            Self::Valid => "valid",
+            Self::Stale => "changed",
+        }
+    }
+
+    /// The `.field-status--*` modifier this status renders with — reusing the
+    /// settings page's set/unset pill styling rather than inventing a second
+    /// small-badge vocabulary for the same shape of question.
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Self::None => "field-status--unset",
+            Self::Valid => "field-status--set",
+            Self::Stale => "field-status--stale",
+        }
+    }
 }
 
 /// Every file sharerr has discovered, sortable and filterable — the page

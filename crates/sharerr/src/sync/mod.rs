@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
 use sharerr_core::config::secret_keys;
@@ -28,6 +29,68 @@ use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
 use seed::{SeedOutcome, Seeder};
+
+/// A short, non-secret fingerprint of a tracker token — truncated SHA-256, hex.
+///
+/// Never the token itself: this is what gets stored per item and read back by
+/// the items page purely to answer "is this the currently configured token".
+/// Shared between [`token_fingerprint`] (which derives it from a built
+/// announce URL) and `web::items` (which derives it from the raw token to
+/// compare against).
+pub(crate) fn fingerprint(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))[..12].to_owned()
+}
+
+/// [`fingerprint`] of the token embedded in `announce`'s primary URL — `None`
+/// when the tracker carries no token at all. See [`Syncer::share`], which
+/// records this per item as its torrent is built or confirmed.
+pub(crate) fn token_fingerprint(announce: &AnnounceSet) -> Option<String> {
+    let token = sharerr_torrent::token_from_announce_url(&announce.primary)?;
+    Some(fingerprint(&token))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn announce(primary: &str) -> AnnounceSet {
+        AnnounceSet::single(url::Url::parse(primary).unwrap())
+    }
+
+    #[test]
+    fn the_same_token_always_fingerprints_the_same_way() {
+        assert_eq!(fingerprint("s3cret"), fingerprint("s3cret"));
+    }
+
+    #[test]
+    fn different_tokens_fingerprint_differently() {
+        assert_ne!(fingerprint("s3cret"), fingerprint("different"));
+    }
+
+    /// Never the token itself — the whole point of storing this instead.
+    #[test]
+    fn the_fingerprint_does_not_contain_the_token() {
+        assert!(!fingerprint("s3cret").contains("s3cret"));
+    }
+
+    #[test]
+    fn an_announce_url_with_no_token_fingerprints_to_none() {
+        assert_eq!(
+            token_fingerprint(&announce("http://sharerr.example/announce")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_announce_url_with_a_token_fingerprints_it() {
+        let with = token_fingerprint(&announce("http://sharerr.example/announce/tok1"));
+        let other = token_fingerprint(&announce("http://sharerr.example/announce/tok2"));
+        assert!(with.is_some());
+        assert_ne!(with, other);
+    }
+}
 
 /// Anything that can answer "which files should be shared right now?".
 ///
@@ -465,12 +528,31 @@ impl Syncer {
             && let Some(hash) = &known.info_hash
             && live.contains(&hash.to_ascii_lowercase())
         {
-            if !dry_run && let Err(err) = self.seeder.refresh_announce(hash, announce).await {
-                tracing::warn!(
-                    item = %item.spec,
-                    error = format!("{err:#}"),
-                    "could not refresh announce URLs"
-                );
+            if !dry_run {
+                match self.seeder.refresh_announce(hash, announce).await {
+                    // Either branch means the live torrent now genuinely
+                    // matches `announce.primary` — a no-op refresh is still a
+                    // confirmation, not merely "nothing to do".
+                    Ok(_) => {
+                        let fp = token_fingerprint(announce);
+                        if let Err(err) = self
+                            .store
+                            .set_announce_token_fp(item.source, item.file_id, fp.as_deref())
+                            .await
+                        {
+                            tracing::warn!(
+                                item = %item.spec,
+                                error = %err,
+                                "could not record the confirmed announce token"
+                            );
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        item = %item.spec,
+                        error = format!("{err:#}"),
+                        "could not refresh announce URLs"
+                    ),
+                }
             }
             return Ok(Step::Unchanged);
         }
@@ -539,7 +621,12 @@ impl Syncer {
 
         let outcome = self.seeder.seed(&paths, announce, torrents).await?;
         self.store
-            .set_seeding(item.source, item.file_id, outcome.info_hash())
+            .set_seeding(
+                item.source,
+                item.file_id,
+                outcome.info_hash(),
+                token_fingerprint(announce).as_deref(),
+            )
             .await?;
 
         Ok(match outcome {

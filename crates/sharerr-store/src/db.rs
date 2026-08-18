@@ -224,9 +224,10 @@ impl Store {
             r#"
             INSERT INTO shared_items (
                 source, source_id, file_id, spec_json, release_title, arr_path,
-                size, ids_json, info_hash, state, last_error, created_at, updated_at
+                size, ids_json, info_hash, announce_token_fp, state, last_error,
+                created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
             ON CONFLICT (source, file_id) DO UPDATE SET
                 source_id     = excluded.source_id,
                 spec_json     = excluded.spec_json,
@@ -241,6 +242,9 @@ impl Store {
                 -- to remove and it would seed forever. Use `set_info_hash` to change
                 -- it, and `set_state(Unshared)` to retire it.
                 info_hash     = COALESCE(excluded.info_hash, shared_items.info_hash),
+                -- Same reasoning as info_hash: a rediscovery must not blank out a
+                -- fingerprint that only `set_seeding`/`set_announce_token_fp` know.
+                announce_token_fp = COALESCE(excluded.announce_token_fp, shared_items.announce_token_fp),
                 state         = excluded.state,
                 last_error    = excluded.last_error,
                 updated_at    = excluded.updated_at
@@ -256,6 +260,7 @@ impl Store {
         .bind(i64::try_from(item.size).unwrap_or(i64::MAX))
         .bind(&ids_json)
         .bind(item.info_hash.as_deref())
+        .bind(item.announce_token_fp.as_deref())
         .bind(item.state.as_str())
         .bind(item.last_error.as_deref())
         .bind(now)
@@ -294,18 +299,49 @@ impl Store {
     /// against and what the feed publishes — and two UPDATEs here were two write
     /// transactions per newly-shared item, hundreds back-to-back on a first
     /// sync. A cleared `last_error` rides along: the share just succeeded.
+    ///
+    /// `announce_token_fp` is the fingerprint of the token embedded in the
+    /// torrent just built, so the items page can show whether it is still the
+    /// currently configured one — see [`Self::set_announce_token_fp`] for the
+    /// case where the torrent already existed and only this needed confirming.
     pub async fn set_seeding(
         &self,
         source: MediaSource,
         file_id: i64,
         info_hash: &str,
+        announce_token_fp: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE shared_items SET info_hash = ?1, state = ?2, last_error = NULL, \
-             updated_at = ?3 WHERE source = ?4 AND file_id = ?5",
+            "UPDATE shared_items SET info_hash = ?1, announce_token_fp = ?2, state = ?3, \
+             last_error = NULL, updated_at = ?4 WHERE source = ?5 AND file_id = ?6",
         )
         .bind(info_hash)
+        .bind(announce_token_fp)
         .bind(ShareState::Seeding.as_str())
+        .bind(now_epoch())
+        .bind(source.as_str())
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record which token an already-seeding item's torrent was just confirmed
+    /// (or fixed) to be announcing with. Called from the sync pass's fast path,
+    /// which only touches the tracker list — never [`Self::set_seeding`], which
+    /// would also mean re-deriving the info hash for a torrent that has not
+    /// changed.
+    pub async fn set_announce_token_fp(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        announce_token_fp: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE shared_items SET announce_token_fp = ?1, updated_at = ?2 \
+             WHERE source = ?3 AND file_id = ?4",
+        )
+        .bind(announce_token_fp)
         .bind(now_epoch())
         .bind(source.as_str())
         .bind(file_id)
@@ -414,7 +450,8 @@ pub struct RunRecord {
 }
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
-     arr_path, size, ids_json, info_hash, state, last_error, created_at FROM shared_items";
+     arr_path, size, ids_json, info_hash, announce_token_fp, state, last_error, created_at \
+     FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     let id: i64 = row.try_get("id")?;
@@ -446,6 +483,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         size: u64::try_from(size).unwrap_or(0),
         ids,
         info_hash: row.try_get("info_hash")?,
+        announce_token_fp: row.try_get("announce_token_fp")?,
         state,
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at").ok(),
@@ -510,6 +548,7 @@ mod tests {
                 ..ExternalIds::default()
             },
             info_hash: None,
+            announce_token_fp: None,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -561,6 +600,7 @@ mod tests {
                 ..ExternalIds::default()
             },
             info_hash: None,
+            announce_token_fp: None,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -724,6 +764,64 @@ mod tests {
             Some("new"),
             "an explicit hash must still win"
         );
+    }
+
+    #[tokio::test]
+    async fn set_seeding_records_the_token_fingerprint_alongside_the_hash() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+
+        store
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .await
+            .unwrap();
+
+        let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
+        assert_eq!(got.state, ShareState::Seeding);
+        assert_eq!(got.info_hash.as_deref(), Some("abc123"));
+        assert_eq!(got.announce_token_fp.as_deref(), Some("fp1"));
+    }
+
+    /// The fast path for an item that already exists: only the fingerprint
+    /// moves, nothing else — proving `set_announce_token_fp` cannot be
+    /// confused with `set_seeding` at the SQL layer.
+    #[tokio::test]
+    async fn set_announce_token_fp_touches_only_the_fingerprint() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .await
+            .unwrap();
+
+        store
+            .set_announce_token_fp(MediaSource::Sonarr, 1001, Some("fp2"))
+            .await
+            .unwrap();
+
+        let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
+        assert_eq!(got.info_hash.as_deref(), Some("abc123"), "must not change");
+        assert_eq!(got.state, ShareState::Seeding, "must not change");
+        assert_eq!(got.announce_token_fp.as_deref(), Some("fp2"));
+    }
+
+    /// A rediscovery (`upsert` with `announce_token_fp: None`) must not blank
+    /// out a fingerprint only `set_seeding`/`set_announce_token_fp` know —
+    /// same COALESCE reasoning as `info_hash`.
+    #[tokio::test]
+    async fn upsert_never_blanks_an_existing_fingerprint() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .await
+            .unwrap();
+
+        // A plain rediscovery, as `Discovered::into_shared_item` produces one.
+        store.upsert(&episode(1001)).await.unwrap();
+
+        let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
+        assert_eq!(got.announce_token_fp.as_deref(), Some("fp1"));
     }
 
     #[tokio::test]

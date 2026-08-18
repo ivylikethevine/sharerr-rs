@@ -805,6 +805,7 @@ mod tests {
                 ..ExternalIds::default()
             },
             info_hash: Some("ab".repeat(20)),
+            announce_token_fp: None,
             state: ShareState::Seeding,
             last_error: None,
             created_at: None,

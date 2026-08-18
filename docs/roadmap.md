@@ -75,10 +75,6 @@ than creating duplicates. If a file is already seeding in qBittorrent under anot
 torrent, sharerr should recognise it rather than adding a second entry for the same
 bytes.
 
-**Health and history in the UI.** The store already records run history
-(`recent_runs`), and the status page shows only the latest runs. Per-item state —
-why _this_ file is not shared — is the question the UI cannot currently answer.
-
 ---
 
 ## Ease of use

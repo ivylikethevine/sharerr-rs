@@ -19,7 +19,7 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use super::peers::ago;
-use super::templates::{DiagnosticsPage, EndpointStatus, SampleRow, ServiceLine, render};
+use super::templates::{DiagnosticsPage, EndpointStatus, RunRow, SampleRow, ServiceLine, render};
 use crate::checks::{self, ArrOutcome, DirOutcome};
 use crate::gluetun::GluetunTarget;
 
@@ -28,6 +28,12 @@ use crate::gluetun::GluetunTarget;
 /// A library with a broken mapping has *every* file broken, and a page listing ten
 /// thousand of them buries the advice that would fix it.
 const MAX_LISTED: usize = 20;
+
+/// How many past runs to show. The status page's glance already answers "is
+/// the *last* sync healthy"; this answers "is that typical", which needs a
+/// few rather than one — enough to see a pattern, not so many the page reads
+/// like a log dump.
+const RECENT_RUNS: i64 = 10;
 
 pub async fn page(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
@@ -118,6 +124,7 @@ pub async fn page(State(state): State<WebState>) -> Response {
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
     let swarm = state.serve.swarms().stats().await;
+    let runs = recent_run_rows(&state).await;
     let gluetun = vec![
         endpoint_status(
             "Tracker/feed",
@@ -160,7 +167,54 @@ pub async fn page(State(state): State<WebState>) -> Response {
         gluetun,
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
+        runs,
     })
+}
+
+/// The last few sync runs, newest first — "is the last one healthy" is the
+/// status page's glance; this is "is that typical", which needs more than
+/// one data point. Empty (not an error) when the store is unavailable — the
+/// rest of this page still has a useful answer without it.
+async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    let Ok(runs) = store.recent_runs(RECENT_RUNS).await else {
+        return Vec::new();
+    };
+
+    runs.into_iter()
+        .map(|run| {
+            let Some(finished_at) = run.finished_at else {
+                return RunRow {
+                    when: ago(run.started_at),
+                    summary: "still running".to_owned(),
+                    failed: false,
+                };
+            };
+            let (summary, failed) = match &run.summary.error {
+                Some(error) => (error.clone(), true),
+                None => {
+                    let mut parts = vec![format!("{} discovered", run.summary.discovered)];
+                    if run.summary.added > 0 {
+                        parts.push(format!("{} added", run.summary.added));
+                    }
+                    if run.summary.unshared > 0 {
+                        parts.push(format!("{} unshared", run.summary.unshared));
+                    }
+                    if run.summary.failed > 0 {
+                        parts.push(format!("{} failed", run.summary.failed));
+                    }
+                    (parts.join(", "), run.summary.failed > 0)
+                }
+            };
+            RunRow {
+                when: ago(finished_at),
+                summary,
+                failed,
+            }
+        })
+        .collect()
 }
 
 /// One gluetun poller's row, pre-rendered for the template.

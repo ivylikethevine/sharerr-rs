@@ -1,0 +1,15 @@
+-- A short fingerprint of the announce token this item's torrent was last
+-- *confirmed* to actually be announcing with.
+--
+-- The tracker token can be rotated from Settings at any time, and an existing
+-- torrent keeps whatever token was baked into its announce URL until the next
+-- sync pass rewrites it -- a window where the torrent looks fine but is
+-- silently using a credential that no longer grants anything. This column is
+-- how the items page tells "still using the current token" from "hasn't been
+-- confirmed since", instead of both looking identical.
+--
+-- Set at creation (`set_seeding`) and refreshed whenever a later sync pass
+-- verifies or fixes an already-seeding item's tracker list
+-- (`set_announce_token_fp`). NULL for an item with no torrent yet, or one
+-- that predates this column and has not been touched by a sync pass since.
+ALTER TABLE shared_items ADD COLUMN announce_token_fp TEXT;

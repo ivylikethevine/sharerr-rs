@@ -56,6 +56,7 @@
         <th>Visible to</th>
         <th>Info hash</th>
         <th>Announce URL</th>
+        <th>Token</th>
       </tr>
     </thead>
     <tbody>
@@ -71,7 +72,12 @@
         </td>
         <td>{{ item.source_label }}</td>
         <td>{{ item.size }}</td>
-        <td>{{ item.state_label }}</td>
+        <td>
+          {{ item.state_label }}
+          {% if let Some(hint) = item.state_hint %}
+          <br><span class="hint">{{ hint }}</span>
+          {% endif %}
+        </td>
         <td>
           {% if item.visible_to.is_empty() %}
           <span class="hint">—</span>
@@ -91,6 +97,13 @@
           <code>{{ url }}</code>
           {% else %}
           <span class="hint">none yet</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if let Some(fp) = item.token_fp %}
+          <span class="field-status {{ item.token_status.css_class() }}" title="{{ item.token_status.label() }}"><code>{{ fp }}</code></span>
+          {% else %}
+          <span class="field-status {{ item.token_status.css_class() }}">{{ item.token_status.label() }}</span>
           {% endif %}
         </td>
       </tr>

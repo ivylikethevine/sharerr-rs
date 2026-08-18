@@ -345,6 +345,7 @@ mod tests {
             size: 1024,
             ids: sharerr_core::ExternalIds::default(),
             info_hash: None,
+            announce_token_fp: None,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
