@@ -230,16 +230,34 @@ mod tests {
         let (store, peer) = store_with_peer().await;
 
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.5:51413", 100, ObservedVia::Direct)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:51413",
+                100,
+                ObservedVia::Direct,
+            )
             .await
             .unwrap();
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.9:51413", 200, ObservedVia::Direct)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.9:51413",
+                200,
+                ObservedVia::Direct,
+            )
             .await
             .unwrap();
         // The same address again, later: refreshed, not duplicated.
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.5:51413", 300, ObservedVia::Direct)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:51413",
+                300,
+                ObservedVia::Direct,
+            )
             .await
             .unwrap();
 
@@ -259,11 +277,23 @@ mod tests {
         let (store, peer) = store_with_peer().await;
 
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.5:1", 500, ObservedVia::Direct)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                500,
+                ObservedVia::Direct,
+            )
             .await
             .unwrap();
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.5:1", 100, ObservedVia::Gossip)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                100,
+                ObservedVia::Gossip,
+            )
             .await
             .unwrap();
 
@@ -279,11 +309,23 @@ mod tests {
         let (store, peer) = store_with_peer().await;
 
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.5:8477", 100, ObservedVia::Direct)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:8477",
+                100,
+                ObservedVia::Direct,
+            )
             .await
             .unwrap();
         store
-            .record_peer_endpoint(peer, EndpointKind::Client, "198.51.100.7:6881", 100, ObservedVia::Gossip)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Client,
+                "198.51.100.7:6881",
+                100,
+                ObservedVia::Gossip,
+            )
             .await
             .unwrap();
 
@@ -336,7 +378,13 @@ mod tests {
     async fn deleting_a_peer_takes_their_endpoint_history_with_them() {
         let (store, peer) = store_with_peer().await;
         store
-            .record_peer_endpoint(peer, EndpointKind::Api, "203.0.113.5:1", 100, ObservedVia::Direct)
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                100,
+                ObservedVia::Direct,
+            )
             .await
             .unwrap();
 

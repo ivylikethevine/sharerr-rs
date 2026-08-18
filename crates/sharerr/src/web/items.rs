@@ -12,7 +12,7 @@
 use axum::extract::{Query, State};
 use axum::response::Response;
 use serde::Deserialize;
-use sharerr_core::{MediaSource, MediaSpec, SharedItem, ShareState};
+use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
 use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
@@ -72,8 +72,16 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // Default view is newest first, matching the order the sync log reports
     // things in. An explicit sort overrides it; the header links below always
     // carry `dir` explicitly, so there is never an ambiguous third click.
-    let sort = if query.sort.is_empty() { "since" } else { query.sort.as_str() };
-    let desc = if query.sort.is_empty() { true } else { query.dir == "desc" };
+    let sort = if query.sort.is_empty() {
+        "since"
+    } else {
+        query.sort.as_str()
+    };
+    let desc = if query.sort.is_empty() {
+        true
+    } else {
+        query.dir == "desc"
+    };
     // `sort_by_cached_key` computes each item's key once, rather than
     // re-lowercasing the title on every comparison the sort makes.
     match sort {
@@ -115,7 +123,11 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                     urlencode(&query.q),
                 ),
                 active,
-                dir: if active { if desc { "desc" } else { "asc" } } else { "" },
+                dir: if active {
+                    if desc { "desc" } else { "asc" }
+                } else {
+                    ""
+                },
             }
         })
         .collect();
@@ -313,7 +325,10 @@ mod tests {
             },
             ShareState::Seeding,
         );
-        assert_eq!(visible_to(&it, &[peer("Sam", PeerScope::Tv)]), "no friend's scope covers it");
+        assert_eq!(
+            visible_to(&it, &[peer("Sam", PeerScope::Tv)]),
+            "no friend's scope covers it"
+        );
         assert_eq!(visible_to(&it, &[peer("Sam", PeerScope::Movies)]), "Sam");
     }
 }

@@ -20,10 +20,10 @@ use anyhow::{Context, Result, bail};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
 use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
-use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
@@ -465,9 +465,7 @@ impl Syncer {
             && let Some(hash) = &known.info_hash
             && live.contains(&hash.to_ascii_lowercase())
         {
-            if !dry_run
-                && let Err(err) = self.seeder.refresh_announce(hash, announce).await
-            {
+            if !dry_run && let Err(err) = self.seeder.refresh_announce(hash, announce).await {
                 tracing::warn!(
                     item = %item.spec,
                     error = format!("{err:#}"),
@@ -646,14 +644,15 @@ fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>
         Some(key) => vault.get(key)?,
         None => None,
     };
-    let credential = crate::checks::TorrentCredential::choose(api_key, password).with_context(
-        || match (client.api_key_key, client.password_key) {
-            (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
-            (Some(api), None) => format!("no {api} in the vault"),
-            (None, Some(password)) => format!("no {password} in the vault"),
-            (None, None) => "no credential configured for this torrent client".to_owned(),
-        },
-    )?;
+    let credential =
+        crate::checks::TorrentCredential::choose(api_key, password).with_context(|| {
+            match (client.api_key_key, client.password_key) {
+                (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
+                (Some(api), None) => format!("no {api} in the vault"),
+                (None, Some(password)) => format!("no {password} in the vault"),
+                (None, None) => "no credential configured for this torrent client".to_owned(),
+            }
+        })?;
 
     crate::checks::build_torrent_client(
         config.torrent_backend,

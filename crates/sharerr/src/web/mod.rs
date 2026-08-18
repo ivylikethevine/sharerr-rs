@@ -158,12 +158,15 @@ async fn status_page(State(state): State<WebState>) -> Response {
                 title: settings::title_case(kind.as_str()),
                 url: config.service(kind).map(|s| s.url.to_string()),
             })
-            .chain(config.library.iter().map(|library| {
-                crate::web::templates::ServiceUrl {
-                    title: format!("Library ({})", library.kind.as_str()),
-                    url: Some(library.path.display().to_string()),
-                }
-            }))
+            .chain(
+                config
+                    .library
+                    .iter()
+                    .map(|library| crate::web::templates::ServiceUrl {
+                        title: format!("Library ({})", library.kind.as_str()),
+                        url: Some(library.path.display().to_string()),
+                    }),
+            )
             .collect(),
         client_name: config.torrent_backend.as_str(),
         client_url: config.torrent_client().url.to_string(),
@@ -407,7 +410,14 @@ mod tests {
     /// would not notice.
     #[tokio::test]
     async fn every_protected_route_refuses_an_anonymous_visitor() {
-        let protected_gets = ["/", "/settings", "/diagnostics", "/items", "/peers", "/peers/1/feed"];
+        let protected_gets = [
+            "/",
+            "/settings",
+            "/diagnostics",
+            "/items",
+            "/peers",
+            "/peers/1/feed",
+        ];
         let protected_posts = [
             "/settings/general",
             "/settings/arr/sonarr",

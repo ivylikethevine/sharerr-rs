@@ -316,16 +316,16 @@ impl Swarms {
         };
 
         let now = Instant::now();
-        swarm
-            .values()
-            .filter(|peer| peer.is_live(now))
-            .fold((0, 0), |(complete, incomplete), peer| {
+        swarm.values().filter(|peer| peer.is_live(now)).fold(
+            (0, 0),
+            |(complete, incomplete), peer| {
                 if peer.left == 0 {
                     (complete + 1, incomplete)
                 } else {
                     (complete, incomplete + 1)
                 }
-            })
+            },
+        )
     }
 
     /// How many swarms are currently tracked.

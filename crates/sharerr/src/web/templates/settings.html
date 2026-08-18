@@ -211,6 +211,20 @@
          {% call lock_attr("gluetun.control_url") %}{% endcall %}>
   {% call locked("gluetun.control_url") %}{% endcall %}
 
+  <label for="gluetun_api_key">Control server API key</label>
+  <input id="gluetun_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(gluetun_api_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if gluetun_api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+  <p class="hint">
+    Required since gluetun v3.40, which made <code>apikey</code> the default
+    control server auth — an unkeyed request now gets a bare <code>401</code>.
+    Find or set it in gluetun's own config under <code>CONTROL_SERVER_AUTH</code>
+    (or the roles section of its auth config file).
+  </p>
+
   <label for="gluetun_poll_secs">Poll interval (seconds)</label>
   <input id="gluetun_poll_secs" name="poll_secs" value="{{ gluetun_poll_secs }}" inputmode="numeric"
          {% call lock_attr("gluetun.poll_secs") %}{% endcall %}>

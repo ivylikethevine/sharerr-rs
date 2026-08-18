@@ -116,6 +116,9 @@ pub struct TrackerForm {
 #[derive(Debug, Deserialize)]
 pub struct GluetunForm {
     control_url: String,
+    api_key: String,
+    #[serde(default)]
+    clear_api_key: Option<String>,
     poll_secs: String,
 }
 
@@ -321,6 +324,17 @@ pub async fn save_gluetun(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
 ) -> Response {
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::GLUETUN_API_KEY,
+        &form.api_key,
+        form.clear_api_key,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
     write_config(&state, "gluetun", |file| {
         let url = form.control_url.trim();
         if url.is_empty() {
@@ -738,6 +752,7 @@ async fn build_page(
             .as_ref()
             .map(url::Url::to_string)
             .unwrap_or_default(),
+        gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
         gluetun_poll_secs: config.gluetun.poll_secs,
 
         revealed: None,
@@ -816,9 +831,19 @@ mod tests {
 
     #[test]
     fn a_loopback_or_private_advertised_host_is_refused() {
-        for host in ["127.0.0.1", "localhost", "LocalHost", "::1", "10.0.0.5", "192.168.1.20"] {
+        for host in [
+            "127.0.0.1",
+            "localhost",
+            "LocalHost",
+            "::1",
+            "10.0.0.5",
+            "192.168.1.20",
+        ] {
             let err = validate_advertised_host(host).expect_err(host);
-            assert!(format!("{err:#}").contains(host) || host.eq_ignore_ascii_case("localhost"), "{err:#}");
+            assert!(
+                format!("{err:#}").contains(host) || host.eq_ignore_ascii_case("localhost"),
+                "{err:#}"
+            );
         }
     }
 

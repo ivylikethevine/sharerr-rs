@@ -118,11 +118,7 @@ impl Seeder {
     /// against, so if the client update fails the comparison stays stale and the
     /// whole step is retried — the opposite order would record success it did not
     /// achieve.
-    pub async fn refresh_announce(
-        &self,
-        info_hash: &str,
-        announce: &AnnounceSet,
-    ) -> Result<bool> {
+    pub async fn refresh_announce(&self, info_hash: &str, announce: &AnnounceSet) -> Result<bool> {
         let path = torrent_file_path(&self.torrent_dir, info_hash);
         let data = match tokio::fs::read(&path).await {
             Ok(data) => data,

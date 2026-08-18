@@ -504,7 +504,10 @@ mod tests {
     fn music_reads_artist_album_and_track_from_the_layout() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        touch(&root.join("Vermilion Choir/Salt Orchard/03 - Tidewrack.flac"), 16);
+        touch(
+            &root.join("Vermilion Choir/Salt Orchard/03 - Tidewrack.flac"),
+            16,
+        );
         touch(&root.join("stray.flac"), 16);
 
         let outcome = scan(&library(root, LibraryKind::Music)).unwrap();

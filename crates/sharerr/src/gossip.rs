@@ -111,8 +111,10 @@ fn signable_bytes(
 /// caller's question, answered against the peers table.
 pub fn verify(record: &EndpointRecord) -> Result<(), &'static str> {
     let mut key_bytes = [0u8; 32];
-    hex::decode_to_slice(&record.pubkey, &mut key_bytes).map_err(|_| "pubkey is not 32 hex bytes")?;
-    let key = VerifyingKey::from_bytes(&key_bytes).map_err(|_| "pubkey is not a valid Ed25519 key")?;
+    hex::decode_to_slice(&record.pubkey, &mut key_bytes)
+        .map_err(|_| "pubkey is not 32 hex bytes")?;
+    let key =
+        VerifyingKey::from_bytes(&key_bytes).map_err(|_| "pubkey is not a valid Ed25519 key")?;
 
     let mut sig_bytes = [0u8; 64];
     hex::decode_to_slice(&record.signature, &mut sig_bytes)
@@ -254,7 +256,11 @@ pub struct IngestSummary {
 /// The presenter matters twice: their own self-record is what TOFU-binds their
 /// pubkey, and endpoints from a self-record are first-hand (`direct`) where
 /// relayed ones are `gossip`.
-pub async fn ingest(store: &Store, presenter_id: i64, records: Vec<EndpointRecord>) -> IngestSummary {
+pub async fn ingest(
+    store: &Store,
+    presenter_id: i64,
+    records: Vec<EndpointRecord>,
+) -> IngestSummary {
     let mut summary = IngestSummary::default();
 
     let peers = match store.list_peers().await {
@@ -528,11 +534,18 @@ async fn exchange_with(
     if !response.status().is_success() {
         return Err(format!("pull answered {}", response.status()));
     }
-    let batch: RecordBatch = response.json().await.map_err(|e| format!("pull body: {e}"))?;
+    let batch: RecordBatch = response
+        .json()
+        .await
+        .map_err(|e| format!("pull body: {e}"))?;
 
     let summary = ingest(store, peer_id, batch.records).await;
     if summary.accepted > 0 {
-        tracing::info!(peer = peer_id, accepted = summary.accepted, "gossip ingested");
+        tracing::info!(
+            peer = peer_id,
+            accepted = summary.accepted,
+            "gossip ingested"
+        );
     }
     Ok(())
 }
@@ -630,10 +643,20 @@ mod tests {
         let alex = identity(1);
 
         // Alex speaks for themselves once, binding their identity.
-        ingest(&store, ids[0], vec![record_for(&alex, "http://old:1", 1000)]).await;
+        ingest(
+            &store,
+            ids[0],
+            vec![record_for(&alex, "http://old:1", 1000)],
+        )
+        .await;
 
         // Blair relays Alex's newer record.
-        let summary = ingest(&store, ids[1], vec![record_for(&alex, "http://new:2", 2000)]).await;
+        let summary = ingest(
+            &store,
+            ids[1],
+            vec![record_for(&alex, "http://new:2", 2000)],
+        )
+        .await;
         assert_eq!(summary.accepted, 1);
 
         let endpoints = store.peer_endpoints(ids[0]).await.unwrap();
@@ -647,8 +670,18 @@ mod tests {
         let (store, ids) = store_with(&["Alex", "Blair"]).await;
         let alex = identity(1);
 
-        ingest(&store, ids[0], vec![record_for(&alex, "http://new:2", 2000)]).await;
-        let summary = ingest(&store, ids[1], vec![record_for(&alex, "http://old:1", 1000)]).await;
+        ingest(
+            &store,
+            ids[0],
+            vec![record_for(&alex, "http://new:2", 2000)],
+        )
+        .await;
+        let summary = ingest(
+            &store,
+            ids[1],
+            vec![record_for(&alex, "http://old:1", 1000)],
+        )
+        .await;
 
         assert_eq!(summary.accepted, 0);
         assert_eq!(summary.stale, 1);
@@ -744,13 +777,7 @@ mod tests {
         let (status, _) = request(&state, "GET", "/api/gossip/endpoints", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-        let (status, _) = request(
-            &state,
-            "GET",
-            "/api/gossip/endpoints?apikey=wrong",
-            None,
-        )
-        .await;
+        let (status, _) = request(&state, "GET", "/api/gossip/endpoints?apikey=wrong", None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 

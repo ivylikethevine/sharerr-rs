@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use lava_torrent::torrent::v1::TorrentBuilder;
 use crate::error::{Result, TorrentError};
+use lava_torrent::torrent::v1::TorrentBuilder;
 
 /// What to build a torrent over.
 ///
@@ -173,7 +173,9 @@ pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Ve
     torrent.announce = Some(announce.primary.to_string());
     torrent.announce_list = announce.tier_list();
 
-    torrent.encode().map_err(|source| TorrentError::Reencode { source })
+    torrent
+        .encode()
+        .map_err(|source| TorrentError::Reencode { source })
 }
 
 #[cfg(test)]
