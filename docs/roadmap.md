@@ -8,10 +8,10 @@ ordering is a judgement about value, not a schedule.
 
 ## Status
 
-| Milestone | Scope                                                                       | Status |
-| --------- | --------------------------------------------------------------------------- | ------ |
-| —         | The interchange: semi-anonymous endpoint rendezvous, its own image and port | Next   |
-| —         | Ratio and bandwidth control                                                 | Next   |
+| Milestone | Scope                                                                       | Status      |
+| --------- | --------------------------------------------------------------------------- | ----------- |
+| —         | The lighthouse: semi-anonymous endpoint rendezvous, its own image and port  | In progress |
+| —         | Ratio and bandwidth control                                                 | Next        |
 
 ---
 
@@ -57,36 +57,6 @@ something in this table looks done just because the shape matches.
 
 ## Functionality
 
-**The interchange.** Gossip only helps peers who can still reach _somebody_; two
-friends whose addresses both rotated while neither was watching have no path back
-to each other. The interchange is the rendezvous for that case: a tiny separate
-service, deliberately knowing nothing but `key hash → latest IP and port`, that a
-sharerr instance reports its endpoint to and a friend queries with the API key
-that peer issued them. The privacy property is the point and shapes the whole
-design: a request without a valid key gets a _plausible fabricated_ IP and port
-rather than an error, so an unauthenticated probe cannot be distinguished from a
-valid lookup — the interchange never confirms that an instance exists, and
-scraping it yields only noise. That makes semi-anonymous tracking of sharerr
-instances possible without any instance exposing its IP publicly. It ships as its
-own docker image on its own port — not another route on sharerr's listener — so
-it can be self-hosted by anyone, placed on neutral ground away from any
-particular library, and carries no database worth stealing: key hashes and
-last-seen addresses only. A sharerr instance treats it as one more observation
-source feeding peer endpoint memory, ranked below a direct sighting of the same
-peer.
-
-The fabricated answers create the opposite problem for the _legitimate_ caller:
-a friend holding a valid key must be able to tell a real record from a decoy, or
-the noise defeats them too. So a genuine record is verifiable — the natural shape
-is the same signed endpoint record gossip uses, signed by the peer it describes
-when that peer reported in, so the interchange relays proof it could not forge
-and a JWT-style signature check separates record from decoy. A decoy carries
-random bytes where the signature would be: identical on the wire to an observer
-without the peer's public key, and never verifying for anyone. The deterministic
-fallback where signing is unavailable: derive the decoy from a keyed hash of the
-queried key hash, so decoys are at least stable across probes rather than fresh
-noise that flags itself by changing.
-
 **Per-peer announce tokens.** The tracker's announce token is one shared secret,
 so an announce carries no peer identity — which is why peer endpoint memory
 cannot attribute a torrent client's address from a direct announce and has to
@@ -100,18 +70,6 @@ library with no cap on what it costs you is a real deterrent to running this.
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
 
-**Cross-seed awareness.** The brief called for preserving existing torrents rather
-than creating duplicates. If a file is already seeding in qBittorrent under another
-torrent, sharerr should recognise it rather than adding a second entry for the same
-bytes.
-
-**Health and history in the UI.** The store already records run history
-(`recent_runs`), and the status page shows only the latest runs. Per-item state —
-why _this_ file is not shared — is the question the UI cannot currently answer.
-
-**Notifications.** Webhook/Discord/Apprise on sync failure or a peer going quiet.
-Standard for the *arr ecosystem this lives in.
-
 ---
 
 ## Ease of use
@@ -120,16 +78,46 @@ Standard for the *arr ecosystem this lives in.
 paths, then tracker, validating each step — matches how the *arr apps onboard and
 would catch misconfiguration at the point it is introduced.
 
-**Auto-detect path mappings.** sharerr knows what Sonarr reports and what it can
-see; proposing the mapping instead of asking the operator to derive it removes the
-single most error-prone configuration step.
-
-**`sharerr doctor --fix`** for the mechanical cases (missing tag, wrong category).
-
-**Better first-run defaults.** `tracker.advertised_host` has no default. The
-save-time half is done — a loopback, private, or `localhost` value is refused
-before it reaches `sharerr.toml`, catching the copy-paste-from-`server.bind`
-mistake for free. Resolving it from gluetun instead of asking still removes the
-guess entirely where that is available; that half remains.
-
 ---
+
+## The lighthouse
+
+**Where this stands:** the rendezvous service described below is implemented —
+`crates/sharerr-lighthouse` — as its own binary and image (`Dockerfile.lighthouse`)
+with report/lookup routes, signed-record verification, and the deterministic decoy
+fabrication the privacy property depends on. sharerr can also run it embedded on
+its own frontend or tracker port, toggled from Settings → Lighthouse or via
+`[lighthouse]` in `sharerr.toml` directly, for an operator who would rather not run
+a second container. Not yet built: the other half, a sharerr instance actually
+reporting its own endpoint to a lighthouse or querying one for a quiet friend —
+today nothing feeds a lighthouse observation into peer endpoint memory. The rest
+of this section is the target design, implemented and not.
+
+Gossip only helps peers who can still reach _somebody_; two friends whose
+addresses both rotated while neither was watching have no path back to each
+other. The lighthouse is the rendezvous for that case: a tiny separate service,
+deliberately knowing nothing but `key hash → latest IP and port`, that a sharerr
+instance reports its endpoint to and a friend queries with the API key that peer
+issued them. The privacy property is the point and shapes the whole design: a
+request without a valid key gets a _plausible fabricated_ IP and port rather
+than an error, so an unauthenticated probe cannot be distinguished from a valid
+lookup — the lighthouse never confirms that an instance exists, and scraping it
+yields only noise. That makes semi-anonymous tracking of sharerr instances
+possible without any instance exposing its IP publicly. It ships as its own
+docker image on its own port — not another route on sharerr's listener — so it
+can be self-hosted by anyone, placed on neutral ground away from any particular
+library, and carries no database worth stealing: key hashes and last-seen
+addresses only. A sharerr instance treats it as one more observation source
+feeding peer endpoint memory, ranked below a direct sighting of the same peer.
+
+The fabricated answers create the opposite problem for the _legitimate_ caller:
+a friend holding a valid key must be able to tell a real record from a decoy, or
+the noise defeats them too. So a genuine record is verifiable — the natural shape
+is the same signed endpoint record gossip uses, signed by the peer it describes
+when that peer reported in, so the lighthouse relays proof it could not forge
+and a JWT-style signature check separates record from decoy. A decoy carries
+random bytes where the signature would be: identical on the wire to an observer
+without the peer's public key, and never verifying for anyone. The deterministic
+fallback where signing is unavailable: derive the decoy from a keyed hash of the
+queried key hash, so decoys are at least stable across probes rather than fresh
+noise that flags itself by changing.

@@ -10,13 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use sharerr_core::Config;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::AdvertisedEndpoint;
-use sharerr_store::{Store, Vault, master_key_from_env};
+use sharerr_store::{Store, Vault};
 use tokio::sync::{Notify, RwLock};
 
+use crate::gluetun::{GluetunStatus, GluetunTarget};
+use crate::notify::QuietNotified;
 use crate::sync::Syncer;
 
 /// How soon to retry building the syncer after the first failure.
@@ -77,6 +79,17 @@ pub struct ServeState {
     /// `tracker_token` — loading it means opening the vault, and the pull side of
     /// gossip is asked on every friend's poll.
     gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
+    /// The embedded lighthouse's state, built lazily the first time
+    /// `[lighthouse] enabled = true` is actually observed — see
+    /// [`Self::lighthouse_state`]. Same `Option<Option<_>>` shape as
+    /// `gossip_identity`: outer `None` is "not looked up yet".
+    lighthouse_state: RwLock<Option<Option<Arc<sharerr_lighthouse::LighthouseState>>>>,
+    /// Each gluetun poller's control-server API key, cached like `tracker_token`
+    /// and for a sharper version of the same reason: the poller re-read it every
+    /// interval, so a default 60-second poll paid 1,440 Argon2 derivations a day,
+    /// and both pollers run. Cleared by [`Self::invalidate`], so a key saved
+    /// through Settings still takes effect on the next pass without a restart.
+    gluetun_api_keys: RwLock<[Option<Option<SecretString>>; 2]>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -87,19 +100,41 @@ pub struct ServeState {
     /// fifteen seconds. `notify_one` stores a permit, so an invalidation that
     /// lands mid-sync is not lost.
     wake: Notify,
-    /// The live externally reachable endpoint. One value for the whole process:
-    /// the syncer's tracker provider reads it, the gluetun poller updates it,
-    /// and a settings save refreshes only its static half — so the poller's
-    /// observations survive both a config change and a syncer rebuild.
+    /// The live externally reachable endpoint — the tracker/feed address a
+    /// friend reaches this instance on. One value for the whole process: the
+    /// syncer's tracker provider reads it, the tracker-facing gluetun poller
+    /// updates it, and a settings save refreshes only its static half — so the
+    /// poller's observations survive both a config change and a syncer
+    /// rebuild.
     endpoint: Arc<AdvertisedEndpoint>,
-    /// Raised by the gluetun push endpoint so the poller re-asks the control
-    /// server *now* instead of at the next tick — the "reacted to in seconds"
-    /// half of the endpoint story.
+    /// The live externally reachable address of the torrent *client* — separate
+    /// from `endpoint` because the two can sit behind independent tunnels (see
+    /// `docker/deploy/dual-vpn/`) that rotate on unrelated schedules. Populated
+    /// only by the `[gluetun_client]` poller; there is no static configuration
+    /// for it, since nothing else in `sharerr.toml` describes the torrent
+    /// client's own reachable address. Read today by gossip's self-record;
+    /// see `docs/roadmap.md`'s "a peer with two addresses" for the rest of the
+    /// story.
+    client_endpoint: Arc<AdvertisedEndpoint>,
+    /// Raised by the gluetun push endpoint so the tracker-facing poller
+    /// re-asks its control server *now* instead of at the next tick — the
+    /// "reacted to in seconds" half of the endpoint story.
     endpoint_refresh: Notify,
+    /// The client-facing counterpart of `endpoint_refresh`, for the second
+    /// poller's own push nudge.
+    client_endpoint_refresh: Notify,
+    /// What the tracker-facing gluetun poller last saw and last failed with —
+    /// the "when did gluetun last actually tell sharerr something" the
+    /// Diagnostics page answers.
+    gluetun_status: Arc<GluetunStatus>,
+    /// The client-facing counterpart of `gluetun_status`.
+    gluetun_client_status: Arc<GluetunStatus>,
     /// The tracker's live swarms. Owned here rather than by the tracker router
     /// because two consumers need one copy: however many listeners carry
     /// `/announce`, and the status page's "n peers connected" line.
     swarms: Arc<sharerr_torrent::Swarms>,
+    /// Dedupe for the peer-quiet notification — see [`crate::notify`].
+    quiet_notified: Arc<QuietNotified>,
 }
 
 impl ServeState {
@@ -121,10 +156,17 @@ impl ServeState {
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
             gossip_identity: RwLock::new(None),
+            lighthouse_state: RwLock::new(None),
+            gluetun_api_keys: RwLock::new([None, None]),
             wake: Notify::new(),
             endpoint,
+            client_endpoint: Arc::new(AdvertisedEndpoint::new(None)),
             endpoint_refresh: Notify::new(),
+            client_endpoint_refresh: Notify::new(),
+            gluetun_status: Arc::new(GluetunStatus::default()),
+            gluetun_client_status: Arc::new(GluetunStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
+            quiet_notified: Arc::new(QuietNotified::default()),
         }
     }
 
@@ -134,9 +176,37 @@ impl ServeState {
         Arc::clone(&self.swarms)
     }
 
-    /// The live advertised endpoint this whole process shares.
+    /// Dedupe state for the peer-quiet notification.
+    pub fn quiet_notified(&self) -> Arc<QuietNotified> {
+        Arc::clone(&self.quiet_notified)
+    }
+
+    /// The live advertised endpoint this whole process shares — where friends
+    /// reach the tracker and the feed.
     pub fn endpoint(&self) -> Arc<AdvertisedEndpoint> {
         Arc::clone(&self.endpoint)
+    }
+
+    /// The live advertised address of the torrent client — see the field
+    /// comment on `client_endpoint`.
+    pub fn client_endpoint(&self) -> Arc<AdvertisedEndpoint> {
+        Arc::clone(&self.client_endpoint)
+    }
+
+    /// The endpoint gluetun keeps in step for `target`.
+    pub fn endpoint_for(&self, target: GluetunTarget) -> Arc<AdvertisedEndpoint> {
+        match target {
+            GluetunTarget::Tracker => self.endpoint(),
+            GluetunTarget::Client => self.client_endpoint(),
+        }
+    }
+
+    /// What `target`'s poller last saw and last failed with.
+    pub fn gluetun_status(&self, target: GluetunTarget) -> Arc<GluetunStatus> {
+        match target {
+            GluetunTarget::Tracker => Arc::clone(&self.gluetun_status),
+            GluetunTarget::Client => Arc::clone(&self.gluetun_client_status),
+        }
     }
 
     /// Ask the background loop to run a pass soon, without invalidating the
@@ -146,14 +216,20 @@ impl ServeState {
         self.wake.notify_one();
     }
 
-    /// Ask the gluetun poller to re-resolve the endpoint now.
-    pub fn nudge_endpoint(&self) {
-        self.endpoint_refresh.notify_one();
+    /// Ask `target`'s gluetun poller to re-resolve its endpoint now.
+    pub fn nudge_endpoint(&self, target: GluetunTarget) {
+        match target {
+            GluetunTarget::Tracker => self.endpoint_refresh.notify_one(),
+            GluetunTarget::Client => self.client_endpoint_refresh.notify_one(),
+        }
     }
 
-    /// Park until [`Self::nudge_endpoint`] is called.
-    pub async fn endpoint_refresh_requested(&self) {
-        self.endpoint_refresh.notified().await;
+    /// Park until [`Self::nudge_endpoint`] is called for `target`.
+    pub async fn endpoint_refresh_requested(&self, target: GluetunTarget) {
+        match target {
+            GluetunTarget::Tracker => self.endpoint_refresh.notified().await,
+            GluetunTarget::Client => self.client_endpoint_refresh.notified().await,
+        }
     }
 
     /// A snapshot of the current configuration.
@@ -198,13 +274,12 @@ impl ServeState {
     /// the web settings pages, the connection probes, and the tracker all come
     /// through here.
     pub async fn open_vault(&self) -> Result<Vault, String> {
-        let master = master_key_from_env().map_err(|err| err.to_string())?;
+        // Just the path, not a clone of the whole `Config` — this is called on
+        // every cache miss and every settings save.
         let path = self.config.read().await.vault_path();
-
-        tokio::task::spawn_blocking(move || Vault::open(&path, &master))
+        crate::secrets::open_vault_at(path)
             .await
-            .map_err(|_| "the vault task panicked".to_owned())?
-            .map_err(|err| format!("opening the vault: {err}"))
+            .map_err(|err| err.to_string())
     }
 
     /// The token the builtin tracker requires in announce URLs, if any.
@@ -230,6 +305,26 @@ impl ServeState {
         token
     }
 
+    /// A gluetun poller's control-server API key, cached after the first read.
+    ///
+    /// Same shape and same reasoning as [`Self::tracker_token`]: the outer
+    /// `None` means "not looked up yet", `Some(None)` means "looked up, and
+    /// there is none". The poller calls this every interval, so without the
+    /// cache each call was an Argon2 derivation on a timer.
+    pub async fn gluetun_api_key(&self, target: GluetunTarget) -> Option<SecretString> {
+        if let Some(cached) = &self.gluetun_api_keys.read().await[target.index()] {
+            return cached.clone();
+        }
+
+        let key = match self.open_vault().await {
+            Ok(vault) => vault.get(target.api_key_secret()).ok().flatten(),
+            Err(_) => None,
+        };
+
+        self.gluetun_api_keys.write().await[target.index()] = Some(key.clone());
+        key
+    }
+
     /// This instance's gossip signing identity, cached after the first load.
     ///
     /// Loading means opening the vault — an Argon2 derivation — and `self_record`
@@ -249,6 +344,34 @@ impl ServeState {
 
         *self.gossip_identity.write().await = Some(identity.clone());
         identity
+    }
+
+    /// The embedded lighthouse's state, built on first use and cached
+    /// thereafter — same reasoning as [`Self::gossip_identity`]: building it
+    /// means opening the vault to load or mint the decoy seed, and `lookup`
+    /// is answered on every friend's probe.
+    ///
+    /// `None` when `[lighthouse] enabled` is false, or when the vault cannot
+    /// be opened — an unconfigured instance still binds and serves
+    /// everything else, so a lighthouse that cannot get its seed yet is
+    /// simply absent rather than a startup failure.
+    pub async fn lighthouse_state(&self) -> Option<Arc<sharerr_lighthouse::LighthouseState>> {
+        if !self.config.read().await.lighthouse.enabled {
+            return None;
+        }
+        if let Some(cached) = &*self.lighthouse_state.read().await {
+            return cached.clone();
+        }
+
+        let state = match self.open_vault().await {
+            Ok(mut vault) => load_or_create_decoy_seed(&mut vault)
+                .ok()
+                .map(|seed| Arc::new(sharerr_lighthouse::LighthouseState::new(seed))),
+            Err(_) => None,
+        };
+
+        *self.lighthouse_state.write().await = Some(state.clone());
+        state
     }
 
     /// Why reconciliation is not running, or `None` when it is.
@@ -282,18 +405,7 @@ impl ServeState {
     pub async fn replace_config(&self, config: Config) {
         // Only the static half is refreshed: the poller's observed endpoints are
         // still true regardless of what the operator just typed.
-        self.endpoint.set_static(
-            match sharerr_core::endpoint::advertised_base(
-                &config.tracker,
-                config.server.bind.port(),
-            ) {
-                Ok(base) => base,
-                Err(err) => {
-                    tracing::warn!(%err, "the saved advertised address is unusable");
-                    None
-                }
-            },
-        );
+        self.endpoint.set_static(static_base(&config));
         *self.config.write().await = config;
         *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;
@@ -312,6 +424,7 @@ impl ServeState {
         // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
         *self.gossip_identity.write().await = None;
+        *self.gluetun_api_keys.write().await = [None, None];
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.
@@ -399,19 +512,48 @@ impl ServeState {
     }
 }
 
-/// The endpoint as configuration alone resolves it, with an unusable address
-/// treated as unset rather than fatal — `serve` must come up either way, and the
-/// tracker provider reports the absence with the sentence that names the fix.
+/// The advertised base as configuration alone resolves it, with an unusable
+/// address treated as unset rather than fatal — `serve` must come up either way,
+/// and the tracker provider reports the absence with the sentence that names the
+/// fix.
+///
+/// One function for both the startup read and the post-save refresh: they used to
+/// be two copies of this match that differed only in the wording of the warning,
+/// which is one copy too many for a value this load-bearing.
+fn static_base(config: &Config) -> Option<url::Url> {
+    match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+        Ok(base) => base,
+        Err(err) => {
+            tracing::warn!(%err, "the advertised address is unusable");
+            None
+        }
+    }
+}
+
+/// The endpoint as configuration alone resolves it.
 fn static_endpoint(config: &Config) -> AdvertisedEndpoint {
-    let base =
-        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
-            Ok(base) => base,
-            Err(err) => {
-                tracing::warn!(%err, "the configured advertised address is unusable");
-                None
-            }
-        };
-    AdvertisedEndpoint::new(base)
+    AdvertisedEndpoint::new(static_base(config))
+}
+
+/// Load the embedded lighthouse's decoy seed from the vault, minting one on
+/// first use — same shape as [`crate::gossip::Identity::load_or_create`].
+fn load_or_create_decoy_seed(vault: &mut Vault) -> Result<[u8; 32], String> {
+    if let Ok(Some(stored)) = vault.get(secret_keys::LIGHTHOUSE_DECOY_SEED) {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(stored.expose_secret(), &mut bytes)
+            .map_err(|_| "the stored lighthouse seed is not 32 hex bytes".to_owned())?;
+        return Ok(bytes);
+    }
+
+    let seed = crate::secrets::random_bytes::<32>()
+        .map_err(|err| format!("generating a lighthouse decoy seed: {err}"))?;
+    vault
+        .put(
+            secret_keys::LIGHTHOUSE_DECOY_SEED,
+            &SecretString::from(hex::encode(seed)),
+        )
+        .map_err(|err| format!("storing the lighthouse decoy seed: {err}"))?;
+    Ok(seed)
 }
 
 #[cfg(test)]

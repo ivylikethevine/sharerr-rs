@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sharerr_core::MediaSource;
 use url::Url;
@@ -167,6 +168,51 @@ impl ArrClient {
                 label: label.to_owned(),
                 available: tags.iter().map(|t| t.label.clone()).collect(),
             })
+    }
+
+    /// Create a tag. Used only by `sharerr doctor --fix` — nothing in an ordinary
+    /// sync creates content in the *arr app it reads from.
+    ///
+    /// Sonarr/Radarr lowercase a label on save and treat the comparison as
+    /// case-insensitive (see [`Self::tag_id`]), so creating one that already
+    /// exists under different casing is harmless — the app dedupes it.
+    pub async fn create_tag(&self, label: &str) -> Result<()> {
+        #[derive(Serialize)]
+        struct NewTag<'a> {
+            label: &'a str,
+        }
+
+        let url = self.endpoint("tag")?;
+        let response = self
+            .http
+            .post(url.clone())
+            .header("X-Api-Key", self.api_key.expose_secret())
+            .json(&NewTag { label })
+            .send()
+            .await
+            .map_err(|source| ArrError::Unreachable {
+                service: self.kind,
+                url: url.to_string(),
+                detail: sharerr_client::error_chain(&source),
+            })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(ArrError::Unauthorized {
+                service: self.kind,
+                status: status.as_u16(),
+            });
+        }
+        if !status.is_success() {
+            let body = clamp_body(&response.text().await.unwrap_or_default());
+            return Err(ArrError::Status {
+                service: self.kind,
+                status: status.as_u16(),
+                path: "tag".to_owned(),
+                body,
+            });
+        }
+        Ok(())
     }
 
     /// Every file belonging to content carrying `tag_label`.

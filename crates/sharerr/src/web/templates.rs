@@ -87,6 +87,11 @@ impl LoginPage {
     }
 }
 
+/// The one page a signed-in operator lands on: what is working, what is not,
+/// and why. Merges what used to be two pages — Status and Diagnostics — since
+/// they answered the same underlying question ("is this instance healthy")
+/// at two different levels of detail, and a person chasing "why isn't this
+/// working" had to know to click through to the second one.
 #[derive(Debug, Template)]
 #[template(path = "status.html")]
 pub struct StatusPage {
@@ -104,9 +109,6 @@ pub struct StatusPage {
     pub recovery_secs: u64,
     pub master_key_present: bool,
     pub tag: String,
-    /// One row per *arr app, configured or not, in `MediaSource::ARRS` order,
-    /// then one per `[[library]]` directory.
-    pub services: Vec<ServiceUrl>,
     /// The *configured* torrent client — showing the unused section's URL on the
     /// "what is this instance using" page sent operators debugging the wrong
     /// service.
@@ -115,6 +117,44 @@ pub struct StatusPage {
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
     pub config_path: String,
+
+    // ------------------------------------------------------ former Diagnostics
+    /// Live connectivity + tag/path checks, one line per *arr app and per
+    /// `[[library]]` directory — only for what is actually configured. Shared
+    /// with `doctor` via `crate::checks`, so the two cannot disagree about
+    /// what they found.
+    pub services: Vec<ServiceLine>,
+    /// Whether any tagged file was found at all. Distinguishes "everything
+    /// resolves" from "there was nothing to resolve", which look identical if you
+    /// only count failures.
+    pub scanned: bool,
+    pub rules: usize,
+    pub checked: usize,
+    pub unmapped: usize,
+    /// Capped for display; `more_missing` carries the remainder.
+    pub missing: Vec<String>,
+    pub more_missing: usize,
+    pub invalid: Vec<String>,
+    pub sample: Option<SampleRow>,
+    /// Files that resolved to something sharerr can actually open.
+    pub readable: usize,
+    /// Whether anything here stops a file being shared. Drives the one-line verdict
+    /// at the top, so the answer is visible without reading the whole page.
+    pub healthy: bool,
+    /// One row per gluetun poller (tracker, then client) — what each is
+    /// pointed at, what it last saw, and what it last failed with. See
+    /// `docs/roadmap.md`'s "gluetun observability" and "a peer with two
+    /// addresses".
+    pub gluetun: Vec<EndpointStatus>,
+    /// Live swarm counts from the tracker's own bookkeeping — not a config
+    /// check like the rest of the page, but the other half of "is networking
+    /// actually working": credentials can all be green while no peer has
+    /// ever announced.
+    pub swarm_peers: usize,
+    pub swarm_seeders: usize,
+    /// The last few sync runs, newest first — the glance above only shows the
+    /// single latest one.
+    pub runs: Vec<RunRow>,
 }
 
 /// The numbers an operator actually came to check, in one strip.
@@ -214,10 +254,36 @@ pub struct SettingsPage {
     pub tracker_advertised_url: String,
     pub tracker_token_set: bool,
 
+    /// Whether the embedded lighthouse (`crates/sharerr-lighthouse`, run as
+    /// extra routes on one of this instance's own listeners) is on.
+    pub lighthouse_enabled: bool,
+    /// `"frontend"` or `"tracker"` — see
+    /// [`sharerr_core::config::LighthouseMount`].
+    pub lighthouse_mount: &'static str,
+
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,
+    pub gluetun_enabled: bool,
     pub gluetun_api_key_set: bool,
     pub gluetun_poll_secs: u64,
+    /// What the tracker-facing poller last saw and last failed with, rendered
+    /// for the settings page's own small status line — the fuller version
+    /// lives on Diagnostics.
+    pub gluetun_last_observed: Option<String>,
+    pub gluetun_last_error: Option<String>,
+
+    /// The second poller — the torrent client's own tunnel. See
+    /// `docs/roadmap.md`'s "a peer with two addresses".
+    pub gluetun_client_control_url: String,
+    pub gluetun_client_enabled: bool,
+    pub gluetun_client_api_key_set: bool,
+    pub gluetun_client_poll_secs: u64,
+    pub gluetun_client_last_observed: Option<String>,
+    pub gluetun_client_last_error: Option<String>,
+    /// Whether the client poller has ever been pointed at anything — the
+    /// disclosure it lives in starts open once it has, same reasoning as
+    /// `secondary_arr_configured`.
+    pub gluetun_client_configured: bool,
 
     /// A freshly minted secret, shown exactly once on the response that created it.
     /// Never populated by an ordinary page load.
@@ -225,6 +291,12 @@ pub struct SettingsPage {
 
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
+
+    /// Whether a webhook URL is stored — see
+    /// `secret_keys::NOTIFICATIONS_WEBHOOK_URL`.
+    pub notifications_webhook_set: bool,
+    pub notifications_kind: &'static str,
+    pub notifications_peer_quiet_secs: u64,
 
     /// One row per `[[library]]` directory, plus a spare blank row.
     pub libraries: Vec<LibraryRow>,
@@ -248,13 +320,6 @@ pub struct SettingsPage {
 pub struct ScopeOption {
     pub value: &'static str,
     pub label: String,
-}
-
-/// One *arr app's row on the status page.
-#[derive(Debug)]
-pub struct ServiceUrl {
-    pub title: String,
-    pub url: Option<String>,
 }
 
 /// One *arr app's section on the settings page.
@@ -295,35 +360,56 @@ pub struct SampleRow {
     pub qbit: String,
 }
 
-/// The check that used to be reachable only from a shell.
-///
-/// `doctor` resolves the path mappings and reports what it finds; the web UI's
-/// per-service "Test connection" buttons deliberately do not, because they answer a
-/// one-line question and this needs a library walk. So the check most likely to
-/// explain "nothing is shared" was the one an operator using only the browser could
-/// never run.
-#[derive(Debug, Template)]
-#[template(path = "diagnostics.html")]
-pub struct DiagnosticsPage {
-    pub signed_in: bool,
+/// The gathered results of the checks folded into [`StatusPage`] — everything
+/// the former Diagnostics page computed, kept as one bundle so `diagnostics`'s
+/// gathering function has a single return type instead of an eleven-tuple.
+#[derive(Debug)]
+pub struct DiagnosticsData {
     pub services: Vec<ServiceLine>,
-    /// Whether any tagged file was found at all. Distinguishes "everything
-    /// resolves" from "there was nothing to resolve", which look identical if you
-    /// only count failures.
     pub scanned: bool,
     pub rules: usize,
     pub checked: usize,
     pub unmapped: usize,
-    /// Capped for display; `more_missing` carries the remainder.
     pub missing: Vec<String>,
     pub more_missing: usize,
     pub invalid: Vec<String>,
     pub sample: Option<SampleRow>,
-    /// Files that resolved to something sharerr can actually open.
     pub readable: usize,
-    /// Whether anything here stops a file being shared. Drives the one-line verdict
-    /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
+    pub gluetun: Vec<EndpointStatus>,
+    pub swarm_peers: usize,
+    pub swarm_seeders: usize,
+    pub runs: Vec<RunRow>,
+}
+
+/// One past sync run, pre-rendered for display.
+#[derive(Debug)]
+pub struct RunRow {
+    pub when: String,
+    /// Either the run's own error, or a summary of what it did.
+    pub summary: String,
+    pub failed: bool,
+}
+
+/// One gluetun-tracked endpoint's state, pre-rendered for display.
+#[derive(Debug)]
+pub struct EndpointStatus {
+    pub label: &'static str,
+    /// Whether this poller is turned on. A poller can be `configured` (has a
+    /// control server URL) but not `enabled` — the whole point of the on/off
+    /// switch.
+    pub enabled: bool,
+    /// Whether a control server URL is set at all.
+    pub configured: bool,
+    /// What sharerr would advertise right now — the dynamic observation if
+    /// there is one, else the static configured address, else nothing.
+    pub current: Option<String>,
+    /// What gluetun last actually reported, with when — `None` even for a
+    /// configured poller that has not resolved yet.
+    pub last_observed: Option<String>,
+    pub last_poll: Option<String>,
+    pub last_success: Option<String>,
+    pub last_error: Option<String>,
 }
 
 /// One friend, as the peers page lists them.
@@ -393,30 +479,6 @@ pub struct RevealedPeer {
     pub key: String,
 }
 
-/// One release as this friend's Torznab client would receive it.
-#[derive(Debug)]
-pub struct FeedPreviewRow {
-    pub title: String,
-    pub category: &'static str,
-    pub size: String,
-    pub download_url: String,
-    /// Empty until the release has an info hash, same as the real feed.
-    pub magnet_url: String,
-}
-
-/// A friend's feed, rendered with their own scope and their own links — the
-/// honest test of scoping, run from the operator's browser instead of a
-/// hand-crafted Torznab query.
-#[derive(Debug, Template)]
-#[template(path = "feed_preview.html")]
-pub struct FeedPreviewPage {
-    pub signed_in: bool,
-    pub peer_label: String,
-    pub peer_scope_label: &'static str,
-    pub total: usize,
-    pub items: Vec<FeedPreviewRow>,
-}
-
 /// One `<option>` in the items page's source/state filters.
 #[derive(Debug)]
 pub struct FilterOption {
@@ -449,14 +511,68 @@ pub struct ItemRow {
     /// Pre-rendered human size (`"1.5 GiB"`) — see `web::items::human_size`.
     pub size: String,
     pub state_label: String,
+    /// A short explanation for a state that would otherwise read as a dead
+    /// end — `Pending` with no `last_error` looks identical whether it is
+    /// mid-sync or has been stuck since a crash, and `Unshared` gives no hint
+    /// that it is not a fault at all. `None` for `Seeding` and `Failed`,
+    /// which already explain themselves (the second via `last_error`).
+    pub state_hint: Option<&'static str>,
     /// Which friends' scopes admit this item, joined for display — empty
     /// unless the item is actually seeding, since nothing else reaches a
     /// friend's feed.
     pub visible_to: String,
     pub since: String,
-    /// A truncated info hash, or `None` before a torrent exists.
-    pub info_hash_short: Option<String>,
+    /// The full 40-character hash, or `None` before a torrent exists.
+    pub info_hash: Option<String>,
+    /// Where this torrent currently announces — the same URL a freshly built
+    /// torrent would carry, computed live rather than stored, since it tracks
+    /// whatever the endpoint currently resolves to. `None` before a torrent
+    /// exists, or when nothing is configured to announce to.
+    pub announce_url: Option<String>,
+    /// A short fingerprint of the token this item's torrent was last confirmed
+    /// to announce with, and whether it still matches the currently configured
+    /// one — see `sync::token_fingerprint`. `None` alongside
+    /// [`TokenStatus::None`] before a torrent exists.
+    pub token_fp: Option<String>,
+    pub token_status: TokenStatus,
     pub last_error: Option<String>,
+}
+
+/// Whether an item's confirmed announce-token fingerprint still matches the
+/// currently configured token. Three states, not two: "no token in use" is
+/// not a fault the way "used to match and no longer does" is, and collapsing
+/// them would make an instance that has never set a tracker token look
+/// exactly like one whose token just rotated out from under every torrent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenStatus {
+    /// No token configured, currently or as last recorded — nothing to check.
+    None,
+    /// Matches the currently configured token.
+    Valid,
+    /// Does not — either the token rotated since this item's torrent was last
+    /// confirmed, or it has never been confirmed at all.
+    Stale,
+}
+
+impl TokenStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "no token",
+            Self::Valid => "valid",
+            Self::Stale => "changed",
+        }
+    }
+
+    /// The `.field-status--*` modifier this status renders with — reusing the
+    /// settings page's set/unset pill styling rather than inventing a second
+    /// small-badge vocabulary for the same shape of question.
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Self::None => "field-status--unset",
+            Self::Valid => "field-status--set",
+            Self::Stale => "field-status--stale",
+        }
+    }
 }
 
 /// Every file sharerr has discovered, sortable and filterable — the page

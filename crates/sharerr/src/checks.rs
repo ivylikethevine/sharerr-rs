@@ -202,15 +202,7 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
 
     let resolver = config.resolver();
     for item in discovered {
-        // Directory items are scanned from sharerr's own view, so only the
-        // sharerr→qbit half of a mapping may apply to them — an arr-side rule
-        // must not rewrite a path that was never an *arr's to report.
-        let resolved = if item.source == MediaSource::Directory {
-            resolver.resolve_sharerr(&item.arr_path)
-        } else {
-            resolver.resolve(&item.arr_path)
-        };
-        match resolved {
+        match resolver.resolve_for(item.source, &item.arr_path) {
             Ok(paths) => {
                 // "Matched no rule" is the normal case for a directory item,
                 // not the warning sign it is for a path another container

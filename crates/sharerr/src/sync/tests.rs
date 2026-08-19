@@ -1160,6 +1160,7 @@ async fn a_broken_arr_app_never_causes_its_shares_to_be_withdrawn() {
         size: 1024,
         ids: sharerr_core::ExternalIds::default(),
         info_hash: Some("radarrhash0000000000000000000000000000aa".to_owned()),
+        announce_token_fp: None,
         state: ShareState::Seeding,
         last_error: None,
         created_at: None,

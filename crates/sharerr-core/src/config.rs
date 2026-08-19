@@ -45,6 +45,18 @@ pub mod secret_keys {
     /// gluetun v3.40 made `apikey` the default auth type for the control
     /// server; without it every request comes back `401`.
     pub const GLUETUN_API_KEY: &str = "gluetun.api_key";
+    /// The API key for the *second* gluetun poller — the torrent client's own
+    /// tunnel, when it is a separate one from the tracker's. See
+    /// [`super::GluetunConfig`] and `[gluetun_client]`.
+    pub const GLUETUN_CLIENT_API_KEY: &str = "gluetun_client.api_key";
+
+    /// Where a sync-failure or peer-quiet notification is POSTed.
+    ///
+    /// In the vault, not `[notifications]` in `sharerr.toml`, even though it is
+    /// not credential-shaped at a glance: a Discord webhook URL embeds its own
+    /// bearer token in the path, so this is exactly the kind of value this
+    /// project treats as a secret everywhere else.
+    pub const NOTIFICATIONS_WEBHOOK_URL: &str = "notifications.webhook_url";
 
     /// This instance's Ed25519 signing key for gossip records, hex-encoded.
     ///
@@ -54,6 +66,15 @@ pub mod secret_keys {
     /// friendship whose peers pinned the old public key. Rotation, when it is
     /// ever needed, deserves an explicit re-pair flow rather than a text box.
     pub const IDENTITY_SIGNING_KEY: &str = "identity.signing_key";
+
+    /// The seed the embedded lighthouse derives its fabricated decoy answers
+    /// from, hex-encoded.
+    ///
+    /// Same reasoning as [`IDENTITY_SIGNING_KEY`], deliberately **not** in
+    /// [`ALL`]: generated on first use by [`super::LighthouseConfig`]'s
+    /// embedding path, not typed by an operator. Only present when
+    /// `[lighthouse] enabled = true` has actually been used at least once.
+    pub const LIGHTHOUSE_DECOY_SEED: &str = "lighthouse.decoy_seed";
 
     /// The vault key holding the API key a friend issued *us*, for pulling
     /// gossip from their sharerr. Per-peer and minted by them, so it cannot be a
@@ -80,6 +101,8 @@ pub mod secret_keys {
         TRANSMISSION_PASSWORD,
         TRACKER_TOKEN,
         GLUETUN_API_KEY,
+        GLUETUN_CLIENT_API_KEY,
+        NOTIFICATIONS_WEBHOOK_URL,
     ];
 }
 
@@ -136,11 +159,33 @@ pub mod config_paths {
     pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
     pub const TRACKER_PORT: &str = "tracker.port";
 
+    /// Whether the lighthouse rendezvous service runs as extra routes on one
+    /// of this instance's own listeners — see [`super::LighthouseConfig`].
+    pub const LIGHTHOUSE_ENABLED: &str = "lighthouse.enabled";
+    /// Which listener: `"frontend"` or `"tracker"` — see
+    /// [`super::LighthouseMount`].
+    pub const LIGHTHOUSE_MOUNT: &str = "lighthouse.mount";
+
+    pub const GLUETUN_ENABLED: &str = "gluetun.enabled";
     pub const GLUETUN_CONTROL_URL: &str = "gluetun.control_url";
     pub const GLUETUN_POLL_SECS: &str = "gluetun.poll_secs";
 
+    /// The second gluetun poller, for the torrent client's own tunnel — see
+    /// `docker/deploy/dual-vpn/`. Independent of the tracker-facing `[gluetun]`
+    /// above: separate control server, separate enabled flag, separate poll
+    /// interval, because the two tunnels rotate on their own schedules.
+    pub const GLUETUN_CLIENT_ENABLED: &str = "gluetun_client.enabled";
+    pub const GLUETUN_CLIENT_CONTROL_URL: &str = "gluetun_client.control_url";
+    pub const GLUETUN_CLIENT_POLL_SECS: &str = "gluetun_client.poll_secs";
+
     pub const SYNC_ENABLED: &str = "sync.enabled";
     pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
+
+    /// Which webhook shape to send — see [`super::NotifyKind`]. The URL itself
+    /// is a vault secret, [`super::secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
+    pub const NOTIFICATIONS_KIND: &str = "notifications.kind";
+    /// How long a peer must go unseen before "gone quiet" fires, in seconds.
+    pub const NOTIFICATIONS_PEER_QUIET_SECS: &str = "notifications.peer_quiet_secs";
 
     /// The `SHARERR_*` variable that overrides a dotted config path — the inverse
     /// of the env scan's lowercase-and-`__`-to-`.` transform. Kept beside the
@@ -174,10 +219,18 @@ pub mod config_paths {
         TRACKER_ADVERTISED_HOST,
         TRACKER_ADVERTISED_URL,
         TRACKER_PORT,
+        LIGHTHOUSE_ENABLED,
+        LIGHTHOUSE_MOUNT,
+        GLUETUN_ENABLED,
         GLUETUN_CONTROL_URL,
         GLUETUN_POLL_SECS,
+        GLUETUN_CLIENT_ENABLED,
+        GLUETUN_CLIENT_CONTROL_URL,
+        GLUETUN_CLIENT_POLL_SECS,
         SYNC_ENABLED,
         SYNC_INTERVAL_SECS,
+        NOTIFICATIONS_KIND,
+        NOTIFICATIONS_PEER_QUIET_SECS,
     ];
 }
 
@@ -207,10 +260,22 @@ pub struct Config {
     /// Only read when `torrent_backend` selects it.
     pub transmission: TransmissionConfig,
     pub tracker: TrackerConfig,
+    /// Embedding the lighthouse rendezvous service on one of this instance's
+    /// own listeners. Off by default — see [`LighthouseConfig`].
+    pub lighthouse: LighthouseConfig,
     /// Resolving the advertised endpoint from a gluetun VPN container's control
     /// server, for deployments with no stable public IP or forwarded port.
     pub gluetun: GluetunConfig,
+    /// A second, independent gluetun poller for the torrent client's own
+    /// tunnel, when it is not the same one the tracker uses — see
+    /// `docker/deploy/dual-vpn/`. Disabled (`control_url: None`) by default:
+    /// the ordinary single-tunnel deployment has nothing to point this at, and
+    /// `gluetun` above already covers it.
+    pub gluetun_client: GluetunConfig,
     pub sync: SyncConfig,
+    /// A webhook fired on sync failure or a peer going quiet. The URL itself is
+    /// a vault secret — see [`secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
+    pub notifications: NotificationsConfig,
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
     pub path_map: Vec<PathMapping>,
@@ -236,8 +301,11 @@ impl Default for Config {
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
             tracker: TrackerConfig::default(),
+            lighthouse: LighthouseConfig::default(),
             gluetun: GluetunConfig::default(),
+            gluetun_client: GluetunConfig::default(),
             sync: SyncConfig::default(),
+            notifications: NotificationsConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
         }
@@ -512,6 +580,58 @@ pub struct TrackerConfig {
     pub bind: Option<SocketAddr>,
 }
 
+/// Which of sharerr's own listeners carries the embedded lighthouse, when
+/// [`LighthouseConfig::enabled`] is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LighthouseMount {
+    /// `server.bind` — the same port as the web UI and the Torznab feed.
+    #[default]
+    Frontend,
+    /// `tracker.bind` when it is set, otherwise `server.bind` — the port a
+    /// friend's torrent client already reaches for announces.
+    Tracker,
+}
+
+impl LighthouseMount {
+    pub const ALL: &'static [Self] = &[Self::Frontend, Self::Tracker];
+
+    /// The value stored in `lighthouse.mount` and rendered by the settings
+    /// page's `<select>` — the same spelling serde's `rename_all = "snake_case"`
+    /// already produces, named explicitly so the web UI does not have to
+    /// round-trip through serde to render a `<select>` option.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Frontend => "frontend",
+            Self::Tracker => "tracker",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.as_str() == value)
+    }
+}
+
+/// Running the lighthouse rendezvous service ([`sharerr_lighthouse`] in the
+/// workspace) as extra routes on one of sharerr's own listeners, instead of
+/// its own separate image and port.
+///
+/// The design brief in `docs/roadmap.md` wants the lighthouse to be a
+/// deliberately separate deployment — no shared process, no shared port — so
+/// that it can be self-hosted by anyone on neutral ground away from any
+/// particular library. This is the exception to that: a single operator
+/// running the lighthouse for their own circle of friends, who would rather
+/// not run a second container for it. Off by default; enabling it changes
+/// nothing about the standalone binary, which keeps working the same way for
+/// anyone who wants the separation.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LighthouseConfig {
+    pub enabled: bool,
+    pub mount: LighthouseMount,
+}
+
 /// Reject any `tracker.backend` value with the migration story.
 ///
 /// The backend choice was removed when the builtin tracker became the only one.
@@ -551,9 +671,13 @@ where
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GluetunConfig {
+    /// Whether this poller runs at all, independent of whether `control_url`
+    /// is set. Split from `control_url` so pausing polling is a checkbox
+    /// rather than blanking (and losing) a saved address.
+    pub enabled: bool,
     /// gluetun's control server, `http://localhost:8000` in the intended
     /// topology (sharerr inside gluetun's network namespace). `None` disables
-    /// endpoint resolution entirely.
+    /// endpoint resolution entirely, same as `enabled = false`.
     pub control_url: Option<Url>,
     /// How often to poll the control server, in seconds.
     pub poll_secs: u64,
@@ -568,11 +692,18 @@ impl GluetunConfig {
     pub fn effective_poll_secs(&self) -> u64 {
         self.poll_secs.max(Self::MIN_POLL_SECS)
     }
+
+    /// Whether this poller should actually run: turned on, and pointed
+    /// somewhere.
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.control_url.is_some()
+    }
 }
 
 impl Default for GluetunConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             control_url: None,
             poll_secs: 60,
         }
@@ -606,6 +737,71 @@ impl Default for SyncConfig {
             enabled: true,
             interval_secs: 900,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+/// A webhook fired on sync failure or a peer going quiet — standard for the
+/// *arr ecosystem this lives in. The URL itself is not here: see
+/// [`secret_keys::NOTIFICATIONS_WEBHOOK_URL`] for why it is a vault secret
+/// rather than a plain config field. Whether notifications are active at all
+/// is therefore decided by whether that secret is set, the same way gluetun
+/// polling is decided by whether `control_url` is set.
+pub struct NotificationsConfig {
+    /// Which webhook shape to send.
+    pub kind: NotifyKind,
+    /// How long a peer must go unseen before "gone quiet" fires, in seconds.
+    /// `0` turns the peer-quiet check off without touching sync-failure
+    /// notifications, which are unconditional once a webhook is configured.
+    pub peer_quiet_secs: u64,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            kind: NotifyKind::default(),
+            // A week. Long enough that a friend's ordinary quiet week (they are
+            // travelling, their box is off) is not a false alarm; short enough
+            // that "did Sam's instance die" is answered before it has been true
+            // for a month.
+            peer_quiet_secs: 7 * 24 * 3600,
+        }
+    }
+}
+
+/// The payload shape a notification is sent in — one per service this project
+/// names explicitly, because each expects a different JSON body at the same
+/// "POST a webhook URL" mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotifyKind {
+    /// `{"event": ..., "message": ...}` — for anything that takes a plain
+    /// JSON webhook, including a custom receiver.
+    #[default]
+    Generic,
+    /// `{"content": ...}` — a Discord webhook URL.
+    Discord,
+    /// `{"title": ..., "body": ...}` — an Apprise API server's `/notify`
+    /// endpoint, which fans a single call out to whatever Apprise itself is
+    /// configured to reach.
+    Apprise,
+}
+
+impl NotifyKind {
+    pub const ALL: &'static [Self] = &[Self::Generic, Self::Discord, Self::Apprise];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Discord => "discord",
+            Self::Apprise => "apprise",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == value)
     }
 }
 

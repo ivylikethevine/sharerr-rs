@@ -15,9 +15,10 @@ use anyhow::{Result, bail};
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome, chain};
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
-use sharerr_core::config::{ServiceConfig, secret_keys};
+use sharerr_core::config::{ServiceConfig, TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
-use sharerr_store::{Store, Vault, master_key_from_env};
+use sharerr_store::{Store, Vault};
+use url::Url;
 
 /// How many individual problem files to name before summarising the rest. A
 /// library with a broken mapping has *every* file broken; printing all of them
@@ -54,7 +55,12 @@ impl Report {
     }
 }
 
-pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
+pub async fn run(
+    config: &Config,
+    config_error: Option<&str>,
+    args: &crate::cli::DoctorArgs,
+) -> Result<()> {
+    let fix = args.fix;
     let mut report = Report::default();
 
     report.section("configuration");
@@ -81,7 +87,7 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
             continue;
         };
         report.section(kind.as_str());
-        discovered.extend(check_arr(kind, service, config, vault.as_ref(), &mut report).await);
+        discovered.extend(check_arr(kind, service, config, vault.as_ref(), fix, &mut report).await);
     }
     for library in &config.library {
         report.section(&format!("library {}", library.path.display()));
@@ -94,7 +100,7 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
     }
 
     report.section(config.torrent_backend.as_str());
-    check_qbit(config, vault.as_ref(), &mut report).await;
+    check_qbit(config, vault.as_ref(), fix, &mut report).await;
 
     if config.gluetun.control_url.is_some() {
         report.section("gluetun");
@@ -107,6 +113,16 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
 
     report.section("paths");
     check_paths(config, &discovered, &mut report);
+
+    if args.suggest_paths {
+        report.section("path suggestions");
+        suggest_paths(
+            config,
+            &discovered,
+            args.search_root.as_deref(),
+            &mut report,
+        );
+    }
 
     println!();
     match (report.failures, report.warnings) {
@@ -127,22 +143,13 @@ pub async fn run(config: &Config, config_error: Option<&str>) -> Result<()> {
 // ------------------------------------------------------------------ vault
 
 fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
-    let master = match master_key_from_env() {
-        Ok(master) => master,
-        Err(err) => {
-            report.fail(chain(&err));
-            return None;
-        }
-    };
-
-    let vault = match Vault::open(config.vault_path(), &master) {
+    let vault = match crate::secrets::open_vault(config) {
         Ok(vault) => vault,
         Err(err) => {
-            report.fail(format!(
-                "{} — {}",
-                config.vault_path().display(),
-                chain(&err)
-            ));
+            // `{:#}` renders anyhow's context chain, which already names the
+            // vault path for an open failure and correctly does not for a
+            // missing master key.
+            report.fail(format!("{err:#}"));
             return None;
         }
     };
@@ -292,6 +299,7 @@ async fn check_arr(
     service: &ServiceConfig,
     config: &Config,
     vault: Option<&Vault>,
+    fix: bool,
     report: &mut Report,
 ) -> Vec<Discovered> {
     // Only *arr apps reach here, and every *arr app has a vault key.
@@ -306,7 +314,19 @@ async fn check_arr(
         return Vec::new();
     };
 
+    // Cloned before the first check consumes it: `--fix` needs a live credential
+    // to create the tag with, and re-deriving it from the vault a second time
+    // would mean opening it twice for one command.
+    let api_key_for_fix = api_key.clone();
+
     let outcome = checks::check_arr(kind, Some(&service.url), Ok(Some(api_key)), &config.tag).await;
+
+    // `TagMissing` is the one mechanical case `--fix` can close here: creating
+    // the tag turns it into `TagUnused` (or `Ready`, if content already carries
+    // it by the time this runs) without a restart or a second invocation.
+    if fix && let ArrOutcome::TagMissing { .. } = &outcome {
+        return fix_missing_tag(kind, service, config, api_key_for_fix, report).await;
+    }
 
     // The rendering is this command's own — a terminal report in the third person,
     // where the web UI writes a badge in the second. What the two can no longer do
@@ -369,6 +389,36 @@ async fn check_arr(
     }
 }
 
+/// Create the configured tag in `kind`, for `check_arr`'s `--fix` path.
+///
+/// Never returns any discovered items: a tag that had to be created cannot yet
+/// carry any content, so there is nothing new to walk this run — the operator
+/// still has to go and apply it, same as [`ArrOutcome::TagUnused`] already says.
+async fn fix_missing_tag(
+    kind: MediaSource,
+    service: &ServiceConfig,
+    config: &Config,
+    api_key: SecretString,
+    report: &mut Report,
+) -> Vec<Discovered> {
+    let client = match sharerr_arr::ArrClient::new(kind, &service.url, api_key) {
+        Ok(client) => client,
+        Err(err) => {
+            report.fail(format!("could not create tag {:?}: {err}", config.tag));
+            return Vec::new();
+        }
+    };
+
+    match client.create_tag(&config.tag).await {
+        Ok(()) => {
+            report.ok(format!("created tag {:?} in {}", config.tag, kind.as_str()));
+            report.info("apply it to content there to start sharing it");
+        }
+        Err(err) => report.fail(format!("could not create tag {:?}: {err}", config.tag)),
+    }
+    Vec::new()
+}
+
 // ------------------------------------------------------------------ library
 
 fn check_library(
@@ -426,7 +476,7 @@ fn check_library(
 /// Which one that is comes from `torrent_backend`. The section names in
 /// `sharerr.toml` differ per client, so the URL, username and vault key are all
 /// resolved together rather than assuming qBittorrent's.
-async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report) {
+async fn check_qbit(config: &Config, vault: Option<&Vault>, fix: bool, report: &mut Report) {
     let settings = config.torrent_client();
     let (url, label) = (settings.url, settings.category);
 
@@ -436,6 +486,10 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
     let api_key = settings
         .api_key_key
         .and_then(|key| quiet_secret(vault, key));
+    // Cloned before `credential` consumes it: the category check below needs its
+    // own qBittorrent-specific client, since "category" is not a concept the
+    // generic `TorrentClient` trait carries — Transmission has none.
+    let api_key_for_category = api_key.clone();
 
     let credential = match api_key {
         Some(api_key) => checks::TorrentCredential::ApiKey(api_key),
@@ -504,6 +558,70 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, report: &mut Report)
             torrents.len()
         )),
         Err(err) => report.warn(format!("could not list torrents: {err}")),
+    }
+
+    // Categories are qBittorrent's own concept — Transmission has only labels,
+    // which need no pre-creation — so this only runs for that backend, and only
+    // once an API key is actually available to build a second client with.
+    if config.torrent_backend == TorrentBackend::Qbittorrent
+        && let Some(api_key) = api_key_for_category
+    {
+        check_qbit_category(url, api_key, label, fix, report).await;
+    }
+}
+
+/// Whether `label` is a category qBittorrent already knows, and — with `--fix`
+/// — create it if not.
+///
+/// Unlike a missing tag this is not a hard failure: a torrent adds fine under a
+/// category qBittorrent has never seen, it simply will not appear in the
+/// WebUI's own category list until one exists. Still worth naming, since "the
+/// category picker is empty" is a real point of confusion for an operator who
+/// has not looked at qBittorrent's own settings.
+async fn check_qbit_category(
+    url: &Url,
+    api_key: SecretString,
+    label: &str,
+    fix: bool,
+    report: &mut Report,
+) {
+    if label.is_empty() {
+        return;
+    }
+
+    let client = match sharerr_qbit::QbitClient::with_api_key(url, api_key) {
+        Ok(client) => client,
+        Err(err) => {
+            report.warn(format!("could not check qBittorrent's categories: {err}"));
+            return;
+        }
+    };
+
+    let categories = match client.categories().await {
+        Ok(categories) => categories,
+        Err(err) => {
+            report.warn(format!("could not list qBittorrent's categories: {err}"));
+            return;
+        }
+    };
+
+    if categories.contains_key(label) {
+        report.ok(format!("category {label:?} exists"));
+        return;
+    }
+
+    if !fix {
+        report.warn(format!(
+            "category {label:?} does not exist in qBittorrent yet — torrents still add \
+             fine, but it will not appear in the WebUI's category list until created. \
+             Re-run with --fix, or create it under Options -> Categories"
+        ));
+        return;
+    }
+
+    match client.create_category(label).await {
+        Ok(()) => report.ok(format!("created category {label:?}")),
+        Err(err) => report.fail(format!("could not create category {label:?}: {err}")),
     }
 }
 
@@ -706,6 +824,71 @@ fn check_paths(config: &Config, discovered: &[Discovered], report: &mut Report) 
         }
         report.info("fix the [[path_map]] rules so the arr view maps onto sharerr's mount");
     }
+}
+
+/// `--suggest-paths`: propose `[[path_map]]` rules by matching tagged files
+/// against what actually exists under `search_root` (default `/media`), by
+/// name and size. See `crate::pathsuggest` for the algorithm and why it never
+/// searches anywhere the operator has not named.
+fn suggest_paths(
+    config: &Config,
+    discovered: &[Discovered],
+    search_root: Option<&std::path::Path>,
+    report: &mut Report,
+) {
+    let default_root = std::path::Path::new("/media");
+    let root = search_root.unwrap_or(default_root);
+
+    if !root.is_dir() {
+        report.fail(format!(
+            "{} is not a directory sharerr can see — pass --search-root, or mount \
+             the library there",
+            root.display()
+        ));
+        return;
+    }
+    if discovered.is_empty() {
+        report.info("nothing tagged, so there is nothing to match against");
+        return;
+    }
+
+    let existing: std::collections::HashSet<(&std::path::Path, &std::path::Path)> = config
+        .path_map
+        .iter()
+        .map(|m| (m.arr.as_path(), m.sharerr.as_path()))
+        .collect();
+
+    let suggestions: Vec<_> = crate::pathsuggest::suggest(discovered, root)
+        .into_iter()
+        .filter(|s| !existing.contains(&(s.arr.as_path(), s.sharerr.as_path())))
+        .collect();
+
+    if suggestions.is_empty() {
+        report.info(format!(
+            "no new mapping found under {} — every match either already has a rule, \
+             or nothing tagged matched a file there by name and size",
+            root.display()
+        ));
+        return;
+    }
+
+    for s in &suggestions {
+        report.ok(format!(
+            "{} -> {} ({} file(s) agree)",
+            s.arr.display(),
+            s.sharerr.display(),
+            s.agreement
+        ));
+        report.info(format!(
+            "  add as: arr = \"{}\", sharerr = \"{}\"",
+            s.arr.display(),
+            s.sharerr.display()
+        ));
+    }
+    report.info(
+        "proposals only — nothing was written; add the ones that look right under \
+         Settings or in [[path_map]]",
+    );
 }
 
 // ------------------------------------------------------------------ summary

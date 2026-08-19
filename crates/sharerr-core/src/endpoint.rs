@@ -161,11 +161,6 @@ impl AdvertisedEndpoint {
         }
     }
 
-    /// Build from configuration, with no dynamic observations yet.
-    pub fn from_tracker(tracker: &TrackerConfig, server_port: u16) -> Result<Self, EndpointError> {
-        Ok(Self::new(advertised_base(tracker, server_port)?))
-    }
-
     /// Adopt a rewritten configuration without losing the dynamic history.
     ///
     /// The settings page can change `advertised_host` while the poller has a
@@ -190,6 +185,17 @@ impl AdvertisedEndpoint {
             .first()
             .map(|o| o.base.clone())
             .or_else(|| inner.static_base.clone())
+    }
+
+    /// The most recent *dynamic* observation, with when it was seen — `None`
+    /// when nothing has ever been observed, even if a static base is
+    /// configured. Unlike [`Self::current`], this never falls back to the
+    /// static base: it answers "what did gluetun last actually report",
+    /// which is a different question from "what would sharerr advertise right
+    /// now" whenever the two differ.
+    pub fn last_observed(&self) -> Option<ObservedBase> {
+        let inner = self.inner.read().ok()?;
+        inner.dynamic.first().cloned()
     }
 
     /// Record an observed base. Returns `true` when this *changes* the current

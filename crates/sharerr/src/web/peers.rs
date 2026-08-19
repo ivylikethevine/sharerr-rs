@@ -22,15 +22,12 @@ use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::now_epoch;
 use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
-use super::items::human_size;
 use super::settings::title_case;
-use super::templates::{
-    FeedPreviewPage, FeedPreviewRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer,
-    ScopeOption, render,
-};
+use super::templates::{PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render};
 
 pub async fn page(State(state): State<WebState>) -> Response {
     render(&build(&state, None, None).await)
@@ -191,11 +188,16 @@ pub async fn delete(
     Ok(applied(&state, result, "delete that friend").await)
 }
 
-/// Render the feed exactly as this friend's Prowlarr would see it: their scope,
-/// their links. Scope filtering happens per key, so "why can't Sam find the
-/// album" otherwise means hand-crafting a Torznab query with Sam's key — this
-/// button answers it in one click, and is the honest test of scoping: not what
-/// the rules *say*, but what the feed *serves*.
+/// The literal XML this friend's Prowlarr would fetch: their scope, their
+/// links, their key's own view. Scope filtering happens per key, so "why
+/// can't Sam find the album" otherwise means hand-crafting a Torznab query
+/// with Sam's key — this button answers it in one click.
+///
+/// Rendered through [`crate::torznab::render_feed`], the same function the
+/// real `/torznab` route calls — not a second, hand-built HTML table that
+/// could show a field the real feed gets right (or wrong) differently. The
+/// honest test of scoping is not what the rules *say* a friend can see, but
+/// literally what the feed *serves* them, byte for byte.
 pub async fn feed_preview(
     State(state): State<WebState>,
     Path(id): Path<i64>,
@@ -218,25 +220,7 @@ pub async fn feed_preview(
     .await
     .map_err(|(status, reason)| (status, reason).into_response())?;
 
-    let items = matched
-        .items
-        .iter()
-        .map(|item| FeedPreviewRow {
-            title: item.release_title.clone(),
-            category: crate::torznab::category_name(crate::torznab::category_for(item)),
-            size: human_size(item.size),
-            download_url: matched.download_url(item),
-            magnet_url: matched.magnet_url(item),
-        })
-        .collect();
-
-    Ok(render(&FeedPreviewPage {
-        signed_in: true,
-        peer_label: peer.label,
-        peer_scope_label: peer.scope.label(),
-        total: matched.items.len(),
-        items,
-    }))
+    Ok(crate::torznab::xml(crate::torznab::render_feed(&matched)))
 }
 
 fn rejected_response(message: &str) -> Response {
@@ -354,10 +338,7 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
 /// usually does not have configured. `pub(crate)` because the status page's
 /// one-glance line answers the same "recently?" question.
 pub(crate) fn ago(epoch_secs: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
-    let seconds = now.saturating_sub(epoch_secs);
+    let seconds = now_epoch().saturating_sub(epoch_secs);
 
     match seconds {
         // Includes negative values, which mean a clock that moved backwards.
@@ -376,10 +357,7 @@ mod tests {
 
     #[test]
     fn relative_times_read_the_way_a_person_would_say_them() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = now_epoch();
 
         assert_eq!(ago(now), "just now");
         assert_eq!(ago(now - 120), "2 minute(s) ago");
@@ -391,10 +369,7 @@ mod tests {
     /// future as an enormous negative age.
     #[test]
     fn a_timestamp_in_the_future_is_not_rendered_as_nonsense() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        let now = now_epoch();
 
         assert_eq!(ago(now + 10_000), "just now");
     }

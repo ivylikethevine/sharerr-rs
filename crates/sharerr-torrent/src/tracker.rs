@@ -159,6 +159,24 @@ pub fn announce_url(base: &Url, token: Option<&str>) -> Result<Url> {
     })
 }
 
+/// The token segment embedded in an announce URL [`announce_url`] built, or
+/// `None` when it carries no token — the inverse of that function, for a
+/// caller that has a URL and wants to know what it actually grants.
+///
+/// Reads the literal path rather than assuming the caller's own token still
+/// applies: this is what lets `sharerr doctor` and the items page answer
+/// "is this *specific* torrent still announcing with the current token"
+/// rather than merely "is a token configured".
+pub fn token_from_announce_url(url: &Url) -> Option<String> {
+    let mut segments = url.path_segments()?;
+    loop {
+        let segment = segments.next()?;
+        if segment == ANNOUNCE_PATH.trim_start_matches('/') {
+            return segments.next().map(str::to_owned);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -257,6 +275,36 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "http://192.0.2.10:9000/announce"
+        );
+    }
+
+    #[test]
+    fn token_from_announce_url_round_trips_through_announce_url() {
+        let base = url("http://sharerr.example:8477");
+        let with_token = announce_url(&base, Some("s3cret")).unwrap();
+        assert_eq!(
+            token_from_announce_url(&with_token).as_deref(),
+            Some("s3cret")
+        );
+
+        let without_token = announce_url(&base, None).unwrap();
+        assert_eq!(token_from_announce_url(&without_token), None);
+    }
+
+    /// The path-prefixed case a reverse proxy produces — the token is still the
+    /// segment right after `announce`, wherever that lands in the path.
+    #[test]
+    fn token_from_announce_url_survives_a_path_prefix() {
+        let base = url("https://proxy.example/sharerr");
+        let with_token = announce_url(&base, Some("tok")).unwrap();
+        assert_eq!(token_from_announce_url(&with_token).as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn token_from_announce_url_is_none_for_an_unrelated_path() {
+        assert_eq!(
+            token_from_announce_url(&url("http://sharerr.example/other/thing")),
+            None
         );
     }
 }

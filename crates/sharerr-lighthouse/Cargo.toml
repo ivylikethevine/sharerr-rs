@@ -1,0 +1,33 @@
+[package]
+name = "sharerr-lighthouse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The lighthouse: semi-anonymous key-hash to endpoint rendezvous. Deliberately independent of the rest of the workspace — see docs/roadmap.md's \"The lighthouse\"."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "sharerr-lighthouse"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+ed25519-dalek = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tower = { workspace = true }

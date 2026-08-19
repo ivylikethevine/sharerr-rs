@@ -23,13 +23,35 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::Router;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
+use serde::Deserialize;
 use sharerr_core::Config;
 
+use crate::gluetun::GluetunTarget;
 use crate::state::ServeState;
 use crate::tracker::TrackerState;
+
+/// Whether the embedded lighthouse belongs on the *frontend* listener rather
+/// than the tracker's.
+///
+/// [`sharerr_core::config::LighthouseMount::Tracker`] means "the port a
+/// friend's torrent client already reaches", which is `tracker_bind` when a
+/// dedicated tracker listener is configured — but when it is not, the main
+/// listener carries the tracker's routes too, so that is where the choice
+/// actually lands. Standalone so the two listeners built in `run` can share
+/// one decision instead of each re-deriving it from the config differently.
+fn lighthouse_belongs_on_frontend(
+    mount: sharerr_core::config::LighthouseMount,
+    tracker_bind: Option<SocketAddr>,
+) -> bool {
+    use sharerr_core::config::LighthouseMount;
+    match mount {
+        LighthouseMount::Frontend => true,
+        LighthouseMount::Tracker => tracker_bind.is_none(),
+    }
+}
 
 pub async fn run(config: &Config, config_path: &Path, config_error: Option<String>) -> Result<()> {
     let state = Arc::new(ServeState::new(
@@ -42,16 +64,25 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // would keep peers arriving on different listeners from meeting.
     let tracker = Arc::new(TrackerState::new(Arc::clone(&state)));
 
+    // The embedded lighthouse, if `[lighthouse] enabled = true` — see
+    // `sharerr_lighthouse` for the protocol and `ServeState::lighthouse_state`
+    // for why this can come back `None` even when enabled (an unopenable
+    // vault). `mount` decides which listener below actually carries the
+    // routes; building the router once here means both listeners share one
+    // `LighthouseState`, same reasoning as sharing one `Swarms` map.
+    let lighthouse_routes = state.lighthouse_state().await.map(sharerr_lighthouse::routes);
+    let lighthouse_mount = config.lighthouse.mount;
+
     // The probes keep their own state and stay outside the web UI's auth layer.
     // `/health` in particular is what the Dockerfile's HEALTHCHECK curls, with no
     // cookie and no intention of getting one. `/gluetun/refresh` and
     // `/gluetun/down` sit here too: gluetun's VPN_PORT_FORWARDING_UP_COMMAND and
-    // VPN_PORT_FORWARDING_DOWN_COMMAND are bare wgets with no cookie jar, and
-    // neither endpoint takes a value from the caller — one nudges the poller to
-    // re-ask the control server, the other additionally forgets the dynamic
-    // endpoint history first — so there is nothing to protect beyond the
-    // private-address check both handlers share.
-    let app = Router::new()
+    // VPN_PORT_FORWARDING_DOWN_COMMAND are bare wgets with no cookie jar, and the
+    // only value either takes is `?target=client` to nudge the second poller
+    // instead of the first (default, and the only choice before it existed) —
+    // so there is nothing to protect beyond the private-address check both
+    // handlers share.
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route(
@@ -63,6 +94,18 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         .merge(crate::tracker::routes(Arc::clone(&tracker)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
+
+    // The frontend listener carries the lighthouse either because that is
+    // literally what was chosen, or because "the tracker port" was chosen but
+    // there is no *dedicated* tracker listener below to put it on — the
+    // tracker's routes live here too in that case, so this is where a peer
+    // reaching "the tracker port" actually lands. See
+    // [`lighthouse_belongs_on_frontend`] for the standalone logic.
+    if lighthouse_belongs_on_frontend(lighthouse_mount, config.tracker.bind)
+        && let Some(routes) = lighthouse_routes.clone()
+    {
+        app = app.merge(routes);
+    }
 
     let listener = tokio::net::TcpListener::bind(config.server.bind)
         .await
@@ -108,8 +151,13 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     let tracker_serve = async {
         match tracker_listener {
             Some(listener) => {
-                let service = crate::tracker::routes(tracker)
-                    .into_make_service_with_connect_info::<SocketAddr>();
+                let mut router = crate::tracker::routes(tracker);
+                if !lighthouse_belongs_on_frontend(lighthouse_mount, config.tracker.bind)
+                    && let Some(routes) = lighthouse_routes
+                {
+                    router = router.merge(routes);
+                }
+                let service = router.into_make_service_with_connect_info::<SocketAddr>();
                 axum::serve(listener, service)
                     .await
                     .context("tracker listener failed")
@@ -124,30 +172,43 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         result = axum::serve(listener, service) => result.context("http server failed"),
         result = tracker_serve => result,
         () = background(Arc::clone(&state)) => Ok(()),
-        () = crate::gluetun::poll_loop(Arc::clone(&state)) => Ok(()),
+        () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Tracker) => Ok(()),
+        () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Client) => Ok(()),
+        () = crate::notify::quiet_peers_loop(Arc::clone(&state)) => Ok(()),
         () = crate::gossip::exchange_loop(state) => Ok(()),
     }
 }
 
-/// `GET|POST /gluetun/refresh` — the push half of endpoint resolution.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct GluetunQuery {
+    #[serde(default)]
+    target: Option<String>,
+}
+
+/// `GET|POST /gluetun/refresh[?target=client]` — the push half of endpoint
+/// resolution.
 ///
 /// Only nudges the poller; the control server stays the source of truth, so a
 /// caller can make sharerr ask a question sooner but can never feed it an
 /// answer. Refused from non-private addresses: the legitimate caller is
 /// gluetun's up-command inside the same namespace (loopback) or a container
-/// neighbour, never the internet side of the tunnel.
+/// neighbour, never the internet side of the tunnel. `target` picks which
+/// poller — the tracker's tunnel (default, unchanged) or the torrent client's
+/// second one, when `[gluetun_client]` is configured.
 async fn gluetun_refresh(
     State(state): State<Arc<ServeState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    Query(query): Query<GluetunQuery>,
 ) -> (StatusCode, &'static str) {
     if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
         return (StatusCode::FORBIDDEN, "refused");
     }
-    state.nudge_endpoint();
+    state.nudge_endpoint(GluetunTarget::from_query(query.target.as_deref()));
     (StatusCode::OK, "refreshing")
 }
 
-/// `GET|POST /gluetun/down` — for `VPN_PORT_FORWARDING_DOWN_COMMAND`.
+/// `GET|POST /gluetun/down[?target=client]` — for
+/// `VPN_PORT_FORWARDING_DOWN_COMMAND`.
 ///
 /// The port gluetun is about to report as gone must not linger as the fallback
 /// a resolve falls back to when the port lookup itself fails (see
@@ -160,12 +221,14 @@ async fn gluetun_refresh(
 async fn gluetun_down(
     State(state): State<Arc<ServeState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    Query(query): Query<GluetunQuery>,
 ) -> (StatusCode, &'static str) {
     if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
         return (StatusCode::FORBIDDEN, "refused");
     }
-    state.endpoint().forget_dynamic();
-    state.nudge_endpoint();
+    let target = GluetunTarget::from_query(query.target.as_deref());
+    state.endpoint_for(target).forget_dynamic();
+    state.nudge_endpoint(target);
     (StatusCode::OK, "acknowledged")
 }
 
@@ -204,13 +267,17 @@ async fn background(state: Arc<ServeState>) {
 
         match syncer.run(false).await {
             Ok(report) => tracing::info!(%report, "sync complete"),
-            Err(err) => tracing::error!(error = format!("{err:#}"), "sync failed"),
+            Err(err) => {
+                let reason = format!("{err:#}");
+                tracing::error!(error = reason, "sync failed");
+                crate::notify::send(&state, "sync failed", &reason).await;
+            }
         }
 
         // Sleeping after the pass rather than on a fixed schedule, so a slow sync is
         // never followed by a burst of catch-up runs.
         state
-            .sleep_or_wake(Duration::from_secs(sync.interval_secs.max(60)))
+            .sleep_or_wake(Duration::from_secs(sync.effective_interval_secs()))
             .await;
     }
 }
@@ -263,6 +330,31 @@ mod tests {
     use super::*;
     use crate::state::fixtures::{unconfigured, unloadable};
 
+    /// `Frontend` always lands on the main listener; `Tracker` follows the
+    /// dedicated tracker listener when there is one, and falls back to the
+    /// main listener — which still carries the tracker's own routes — when
+    /// there is not.
+    #[test]
+    fn the_tracker_mount_falls_back_to_frontend_without_a_dedicated_listener() {
+        use sharerr_core::config::LighthouseMount;
+
+        let dedicated: SocketAddr = "0.0.0.0:9000".parse().unwrap();
+
+        assert!(lighthouse_belongs_on_frontend(LighthouseMount::Frontend, None));
+        assert!(lighthouse_belongs_on_frontend(
+            LighthouseMount::Frontend,
+            Some(dedicated)
+        ));
+        assert!(lighthouse_belongs_on_frontend(
+            LighthouseMount::Tracker,
+            None
+        ));
+        assert!(!lighthouse_belongs_on_frontend(
+            LighthouseMount::Tracker,
+            Some(dedicated)
+        ));
+    }
+
     /// The regression that matters most: an unconfigured instance must still look
     /// alive, or the orchestrator restarts the container the operator is trying to
     /// type a password into. `health`'s lack of state is what enforces that, so this
@@ -284,19 +376,62 @@ mod tests {
 
     /// The refresh nudge is reachable to gluetun's up-command (loopback, docker
     /// neighbours) and to nothing on the internet side of the tunnel — the
-    /// endpoint takes no input, but an open one would let strangers drive the
-    /// poll timer.
+    /// endpoint takes only `target`, but an open one would let strangers drive
+    /// the poll timer.
     #[tokio::test]
     async fn the_gluetun_refresh_nudge_is_private_only() {
         let (_dir, state) = unconfigured();
+        let no_target = Query(GluetunQuery::default());
 
         let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
-        let (status, _) = gluetun_refresh(State(Arc::clone(&state)), private).await;
+        let (status, _) =
+            gluetun_refresh(State(Arc::clone(&state)), private, no_target.clone()).await;
         assert_eq!(status, StatusCode::OK);
 
         let public = ConnectInfo(std::net::SocketAddr::from(([203, 0, 113, 9], 40000)));
-        let (status, _) = gluetun_refresh(State(state), public).await;
+        let (status, _) = gluetun_refresh(State(state), public, no_target).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// `?target=client` must nudge the *second* poller, not the first — the
+    /// whole reason the query parameter exists.
+    #[tokio::test]
+    async fn a_client_target_nudges_the_client_poller_only() {
+        let (_dir, state) = unconfigured();
+        let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
+
+        let tracker_waiter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                state
+                    .endpoint_refresh_requested(GluetunTarget::Tracker)
+                    .await
+            })
+        };
+        let client_waiter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                state
+                    .endpoint_refresh_requested(GluetunTarget::Client)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let query = Query(GluetunQuery {
+            target: Some("client".to_owned()),
+        });
+        gluetun_refresh(State(Arc::clone(&state)), private, query).await;
+
+        tokio::time::timeout(Duration::from_secs(5), client_waiter)
+            .await
+            .expect("the client poller must be nudged")
+            .expect("must not panic");
+        assert!(
+            !tracker_waiter.is_finished(),
+            "the tracker poller must not be nudged by a client-targeted refresh"
+        );
+        tracker_waiter.abort();
     }
 
     #[tokio::test]

@@ -64,12 +64,8 @@ pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
 /// will not open (no master key set for this run) means an unkeyed request,
 /// same as before this key existed, and any resulting `401` explains itself.
 async fn gluetun_api_key(config: &Config) -> Option<secrecy::SecretString> {
-    let master = sharerr_store::master_key_from_env().ok()?;
-    let path = config.vault_path();
-    let vault =
-        tokio::task::spawn_blocking(move || sharerr_store::Vault::open(&path, &master)).await;
-    vault
-        .ok()?
+    crate::secrets::open_vault_async(config)
+        .await
         .ok()?
         .get(sharerr_core::config::secret_keys::GLUETUN_API_KEY)
         .ok()

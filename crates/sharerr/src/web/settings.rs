@@ -28,9 +28,11 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
-use sharerr_core::config::{config_paths, secret_keys};
+use sharerr_core::config::{SyncConfig, config_paths, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
+
+use crate::gluetun::GluetunTarget;
 
 use super::WebState;
 use super::config_io::{ConfigFile, Edit, parse_libraries, parse_path_map};
@@ -114,7 +116,16 @@ pub struct TrackerForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LighthouseForm {
+    #[serde(default)]
+    enabled: Option<String>,
+    mount: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct GluetunForm {
+    #[serde(default)]
+    enabled: Option<String>,
     control_url: String,
     api_key: String,
     #[serde(default)]
@@ -127,6 +138,15 @@ pub struct SyncForm {
     #[serde(default)]
     enabled: Option<String>,
     interval_secs: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotificationsForm {
+    webhook_url: String,
+    #[serde(default)]
+    clear_webhook_url: Option<String>,
+    kind: String,
+    peer_quiet_secs: String,
 }
 
 /// Repeated inputs, one entry per row. `axum_extra`'s `Form` is what makes this
@@ -320,30 +340,88 @@ pub async fn save_tracker(
     .await
 }
 
+/// The embedded lighthouse: on/off, plus which of sharerr's own listeners
+/// carries it when on. No secret involved — the decoy seed behind it is
+/// minted and stored by [`crate::state::ServeState::lighthouse_state`] on
+/// first use, not typed by an operator.
+pub async fn save_lighthouse(
+    State(state): State<WebState>,
+    Form(form): Form<LighthouseForm>,
+) -> Response {
+    let Some(mount) = sharerr_core::config::LighthouseMount::parse(&form.mount) else {
+        return reject(&state, "That is not a valid lighthouse listener choice.").await;
+    };
+
+    write_config(&state, "lighthouse", move |file| {
+        file.apply([
+            Edit::bool(config_paths::LIGHTHOUSE_ENABLED, checked(&form.enabled)),
+            Edit::str(config_paths::LIGHTHOUSE_MOUNT, mount.as_str()),
+        ]);
+        Ok(())
+    })
+    .await
+}
+
 pub async fn save_gluetun(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
 ) -> Response {
-    if let Err(message) = apply_secret(
-        &state,
+    save_gluetun_section(
+        state,
+        form,
+        "gluetun",
+        config_paths::GLUETUN_ENABLED,
+        config_paths::GLUETUN_CONTROL_URL,
+        config_paths::GLUETUN_POLL_SECS,
         secret_keys::GLUETUN_API_KEY,
-        &form.api_key,
-        form.clear_api_key,
     )
     .await
+}
+
+/// The second poller — the torrent client's own tunnel, when it is a separate
+/// one from the tracker's. Same form shape, same rules, a different section:
+/// see `docs/roadmap.md`'s "a peer with two addresses".
+pub async fn save_gluetun_client(
+    State(state): State<WebState>,
+    Form(form): Form<GluetunForm>,
+) -> Response {
+    save_gluetun_section(
+        state,
+        form,
+        "gluetun_client",
+        config_paths::GLUETUN_CLIENT_ENABLED,
+        config_paths::GLUETUN_CLIENT_CONTROL_URL,
+        config_paths::GLUETUN_CLIENT_POLL_SECS,
+        secret_keys::GLUETUN_CLIENT_API_KEY,
+    )
+    .await
+}
+
+/// The save logic both gluetun sections share — only the paths and vault key
+/// differ between the tracker's poller and the client's.
+async fn save_gluetun_section(
+    state: WebState,
+    form: GluetunForm,
+    section: &'static str,
+    enabled_path: &'static str,
+    control_url_path: &'static str,
+    poll_secs_path: &'static str,
+    api_key_secret: &'static str,
+) -> Response {
+    if let Err(message) =
+        apply_secret(&state, api_key_secret, &form.api_key, form.clear_api_key).await
     {
         return reject(&state, &message).await;
     }
 
-    write_config(&state, "gluetun", |file| {
+    write_config(&state, section, move |file| {
+        file.apply([Edit::bool(enabled_path, checked(&form.enabled))]);
+
         let url = form.control_url.trim();
         if url.is_empty() {
-            file.apply([Edit::unset(config_paths::GLUETUN_CONTROL_URL)]);
+            file.apply([Edit::unset(control_url_path)]);
         } else {
-            file.apply([Edit::str(
-                config_paths::GLUETUN_CONTROL_URL,
-                normalise_url(url)?,
-            )]);
+            file.apply([Edit::str(control_url_path, normalise_url(url)?)]);
         }
 
         let poll = form.poll_secs.trim();
@@ -357,10 +435,7 @@ pub async fn save_gluetun(
                     sharerr_core::config::GluetunConfig::MIN_POLL_SECS
                 );
             }
-            file.apply([Edit::int(
-                config_paths::GLUETUN_POLL_SECS,
-                i64::try_from(secs).unwrap_or(60),
-            )]);
+            file.apply([Edit::int(poll_secs_path, i64::try_from(secs).unwrap_or(60))]);
         }
         Ok(())
     })
@@ -374,10 +449,14 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
                 anyhow::anyhow!("the sync interval must be a whole number of seconds")
             })?;
 
-        // Mirrors the `.max(60)` the background loop already applies. Saying so
-        // here beats silently storing 5 and running at 60.
-        if interval < 60 {
-            anyhow::bail!("the sync interval must be at least 60 seconds");
+        // The same floor the background loop clamps to, read from the one
+        // constant rather than retyped. Saying so here beats silently storing 5
+        // and running at 60.
+        if interval < SyncConfig::MIN_INTERVAL_SECS {
+            anyhow::bail!(
+                "the sync interval must be at least {} seconds",
+                SyncConfig::MIN_INTERVAL_SECS
+            );
         }
 
         file.apply([
@@ -387,6 +466,50 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
                 i64::try_from(interval).unwrap_or(900),
             ),
         ]);
+        Ok(())
+    })
+    .await
+}
+
+/// A webhook fired on sync failure or a peer going quiet.
+///
+/// The URL is a vault secret — see
+/// [`sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL`] for why —
+/// so this is two writes, same shape as [`save_gluetun`]: a secret and a
+/// config section.
+pub async fn save_notifications(
+    State(state): State<WebState>,
+    Form(form): Form<NotificationsForm>,
+) -> Response {
+    let webhook = form.webhook_url.trim();
+    if !webhook.is_empty() && url::Url::parse(webhook).is_err() {
+        return reject(&state, "That does not look like a valid webhook URL.").await;
+    }
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+        webhook,
+        form.clear_webhook_url,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    write_config(&state, "notifications", |file| {
+        let Some(kind) = sharerr_core::config::NotifyKind::parse(form.kind.trim()) else {
+            anyhow::bail!("{:?} is not a known notification kind", form.kind);
+        };
+        file.apply([Edit::str(config_paths::NOTIFICATIONS_KIND, kind.as_str())]);
+
+        let secs: u64 = form.peer_quiet_secs.trim().parse().map_err(|_| {
+            anyhow::anyhow!("the peer-quiet threshold must be a whole number of seconds")
+        })?;
+        file.apply([Edit::int(
+            config_paths::NOTIFICATIONS_PEER_QUIET_SECS,
+            i64::try_from(secs).unwrap_or(604_800),
+        )]);
         Ok(())
     })
     .await
@@ -589,6 +712,28 @@ fn checked(field: &Option<String>) -> bool {
     field.is_some()
 }
 
+/// What gluetun last actually reported for one endpoint, or `None` when
+/// nothing has been observed yet — the settings page's short version of what
+/// Diagnostics shows in full.
+fn gluetun_last_observed(endpoint: &sharerr_core::endpoint::AdvertisedEndpoint) -> Option<String> {
+    let observed = endpoint.last_observed()?;
+    Some(format!(
+        "{} ({})",
+        observed.base,
+        super::peers::ago(observed.observed_at)
+    ))
+}
+
+/// The most recent failure `target`'s poller hit, if it has one right now —
+/// cleared the moment a poll succeeds, so this never shows a stale error next
+/// to a working endpoint.
+async fn gluetun_last_error(
+    state: &crate::state::ServeState,
+    target: GluetunTarget,
+) -> Option<String> {
+    state.gluetun_status(target).snapshot().await.last_error
+}
+
 /// Reject a `tracker.advertised_host` that could never work for anyone outside
 /// this machine or network.
 ///
@@ -746,19 +891,41 @@ async fn build_page(
             .map(url::Url::to_string)
             .unwrap_or_default(),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
+        lighthouse_enabled: config.lighthouse.enabled,
+        lighthouse_mount: config.lighthouse.mount.as_str(),
         gluetun_control_url: config
             .gluetun
             .control_url
             .as_ref()
             .map(url::Url::to_string)
             .unwrap_or_default(),
+        gluetun_enabled: config.gluetun.enabled,
         gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
         gluetun_poll_secs: config.gluetun.poll_secs,
+        gluetun_last_observed: gluetun_last_observed(&state.serve.endpoint()),
+        gluetun_last_error: gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
+
+        gluetun_client_control_url: config
+            .gluetun_client
+            .control_url
+            .as_ref()
+            .map(url::Url::to_string)
+            .unwrap_or_default(),
+        gluetun_client_enabled: config.gluetun_client.enabled,
+        gluetun_client_api_key_set: is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
+        gluetun_client_poll_secs: config.gluetun_client.poll_secs,
+        gluetun_client_last_observed: gluetun_last_observed(&state.serve.client_endpoint()),
+        gluetun_client_last_error: gluetun_last_error(&state.serve, GluetunTarget::Client).await,
+        gluetun_client_configured: config.gluetun_client.control_url.is_some(),
 
         revealed: None,
 
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
+
+        notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),
+        notifications_kind: config.notifications.kind.as_str(),
+        notifications_peer_quiet_secs: config.notifications.peer_quiet_secs,
 
         // A spare blank row so "add a library" needs no JavaScript, same as
         // the path map below.

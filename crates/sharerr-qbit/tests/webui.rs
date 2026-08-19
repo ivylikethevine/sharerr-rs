@@ -389,6 +389,54 @@ async fn remove_torrent_never_deletes_files() {
     client(&server).remove_torrent("aabbcc").await.unwrap();
 }
 
+// ---------------------------------------------------------------- categories
+
+/// `categories()` decodes the name-keyed map qBittorrent actually returns —
+/// this is what `sharerr doctor --fix` checks membership against.
+#[tokio::test]
+async fn categories_decodes_the_name_keyed_map() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sharerr": {"name": "sharerr", "savePath": ""},
+            "Movies": {"name": "Movies", "savePath": "/movies"},
+        })))
+        .mount(&server)
+        .await;
+
+    let categories = client(&server).categories().await.unwrap();
+
+    assert!(categories.contains_key("sharerr"));
+    assert!(categories.contains_key("Movies"));
+    assert_eq!(categories.len(), 2);
+}
+
+/// `create_category` sends only the name — no `savePath`, since sharerr never
+/// lets qBittorrent choose where content lives (see `add_torrent`'s
+/// `autoTMM=false`).
+#[tokio::test]
+async fn create_category_sends_only_the_name() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/createCategory"))
+        .and(body_string_contains("category=sharerr"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).create_category("sharerr").await.unwrap();
+
+    let requests = requests_to(&server, "createCategory").await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !body_text(&requests[0]).contains("savePath"),
+        "must not send savePath: {}",
+        body_text(&requests[0])
+    );
+}
+
 // ----------------------------------------------------------------- trackers
 
 /// Replacing the tracker list adds the new URLs before removing the stale ones

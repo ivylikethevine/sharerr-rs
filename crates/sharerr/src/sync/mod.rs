@@ -17,17 +17,80 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use sha2::{Digest, Sha256};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
-use sharerr_store::{RunSummary, Store, Vault, master_key_from_env};
+use sharerr_store::{RunSummary, Store, Vault};
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
 use seed::{SeedOutcome, Seeder};
+
+/// A short, non-secret fingerprint of a tracker token — truncated SHA-256, hex.
+///
+/// Never the token itself: this is what gets stored per item and read back by
+/// the items page purely to answer "is this the currently configured token".
+/// Shared between [`token_fingerprint`] (which derives it from a built
+/// announce URL) and `web::items` (which derives it from the raw token to
+/// compare against).
+pub(crate) fn fingerprint(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))[..12].to_owned()
+}
+
+/// [`fingerprint`] of the token embedded in `announce`'s primary URL — `None`
+/// when the tracker carries no token at all. See [`Syncer::share`], which
+/// records this per item as its torrent is built or confirmed.
+pub(crate) fn token_fingerprint(announce: &AnnounceSet) -> Option<String> {
+    let token = sharerr_torrent::token_from_announce_url(&announce.primary)?;
+    Some(fingerprint(&token))
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn announce(primary: &str) -> AnnounceSet {
+        AnnounceSet::single(url::Url::parse(primary).unwrap())
+    }
+
+    #[test]
+    fn the_same_token_always_fingerprints_the_same_way() {
+        assert_eq!(fingerprint("s3cret"), fingerprint("s3cret"));
+    }
+
+    #[test]
+    fn different_tokens_fingerprint_differently() {
+        assert_ne!(fingerprint("s3cret"), fingerprint("different"));
+    }
+
+    /// Never the token itself — the whole point of storing this instead.
+    #[test]
+    fn the_fingerprint_does_not_contain_the_token() {
+        assert!(!fingerprint("s3cret").contains("s3cret"));
+    }
+
+    #[test]
+    fn an_announce_url_with_no_token_fingerprints_to_none() {
+        assert_eq!(
+            token_fingerprint(&announce("http://sharerr.example/announce")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_announce_url_with_a_token_fingerprints_it() {
+        let with = token_fingerprint(&announce("http://sharerr.example/announce/tok1"));
+        let other = token_fingerprint(&announce("http://sharerr.example/announce/tok2"));
+        assert!(with.is_some());
+        assert_ne!(with, other);
+    }
+}
 
 /// Anything that can answer "which files should be shared right now?".
 ///
@@ -192,17 +255,9 @@ impl Syncer {
     /// rotated forwarded port reaches the next announce URL without rebuilding
     /// the syncer. One-shot commands build a static one from configuration.
     pub async fn build(config: &Config, endpoint: Arc<AdvertisedEndpoint>) -> Result<Self> {
-        let master = master_key_from_env()?;
-
-        // Off the runtime: opening the vault derives its key with Argon2, ~16ms of
-        // solid CPU on x86 and considerably more on the ARM boxes this ships to.
-        // `serve` calls this on a timer *while already serving HTTP*, and a
-        // container pinned to one CPU has exactly one worker thread — so run inline
-        // it would stall /health on every retry.
-        let vault_path = config.vault_path();
-        let vault = tokio::task::spawn_blocking(move || Vault::open(&vault_path, &master))
-            .await?
-            .with_context(|| format!("opening vault at {}", config.vault_path().display()))?;
+        // Off the runtime — `serve` calls this on a timer *while already serving
+        // HTTP*. See `secrets::open_vault_async`.
+        let vault = crate::secrets::open_vault_async(config).await?;
 
         // Every credential is read before anything is *opened*. `serve` retries this
         // whole function on a timer while the vault is incomplete, and opening the
@@ -337,7 +392,8 @@ impl Syncer {
             bail!("no library source could be scanned — nothing was changed");
         }
 
-        let torrents = torrents.context("listing torrents in qBittorrent")?;
+        let torrents =
+            torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
         let live: HashSet<String> = torrents
             .iter()
             .map(|t| t.hash.to_ascii_lowercase())
@@ -465,26 +521,39 @@ impl Syncer {
             && let Some(hash) = &known.info_hash
             && live.contains(&hash.to_ascii_lowercase())
         {
-            if !dry_run && let Err(err) = self.seeder.refresh_announce(hash, announce).await {
-                tracing::warn!(
-                    item = %item.spec,
-                    error = format!("{err:#}"),
-                    "could not refresh announce URLs"
-                );
+            if !dry_run {
+                match self.seeder.refresh_announce(hash, announce).await {
+                    // Either branch means the live torrent now genuinely
+                    // matches `announce.primary` — a no-op refresh is still a
+                    // confirmation, not merely "nothing to do".
+                    Ok(_) => {
+                        let fp = token_fingerprint(announce);
+                        if let Err(err) = self
+                            .store
+                            .set_announce_token_fp(item.source, item.file_id, fp.as_deref())
+                            .await
+                        {
+                            tracing::warn!(
+                                item = %item.spec,
+                                error = %err,
+                                "could not record the confirmed announce token"
+                            );
+                        }
+                    }
+                    Err(err) => tracing::warn!(
+                        item = %item.spec,
+                        error = format!("{err:#}"),
+                        "could not refresh announce URLs"
+                    ),
+                }
             }
             return Ok(Step::Unchanged);
         }
 
-        // A directory item's path is already sharerr's own view — running it
-        // through the arr-side rules would let a [[path_map]] meant for Sonarr
-        // rewrite it into a path that exists nowhere. Only the sharerr→qbit
-        // half of a mapping can apply to it.
-        let paths = if item.source == MediaSource::Directory {
-            self.resolver.resolve_sharerr(&item.arr_path)
-        } else {
-            self.resolver.resolve(&item.arr_path)
-        }
-        .with_context(|| format!("resolving {}", item.arr_path.display()))?;
+        let paths = self
+            .resolver
+            .resolve_for(item.source, &item.arr_path)
+            .with_context(|| format!("resolving {}", item.arr_path.display()))?;
 
         // Checked before hashing: discovering a missing file only after SHA-1ing
         // gigabytes would be a needlessly expensive way to find out.
@@ -539,7 +608,12 @@ impl Syncer {
 
         let outcome = self.seeder.seed(&paths, announce, torrents).await?;
         self.store
-            .set_seeding(item.source, item.file_id, outcome.info_hash())
+            .set_seeding(
+                item.source,
+                item.file_id,
+                outcome.info_hash(),
+                token_fingerprint(announce).as_deref(),
+            )
             .await?;
 
         Ok(match outcome {
@@ -586,7 +660,10 @@ impl Syncer {
             {
                 // Worth continuing: marking the row Unshared is still correct, and
                 // the torrent can be cleaned up by hand.
-                tracing::warn!(%hash, %err, "could not remove torrent from qBittorrent");
+                // The client's own name, not a hardcoded one: this field is a
+                // `dyn TorrentClient` and may well be Transmission.
+                let client = self.seeder.qbit.kind();
+                tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
             }
 
             match self

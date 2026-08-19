@@ -18,7 +18,7 @@ use sharerr_store::{Peer, PeerScope};
 use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
-use super::templates::{FilterOption, ItemRow, ItemsPage, SortLink, render};
+use super::templates::{FilterOption, ItemRow, ItemsPage, SortLink, TokenStatus, render};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemsQuery {
@@ -72,15 +72,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // Default view is newest first, matching the order the sync log reports
     // things in. An explicit sort overrides it; the header links below always
     // carry `dir` explicitly, so there is never an ambiguous third click.
-    let sort = if query.sort.is_empty() {
-        "since"
+    let (sort, desc) = if query.sort.is_empty() {
+        ("since", true)
     } else {
-        query.sort.as_str()
-    };
-    let desc = if query.sort.is_empty() {
-        true
-    } else {
-        query.dir == "desc"
+        (query.sort.as_str(), query.dir == "desc")
     };
     // `sort_by_cached_key` computes each item's key once, rather than
     // re-lowercasing the title on every comparison the sort makes.
@@ -97,6 +92,20 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
 
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
+
+    // Computed once for the whole page, not per row: every seeding torrent
+    // announces to the same live endpoint, so there is exactly one answer to
+    // "where does this instance's tracker currently reach". `None` when
+    // nothing is configured to announce to yet — the same condition that
+    // blocks the tracker itself (`TorrentError::NoAdvertisedHost`).
+    let announce_url = current_announce_url(&state.serve).await;
+    // Same reasoning: one current token for the whole instance, hashed once
+    // and compared against each row's own stored fingerprint.
+    let current_token_fp = state
+        .serve
+        .tracker_token()
+        .await
+        .map(|token| crate::sync::fingerprint(&token));
 
     let sort_links = SORT_COLUMNS
         .iter()
@@ -137,7 +146,17 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         error,
         total,
         shown: items.len(),
-        items: items.iter().map(|item| row(item, &active)).collect(),
+        items: items
+            .iter()
+            .map(|item| {
+                row(
+                    item,
+                    &active,
+                    announce_url.as_deref(),
+                    current_token_fp.as_deref(),
+                )
+            })
+            .collect(),
         source_options: MediaSource::ALL
             .iter()
             .map(|s| FilterOption {
@@ -179,6 +198,26 @@ fn scope_admits(scope: PeerScope, item: &SharedItem) -> bool {
     spec_kind(&item.spec) == kind
 }
 
+/// A short explanation for a state that would otherwise read as a dead end —
+/// see the field comment on [`crate::web::templates::ItemRow::state_hint`].
+///
+/// `Pending` genuinely should not linger: `Syncer::share` records it, then
+/// immediately either fails (which sets `Failed` with a reason) or reaches
+/// `Seeding` in the same call — so a row still `Pending` on a later page load
+/// means the process died mid-share, not that anything is queued behind it.
+fn state_hint(state: ShareState) -> Option<&'static str> {
+    match state {
+        ShareState::Pending => Some(
+            "recorded but not finished — sharerr likely restarted mid-share; \
+             the next sync retries it",
+        ),
+        ShareState::Unshared => {
+            Some("not a fault — the tag was removed upstream, so the share was withdrawn")
+        }
+        ShareState::Seeding | ShareState::Failed => None,
+    }
+}
+
 fn spec_kind(spec: &MediaSpec) -> &'static str {
     match spec {
         MediaSpec::Episode { .. } => "episode",
@@ -209,21 +248,61 @@ fn visible_to(item: &SharedItem, peers: &[Peer]) -> String {
     }
 }
 
-fn row(item: &SharedItem, peers: &[Peer]) -> ItemRow {
+fn row(
+    item: &SharedItem,
+    peers: &[Peer],
+    announce_url: Option<&str>,
+    current_token_fp: Option<&str>,
+) -> ItemRow {
     ItemRow {
         title: item.spec.title().to_owned(),
         kind: spec_kind(&item.spec),
         source_label: title_case(item.source.as_str()),
         size: human_size(item.size),
         state_label: title_case(item.state.as_str()),
+        state_hint: state_hint(item.state),
         visible_to: visible_to(item, peers),
         since: item.created_at.map(ago).unwrap_or_default(),
-        info_hash_short: item
-            .info_hash
-            .as_deref()
-            .map(|h| format!("{}…", &h[..h.len().min(10)])),
+        info_hash: item.info_hash.clone(),
+        // A torrent with no info hash has not been built yet, so there is
+        // nothing meaningful to announce either — `None` regardless of
+        // whether the tracker itself is configured.
+        announce_url: item.info_hash.as_ref().and(announce_url).map(str::to_owned),
+        token_fp: item.announce_token_fp.clone(),
+        token_status: token_status(item, current_token_fp),
         last_error: item.last_error.clone(),
     }
+}
+
+/// Whether this item's last-confirmed announce token still matches the one
+/// currently configured. See [`crate::sync::token_fingerprint`] for how each
+/// side is derived.
+fn token_status(item: &SharedItem, current_token_fp: Option<&str>) -> TokenStatus {
+    // No torrent, nothing to have confirmed yet — not the same condition as a
+    // torrent that *was* confirmed and has since drifted.
+    if item.info_hash.is_none() {
+        return TokenStatus::None;
+    }
+    match (item.announce_token_fp.as_deref(), current_token_fp) {
+        (None, None) => TokenStatus::None,
+        (Some(stored), Some(current)) if stored == current => TokenStatus::Valid,
+        // Either it changed, or nothing has confirmed this item since a token
+        // was first configured (or removed) — both are "not confirmed as
+        // current", which is exactly what red is for.
+        _ => TokenStatus::Stale,
+    }
+}
+
+/// The announce URL a freshly built torrent would carry right now: the same
+/// construction `BuiltinTracker::announce_set` uses, computed live rather
+/// than stored so it always reflects whatever the endpoint currently
+/// resolves to. `None` when nothing is configured to announce to yet.
+async fn current_announce_url(state: &crate::state::ServeState) -> Option<String> {
+    let base = state.endpoint().current()?;
+    let token = state.tracker_token().await;
+    sharerr_torrent::announce_url(&base, token.as_deref())
+        .ok()
+        .map(|url| url.to_string())
 }
 
 /// A byte count as a person reads it — binary units, one decimal past the first,
@@ -262,6 +341,7 @@ mod tests {
             size: 1_610_612_736, // 1.5 GiB
             ids: sharerr_core::ExternalIds::default(),
             info_hash: None,
+            announce_token_fp: None,
             state,
             last_error: None,
             created_at: None,
@@ -330,5 +410,74 @@ mod tests {
             "no friend's scope covers it"
         );
         assert_eq!(visible_to(&it, &[peer("Sam", PeerScope::Movies)]), "Sam");
+    }
+
+    fn seeding_with_hash(hash: &str) -> SharedItem {
+        SharedItem {
+            info_hash: Some(hash.to_owned()),
+            state: ShareState::Seeding,
+            ..item(
+                MediaSource::Sonarr,
+                MediaSpec::Episode {
+                    series_title: "X".to_owned(),
+                    season: 1,
+                    episode: 1,
+                },
+                ShareState::Seeding,
+            )
+        }
+    }
+
+    #[test]
+    fn no_torrent_yet_is_not_the_same_as_a_stale_token() {
+        let pending = item(
+            MediaSource::Sonarr,
+            MediaSpec::Movie {
+                title: "X".to_owned(),
+                year: None,
+            },
+            ShareState::Pending,
+        );
+        assert_eq!(
+            token_status(&pending, Some("current")),
+            TokenStatus::None,
+            "nothing has been confirmed yet, which is not the same as having drifted"
+        );
+    }
+
+    #[test]
+    fn a_matching_fingerprint_is_valid() {
+        let mut it = seeding_with_hash("aa".repeat(20).as_str());
+        it.announce_token_fp = Some("abc123".to_owned());
+        assert_eq!(token_status(&it, Some("abc123")), TokenStatus::Valid);
+    }
+
+    #[test]
+    fn a_different_fingerprint_is_stale() {
+        let mut it = seeding_with_hash("aa".repeat(20).as_str());
+        it.announce_token_fp = Some("old".to_owned());
+        assert_eq!(token_status(&it, Some("new")), TokenStatus::Stale);
+    }
+
+    /// A token that was configured and then removed (or vice versa) must not
+    /// silently read as valid just because both sides happen to differ from
+    /// "the same string".
+    #[test]
+    fn a_token_that_appeared_or_disappeared_is_stale_not_none() {
+        let mut it = seeding_with_hash("aa".repeat(20).as_str());
+        it.announce_token_fp = Some("abc123".to_owned());
+        assert_eq!(token_status(&it, None), TokenStatus::Stale);
+
+        let mut it = seeding_with_hash("bb".repeat(20).as_str());
+        it.announce_token_fp = None;
+        assert_eq!(token_status(&it, Some("abc123")), TokenStatus::Stale);
+    }
+
+    #[test]
+    fn only_pending_and_unshared_get_a_hint() {
+        assert!(state_hint(ShareState::Pending).is_some());
+        assert!(state_hint(ShareState::Unshared).is_some());
+        assert!(state_hint(ShareState::Seeding).is_none());
+        assert!(state_hint(ShareState::Failed).is_none());
     }
 }

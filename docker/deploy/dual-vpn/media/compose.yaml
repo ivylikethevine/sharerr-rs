@@ -1,0 +1,119 @@
+# The library stack: gluetun, qBittorrent, Sonarr, Radarr.
+#
+#   docker network create sharerr-shared   # once, before either stack
+#   cp .env.example .env && $EDITOR .env
+#   docker compose up -d
+#
+# The sharerr half of this deployment lives in ../sharerr/ and runs as a
+# separate `docker compose` project, on its own tunnel. See ../README.md for
+# why they are split and how they still reach each other. This file alone is
+# also a perfectly ordinary standalone qBittorrent+Sonarr+Radarr-behind-gluetun
+# stack if you never bring the other one up.
+
+name: sharerr-media
+
+networks:
+  default:
+  # The only thing this stack shares with ../sharerr/. Created once, outside
+  # compose, so both projects can attach to the same network without either
+  # one owning its lifecycle.
+  sharerr-shared:
+    external: true
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3.40.0
+    container_name: media-gluetun
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks: [default, sharerr-shared]
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
+      VPN_TYPE: wireguard
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set this in .env}
+      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:?set this in .env}
+      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:?set this in .env}
+      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-51820}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set this in .env}
+
+      # Only qBittorrent's listener needs to be reachable from the internet
+      # through this tunnel — the tracker/feed live in the other stack now.
+      FIREWALL_VPN_INPUT_PORTS: "6881"
+      # The WebUI, for the host-published port below, and for sharerr calling
+      # in over sharerr-shared — both arrive on the non-tunnel interface.
+      FIREWALL_INPUT_PORTS: "8080"
+      # LAN/docker ranges plus sharerr-shared's own subnet, so a killswitch
+      # that is otherwise correctly paranoid does not also block the one
+      # cross-stack call this deployment needs.
+      FIREWALL_OUTBOUND_SUBNETS: >-
+        ${LAN_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8},172.31.90.0/24
+      DNS_ADDRESS: 127.0.0.11
+      TZ: ${TZ:-Etc/UTC}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - gluetun-config:/gluetun
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
+    container_name: media-qbittorrent
+    # No `networks:` and no `ports:` — both belong to gluetun, which is the
+    # only member of this stack that also touches sharerr-shared.
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: "6881"
+    volumes:
+      - qbittorrent-config:/config
+      - ${MEDIA_PATH:?set this in .env}:/downloads:ro
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.15
+    container_name: sonarr
+    networks: [default, sharerr-shared]
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - sonarr-config:/config
+      - ${MEDIA_PATH}/tv:/tv:ro
+    ports:
+      - "127.0.0.1:8989:8989"
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.14.0
+    container_name: radarr
+    networks: [default, sharerr-shared]
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - radarr-config:/config
+      - ${MEDIA_PATH}/movies:/movies:ro
+    ports:
+      - "127.0.0.1:7878:7878"
+    restart: unless-stopped
+
+volumes:
+  gluetun-config:
+  qbittorrent-config:
+  sonarr-config:
+  radarr-config:

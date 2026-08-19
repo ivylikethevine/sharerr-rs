@@ -29,4 +29,5 @@ pub use factory::{
 pub use title::{ParsedTitle, parse, resolve, synthesize};
 pub use tracker::{
     ANNOUNCE_PATH, AnnounceSet, BuiltinTracker, SCRAPE_PATH, TrackerProvider, announce_url,
+    token_from_announce_url,
 };

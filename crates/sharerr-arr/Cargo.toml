@@ -11,6 +11,7 @@ description = "Sonarr and Radarr v3 API clients, and the tagged-content discover
 workspace = true
 
 [dependencies]
+futures = { workspace = true }
 reqwest = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }

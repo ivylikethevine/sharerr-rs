@@ -175,6 +175,22 @@ form.inline { display: inline; }
 .warn  { background: var(--warn-bg);  color: var(--warn-ink); }
 .error { background: var(--error-bg); color: var(--error-ink); }
 
+/* A small pill next to a field's label, so "is this secret already stored"
+   reads at a glance instead of depending on placeholder text that vanishes
+   the moment the input is focused. */
+.field-status {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+.field-status--set   { background: var(--ok-bg);    color: var(--ok-ink); }
+.field-status--unset { background: transparent; color: var(--muted); border: 1px solid var(--muted); }
+.field-status--stale { background: var(--error-bg); color: var(--error-ink); }
+
 .facts {
   display: grid;
   grid-template-columns: minmax(8rem, auto) 1fr;
@@ -195,6 +211,10 @@ form.inline { display: inline; }
 }
 
 table { border-collapse: collapse; width: 100%; }
+
+/* A table with a column that cannot reasonably wrap — a full URL or hash —
+   scrolls inside its own box instead of forcing the whole page wider. */
+.table-scroll { overflow-x: auto; }
 th, td { text-align: left; padding: 0.4rem 0.5rem 0.4rem 0; font-size: 0.92rem; }
 th { color: var(--muted); font-weight: 550; }
 

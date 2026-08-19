@@ -1,4 +1,5 @@
-//! The diagnostics page: does the library actually resolve?
+//! The health checks folded into the combined status/diagnostics page: does
+//! the library actually resolve?
 //!
 //! `doctor` has always answered this from a shell. The settings page's "Test
 //! connection" buttons deliberately do not — they answer a one-line question about
@@ -7,18 +8,21 @@
 //! nothing" was the one an operator who never opens a terminal could not run.
 //!
 //! The checking is shared with `doctor` via [`crate::checks`]; this module only
-//! gathers and renders.
+//! gathers. [`gather`] used to render its own page — until that page and Status
+//! merged, on the grounds that both answered "is this instance healthy" at two
+//! levels of detail a person had to know to click through between.
 
-use axum::extract::State;
-use axum::response::Response;
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
 use sharerr_core::config::secret_keys;
+use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
-use super::templates::{DiagnosticsPage, SampleRow, ServiceLine, render};
+use super::peers::ago;
+use super::templates::{DiagnosticsData, EndpointStatus, RunRow, SampleRow, ServiceLine};
 use crate::checks::{self, ArrOutcome, DirOutcome};
+use crate::gluetun::GluetunTarget;
 
 /// How many problem paths to name before summarising the rest.
 ///
@@ -26,7 +30,15 @@ use crate::checks::{self, ArrOutcome, DirOutcome};
 /// thousand of them buries the advice that would fix it.
 const MAX_LISTED: usize = 20;
 
-pub async fn page(State(state): State<WebState>) -> Response {
+/// How many past runs to show. The status page's glance already answers "is
+/// the *last* sync healthy"; this answers "is that typical", which needs a
+/// few rather than one — enough to see a pattern, not so many the page reads
+/// like a log dump.
+const RECENT_RUNS: i64 = 10;
+
+/// Run every health check and return the results, unrendered — [`super::status_page`]
+/// folds this into the combined page alongside the glance and the banners.
+pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     let config = state.serve.config().await;
 
     // One vault open for the whole page. Opening it derives the key with Argon2 —
@@ -114,8 +126,26 @@ pub async fn page(State(state): State<WebState>) -> Response {
     };
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
-    render(&DiagnosticsPage {
-        signed_in: true,
+    let swarm = state.serve.swarms().stats().await;
+    let runs = recent_run_rows(state).await;
+    let gluetun = vec![
+        endpoint_status(
+            "Tracker/feed",
+            &config.gluetun,
+            &state.serve.endpoint(),
+            state.serve.gluetun_status(GluetunTarget::Tracker),
+        )
+        .await,
+        endpoint_status(
+            "Torrent client",
+            &config.gluetun_client,
+            &state.serve.client_endpoint(),
+            state.serve.gluetun_status(GluetunTarget::Client),
+        )
+        .await,
+    ];
+
+    DiagnosticsData {
         services,
         scanned,
         rules: paths.rules,
@@ -136,7 +166,64 @@ pub async fn page(State(state): State<WebState>) -> Response {
             sharerr: sample.sharerr.display().to_string(),
             qbit: sample.qbit.display().to_string(),
         }),
-    })
+        gluetun,
+        swarm_peers: swarm.peers,
+        swarm_seeders: swarm.seeders,
+        runs,
+    }
+}
+
+/// The last few sync runs, newest first — "is the last one healthy" is the
+/// status page's glance; this is "is that typical", which needs more than
+/// one data point. Empty (not an error) when the store is unavailable — the
+/// rest of this page still has a useful answer without it.
+async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    let Ok(runs) = store.recent_runs(RECENT_RUNS).await else {
+        return Vec::new();
+    };
+
+    runs.into_iter()
+        .map(|run| {
+            let Some(finished_at) = run.finished_at else {
+                return RunRow {
+                    when: ago(run.started_at),
+                    summary: "still running".to_owned(),
+                    failed: false,
+                };
+            };
+            let (summary, failed) = run.summary.describe(true);
+            RunRow {
+                when: ago(finished_at),
+                summary,
+                failed,
+            }
+        })
+        .collect()
+}
+
+/// One gluetun poller's row, pre-rendered for the template.
+async fn endpoint_status(
+    label: &'static str,
+    gluetun_config: &sharerr_core::config::GluetunConfig,
+    endpoint: &AdvertisedEndpoint,
+    status: std::sync::Arc<crate::gluetun::GluetunStatus>,
+) -> EndpointStatus {
+    let snapshot = status.snapshot().await;
+    EndpointStatus {
+        label,
+        enabled: gluetun_config.enabled,
+        configured: gluetun_config.control_url.is_some(),
+        current: endpoint.current().map(|base| base.to_string()),
+        last_observed: endpoint
+            .last_observed()
+            .map(|observed| format!("{} ({})", observed.base, ago(observed.observed_at))),
+        last_poll: snapshot.last_poll_at.map(ago),
+        last_success: snapshot.last_success_at.map(ago),
+        last_error: snapshot.last_error,
+    }
 }
 
 /// One line per service, saying whether it contributed anything to the scan.

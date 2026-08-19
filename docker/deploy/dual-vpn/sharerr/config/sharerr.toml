@@ -1,0 +1,64 @@
+# sharerr, in its own gluetun, talking to qBittorrent/Sonarr/Radarr in a
+# separate stack (../../media/) over the shared `sharerr-shared` network.
+# See ../../README.md for the topology.
+#
+# Secrets are deliberately absent. The qBittorrent API key (or password), the
+# *arr API keys, and the Torznab key live in the encrypted vault, not here —
+# set them in the web UI under Settings, or pipe them in:
+#
+#   docker compose exec sharerr \
+#     sh -c 'printf %s "$KEY" | sharerr vault set qbittorrent.api_key'
+#
+# The web UI rewrites this file in place, comments and all, when you save.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[qbittorrent]
+# Not `localhost` — unlike the single-stack layout, qBittorrent is *not* in
+# this container's network namespace. It's reached by the other stack's
+# gluetun container name, over sharerr-shared. This is the line most likely
+# to be wrong if you adapted this from the single-stack deploy.
+url = "http://media-gluetun:8080"
+username = "admin"
+category = "sharerr"
+tag = "sharerr"
+skip_checking = false
+
+[tracker]
+# What friends resolve *this* instance as. With [gluetun] below enabled, the
+# live exit address and forwarded port from this stack's own tunnel win over
+# this pair — keep a DNS name here anyway; it rides along as an extra
+# announce-list tier. This is unrelated to qBittorrent's own address: that one
+# is forwarded by ../../media/'s gluetun and sharerr does not track it.
+advertised_host = "CHANGE-ME.example.com"
+port = 8477
+
+[gluetun]
+# This stack's own gluetun, not the media stack's. Polls this tunnel's exit
+# and forwarded port only — the tracker/feed address, never qBittorrent's.
+control_url = "http://localhost:8000"
+poll_secs = 60
+
+[sync]
+enabled = true
+interval_secs = 900
+
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"
+
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"

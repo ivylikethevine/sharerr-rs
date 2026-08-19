@@ -32,6 +32,7 @@ use axum::response::{IntoResponse, Response};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::now_epoch;
 use sharerr_store::{EndpointKind, ObservedVia, Store};
@@ -194,7 +195,7 @@ impl Identity {
 }
 
 /// This instance's current self-record: identity from the vault, endpoints from
-/// the live advertised base. `None` when the vault (and so the identity) is
+/// the live advertised bases. `None` when the vault (and so the identity) is
 /// unavailable — gossip still relays without it, it just cannot speak for
 /// itself.
 async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
@@ -204,27 +205,35 @@ async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
     };
 
     let now = now_epoch();
-    let endpoints = state
-        .endpoint()
-        .current()
-        .map(|base| {
-            let addr = sharerr_core::endpoint::base_string(&base);
-            vec![
-                // The same listener carries both today; recorded separately so
-                // the day they split, older friends already understand it.
-                RecordEndpoint {
-                    kind: EndpointKind::Tracker.as_str().to_owned(),
-                    addr: addr.clone(),
-                    observed_at: now,
-                },
-                RecordEndpoint {
-                    kind: EndpointKind::Api.as_str().to_owned(),
-                    addr,
-                    observed_at: now,
-                },
-            ]
-        })
-        .unwrap_or_default();
+    let mut endpoints = Vec::new();
+    if let Some(base) = state.endpoint().current() {
+        let addr = sharerr_core::endpoint::base_string(&base);
+        // Tracker and Api share one listener today, so they always carry the
+        // same address; recorded separately so a friend who only understands
+        // one of the two kinds still gets it.
+        endpoints.push(RecordEndpoint {
+            kind: EndpointKind::Tracker.as_str().to_owned(),
+            addr: addr.clone(),
+            observed_at: now,
+        });
+        endpoints.push(RecordEndpoint {
+            kind: EndpointKind::Api.as_str().to_owned(),
+            addr,
+            observed_at: now,
+        });
+    }
+    // Unlike Tracker/Api, Client is genuinely independent — see
+    // `docs/roadmap.md`'s "a peer with two addresses". Present only once
+    // `[gluetun_client]` (or some other future source) has actually observed
+    // the torrent client's own address; absent is honest where nothing knows
+    // it, rather than repeating the tracker's address as a guess.
+    if let Some(base) = state.client_endpoint().current() {
+        endpoints.push(RecordEndpoint {
+            kind: EndpointKind::Client.as_str().to_owned(),
+            addr: sharerr_core::endpoint::base_string(&base),
+            observed_at: now,
+        });
+    }
 
     match identity.sign_record(endpoints, now) {
         Ok(record) => Some(record),
@@ -472,30 +481,31 @@ async fn run_exchange(state: &Arc<ServeState>) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    for peer in outbound {
-        // `filter` above; the unwrap cannot fire but the type does not know.
-        let Some(url) = peer.gossip_url.as_deref() else {
-            continue;
-        };
+    // Concurrently: the friends are independent hosts behind independent keys,
+    // and each exchange can sit on the 15s timeout above. In series, one friend
+    // behind a dead tunnel delayed every friend after them — with five friends
+    // and two unreachable, a single pass burned 30s of wall time doing nothing.
+    let (http, store, own, known) = (&http, &store, own.as_ref(), &known);
+    let exchanges = outbound.into_iter().filter_map(|peer| {
         let Ok(Some(key)) = vault.get(&secret_keys::peer_gossip_key(peer.id)) else {
             tracing::debug!(peer = %peer.label, "no outbound key stored — skipping gossip");
-            continue;
+            return None;
         };
 
-        if let Err(reason) = exchange_with(
-            &http,
-            &store,
-            peer.id,
-            url,
-            key.expose_secret(),
-            own.as_ref(),
-            &known,
-        )
-        .await
-        {
-            tracing::debug!(peer = %peer.label, reason, "gossip exchange failed");
-        }
-    }
+        Some(async move {
+            // `filter` above; this cannot fire but the type does not know.
+            let Some(url) = peer.gossip_url.as_deref() else {
+                return;
+            };
+
+            if let Err(reason) =
+                exchange_with(http, store, peer.id, url, key.expose_secret(), own, known).await
+            {
+                tracing::debug!(peer = %peer.label, reason, "gossip exchange failed");
+            }
+        })
+    });
+    futures::future::join_all(exchanges).await;
 
     Ok(())
 }
@@ -511,26 +521,33 @@ async fn exchange_with(
     known: &[&str],
 ) -> Result<(), String> {
     let base = base.trim_end_matches('/');
+    let endpoint = format!("{base}/api/gossip/endpoints");
 
+    // The key and the peer list ride as real query parameters rather than being
+    // formatted into the URL: reqwest escapes them, and a key containing a `&`
+    // would otherwise silently truncate the request.
+    //
+    // `error_chain` rather than `{e}` on the sends — reqwest's own Display stops
+    // at "error sending request for url (…)" and drops the cause, which is the
+    // "Connection refused" an operator actually needs.
     if let Some(own) = own {
         let batch = RecordBatch {
             records: vec![own.clone()],
         };
-        http.post(format!("{base}/api/gossip/endpoints?apikey={key}"))
+        http.post(&endpoint)
+            .query(&[("apikey", key)])
             .json(&batch)
             .send()
             .await
-            .map_err(|e| format!("push: {e}"))?;
+            .map_err(|e| format!("push: {}", error_chain(&e)))?;
     }
 
     let response = http
-        .get(format!(
-            "{base}/api/gossip/endpoints?apikey={key}&peers={}",
-            known.join(",")
-        ))
+        .get(&endpoint)
+        .query(&[("apikey", key), ("peers", &known.join(","))])
         .send()
         .await
-        .map_err(|e| format!("pull: {e}"))?;
+        .map_err(|e| format!("pull: {}", error_chain(&e)))?;
     if !response.status().is_success() {
         return Err(format!("pull answered {}", response.status()));
     }
