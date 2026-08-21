@@ -31,9 +31,12 @@ design is built around.
 | Path-mapping diagnostics in the browser | ✅ |
 | Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
 | Per-friend scoping: this friend sees TV, that one films | ✅ |
+| Per-friend announce-token attribution: revoking a friend cuts tracker access too | ✅ |
+| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal | ✅ |
 | Plain directory sharing, no *arr app at all | ✅ |
 | Dynamic endpoint from gluetun: rotating exit IP and forwarded port | ✅ |
 | Peer endpoint memory and signed endpoint gossip between friends | ✅ |
+| The lighthouse: rendezvous for a friend whose address rotated while unwatched | ✅ |
 | Plex as a library source | ❌ |
 
 ## Quickstart
@@ -82,12 +85,18 @@ in their Prowlarr using those two values.
 
 Because each friend has their own key, the Friends page can tell you when each of
 them last used the feed — "never" means they have the key but have not finished
-setting up — and revoking one person leaves everybody else working.
+setting up — and revoking one person leaves everybody else working. That key is
+also what a magnet from the feed embeds as the announce token, so revoking a
+friend cuts their access to sharerr's own tracker too, not just the feed —
+instantly, and with no effect on anyone else, since nobody else's access ever
+depended on it. This only applies to what a friend fetches by magnet; a
+`.torrent` downloaded directly still carries the one shared fallback token
+today (see [the roadmap](docs/roadmap.md)'s "Per-peer announce tokens").
 
 You can also scope what each friend sees: everything, or only TV, films, music or
-books. That
-applies to the feed itself, not just the display — content outside a friend's scope
-is never listed and never offered, and they cannot search their way around it.
+books. That applies to the feed itself, not just the display — content outside a
+friend's scope is never listed and never offered, and they cannot search their
+way around it.
 
 > A single shared `torznab.api_key` still works, for setups made before per-friend
 > keys existed. While one is set, revoking a friend does **not** cut them off,
@@ -139,6 +148,29 @@ One caveat: the announce endpoint is part of `sharerr serve`, so a one-shot
 `sharerr sync` produces correct torrents whose announces fail until `serve` is
 running.
 
+### Seeding limits
+
+Sharing a library with no cap on what it costs you is a real deterrent to
+running this, so Settings → Seeding limits takes an upload-speed cap (KiB/s)
+and a seed-ratio goal, applied once per torrent at the moment sharerr hands
+it to qBittorrent or Transmission:
+
+```toml
+[seeding]
+upload_limit_kib = 500
+ratio_limit = 2.0
+```
+
+Neither is enforced by sharerr itself afterward — each client's own already-
+running seeding engine honours the goal from then on, the same as it would
+for a torrent added by hand. That also means a change here only takes effect
+on torrents added *after* the change; nothing already seeding is touched.
+Leave a field blank (or the section out entirely) for no cap, today's
+default. There is deliberately no time-based goal: qBittorrent's equivalent
+is total time seeded, but Transmission's only comparable knob is *idle*
+time, a different condition, and one field meaning two different things per
+backend would be a footgun rather than a fix.
+
 ### A dynamic endpoint (gluetun)
 
 Behind a VPN with provider port forwarding there is no stable address to type
@@ -179,7 +211,7 @@ instances, and `tracker.bind` opens a second listener carrying only the tracker
 — for the topology where exactly one forwarded port exists and it has to be the
 tracker's, while the web UI stays on the LAN side.
 
-### The lighthouse (early)
+### The lighthouse
 
 Gossip only helps a friend who can still reach *somebody* — two friends whose
 addresses both rotated while neither was watching have no path back to each
@@ -189,6 +221,26 @@ peer reports its endpoint to and a friend looks up under the API key that
 peer issued them. A request without a valid key still gets a plausible
 fabricated answer rather than an error, so scraping it yields only noise —
 see `docs/roadmap.md`'s "The lighthouse" for the full design.
+
+Using one is a Settings → Lighthouse field, `lighthouse.urls` — one or more
+lighthouse base URLs, self-hosted by a friend or by you:
+
+```toml
+[lighthouse]
+urls = ["https://a-friends-lighthouse.example"]
+```
+
+With at least one set, sharerr reports its own endpoint to every URL listed
+— once per active friend's issued-key hash, since a lighthouse indexes by
+key hash alone and never learns which reports belong to the same instance —
+and queries the same list for any friend who has gone quiet. A lookup result
+is only ever trusted, and folded into peer endpoint memory, once it both
+verifies and names that friend's already-known identity (bound the first
+time gossip ever heard from them) — a friend never gossiped with has nothing
+to check a lighthouse's answer against, so is skipped rather than guessed
+at. This is independent of running the embedded service below: consuming a
+friend's lighthouse needs nothing checked in Settings, and running one for
+friends needs nothing typed here.
 
 Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`,
 built from `Dockerfile.lighthouse`) is meant to be self-hosted by anyone on
@@ -216,9 +268,9 @@ mount = "tracker"   # or "frontend" — see below
 `mount = "tracker"` puts it on the same port a friend's torrent client
 already reaches (`tracker.bind` if set, otherwise the main listener);
 `mount = "frontend"` puts it on the main listener regardless. Off by
-default, and only the embedding is implemented so far — a sharerr instance
-does not yet report itself to a lighthouse or query one for a quiet friend;
-that half is still on the roadmap.
+default, and unrelated to `lighthouse.urls` above — running the embedded
+service and using a lighthouse as a client are two independent choices, not
+a matched pair.
 
 ## Sharing music, books, and more
 
@@ -253,10 +305,12 @@ Notes that are easy to trip over:
 A peer used to be only a credential; sharerr now also remembers *where* each
 friend was recently seen — the last few addresses, timestamped, with their feed
 traffic and their torrent client recorded separately (a dual-VPN friend has the
-two behind different exits). Sightings come from authenticated feed pulls and
-from **gossip**: when a friend also runs sharerr, the two instances exchange
-signed endpoint records over the same per-friend key the feed uses, so one
-friend noticing a moved address is enough for everyone who already knows them.
+two behind different exits). Sightings come from authenticated feed pulls, from
+**gossip** — when a friend also runs sharerr, the two instances exchange signed
+endpoint records over the same per-friend key the feed uses, so one friend
+noticing a moved address is enough for everyone who already knows them — and,
+when gossip alone has no path back to a quiet friend, from a lighthouse (see
+"The lighthouse" above), ranked below both of the other two.
 
 The trust model is worth stating plainly: every record is Ed25519-signed by the
 peer it describes, so a friend can relay it but never rewrite it; an older

@@ -33,9 +33,13 @@ this torrent, with the data already at this path". Announces always go to
 sharerr's own tracker, so a client needs no tracker of its own.
 
 Adding a third is now mostly writing one file. What a new client must answer
-honestly: whether it can remove a torrent _without_ deleting the data, and how
-it replaces a torrent's tracker list in place (`set_trackers`, for endpoint
-rotation).
+honestly: whether it can remove a torrent _without_ deleting the data, how it
+replaces a torrent's tracker list in place (`set_trackers`, for endpoint
+rotation), and how it expresses `AddRequest::upload_limit_kib`/`ratio_limit`
+when either is set — the one deliberate exception to "ratios belong to the
+client," a seeding goal stated once at add time through whatever native
+mechanism the client offers for it, same as qBittorrent (inline on
+`torrents/add`) and Transmission (a follow-up `torrent-set`) already do.
 
 | Client                            | Notes                                                                                                                |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -64,8 +68,9 @@ existed (the sha256 of their issued API key), not a new credential with its
 own settings page. A real announce presenting a peer's own token is now
 attributed to them in peer endpoint memory (`EndpointKind::Client`,
 `ObservedVia::Direct` — `crates/sharerr/src/tracker.rs`'s
-`authenticate_token`/`record_client_sighting`), closing the "cannot attribute
-a torrent client's address from a direct announce" gap for the common case.
+`authenticate_token`, feeding the same `torznab::record_sighting` the feed's
+own API-key auth uses), closing the "cannot attribute a torrent client's
+address from a direct announce" gap for the common case.
 Revoking a peer — already possible, for the feed — now also, with no extra
 step, revokes their tracker access: their `key_hash` simply stops resolving.
 The instance's original shared token keeps working forever alongside this,

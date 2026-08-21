@@ -63,6 +63,17 @@ with. Mocks cannot prove that.
 All fixtures are synthetic — invented titles, seeded pseudo-random bytes, so
 torrent info hashes are stable across machines. No real content, ever.
 
+**No tier-1 fixture opens a real vault.** `state::fixtures::unconfigured()` has no
+master key, so `ServeState::open_vault`/`tracker_token`/`gossip_identity` all
+resolve to "unavailable" there — fine for testing the not-yet-configured path, a
+real gap for anything that only behaves differently once a vault-backed secret
+*is* set (e.g. a magnet's announce token once `tracker.token` exists). Standing
+one up would mean setting `SHARERR_MASTER_KEY` on the real process env, which
+nothing in this suite does because a parallel test runner does not scope env
+vars per test. Prefer testing the store-backed logic directly (pass `Store` and
+the resolved secret as plain parameters, the way `tracker::authenticate_token`
+does) over reaching for a live vault.
+
 ## Traps
 
 **Torrent name vs release title are two different strings.** Conflating them
@@ -83,6 +94,18 @@ explicitly), or the web UI silently will not manage it.
 **The config file is rewritten in place by the web UI**, comments and all, via
 `toml_edit`. A settings path is a hand-typed string in more than one place; check
 `web/settings.rs` and `web/templates/settings.html` agree.
+
+**Every `web/settings.rs` form field must be `#[serde(default)]`**, even ones the
+handler goes on to treat as required. An `<input>` can render `disabled` — no
+master key yet, or its config path pinned by a `SHARERR_*` env var
+(`lock_attr`/`locks` in `settings.html`) — and a disabled input submits nothing at
+all. A `Form` field with no default then fails to deserialize *before* the handler
+runs, so `reject()`'s own styled error page never renders; the caller gets a bare
+`Failed to deserialize form body: missing field` instead, and whatever they typed
+in every other field on that form is discarded. Apply it once, at the struct
+level (`#[serde(default)]` above the struct, `#[derive(Default)]` on it) rather
+than per field — see any struct in `web/settings.rs`'s Forms section — so a field
+added later inherits the tolerance instead of needing to remember it.
 
 ## Repository
 
