@@ -449,8 +449,7 @@ mod tests {
         let no_target = Query(GluetunQuery::default());
 
         let public = ConnectInfo(std::net::SocketAddr::from(([203, 0, 113, 9], 40000)));
-        let (status, _) =
-            gluetun_down(State(Arc::clone(&state)), public, no_target.clone()).await;
+        let (status, _) = gluetun_down(State(Arc::clone(&state)), public, no_target.clone()).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
 
         let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
@@ -466,7 +465,10 @@ mod tests {
         let (_dir, state) = unconfigured();
         let endpoint = state.endpoint_for(GluetunTarget::Tracker);
         endpoint.observe("http://10.0.0.5:51413".parse().unwrap());
-        assert!(endpoint.last_observed().is_some(), "setup: must have observed something");
+        assert!(
+            endpoint.last_observed().is_some(),
+            "setup: must have observed something"
+        );
 
         let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
         gluetun_down(

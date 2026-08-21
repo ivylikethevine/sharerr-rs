@@ -513,7 +513,11 @@ mod tests {
     fn title_is_the_searchable_name_per_kind() {
         assert_eq!(episode().title(), "Lanternwick Hollow");
         assert_eq!(movie(None).title(), "Copper Vale");
-        assert_eq!(track(None).title(), "Static Orchard", "the album, not the artist");
+        assert_eq!(
+            track(None).title(),
+            "Static Orchard",
+            "the album, not the artist"
+        );
         assert_eq!(book().title(), "The Quiet Ledger");
     }
 
@@ -530,7 +534,10 @@ mod tests {
         assert_eq!(episode().to_string(), "Lanternwick Hollow S01E02");
         assert_eq!(movie(Some(1999)).to_string(), "Copper Vale (1999)");
         assert_eq!(movie(None).to_string(), "Copper Vale");
-        assert_eq!(track(Some(4)).to_string(), "The Verdigris - Static Orchard [04]");
+        assert_eq!(
+            track(Some(4)).to_string(),
+            "The Verdigris - Static Orchard [04]"
+        );
         assert_eq!(track(None).to_string(), "The Verdigris - Static Orchard");
         assert_eq!(book().to_string(), "Marlow Finch - The Quiet Ledger");
     }
@@ -570,7 +577,9 @@ mod tests {
     #[test]
     fn shared_item_and_discovered_keys_agree() {
         let discovered = discovered();
-        let shared = discovered.clone().into_shared_item("Copper.Vale.2001".to_owned());
+        let shared = discovered
+            .clone()
+            .into_shared_item("Copper.Vale.2001".to_owned());
         assert_eq!(discovered.key(), (MediaSource::Radarr, 99));
         assert_eq!(shared.key(), discovered.key());
     }

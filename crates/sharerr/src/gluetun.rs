@@ -470,7 +470,7 @@ async fn resolve_once(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use wiremock::matchers::{method, path};
@@ -714,9 +714,18 @@ mod tests {
 
     #[test]
     fn from_query_recognises_only_client_and_defaults_everything_else_to_tracker() {
-        assert_eq!(GluetunTarget::from_query(Some("client")), GluetunTarget::Client);
-        assert_eq!(GluetunTarget::from_query(Some("tracker")), GluetunTarget::Tracker);
-        assert_eq!(GluetunTarget::from_query(Some("bogus")), GluetunTarget::Tracker);
+        assert_eq!(
+            GluetunTarget::from_query(Some("client")),
+            GluetunTarget::Client
+        );
+        assert_eq!(
+            GluetunTarget::from_query(Some("tracker")),
+            GluetunTarget::Tracker
+        );
+        assert_eq!(
+            GluetunTarget::from_query(Some("bogus")),
+            GluetunTarget::Tracker
+        );
         assert_eq!(GluetunTarget::from_query(None), GluetunTarget::Tracker);
     }
 
@@ -837,7 +846,10 @@ mod tests {
             "{:?}",
             snapshot.last_error
         );
-        assert!(last_error.is_some(), "the loop's own dedup state must be updated too");
+        assert!(
+            last_error.is_some(),
+            "the loop's own dedup state must be updated too"
+        );
     }
 
     /// `poll_once`'s two early returns (inactive, no API key) are covered above;

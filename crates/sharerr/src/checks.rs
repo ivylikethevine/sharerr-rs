@@ -834,9 +834,7 @@ mod tests {
             TorrentBackend::Qbittorrent,
             &url,
             None,
-            TorrentCredential::ApiKey(SecretString::from(
-                "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
-            )),
+            TorrentCredential::ApiKey(SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86")),
         )
         .unwrap();
         assert_eq!(client.kind(), ClientKind::QBittorrent);
@@ -890,7 +888,13 @@ mod tests {
         let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
             "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
         ))));
-        let outcome = check_qbit(TorrentBackend::Qbittorrent, &base(&server), None, credential).await;
+        let outcome = check_qbit(
+            TorrentBackend::Qbittorrent,
+            &base(&server),
+            None,
+            credential,
+        )
+        .await;
 
         match outcome {
             QbitOutcome::Ready { version, kind, .. } => {
@@ -923,7 +927,13 @@ mod tests {
         let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
             "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
         ))));
-        let outcome = check_qbit(TorrentBackend::Qbittorrent, &base(&server), None, credential).await;
+        let outcome = check_qbit(
+            TorrentBackend::Qbittorrent,
+            &base(&server),
+            None,
+            credential,
+        )
+        .await;
 
         assert!(matches!(outcome, QbitOutcome::Failed(_)), "{outcome:?}");
     }

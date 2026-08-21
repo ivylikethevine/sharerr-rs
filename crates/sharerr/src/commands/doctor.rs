@@ -984,7 +984,7 @@ fn print_config_summary(config: &Config) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use secrecy::SecretString;
     use sharerr_core::config::{LibraryKind, TorrentBackend};
@@ -1013,7 +1013,12 @@ mod tests {
         let items: Vec<i32> = (0..(MAX_LISTED as i32 + 3)).collect();
         let mut shown = Vec::new();
 
-        report_capped(&mut report, &items, |_, item| shown.push(*item), " thing(s)");
+        report_capped(
+            &mut report,
+            &items,
+            |_, item| shown.push(*item),
+            " thing(s)",
+        );
 
         assert_eq!(shown.len(), MAX_LISTED);
         assert_eq!(shown, items[..MAX_LISTED]);
@@ -1064,7 +1069,9 @@ mod tests {
     fn quiet_secret_and_secret_read_a_real_vault_without_reporting_the_quiet_ones() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = vault_in(&dir);
-        vault.put("sonarr.api_key", &SecretString::from("k")).unwrap();
+        vault
+            .put("sonarr.api_key", &SecretString::from("k"))
+            .unwrap();
 
         assert!(quiet_secret(Some(&vault), "sonarr.api_key").is_some());
         assert!(quiet_secret(Some(&vault), "radarr.api_key").is_none());
@@ -1118,12 +1125,7 @@ mod tests {
             .unwrap();
         let mut report = Report::default();
 
-        check_torrent_credential(
-            &vault,
-            None,
-            Some("transmission.password"),
-            &mut report,
-        );
+        check_torrent_credential(&vault, None, Some("transmission.password"), &mut report);
 
         assert_eq!(report.failures, 0);
     }
@@ -1134,12 +1136,7 @@ mod tests {
         let vault = vault_in(&dir);
         let mut report = Report::default();
 
-        check_torrent_credential(
-            &vault,
-            None,
-            Some("transmission.password"),
-            &mut report,
-        );
+        check_torrent_credential(&vault, None, Some("transmission.password"), &mut report);
 
         assert_eq!(report.failures, 1);
     }
@@ -1409,7 +1406,10 @@ mod tests {
         .await;
 
         assert!(items.is_empty(), "a just-created tag carries nothing yet");
-        assert_eq!(report.failures, 0, "fix succeeded, so this is not a failure");
+        assert_eq!(
+            report.failures, 0,
+            "fix succeeded, so this is not a failure"
+        );
     }
 
     // --------------------------------------------------------------- check_qbit
@@ -1429,17 +1429,19 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/api/v2/torrents/categories"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "sharerr": { "name": "sharerr", "savePath": "" } })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "sharerr": { "name": "sharerr", "savePath": "" } }),
+            ))
             .mount(&server)
             .await;
 
         let dir = tempfile::tempdir().unwrap();
         let mut vault = vault_in(&dir);
         vault
-            .put(secret_keys::QBITTORRENT_API_KEY, &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"))
+            .put(
+                secret_keys::QBITTORRENT_API_KEY,
+                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            )
             .unwrap();
         let config = Config {
             torrent_backend: TorrentBackend::Qbittorrent,
@@ -1483,7 +1485,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = vault_in(&dir);
         vault
-            .put(secret_keys::QBITTORRENT_API_KEY, &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"))
+            .put(
+                secret_keys::QBITTORRENT_API_KEY,
+                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            )
             .unwrap();
         let config = Config {
             torrent_backend: TorrentBackend::Qbittorrent,

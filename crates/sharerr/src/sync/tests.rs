@@ -5,7 +5,7 @@
 //! what was added, because the property under test — running sync twice changes
 //! nothing the second time — is invisible to a stateless mock.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -1379,8 +1379,7 @@ async fn a_run_is_recorded_in_history() {
 /// be exercised directly with a vault opened in a tempdir, no `SHARERR_MASTER_KEY`
 /// required.
 fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
-    sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master"))
-        .unwrap()
+    sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master")).unwrap()
 }
 
 #[test]
@@ -1408,10 +1407,7 @@ fn build_arr_fails_with_the_missing_key_named_when_no_credential_is_stored() {
     };
 
     let err = super::build_arr(MediaSource::Sonarr, &config, &vault).unwrap_err();
-    assert!(
-        format!("{err:#}").contains("sonarr.api_key"),
-        "{err:#}"
-    );
+    assert!(format!("{err:#}").contains("sonarr.api_key"), "{err:#}");
 }
 
 #[test]
@@ -1546,10 +1542,7 @@ fn build_bails_when_no_library_source_is_configured() {
         let err = runtime
             .block_on(Syncer::build(&config, endpoint))
             .unwrap_err();
-        assert!(
-            format!("{err:#}").contains("no library source"),
-            "{err:#}"
-        );
+        assert!(format!("{err:#}").contains("no library source"), "{err:#}");
         Ok(())
     });
 }

@@ -1970,7 +1970,10 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
         let written = std::fs::read_to_string(&config_path).expect("save_tracker writes the file");
-        assert!(written.contains(r#"advertised_host = "sharerr.example""#), "{written}");
+        assert!(
+            written.contains(r#"advertised_host = "sharerr.example""#),
+            "{written}"
+        );
         assert!(written.contains("port = 51413"), "{written}");
         assert!(
             written.contains(r#"advertised_url = "https://sharerr.example/""#),

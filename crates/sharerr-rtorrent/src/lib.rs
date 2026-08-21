@@ -1045,13 +1045,17 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(
-                ResponseTemplate::new(200).set_body_string(scalar_response("<string>oops</string>")),
+                ResponseTemplate::new(200)
+                    .set_body_string(scalar_response("<string>oops</string>")),
             )
             .mount(&server)
             .await;
 
         let err = client(&server).list(None).await.unwrap_err();
-        assert!(err.to_string().contains("expected an array of arrays"), "{err}");
+        assert!(
+            err.to_string().contains("expected an array of arrays"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -1133,10 +1137,10 @@ mod tests {
             .map(|r| String::from_utf8(r.body.clone()).unwrap())
             .collect();
         assert!(
-            bodies
-                .iter()
-                .any(|b| b.contains("throttle.up.max.set") && b.contains("abc123")
-                    || b.contains("throttle.up.max.set")),
+            bodies.iter().any(
+                |b| b.contains("throttle.up.max.set") && b.contains("abc123")
+                    || b.contains("throttle.up.max.set")
+            ),
             "expected a throttle.up.max.set call: {bodies:?}"
         );
         assert!(

@@ -569,7 +569,7 @@ async fn exchange_with(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use sharerr_store::PeerScope;
@@ -899,9 +899,11 @@ mod tests {
             .await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/api/gossip/endpoints"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(RecordBatch {
-                records: vec![friend],
-            }))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(RecordBatch {
+                    records: vec![friend],
+                }),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -973,18 +975,13 @@ mod tests {
 
         // Port 0 never accepts a connection — a stand-in for "the friend's
         // sharerr is offline" without depending on any real network.
-        let err = exchange_with(
-            &http,
-            &store,
-            ids[0],
-            "http://127.0.0.1:0",
-            "k",
-            None,
-            &[],
-        )
-        .await
-        .unwrap_err();
-        assert!(err.starts_with("push: ") || err.starts_with("pull: "), "{err}");
+        let err = exchange_with(&http, &store, ids[0], "http://127.0.0.1:0", "k", None, &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("push: ") || err.starts_with("pull: "),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -1032,7 +1029,10 @@ mod tests {
                 kinds.contains(&"client"),
                 "the client endpoint is independent of tracker/api and must appear once observed: {kinds:?}"
             );
-            assert!(verify(&record).is_ok(), "self_record must sign, not just assemble");
+            assert!(
+                verify(&record).is_ok(),
+                "self_record must sign, not just assemble"
+            );
             Ok(())
         });
     }
@@ -1076,11 +1076,7 @@ mod tests {
 
                 let store = state.store().await.unwrap();
                 let peer = store
-                    .create_peer(
-                        "Friend",
-                        &SecretString::from("friend-key"),
-                        PeerScope::All,
-                    )
+                    .create_peer("Friend", &SecretString::from("friend-key"), PeerScope::All)
                     .await
                     .unwrap();
                 store
@@ -1199,5 +1195,4 @@ mod tests {
             Ok(())
         });
     }
-
 }

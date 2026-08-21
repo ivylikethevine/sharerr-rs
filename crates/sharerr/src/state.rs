@@ -595,7 +595,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::fixtures::{unconfigured, unloadable};
     use super::*;
@@ -776,7 +776,10 @@ mod tests {
     async fn quiet_notified_and_swarms_are_shared_handles() {
         let (_dir, state) = unconfigured();
 
-        assert!(Arc::ptr_eq(&state.quiet_notified(), &state.quiet_notified()));
+        assert!(Arc::ptr_eq(
+            &state.quiet_notified(),
+            &state.quiet_notified()
+        ));
         assert!(Arc::ptr_eq(&state.swarms(), &state.swarms()));
     }
 
@@ -895,7 +898,10 @@ mod tests {
                 assert!(state.tracker_token().await.is_none());
 
                 assert!(
-                    state.gluetun_api_key(GluetunTarget::Tracker).await.is_none(),
+                    state
+                        .gluetun_api_key(GluetunTarget::Tracker)
+                        .await
+                        .is_none(),
                     "no gluetun key stored yet"
                 );
 

@@ -299,7 +299,7 @@ pub(crate) async fn asset(axum::extract::Path(file): axum::extract::Path<String>
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use crate::state::fixtures::unconfigured;

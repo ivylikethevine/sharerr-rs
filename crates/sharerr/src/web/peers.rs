@@ -466,7 +466,11 @@ mod tests {
         let (_dir, state) = web_state_with_unopenable_store();
 
         let response = page(State(state)).await;
-        assert_eq!(response.status(), axum::http::StatusCode::OK, "still renders");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "still renders"
+        );
     }
 
     #[tokio::test]
@@ -499,7 +503,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -507,7 +514,10 @@ mod tests {
         let (_dir, state) = web_state_with_unopenable_store();
 
         let response = revoke(State(state), Path(1)).await;
-        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -522,7 +532,10 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -539,7 +552,10 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -547,7 +563,10 @@ mod tests {
         let (_dir, state) = web_state_with_unopenable_store();
 
         let response = delete(State(state), Path(1)).await;
-        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
@@ -555,7 +574,10 @@ mod tests {
         let (_dir, state) = web_state_with_unopenable_store();
 
         let response = feed_preview(State(state), Path(1)).await;
-        assert_eq!(response.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     /// A peer with a recorded endpoint must have it round-trip into the

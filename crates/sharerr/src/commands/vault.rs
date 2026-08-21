@@ -112,7 +112,7 @@ fn validate_secret(key: &str, raw: &str) -> Result<SecretString> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use secrecy::ExposeSecret;
 
@@ -160,7 +160,10 @@ mod tests {
 
     #[test]
     fn remove_message_when_present() {
-        assert_eq!(remove_message("sonarr.api_key", true), "removed \"sonarr.api_key\"");
+        assert_eq!(
+            remove_message("sonarr.api_key", true),
+            "removed \"sonarr.api_key\""
+        );
     }
 
     #[test]

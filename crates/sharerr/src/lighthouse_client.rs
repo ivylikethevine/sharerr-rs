@@ -274,7 +274,7 @@ async fn apply_lookup(store: &Store, peer_id: i64, record: &LighthouseRecord) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use std::net::SocketAddr;
 

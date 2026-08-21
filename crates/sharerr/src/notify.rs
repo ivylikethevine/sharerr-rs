@@ -206,7 +206,7 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
 

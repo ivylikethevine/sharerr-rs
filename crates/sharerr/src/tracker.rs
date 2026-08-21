@@ -819,7 +819,10 @@ mod tests {
 
         let (status, body) = get(&state, "/scrape?info_hash=%00").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("info_hash must be exactly 20 bytes"), "{body}");
+        assert!(
+            body.contains("info_hash must be exactly 20 bytes"),
+            "{body}"
+        );
     }
 
     /// A well-formed hash for a torrent this instance does not share gets an

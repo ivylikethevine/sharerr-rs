@@ -88,7 +88,7 @@ pub async fn open_vault_at(path: std::path::PathBuf) -> anyhow::Result<Vault> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::result_large_err)]
 
     use super::*;
 

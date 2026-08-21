@@ -332,7 +332,10 @@ mod tests {
         async fn version(&self) -> sharerr_client::Result<String> {
             Ok("stub".to_owned())
         }
-        async fn list(&self, _category: Option<&str>) -> sharerr_client::Result<Vec<TorrentSummary>> {
+        async fn list(
+            &self,
+            _category: Option<&str>,
+        ) -> sharerr_client::Result<Vec<TorrentSummary>> {
             Ok(Vec::new())
         }
         async fn files(&self, hash: &str) -> sharerr_client::Result<Vec<TorrentFileEntry>> {
@@ -410,13 +413,13 @@ mod tests {
     #[tokio::test]
     async fn refresh_announce_with_no_cached_file_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
-        let seeder = seeder(
-            Arc::new(StubClient::default()),
-            dir.path().to_path_buf(),
-        );
+        let seeder = seeder(Arc::new(StubClient::default()), dir.path().to_path_buf());
         let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
 
-        let changed = seeder.refresh_announce("deadbeef", &announce).await.unwrap();
+        let changed = seeder
+            .refresh_announce("deadbeef", &announce)
+            .await
+            .unwrap();
         assert!(!changed);
     }
 
@@ -426,8 +429,7 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let old_announce =
-            AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
+        let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
         let built = LavaTorrentFactory
             .create(&TorrentRequest {
                 path: &media,
@@ -437,12 +439,15 @@ mod tests {
 
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
-        std::fs::write(torrent_file_path(&torrent_dir, &built.info_hash), &built.data).unwrap();
+        std::fs::write(
+            torrent_file_path(&torrent_dir, &built.info_hash),
+            &built.data,
+        )
+        .unwrap();
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let new_announce =
-            AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
+        let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
 
         let changed = seeder
             .refresh_announce(&built.info_hash, &new_announce)
