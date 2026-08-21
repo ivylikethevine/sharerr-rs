@@ -6,8 +6,9 @@
 //! ./run_docker_tests.sh
 //! ```
 //!
-//! which brings the stack up, seeds Sonarr and Radarr with tagged content, loads
-//! the credentials, and ends by running these. Driving it by hand is documented in
+//! which brings the stack up, seeds Sonarr, Radarr, and (on the plain stack)
+//! Lidarr with tagged content, loads the credentials, and ends by running these.
+//! Driving it by hand is documented in
 //! `docker/README.md`; the invocation these expect is
 //! `cargo test -p sharerr --features e2e -- --ignored --test-threads=1`.
 //!
@@ -165,7 +166,8 @@ fn a_real_sync_never_moves_or_rewrites_the_library() {
     // moves nothing. The count comes from the same fixtures `seed-arr` tags, so it
     // cannot drift from what Sonarr and Radarr were told about.
     let expected = sharerr_testkit::library::tv_files(&media).len()
-        + sharerr_testkit::library::movie_files(&media).len();
+        + sharerr_testkit::library::movie_files(&media).len()
+        + sharerr_testkit::library::music_files(&media).len();
     assert!(
         report.contains(&format!("{expected} discovered")),
         "expected {expected} tagged file(s) — is the stack seeded? got: {report}"

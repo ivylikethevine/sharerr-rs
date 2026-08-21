@@ -41,23 +41,46 @@ client," a seeding goal stated once at add time through whatever native
 mechanism the client offers for it, same as qBittorrent (inline on
 `torrents/add`) and Transmission (a follow-up `torrent-set`) already do.
 
-| Client                            | Notes                                                                                                                |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **rTorrent / ruTorrent**          | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.                   |
-| **Transmission-compatible forks** | Anything speaking the Transmission RPC should already work — the client is the same. Untested, and cheap to confirm. |
+| Client                   | Notes                                                                                               |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| **rTorrent / ruTorrent** | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.  |
+
+**Transmission-compatible forks.** Confirmed by inspection: `sharerr-transmission` has no
+version pinning, fork detection, or anything else RPC-version-specific — it only implements the
+documented session-id handshake and standard `torrent-*`/`session-get` methods
+(`crates/sharerr-transmission/src/lib.rs`). The tier-2 suite already drives this same client
+against a real `transmission-daemon` (`docker/compose.transmission.yml`) over genuine RPC, which
+is the same protocol surface a compatible fork would present — there is no fork-specific behavior
+in the client left to separately prove. Standing up a real fork was investigated and set aside:
+the one actively-maintained candidate has no published Docker image, and its own maintainers
+describe its RPC compatibility as imperfect — not a good use of effort to re-confirm what tier-2
+already covers.
 
 ### Indexers (what consumes the feed)
 
 Today: **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
-**Sonarr/Radarr direct** (confirmed against a real Sonarr in the tier-2 suite).
-
-| Consumer                  | Notes                                                                                           |
-| ------------------------- | ----------------------------------------------------------------------------------------------- |
-| **Lidarr/Readarr direct** | Follows from library-source support, since the caps document gates what they will even ask for. |
+**Sonarr/Radarr/Lidarr direct** (each confirmed against a real instance in the
+tier-2 suite — `docker/compose.test.yml`'s `lidarr` service, seeded the same way
+as Sonarr/Radarr via `seed-arr`, and a real Lidarr accepting sharerr as a Torznab
+indexer over category 3000). **Readarr direct is explicitly out of scope**: this
+project targets small-scale homelab media-file sharing, and books are a
+different, much smaller scale of content than the audio/video files everything
+else here shares — existing Readarr library-source support is unaffected, this
+is only about the indexer direction.
 
 One earlier "should already work" assumption turned out not to (Sonarr direct
 rejected the feed over a missing `pubDate`) — worth remembering the next time
-something in this table looks done just because the shape matches.
+something in this table looks done just because the shape matches. Confirming
+Lidarr direct surfaced three more, unrelated to Lidarr itself: `seed-arr`'s
+Lidarr schema had to be reverse-engineered against a live container from
+scratch (nothing in the repo named it, unlike Sonarr/Radarr's), and
+`run_docker_tests.sh` turned out to have silently rotted out from under three
+separate drifts nothing had caught since tier-2 is opt-in and CI never runs it:
+a stale `qbittorrent.username` config key (`QbitConfig` has never had one),
+qBittorrent pinned at 5.0.4 while `sharerr-qbit` speaks only the WebUI API key
+introduced in 5.2, and the Torznab feed's `apikey` check being peer-only with no
+shared-secret fallback while the script still tried to vault-set one. All three
+are fixed as part of this work; the tier-2 suite passes end to end again.
 
 ## Functionality
 

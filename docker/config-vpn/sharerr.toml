@@ -29,10 +29,9 @@ url = "http://radarr:7878"
 # behind a VPN container, and it fails as "connection refused"/"no such host"
 # rather than as anything that names the cause.
 url = "http://gluetun:8080"
-username = "admin"
 category = "sharerr"
 tag = "sharerr"
-skip_checking = false
+skip_checking = true
 
 [tracker]
 # The address a *peer* uses, which behind a VPN is the tunnel's exit — not this

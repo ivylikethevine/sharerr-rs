@@ -150,7 +150,7 @@ mod tests {
             let cfg = load(&jail.directory().join("absent.toml")).expect("defaults load");
             assert_eq!(cfg.tag, "sharerr");
             assert_eq!(cfg.server.bind.port(), 8477);
-            assert!(!cfg.qbittorrent.skip_checking);
+            assert!(cfg.qbittorrent.skip_checking);
             Ok(())
         });
     }

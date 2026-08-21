@@ -36,12 +36,20 @@ fn main() -> ExitCode {
         }
     };
 
+    let music = match sharerr_testkit::music_library(&root) {
+        Ok(library) => library,
+        Err(err) => {
+            eprintln!("could not write the music library: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     println!(
         "wrote {} synthetic file(s) under {}",
-        tv.files.len() + movies.files.len(),
+        tv.files.len() + movies.files.len() + music.files.len(),
         root.display()
     );
-    for file in tv.files.iter().chain(&movies.files) {
+    for file in tv.files.iter().chain(&movies.files).chain(&music.files) {
         println!("  {} ({} bytes)", file.disk_path.display(), file.size);
     }
     println!();

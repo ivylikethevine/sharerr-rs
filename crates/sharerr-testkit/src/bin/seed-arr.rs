@@ -1,27 +1,30 @@
-//! Write the tagged fixture library straight into Sonarr's and Radarr's databases.
+//! Write the tagged fixture library straight into Sonarr's, Radarr's, and
+//! Lidarr's databases.
 //!
 //! ```text
 //! cargo run -p sharerr-testkit --bin seed-arr -- \
 //!     --sonarr docker/state/sonarr/sonarr.db \
-//!     --radarr docker/state/radarr/radarr.db
+//!     --radarr docker/state/radarr/radarr.db \
+//!     --lidarr docker/state/lidarr/lidarr.db
 //! ```
 //!
 //! # Why not the API
 //!
 //! `POST /api/v3/series` triggers a metadata lookup against `services.sonarr.tv`,
-//! and `POST /api/v3/movie` one against `api.radarr.video`. The compose stack's
-//! network is `internal: true` precisely so nothing can reach either, and even with
+//! `POST /api/v3/movie` one against `api.radarr.video`, and adding an artist or
+//! album to Lidarr one against MusicBrainz. The compose stack's network is
+//! `internal: true` precisely so nothing can reach any of them, and even with
 //! egress the lookup would fail: every fixture title is invented, so there is
 //! nothing out there to find. Writing the rows directly is the only way to get
 //! tagged content while keeping the stack sealed.
 //!
 //! # Two consequences
 //!
-//! **Sonarr and Radarr must be stopped.** Both hold their SQLite database open and
+//! **All three apps must be stopped.** Each holds its SQLite database open and
 //! will not observe an external write while running.
 //!
 //! **This is coupled to their schemas**, which is why `compose.test.yml` pins
-//! image tags rather than using `:latest`. Only the columns sharerr's four read
+//! image tags rather than using `:latest`. Only the columns sharerr's read
 //! endpoints need are populated; the rows are deliberately minimal and would not
 //! satisfy a metadata refresh.
 //!
@@ -35,9 +38,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use sharerr_testkit::library::{
-    ARR_MOVIE_PREFIX, ARR_TV_PREFIX, EPISODES, MOVIE_FOLDER, MOVIE_ID, MOVIE_IMDB_ID, MOVIE_TITLE,
-    MOVIE_TMDB_ID, MOVIE_YEAR, MediaFile, SERIES_FOLDER, SERIES_ID, SERIES_IMDB_ID, SERIES_TITLE,
-    SERIES_TVDB_ID, SERIES_TVMAZE_ID, TAG_LABEL, movie_files, tv_files,
+    ALBUM_FOREIGN_ID, ALBUM_ID, ALBUM_RELEASE_FOREIGN_ID, ALBUM_TITLE, ARR_MOVIE_PREFIX,
+    ARR_MUSIC_PREFIX, ARR_TV_PREFIX, ARTIST_FOLDER, ARTIST_FOREIGN_ID, ARTIST_ID, ARTIST_NAME,
+    EPISODES, MOVIE_FOLDER, MOVIE_ID, MOVIE_IMDB_ID, MOVIE_TITLE, MOVIE_TMDB_ID, MOVIE_YEAR,
+    MediaFile, SERIES_FOLDER, SERIES_ID, SERIES_IMDB_ID, SERIES_TITLE, SERIES_TVDB_ID,
+    SERIES_TVMAZE_ID, TAG_LABEL, TRACKS, movie_files, music_files, tv_files,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::{Executor, Row};
@@ -62,24 +67,27 @@ const LANGUAGES: &str = "[1]";
 /// Never a root folder the *arr app itself owns — these are the read-only mounts.
 const TV_ROOT: &str = ARR_TV_PREFIX;
 const MOVIE_ROOT: &str = ARR_MOVIE_PREFIX;
+const MUSIC_ROOT: &str = ARR_MUSIC_PREFIX;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (sonarr, radarr) = match parse_args() {
+    let (sonarr, radarr, lidarr) = match parse_args() {
         Ok(paths) => paths,
         Err(message) => {
             eprintln!("{message}");
             eprintln!(
-                "usage: seed-arr --sonarr <sonarr.db> --radarr <radarr.db>\n\
+                "usage: seed-arr --sonarr <sonarr.db> --radarr <radarr.db> \
+                 [--lidarr <lidarr.db>]\n\
                  \n\
-                 Both apps must be stopped: they hold these databases open and will\n\
-                 not see an external write while running."
+                 Every named app must be stopped: it holds its database open and will\n\
+                 not see an external write while running. --lidarr is omitted by the\n\
+                 VPN and Transmission stacks, which carry no Lidarr container."
             );
             return ExitCode::FAILURE;
         }
     };
 
-    if let Err(err) = run(&sonarr, &radarr).await {
+    if let Err(err) = run(&sonarr, &radarr, lidarr.as_deref()).await {
         eprintln!("seeding failed: {err}");
         return ExitCode::FAILURE;
     }
@@ -87,15 +95,17 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn parse_args() -> Result<(PathBuf, PathBuf), String> {
+fn parse_args() -> Result<(PathBuf, PathBuf, Option<PathBuf>), String> {
     let mut sonarr = None;
     let mut radarr = None;
+    let mut lidarr = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(flag) = args.next() {
         let target = match flag.as_str() {
             "--sonarr" => &mut sonarr,
             "--radarr" => &mut radarr,
+            "--lidarr" => &mut lidarr,
             other => return Err(format!("unexpected argument {other:?}")),
         };
         let value = args.next().ok_or(format!("{flag} needs a path"))?;
@@ -103,12 +113,16 @@ fn parse_args() -> Result<(PathBuf, PathBuf), String> {
     }
 
     match (sonarr, radarr) {
-        (Some(sonarr), Some(radarr)) => Ok((sonarr, radarr)),
-        _ => Err("both --sonarr and --radarr are required".to_owned()),
+        (Some(sonarr), Some(radarr)) => Ok((sonarr, radarr, lidarr)),
+        _ => Err("--sonarr and --radarr are required".to_owned()),
     }
 }
 
-async fn run(sonarr_db: &std::path::Path, radarr_db: &std::path::Path) -> anyhow::Result<()> {
+async fn run(
+    sonarr_db: &std::path::Path,
+    radarr_db: &std::path::Path,
+    lidarr_db: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     // The fixture root is irrelevant here — only `arr_path`, `size` and
     // `scene_name` are used, and those describe how the *arr app sees the file,
     // not where it is on this host.
@@ -126,13 +140,27 @@ async fn run(sonarr_db: &std::path::Path, radarr_db: &std::path::Path) -> anyhow
     seed_radarr(&radarr, tag_id, &movies).await?;
     radarr.close().await;
 
-    println!(
-        "tagged {:?}: {} episode file(s) on {SERIES_TITLE:?}, {} movie file(s) on {MOVIE_TITLE:?}",
-        TAG_LABEL,
+    let music_count = if let Some(lidarr_db) = lidarr_db {
+        let music = music_files(unused_root);
+        let lidarr = open(lidarr_db).await?;
+        let tag_id = ensure_tag(&lidarr).await?;
+        seed_lidarr(&lidarr, tag_id, &music).await?;
+        lidarr.close().await;
+        Some(music.len())
+    } else {
+        None
+    };
+
+    print!(
+        "tagged {TAG_LABEL:?}: {} episode file(s) on {SERIES_TITLE:?}, {} movie file(s) on {MOVIE_TITLE:?}",
         tv.len(),
         movies.len()
     );
-    println!("start sonarr and radarr again to pick this up");
+    match music_count {
+        Some(count) => println!(", {count} track file(s) on {ARTIST_NAME:?}"),
+        None => println!(" (no --lidarr given, so nothing was tagged on {ARTIST_NAME:?})"),
+    }
+    println!("start the apps just stopped again to pick this up");
     Ok(())
 }
 
@@ -318,6 +346,128 @@ async fn seed_radarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
     .bind(LANGUAGES)
     .execute(db)
     .await?;
+
+    Ok(())
+}
+
+/// Lidarr tags the artist, not the album — one tagged artist shares their whole
+/// discography, the same surprise Sonarr's series-level tags produce.
+///
+/// Every `TrackFiles` row needs at least one `Tracks` row pointing at it, or it
+/// is invisible to Lidarr's own API — confirmed against a live container that
+/// its artist/album-filtered `trackfile` endpoint inner-joins through `Tracks`,
+/// so a file nothing points at does not merely look track-less, it does not
+/// exist as far as the API is concerned. `sharerr_arr::lidarr::track_number`'s
+/// "whole album" fallback is therefore two `Tracks` rows sharing one
+/// `TrackFileId`, not zero — see [`sharerr_testkit::library::TRACKS`].
+///
+/// Column names here were confirmed against a live `lscr.io/linuxserver/lidarr`
+/// container's schema rather than assumed — Lidarr splits the descriptive half
+/// of both an artist and an album into their own tables (`ArtistMetadata`,
+/// `AlbumReleases`), the same way Radarr 5 splits `MovieMetadata` from `Movies`.
+/// Unlike `EpisodeFiles`/`MovieFiles`, `TrackFiles.Path` holds the *full* path —
+/// there is no `RelativePath` column to join against the artist's own `Path`.
+async fn seed_lidarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyhow::Result<()> {
+    let artist_path = format!("{MUSIC_ROOT}/{ARTIST_FOLDER}");
+    let tags = format!("[{tag_id}]");
+
+    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(MUSIC_ROOT))
+        .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO ArtistMetadata (
+             Id, ForeignArtistId, Name, Status, Images, Aliases, OldForeignArtistIds
+         ) VALUES (?, ?, ?, 1, '[]', '[]', '[]')",
+    )
+    .bind(ARTIST_ID)
+    .bind(ARTIST_FOREIGN_ID)
+    .bind(ARTIST_NAME)
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO Artists (
+             Id, CleanName, Path, Monitored, SortName, QualityProfileId, Tags, Added,
+             MetadataProfileId, ArtistMetadataId, MonitorNewItems
+         ) VALUES (?, ?, ?, 1, ?, 1, ?, ?, 1, ?, 0)",
+    )
+    .bind(ARTIST_ID)
+    .bind(clean(ARTIST_NAME))
+    .bind(&artist_path)
+    .bind(ARTIST_NAME.to_lowercase())
+    .bind(&tags)
+    .bind(ADDED)
+    .bind(ARTIST_ID)
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO Albums (
+             Id, ForeignAlbumId, Title, CleanTitle, Images, Monitored, ProfileId, Added,
+             AlbumType, ArtistMetadataId, AnyReleaseOk, OldForeignAlbumIds
+         ) VALUES (?, ?, ?, ?, '[]', 1, 1, ?, 'Album', ?, 1, '[]')",
+    )
+    .bind(ALBUM_ID)
+    .bind(ALBUM_FOREIGN_ID)
+    .bind(ALBUM_TITLE)
+    .bind(clean(ALBUM_TITLE))
+    .bind(ADDED)
+    .bind(ARTIST_ID)
+    .execute(db)
+    .await?;
+
+    // The specific pressing `Tracks` points at, distinct from the album itself —
+    // one album can have several MusicBrainz releases; this fixture has one.
+    sqlx::query(
+        "INSERT OR REPLACE INTO AlbumReleases (
+             Id, ForeignReleaseId, AlbumId, Title, Status, Duration, Monitored, OldForeignReleaseIds
+         ) VALUES (?, ?, ?, ?, 'Official', 0, 1, '[]')",
+    )
+    .bind(ALBUM_ID)
+    .bind(ALBUM_RELEASE_FOREIGN_ID)
+    .bind(ALBUM_ID)
+    .bind(ALBUM_TITLE)
+    .execute(db)
+    .await?;
+
+    for file in files {
+        sqlx::query(
+            "INSERT OR REPLACE INTO TrackFiles (
+                 Id, AlbumId, Quality, Size, SceneName, DateAdded, ReleaseGroup, MediaInfo,
+                 Modified, Path, IndexerFlags
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 0)",
+        )
+        .bind(file.file_id)
+        .bind(ALBUM_ID)
+        .bind(QUALITY)
+        .bind(file.size as i64)
+        .bind(file.scene_name.as_deref())
+        .bind(ADDED)
+        .bind(ADDED)
+        .bind(&file.arr_path)
+        .execute(db)
+        .await?;
+    }
+
+    for (track_id, file_id, number, foreign_track_id) in TRACKS {
+        sqlx::query(
+            "INSERT OR REPLACE INTO Tracks (
+                 Id, ForeignTrackId, Title, Explicit, TrackFileId, Duration, MediumNumber,
+                 AbsoluteTrackNumber, ForeignRecordingId, AlbumReleaseId, ArtistMetadataId,
+                 OldForeignRecordingIds, OldForeignTrackIds
+             ) VALUES (?, ?, ?, 0, ?, 180, 1, ?, ?, ?, ?, '[]', '[]')",
+        )
+        .bind(track_id)
+        .bind(foreign_track_id)
+        .bind(format!("Track {number}"))
+        .bind(file_id)
+        .bind(number)
+        .bind(foreign_track_id)
+        .bind(ALBUM_ID)
+        .bind(ARTIST_ID)
+        .execute(db)
+        .await?;
+    }
 
     Ok(())
 }

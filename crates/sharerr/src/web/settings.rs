@@ -1214,4 +1214,84 @@ mod tests {
         assert!(validate_advertised_host("203.0.113.9").is_ok());
         assert!(validate_advertised_host("sharerr.example").is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // Handler tests
+    //
+    // A `WebState` built on `state::fixtures::unconfigured()` — a temp `data_dir`
+    // with no master key set, same fixture `state.rs`'s own tests use. Per
+    // CLAUDE.md, no tier-1 fixture opens a real vault (a parallel test runner
+    // cannot scope `SHARERR_MASTER_KEY` per test), so these call handlers
+    // directly with hand-built extractors rather than through a router, and
+    // stick to inputs that either avoid the vault entirely or deliberately
+    // exercise the path where it will not open.
+    // -----------------------------------------------------------------------
+
+    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
+        WebState {
+            serve,
+            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_arr_writes_the_normalised_url_to_the_config_file() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        // Blank api_key with no clear flag never touches the vault — see
+        // `apply_secret`'s early return — so this stays within the no-live-vault
+        // rule while still exercising the config-writing half of `save_arr`.
+        let response = save_arr(
+            State(state),
+            axum::extract::Path(MediaSource::Sonarr),
+            Form(ArrForm {
+                url: "sonarr:8989".to_owned(),
+                api_key: String::new(),
+                clear_api_key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .expect("a successful save redirects"),
+            "/settings?saved=sonarr"
+        );
+
+        let written = std::fs::read_to_string(&config_path).expect("save_arr writes the file");
+        assert!(written.contains("http://sonarr:8989/"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        // A non-blank api_key routes through `apply_secret`, which opens the
+        // vault — impossible here with no master key set. `save_arr` must reject
+        // before `write_config` ever runs, or a URL would land in `sharerr.toml`
+        // while the API key silently failed to save beside it.
+        let response = save_arr(
+            State(state),
+            axum::extract::Path(MediaSource::Sonarr),
+            Form(ArrForm {
+                url: "sonarr:8989".to_owned(),
+                api_key: "some-api-key".to_owned(),
+                clear_api_key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            !config_path.exists(),
+            "a rejected secret write must not leave a partial config file behind"
+        );
+    }
 }

@@ -25,6 +25,7 @@ pub const TAG_LABEL: &str = "sharerr";
 /// really are, so every test exercises path mapping rather than assuming identity.
 pub const ARR_TV_PREFIX: &str = "/tv";
 pub const ARR_MOVIE_PREFIX: &str = "/movies";
+pub const ARR_MUSIC_PREFIX: &str = "/music";
 
 /// The tagged series, as the *arr apps record it.
 ///
@@ -51,6 +52,40 @@ pub const MOVIE_YEAR: i64 = 2019;
 pub const MOVIE_TMDB_ID: i64 = 555_444;
 pub const MOVIE_IMDB_ID: &str = "tt1234567";
 
+/// The tagged artist, as Lidarr records it. Lidarr tags the *artist*, not the
+/// album, so one tagged artist shares their whole discography — the same
+/// surprise Sonarr's series-level tags produce.
+pub const ARTIST_ID: i64 = 51;
+pub const ARTIST_NAME: &str = "Marigold Static";
+pub const ARTIST_FOLDER: &str = "Marigold Static";
+pub const ARTIST_FOREIGN_ID: &str = "3f6b1a2e-9c4d-4e7a-8f1b-2d5c6e7a8b9c";
+
+pub const ALBUM_ID: i64 = 71;
+pub const ALBUM_TITLE: &str = "Copper Wire Choir";
+pub const ALBUM_FOREIGN_ID: &str = "7a8b9c1d-2e3f-4a5b-6c7d-8e9f0a1b2c3d";
+pub const ALBUM_RELEASE_FOREIGN_ID: &str = "1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f";
+
+/// The two track files.
+pub const TRACK_FILE_IDS: [i64; 2] = [601, 602];
+
+/// Track id, the file it belongs to, absolute track number, and the foreign
+/// (MusicBrainz-shaped) track id.
+///
+/// File 601 has exactly one track pointing at it and is named after that track.
+/// File 602 has *two* tracks pointing at it — real Lidarr's actual shape for "this
+/// file is the whole album, not one track": confirmed against a live container
+/// that a `TrackFile` with *zero* `Tracks` rows is invisible to Lidarr's own
+/// artist/album-filtered `trackfile` API (it inner-joins through `Tracks`), so
+/// "no track claims this file" is not a real state to seed — the file simply
+/// would not exist as far as Lidarr's API is concerned. Two tracks sharing one
+/// `TrackFileId` is what actually falls back to the album name — see
+/// `sharerr_arr::lidarr::track_number`.
+pub const TRACKS: [(i64, i64, u32, &str); 3] = [
+    (6000, 601, 1, "9d8c7b6a-5e4f-3d2c-1b0a-9f8e7d6c5b4a"),
+    (6001, 602, 2, "5b4a3c2d-1e0f-9a8b-7c6d-5e4f3a2b1c0d"),
+    (6002, 602, 3, "6e5d4c3b-2a1f-0e9d-8c7b-6a5f4e3d2c1b"),
+];
+
 /// Big enough to span several pieces at the 256 KiB floor, small enough to be free.
 const FILE_SIZE: usize = 768 * 1024;
 
@@ -76,6 +111,12 @@ pub struct TvLibrary {
 
 #[derive(Debug, Clone)]
 pub struct MovieLibrary {
+    pub root: PathBuf,
+    pub files: Vec<MediaFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MusicLibrary {
     pub root: PathBuf,
     pub files: Vec<MediaFile>,
 }
@@ -129,6 +170,37 @@ pub fn movie_files(root: &Path) -> Vec<MediaFile> {
     }]
 }
 
+/// The music fixtures as records, without touching the disk. See [`tv_files`].
+///
+/// Two track files on one tagged album: one with a resolvable track number (see
+/// [`TRACKS`]), one where two tracks share the file — the file is the whole
+/// album rather than one track, and still shareable as such.
+pub fn music_files(root: &Path) -> Vec<MediaFile> {
+    let relative = [
+        (
+            TRACK_FILE_IDS[0],
+            "01 copper wire choir.flac",
+            Some("Marigold.Static-Copper.Wire.Choir-01-FAKEGRP"),
+        ),
+        (TRACK_FILE_IDS[1], "02 copper wire choir.flac", None),
+    ];
+
+    relative
+        .into_iter()
+        .map(|(file_id, tail, scene_name)| {
+            let suffix = format!("{ARTIST_FOLDER}/{ALBUM_TITLE}/{tail}");
+            MediaFile {
+                file_id,
+                source_id: ARTIST_ID,
+                arr_path: format!("{ARR_MUSIC_PREFIX}/{suffix}"),
+                disk_path: root.join("music").join(&suffix),
+                size: FILE_SIZE as u64,
+                scene_name: scene_name.map(str::to_owned),
+            }
+        })
+        .collect()
+}
+
 /// Two tagged episodes of one series, plus an untagged series that must never
 /// appear in discovery. Writes the files.
 pub fn tv_library(root: &Path) -> std::io::Result<TvLibrary> {
@@ -152,6 +224,19 @@ pub fn movie_library(root: &Path) -> std::io::Result<MovieLibrary> {
     }
 
     Ok(MovieLibrary {
+        root: root.to_path_buf(),
+        files,
+    })
+}
+
+/// One tagged artist with two track files on one album. Writes the files.
+pub fn music_library(root: &Path) -> std::io::Result<MusicLibrary> {
+    let files = music_files(root);
+    for (index, file) in files.iter().enumerate() {
+        write_media_file(&file.disk_path, FILE_SIZE, 3000 + index as u64)?;
+    }
+
+    Ok(MusicLibrary {
         root: root.to_path_buf(),
         files,
     })
@@ -325,5 +410,23 @@ mod tests {
         assert_eq!(library.files.len(), 1);
         assert!(library.files[0].disk_path.exists());
         assert_eq!(library.movie_json().as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_music_library_lands_on_disk_where_it_says_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = music_library(dir.path()).unwrap();
+
+        assert_eq!(library.files.len(), 2);
+        for file in &library.files {
+            assert!(
+                file.disk_path.exists(),
+                "{} was not written",
+                file.disk_path.display()
+            );
+            assert_eq!(std::fs::metadata(&file.disk_path).unwrap().len(), file.size);
+            assert!(file.arr_path.starts_with(ARR_MUSIC_PREFIX));
+            assert_ne!(Path::new(&file.arr_path), file.disk_path);
+        }
     }
 }

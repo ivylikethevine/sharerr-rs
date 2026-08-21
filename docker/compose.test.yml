@@ -27,7 +27,7 @@
 # What this does mean: the stack no longer *proves* sharerr makes no outbound
 # requests. That property now rests on the code and its hermetic tests.
 #
-# ## Sonarr and Radarr keep their config in `./state`, not a named volume
+# ## Sonarr, Radarr, and Lidarr keep their config in `./state`, not a named volume
 #
 # `seed-arr` runs on the host and writes to those SQLite databases directly, which
 # needs a path the host can actually open. PUID/PGID default to 1000 and follow the
@@ -36,7 +36,7 @@
 
 name: sharerr-test
 
-# Anchored once rather than repeated per service: all four *arr-family containers
+# Anchored once rather than repeated per service: all *arr-family containers
 # must write files the host user can then open.
 x-puid: &puid "${SHARERR_TEST_UID:-1000}"
 x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
@@ -72,8 +72,24 @@ services:
     ports:
       - "127.0.0.1:17878:7878"
 
+  lidarr:
+    # Confirmed against this exact version's live schema while building the
+    # Lidarr-direct indexer check — a silent major bump is exactly the kind of
+    # surprise `seed-arr`'s direct-SQLite writes cannot tolerate.
+    image: lscr.io/linuxserver/lidarr:3.1.0.4875-ls39
+    container_name: sharerr-test-lidarr
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state/lidarr:/config
+      - ../tests/fixtures/media/music:/music:ro
+    ports:
+      - "127.0.0.1:18686:8686"
+
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.0.4
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
     container_name: sharerr-test-qbittorrent
     environment:
       PUID: *puid
@@ -113,7 +129,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     container_name: sharerr-test-sharerr
-    depends_on: [sonarr, radarr, qbittorrent]
+    depends_on: [sonarr, radarr, lidarr, qbittorrent]
 
     environment:
       # A throwaway key for a throwaway stack. A real deployment supplies this as

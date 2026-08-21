@@ -22,13 +22,13 @@ bind = "0.0.0.0:8477"
 # they share one loopback and there is no name to resolve. This is the single
 # line most likely to be wrong if you adapted this from a non-VPN stack.
 url = "http://localhost:8080"
-username = "admin"
 category = "sharerr"
 tag = "sharerr"
-# Let qBittorrent verify the files it already has and go straight to seeding.
-# `true` is faster on a large library and will happily seed mismatched data if a
-# path mapping is wrong, so leave it off until the mappings are proven.
-skip_checking = false
+# `true` (the default) is faster on a large library, since sharerr never moves,
+# renames, or re-links media — but it will happily seed mismatched data if a path
+# mapping is wrong. Set this `false` while still proving the mappings are right,
+# so qBittorrent verifies rather than trusting them.
+skip_checking = true
 
 [tracker]
 # What *friends* resolve this instance as — the VPN exit's public address, not

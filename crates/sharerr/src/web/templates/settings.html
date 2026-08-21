@@ -148,8 +148,9 @@
   </label>
   {% call locked("qbittorrent.skip_checking") %}{% endcall %}
   <p class="hint">
-    Faster on a large library, but it will seed mismatched data if a path mapping
-    is wrong. Leave off unless you know the mappings are right.
+    On by default — faster on a large library. Turn it off while you're still
+    confirming your path mappings: with it on, a wrong mapping seeds mismatched
+    data instead of qBittorrent catching it.
   </p>
 
   <button type="submit">Save</button>

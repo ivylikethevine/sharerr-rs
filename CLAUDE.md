@@ -81,8 +81,11 @@ stalls seeding at 0%. The torrent's name must describe the file where it already
 sits; the release title is what the feed advertises. See `sharerr-torrent`.
 
 **Never move, rename, or re-link media.** This is the project's central constraint,
-not a preference. `skip_checking = false` is the default so qBittorrent verifies
-the existing file and seeds it in place.
+not a preference. `skip_checking = true` is the default, so qBittorrent seeds a
+newly-added torrent immediately rather than re-verifying it — sharerr never wrote
+anything qBittorrent's own hash check would need to catch. Set it `false` while
+still confirming a path mapping is correct: with checking on, a wrong mapping
+seeds mismatched data instead of qBittorrent refusing it.
 
 **Secrets never go in `sharerr.toml`.** They live in the encrypted vault, keyed by
 the constants in `sharerr_core::config::secret_keys`. Adding a secret means adding

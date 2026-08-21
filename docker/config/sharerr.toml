@@ -19,13 +19,16 @@ url = "http://sonarr:8989"
 [radarr]
 url = "http://radarr:7878"
 
+[lidarr]
+url = "http://lidarr:8686"
+
 [qbittorrent]
 url = "http://qbittorrent:8080"
-username = "admin"
 category = "sharerr"
 tag = "sharerr"
-# Let qBittorrent verify the files it already has and go straight to seeding.
-skip_checking = false
+# `true` (the default) trusts qBittorrent to seed newly-added torrents
+# immediately rather than re-verifying data sharerr never wrote to.
+skip_checking = true
 
 [tracker]
 # Whatever friends resolve this instance as. `localhost` only works because every
@@ -49,3 +52,8 @@ qbit = "/downloads/tv"
 arr = "/movies"
 sharerr = "/media/movies"
 qbit = "/downloads/movies"
+
+[[path_map]]
+arr = "/music"
+sharerr = "/media/music"
+qbit = "/downloads/music"

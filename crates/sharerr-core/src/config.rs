@@ -504,9 +504,12 @@ pub struct QbitConfig {
     pub tag: String,
     /// Skip qBittorrent's hash check when adding a torrent.
     ///
-    /// Default `false`: qBittorrent verifies the existing file, finds it complete,
-    /// and seeds immediately. Setting this `true` is faster on large libraries but
-    /// will happily seed mismatched data if a path mapping is wrong.
+    /// Default `true`: faster on large libraries, since sharerr never moves,
+    /// renames, or re-links media and expects `qbittorrent.url`/path mapping to
+    /// already be correct by the time a sync adds anything. Set this `false` to
+    /// have qBittorrent verify the existing file on every add instead — the
+    /// safer choice while path mappings are still being worked out, since a wrong
+    /// mapping otherwise seeds mismatched data instead of being caught.
     pub skip_checking: bool,
 }
 
@@ -519,7 +522,7 @@ impl Default for QbitConfig {
             url: Url::parse("http://localhost:8080").expect("valid literal url"),
             category: "sharerr".to_owned(),
             tag: "sharerr".to_owned(),
-            skip_checking: false,
+            skip_checking: true,
         }
     }
 }

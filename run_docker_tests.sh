@@ -41,6 +41,7 @@ if ((TM)); then
     STATE=docker/state-tm
     SONARR_PORT=38989 RADARR_PORT=37878 QBIT_PORT=39091 SHARERR_PORT=38477
     QBIT_SERVICE=transmission
+    LIDARR=0
 elif ((VPN)); then
     COMPOSE=(docker compose -f docker/compose.vpn.yml)
     STATE=docker/state-vpn
@@ -48,15 +49,23 @@ elif ((VPN)); then
     # qBittorrent's WebUI is published by gluetun, because qBittorrent has no
     # network of its own. Waiting on the gluetun service is waiting on both.
     QBIT_SERVICE=gluetun
+    LIDARR=0
 else
     COMPOSE=(docker compose -f docker/compose.test.yml)
     STATE=docker/state
     SONARR_PORT=18989 RADARR_PORT=17878 QBIT_PORT=18080 SHARERR_PORT=18477
     QBIT_SERVICE=qbittorrent
+    # Only the plain stack carries a Lidarr container — the VPN and Transmission
+    # variants exist to prove client/topology concerns, not indexer coverage, and
+    # duplicating the Lidarr indexer-test flow into both would triple the cost for
+    # no additional coverage of what those stacks are actually for.
+    LIDARR_PORT=18686
+    LIDARR=1
 fi
 
 SONARR_DB=$STATE/sonarr/sonarr.db
 RADARR_DB=$STATE/radarr/radarr.db
+LIDARR_DB=$STATE/lidarr/lidarr.db
 
 # Remove `docker/state`, falling back to a root-owned delete.
 #
@@ -159,6 +168,43 @@ vault_set() {
     printf %s "$value" | "${COMPOSE[@]}" exec -T sharerr sharerr vault set "$key"
 }
 
+# Exchange qBittorrent's temporary admin password for the WebUI API key
+# `sharerr-qbit` actually authenticates with. sharerr's own client never logs
+# in — "there is no auth/login round trip" per its module doc — the key is
+# meant to be minted once by a human under Options -> Web UI -> API key. This
+# reproduces that by hand: log in with the temporary password, then call the
+# same `rotateAPIKey` endpoint the WebUI's "Generate API key" button does.
+#
+# Run *inside* the sharerr container against the internal service name, not
+# the host's published port: qBittorrent checks the `Host` header's port
+# against the port it actually listens on and 401s on a mismatch — which a
+# remapped published port always is (`sharerr-qbit`'s client doc names this
+# exact trap). The password travels as an env var into the exec'd shell, not
+# interpolated into the command string, for the same apostrophe-safety reason
+# `vault_set` above avoids that.
+qbittorrent_api_key() {
+    local password=$1 host=$2 response key
+    # shellcheck disable=SC2016
+    # Single-quoted on purpose: $QBIT_HOST/$QBIT_PW must expand inside the
+    # container's shell from the env this exec sets, not out here.
+    response=$("${COMPOSE[@]}" exec -T -e QBIT_PW="$password" -e QBIT_HOST="$host" sharerr sh -c '
+        base="http://$QBIT_HOST:8080"
+        curl -sf -c /tmp/qbit-cookie \
+            --data-urlencode "username=admin" --data-urlencode "password=$QBIT_PW" \
+            -H "Referer: $base" "$base/api/v2/auth/login" >/dev/null &&
+        curl -sf -X POST -b /tmp/qbit-cookie -H "Referer: $base" "$base/api/v2/app/rotateAPIKey"
+    ') || {
+        echo "error: could not log in to qBittorrent to mint a WebUI API key" >&2
+        return 1
+    }
+    key=$(sed -n 's/.*"apiKey":"\([^"]*\)".*/\1/p' <<<"$response")
+    if [[ -z $key ]]; then
+        echo "error: qBittorrent did not return an API key: $response" >&2
+        return 1
+    fi
+    printf %s "$key"
+}
+
 # 1. Generate the synthetic library (idempotent — same bytes every time).
 cargo run -q -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 
@@ -168,24 +214,35 @@ cargo run -q -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 #    touch it.
 remove_state
 mkdir -p "$STATE/sonarr" "$STATE/radarr"
+((LIDARR)) && mkdir -p "$STATE/lidarr"
 "${COMPOSE[@]}" up -d --build
 
 wait_for sonarr "$SONARR_PORT" /ping
 wait_for radarr "$RADARR_PORT" /ping
+((LIDARR)) && wait_for lidarr "$LIDARR_PORT" /ping
 
-# 3. Give Sonarr and Radarr something tagged to find.
+# 3. Give Sonarr, Radarr, and (on the plain stack) Lidarr something tagged to
+#    find.
 #
 #    Written straight into their databases rather than added through the API: the
-#    add path does a metadata lookup against services.sonarr.tv / api.radarr.video,
-#    and every fixture title is invented, so the lookup would find nothing. Both
-#    apps must be stopped first; they hold these databases open and ignore
-#    external writes.
-"${COMPOSE[@]}" stop sonarr radarr
-cargo run -q -p sharerr-testkit --bin seed-arr -- --sonarr "$SONARR_DB" --radarr "$RADARR_DB"
-"${COMPOSE[@]}" start sonarr radarr
+#    add path does a metadata lookup against services.sonarr.tv / api.radarr.video
+#    / MusicBrainz, and every fixture title is invented, so the lookup would find
+#    nothing. Every app seeded this way must be stopped first; each holds its
+#    database open and ignores external writes.
+if ((LIDARR)); then
+    "${COMPOSE[@]}" stop sonarr radarr lidarr
+    cargo run -q -p sharerr-testkit --bin seed-arr -- \
+        --sonarr "$SONARR_DB" --radarr "$RADARR_DB" --lidarr "$LIDARR_DB"
+    "${COMPOSE[@]}" start sonarr radarr lidarr
+else
+    "${COMPOSE[@]}" stop sonarr radarr
+    cargo run -q -p sharerr-testkit --bin seed-arr -- --sonarr "$SONARR_DB" --radarr "$RADARR_DB"
+    "${COMPOSE[@]}" start sonarr radarr
+fi
 
 wait_for sonarr "$SONARR_PORT" /ping
 wait_for radarr "$RADARR_PORT" /ping
+((LIDARR)) && wait_for lidarr "$LIDARR_PORT" /ping
 # Waited on too, though nothing used to: step 5 execs into sharerr and the step
 # below greps qBittorrent's log, so both have to be up. Their absence from the
 # original wait list is what the fixed sleeps were quietly compensating for.
@@ -197,6 +254,7 @@ wait_for sharerr "$SHARERR_PORT" /health
 # 4. Collect the credentials each app generated on first start.
 SONARR_KEY=$(api_key sonarr)
 RADARR_KEY=$(api_key radarr)
+((LIDARR)) && LIDARR_KEY=$(api_key lidarr)
 
 # qBittorrent prints a temporary admin password to its log on first start. It only
 # does so when it has no stored password, so a miss means the config volume
@@ -206,12 +264,18 @@ if ((TM)); then
     # Transmission is given its credentials up front by compose, so there is no
     # temporary password to scrape — and its vault key is a different one.
     QBITTORRENT_PW=transmission-test-password
-elif ! QBITTORRENT_PW=$("${COMPOSE[@]}" logs qbittorrent 2>/dev/null |
-    grep -i 'temporary password' | awk '{print $NF}' | tail -n 1) ||
-    [[ -z ${QBITTORRENT_PW:-} ]]; then
-    echo "error: qBittorrent logged no temporary password." >&2
-    echo "       Its config volume is not fresh — run: ${COMPOSE[*]} down -v" >&2
-    exit 1
+else
+    if ! QBITTORRENT_PW=$("${COMPOSE[@]}" logs qbittorrent 2>/dev/null |
+        grep -i 'temporary password' | awk '{print $NF}' | tail -n 1) ||
+        [[ -z ${QBITTORRENT_PW:-} ]]; then
+        echo "error: qBittorrent logged no temporary password." >&2
+        echo "       Its config volume is not fresh — run: ${COMPOSE[*]} down -v" >&2
+        exit 1
+    fi
+    # The temporary password only logs sharerr into qBittorrent long enough to
+    # mint the WebUI API key sharerr's client actually authenticates with —
+    # see `qbittorrent_api_key` above.
+    QBITTORRENT_KEY=$(qbittorrent_api_key "$QBITTORRENT_PW" "$QBIT_SERVICE") || exit 1
 fi
 
 # 5. Load them into sharerr. Either open the UI on $SHARERR_PORT and paste them
@@ -222,16 +286,40 @@ fi
 #    `sharerr vault set` and stored something nothing ever read.
 vault_set sonarr.api_key "$SONARR_KEY"
 vault_set radarr.api_key "$RADARR_KEY"
+((LIDARR)) && vault_set lidarr.api_key "$LIDARR_KEY"
 if ((TM)); then
     vault_set transmission.password "$QBITTORRENT_PW"
 else
-    vault_set qbittorrent.password "$QBITTORRENT_PW"
+    vault_set qbittorrent.api_key "$QBITTORRENT_KEY"
 fi
 
-# The Torznab feed is closed without a key, so nothing exercised it. Set one and
-# the endpoint becomes checkable in step 6.
-TORZNAB_KEY=sharerr-test-torznab-key
-vault_set torznab.api_key "$TORZNAB_KEY"
+# The Torznab feed authenticates against a registered peer's own key — there is
+# no shared instance secret for it, so a vault entry cannot open it. Create the
+# one-time operator account and one peer the same way a real friend gets one:
+# through the web UI, since neither has a CLI or SQL shortcut ("sharerr-data" is
+# a named volume, not a bind mount, so seed-arr's direct-database approach does
+# not reach it either).
+SETUP_PW=sharerr-test-admin-password
+COOKIES=$(mktemp)
+curl -sf -c "$COOKIES" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=$SETUP_PW" \
+    --data-urlencode "confirm=$SETUP_PW" \
+    "http://127.0.0.1:$SHARERR_PORT/setup" -o /dev/null
+
+PEERS_BODY=$(curl -sf -b "$COOKIES" \
+    --data-urlencode "label=sharerr-test-peer" \
+    --data-urlencode "scope=all" \
+    "http://127.0.0.1:$SHARERR_PORT/peers")
+# The key is shown exactly once, in a bare <code> tag — the first one on a
+# successful response (the feed URL's own <code> comes later on the page) —
+# and there is no id/class to anchor on more directly than that.
+TORZNAB_KEY=$(sed -n 's/.*<code>\([^<]*\)<\/code>.*/\1/p' <<<"$PEERS_BODY" | head -n1)
+if [[ -z $TORZNAB_KEY ]]; then
+    echo "error: could not create a test peer or extract its key" >&2
+    echo "$PEERS_BODY" >&2
+    exit 1
+fi
 
 # 6. Check the wiring before trying to sync. The UI's per-service "Test connection"
 #    buttons cover the same ground for the services themselves; `doctor`
@@ -352,6 +440,42 @@ if [[ $(tail -n1 <<<"$indexer_test") != 200 ]]; then
 fi
 echo "sonarr accepts sharerr as an indexer ok"
 
+# 6g. The same proof for music: can a real Lidarr add sharerr as an indexer? Only
+#     on the plain stack — see the `LIDARR` note above. Lidarr's request/response
+#     shape was confirmed by hand against a live container while this was built:
+#     same Torznab `fields` array Sonarr uses, `/api/v1/indexer/test` in place of
+#     `/api/v3/`, category 3000 (Audio) in place of 5000 (TV). The sync above
+#     already covers Lidarr — `sharerr sync` walks every configured *arr source in
+#     one pass.
+if ((LIDARR)); then
+    lidarr_indexer=$(cat <<JSON
+{
+  "enableRss": true, "enableAutomaticSearch": true, "enableInteractiveSearch": true,
+  "supportsRss": true, "supportsSearch": true, "protocol": "torrent", "priority": 25,
+  "name": "sharerr-direct",
+  "implementation": "Torznab", "implementationName": "Torznab",
+  "configContract": "TorznabSettings",
+  "fields": [
+    {"name": "baseUrl", "value": "http://sharerr:8477"},
+    {"name": "apiPath", "value": "/api"},
+    {"name": "apiKey", "value": "$TORZNAB_KEY"},
+    {"name": "categories", "value": [3000]},
+    {"name": "minimumSeeders", "value": 1}
+  ]
+}
+JSON
+)
+    indexer_test=$(curl -s -w '\n%{http_code}' -X POST \
+        -H "X-Api-Key: $LIDARR_KEY" -H 'Content-Type: application/json' \
+        --data "$lidarr_indexer" "http://127.0.0.1:$LIDARR_PORT/api/v1/indexer/test")
+    if [[ $(tail -n1 <<<"$indexer_test") != 200 ]]; then
+        echo "error: a real Lidarr rejected sharerr as a Torznab indexer:" >&2
+        sed '$d' <<<"$indexer_test" >&2
+        exit 1
+    fi
+    echo "lidarr accepts sharerr as an indexer ok"
+fi
+
 # 6f. What only the Transmission stack can prove.
 if ((TM)); then
     # The client actually in use must be the configured one. `doctor` names it, so
@@ -425,10 +549,11 @@ if ((VPN)); then
     echo "vpn: sharerr survived the tunnel dropping"
 fi
 
-# 6c. The web UI is reachable and its guard is on. This stack has no operator
-#     account, so every protected page must bounce to /setup — which is also the
-#     cheapest proof that the auth middleware is wired in the real binary and not
-#     only in the unit tests.
+# 6c. The web UI is reachable and its guard is on. An unauthenticated request
+#     (no cookie sent) must bounce every protected page — to /login now that
+#     step 5 has claimed the instance, to /setup on an unclaimed one — which is
+#     also the cheapest proof that the auth middleware is wired in the real
+#     binary and not only in the unit tests.
 for page in / /settings /diagnostics /peers; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SHARERR_PORT$page")
     if [[ $code != 303 ]]; then

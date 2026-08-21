@@ -1,8 +1,8 @@
 # The compose test stack
 
-A disposable Sonarr + Radarr + qBittorrent + Prowlarr stack for exercising sharerr
-against the real services. **Entirely optional** — the default `cargo test` suite is
-hermetic and needs none of this.
+A disposable Sonarr + Radarr + Lidarr + qBittorrent + Prowlarr stack for exercising
+sharerr against the real services. **Entirely optional** — the default `cargo test`
+suite is hermetic and needs none of this.
 
 Everything in `tests/fixtures/media` is synthetic: invented titles, seeded
 pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhere.
@@ -24,20 +24,22 @@ The steps, if you want to drive them by hand:
 # 1. Generate the synthetic library (idempotent — same bytes every time).
 cargo run -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 
-# 2. Bring the stack up. Sonarr and Radarr keep their config in ./docker/state,
-#    which has to exist first — see "Seeding tagged content" below.
-mkdir -p docker/state/sonarr docker/state/radarr
+# 2. Bring the stack up. Sonarr, Radarr, and Lidarr keep their config in
+#    ./docker/state, which has to exist first — see "Seeding tagged content" below.
+mkdir -p docker/state/sonarr docker/state/radarr docker/state/lidarr
 docker compose -f docker/compose.test.yml up -d --build
 
 # 3. Give the *arr apps something tagged. They must be stopped for this.
-docker compose -f docker/compose.test.yml stop sonarr radarr
+docker compose -f docker/compose.test.yml stop sonarr radarr lidarr
 cargo run -p sharerr-testkit --bin seed-arr -- \
     --sonarr docker/state/sonarr/sonarr.db \
-    --radarr docker/state/radarr/radarr.db
-docker compose -f docker/compose.test.yml start sonarr radarr
+    --radarr docker/state/radarr/radarr.db \
+    --lidarr docker/state/lidarr/lidarr.db
+docker compose -f docker/compose.test.yml start sonarr radarr lidarr
 
 # 4. Collect API keys from each app's config.
 SONARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/sonarr/config.xml)
+LIDARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/lidarr/config.xml)
 
 # qBittorrent prints a temporary admin password to its log on first start.
 docker compose -f docker/compose.test.yml logs qbittorrent | grep -i password
@@ -46,6 +48,8 @@ docker compose -f docker/compose.test.yml logs qbittorrent | grep -i password
 #    into Settings, or pipe them in — the two write to the same vault.
 docker compose -f docker/compose.test.yml exec -T sharerr \
     sh -c "printf %s '$SONARR_KEY' | sharerr vault set sonarr.api_key"
+docker compose -f docker/compose.test.yml exec -T sharerr \
+    sh -c "printf %s '$LIDARR_KEY' | sharerr vault set lidarr.api_key"
 
 # 6. Check the wiring before trying to sync. The UI's per-service "Test
 #    connection" buttons cover the same ground for the services themselves;
@@ -115,32 +119,43 @@ tagged content exercises nothing: `doctor` fails with `TagNotFound`, and `sync`
 bails with "no library source could be scanned". Getting content in is the one part of
 this stack that cannot go through the *arr APIs, and it is worth knowing why.
 
-> **Adding a series or movie through the *arr API triggers a metadata lookup**
-> against `services.sonarr.tv` / `api.radarr.video`. Every fixture title is
-> invented, so the lookup finds nothing and the add fails.
+> **Adding a series, movie, or artist through the *arr API triggers a metadata
+> lookup** against `services.sonarr.tv` / `api.radarr.video` / MusicBrainz. Every
+> fixture title is invented, so the lookup finds nothing and the add fails.
 
 That is a property of the fixtures, not of the network, so it holds however the
-stack is wired. `seed-arr` therefore writes the rows straight into Sonarr's and
-Radarr's own SQLite databases:
+stack is wired. `seed-arr` therefore writes the rows straight into Sonarr's,
+Radarr's, and Lidarr's own SQLite databases:
 
 ```bash
 cargo run -p sharerr-testkit --bin seed-arr -- \
     --sonarr docker/state/sonarr/sonarr.db \
-    --radarr docker/state/radarr/radarr.db
+    --radarr docker/state/radarr/radarr.db \
+    --lidarr docker/state/lidarr/lidarr.db
 ```
+
+`--lidarr` is optional — the VPN and Transmission stacks carry no Lidarr
+container, so their invocations omit it and seed only Sonarr and Radarr.
 
 Three things about it:
 
-- **Both apps must be stopped.** They hold their databases open and will not
+- **Every named app must be stopped.** Each holds its database open and will not
   observe an external write while running. `run_docker_tests.sh` stops and starts
   them around the seed.
-- **Sonarr and Radarr keep their config in `./docker/state`**, bind-mounted rather
-  than in a named volume, so a host-side seeder can open those files at all. `down
-  -v` does not clear a bind mount, so teardown removes the directory too.
+- **They keep their config in `./docker/state`**, bind-mounted rather than in a
+  named volume, so a host-side seeder can open those files at all. `down -v` does
+  not clear a bind mount, so teardown removes the directory too.
 - **It is coupled to their schemas.** That is the cost of seeding this way, and it
   is why the image tags in `compose.test.yml` are pinned rather than `:latest`. The
-  rows are minimal — enough for the four endpoints sharerr reads (`tag`, `series`,
-  `episodefile`+`episode`, `movie`), not enough for a metadata refresh.
+  rows are minimal — enough for the endpoints sharerr reads (`tag`, `series`,
+  `episodefile`+`episode`, `movie`, `artist`, `album`, `trackfile`+`track`), not
+  enough for a metadata refresh. Lidarr's schema splits the descriptive half of
+  both an artist and an album into their own tables (`ArtistMetadata`,
+  `AlbumReleases`), the same way Radarr 5 splits `MovieMetadata` from `Movies` —
+  and unlike Sonarr/Radarr's `EpisodeFiles`/`MovieFiles`, Lidarr's `TrackFiles`
+  stores the file's *full* path rather than a path relative to the artist's own
+  folder. Confirmed against a live container rather than assumed, the same way the
+  original Sonarr/Radarr schema was.
 
 ### The network used to be `internal: true`
 
@@ -161,7 +176,7 @@ The tag id is left to SQLite. sharerr resolves the *label*, case-insensitively, 
 Everything else sharerr does stays inside the stack anyway: tag lookup, file
 discovery, path resolution, torrent creation, and seeding.
 
-## Four views of one library
+## Views of one library
 
 The mounts deliberately disagree, because in a real deployment they almost always
 do, and identical mounts would hide every path-mapping bug:
@@ -170,6 +185,7 @@ do, and identical mounts would hide every path-mapping bug:
 |---|---|
 | Sonarr | `/tv` |
 | Radarr | `/movies` |
+| Lidarr | `/music` |
 | qBittorrent | `/downloads` |
 | sharerr | `/media` |
 
@@ -185,6 +201,7 @@ All bound to `127.0.0.1` so the stack is not exposed on the network.
 |---|---|
 | Sonarr | 18989 |
 | Radarr | 17878 |
+| Lidarr | 18686 |
 | qBittorrent WebUI | 18080 |
 | Prowlarr | 19696 (opt-in — see below) |
 | sharerr | 18477 |

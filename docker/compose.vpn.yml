@@ -111,7 +111,7 @@ services:
       - "127.0.0.1:28080:8080"
 
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.0.4
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
     container_name: sharerr-vpn-test-qbittorrent
     # The whole point of this stack. No `networks:`, and no `ports:` — both belong
     # to gluetun now, and declaring either here is an error.
