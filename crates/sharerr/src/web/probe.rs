@@ -336,6 +336,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_badge_reports_a_path_that_is_not_a_directory() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: file.path().to_path_buf(),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+
+        let html = body_of(library_badge(&config).await).await;
+        assert!(html.contains("class=\"error\""), "{html}");
+        assert!(html.contains("is not a directory"), "{html}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn library_badge_reports_an_unreadable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("placeholder"), b"x").unwrap();
+        let unreadable = dir.path().join("locked");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: unreadable.clone(),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+
+        let html = body_of(library_badge(&config).await).await;
+        // Running as root (some CI/sandboxes) ignores directory permission
+        // bits, so this exercises "Could not scan" only where a real
+        // unreadable directory is achievable — otherwise it degrades to the
+        // ordinary "empty" badge rather than failing the test.
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if html.contains("class=\"error\"") {
+            assert!(html.contains("Could not scan"), "{html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn library_badge_reports_skipped_files_alongside_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Lanternwick.Hollow.S02E01.mkv"), [0u8; 16]).unwrap();
+        std::fs::write(dir.path().join("some home video.mkv"), [0u8; 16]).unwrap();
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: dir.path().to_path_buf(),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+
+        let html = body_of(library_badge(&config).await).await;
+        assert!(html.contains("class=\"ok\""), "{html}");
+        assert!(html.contains("1 file(s) skipped"), "{html}");
+    }
+
+    #[tokio::test]
     async fn library_badge_reports_a_missing_directory() {
         let config = Config {
             library: vec![sharerr_core::config::LibraryConfig {

@@ -768,4 +768,147 @@ mod tests {
 
         assert_eq!(state.recovery_delay().await, RECOVERY_INTERVAL);
     }
+
+    /// `quiet_notified` and `swarms` both hand out one shared handle for the
+    /// whole process — asserting `Arc::ptr_eq` is what proves a second call
+    /// reuses it rather than building a fresh, disconnected one.
+    #[tokio::test]
+    async fn quiet_notified_and_swarms_are_shared_handles() {
+        let (_dir, state) = unconfigured();
+
+        assert!(Arc::ptr_eq(&state.quiet_notified(), &state.quiet_notified()));
+        assert!(Arc::ptr_eq(&state.swarms(), &state.swarms()));
+    }
+
+    /// `endpoint_for`/`gluetun_status` must route `Client` to the client-facing
+    /// handle, not silently alias the tracker-facing one — the whole reason
+    /// the two are separate fields.
+    #[tokio::test]
+    async fn endpoint_for_and_gluetun_status_route_by_target() {
+        let (_dir, state) = unconfigured();
+
+        assert!(Arc::ptr_eq(
+            &state.endpoint_for(GluetunTarget::Tracker),
+            &state.endpoint()
+        ));
+        assert!(Arc::ptr_eq(
+            &state.endpoint_for(GluetunTarget::Client),
+            &state.client_endpoint()
+        ));
+        assert!(!Arc::ptr_eq(
+            &state.endpoint_for(GluetunTarget::Tracker),
+            &state.endpoint_for(GluetunTarget::Client)
+        ));
+
+        assert!(Arc::ptr_eq(
+            &state.gluetun_status(GluetunTarget::Client),
+            &state.gluetun_status(GluetunTarget::Client)
+        ));
+        assert!(!Arc::ptr_eq(
+            &state.gluetun_status(GluetunTarget::Tracker),
+            &state.gluetun_status(GluetunTarget::Client)
+        ));
+    }
+
+    /// `request_sync` must not panic when nothing is parked on the wake
+    /// notify yet — `notify_one` storing a permit for the next waiter is the
+    /// whole point, and calling it with no waiter present is the common case.
+    #[tokio::test]
+    async fn request_sync_is_harmless_with_no_waiter() {
+        let (_dir, state) = unconfigured();
+        state.request_sync();
+    }
+
+    /// `nudge_endpoint`/`endpoint_refresh_requested` must route by target too
+    /// — a tracker-facing push must not wake the client-facing poller.
+    #[tokio::test]
+    async fn nudge_endpoint_wakes_only_the_matching_target() {
+        let (_dir, state) = unconfigured();
+
+        let waiter = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                state
+                    .endpoint_refresh_requested(GluetunTarget::Client)
+                    .await;
+            })
+        };
+        tokio::task::yield_now().await;
+
+        state.nudge_endpoint(GluetunTarget::Tracker);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a tracker-facing nudge must not wake the client-facing waiter"
+        );
+
+        state.nudge_endpoint(GluetunTarget::Client);
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the client-facing nudge must wake it")
+            .expect("the waiting task should not panic");
+    }
+
+    /// `lighthouse_state` must return `None` without ever touching the vault
+    /// when the feature is disabled — the default for an unconfigured
+    /// instance, and the branch that keeps a fresh container's `/health`
+    /// from paying an Argon2 derivation it does not need.
+    #[tokio::test]
+    async fn lighthouse_state_is_none_when_disabled() {
+        let (_dir, state) = unconfigured();
+        assert!(!state.config().await.lighthouse.enabled);
+        assert!(state.lighthouse_state().await.is_none());
+    }
+
+    /// Every `cached_from_vault`-backed accessor's *success* path needs a real
+    /// open vault, which means a real `SHARERR_MASTER_KEY` — safe here (unlike
+    /// a plain `std::env::set_var`) because `Jail` scopes it to this closure
+    /// and serializes against every other Jail-based test in the binary. `Jail`
+    /// itself is not async, hence the plain `#[test]` driving its own runtime
+    /// rather than `#[tokio::test]`.
+    #[test]
+    fn vault_backed_accessors_succeed_and_cache_once_the_vault_opens() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                lighthouse: sharerr_core::config::LighthouseConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let state = ServeState::new(config, path, None);
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                // No token stored yet: `load` runs against a real, empty vault
+                // and legitimately returns `None` — this still exercises the
+                // `Ok(vault) => load(vault)` success arm, distinct from the
+                // vault-unavailable `Err(_) => None` arm covered elsewhere.
+                assert!(state.tracker_token().await.is_none());
+                // Cached: a second call must not need the vault again. There is
+                // no direct way to assert that from outside, so this only
+                // guards against a changed return value, not the caching path
+                // itself — `cached_from_vault`'s doc comment covers the intent.
+                assert!(state.tracker_token().await.is_none());
+
+                assert!(
+                    state.gluetun_api_key(GluetunTarget::Tracker).await.is_none(),
+                    "no gluetun key stored yet"
+                );
+
+                let identity = state.gossip_identity().await;
+                assert!(identity.is_some(), "an identity is minted on first use");
+
+                let lighthouse = state.lighthouse_state().await;
+                assert!(
+                    lighthouse.is_some(),
+                    "a decoy seed is minted on first use once enabled"
+                );
+            });
+            Ok(())
+        });
+    }
 }

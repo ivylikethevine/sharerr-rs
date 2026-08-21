@@ -496,4 +496,50 @@ mod tests {
             "no known pubkey means nothing to verify a result against"
         );
     }
+
+    #[tokio::test]
+    async fn run_returns_immediately_with_no_lighthouses_configured() {
+        let (_dir, state) = crate::state::fixtures::unconfigured();
+        assert!(state.config().await.lighthouse.urls.is_empty());
+
+        // Nothing to assert beyond "returns instead of hanging or panicking" —
+        // the point is exercising the empty-`urls` early return.
+        run(&state).await;
+    }
+
+    /// `open_vault` reads `SHARERR_MASTER_KEY` from the real process env, and
+    /// `secrets.rs` has a `#[test]` that legitimately sets it via
+    /// `figment::Jail` — so asserting the var's *absence* would race that test
+    /// under the parallel runner unless this is scoped by `Jail` too. `run` is
+    /// async, and `Jail::expect_with`'s closure is not, hence the plain
+    /// `#[test]` driving its own runtime rather than `#[tokio::test]`.
+    #[test]
+    fn run_returns_when_the_vault_cannot_open_even_with_lighthouses_configured() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                lighthouse: sharerr_core::config::LighthouseConfig {
+                    urls: vec![Url::parse("http://lighthouse.example.invalid/").unwrap()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let state = Arc::new(ServeState::new(config, path, None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                // `store()` opens a plain sqlite file with no vault involved,
+                // so it succeeds here; it is `open_vault()` — with no
+                // `SHARERR_MASTER_KEY` set — that must be what stops `run`
+                // before it ever reaches the network.
+                assert!(state.store().await.is_ok());
+                assert!(state.open_vault().await.is_err());
+
+                run(&state).await;
+            });
+            Ok(())
+        });
+    }
 }

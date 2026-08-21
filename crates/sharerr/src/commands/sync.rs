@@ -48,15 +48,19 @@ pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
         // already on the log and in `shared_items.last_error`. An *arr app that
         // could not be scanned counts too: nothing was lost, but the pass did not
         // cover what it was asked to.
-        anyhow::bail!(
-            "{} item(s) could not be shared and {} *arr app(s) could not be scanned \
-             — see the log above",
-            report.failed,
-            report.sources_failed
-        );
+        anyhow::bail!(problems_message(report.failed, report.sources_failed));
     }
 
     Ok(())
+}
+
+/// The error text for a run that left problems behind, split out from [`run`]
+/// so the wording can be checked without driving a real sync.
+fn problems_message(failed: usize, sources_failed: usize) -> String {
+    format!(
+        "{failed} item(s) could not be shared and {sources_failed} *arr app(s) could not be scanned \
+         — see the log above"
+    )
 }
 
 /// Best-effort lookup, mirroring [`crate::gluetun::poll_loop`]'s: a vault that
@@ -69,4 +73,24 @@ async fn gluetun_api_key(config: &Config) -> Option<secrecy::SecretString> {
         .get(sharerr_core::config::secret_keys::GLUETUN_API_KEY)
         .ok()
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn problems_message_reports_both_counts() {
+        let text = problems_message(3, 1);
+        assert!(text.contains("3 item(s) could not be shared"));
+        assert!(text.contains("1 *arr app(s) could not be scanned"));
+    }
+
+    #[test]
+    fn problems_message_zero_counts_still_render() {
+        let text = problems_message(0, 0);
+        assert!(text.starts_with("0 item(s) could not be shared and 0 *arr app(s)"));
+    }
 }

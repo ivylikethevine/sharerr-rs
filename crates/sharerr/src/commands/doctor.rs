@@ -145,7 +145,13 @@ pub async fn run(
     }
 
     println!();
-    match (report.failures, report.warnings) {
+    summarize(report.failures, report.warnings)
+}
+
+/// The exit-code decision, split out from [`run`] so the three outcomes can be
+/// checked without driving a full check pass.
+fn summarize(failures: usize, warnings: usize) -> Result<()> {
+    match (failures, warnings) {
         (0, 0) => {
             println!("all checks passed");
             Ok(())
@@ -973,5 +979,1075 @@ fn print_config_summary(config: &Config) {
                 m.qbit.as_ref().unwrap_or(&m.sharerr).display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use secrecy::SecretString;
+    use sharerr_core::config::{LibraryKind, TorrentBackend};
+    use url::Url;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    // `check_vault` (and therefore `run`) resolve the master key from the real
+    // process env var — see CLAUDE.md's "no tier-1 fixture opens a real vault".
+    // Everything below that takes `Option<&Vault>`/`&Vault` directly, rather than
+    // deriving it internally, is tested against a vault built the way
+    // `gossip.rs`'s and `sync/tests.rs`'s tests do: a local key that never
+    // touches the process env.
+    fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
+        sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master"))
+            .expect("opening a fresh vault file cannot fail")
+    }
+
+    // --------------------------------------------------------- report_capped
+
+    #[test]
+    fn report_capped_stops_showing_items_past_the_cap_but_still_counts_them() {
+        let mut report = Report::default();
+        let items: Vec<i32> = (0..(MAX_LISTED as i32 + 3)).collect();
+        let mut shown = Vec::new();
+
+        report_capped(&mut report, &items, |_, item| shown.push(*item), " thing(s)");
+
+        assert_eq!(shown.len(), MAX_LISTED);
+        assert_eq!(shown, items[..MAX_LISTED]);
+    }
+
+    #[test]
+    fn report_capped_shows_every_item_when_under_the_cap() {
+        let mut report = Report::default();
+        let items = vec!["a", "b"];
+        let mut shown = Vec::new();
+
+        report_capped(&mut report, &items, |_, item| shown.push(*item), "");
+
+        assert_eq!(shown, items);
+    }
+
+    // ------------------------------------------------------------ fail/hint
+
+    #[test]
+    fn fix_hint_names_both_the_web_ui_and_the_cli() {
+        let hint = fix_hint("sonarr.api_key");
+        assert!(hint.contains("Settings"));
+        assert!(hint.contains("sharerr vault set sonarr.api_key"));
+    }
+
+    #[test]
+    fn fail_missing_and_fail_unreadable_both_count_as_failures() {
+        let mut report = Report::default();
+        fail_missing(&mut report, "sonarr.api_key");
+        assert_eq!(report.failures, 1);
+
+        fail_unreadable(
+            &mut report,
+            "sonarr.api_key",
+            std::io::Error::other("decryption failed"),
+        );
+        assert_eq!(report.failures, 2);
+    }
+
+    // ------------------------------------------------------- quiet_secret/secret
+
+    #[test]
+    fn quiet_secret_is_none_without_a_vault_and_reports_nothing() {
+        assert!(quiet_secret(None, "sonarr.api_key").is_none());
+    }
+
+    #[test]
+    fn quiet_secret_and_secret_read_a_real_vault_without_reporting_the_quiet_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault.put("sonarr.api_key", &SecretString::from("k")).unwrap();
+
+        assert!(quiet_secret(Some(&vault), "sonarr.api_key").is_some());
+        assert!(quiet_secret(Some(&vault), "radarr.api_key").is_none());
+
+        let mut report = Report::default();
+        assert!(secret(Some(&vault), "sonarr.api_key", &mut report).is_some());
+        assert_eq!(report.failures, 0, "a present secret is not a failure");
+    }
+
+    #[test]
+    fn secret_reports_a_missing_key_and_a_closed_vault_each_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault_in(&dir);
+
+        let mut report = Report::default();
+        assert!(secret(Some(&vault), "radarr.api_key", &mut report).is_none());
+        assert_eq!(report.failures, 1);
+
+        let mut report = Report::default();
+        assert!(secret(None, "radarr.api_key", &mut report).is_none());
+        assert_eq!(report.failures, 1);
+    }
+
+    // ------------------------------------------------- check_torrent_credential
+
+    #[test]
+    fn an_api_key_takes_precedence_over_a_configured_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put("qbittorrent.api_key", &SecretString::from("k"))
+            .unwrap();
+        let mut report = Report::default();
+
+        check_torrent_credential(
+            &vault,
+            Some("qbittorrent.api_key"),
+            Some("qbittorrent.password"),
+            &mut report,
+        );
+
+        assert_eq!(report.failures, 0);
+    }
+
+    #[test]
+    fn a_missing_api_key_falls_back_to_a_present_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put("transmission.password", &SecretString::from("p"))
+            .unwrap();
+        let mut report = Report::default();
+
+        check_torrent_credential(
+            &vault,
+            None,
+            Some("transmission.password"),
+            &mut report,
+        );
+
+        assert_eq!(report.failures, 0);
+    }
+
+    #[test]
+    fn neither_credential_present_is_reported_as_the_password_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault_in(&dir);
+        let mut report = Report::default();
+
+        check_torrent_credential(
+            &vault,
+            None,
+            Some("transmission.password"),
+            &mut report,
+        );
+
+        assert_eq!(report.failures, 1);
+    }
+
+    #[test]
+    fn a_backend_with_only_an_api_key_concept_reports_that_key_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault_in(&dir);
+        let mut report = Report::default();
+
+        check_torrent_credential(&vault, Some("qbittorrent.api_key"), None, &mut report);
+
+        assert_eq!(report.failures, 1);
+    }
+
+    // ---------------------------------------------------------- check_library
+
+    #[test]
+    fn a_missing_library_directory_is_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = sharerr_core::config::LibraryConfig {
+            path: dir.path().join("does-not-exist"),
+            kind: LibraryKind::Tv,
+        };
+        let mut report = Report::default();
+
+        let items = check_library(&library, &mut report);
+
+        assert!(items.is_empty());
+        assert_eq!(report.failures, 1);
+    }
+
+    #[test]
+    fn a_library_path_that_is_a_file_is_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"nope").unwrap();
+        let library = sharerr_core::config::LibraryConfig {
+            path: file,
+            kind: LibraryKind::Movie,
+        };
+        let mut report = Report::default();
+
+        let items = check_library(&library, &mut report);
+
+        assert!(items.is_empty());
+        assert_eq!(report.failures, 1);
+    }
+
+    #[test]
+    fn an_empty_library_directory_is_a_warning_not_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = sharerr_core::config::LibraryConfig {
+            path: dir.path().to_path_buf(),
+            kind: LibraryKind::Tv,
+        };
+        let mut report = Report::default();
+
+        let items = check_library(&library, &mut report);
+
+        assert!(items.is_empty());
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 1);
+    }
+
+    #[test]
+    fn a_populated_library_is_reported_ready_with_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = sharerr_testkit::tv_library(dir.path()).unwrap();
+        let library = sharerr_core::config::LibraryConfig {
+            path: dir.path().to_path_buf(),
+            kind: LibraryKind::Tv,
+        };
+        let mut report = Report::default();
+
+        let items = check_library(&library, &mut report);
+
+        assert!(!items.is_empty());
+        assert_eq!(items.len(), fixture.files.len());
+        assert_eq!(report.failures, 0);
+    }
+
+    // ----------------------------------------------------------- check_tracker
+
+    #[test]
+    fn no_advertised_address_and_no_gluetun_is_a_failure() {
+        let config = Config::default();
+        let mut report = Report::default();
+
+        check_tracker(&config, &mut report);
+
+        assert_eq!(report.failures, 1);
+    }
+
+    #[test]
+    fn no_static_address_but_a_gluetun_control_url_is_only_informational() {
+        let config = Config {
+            gluetun: sharerr_core::config::GluetunConfig {
+                control_url: Some(Url::parse("http://127.0.0.1:8000").unwrap()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_tracker(&config, &mut report);
+
+        assert_eq!(report.failures, 0);
+    }
+
+    #[test]
+    fn a_configured_advertised_host_is_reported_ok() {
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("box.lan".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_tracker(&config, &mut report);
+
+        assert_eq!(report.failures, 0);
+    }
+
+    #[test]
+    fn an_unparseable_advertised_host_is_reported_as_a_failure() {
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                // A space is not a legal host character, so `Url::parse` fails
+                // even after `bracket_ipv6`.
+                advertised_host: Some("not a host".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_tracker(&config, &mut report);
+
+        assert_eq!(report.failures, 1);
+    }
+
+    // ---------------------------------------------------------- check_database
+
+    #[tokio::test]
+    async fn check_database_opens_a_fresh_store_and_counts_its_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_database(&config, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+    }
+
+    // ---------------------------------------------------------------- check_arr
+
+    fn arr_service(url: &Url) -> ServiceConfig {
+        ServiceConfig { url: url.clone() }
+    }
+
+    #[tokio::test]
+    async fn check_arr_reports_a_ready_source_and_returns_its_items() {
+        let server = MockServer::start().await;
+        sharerr_testkit::mock::mount_json(
+            &server,
+            "/api/v3/system/status",
+            sharerr_testkit::library::system_status_json("Sonarr"),
+        )
+        .await;
+        sharerr_testkit::mock::mount_json(
+            &server,
+            "/api/v3/tag",
+            serde_json::json!([{ "id": 3, "label": "sharerr" }]),
+        )
+        .await;
+        sharerr_testkit::mock::mount_json(&server, "/api/v3/series", serde_json::json!([])).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
+            .unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        let items = check_arr(
+            MediaSource::Sonarr,
+            &arr_service(&url),
+            &config,
+            Some(&vault),
+            false,
+            &mut report,
+        )
+        .await;
+
+        // The tag resolves but nothing carries it yet — `TagUnused`, so no items.
+        assert!(items.is_empty());
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 1);
+    }
+
+    #[tokio::test]
+    async fn check_arr_without_a_stored_credential_fails_once_and_does_not_call_out() {
+        let server = MockServer::start().await;
+        let url = Url::parse(&server.uri()).unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        let items = check_arr(
+            MediaSource::Sonarr,
+            &arr_service(&url),
+            &config,
+            None,
+            false,
+            &mut report,
+        )
+        .await;
+
+        assert!(items.is_empty());
+        assert_eq!(report.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn check_arr_with_fix_creates_a_missing_tag_instead_of_just_failing() {
+        let server = MockServer::start().await;
+        sharerr_testkit::mock::mount_json(
+            &server,
+            "/api/v3/system/status",
+            sharerr_testkit::library::system_status_json("Sonarr"),
+        )
+        .await;
+        // No `sharerr` tag exists yet.
+        sharerr_testkit::mock::mount_json(&server, "/api/v3/tag", serde_json::json!([])).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/tag"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 9,
+                "label": "sharerr"
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
+            .unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        let items = check_arr(
+            MediaSource::Sonarr,
+            &arr_service(&url),
+            &config,
+            Some(&vault),
+            true,
+            &mut report,
+        )
+        .await;
+
+        assert!(items.is_empty(), "a just-created tag carries nothing yet");
+        assert_eq!(report.failures, 0, "fix succeeded, so this is not a failure");
+    }
+
+    // --------------------------------------------------------------- check_qbit
+
+    #[tokio::test]
+    async fn check_qbit_reports_ready_and_lists_the_configured_category() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/app/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/categories"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "sharerr": { "name": "sharerr", "savePath": "" } })),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::QBITTORRENT_API_KEY, &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"))
+            .unwrap();
+        let config = Config {
+            torrent_backend: TorrentBackend::Qbittorrent,
+            qbittorrent: sharerr_core::config::QbitConfig {
+                url: Url::parse(&server.uri()).unwrap(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_qbit(&config, Some(&vault), false, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+    }
+
+    #[tokio::test]
+    async fn check_qbit_offers_to_create_a_missing_category_and_does_so_with_fix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/app/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/categories"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/torrents/createCategory"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::QBITTORRENT_API_KEY, &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"))
+            .unwrap();
+        let config = Config {
+            torrent_backend: TorrentBackend::Qbittorrent,
+            qbittorrent: sharerr_core::config::QbitConfig {
+                url: Url::parse(&server.uri()).unwrap(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_qbit(&config, Some(&vault), true, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+    }
+
+    // -------------------------------------------------------------- suggest_paths
+
+    #[test]
+    fn suggest_paths_refuses_a_search_root_that_is_not_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope");
+        let config = Config::default();
+        let mut report = Report::default();
+
+        suggest_paths(&config, &[], Some(&missing), &mut report);
+
+        assert_eq!(report.failures, 1);
+    }
+
+    #[test]
+    fn suggest_paths_with_nothing_discovered_has_nothing_to_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        suggest_paths(&config, &[], Some(dir.path()), &mut report);
+
+        assert_eq!(report.failures, 0);
+    }
+
+    // ---------------------------------------------------------- print_config_summary
+
+    /// Not a behavioural assertion — `println!` output is not worth capturing —
+    /// but a guard against a panic in any of its branches (services configured
+    /// or not, libraries present, a path map with and without a distinct qbit
+    /// view) as this function changes.
+    #[test]
+    fn print_config_summary_does_not_panic_on_a_populated_config() {
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: "/data/tv".into(),
+                kind: LibraryKind::Tv,
+            }],
+            path_map: vec![sharerr_core::config::PathMapping {
+                arr: "/tv".into(),
+                sharerr: "/data/tv".into(),
+                qbit: None,
+            }],
+            ..Config::default()
+        };
+
+        print_config_summary(&config);
+        print_config_summary(&Config::default());
+    }
+
+    #[test]
+    fn print_config_summary_reports_a_client_username_when_the_backend_has_one() {
+        // Only Transmission/rtorrent carry a username; qBittorrent (the
+        // default) never does, so the `Some` arm needs a different backend.
+        print_config_summary(&Config {
+            torrent_backend: TorrentBackend::Transmission,
+            ..Config::default()
+        });
+    }
+
+    #[test]
+    fn print_config_summary_reports_an_unparseable_advertised_host() {
+        print_config_summary(&Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("not a host".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        });
+    }
+
+    // -------------------------------------------------------------- summarize
+
+    #[test]
+    fn summarize_with_nothing_wrong_says_so() {
+        assert!(summarize(0, 0).is_ok());
+    }
+
+    #[test]
+    fn summarize_with_only_warnings_still_succeeds() {
+        assert!(summarize(0, 3).is_ok());
+    }
+
+    #[test]
+    fn summarize_with_any_failure_is_an_error_naming_both_counts() {
+        let err = summarize(2, 1).unwrap_err();
+        assert!(err.to_string().contains("2 check(s) failed"));
+        assert!(err.to_string().contains("1 warning(s)"));
+    }
+
+    // ------------------------------------------------------------------- run
+
+    fn doctor_args() -> crate::cli::DoctorArgs {
+        crate::cli::DoctorArgs {
+            fix: false,
+            suggest_paths: false,
+            search_root: None,
+        }
+    }
+
+    /// Nothing configured at all: no master key (so the vault section fails),
+    /// no *arr app and no `[[library]]`, no advertised address. Exercises
+    /// `run`'s control flow end to end down the all-failing path.
+    ///
+    /// `secrets.rs` has a `#[test]` that legitimately sets `SHARERR_MASTER_KEY`
+    /// via `figment::Jail`, so relying on the var being merely *unset in this
+    /// process* would race it under the parallel test runner. `Jail` clears the
+    /// env for its closure and serializes against every other Jail-based test,
+    /// which is what actually makes "no master key" safe to assert here rather
+    /// than racy — hence a plain `#[test]` driving its own runtime inside the
+    /// `Jail` closure (matching `secrets.rs::open_vault_at_opens_the_vault_named_by_a_master_key`)
+    /// instead of `#[tokio::test]`, which would already hold a runtime on this
+    /// thread and panic on the nested one `Jail`'s pattern needs.
+    #[test]
+    fn run_reports_every_failure_on_an_empty_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Config::default()
+            };
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let result = runtime.block_on(run(&config, Some("bad config file"), &doctor_args()));
+
+            assert!(result.is_err(), "an unconfigured instance cannot pass");
+            Ok(())
+        });
+    }
+
+    // ----------------------------------------------------------- check_gluetun
+
+    async fn gluetun_server(ip: serde_json::Value, port: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ip))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/openvpn/portforwarded"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(port))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn gluetun_config(control_url: &Url) -> Config {
+        Config {
+            gluetun: sharerr_core::config::GluetunConfig {
+                control_url: Some(control_url.clone()),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn check_gluetun_with_no_control_url_does_nothing() {
+        let mut report = Report::default();
+        check_gluetun(&Config::default(), None, &mut report).await;
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
+    }
+
+    #[tokio::test]
+    async fn check_gluetun_reports_ip_and_port_when_they_agree_with_the_config() {
+        let server = gluetun_server(
+            serde_json::json!({ "public_ip": "203.0.113.9" }),
+            serde_json::json!({ "port": 41234 }),
+        )
+        .await;
+        let config = gluetun_config(&Url::parse(&server.uri()).unwrap());
+        let mut report = Report::default();
+
+        check_gluetun(&config, None, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
+    }
+
+    #[tokio::test]
+    async fn check_gluetun_warns_when_the_advertised_host_is_not_the_tunnels_exit() {
+        let server = gluetun_server(
+            serde_json::json!({ "public_ip": "203.0.113.9" }),
+            serde_json::json!({ "port": 41234 }),
+        )
+        .await;
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("198.51.100.1".to_owned()),
+                ..Config::default().tracker
+            },
+            ..gluetun_config(&Url::parse(&server.uri()).unwrap())
+        };
+        let mut report = Report::default();
+
+        check_gluetun(&config, None, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 1);
+    }
+
+    #[tokio::test]
+    async fn check_gluetun_fails_on_ip_and_warns_on_port_independently() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/openvpn/portforwarded"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let config = gluetun_config(&Url::parse(&server.uri()).unwrap());
+        let mut report = Report::default();
+
+        check_gluetun(&config, None, &mut report).await;
+
+        assert_eq!(report.failures, 1);
+        assert_eq!(report.warnings, 1);
+    }
+
+    // ------------------------------------------------------- check_reachability
+
+    #[tokio::test]
+    async fn check_reachability_accepts_a_live_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept in the background so the connect below completes rather than
+        // sitting in the kernel's backlog for the length of the test.
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_url: Some(Url::parse(&format!("http://127.0.0.1:{port}")).unwrap()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_reachability(&config, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
+    }
+
+    #[tokio::test]
+    async fn check_reachability_warns_rather_than_fails_when_nothing_answers() {
+        let port = sharerr_testkit::net::closed_port();
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_url: Some(Url::parse(&format!("http://127.0.0.1:{port}")).unwrap()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_reachability(&config, &mut report).await;
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 1);
+    }
+
+    #[tokio::test]
+    async fn check_reachability_does_nothing_without_an_advertised_address() {
+        let mut report = Report::default();
+        check_reachability(&Config::default(), &mut report).await;
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
+    }
+
+    // ------------------------------------------------------------- check_paths
+
+    fn discovered(arr_path: impl Into<std::path::PathBuf>, size: u64) -> Discovered {
+        sharerr_core::Discovered {
+            source: MediaSource::Sonarr,
+            source_id: 1,
+            file_id: 2,
+            spec: sharerr_core::MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: arr_path.into(),
+            size,
+            ids: sharerr_core::ExternalIds::default(),
+            scene_name: None,
+        }
+    }
+
+    #[test]
+    fn check_paths_covers_a_sample_an_unmapped_file_and_an_invalid_path() {
+        use sharerr_core::config::PathMapping;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mapped_file = dir.path().join("show.s01e01.mkv");
+        std::fs::write(&mapped_file, b"x").unwrap();
+
+        let config = Config {
+            path_map: vec![PathMapping {
+                arr: "/tv".into(),
+                sharerr: dir.path().to_path_buf(),
+                qbit: None,
+            }],
+            ..Config::default()
+        };
+        let items = vec![
+            discovered("/tv/show.s01e01.mkv", 1),
+            discovered("relative/bad.mkv", 1),
+            discovered("/movies/unmapped.mkv", 1),
+        ];
+        let mut report = Report::default();
+
+        check_paths(&config, &items, &mut report);
+
+        assert_eq!(report.failures, 2, "one invalid path, one missing file");
+        assert_eq!(report.warnings, 1, "the unmapped item");
+    }
+
+    #[test]
+    fn check_paths_with_no_map_and_nothing_discovered_is_informational_only() {
+        let mut report = Report::default();
+        check_paths(&Config::default(), &[], &mut report);
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
+    }
+
+    #[test]
+    fn check_paths_with_everything_readable_reports_success() {
+        use sharerr_core::config::PathMapping;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("show.s01e01.mkv");
+        std::fs::write(&file, b"x").unwrap();
+
+        let config = Config {
+            path_map: vec![PathMapping {
+                arr: "/tv".into(),
+                sharerr: dir.path().to_path_buf(),
+                qbit: None,
+            }],
+            ..Config::default()
+        };
+        let items = vec![discovered("/tv/show.s01e01.mkv", 1)];
+        let mut report = Report::default();
+
+        check_paths(&config, &items, &mut report);
+
+        assert_eq!(report.failures, 0);
+    }
+
+    // ------------------------------------------------------------ suggest_paths
+
+    #[test]
+    fn suggest_paths_finds_a_match_by_name_and_size_under_the_search_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual = dir.path().join("Gilded.Ferry.2019.mkv");
+        std::fs::write(&actual, b"xx").unwrap();
+
+        let config = Config::default();
+        let items = vec![discovered("/tv/Gilded.Ferry.2019.mkv", 2)];
+        let mut report = Report::default();
+
+        suggest_paths(&config, &items, Some(dir.path()), &mut report);
+
+        assert_eq!(report.failures, 0);
+    }
+
+    // ---------------------------------------------------------------- check_arr
+
+    #[tokio::test]
+    async fn check_arr_reports_a_missing_tag_as_a_failure_without_fix() {
+        let server = MockServer::start().await;
+        sharerr_testkit::mock::mount_json(
+            &server,
+            "/api/v3/system/status",
+            sharerr_testkit::library::system_status_json("Sonarr"),
+        )
+        .await;
+        sharerr_testkit::mock::mount_json(&server, "/api/v3/tag", serde_json::json!([])).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
+            .unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        let items = check_arr(
+            MediaSource::Sonarr,
+            &arr_service(&url),
+            &config,
+            Some(&vault),
+            false,
+            &mut report,
+        )
+        .await;
+
+        assert!(items.is_empty());
+        assert_eq!(report.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn check_arr_reports_a_rejected_key_as_a_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/system/status"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
+            .unwrap();
+        let url = Url::parse(&server.uri()).unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        check_arr(
+            MediaSource::Sonarr,
+            &arr_service(&url),
+            &config,
+            Some(&vault),
+            false,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn check_arr_reports_an_unreachable_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
+            .unwrap();
+        let port = sharerr_testkit::net::closed_port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let config = Config::default();
+        let mut report = Report::default();
+
+        check_arr(
+            MediaSource::Sonarr,
+            &arr_service(&url),
+            &config,
+            Some(&vault),
+            false,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.failures, 1);
+    }
+
+    // --------------------------------------------------------------- check_qbit
+
+    #[tokio::test]
+    async fn check_qbit_reports_a_rejected_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/app/version"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(
+                secret_keys::QBITTORRENT_API_KEY,
+                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            )
+            .unwrap();
+        let config = Config {
+            torrent_backend: TorrentBackend::Qbittorrent,
+            qbittorrent: sharerr_core::config::QbitConfig {
+                url: Url::parse(&server.uri()).unwrap(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_qbit(&config, Some(&vault), false, &mut report).await;
+
+        assert_eq!(report.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn check_qbit_reports_an_unreachable_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(
+                secret_keys::QBITTORRENT_API_KEY,
+                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            )
+            .unwrap();
+        let port = sharerr_testkit::net::closed_port();
+        let config = Config {
+            torrent_backend: TorrentBackend::Qbittorrent,
+            qbittorrent: sharerr_core::config::QbitConfig {
+                url: Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_qbit(&config, Some(&vault), false, &mut report).await;
+
+        assert_eq!(report.failures, 1);
+    }
+
+    #[tokio::test]
+    async fn check_qbit_falls_back_to_a_password_when_the_backend_has_no_api_key() {
+        // Transmission has no API-key concept, so `check_qbit` must resolve
+        // its password instead — a different branch than every qBittorrent
+        // test above exercises.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault_in(&dir);
+        let port = sharerr_testkit::net::closed_port();
+        let config = Config {
+            torrent_backend: TorrentBackend::Transmission,
+            transmission: sharerr_core::config::TransmissionConfig {
+                url: Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        // No password stored either: `secret()` reports the miss and
+        // `check_qbit` returns without ever building a client.
+        check_qbit(&config, Some(&vault), false, &mut report).await;
+
+        assert_eq!(report.failures, 1);
     }
 }

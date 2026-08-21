@@ -552,4 +552,366 @@ mod tests {
             .is_some()
         );
     }
+
+    #[test]
+    fn password_rejection_flags_mismatch_before_length() {
+        assert_eq!(
+            password_rejection("short", "different"),
+            Some("Those passwords do not match.".to_owned())
+        );
+        assert_eq!(
+            password_rejection("short", "short"),
+            Some(format!(
+                "Password must be at least {MIN_PASSWORD_LEN} characters."
+            ))
+        );
+        assert_eq!(
+            password_rejection("a-long-password", "a-long-password"),
+            None
+        );
+    }
+
+    // A `WebState` over `state::fixtures::unconfigured()`, same as web/settings.rs's
+    // handler tests — a real sqlite-backed `Store` (no vault involved), so account
+    // creation, login, and password change all exercise the genuine store queries.
+    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
+        WebState {
+            serve,
+            sessions: std::sync::Arc::new(Sessions::default()),
+        }
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn setup_page_renders_the_form_on_an_unclaimed_instance() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let response = setup_page(State(web_state(serve))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn setup_page_redirects_to_login_once_claimed() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .create_user("ivy", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+
+        let response = setup_page(State(web_state(serve))).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/login"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_submit_rejects_mismatched_passwords_without_creating_an_account() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+
+        let response = setup_submit(
+            State(state),
+            CookieJar::new(),
+            Form(SetupForm {
+                username: "ivy".to_owned(),
+                password: "a-long-password".to_owned(),
+                confirm: "not-the-same".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("do not match"));
+        assert_eq!(store.user_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn setup_submit_creates_the_first_account_and_signs_in() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+
+        let response = setup_submit(
+            State(state),
+            CookieJar::new(),
+            Form(SetupForm {
+                username: "ivy".to_owned(),
+                password: "a-long-password".to_owned(),
+                confirm: "a-long-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/wizard",
+            "a fresh instance lands on the wizard, not the status page"
+        );
+        assert!(
+            response
+                .headers()
+                .get_all(axum::http::header::SET_COOKIE)
+                .iter()
+                .any(|c| c.to_str().unwrap().starts_with(COOKIE_NAME)),
+        );
+        assert_eq!(store.user_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn setup_submit_redirects_when_someone_else_won_the_race() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .create_user("first", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = setup_submit(
+            State(state),
+            CookieJar::new(),
+            Form(SetupForm {
+                username: "second".to_owned(),
+                password: "a-long-password".to_owned(),
+                confirm: "a-long-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/login"
+        );
+        assert_eq!(store.user_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn login_page_redirects_to_setup_on_an_unclaimed_instance() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let response = login_page(State(web_state(serve)), CookieJar::new()).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_page_renders_the_form_once_claimed() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .store()
+            .await
+            .unwrap()
+            .create_user("ivy", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+
+        let response = login_page(State(web_state(serve)), CookieJar::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_submit_signs_in_on_a_correct_password() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .store()
+            .await
+            .unwrap()
+            .create_user("ivy", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+
+        let response = login_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            Form(LoginForm {
+                username: "ivy".to_owned(),
+                password: "a-long-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_submit_rejects_a_wrong_password_with_one_generic_message() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .store()
+            .await
+            .unwrap()
+            .create_user("ivy", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+
+        let response = login_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            Form(LoginForm {
+                username: "ivy".to_owned(),
+                password: "wrong-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(body_text(response).await.contains("do not match"));
+    }
+
+    #[tokio::test]
+    async fn logout_clears_both_the_session_and_the_cookie() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let token = state.sessions.create("ivy").await.unwrap();
+        let jar = CookieJar::new().add(session_cookie(token.clone()));
+
+        let response = logout(State(state.clone()), jar).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/login"
+        );
+        assert!(state.sessions.touch(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn change_password_without_a_session_bounces_to_login() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let response = change_password(
+            State(web_state(serve)),
+            CookieJar::new(),
+            Form(ChangePasswordForm {
+                current_password: "whatever".to_owned(),
+                new_password: "a-new-password".to_owned(),
+                confirm_password: "a-new-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/login"
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_rejects_the_wrong_current_password() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .store()
+            .await
+            .unwrap()
+            .create_user("ivy", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+        let token = state.sessions.create("ivy").await.unwrap();
+        let jar = CookieJar::new().add(session_cookie(token));
+
+        let response = change_password(
+            State(state),
+            jar,
+            Form(ChangePasswordForm {
+                current_password: "not-the-current-one".to_owned(),
+                new_password: "a-new-password".to_owned(),
+                confirm_password: "a-new-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            body_text(response)
+                .await
+                .contains("not your current password")
+        );
+    }
+
+    #[tokio::test]
+    async fn change_password_succeeds_and_revokes_every_other_session() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .create_user("ivy", &SecretString::from("a-long-password"))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+        let current = state.sessions.create("ivy").await.unwrap();
+        let other = state.sessions.create("ivy").await.unwrap();
+        let jar = CookieJar::new().add(session_cookie(current.clone()));
+
+        let response = change_password(
+            State(state.clone()),
+            jar,
+            Form(ChangePasswordForm {
+                current_password: "a-long-password".to_owned(),
+                new_password: "a-new-password".to_owned(),
+                confirm_password: "a-new-password".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/settings?saved=account"
+        );
+        assert!(
+            store
+                .verify_password("ivy", &SecretString::from("a-new-password"))
+                .await
+                .unwrap()
+        );
+        assert!(state.sessions.touch(&current).await.is_some());
+        assert!(state.sessions.touch(&other).await.is_none());
+    }
+
+    #[test]
+    fn internal_reports_the_message_as_a_500() {
+        let response = internal("something broke");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

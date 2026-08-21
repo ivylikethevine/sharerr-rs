@@ -429,6 +429,64 @@ mod tests {
         assert_eq!(glance.swarm_peers, 0, "nobody has announced");
     }
 
+    /// `secret` opens the vault and forwards its `.get`, rather than only
+    /// forwarding `open_vault`'s own error — a real vault is required to
+    /// exercise the forwarding line itself, so this uses the `figment::Jail`
+    /// pattern from `secrets.rs` (scoped, serialized `SHARERR_MASTER_KEY`)
+    /// rather than skipping the branch as untestable.
+    #[test]
+    fn secret_forwards_a_lookup_against_a_real_vault() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let path = dir.join("sharerr.toml");
+            let serve = Arc::new(ServeState::new(config, path, None));
+            let state = WebState {
+                serve,
+                sessions: Arc::new(Sessions::default()),
+            };
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let result = runtime.block_on(state.secret("nonexistent-key"));
+            assert!(matches!(result, Ok(None)));
+            Ok(())
+        });
+    }
+
+    /// The status page, hit directly (not through the router — no auth cookie
+    /// needed, mirroring `web/settings.rs`'s handler-level test style) so its
+    /// own assembly of the diagnostics/glance/banner fields is exercised, not
+    /// just the anonymous-redirect path above.
+    #[tokio::test]
+    async fn the_status_page_renders_for_a_fresh_unconfigured_instance() {
+        let (_dir, serve) = unconfigured();
+        let state = WebState {
+            serve,
+            sessions: Arc::new(Sessions::default()),
+        };
+
+        let response = status_page(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn htmx_and_the_favicon_are_served_by_name() {
+        for file in ["htmx.min.js", "favicon.svg"] {
+            let response = asset(axum::extract::Path(file.to_owned())).await;
+            assert_eq!(response.status(), StatusCode::OK, "{file}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_asset_name_is_not_found() {
+        let response = asset(axum::extract::Path("not-a-real-asset".to_owned())).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Every protected route must refuse an anonymous caller.
     ///
     /// Enumerated rather than spot-checked: the guard is applied with a single

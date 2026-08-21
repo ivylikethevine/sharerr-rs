@@ -338,6 +338,155 @@ mod tests {
         webhook.post("sync failed", "whatever").await;
     }
 
+    // ---------------------------------------------------- webhook() resolution
+    //
+    // `webhook()` opens a real vault, which this suite otherwise avoids (see
+    // CLAUDE.md). `figment::Jail` scopes and serializes `SHARERR_MASTER_KEY`
+    // to one closure at a time, the same pattern `secrets.rs` and
+    // `web/mod.rs` already use, which makes exercising `webhook()` itself
+    // (rather than only its "vault will not open" fallback) safe here.
+
+    fn state_with_a_stored_webhook_url(jail: &mut figment::Jail, url: &str) -> Arc<ServeState> {
+        jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+        let dir = jail.directory().to_path_buf();
+        let config = sharerr_core::Config {
+            data_dir: dir.clone(),
+            ..sharerr_core::Config::default()
+        };
+        let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut vault = state.open_vault().await.unwrap();
+            vault
+                .put(
+                    secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                    &secrecy::SecretString::from(url.to_owned()),
+                )
+                .unwrap();
+        });
+        state
+    }
+
+    #[test]
+    fn webhook_resolves_the_url_and_kind_from_a_real_vault_secret() {
+        figment::Jail::expect_with(|jail| {
+            let state = state_with_a_stored_webhook_url(jail, "https://hooks.example/abc");
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let resolved = runtime.block_on(webhook(&state)).expect("must resolve");
+            assert_eq!(resolved.url.as_str(), "https://hooks.example/abc");
+            assert_eq!(resolved.kind, NotifyKind::Generic);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn webhook_with_an_unparseable_stored_url_is_treated_as_unconfigured() {
+        figment::Jail::expect_with(|jail| {
+            let state = state_with_a_stored_webhook_url(jail, "not a url at all");
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            assert!(runtime.block_on(webhook(&state)).is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn send_delivers_through_a_vault_configured_webhook() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                send(&state, "sync failed", "could not reach qBittorrent").await;
+            });
+            Ok(())
+        });
+    }
+
+    // -------------------------------------------------- check_quiet_peers, live
+
+    #[test]
+    fn check_quiet_peers_notifies_a_stale_peer_once_then_dedupes() {
+        figment::Jail::expect_with(|jail| {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+                let dir = jail.directory().to_path_buf();
+                let config = sharerr_core::Config {
+                    data_dir: dir.clone(),
+                    notifications: sharerr_core::config::NotificationsConfig {
+                        // A 1-second threshold, cleared with a short sleep
+                        // below — there is no store API to backdate
+                        // `last_seen_at` directly, only `touch_peer` (always
+                        // "now"), so time is left to actually pass instead.
+                        peer_quiet_secs: 1,
+                        ..Default::default()
+                    },
+                    ..sharerr_core::Config::default()
+                };
+                let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let store = state.store().await.unwrap();
+                let peer = store
+                    .create_peer(
+                        "Sam",
+                        &secrecy::SecretString::from("sam-key"),
+                        sharerr_store::PeerScope::All,
+                    )
+                    .await
+                    .unwrap();
+                store.touch_peer(peer.id).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+
+                check_quiet_peers(&state).await.unwrap();
+                // A second pass finds the same staleness and must not notify
+                // again — the mock's `expect(1)` above enforces this.
+                check_quiet_peers(&state).await.unwrap();
+            });
+            Ok(())
+        });
+    }
+
     // ------------------------------------------------------- send / quiet loop
 
     #[tokio::test]

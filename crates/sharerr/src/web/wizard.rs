@@ -166,4 +166,61 @@ mod tests {
         let sources: Vec<_> = wizard.arrs.iter().map(|a| a.source).collect();
         assert_eq!(sources, vec!["sonarr", "radarr"]);
     }
+
+    /// The five route handlers are thin wrappers around `page` — exercised
+    /// directly (rather than only through `page`) so a handler that stops
+    /// forwarding its query or drops its step argument would be caught.
+    #[tokio::test]
+    async fn every_route_handler_renders() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let no_query = Query(WizardQuery::default());
+
+        for response in [
+            welcome(State(state.clone())).await,
+            services(State(state.clone()), Query(WizardQuery::default())).await,
+            paths(State(state.clone()), no_query).await,
+            tracker(
+                State(state.clone()),
+                Query(WizardQuery {
+                    saved: Some("tracker".to_owned()),
+                }),
+            )
+            .await,
+            done(State(state.clone())).await,
+        ] {
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    /// A configured qBittorrent-side path must round-trip into the rendered
+    /// row rather than silently falling back to the `unwrap_or_default` empty
+    /// string the way an unmapped row does.
+    #[tokio::test]
+    async fn a_path_mapping_with_a_qbit_side_renders_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = sharerr_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            path_map: vec![sharerr_core::config::PathMapping {
+                arr: "/data/tv".into(),
+                sharerr: "/share/tv".into(),
+                qbit: Some("/downloads/tv".into()),
+            }],
+            ..sharerr_core::Config::default()
+        };
+        let path = dir.path().join("sharerr.toml");
+        let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+        let state = web_state(serve);
+
+        let wizard = page(&state, WizardStep::Paths, None).await;
+        let row = wizard
+            .path_map
+            .iter()
+            .find(|r| r.arr == "/data/tv")
+            .expect("the configured mapping must appear");
+        assert_eq!(row.qbit, "/downloads/tv");
+
+        // The trailing blank row for adding a new mapping is still appended.
+        assert!(wizard.path_map.iter().any(|r| r.arr.is_empty()));
+    }
 }
