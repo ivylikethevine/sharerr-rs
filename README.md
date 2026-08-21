@@ -48,7 +48,7 @@ design is built around.
 - [Licence](#licence)
 
 See also: [the configuration reference](docs/CONFIGURATION.md), [the
-roadmap](docs/ROADMAP.md), [the original design brief](docs/design.md), and
+roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 [the security policy](SECURITY.md).
 
 ## What works today
@@ -547,7 +547,7 @@ bytes. No real content is involved anywhere.
 | `sharerr-testkit`      | Synthetic fixtures. Never in a release build              |
 
 The original design brief, and the two corrections the implementation forced on
-it, are in [docs/design.md](docs/design.md).
+it, are in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## AI usage
 

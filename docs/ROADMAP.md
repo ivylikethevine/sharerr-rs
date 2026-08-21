@@ -76,40 +76,21 @@ about the indexer direction. No further indexer work is currently planned.
 
 ## Functionality
 
-**Per-peer announce tokens.** Stage 1 is done: a magnet built by the Torznab
-feed carries the requesting friend's own `Peer.key_hash` as its announce
-token instead of the one shared instance secret, so a real announce
-attributes to that friend in peer endpoint memory, and revoking a peer now
-also revokes their tracker access. The instance's original shared token keeps
-working forever alongside this, unattributed, so nothing seeded before this
-existed ever breaks.
-
-Stage 2 is done: the Torznab feed's `.torrent` enclosure link now carries the
-requesting friend's own `key_hash` as a `?token=` query parameter (only when a
-tracker token is configured at all — the same condition the magnet's tiers
-already used), and `GET /torrents/{hash}.torrent` rewrites the announce URLs
-it serves to that token, in memory, before the response goes out. The file
-cached on disk is untouched — still the shared instance token, written once by
-the sync loop — so nothing is cached per peer. A request with no token, or one
-that no longer resolves to an active peer (unknown, or since revoked), falls
-back to serving the file exactly as cached: every download link that predates
-this feature keeps working unchanged. See `crate::tracker::torrent_file` in
-`crates/sharerr/src/tracker.rs`.
-
-One follow-on stage, deliberately not built yet:
-
-- **Stage 3 — graceful rotation of the shared legacy token itself.** Per-peer
-  tokens already make expelling one specific friend surgical and instant, with
-  zero effect on anyone else — no rollout needed. What is still missing is a
-  safe way to rotate or retire the *shared fallback* (e.g. if it leaked, or
-  eventually to sunset it once every peer is believed to have moved off it):
-  hold the old and new legacy token valid together, extend the existing
-  `announce_token_fp` fingerprinting to track who is still on the old one, and
-  let the operator finalize once satisfied. This is not a substitute for
-  Stage 1's per-peer revocation — a purely shared, rotating token can never
-  stop an *already-connected* bad actor's live announces, since every peer
-  holding the current value is indistinguishable from any other to the
-  tracker; only a genuinely per-peer credential can do that.
+**Per-peer announce tokens: rotating the shared legacy token.** Per-peer
+attribution for both magnet and `.torrent` download is done — see [the
+README](../README.md#sharing-with-a-friend) for how that works today. It
+makes expelling one specific friend surgical and instant, with zero effect on
+anyone else, so no rollout is needed for that case. What is still missing is
+a safe way to rotate or retire the *shared fallback* token every instance
+still accepts alongside per-peer ones (e.g. if it leaked, or eventually to
+sunset it once every peer is believed to have moved off it): hold the old and
+new legacy token valid together, extend the existing `announce_token_fp`
+fingerprinting to track who is still on the old one, and let the operator
+finalize once satisfied. This is not a substitute for per-peer revocation — a
+purely shared, rotating token can never stop an *already-connected* bad
+actor's live announces, since every peer holding the current value is
+indistinguishable from any other to the tracker; only a genuinely per-peer
+credential can do that.
 
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
