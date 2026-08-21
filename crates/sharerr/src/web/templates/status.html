@@ -5,10 +5,12 @@
 <h1>Status</h1>
 
 {% if let Some(glance) = glance %}
-<div class="panel">
-  <dl class="facts">
+<dl class="stat-grid">
+  <div class="stat">
     <dt>Shared</dt>
     <dd><strong>{{ glance.items_shared }}</strong> item(s) seeding</dd>
+  </div>
+  <div class="stat">
     <dt>Last sync</dt>
     <dd>
       {% if let Some(when) = glance.last_sync %}
@@ -20,6 +22,8 @@
       never
       {% endif %}
     </dd>
+  </div>
+  <div class="stat">
     <dt>Friends</dt>
     <dd>
       {% if glance.friends_total == 0 %}
@@ -28,6 +32,8 @@
       <strong>{{ glance.friends_recent }}</strong> of {{ glance.friends_total }} seen in the last hour
       {% endif %}
     </dd>
+  </div>
+  <div class="stat">
     <dt>Swarms</dt>
     <dd>
       {% if glance.swarm_peers == 0 %}
@@ -36,8 +42,8 @@
       <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
       {% endif %}
     </dd>
-  </dl>
-</div>
+  </div>
+</dl>
 {% endif %}
 
 {# The config error replaces the blocked banner rather than joining it: while the

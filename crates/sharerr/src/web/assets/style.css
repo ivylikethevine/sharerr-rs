@@ -5,131 +5,283 @@
 
 :root {
   color-scheme: light dark;
-  --bg: #fbfbfd;
+  --bg: #f6f7f9;
   --panel: #ffffff;
+  --panel-2: #fbfbfd;
   --ink: #1b1c1f;
   --muted: #5d616b;
-  --line: #dcdfe6;
+  --faint: #8b8f99;
+  --line: #e1e4ea;
+  --line-strong: #cbd0d9;
   --accent: #2f6f4f;
+  --accent-hover: #275c41;
   --accent-ink: #ffffff;
+  --accent-wash: #2f6f4f14;
   --ok-bg: #e7f4ec;
   --ok-ink: #1d5537;
   --warn-bg: #fdf3e2;
   --warn-ink: #7a5312;
   --error-bg: #fbeaea;
   --error-ink: #8c2b2b;
+  --shadow-sm: 0 1px 2px rgba(20, 21, 26, 0.04);
+  --shadow-md: 0 4px 14px rgba(20, 21, 26, 0.06);
+  --radius: 10px;
+  --radius-sm: 7px;
+  --ease: 150ms cubic-bezier(0.2, 0, 0, 1);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16171a;
-    --panel: #1e2024;
+    --bg: #131417;
+    --panel: #1c1e22;
+    --panel-2: #202226;
     --ink: #e8e9ec;
     --muted: #a0a4ae;
-    --line: #33363d;
+    --faint: #71757f;
+    --line: #303339;
+    --line-strong: #43474f;
     --accent: #4c9a72;
+    --accent-hover: #5cae83;
     --accent-ink: #0e1512;
+    --accent-wash: #4c9a721c;
     --ok-bg: #16302322;
     --ok-ink: #7fcda3;
     --warn-bg: #3a2f1a44;
     --warn-ink: #e2b96b;
     --error-bg: #3a1e1e55;
     --error-ink: #e79595;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
+    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
   }
 }
 
 * { box-sizing: border-box; }
 
+html { scroll-behavior: smooth; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 16px/1.55 -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
 main {
   max-width: 46rem;
   margin: 0 auto;
-  padding: 1.75rem 1.25rem 4rem;
+  padding: 2rem 1.25rem 5rem;
+}
+
+/* Screen-reader-only until focused, so keyboard users can jump past the nav
+   without a visible skip link cluttering every page for everyone else. */
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: auto;
+  z-index: 100;
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 0.6rem 1rem;
+  border-radius: 0 0 var(--radius-sm) 0;
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-link:focus {
+  left: 0;
+  top: 0;
 }
 
 .bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   flex-wrap: wrap;
-  padding: 0.75rem 1.25rem;
-  background: var(--panel);
+  padding: 0.85rem 1.25rem;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line);
 }
 
 .brand {
-  font-weight: 650;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 700;
+  font-size: 1.05rem;
   letter-spacing: -0.01em;
   color: var(--ink);
   text-decoration: none;
 }
 
+.brand::before {
+  content: "";
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
 .bar nav {
   display: flex;
   align-items: center;
-  gap: 1rem;
+  gap: 0.15rem;
+  flex-wrap: wrap;
 }
 
-a { color: var(--accent); }
+.bar nav a {
+  padding: 0.4rem 0.65rem;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 550;
+  font-size: 0.94rem;
+  transition: background var(--ease), color var(--ease);
+}
 
-h1 { font-size: 1.5rem; letter-spacing: -0.015em; margin: 0 0 0.5rem; }
-h2 { font-size: 1.1rem; letter-spacing: -0.01em; margin: 2rem 0 0.35rem; }
-h3 { font-size: 1rem; letter-spacing: -0.01em; margin: 1.25rem 0 0.35rem; }
+.bar nav a:hover { color: var(--ink); background: var(--accent-wash); }
+
+.bar nav a[aria-current="page"] {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+a:hover { color: var(--accent-hover); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+h1 { font-size: 1.65rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.5rem; }
+h2 {
+  font-size: 1.12rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 2.5rem 0 0.6rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--line);
+}
+h3 { font-size: 1rem; font-weight: 650; letter-spacing: -0.01em; margin: 1.4rem 0 0.4rem; }
 
 /* The disclosure the secondary service sections fold into. The summary is
    styled to sit in the heading rhythm, so closed it reads as one more section
    title rather than a widget. */
+details.fold {
+  margin-top: 2.5rem;
+}
 details.fold > summary {
   cursor: pointer;
-  font-size: 1.1rem;
-  font-weight: 600;
+  font-size: 1.12rem;
+  font-weight: 650;
   letter-spacing: -0.01em;
-  margin: 2rem 0 0.35rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--line);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before {
+  content: "\25B8";
+  display: inline-block;
+  color: var(--muted);
+  transition: transform var(--ease);
+}
+details.fold[open] > summary::before { transform: rotate(90deg); }
+details.fold > summary:hover { color: var(--accent); }
 
-.lede, .hint { color: var(--muted); }
+.lede { color: var(--muted); font-size: 1.02rem; max-width: 42rem; }
+.hint { color: var(--muted); }
 .hint { font-size: 0.9rem; }
 
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.9em;
-  background: color-mix(in srgb, var(--ink) 8%, transparent);
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
+  font-size: 0.87em;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
 }
 
 .card, .panel {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 1.25rem;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 1.35rem;
   margin: 1rem 0;
 }
 
 .card { display: flex; flex-direction: column; gap: 0.35rem; max-width: 26rem; }
 
+/* Auth pages (sign-in, claim-instance) put their only content in a `.card`;
+   centering it here — rather than in the page templates — keeps every other
+   `.card` user (there are none yet, but the class is generic) unaffected. */
+main:has(> form.card) {
+  min-height: calc(100vh - 8rem);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+main:has(> form.card) h1 { text-align: center; }
+main:has(> form.card) > .card { margin: 1.5rem auto 0; width: 100%; }
+main:has(> form.card) > p.error { max-width: 26rem; margin-left: auto; margin-right: auto; }
+
 /* `display: block` is the point: two adjacent `<label>`s with nothing between
    them (a checkbox's label right before the next field's) are inline by
    default and run onto one line otherwise. */
-label { display: block; font-weight: 550; font-size: 0.92rem; margin-top: 0.5rem; }
+label { display: block; font-weight: 550; font-size: 0.92rem; margin-top: 0.9rem; }
+label:first-child { margin-top: 0; }
 
 input[type="text"], input[type="password"], input[type="url"],
 input[type="number"], select, input:not([type]) {
   width: 100%;
-  padding: 0.5rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--bg);
+  margin-top: 0.3rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
   color: var(--ink);
   font: inherit;
   font-size: 0.95rem;
+  transition: border-color var(--ease), box-shadow var(--ease);
+}
+
+input[type="text"]:hover, input[type="password"]:hover, input[type="url"]:hover,
+input[type="number"]:hover, select:hover, input:not([type]):hover {
+  border-color: var(--faint);
+}
+
+input[type="text"]:focus, input[type="password"]:focus, input[type="url"]:focus,
+input[type="number"]:focus, select:focus, input:not([type]):focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+input[type="checkbox"] {
+  width: auto;
+  margin: 0 0.45rem 0 0;
+  accent-color: var(--accent);
+  vertical-align: -2px;
 }
 
 /* `width: 100%` above makes a `<select>`'s rendered size follow its column,
@@ -140,30 +292,42 @@ input[type="number"], select, input:not([type]) {
    intrinsic-sizing input to that layout, so it pulls the column wide enough
    for the longest option ("Everything") without touching every `<select>`'s
    layout outside a table. */
-select { min-width: 8rem; }
+select { min-width: 8rem; cursor: pointer; }
 
 input:disabled, select:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
 button {
   align-self: flex-start;
-  margin-top: 0.9rem;
-  padding: 0.5rem 1rem;
+  margin-top: 1.1rem;
+  margin-right: 0.6rem;
+  padding: 0.55rem 1.1rem;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--accent-ink);
   font: inherit;
-  font-weight: 550;
+  font-weight: 600;
+  font-size: 0.93rem;
   cursor: pointer;
+  transition: background var(--ease), box-shadow var(--ease), transform var(--ease);
 }
+
+button:hover { background: var(--accent-hover); }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 button.secondary {
   background: transparent;
-  border-color: var(--line);
+  border-color: var(--line-strong);
   color: var(--ink);
+}
+button.secondary:hover {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 button.link {
@@ -171,9 +335,15 @@ button.link {
   padding: 0;
   background: none;
   color: var(--accent);
-  font-weight: 400;
+  font-weight: 500;
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
+button.link:hover { color: var(--accent-hover); }
+
+/* htmx toggles this class on the element mid-request; a busy "Test connection"
+   button should read as busy rather than silently doing nothing for a beat. */
+.htmx-request { opacity: 0.65; cursor: progress; }
 
 form.inline { display: inline; }
 
@@ -187,15 +357,16 @@ form.inline { display: inline; }
 .error { color: var(--error-ink); }
 
 p.ok, p.warn, p.error, div.ok, div.warn, div.error {
-  border-radius: 8px;
-  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius);
+  padding: 0.8rem 1rem;
   margin: 0.85rem 0;
   border: 1px solid transparent;
+  box-shadow: var(--shadow-sm);
 }
 
-p.ok,   div.ok    { background: var(--ok-bg); }
-p.warn, div.warn  { background: var(--warn-bg); }
-p.error,div.error { background: var(--error-bg); }
+p.ok,   div.ok    { background: var(--ok-bg); border-color: color-mix(in srgb, var(--ok-ink) 20%, transparent); }
+p.warn, div.warn  { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn-ink) 20%, transparent); }
+p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb, var(--error-ink) 20%, transparent); }
 
 /* A small pill next to a field's label, so "is this secret already stored"
    reads at a glance instead of depending on placeholder text that vanishes
@@ -203,33 +374,84 @@ p.error,div.error { background: var(--error-bg); }
 .field-status {
   display: inline-block;
   font-size: 0.72rem;
-  font-weight: 600;
-  padding: 0.05rem 0.5rem;
+  font-weight: 650;
+  padding: 0.08rem 0.55rem;
   border-radius: 999px;
   margin-left: 0.4rem;
   vertical-align: middle;
 }
 .field-status--set   { background: var(--ok-bg);    color: var(--ok-ink); }
-.field-status--unset { background: transparent; color: var(--muted); border: 1px solid var(--muted); }
+.field-status--unset { background: transparent; color: var(--muted); border: 1px solid var(--line-strong); }
 .field-status--stale { background: var(--error-bg); color: var(--error-ink); }
 
 .facts {
   display: grid;
   grid-template-columns: minmax(8rem, auto) 1fr;
-  gap: 0.4rem 1rem;
+  gap: 0.55rem 1rem;
   margin: 1.25rem 0 0;
 }
 
 .facts dt { color: var(--muted); font-size: 0.92rem; }
 .facts dd { margin: 0; }
 
+/* Status page's headline numbers — the first thing an operator should be able
+   to read at a glance, so they get more visual weight than an ordinary
+   definition list. Falls back to a single column below ~26rem per card. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+  padding: 0;
+}
+.stat {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.85rem 1rem;
+}
+.stat dt {
+  margin: 0 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.stat dd { margin: 0; font-size: 0.95rem; line-height: 1.4; }
+.stat dd strong { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.01em; }
+
+/* Settings is one long page of sections; a row of jump links at the top turns
+   it back into something navigable without JS or a fixed sidebar. */
+.quicknav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+}
+.quicknav a {
+  display: inline-block;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--panel-2);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 550;
+  transition: border-color var(--ease), color var(--ease), background var(--ease);
+}
+.quicknav a:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-wash); }
+
 .locked {
   font-size: 0.85rem;
   color: var(--warn-ink);
   background: var(--warn-bg);
   border-radius: 6px;
-  padding: 0.3rem 0.5rem;
-  margin: 0.3rem 0 0;
+  padding: 0.35rem 0.55rem;
+  margin: 0.35rem 0 0;
 }
 
 table { border-collapse: collapse; width: 100%; }
@@ -245,13 +467,16 @@ table { border-collapse: collapse; width: 100%; }
    the box when that content is narrower than the viewport. */
 .table-scroll { overflow-x: auto; }
 .table-scroll table { width: auto; min-width: 100%; }
-th, td { text-align: left; padding: 0.4rem 0.5rem 0.4rem 0; font-size: 0.92rem; }
-th { color: var(--muted); font-weight: 550; }
+th, td { text-align: left; padding: 0.55rem 0.6rem 0.55rem 0; font-size: 0.92rem; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 650; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--accent-wash); }
 
 /* A revoked friend stays in the list so the operator can see it happened, but
    should not read as an active one. */
 tr.revoked td { color: var(--muted); text-decoration: line-through; }
 tr.revoked td .error { text-decoration: none; }
+tr.revoked:hover td { background: transparent; }
 
 /* Revoke/Delete sit together on one row without wrapping onto two lines. */
 td.actions { display: flex; gap: 0.75rem; white-space: nowrap; }
@@ -259,5 +484,11 @@ td.actions { display: flex; gap: 0.75rem; white-space: nowrap; }
 /* Path lists on the diagnostics page: many similar strings, so they want to be
    scannable and monospaced rather than prose. */
 .paths { margin: 0.5rem 0 0; padding-left: 1.25rem; }
-.paths li { font-size: 0.9rem; margin: 0.15rem 0; }
+.paths li { font-size: 0.9rem; margin: 0.2rem 0; }
 .paths code { word-break: break-all; }
+
+@media (max-width: 32rem) {
+  main { padding: 1.5rem 1rem 4rem; }
+  .bar { padding: 0.7rem 1rem; }
+  h1 { font-size: 1.4rem; }
+}

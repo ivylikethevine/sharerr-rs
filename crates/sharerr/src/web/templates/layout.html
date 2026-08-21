@@ -4,10 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}sharerr{% endblock %}</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/style.css">
 <script src="/assets/htmx.min.js" defer></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 <header class="bar">
   <a class="brand" href="/">sharerr</a>
   {% if signed_in %}
@@ -23,8 +25,22 @@
   {% endif %}
 </header>
 
-<main>
+<main id="main">
 {% block content %}{% endblock %}
 </main>
+
+{% if signed_in %}
+<script>
+(function () {
+  var path = location.pathname;
+  var links = document.querySelectorAll(".bar nav a[href]");
+  for (var i = 0; i < links.length; i++) {
+    var href = links[i].getAttribute("href");
+    var here = href === "/" ? path === "/" : path === href || path.indexOf(href + "/") === 0;
+    if (here) links[i].setAttribute("aria-current", "page");
+  }
+})();
+</script>
+{% endif %}
 </body>
 </html>

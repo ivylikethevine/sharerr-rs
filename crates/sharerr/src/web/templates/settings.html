@@ -40,6 +40,19 @@
 {% block content %}
 <h1>Settings</h1>
 
+<ul class="quicknav">
+  <li><a href="#general">General</a></li>
+  <li><a href="#qbittorrent">qBittorrent</a></li>
+  <li><a href="#tracker">Tracker</a></li>
+  <li><a href="#lighthouse">Lighthouse</a></li>
+  <li><a href="#gluetun">Gluetun</a></li>
+  <li><a href="#path-mappings">Path mappings</a></li>
+  <li><a href="#periodic-sync">Sync</a></li>
+  <li><a href="#notifications">Notifications</a></li>
+  <li><a href="#library-directories">Libraries</a></li>
+  <li><a href="#your-account">Account</a></li>
+</ul>
+
 {% if let Some(section) = saved %}
 {% if section == "account" %}
 <p class="ok" role="status">Password changed. Any other signed-in session has been signed out.</p>
@@ -86,7 +99,7 @@
 </p>
 {% endif %}
 
-<h2>General</h2>
+<h2 id="general">General</h2>
 <form method="post" action="/settings/general" class="panel">
   <label for="tag">Tag to watch</label>
   <input id="tag" name="tag" value="{{ tag }}" required
@@ -96,7 +109,7 @@
   <button type="submit">Save</button>
 </form>
 
-<h2>qBittorrent</h2>
+<h2 id="qbittorrent">qBittorrent</h2>
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>
   <input id="qbit_url" name="url" value="{{ qbit_url }}" required
@@ -143,7 +156,7 @@
   <span id="test-qbittorrent"></span>
 </form>
 
-<h2>Tracker</h2>
+<h2 id="tracker">Tracker</h2>
 <form method="post" action="/settings/tracker" class="panel">
   <p class="hint">
     sharerr serves announces itself, from this instance, whichever torrent client
@@ -215,7 +228,7 @@
   </button>
 </form>
 
-<h2>Lighthouse</h2>
+<h2 id="lighthouse">Lighthouse</h2>
 <form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
@@ -255,7 +268,7 @@
   <button type="submit">Save</button>
 </form>
 
-<h2>Gluetun</h2>
+<h2 id="gluetun">Gluetun</h2>
 <form method="post" action="/settings/gluetun" class="panel">
   <p class="hint">
     Behind a VPN with a forwarded port, the address friends reach you on changes
@@ -396,7 +409,7 @@
   </form>
 </details>
 
-<h2>Path mappings</h2>
+<h2 id="path-mappings">Path mappings</h2>
 <form method="post" action="/settings/paths" class="panel">
   <p class="hint">
     How the *arr apps, sharerr, and qBittorrent each see the same library. Leave
@@ -422,7 +435,7 @@
   <button type="submit">Save</button>
 </form>
 
-<h2>Periodic sync</h2>
+<h2 id="periodic-sync">Periodic sync</h2>
 <form method="post" action="/settings/sync" class="panel">
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if sync_enabled %}checked{% endif %}
@@ -440,7 +453,7 @@
   <button type="submit">Save</button>
 </form>
 
-<h2>Notifications</h2>
+<h2 id="notifications">Notifications</h2>
 <form method="post" action="/settings/notifications" class="panel">
   <p class="hint">
     A webhook fired when a sync fails outright, or when a friend has not been
@@ -488,7 +501,7 @@
   leave the rest blank.
 </p>
 
-<h2>Library directories</h2>
+<h2 id="library-directories">Library directories</h2>
 <form method="post" action="/settings/libraries" class="panel">
   <p class="hint">
     Plain folders shared without any *arr app — everything in each one is shared,
@@ -543,7 +556,7 @@
   {% endfor %}
 </details>
 
-<h2>Your account</h2>
+<h2 id="your-account">Your account</h2>
 <form method="post" action="/settings/account/password" class="panel">
   <p class="hint">
     Changing this signs out every other session, here and elsewhere.

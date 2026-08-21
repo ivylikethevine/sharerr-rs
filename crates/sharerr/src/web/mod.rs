@@ -249,8 +249,8 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
 
 /// Serve one embedded asset.
 ///
-/// An explicit match rather than a lookup table: the set is two files, and a match
-/// makes it impossible for a path to escape into the filesystem.
+/// An explicit match rather than a lookup table: the set is a handful of files,
+/// and a match makes it impossible for a path to escape into the filesystem.
 async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
     let (body, mime) = match file.as_str() {
         "style.css" => (include_str!("assets/style.css"), "text/css; charset=utf-8"),
@@ -258,6 +258,7 @@ async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Respon
             include_str!("assets/htmx.min.js"),
             "text/javascript; charset=utf-8",
         ),
+        "favicon.svg" => (include_str!("assets/favicon.svg"), "image/svg+xml"),
         _ => return (StatusCode::NOT_FOUND, "no such asset").into_response(),
     };
 
