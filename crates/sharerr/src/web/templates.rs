@@ -210,6 +210,51 @@ impl Default for LibraryRow {
     }
 }
 
+/// Which page of the guided first-run is showing. Order matches the
+/// progression the roadmap describes: services, then paths, then tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardStep {
+    Welcome,
+    Services,
+    Paths,
+    Tracker,
+    Done,
+}
+
+/// The guided first-run: a handful of the same forms `SettingsPage` renders,
+/// one step at a time, each submitting to the very same `/settings/*`
+/// handlers with `?next=` set so a save lands back on the wizard instead of
+/// on the full Settings page. Not a separate configuration path — every
+/// field here is also on Settings, unlocked and re-orderable at any time.
+#[derive(Debug, Template)]
+#[template(path = "wizard.html")]
+pub struct WizardPage {
+    pub signed_in: bool,
+    pub step: WizardStep,
+    pub saved: Option<String>,
+    pub master_key_present: bool,
+    pub locks: std::collections::BTreeMap<String, String>,
+
+    pub tag: String,
+    /// Sonarr and Radarr only — the two most instances run. The rest of the
+    /// *arr apps stay on the full Settings page, same as their secondary
+    /// disclosure there.
+    pub arrs: Vec<ArrSection>,
+
+    pub qbit_url: String,
+    pub qbit_api_key_set: bool,
+    pub qbit_category: String,
+    pub qbit_tag: String,
+    pub qbit_skip_checking: bool,
+
+    pub path_map: Vec<PathRow>,
+
+    pub tracker_advertised_host: String,
+    pub tracker_port: String,
+    pub tracker_advertised_url: String,
+    pub tracker_token_set: bool,
+}
+
 #[derive(Debug, Template)]
 #[template(path = "settings.html")]
 pub struct SettingsPage {

@@ -21,6 +21,7 @@ pub mod peers;
 pub mod probe;
 pub mod settings;
 pub mod templates;
+pub mod wizard;
 
 use std::sync::Arc;
 
@@ -103,6 +104,11 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/peers/{id}/revoke", post(peers::revoke))
         .route("/peers/{id}/delete", post(peers::delete))
         .route("/peers/{id}/feed", get(peers::feed_preview))
+        .route("/wizard", get(wizard::welcome))
+        .route("/wizard/services", get(wizard::services))
+        .route("/wizard/paths", get(wizard::paths))
+        .route("/wizard/tracker", get(wizard::tracker))
+        .route("/wizard/done", get(wizard::done))
         .route("/settings", get(settings::page))
         .route("/settings/general", post(settings::save_general))
         .route("/settings/arr/{source}", post(settings::save_arr))
@@ -423,6 +429,11 @@ mod tests {
             "/items",
             "/peers",
             "/peers/1/feed",
+            "/wizard",
+            "/wizard/services",
+            "/wizard/paths",
+            "/wizard/tracker",
+            "/wizard/done",
         ];
         let protected_posts = [
             "/settings/general",
@@ -489,6 +500,27 @@ mod tests {
                 response.status()
             );
         }
+    }
+
+    /// Claiming a fresh instance lands on the wizard, not the status page —
+    /// nothing is configured yet, so the guided flow is the useful thing to
+    /// see first. Signing in again later still goes straight to `/`.
+    #[tokio::test]
+    async fn claiming_the_instance_redirects_to_the_wizard() {
+        let (_dir, app) = router();
+        let response = send(
+            app,
+            post("/setup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=operator&password=hunter22&confirm=hunter22",
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/wizard");
     }
 
     /// `/assets/*` sits outside the guard so the login page can style itself —

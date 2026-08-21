@@ -72,6 +72,24 @@ pub struct PageQuery {
     saved: Option<String>,
 }
 
+/// Where a save should land after it succeeds, instead of the ordinary
+/// Settings page. The wizard is the only caller: its steps submit to these
+/// same handlers with `?next=/wizard/...` on the form's `action`, so a save
+/// made mid-wizard returns to the wizard step rather than dropping the
+/// operator onto the full Settings page.
+#[derive(Debug, Default, Deserialize)]
+pub struct NextQuery {
+    next: Option<String>,
+}
+
+/// Refuse anything that is not one of this app's own paths, so a crafted
+/// `?next=` cannot turn a settings save into an open redirect. `next` only
+/// ever comes from a URL this crate rendered, but the value still arrives
+/// through the query string of a request nothing else validates.
+fn sanitize_next(next: Option<String>) -> Option<String> {
+    next.filter(|path| path.starts_with('/') && !path.starts_with("//"))
+}
+
 pub async fn page(State(state): State<WebState>, Query(query): Query<PageQuery>) -> Response {
     render(&build_page(&state, query.saved, None).await)
 }
@@ -212,6 +230,7 @@ pub struct LibrariesForm {
 
 pub async fn save_general(
     State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
     Form(form): Form<GeneralForm>,
 ) -> Response {
     let tag = form.tag.trim();
@@ -223,7 +242,7 @@ pub async fn save_general(
         .await;
     }
 
-    write_config(&state, "general", |file| {
+    write_config(&state, "general", next.next, |file| {
         file.apply([Edit::str(config_paths::TAG, tag)]);
         Ok(())
     })
@@ -237,6 +256,7 @@ pub async fn save_general(
 pub async fn save_arr(
     State(state): State<WebState>,
     axum::extract::Path(source): axum::extract::Path<MediaSource>,
+    Query(next): Query<NextQuery>,
     Form(form): Form<ArrForm>,
 ) -> Response {
     // The directory source parses as a `MediaSource` but has neither a URL nor
@@ -254,7 +274,7 @@ pub async fn save_arr(
         return reject(&state, &message).await;
     }
 
-    write_config(&state, section, |file| {
+    write_config(&state, section, next.next, |file| {
         let url = form.url.trim();
         if url.is_empty() {
             // Removing the whole table, not just the URL: each *arr section is
@@ -271,6 +291,7 @@ pub async fn save_arr(
 
 pub async fn save_qbittorrent(
     State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
     Form(form): Form<QbitForm>,
 ) -> Response {
     // Checked here rather than at the first sync, because a key pasted with a
@@ -297,7 +318,7 @@ pub async fn save_qbittorrent(
         return reject(&state, &message).await;
     }
 
-    write_config(&state, "qbittorrent", |file| {
+    write_config(&state, "qbittorrent", next.next, |file| {
         let url = form.url.trim();
         if url.is_empty() {
             anyhow::bail!("qBittorrent's URL is required — sharerr cannot seed without it");
@@ -323,6 +344,7 @@ pub async fn save_qbittorrent(
 
 pub async fn save_tracker(
     State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
     Form(form): Form<TrackerForm>,
 ) -> Response {
     if let Err(message) = apply_secret(
@@ -336,7 +358,7 @@ pub async fn save_tracker(
         return reject(&state, &message).await;
     }
 
-    write_config(&state, "tracker", |file| {
+    write_config(&state, "tracker", next.next, |file| {
         let host = form.advertised_host.trim();
         if !host.is_empty() {
             // Wrong at save time is loud; wrong after the fact is a torrent nobody
@@ -396,7 +418,7 @@ pub async fn save_lighthouse(
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
 
-    write_config(&state, "lighthouse", move |file| {
+    write_config(&state, "lighthouse", None, move |file| {
         file.apply([
             Edit::bool(config_paths::LIGHTHOUSE_ENABLED, checked(&form.enabled)),
             Edit::str(config_paths::LIGHTHOUSE_MOUNT, mount.as_str()),
@@ -461,7 +483,7 @@ pub async fn save_seeding(State(state): State<WebState>, Form(form): Form<Seedin
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
 
-    write_config(&state, "seeding", move |file| {
+    write_config(&state, "seeding", None, move |file| {
         file.apply([
             match upload_limit_kib {
                 Some(kib) => Edit::int(
@@ -532,7 +554,7 @@ async fn save_gluetun_section(
         return reject(&state, &message).await;
     }
 
-    write_config(&state, section, move |file| {
+    write_config(&state, section, None, move |file| {
         file.apply([Edit::bool(enabled_path, checked(&form.enabled))]);
 
         let url = form.control_url.trim();
@@ -561,7 +583,7 @@ async fn save_gluetun_section(
 }
 
 pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>) -> Response {
-    write_config(&state, "sync", |file| {
+    write_config(&state, "sync", None, |file| {
         let interval: u64 =
             form.interval_secs.trim().parse().map_err(|_| {
                 anyhow::anyhow!("the sync interval must be a whole number of seconds")
@@ -615,7 +637,7 @@ pub async fn save_notifications(
         return reject(&state, &message).await;
     }
 
-    write_config(&state, "notifications", |file| {
+    write_config(&state, "notifications", None, |file| {
         let Some(kind) = sharerr_core::config::NotifyKind::parse(form.kind.trim()) else {
             anyhow::bail!("{:?} is not a known notification kind", form.kind);
         };
@@ -652,14 +674,18 @@ pub async fn save_libraries(
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
 
-    write_config(&state, "libraries", |file| {
+    write_config(&state, "libraries", None, |file| {
         file.set_libraries(&libraries);
         Ok(())
     })
     .await
 }
 
-pub async fn save_paths(State(state): State<WebState>, Form(form): Form<PathsForm>) -> Response {
+pub async fn save_paths(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<PathsForm>,
+) -> Response {
     // Rows arrive as three parallel lists; a short one means a malformed submission
     // rather than an empty field, and zipping blindly would silently pair the wrong
     // paths together — which is the single most damaging thing this page can get
@@ -682,7 +708,7 @@ pub async fn save_paths(State(state): State<WebState>, Form(form): Form<PathsFor
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
 
-    write_config(&state, "paths", |file| {
+    write_config(&state, "paths", next.next, |file| {
         file.set_path_map(&mappings);
         Ok(())
     })
@@ -697,7 +723,12 @@ pub async fn save_paths(State(state): State<WebState>, Form(form): Form<PathsFor
 ///
 /// Every settings handler goes through here so that no path can skip the
 /// validate-before-write step or forget to invalidate the syncer.
-async fn write_config<F>(state: &WebState, section: &str, edit: F) -> Response
+async fn write_config<F>(
+    state: &WebState,
+    section: &str,
+    next: Option<String>,
+    edit: F,
+) -> Response
 where
     F: FnOnce(&mut ConfigFile) -> anyhow::Result<()>,
 {
@@ -722,7 +753,8 @@ where
             // live within one recovery interval instead of at the next restart.
             state.serve.replace_config(config).await;
             tracing::info!(section, path = %path.display(), "settings saved");
-            Redirect::to(&format!("/settings?saved={section}")).into_response()
+            let destination = sanitize_next(next).unwrap_or_else(|| "/settings".to_owned());
+            Redirect::to(&format!("{destination}?saved={section}")).into_response()
         }
         Err(err) => reject(state, &format!("{err:#}")).await,
     }
@@ -831,7 +863,7 @@ fn checked(field: &Option<String>) -> bool {
 }
 
 /// An unset URL renders as an empty field, not `None`.
-fn url_or_empty(url: Option<&url::Url>) -> String {
+pub(super) fn url_or_empty(url: Option<&url::Url>) -> String {
     url.map(url::Url::to_string).unwrap_or_default()
 }
 
@@ -911,7 +943,7 @@ pub(super) fn title_case(name: &str) -> String {
 
 /// The example URL shown in each app's empty URL field: its documented default
 /// port, which is the strongest hint a placeholder can give.
-fn url_placeholder(source: MediaSource) -> &'static str {
+pub(super) fn url_placeholder(source: MediaSource) -> &'static str {
     use MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
     match source {
         Sonarr => "http://sonarr:8989",
@@ -1246,6 +1278,7 @@ mod tests {
         let response = save_arr(
             State(state),
             axum::extract::Path(MediaSource::Sonarr),
+            Query(NextQuery::default()),
             Form(ArrForm {
                 url: "sonarr:8989".to_owned(),
                 api_key: String::new(),
@@ -1280,6 +1313,7 @@ mod tests {
         let response = save_arr(
             State(state),
             axum::extract::Path(MediaSource::Sonarr),
+            Query(NextQuery::default()),
             Form(ArrForm {
                 url: "sonarr:8989".to_owned(),
                 api_key: "some-api-key".to_owned(),
@@ -1292,6 +1326,75 @@ mod tests {
         assert!(
             !config_path.exists(),
             "a rejected secret write must not leave a partial config file behind"
+        );
+    }
+
+    /// The wizard is the only source of `next`, but the value still arrives
+    /// through an ordinary query string that a crafted link could set to
+    /// anything — a scheme-relative or absolute URL must not survive to
+    /// become the `Location` header.
+    #[test]
+    fn next_is_only_honoured_when_it_is_this_apps_own_path() {
+        assert_eq!(
+            sanitize_next(Some("/wizard/paths".to_owned())),
+            Some("/wizard/paths".to_owned())
+        );
+        assert_eq!(sanitize_next(Some("//evil.example".to_owned())), None);
+        assert_eq!(
+            sanitize_next(Some("https://evil.example".to_owned())),
+            None
+        );
+        assert_eq!(sanitize_next(Some(String::new())), None);
+        assert_eq!(sanitize_next(None), None);
+    }
+
+    #[tokio::test]
+    async fn save_general_redirects_to_next_when_it_is_given_a_safe_one() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_general(
+            State(state),
+            Query(NextQuery {
+                next: Some("/wizard/services".to_owned()),
+            }),
+            Form(GeneralForm {
+                tag: "sharerr".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .expect("a successful save redirects"),
+            "/wizard/services?saved=general"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_general_falls_back_to_settings_when_next_is_not_this_apps_own_path() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_general(
+            State(state),
+            Query(NextQuery {
+                next: Some("https://evil.example".to_owned()),
+            }),
+            Form(GeneralForm {
+                tag: "sharerr".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .expect("a successful save redirects"),
+            "/settings?saved=general"
         );
     }
 }

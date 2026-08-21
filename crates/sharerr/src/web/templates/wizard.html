@@ -1,0 +1,223 @@
+{% extends "layout.html" %}
+{% block title %}Set up sharerr{% endblock %}
+
+{% macro lock_attr(key) %}{% if locks.contains_key(*key) %}disabled{% endif %}{% endmacro %}
+{%- macro locked(key) %}
+{%- if let Some(var) = locks.get(*key) %}
+  <p class="locked">Pinned by <code>{{ var }}</code>. Unset that variable to edit this here.</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
+{%- macro field_status(is_set) %}
+{%- if is_set %}<span class="field-status field-status--set">&#10003; set</span>
+{%- else %}<span class="field-status field-status--unset">not set</span>
+{%- endif %}
+{%- endmacro %}
+
+{% block content %}
+<h1>Set up sharerr</h1>
+
+<ol class="wizard-steps">
+  <li class="{% if step == WizardStep::Welcome %}current{% endif %}">Welcome</li>
+  <li class="{% if step == WizardStep::Services %}current{% endif %}">Services</li>
+  <li class="{% if step == WizardStep::Paths %}current{% endif %}">Paths</li>
+  <li class="{% if step == WizardStep::Tracker %}current{% endif %}">Tracker</li>
+  <li class="{% if step == WizardStep::Done %}current{% endif %}">Done</li>
+</ol>
+
+{% if let Some(section) = saved %}
+<p class="ok" role="status">Saved {{ section }}.</p>
+{% endif %}
+
+{% if !master_key_present %}
+<p class="warn">
+  <strong>No vault master key.</strong> API keys cannot be stored until
+  <code>SHARERR_MASTER_KEY</code> (or <code>SHARERR_MASTER_KEY_FILE</code>) is set on
+  the container and it is restarted. Everything else below still saves.
+</p>
+{% endif %}
+
+{% if step == WizardStep::Welcome %}
+<p class="lede">
+  A few steps to get sharing: which apps hold your library, how their paths line
+  up with what sharerr and qBittorrent see, and the tracker address your friends
+  will reach you on. Every field here also lives on the Settings page, so nothing
+  here is a one-time choice — skip anything and come back to it later.
+</p>
+<p><a class="button" href="/wizard/services">Get started</a></p>
+<p class="hint"><a href="/settings">Skip the wizard and open Settings directly</a></p>
+
+{% else if step == WizardStep::Services %}
+<h2>Where your library lives</h2>
+<form method="post" action="/settings/general?next=/wizard/services" class="panel">
+  <label for="tag">Tag to watch</label>
+  <input id="tag" name="tag" value="{{ tag }}" required
+         {% call lock_attr("tag") %}{% endcall %}>
+  {% call locked("tag") %}{% endcall %}
+  <p class="hint">Sonarr and Radarr content carrying this tag is what gets shared.</p>
+  <button type="submit">Save</button>
+</form>
+
+{% for arr in arrs %}
+<h2>{{ arr.title }}</h2>
+<form method="post" action="/settings/arr/{{ arr.source }}?next=/wizard/services" class="panel">
+  <label for="{{ arr.source }}_url">URL</label>
+  <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
+         {% call lock_attr(arr.url_path) %}{% endcall %}>
+  {% call locked(arr.url_path) %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
+
+  <label for="{{ arr.source }}_key">API key {% call field_status(arr.key_set) %}{% endcall %}</label>
+  <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if arr.key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/{{ arr.source }}" hx-target="#test-{{ arr.source }}" hx-swap="innerHTML">Test connection</button>
+  <span id="test-{{ arr.source }}"></span>
+</form>
+{% endfor %}
+
+<h2>qBittorrent</h2>
+<form method="post" action="/settings/qbittorrent?next=/wizard/services" class="panel">
+  <label for="qbit_url">URL</label>
+  <input id="qbit_url" name="url" value="{{ qbit_url }}" required
+         {% call lock_attr("qbittorrent.url") %}{% endcall %}>
+  {% call locked("qbittorrent.url") %}{% endcall %}
+
+  <label for="qbit_api_key">API key {% call field_status(qbit_api_key_set) %}{% endcall %}</label>
+  <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if qbit_api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
+  {% endif %}
+  <p class="hint">
+    Generate one under Options &rarr; Web UI &rarr; API key (qBittorrent 5.2 or
+    newer).
+  </p>
+
+  <label for="qbit_category">Category for sharerr's torrents</label>
+  <input id="qbit_category" name="category" value="{{ qbit_category }}"
+         {% call lock_attr("qbittorrent.category") %}{% endcall %}>
+  {% call locked("qbittorrent.category") %}{% endcall %}
+
+  <label for="qbit_tag">Tag for sharerr's torrents</label>
+  <input id="qbit_tag" name="tag" value="{{ qbit_tag }}"
+         {% call lock_attr("qbittorrent.tag") %}{% endcall %}>
+  {% call locked("qbittorrent.tag") %}{% endcall %}
+
+  <label class="hint">
+    <input type="checkbox" name="skip_checking" value="1" {% if qbit_skip_checking %}checked{% endif %}
+           {% call lock_attr("qbittorrent.skip_checking") %}{% endcall %}>
+    Skip the hash check when adding a torrent
+  </label>
+  {% call locked("qbittorrent.skip_checking") %}{% endcall %}
+  <p class="hint">
+    On by default. Turn it off while you're still confirming your path mappings
+    on the next step: with it on, a wrong mapping seeds mismatched data instead
+    of qBittorrent catching it.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/qbittorrent" hx-target="#test-qbittorrent" hx-swap="innerHTML">Test connection</button>
+  <span id="test-qbittorrent"></span>
+</form>
+
+<p><a class="button" href="/wizard/paths">Continue to path mappings &rarr;</a></p>
+<p class="hint"><a href="/settings">Prefer the full Settings page instead</a></p>
+
+{% else if step == WizardStep::Paths %}
+<h2>How the pieces see the same files</h2>
+<p class="lede">
+  Sonarr/Radarr, sharerr, and qBittorrent can each mount your library at a
+  different path. Leave this empty if all three agree — most setups do.
+</p>
+<form method="post" action="/settings/paths?next=/wizard/paths" class="panel">
+  <p class="hint">
+    Blank rows are ignored, so use the spare row at the bottom to add one.
+  </p>
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>As Sonarr/Radarr report it</th><th>As sharerr sees it</th><th>As qBittorrent sees it</th></tr>
+    </thead>
+    <tbody>
+      {% for row in path_map %}
+      <tr>
+        <td><input name="arr" value="{{ row.arr }}" placeholder="/tv"></td>
+        <td><input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"></td>
+        <td><input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+</form>
+
+<p><a class="button" href="/wizard/tracker">Continue to tracker &rarr;</a></p>
+<p class="hint"><a href="/settings">Prefer the full Settings page instead</a></p>
+
+{% else if step == WizardStep::Tracker %}
+<h2>How your friends reach you</h2>
+<form method="post" action="/settings/tracker?next=/wizard/tracker" class="panel">
+  <p class="hint">
+    sharerr serves announces itself, from this instance, whichever torrent client
+    seeds. It answers only for torrents sharerr made.
+  </p>
+
+  <label for="advertised_host">Advertised host</label>
+  <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
+         placeholder="the name or IP your friends reach you on"
+         {% call lock_attr("tracker.advertised_host") %}{% endcall %}>
+  {% call locked("tracker.advertised_host") %}{% endcall %}
+  <p class="hint">
+    Required for peers to announce successfully. Running behind gluetun with a
+    forwarded port? Configure that from the Gluetun section on Settings instead —
+    it keeps this in step automatically.
+  </p>
+
+  <label for="tracker_port">Announce port</label>
+  <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"
+         placeholder="default: this server's own port"
+         {% call lock_attr("tracker.port") %}{% endcall %}>
+  {% call locked("tracker.port") %}{% endcall %}
+
+  <label for="tracker_token">Tracker token {% call field_status(tracker_token_set) %}{% endcall %}</label>
+  <input id="tracker_token" name="token" type="password" autocomplete="off"
+         placeholder="{% call stored(tracker_token_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if tracker_token_set %}
+  <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
+  {% endif %}
+  <input type="hidden" name="advertised_url" value="{{ tracker_advertised_url }}">
+  <p class="hint">
+    Optional, but recommended: without one, every friend shares the same
+    tracker token. Generate one from the Tracker section on Settings, or paste
+    one here.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
+
+<p><a class="button" href="/wizard/done">Finish &rarr;</a></p>
+<p class="hint"><a href="/settings">Prefer the full Settings page instead</a></p>
+
+{% else if step == WizardStep::Done %}
+<h2>You're set up</h2>
+<p class="lede">
+  Everything above can be revisited any time from Settings — reverse proxies,
+  Lidarr and the other secondary *arr apps, seeding limits, the lighthouse, and
+  more all live there. Add a friend from the Friends page once you're ready to
+  share the feed.
+</p>
+<p>
+  <a class="button" href="/">Go to status</a>
+  <a class="button secondary" href="/settings">Open Settings</a>
+</p>
+{% endif %}
+{% endblock %}

@@ -1,5 +1,13 @@
 # sharerr
 
+---
+
+## EXPERIMENTAL UNTIL v1.0.0-stable RELEASES
+
+NOTE: Project is in active development, many things are subject to change and this current state is not a representation of final, published quality. This is a hobby project.
+
+---
+
 Share your media library with friends, over the tools you already run.
 
 sharerr connects to your *arr apps — Sonarr, Radarr, Lidarr, Readarr, Whisparr —
@@ -19,25 +27,25 @@ design is built around.
 
 ## What works today
 
-| | |
-|---|---|
-| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr** | ✅ |
-| Torrent construction, files never moved | ✅ |
-| Seeding through qBittorrent **or Transmission** | ✅ |
-| Builtin BitTorrent tracker, served by sharerr itself | ✅ |
-| Torznab feed for Prowlarr, with magnet links | ✅ |
-| Jackett compatibility: URLs, indexer list, JSON results | ✅ |
-| Web UI: setup, settings, connection tests | ✅ |
-| Path-mapping diagnostics in the browser | ✅ |
-| Friend/peer management: per-friend keys, revoke, last-seen | ✅ |
-| Per-friend scoping: this friend sees TV, that one films | ✅ |
-| Per-friend announce-token attribution: revoking a friend cuts tracker access too | ✅ |
-| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal | ✅ |
-| Plain directory sharing, no *arr app at all | ✅ |
-| Dynamic endpoint from gluetun: rotating exit IP and forwarded port | ✅ |
-| Peer endpoint memory and signed endpoint gossip between friends | ✅ |
-| The lighthouse: rendezvous for a friend whose address rotated while unwatched | ✅ |
-| Plex as a library source | ❌ |
+|                                                                                  |     |
+| -------------------------------------------------------------------------------- | --- |
+| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr**                  | ✅  |
+| Torrent construction, files never moved                                          | ✅  |
+| Seeding through qBittorrent **or Transmission**                                  | ✅  |
+| Builtin BitTorrent tracker, served by sharerr itself                             | ✅  |
+| Torznab feed for Prowlarr, with magnet links                                     | ✅  |
+| Jackett compatibility: URLs, indexer list, JSON results                          | ✅  |
+| Web UI: setup, settings, connection tests                                        | ✅  |
+| Path-mapping diagnostics in the browser                                          | ✅  |
+| Friend/peer management: per-friend keys, revoke, last-seen                       | ✅  |
+| Per-friend scoping: this friend sees TV, that one films                          | ✅  |
+| Per-friend announce-token attribution: revoking a friend cuts tracker access too | ✅  |
+| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal           | ✅  |
+| Plain directory sharing, no *arr app at all                                      | ✅  |
+| Dynamic endpoint from gluetun: rotating exit IP and forwarded port               | ✅  |
+| Peer endpoint memory and signed endpoint gossip between friends                  | ✅  |
+| The lighthouse: rendezvous for a friend whose address rotated while unwatched    | ✅  |
+| Plex as a library source                                                         | ❌  |
 
 ## Quickstart
 
@@ -58,7 +66,7 @@ Then open `http://localhost:8477/`. The first visit asks you to create an accoun
 whoever gets there first claims the instance, so do it now rather than leaving it
 reachable and unclaimed. After that, **Settings** takes the Sonarr and Radarr URLs
 and API keys, the qBittorrent URL and API key, the path mappings, and the
-tracker's advertised host. Each service has a *Test connection* button, and
+tracker's advertised host. Each service has a _Test connection_ button, and
 saving takes effect within a second or two — no restart.
 
 `SHARERR_MASTER_KEY` is the one thing that cannot come from the UI, because it is
@@ -80,7 +88,7 @@ that is not true of your network, put it behind a TLS-terminating proxy.
 
 sharerr publishes what it shares as a **Torznab** feed, which is what Prowlarr
 speaks. Open **Friends**, add your friend by name, and sharerr generates a key just
-for them — shown once, alongside the feed URL. They add a *Generic Torznab* indexer
+for them — shown once, alongside the feed URL. They add a _Generic Torznab_ indexer
 in their Prowlarr using those two values.
 
 Because each friend has their own key, the Friends page can tell you when each of
@@ -110,7 +118,7 @@ read-only admin endpoints — the indexer list, the server config, and the JSON
 results some clients prefer to Torznab. The indexer id in the path is ignored, so
 whatever id was in the old Jackett config keeps working.
 
-Jackett's *write* endpoints — adding, configuring or deleting indexers — are not
+Jackett's _write_ endpoints — adding, configuring or deleting indexers — are not
 implemented, because sharerr has exactly one indexer and it is not configurable
 over HTTP. A client that calls one gets a `501` and sharerr logs the exact method
 and path, so a gap that actually matters says so instead of failing silently.
@@ -164,10 +172,10 @@ ratio_limit = 2.0
 Neither is enforced by sharerr itself afterward — each client's own already-
 running seeding engine honours the goal from then on, the same as it would
 for a torrent added by hand. That also means a change here only takes effect
-on torrents added *after* the change; nothing already seeding is touched.
+on torrents added _after_ the change; nothing already seeding is touched.
 Leave a field blank (or the section out entirely) for no cap, today's
 default. There is deliberately no time-based goal: qBittorrent's equivalent
-is total time seeded, but Transmission's only comparable knob is *idle*
+is total time seeded, but Transmission's only comparable knob is _idle_
 time, a different condition, and one field meaning two different things per
 backend would be a footgun rather than a fix.
 
@@ -184,7 +192,7 @@ poll_secs = 60
 ```
 
 sharerr polls `/v1/publicip/ip` and `/v1/openvpn/portforwarded` as the source of
-truth, and torrents carry an announce *list* spanning the recently held
+truth, and torrents carry an announce _list_ spanning the recently held
 endpoints, so a friend's client falls back through older tiers after a rotation.
 When the endpoint changes, sharerr rewrites every cached `.torrent` (the info
 hash is untouched — announce lives outside the info dictionary) and repoints the
@@ -213,7 +221,7 @@ tracker's, while the web UI stays on the LAN side.
 
 ### The lighthouse
 
-Gossip only helps a friend who can still reach *somebody* — two friends whose
+Gossip only helps a friend who can still reach _somebody_ — two friends whose
 addresses both rotated while neither was watching have no path back to each
 other. The lighthouse is the rendezvous for that case: a `key hash -> latest
 endpoint` service, deliberately independent of the rest of sharerr, that a
@@ -302,7 +310,7 @@ Notes that are easy to trip over:
 
 ## Friends finding each other
 
-A peer used to be only a credential; sharerr now also remembers *where* each
+A peer used to be only a credential; sharerr now also remembers _where_ each
 friend was recently seen — the last few addresses, timestamped, with their feed
 traffic and their torrent client recorded separately (a dual-VPN friend has the
 two behind different exits). Sightings come from authenticated feed pulls, from
@@ -319,7 +327,7 @@ use; and a gossip pull returns only records for peers the caller proves they
 already know — nobody learns of a peer they are not already sharing with.
 
 Set it up per friend on the Friends page: their sharerr's URL, and the key they
-issued you (from *their* Friends page). Leave both empty and your instance still
+issued you (from _their_ Friends page). Leave both empty and your instance still
 answers their pulls and accepts their pushes; it just never initiates.
 
 ## Sharing a plain directory, no *arr app at all
@@ -370,7 +378,7 @@ not supported — upgrade to 5.2 or newer.
 and answers `401` before it ever reads the key when they differ. A remapped docker
 port (`-p 18080:8080`) or a reverse proxy on another port trips this. Either point
 `qbittorrent.url` at the port qBittorrent itself listens on, or turn off Options →
-Web UI → *Validate Host header*.
+Web UI → _Validate Host header_.
 
 `sharerr doctor` names this, rather than reporting "rejected the API key" and
 leaving you to rotate a key that was never wrong.
@@ -402,14 +410,14 @@ One difference worth knowing, enforced rather than documented-and-hoped:
 The UI covers everything, but each verb has a headless equivalent, which is what a
 scripted deployment or a secrets manager wants:
 
-| Command | What it does |
-|---|---|
-| `sharerr serve` | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs. |
-| `sharerr sync` | One reconciliation pass, then exit. |
-| `sharerr doctor` | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
-| `sharerr vault set <key>` | Reads a secret from stdin into the encrypted vault. |
-| `sharerr vault list` | Lists which secret keys are currently set, without their values. |
-| `sharerr vault remove <key>` | Deletes a secret from the vault. |
+| Command                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `sharerr sync`               | One reconciliation pass, then exit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
+| `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `sharerr vault list`         | Lists which secret keys are currently set, without their values.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -454,32 +462,30 @@ bytes. No real content is involved anywhere.
 
 ## Layout
 
-| Crate | |
-|---|---|
-| `sharerr` | The binary: CLI, web UI, Torznab, tracker, reconciliation |
-| `sharerr-core` | Domain types, layered config, path mapping. No I/O |
-| `sharerr-arr` | Sonarr/Radarr clients and tagged-content discovery |
-| `sharerr-client` | The narrow trait a torrent client backend implements |
-| `sharerr-qbit` | qBittorrent WebUI client |
-| `sharerr-transmission` | Transmission RPC client |
-| `sharerr-store` | Encrypted vault + SQLite store |
-| `sharerr-torrent` | Torrent construction and tracker resolution |
-| `sharerr-lighthouse` | The lighthouse rendezvous service — its own binary too |
-| `sharerr-testkit` | Synthetic fixtures. Never in a release build |
+| Crate                  |                                                           |
+| ---------------------- | --------------------------------------------------------- |
+| `sharerr`              | The binary: CLI, web UI, Torznab, tracker, reconciliation |
+| `sharerr-core`         | Domain types, layered config, path mapping. No I/O        |
+| `sharerr-arr`          | Sonarr/Radarr clients and tagged-content discovery        |
+| `sharerr-client`       | The narrow trait a torrent client backend implements      |
+| `sharerr-qbit`         | qBittorrent WebUI client                                  |
+| `sharerr-transmission` | Transmission RPC client                                   |
+| `sharerr-store`        | Encrypted vault + SQLite store                            |
+| `sharerr-torrent`      | Torrent construction and tracker resolution               |
+| `sharerr-lighthouse`   | The lighthouse rendezvous service — its own binary too    |
+| `sharerr-testkit`      | Synthetic fixtures. Never in a release build              |
 
 The original design brief, and the two corrections the implementation forced on
 it, are in [docs/design.md](docs/design.md).
 
 ## AI usage
 
-Heavily inspired by: https://v2.dictionarry.dev/ai-transparency
+Heavily inspired by:
 
-I have used generative AI to write large parts of this project. Regardless, all of
-the code in this repository is my _responsibility_. AI is a tool, not an owner of a
-project. I have personally understood, reviewed, and approved all of the AI
-generated code in this repository. _Mainline releases_ have the same level of
-accountability to me as any code I write and publish.
+Heavily inspired by: [Dictionarry/Profilarr's AI Transparency Statement](https://v2.dictionarry.dev/ai-transparency)
+
+I have used generative AI to write large parts of this project. All of the code here is my responsibility regardless: AI is a tool, not an owner of a project. I have personally understood, reviewed and approved all of the AI-generated code in this repository, and _mainline releases_ carry the same accountability to me as anything I write and publish myself.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](./LICENSE.md).

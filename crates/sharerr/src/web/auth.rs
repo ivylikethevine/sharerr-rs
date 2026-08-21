@@ -251,7 +251,9 @@ pub async fn setup_submit(
     }
 
     tracing::info!(username = %form.username, "operator account created");
-    sign_in(&state, jar, &form.username).await
+    // A fresh instance has nothing configured yet — the wizard, not the
+    // status page, is the useful first thing to see.
+    sign_in(&state, jar, &form.username, "/wizard").await
 }
 
 pub async fn login_page(State(state): State<WebState>, jar: CookieJar) -> Response {
@@ -280,7 +282,7 @@ pub async fn login_submit(
 
     let password = SecretString::from(form.password.clone());
     match store.verify_password(&form.username, &password).await {
-        Ok(true) => sign_in(&state, jar, &form.username).await,
+        Ok(true) => sign_in(&state, jar, &form.username, "/").await,
         Ok(false) => {
             // Deliberately one message for both a wrong password and an unknown
             // username. `Store::verify_password` already equalises the timing;
@@ -385,9 +387,9 @@ pub async fn change_password(
     Redirect::to("/settings?saved=account").into_response()
 }
 
-async fn sign_in(state: &WebState, jar: CookieJar, username: &str) -> Response {
+async fn sign_in(state: &WebState, jar: CookieJar, username: &str, destination: &str) -> Response {
     match state.sessions.create(username).await {
-        Ok(token) => (jar.add(session_cookie(token)), Redirect::to("/")).into_response(),
+        Ok(token) => (jar.add(session_cookie(token)), Redirect::to(destination)).into_response(),
         Err(reason) => internal(&reason),
     }
 }

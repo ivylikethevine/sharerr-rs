@@ -299,7 +299,7 @@ input:disabled, select:disabled {
   cursor: not-allowed;
 }
 
-button {
+button, a.button {
   align-self: flex-start;
   margin-top: 1.1rem;
   margin-right: 0.6rem;
@@ -315,16 +315,21 @@ button {
   transition: background var(--ease), box-shadow var(--ease), transform var(--ease);
 }
 
-button:hover { background: var(--accent-hover); }
-button:active { transform: translateY(1px); }
+/* `a.button` is a link that reads as a button (the wizard's "Continue"
+   steps) — inline-block so it accepts padding, and text-decoration explicitly
+   off since it is not one of the page's ordinary text links. */
+a.button { display: inline-block; text-decoration: none; }
+
+button:hover, a.button:hover { background: var(--accent-hover); }
+button:active, a.button:active { transform: translateY(1px); }
 button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-button.secondary {
+button.secondary, a.button.secondary {
   background: transparent;
   border-color: var(--line-strong);
   color: var(--ink);
 }
-button.secondary:hover {
+button.secondary:hover, a.button.secondary:hover {
   background: var(--accent-wash);
   border-color: var(--accent);
   color: var(--accent);
@@ -452,6 +457,32 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
   border-radius: 6px;
   padding: 0.35rem 0.55rem;
   margin: 0.35rem 0 0;
+}
+
+/* The wizard's step indicator: `.current` marks where the operator is —
+   there is no notion of "already completed" since every step can be
+   revisited and re-saved at any time, so the rest stay visually equal. */
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 1.5rem;
+  padding: 0;
+  list-style: none;
+}
+.wizard-steps li {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--panel-2);
+  font-size: 0.85rem;
+  font-weight: 550;
+}
+.wizard-steps li.current {
+  color: var(--accent-ink);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 table { border-collapse: collapse; width: 100%; }

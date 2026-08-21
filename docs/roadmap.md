@@ -92,14 +92,6 @@ An inbound request queue with an approve step is the other half of that idea.
 
 ---
 
-## Ease of use
-
-**Setup wizard.** Settings is a wall of fields. A guided first-run — services, then
-paths, then tracker, validating each step — matches how the *arr apps onboard and
-would catch misconfiguration at the point it is introduced.
-
----
-
 ## The lighthouse
 
 Shipped — see [the README](../README.md#the-lighthouse) for how to use it. The
