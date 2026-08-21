@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, normalise_base,
+    error_chain, is_auth_rejection, normalise_base,
 };
 use tokio::sync::RwLock;
 use url::Url;
@@ -148,9 +148,7 @@ impl TransmissionClient {
                 }
             }
 
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
+            if is_auth_rejection(status) {
                 return Err(ClientError::AuthRejected { kind: KIND });
             }
 
@@ -194,10 +192,10 @@ struct Envelope {
 
 /// Typed views of the `torrent-get` responses, mirroring the sibling qBittorrent
 /// crate's wire structs. Typed on purpose: hand-walking `Value` with
-/// `unwrap_or_default` once turned a renamed `hashString` into an empty hash —
-/// which never matches the live set, so reconciliation silently re-added every
-/// torrent on every pass. A missing field here is a `Malformed` error that names
-/// the call instead.
+/// `unwrap_or_default` would silently turn a renamed `hashString` into an empty
+/// hash, which never matches the live set and would make reconciliation re-add
+/// every torrent on every pass. A missing field here is a `Malformed` error that
+/// names the call instead.
 #[derive(Debug, Deserialize)]
 struct TorrentGetResponse {
     torrents: Vec<ListedTorrent>,

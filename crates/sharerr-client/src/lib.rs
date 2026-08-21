@@ -66,6 +66,15 @@ pub fn split_tags(raw: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Whether a status means "the credential was not accepted".
+///
+/// Both, and not one: a rejected key or password can come back as either 401 or
+/// 403 depending on the server, and treating only one as rejection would silently
+/// ignore the other.
+pub fn is_auth_rejection(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+}
+
 /// A copy of `base` whose path ends in `/`, so `Url::join` appends rather than
 /// replacing the last segment. This is what makes reverse-proxy subpaths
 /// (`http://host/sonarr/`) work.
@@ -422,6 +431,15 @@ mod tests {
         }
 
         assert_eq!(error_chain(&Outer), "sending request: refused");
+    }
+
+    /// Both statuses that mean a credential was rejected must be treated alike.
+    #[test]
+    fn both_statuses_that_mean_the_credential_was_rejected_are_treated_alike() {
+        assert!(is_auth_rejection(reqwest::StatusCode::UNAUTHORIZED));
+        assert!(is_auth_rejection(reqwest::StatusCode::FORBIDDEN));
+        assert!(!is_auth_rejection(reqwest::StatusCode::OK));
+        assert!(!is_auth_rejection(reqwest::StatusCode::NOT_FOUND));
     }
 
     /// A subpath base must keep its prefix once normalised, or a reverse-proxied

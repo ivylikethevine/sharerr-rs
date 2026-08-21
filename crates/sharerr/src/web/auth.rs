@@ -2,11 +2,11 @@
 //!
 //! # Why the UI has a login at all
 //!
-//! Before this existed the HTTP surface was `/health` and `/ready` — two strings
-//! worth nothing to an attacker. The settings pages are a different proposition:
-//! they accept API keys and a qBittorrent password, and `server.bind` defaults to
-//! `0.0.0.0`. An unauthenticated form that writes to the credential vault would be
-//! a worse hole than the vault closes.
+//! `/health` and `/ready` are two strings worth nothing to an attacker, but the
+//! settings pages are a different proposition: they accept API keys and a
+//! qBittorrent password, and `server.bind` defaults to `0.0.0.0`. An
+//! unauthenticated form that writes to the credential vault would be a worse
+//! hole than the vault closes.
 //!
 //! # What it does and does not defend
 //!
@@ -171,11 +171,10 @@ pub async fn require_auth(
 
 /// Refuse a state-changing request that came from another site.
 ///
-/// Applied once over the whole router rather than per handler. An earlier version
-/// exempted `/login` and `/setup` on the grounds that they needed to re-render
-/// their own form on rejection — they did not, they returned the refusal verbatim,
-/// so the exemption bought nothing and left the two most attackable POSTs relying
-/// on someone remembering an inline call.
+/// Applied once over the whole router rather than per handler, with no exemption
+/// for `/login` or `/setup`: a rejection there just returns the refusal verbatim
+/// like anywhere else, so carving them out would buy nothing while leaving the
+/// two most attackable POSTs relying on someone remembering an inline call.
 pub async fn deny_cross_origin(request: axum::extract::Request, next: Next) -> Response {
     // GETs are not state-changing and browsers do not send `Origin` for ordinary
     // navigation, so checking them would reject every normal page load.

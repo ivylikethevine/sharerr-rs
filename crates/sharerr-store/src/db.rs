@@ -235,12 +235,11 @@ impl Store {
                 arr_path      = excluded.arr_path,
                 size          = excluded.size,
                 ids_json      = excluded.ids_json,
-                -- Never clear a known infohash. Discovery rebuilds items with
-                -- `info_hash: None`, so a plain assignment would drop the hash of a
-                -- torrent qBittorrent is still seeding; if the re-share then failed
-                -- and the item were later untagged, nothing would know which torrent
-                -- to remove and it would seed forever. Use `set_info_hash` to change
-                -- it, and `set_state(Unshared)` to retire it.
+                -- Never clear a known infohash: discovery rebuilds items with
+                -- `info_hash: None`, and a plain assignment would drop the hash
+                -- of a torrent qBittorrent is still seeding, leaving nothing to
+                -- remove if the item is later untagged. Use `set_info_hash` to
+                -- change it, and `set_state(Unshared)` to retire it.
                 info_hash     = COALESCE(excluded.info_hash, shared_items.info_hash),
                 -- Same reasoning as info_hash: a rediscovery must not blank out a
                 -- fingerprint that only `set_seeding`/`set_announce_token_fp` know.
@@ -492,10 +491,10 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
     let id: i64 = row.try_get("id")?;
     let malformed = |detail: String| StoreError::Malformed { id, detail };
 
-    // Decoded as `&str`, which borrows the row's own buffer rather than
-    // allocating: all four of these are either parsed into an enum or handed
-    // straight to serde, so the `String` each used to build was constructed only
-    // to be dropped. This runs per row of every feed request and every sync pass.
+    // Decoded as `&str`, borrowing the row's own buffer instead of allocating:
+    // all four of these are either parsed into an enum or handed straight to
+    // serde, so a `String` would only be built to be dropped. This runs per row
+    // of every feed request and every sync pass.
     let raw_source = row.try_get::<&str, _>("source")?;
     let source = MediaSource::parse(raw_source)
         .ok_or_else(|| malformed(format!("unknown source {raw_source:?}")))?;
@@ -540,8 +539,8 @@ fn encode_json(value: &impl serde::Serialize) -> Result<String> {
 /// Trim and bound a human-entered name, with the caller's own messages.
 ///
 /// Usernames and peer labels share the same rule — non-blank, at most 64
-/// characters — and used to enforce it separately; the messages stay
-/// per-caller because they render straight back to different forms.
+/// characters — but the messages stay per-caller because they render straight
+/// back to different forms.
 pub(crate) fn validate_name(
     raw: &str,
     blank_msg: &'static str,
@@ -596,10 +595,9 @@ mod tests {
 
     /// Every source must survive an insert and a read-back.
     ///
-    /// The schema once carried its own `CHECK (source IN ('sonarr', 'radarr'))`
-    /// copy of the closed set, so Lidarr, Readarr and Whisparr rows failed at
-    /// INSERT while everything on the Rust side compiled clean — and no test
-    /// wrote a non-Sonarr/Radarr row to notice. This is that test.
+    /// Guards against a schema `CHECK (source IN (...))` silently excluding a
+    /// newly added source: such a row would fail at INSERT while the Rust side
+    /// compiles clean, and nothing else would notice.
     #[tokio::test]
     async fn every_media_source_round_trips_through_the_store() {
         let store = Store::open_in_memory().await.unwrap();
@@ -921,10 +919,11 @@ mod tests {
         );
     }
 
-    /// The closed set of states lives in `ShareState`, not the schema — the SQL
-    /// CHECK copy of it is what once silently rejected every Lidarr row. Writes
-    /// only ever bind `as_str`, and a row something else scribbled a bad state
-    /// into must surface as `Malformed` on read, never decode to a wrong state.
+    /// The closed set of states lives in `ShareState`, not a SQL CHECK
+    /// constraint, which would silently reject any state a future version adds.
+    /// Writes only ever bind `as_str`, and a row something else scribbled a bad
+    /// state into must surface as `Malformed` on read, never decode to a wrong
+    /// state.
     #[tokio::test]
     async fn a_state_outside_the_enum_is_malformed_on_read() {
         let store = Store::open_in_memory().await.unwrap();

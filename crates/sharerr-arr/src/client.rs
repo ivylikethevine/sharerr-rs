@@ -88,6 +88,28 @@ impl ArrClient {
             })
     }
 
+    /// Turn a non-2xx response into the matching [`ArrError`], `path` named for the
+    /// message; otherwise hand the response back for the caller to read the body.
+    async fn check_status(&self, response: reqwest::Response, path: &str) -> Result<reqwest::Response> {
+        let status = response.status();
+        if sharerr_client::is_auth_rejection(status) {
+            return Err(ArrError::Unauthorized {
+                service: self.kind,
+                status: status.as_u16(),
+            });
+        }
+        if !status.is_success() {
+            let body = clamp_body(&response.text().await.unwrap_or_default());
+            return Err(ArrError::Status {
+                service: self.kind,
+                status: status.as_u16(),
+                path: path.to_owned(),
+                body,
+            });
+        }
+        Ok(response)
+    }
+
     /// The only place the API key is read. Everything else goes through here, so
     /// there is exactly one line to audit.
     pub(crate) async fn get<T: DeserializeOwned>(
@@ -110,23 +132,7 @@ impl ArrClient {
                 detail: sharerr_client::error_chain(&source),
             })?;
 
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ArrError::Unauthorized {
-                service: self.kind,
-                status: status.as_u16(),
-            });
-        }
-
-        if !status.is_success() {
-            let body = clamp_body(&response.text().await.unwrap_or_default());
-            return Err(ArrError::Status {
-                service: self.kind,
-                status: status.as_u16(),
-                path: path.to_owned(),
-                body,
-            });
-        }
+        let response = self.check_status(response, path).await?;
 
         // Decode from bytes rather than `response.json()` so a malformed payload
         // reports which endpoint produced it.
@@ -196,22 +202,7 @@ impl ArrClient {
                 detail: sharerr_client::error_chain(&source),
             })?;
 
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ArrError::Unauthorized {
-                service: self.kind,
-                status: status.as_u16(),
-            });
-        }
-        if !status.is_success() {
-            let body = clamp_body(&response.text().await.unwrap_or_default());
-            return Err(ArrError::Status {
-                service: self.kind,
-                status: status.as_u16(),
-                path: "tag".to_owned(),
-                body,
-            });
-        }
+        self.check_status(response, "tag").await?;
         Ok(())
     }
 

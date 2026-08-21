@@ -161,9 +161,8 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
     // A threshold configured but no webhook to report through is the same as
     // the check being off — cheaper to notice here than to run the query and
     // discard every result. Resolved once and reused for every quiet peer
-    // found: this used to open the vault here and then again inside `send` per
-    // peer, so an hourly pass with N quiet friends paid 1+N Argon2 derivations
-    // for a value already in hand.
+    // found, so an hourly pass with N quiet friends pays one Argon2
+    // derivation, not N.
     let Some(webhook) = webhook(state).await else {
         return Ok(());
     };

@@ -83,8 +83,8 @@ impl MediaSource {
     /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
     ///
     /// This is *the* decoder for stored and URL-borne source names; a local
-    /// string match at a call site is how the database once lost every Lidarr
-    /// row to an "unknown source" error.
+    /// string match at a call site is how a database loses every Lidarr row to
+    /// an "unknown source" error.
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|s| s.as_str() == value)
     }

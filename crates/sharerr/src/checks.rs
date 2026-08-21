@@ -3,12 +3,10 @@
 //! # Why this exists
 //!
 //! `sharerr doctor` and the settings page's "Test connection" button ask the same
-//! questions of the same services, and they used to answer them separately. The two
-//! implementations had already drifted into describing *different conditions* under
-//! similar words: the CLI warned "tag exists but nothing carries it", while the UI
-//! failed with "no tag named X exists there yet". Those are not two phrasings of one
-//! finding — they are two distinct states, and each tool could only report the one
-//! it happened to look for.
+//! questions of the same services. "Tag exists but nothing carries it" and "no tag
+//! named X exists there yet" are not two phrasings of one finding — they are two
+//! distinct states with different fixes, and a single implementation must report
+//! the one that actually applies.
 //!
 //! So the decision lives here and the wording lives with the caller. This module
 //! answers *what is true*; [`crate::commands::doctor`] and [`crate::web::probe`]
@@ -126,9 +124,8 @@ pub async fn check_arr(
         status.app_name
     };
 
-    // Both tag questions are asked, every time. Previously each caller asked only
-    // one of them and reported the other's condition in its wording. The id from
-    // the first answers feeds the walk, so the `/tag` list is fetched once.
+    // Both tag questions are asked, every time — the id from the first answer
+    // feeds the walk, so the `/tag` list is fetched once.
     let Ok(tag_id) = client.tag_id(tag).await else {
         return ArrOutcome::TagMissing { version };
     };
@@ -309,15 +306,6 @@ pub enum QbitOutcome {
     },
 }
 
-/// Sign in to the configured torrent client and read its version.
-///
-/// The login is explicit rather than left to the first real call, because "reached
-/// it but the password is wrong" and "could not reach it" have different fixes and
-/// an implicit login reports them identically.
-///
-/// Which client this talks to is a configuration choice, and the caller passes the
-/// already-resolved backend rather than guessing from the URL — two clients can
-/// perfectly well live on the same host.
 /// Construct whichever torrent client `backend` selects.
 ///
 /// The one place the backend→constructor decision lives: the reconciliation
@@ -394,6 +382,15 @@ impl TorrentCredential {
     }
 }
 
+/// Sign in to the configured torrent client and read its version.
+///
+/// The login is explicit rather than left to the first real call, because "reached
+/// it but the password is wrong" and "could not reach it" have different fixes and
+/// an implicit login reports them identically.
+///
+/// Which client this talks to is a configuration choice, and the caller passes the
+/// already-resolved backend rather than guessing from the URL — two clients can
+/// perfectly well live on the same host.
 pub async fn check_qbit(
     backend: TorrentBackend,
     url: &Url,
@@ -462,8 +459,7 @@ mod tests {
 
     /// The distinction this module was created to preserve: a tag that does not
     /// exist and a tag nobody has applied are different findings with different
-    /// fixes. `doctor` used to see only the second and the web UI only the first, so
-    /// each described the other's condition in its own wording.
+    /// fixes.
     #[tokio::test]
     async fn a_tag_that_does_not_exist_is_reported_as_missing() {
         let server = MockServer::start().await;

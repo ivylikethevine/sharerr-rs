@@ -88,10 +88,10 @@ impl LoginPage {
 }
 
 /// The one page a signed-in operator lands on: what is working, what is not,
-/// and why. Merges what used to be two pages — Status and Diagnostics — since
-/// they answered the same underlying question ("is this instance healthy")
-/// at two different levels of detail, and a person chasing "why isn't this
-/// working" had to know to click through to the second one.
+/// and why. Status and Diagnostics live together here because they answer
+/// the same underlying question ("is this instance healthy") at two
+/// different levels of detail, and splitting them made a person chasing
+/// "why isn't this working" hunt for a second page.
 #[derive(Debug, Template)]
 #[template(path = "status.html")]
 pub struct StatusPage {
@@ -118,7 +118,7 @@ pub struct StatusPage {
     pub sync_interval_secs: u64,
     pub config_path: String,
 
-    // ------------------------------------------------------ former Diagnostics
+    // ------------------------------------------------------ diagnostics
     /// Live connectivity + tag/path checks, one line per *arr app and per
     /// `[[library]]` directory — only for what is actually configured. Shared
     /// with `doctor` via `crate::checks`, so the two cannot disagree about
@@ -360,9 +360,9 @@ pub struct SampleRow {
     pub qbit: String,
 }
 
-/// The gathered results of the checks folded into [`StatusPage`] — everything
-/// the former Diagnostics page computed, kept as one bundle so `diagnostics`'s
-/// gathering function has a single return type instead of an eleven-tuple.
+/// The gathered results of the checks folded into [`StatusPage`] — kept as one
+/// bundle so `diagnostics`'s gathering function has a single return type
+/// instead of an eleven-tuple.
 #[derive(Debug)]
 pub struct DiagnosticsData {
     pub services: Vec<ServiceLine>,
@@ -576,8 +576,7 @@ impl TokenStatus {
 }
 
 /// Every file sharerr has discovered, sortable and filterable — the page
-/// `docs/roadmap.md` used to describe as the thing "an operator asks for after
-/// setup and the last thing they can currently get".
+/// `docs/roadmap.md` names as what an operator wants right after setup.
 #[derive(Debug, Template)]
 #[template(path = "items.html")]
 pub struct ItemsPage {

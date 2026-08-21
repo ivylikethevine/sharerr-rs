@@ -150,9 +150,9 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
 }
 
 /// The one page a signed-in operator lands on: what is working, what is not,
-/// and why. Used to be two pages — this one's glance, and Diagnostics' deeper
-/// checks — merged because both answered "is this instance healthy" and a
-/// person chasing a problem had to know a second page existed at all.
+/// and why. The glance and Diagnostics' deeper checks live together here
+/// because both answer "is this instance healthy", and splitting them would
+/// make a person chasing a problem hunt for a second page.
 async fn status_page(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
     // Concurrently, because they share no data and `gather` is the expensive
@@ -286,11 +286,11 @@ mod tests {
 
     /// Drive the *assembled* router, middleware and all.
     ///
-    /// Everything under `web/` was previously tested one helper at a time, which
-    /// left the two properties that actually matter unasserted: that the auth guard
-    /// is wired to every protected route, and that the cross-origin layer really
-    /// does cover the public POSTs. Both are facts about how `routes()` composes
-    /// its layers, and neither is observable from a unit test of the handler.
+    /// Testing handlers one at a time leaves two properties unasserted: that the
+    /// auth guard is wired to every protected route, and that the cross-origin
+    /// layer really does cover the public POSTs. Both are facts about how
+    /// `routes()` composes its layers, and neither is observable from a unit
+    /// test of the handler.
     fn router() -> (tempfile::TempDir, Router) {
         let (dir, serve) = unconfigured();
         (dir, routes(serve))

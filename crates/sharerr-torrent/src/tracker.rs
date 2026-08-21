@@ -1,10 +1,8 @@
 //! Where sharerr's torrents announce: sharerr's own tracker.
 //!
-//! There used to be a second backend here — qBittorrent's embedded tracker — and
-//! it was removed on purpose. Two backends meant two independently built announce
-//! URLs, and every change to how the endpoint is resolved had to be made and
-//! tested twice. The builtin tracker works whichever torrent client seeds, so it
-//! is now the only one.
+//! Deliberately the only backend: a second one would mean two independently
+//! built announce URLs, doubling every change to how the endpoint is resolved.
+//! The builtin tracker works whichever torrent client seeds.
 //!
 //! The announce URL itself is one path appended to whatever base
 //! [`AdvertisedEndpoint`] currently resolves — the same resolver every feed link
@@ -199,8 +197,8 @@ mod tests {
         assert!(tracker.ensure_ready().await.is_ok());
     }
 
-    /// Configuration written before the resolver existed must keep producing the
-    /// same URLs, so the scheme is frozen.
+    /// Existing configuration must keep producing the same URLs, so the scheme
+    /// is frozen.
     #[tokio::test]
     async fn the_builtin_tracker_still_produces_its_announce_url() {
         let tracker = BuiltinTracker::new(endpoint("http://sharerr.example:8477"), None);

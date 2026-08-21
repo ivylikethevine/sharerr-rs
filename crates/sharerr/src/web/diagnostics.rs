@@ -1,16 +1,17 @@
 //! The health checks folded into the combined status/diagnostics page: does
 //! the library actually resolve?
 //!
-//! `doctor` has always answered this from a shell. The settings page's "Test
-//! connection" buttons deliberately do not — they answer a one-line question about
-//! one service, and path resolution needs a full discovery walk plus a look at the
-//! filesystem. The result was that the check most likely to explain "sharerr does
-//! nothing" was the one an operator who never opens a terminal could not run.
+//! `doctor` answers this from a shell. The settings page's "Test connection"
+//! buttons deliberately do not — they answer a one-line question about one
+//! service, while path resolution needs a full discovery walk plus a look at
+//! the filesystem. Without this page, the check most likely to explain
+//! "sharerr does nothing" was the one an operator who never opens a terminal
+//! could not run.
 //!
-//! The checking is shared with `doctor` via [`crate::checks`]; this module only
-//! gathers. [`gather`] used to render its own page — until that page and Status
-//! merged, on the grounds that both answered "is this instance healthy" at two
-//! levels of detail a person had to know to click through between.
+//! The checking is shared with `doctor` via [`crate::checks`]; this module
+//! only gathers — the status page renders it together with the glance, since
+//! both answer "is this instance healthy" at different levels of detail and
+//! a second page to click through to answered no one's question.
 
 use secrecy::SecretString;
 use sharerr_arr::Discovered;

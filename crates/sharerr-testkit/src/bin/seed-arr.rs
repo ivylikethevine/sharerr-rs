@@ -12,9 +12,8 @@
 //! and `POST /api/v3/movie` one against `api.radarr.video`. The compose stack's
 //! network is `internal: true` precisely so nothing can reach either, and even with
 //! egress the lookup would fail: every fixture title is invented, so there is
-//! nothing out there to find. Writing the rows is the only way to have tagged
-//! content offline, and `docker/README.md` has always named it as the option that
-//! keeps the stack sealed.
+//! nothing out there to find. Writing the rows directly is the only way to get
+//! tagged content while keeping the stack sealed.
 //!
 //! # Two consequences
 //!

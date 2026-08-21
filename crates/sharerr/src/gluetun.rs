@@ -35,8 +35,8 @@
 //! # Two independent pollers
 //!
 //! [`poll_loop`] is generic over [`GluetunTarget`] rather than assuming there is
-//! one gluetun: `Tracker` keeps the announce/feed address in step, exactly as
-//! before, and `Client` does the same for the torrent client's own tunnel when
+//! one gluetun: `Tracker` keeps the announce/feed address in step, and `Client`
+//! does the same for the torrent client's own tunnel when
 //! it is a *separate* one — see `docker/deploy/dual-vpn/` and `docs/roadmap.md`'s
 //! "a peer with two addresses". Both share this module's client and error types;
 //! they differ only in which `GluetunConfig`, `AdvertisedEndpoint`,
@@ -52,7 +52,7 @@ use serde::Deserialize;
 use sharerr_client::error_chain;
 use sharerr_core::Config;
 use sharerr_core::config::{GluetunConfig, secret_keys};
-use sharerr_core::endpoint::now_epoch;
+use sharerr_core::endpoint::{AdvertisedEndpoint, now_epoch};
 use url::Url;
 
 use crate::state::ServeState;
@@ -72,8 +72,7 @@ pub enum GluetunTarget {
 impl GluetunTarget {
     /// Parse the `?target=` query parameter `/gluetun/refresh` and
     /// `/gluetun/down` accept. Anything unrecognised, including absent, is
-    /// `Tracker` — the endpoint's original and only meaning before a second
-    /// poller existed.
+    /// `Tracker`, so callers that never send `target` keep working unchanged.
     pub fn from_query(raw: Option<&str>) -> Self {
         match raw {
             Some("client") => Self::Client,
@@ -111,9 +110,8 @@ impl GluetunTarget {
     }
 }
 
-/// What a gluetun poller last saw and last failed with — the "when did
-/// gluetun last actually tell sharerr something" the Diagnostics page
-/// answers, since before this only `tracing::warn!`/`tracing::info!` said so.
+/// What a gluetun poller last saw and last failed with, so the Diagnostics
+/// page can show when gluetun last actually told sharerr something.
 #[derive(Debug, Default)]
 pub struct GluetunStatus {
     last_poll_at: tokio::sync::RwLock<Option<i64>>,
@@ -342,89 +340,14 @@ pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
     let mut last_error: Option<String> = None;
     let status = state.gluetun_status(target);
     let endpoint = state.endpoint_for(target);
-    // Built once and reused for the life of the poller: a client per tick threw
-    // away its connection pool every interval, forever. `reqwest::Client` is an
-    // Arc internally, so cloning it per poll shares the pool rather than copying
-    // it. A build failure is kept rather than returned — this loop never returns,
-    // and reporting it once per poll is what the old per-poll construction did.
+    // Built once and reused for the life of the poller: `reqwest::Client` is an
+    // Arc internally, so cloning it per poll shares its connection pool rather
+    // than discarding one every interval. A build failure is kept rather than
+    // returned, since this loop never returns; it is reported once per poll.
     let http = GluetunClient::http_client().map_err(|err| err.to_string());
 
     loop {
-        let config = state.config().await;
-        let gluetun_cfg = target.config(&config);
-        let interval = Duration::from_secs(gluetun_cfg.effective_poll_secs());
-
-        // An inactive poller is deliberately silent: being turned off, or having
-        // no control server to ask, is a choice rather than a fault, and this
-        // loop still runs (to notice it being re-enabled) so it must not add a
-        // warning to the log every interval forever.
-        if let Some(control) = gluetun_cfg
-            .control_url
-            .as_ref()
-            .filter(|_| gluetun_cfg.is_active())
-        {
-            let api_key = state.gluetun_api_key(target).await;
-
-            // gluetun's control server has required an API key by default since
-            // v3.40; sending an unkeyed request just to learn that again, every
-            // interval, forever, on a deployment that has not been fixed yet is
-            // a wasted round trip whose only possible answer is the same 401.
-            // The config is re-read every iteration, so the moment a key is
-            // saved through Settings, polling resumes on the next pass with no
-            // restart needed.
-            if let Some(api_key) = api_key {
-                // A fallback for a forwarded-port lookup that fails on its own
-                // — see `resolve_base` — read from what is currently
-                // advertised rather than cached separately, so
-                // `/gluetun/down` forgetting the dynamic history (a
-                // known-dead port, not a flaky lookup) also clears this
-                // fallback.
-                let fallback_port = endpoint.current().and_then(|base| base.port());
-
-                let resolved = match &http {
-                    Ok(http) => {
-                        resolve_once(http.clone(), control, Some(api_key), fallback_port).await
-                    }
-                    Err(err) => Err(GluetunError::Malformed(err.clone())),
-                };
-                match resolved {
-                    Ok(base) => {
-                        status.record_ok().await;
-                        if last_error.take().is_some() {
-                            tracing::info!(target = target.label(), %base, "gluetun endpoint resolution recovered");
-                        }
-                        if endpoint.observe(base.clone()) {
-                            tracing::info!(target = target.label(), %base, "advertised endpoint changed");
-                            if target == GluetunTarget::Tracker {
-                                tracing::info!(
-                                    "waking the sync loop to re-announce and rewrite torrents"
-                                );
-                                state.request_sync();
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        let rendered = err.to_string();
-                        status.record_err(rendered.clone()).await;
-                        if last_error.as_deref() != Some(&rendered) {
-                            tracing::warn!(target = target.label(), error = %rendered, "could not resolve the endpoint from gluetun");
-                            last_error = Some(rendered);
-                        }
-                    }
-                }
-            } else {
-                let rendered = format!(
-                    "no {} configured — skipping the poll rather than sending a \
-                     request that would only come back 401",
-                    target.api_key_secret()
-                );
-                status.record_err(rendered.clone()).await;
-                if last_error.as_deref() != Some(&rendered) {
-                    tracing::warn!(target = target.label(), "{rendered}");
-                    last_error = Some(rendered);
-                }
-            }
-        }
+        let interval = poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
 
         tokio::select! {
             () = tokio::time::sleep(interval) => {}
@@ -433,6 +356,102 @@ pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
             }
         }
     }
+}
+
+/// One poll: resolve the endpoint if the poller is active, and record the
+/// outcome. Split out of [`poll_loop`] so the resolve-and-record logic reads
+/// apart from the loop/select scaffolding around it. Returns how long the
+/// caller should wait before the next poll, read from the same config fetch
+/// every path through this function needs anyway.
+async fn poll_once(
+    state: &ServeState,
+    target: GluetunTarget,
+    http: &std::result::Result<reqwest::Client, String>,
+    status: &GluetunStatus,
+    endpoint: &AdvertisedEndpoint,
+    last_error: &mut Option<String>,
+) -> Duration {
+    let config = state.config().await;
+    let gluetun_cfg = target.config(&config);
+    let interval = Duration::from_secs(gluetun_cfg.effective_poll_secs());
+
+    // An inactive poller is deliberately silent: being turned off, or having
+    // no control server to ask, is a choice rather than a fault, and this
+    // loop still runs (to notice it being re-enabled) so it must not add a
+    // warning to the log every interval forever.
+    let Some(control) = gluetun_cfg
+        .control_url
+        .as_ref()
+        .filter(|_| gluetun_cfg.is_active())
+    else {
+        return interval;
+    };
+
+    // gluetun's control server has required an API key by default since
+    // v3.40; sending an unkeyed request on every poll of an unfixed
+    // deployment is a wasted round trip that can only 401. The config is
+    // re-read every iteration, so saving a key through Settings resumes
+    // polling on the next pass with no restart needed.
+    let Some(api_key) = state.gluetun_api_key(target).await else {
+        let rendered = format!(
+            "no {} configured — skipping the poll rather than sending a \
+             request that would only come back 401",
+            target.api_key_secret()
+        );
+        if record_error(status, last_error, rendered.clone()).await {
+            tracing::warn!(target = target.label(), "{rendered}");
+        }
+        return interval;
+    };
+
+    // A fallback for a forwarded-port lookup that fails on its own — see
+    // `resolve_base` — read from what is currently advertised rather than
+    // cached separately, so `/gluetun/down` forgetting the dynamic history
+    // (a known-dead port, not a flaky lookup) also clears this fallback.
+    let fallback_port = endpoint.current().and_then(|base| base.port());
+
+    let resolved = match http {
+        Ok(http) => resolve_once(http.clone(), control, Some(api_key), fallback_port).await,
+        Err(err) => Err(GluetunError::Malformed(err.clone())),
+    };
+
+    match resolved {
+        Ok(base) => {
+            status.record_ok().await;
+            if last_error.take().is_some() {
+                tracing::info!(target = target.label(), %base, "gluetun endpoint resolution recovered");
+            }
+            if endpoint.observe(base.clone()) {
+                tracing::info!(target = target.label(), %base, "advertised endpoint changed");
+                if target == GluetunTarget::Tracker {
+                    tracing::info!("waking the sync loop to re-announce and rewrite torrents");
+                    state.request_sync();
+                }
+            }
+        }
+        Err(err) => {
+            let rendered = err.to_string();
+            if record_error(status, last_error, rendered.clone()).await {
+                tracing::warn!(target = target.label(), error = %rendered, "could not resolve the endpoint from gluetun");
+            }
+        }
+    }
+
+    interval
+}
+
+/// Record `rendered` as this poll's failure, and report whether it is new
+/// since the last one. The comparison, not just the recording, is what has
+/// to happen identically at every failure site — logged once per transition
+/// rather than once per poll, or a steady failure (no port granted, control
+/// server down) turns into a warning every interval forever.
+async fn record_error(status: &GluetunStatus, last_error: &mut Option<String>, rendered: String) -> bool {
+    status.record_err(rendered.clone()).await;
+    let changed = last_error.as_deref() != Some(&rendered);
+    if changed {
+        *last_error = Some(rendered);
+    }
+    changed
 }
 
 /// One resolve against `control`, reusing the caller's HTTP client.

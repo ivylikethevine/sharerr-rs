@@ -26,9 +26,7 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     strip_prefix(ENV_MASTER_KEY_FILE),
     // Read by the opt-in e2e suite (crates/sharerr/tests/e2e.rs). Without this,
     // a developer who exports it gets an unrelated startup failure from any
-    // sharerr command. Every new SHARERR_-prefixed variable that is not a config
-    // field has to be listed here — that cost is the price of `deny_unknown_fields`
-    // turning a typo into an error instead of a setting that silently does nothing.
+    // sharerr command.
     "E2E_MEDIA",
     "E2E_COMPOSE",
 ];

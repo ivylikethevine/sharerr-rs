@@ -135,8 +135,8 @@ impl AnnounceRequest {
             port,
             left: number("left", 0)?,
             event: params.get("event").map_or(Event::None, |e| Event::parse(e)),
-            // Compact is the default in practice; every client written this century
-            // sets `compact=1`, and the non-compact form is only a fallback.
+            // Compact is the default: virtually every client sets `compact=1`;
+            // the non-compact form is only a fallback.
             compact: params.get("compact").is_none_or(|v| v != b"0"),
             numwant: usize::try_from(number("numwant", MAX_NUMWANT as u64)?)
                 .unwrap_or(MAX_NUMWANT)

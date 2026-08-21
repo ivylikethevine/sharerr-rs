@@ -199,9 +199,9 @@ async fn a_malformed_payload_names_the_endpoint_that_produced_it() {
     );
 }
 
-/// A long non-ASCII error body used to panic the client outright: `String::truncate`
-/// asserts on a char boundary, and a localized error page from a reverse proxy puts
-/// a multi-byte character wherever it likes. Under `serve` that killed the sync task.
+/// A long non-ASCII error body must not panic the client: `String::truncate` asserts
+/// on a char boundary, and a localized error page from a reverse proxy can put a
+/// multi-byte character wherever it likes.
 #[tokio::test]
 async fn a_long_non_ascii_error_body_does_not_panic() {
     let server = MockServer::start().await;

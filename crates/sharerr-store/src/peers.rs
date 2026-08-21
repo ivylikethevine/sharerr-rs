@@ -187,10 +187,10 @@ fn validate_label(label: &str) -> Result<String> {
 
 /// Every column [`row_to_peer`] decodes, in one place.
 ///
-/// Written out three times before — twice in a `SELECT` and once in a
-/// `RETURNING` — where adding a column meant three edits and missing one was a
-/// runtime `try_get` failure rather than a compile error. `db.rs` solves the
-/// same problem for `shared_items` with `SELECT_COLUMNS`.
+/// One list instead of separate spellings across two `SELECT`s and a
+/// `RETURNING`: adding a column here is one edit, and a missed one is a compile
+/// error rather than a runtime `try_get` failure. `db.rs` solves the same
+/// problem for `shared_items` with `SELECT_COLUMNS`.
 const PEER_COLUMNS: &str = "id, label, created_at, last_seen_at, revoked_at, scope, pubkey, \
      gossip_url";
 
@@ -404,7 +404,7 @@ mod tests {
     }
 
     /// The whole reason peers exist: one friend can be cut off without touching
-    /// anybody else. Under the old single shared key this was not expressible.
+    /// anybody else.
     #[tokio::test]
     async fn revoking_one_peer_leaves_the_others_working() {
         let store = store().await;

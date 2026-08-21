@@ -12,5 +12,6 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+reqwest = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }

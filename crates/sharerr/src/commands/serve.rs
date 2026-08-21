@@ -79,9 +79,8 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // `/gluetun/down` sit here too: gluetun's VPN_PORT_FORWARDING_UP_COMMAND and
     // VPN_PORT_FORWARDING_DOWN_COMMAND are bare wgets with no cookie jar, and the
     // only value either takes is `?target=client` to nudge the second poller
-    // instead of the first (default, and the only choice before it existed) —
-    // so there is nothing to protect beyond the private-address check both
-    // handlers share.
+    // instead of the first (the default) — so there is nothing to protect
+    // beyond the private-address check both handlers share.
     let mut app = Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))

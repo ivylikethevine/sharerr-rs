@@ -26,7 +26,7 @@
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, HeaderValue, REFERER};
-use reqwest::{Method, RequestBuilder, Response, StatusCode};
+use reqwest::{Method, RequestBuilder, Response};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -171,7 +171,7 @@ impl QbitClient {
         // A rejected key never becomes accepted by asking again, and there is no
         // session to renew — retrying would only walk towards qBittorrent's ban
         // counter for nothing.
-        if is_auth_rejection(response.status()) {
+        if sharerr_client::is_auth_rejection(response.status()) {
             return Err(QbitError::ApiKeyRejected);
         }
 
@@ -222,15 +222,6 @@ impl QbitClient {
     }
 }
 
-/// Whether a status means "the key was not accepted".
-///
-/// Both, and not one: qBittorrent answers a rejected bearer token with either
-/// 401 or 403 depending on the reason, and treating only one as rejection would
-/// silently ignore the other.
-fn is_auth_rejection(status: StatusCode) -> bool {
-    status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED
-}
-
 /// Whether a string has the shape of a qBittorrent API key.
 ///
 /// Checked at construction rather than on the first request, so a pasted password
@@ -262,14 +253,6 @@ mod tests {
         assert!(!looks_like_api_key("qbt_short"));
         // Right length and prefix, wrong alphabet.
         assert!(!looks_like_api_key("qbt_jCGn3V76XutJwQpsXgIm6A9NLB8-"));
-    }
-
-    #[test]
-    fn both_statuses_that_mean_the_key_was_rejected_are_treated_alike() {
-        assert!(is_auth_rejection(StatusCode::UNAUTHORIZED));
-        assert!(is_auth_rejection(StatusCode::FORBIDDEN));
-        assert!(!is_auth_rejection(StatusCode::OK));
-        assert!(!is_auth_rejection(StatusCode::NOT_FOUND));
     }
 
     #[test]

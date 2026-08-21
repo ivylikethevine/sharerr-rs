@@ -1,17 +1,15 @@
 //! The one resolver for this instance's externally reachable address.
 //!
-//! Before this module existed, `Config::public_base_url()` and the tracker
-//! provider each built the same `http://{host}:{port}` out of the same two config
-//! fields by different routes — a drift waiting to happen the moment the endpoint
-//! starts changing at runtime. Everything that needs "the URL a friend reaches
-//! this instance on" now comes through [`advertised_base`], and everything that
-//! appends a path to it goes through [`join_path`].
+//! `Config::public_base_url()` and the tracker provider both need "the URL a
+//! friend reaches this instance on" built from the same two config fields — one
+//! route, [`advertised_base`], keeps them from drifting apart the moment the
+//! endpoint starts changing at runtime. Anything that appends a path to it goes
+//! through [`join_path`].
 //!
-//! The resolver is also where the endpoint became *expressive*: the old
-//! construction had no scheme, no path prefix, and no brackets for an IPv6
-//! literal, which is exactly where reverse-proxied and IPv6 self-hosted setups
-//! break. `tracker.advertised_url` carries all three; `advertised_host` stays for
-//! the plain case and gains the IPv6 bracketing it never had.
+//! `tracker.advertised_url` carries scheme, path prefix, and IPv6 brackets —
+//! what a reverse-proxied or IPv6 self-hosted setup needs and a bare host:port
+//! cannot express. `advertised_host` stays for the plain case, with IPv6 literals
+//! bracketed automatically.
 
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::RwLock;
@@ -52,8 +50,7 @@ pub enum EndpointError {
 /// `tracker.advertised_url` wins when set — it is the expressive form, carrying
 /// scheme, port, and path prefix in one value. Otherwise `advertised_host` (plus
 /// `tracker.port`, falling back to `server_port`) builds the plain
-/// `http://host:port` every earlier version advertised. An IPv6 literal host is
-/// bracketed, which the old `format!` never did.
+/// `http://host:port` form. An IPv6 literal host is bracketed automatically.
 pub fn advertised_base(
     tracker: &TrackerConfig,
     server_port: u16,
@@ -308,8 +305,8 @@ mod tests {
         assert_eq!(base_string(&with_port), "http://sharerr.example:9000");
     }
 
-    /// The failure the old `format!` shipped: `http://2001:db8::1:8477` is not a
-    /// URL anyone can parse, and nothing said so.
+    /// An unbracketed IPv6 host would produce `http://2001:db8::1:8477`, which
+    /// no URL parser accepts.
     #[test]
     fn an_ipv6_literal_gains_brackets() {
         let base = advertised_base(&tracker(Some("2001:db8::1"), None, None), 8477)

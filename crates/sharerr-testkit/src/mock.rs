@@ -1,10 +1,9 @@
 //! Shared wiremock scaffolding.
 //!
-//! The stubs here are the ones more than one crate's tests were writing out by
-//! hand — qBittorrent's login handshake existed in three copies and its
-//! preferences endpoint in two before this module. A stub that encodes one
-//! test's specific choreography (expected call counts, staged responses) stays
-//! with that test; only the plain building blocks live here.
+//! Only stubs reused across more than one crate's tests live here — e.g.
+//! qBittorrent's login handshake and preferences endpoint. A stub that encodes
+//! one test's specific choreography (expected call counts, staged responses)
+//! stays with that test.
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

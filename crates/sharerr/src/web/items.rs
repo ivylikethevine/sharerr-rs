@@ -12,7 +12,7 @@
 use axum::extract::{Query, State};
 use axum::response::Response;
 use serde::Deserialize;
-use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
+use sharerr_core::{MediaSource, ShareState, SharedItem};
 use sharerr_store::{Peer, PeerScope};
 
 use super::WebState;
@@ -195,7 +195,7 @@ fn scope_admits(scope: PeerScope, item: &SharedItem) -> bool {
     let Some(kind) = scope.directory_kind() else {
         return false;
     };
-    spec_kind(&item.spec) == kind
+    item.spec.kind_tag() == kind
 }
 
 /// A short explanation for a state that would otherwise read as a dead end —
@@ -215,15 +215,6 @@ fn state_hint(state: ShareState) -> Option<&'static str> {
             Some("not a fault — the tag was removed upstream, so the share was withdrawn")
         }
         ShareState::Seeding | ShareState::Failed => None,
-    }
-}
-
-fn spec_kind(spec: &MediaSpec) -> &'static str {
-    match spec {
-        MediaSpec::Episode { .. } => "episode",
-        MediaSpec::Movie { .. } => "movie",
-        MediaSpec::Track { .. } => "track",
-        MediaSpec::Book { .. } => "book",
     }
 }
 
@@ -256,7 +247,7 @@ fn row(
 ) -> ItemRow {
     ItemRow {
         title: item.spec.title().to_owned(),
-        kind: spec_kind(&item.spec),
+        kind: item.spec.kind_tag(),
         source_label: title_case(item.source.as_str()),
         size: human_size(item.size),
         state_label: title_case(item.state.as_str()),
@@ -328,6 +319,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use sharerr_core::MediaSpec;
 
     fn item(source: MediaSource, spec: MediaSpec, state: ShareState) -> SharedItem {
         SharedItem {

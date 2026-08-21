@@ -2594,6 +2594,7 @@ name = "sharerr-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "reqwest",
  "thiserror 2.0.20",
  "url",
 ]

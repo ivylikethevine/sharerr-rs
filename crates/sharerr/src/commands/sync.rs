@@ -20,8 +20,7 @@ pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
         let api_key = gluetun_api_key(config).await;
         match crate::gluetun::GluetunClient::new(control, api_key) {
             // No prior observation exists in a one-shot run, so there is no
-            // fallback port to offer — a failed port lookup is fatal here the
-            // same way it always was before the poller gained one.
+            // fallback port to offer — a failed port lookup here is fatal.
             Ok(client) => match client.resolve_base(None).await {
                 Ok(base) => {
                     endpoint.observe(base);
@@ -62,7 +61,7 @@ pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
 
 /// Best-effort lookup, mirroring [`crate::gluetun::poll_loop`]'s: a vault that
 /// will not open (no master key set for this run) means an unkeyed request,
-/// same as before this key existed, and any resulting `401` explains itself.
+/// and any resulting `401` explains itself.
 async fn gluetun_api_key(config: &Config) -> Option<secrecy::SecretString> {
     crate::secrets::open_vault_async(config)
         .await

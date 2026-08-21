@@ -282,27 +282,44 @@ impl ServeState {
             .map_err(|err| err.to_string())
     }
 
-    /// The token the builtin tracker requires in announce URLs, if any.
+    /// Read `cache`, or fill it by opening the vault and deriving a value with
+    /// `load`, caching the result either way.
     ///
-    /// Cached after the first read. A vault that will not open yields `None`,
-    /// which is correct rather than merely convenient: without a vault there is no
-    /// stored token, so there is none to enforce.
-    pub async fn tracker_token(&self) -> Option<String> {
-        if let Some(cached) = &*self.tracker_token.read().await {
+    /// The shape shared by [`Self::tracker_token`], [`Self::gossip_identity`],
+    /// and [`Self::lighthouse_state`]: each differs only in which lock it
+    /// touches and how it derives a value from an opened vault. The outer
+    /// `None` means "not looked up yet", `Some(None)` means "looked up, and
+    /// there is none" — a vault that will not open yields `None` here too,
+    /// which is correct rather than merely convenient: without a vault there
+    /// is nothing to read.
+    async fn cached_from_vault<T: Clone>(
+        &self,
+        cache: &RwLock<Option<Option<T>>>,
+        load: impl FnOnce(Vault) -> Option<T>,
+    ) -> Option<T> {
+        if let Some(cached) = &*cache.read().await {
             return cached.clone();
         }
 
-        let token = match self.open_vault().await {
-            Ok(vault) => vault
-                .get(secret_keys::TRACKER_TOKEN)
-                .ok()
-                .flatten()
-                .map(|secret| secret.expose_secret().to_owned()),
+        let value = match self.open_vault().await {
+            Ok(vault) => load(vault),
             Err(_) => None,
         };
 
-        *self.tracker_token.write().await = Some(token.clone());
-        token
+        *cache.write().await = Some(value.clone());
+        value
+    }
+
+    /// The token the builtin tracker requires in announce URLs, if any.
+    pub async fn tracker_token(&self) -> Option<String> {
+        self.cached_from_vault(&self.tracker_token, |vault| {
+            vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .ok()
+                .flatten()
+                .map(|secret| secret.expose_secret().to_owned())
+        })
+        .await
     }
 
     /// A gluetun poller's control-server API key, cached after the first read.
@@ -327,23 +344,15 @@ impl ServeState {
 
     /// This instance's gossip signing identity, cached after the first load.
     ///
-    /// Loading means opening the vault — an Argon2 derivation — and `self_record`
-    /// used to pay that on every pull request a friend made. Cached the same way
-    /// as `tracker_token`, for the same reason.
+    /// Loading means opening the vault — an Argon2 derivation — and
+    /// `self_record` is asked on every pull request a friend makes.
     pub async fn gossip_identity(&self) -> Option<Arc<crate::gossip::Identity>> {
-        if let Some(cached) = &*self.gossip_identity.read().await {
-            return cached.clone();
-        }
-
-        let identity = match self.open_vault().await {
-            Ok(mut vault) => crate::gossip::Identity::load_or_create(&mut vault)
+        self.cached_from_vault(&self.gossip_identity, |mut vault| {
+            crate::gossip::Identity::load_or_create(&mut vault)
                 .ok()
-                .map(Arc::new),
-            Err(_) => None,
-        };
-
-        *self.gossip_identity.write().await = Some(identity.clone());
-        identity
+                .map(Arc::new)
+        })
+        .await
     }
 
     /// The embedded lighthouse's state, built on first use and cached
@@ -359,19 +368,12 @@ impl ServeState {
         if !self.config.read().await.lighthouse.enabled {
             return None;
         }
-        if let Some(cached) = &*self.lighthouse_state.read().await {
-            return cached.clone();
-        }
-
-        let state = match self.open_vault().await {
-            Ok(mut vault) => load_or_create_decoy_seed(&mut vault)
+        self.cached_from_vault(&self.lighthouse_state, |mut vault| {
+            load_or_create_decoy_seed(&mut vault)
                 .ok()
-                .map(|seed| Arc::new(sharerr_lighthouse::LighthouseState::new(seed))),
-            Err(_) => None,
-        };
-
-        *self.lighthouse_state.write().await = Some(state.clone());
-        state
+                .map(|seed| Arc::new(sharerr_lighthouse::LighthouseState::new(seed)))
+        })
+        .await
     }
 
     /// Why reconciliation is not running, or `None` when it is.
@@ -517,9 +519,8 @@ impl ServeState {
 /// and the tracker provider reports the absence with the sentence that names the
 /// fix.
 ///
-/// One function for both the startup read and the post-save refresh: they used to
-/// be two copies of this match that differed only in the wording of the warning,
-/// which is one copy too many for a value this load-bearing.
+/// One function for both the startup read and the post-save refresh, so this
+/// match is not duplicated for a value this load-bearing.
 fn static_base(config: &Config) -> Option<url::Url> {
     match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
         Ok(base) => base,
@@ -661,11 +662,11 @@ mod tests {
 
     /// The wait a user actually experiences after saving a credential.
     ///
-    /// Before this, `invalidate` only marked the syncer stale and the background
-    /// loop noticed whenever its current sleep expired — which on a *working*
-    /// instance is `sync.interval_secs`, 15 minutes by default, while the status
-    /// page promised fifteen seconds. The sleep here is an hour: if it is not cut
-    /// short, the test hangs rather than passing slowly.
+    /// Without this cutoff, `invalidate` only marks the syncer stale and the
+    /// background loop notices whenever its current sleep expires — which on a
+    /// *working* instance is `sync.interval_secs`, 15 minutes by default, though
+    /// the status page promises fifteen seconds. The sleep here is an hour: if it
+    /// is not cut short, the test hangs rather than passing slowly.
     #[tokio::test]
     async fn invalidating_cuts_short_a_long_sleep() {
         let (_dir, state) = unconfigured();

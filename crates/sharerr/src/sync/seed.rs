@@ -62,8 +62,8 @@ impl Seeder {
     /// nothing already covers it.
     ///
     /// `torrents` is the client's full list, fetched once per reconciliation pass
-    /// by the caller — refetching it here per item once made a first sync of a
-    /// large library cost one full-library round trip per file. A snapshot is
+    /// by the caller — refetching it here per item would cost a first sync of a
+    /// large library one full-library round trip per file. A snapshot is
     /// sound: torrents this pass adds are single-file and each discovered item is
     /// a distinct file, so a later item can never be covered by an earlier add.
     pub async fn seed(

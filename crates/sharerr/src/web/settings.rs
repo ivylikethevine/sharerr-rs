@@ -40,7 +40,7 @@ use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
 
 /// Mint a fresh secret and show it once.
 ///
-/// Only the tracker token is minted this way now — a friend's own key, generated
+/// Only the tracker token is minted this way — a friend's own key, generated
 /// on the Friends page, is what opens the Torznab feed to them.
 pub async fn generate_secret(
     State(state): State<WebState>,
@@ -680,8 +680,8 @@ async fn apply_secret(
 ///
 /// Reads the names straight out of the file rather than opening the vault. They
 /// are cleartext in the format by design, so this costs a ~200-byte read instead
-/// of the ~16ms Argon2 derivation `open_vault` pays — which is what drawing a page
-/// used to cost, on every render and again after every save.
+/// of the ~16ms Argon2 derivation `open_vault` pays on every render and again
+/// after every save.
 ///
 /// It also means the page tells the truth when the master key is missing or wrong:
 /// a secret that cannot currently be decrypted is still stored, and reporting it
@@ -710,6 +710,11 @@ pub(super) async fn reject(state: &WebState, message: &str) -> Response {
 /// An HTML checkbox submits nothing at all when unticked, so absence is `false`.
 fn checked(field: &Option<String>) -> bool {
     field.is_some()
+}
+
+/// An unset URL renders as an empty field, not `None`.
+fn url_or_empty(url: Option<&url::Url>) -> String {
+    url.map(url::Url::to_string).unwrap_or_default()
 }
 
 /// What gluetun last actually reported for one endpoint, or `None` when
@@ -812,10 +817,10 @@ async fn build_page(
     let is_set = |key: &str| secrets.contains(key);
     let locks = super::config_io::env_overrides();
 
-    // One section per app, from the same list everything else iterates — the
-    // settings page used to be the one surface that hand-enumerated two of the
-    // five and silently could not configure the rest. `ARRS`, not `ALL`: the
-    // directory source has no URL or key and gets the Libraries section below.
+    // One section per app, from the same list everything else iterates, so a
+    // hand-typed enumeration cannot silently leave an app unconfigurable.
+    // `ARRS`, not `ALL`: the directory source has no URL or key and gets the
+    // Libraries section below.
     let arrs = MediaSource::ARRS
         .iter()
         .copied()
@@ -884,33 +889,18 @@ async fn build_page(
             .port
             .map(|p| p.to_string())
             .unwrap_or_default(),
-        tracker_advertised_url: config
-            .tracker
-            .advertised_url
-            .as_ref()
-            .map(url::Url::to_string)
-            .unwrap_or_default(),
+        tracker_advertised_url: url_or_empty(config.tracker.advertised_url.as_ref()),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
         lighthouse_enabled: config.lighthouse.enabled,
         lighthouse_mount: config.lighthouse.mount.as_str(),
-        gluetun_control_url: config
-            .gluetun
-            .control_url
-            .as_ref()
-            .map(url::Url::to_string)
-            .unwrap_or_default(),
+        gluetun_control_url: url_or_empty(config.gluetun.control_url.as_ref()),
         gluetun_enabled: config.gluetun.enabled,
         gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
         gluetun_poll_secs: config.gluetun.poll_secs,
         gluetun_last_observed: gluetun_last_observed(&state.serve.endpoint()),
         gluetun_last_error: gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
 
-        gluetun_client_control_url: config
-            .gluetun_client
-            .control_url
-            .as_ref()
-            .map(url::Url::to_string)
-            .unwrap_or_default(),
+        gluetun_client_control_url: url_or_empty(config.gluetun_client.control_url.as_ref()),
         gluetun_client_enabled: config.gluetun_client.enabled,
         gluetun_client_api_key_set: is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
         gluetun_client_poll_secs: config.gluetun_client.poll_secs,
@@ -939,9 +929,7 @@ async fn build_page(
             .chain(std::iter::once(LibraryRow::default()))
             .collect(),
 
-        // A spare blank row so "add a mapping" needs no JavaScript — the form
-        // simply has one more row than there are mappings, and blank rows are
-        // dropped on save.
+        // A spare blank row, same reasoning as libraries above.
         path_map: config
             .path_map
             .iter()

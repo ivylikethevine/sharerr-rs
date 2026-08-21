@@ -26,10 +26,10 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
     init_tracing(args.verbose);
 
-    // Deliberately not fatal. A malformed `sharerr.toml` used to abort every
-    // subcommand, which for the containerised `serve` meant a restart loop with no
-    // HTTP surface — and the web UI is how an operator would fix the file. So the
-    // failure is loud but survivable, and `serve` carries the reason into the UI.
+    // Deliberately not fatal: aborting every subcommand on a malformed `sharerr.toml`
+    // would mean a restart loop for the containerised `serve`, with no HTTP surface —
+    // and the web UI is how an operator would fix the file. So the failure is loud
+    // but survivable, and `serve` carries the reason into the UI.
     let (config, config_error) = settings::load_or_recover(&args.config);
     if let Some(error) = &config_error {
         // `error`, and repeated on every command, because the salvage is *not* what

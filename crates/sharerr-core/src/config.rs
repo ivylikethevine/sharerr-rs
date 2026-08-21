@@ -86,11 +86,11 @@ pub mod secret_keys {
 
     /// Every key sharerr actually reads.
     ///
-    /// One list, because both consumers ask the same question and used to answer
-    /// it separately: the CLI warns when `vault set` is given something outside
-    /// it, and the web UI offers exactly these as editable fields. A fifth secret
-    /// added to only one of those copies is a field the UI silently will not
-    /// manage — so the list lives beside the constants that define it.
+    /// One list: both consumers ask the same question — the CLI warns when
+    /// `vault set` is given something outside it, and the web UI offers exactly
+    /// these as editable fields. A fifth secret added to only one of those
+    /// copies is a field the UI silently will not manage — so the list lives
+    /// beside the constants that define it.
     pub const ALL: &[&str] = &[
         SONARR_API_KEY,
         RADARR_API_KEY,
@@ -497,9 +497,9 @@ impl Default for QbitConfig {
 
 /// Which torrent client sharerr drives.
 ///
-/// qBittorrent remains the default because it was the only option for the whole of
-/// M1–M5 and every existing config expects it. The choice is purely which HTTP API
-/// is spoken: sharerr's builtin tracker answers announces whichever client seeds.
+/// qBittorrent is the default because every existing config expects it. The choice
+/// is purely which HTTP API is spoken: sharerr's builtin tracker answers announces
+/// whichever client seeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TorrentBackend {
@@ -546,11 +546,10 @@ impl Default for TransmissionConfig {
 #[serde(default, deny_unknown_fields)]
 /// The address peers reach sharerr's tracker on.
 ///
-/// The tracker itself is always sharerr's own, served by this process. There used
-/// to be a `backend` choice here — qBittorrent's embedded tracker or sharerr's —
-/// and it was removed: two backends meant two independently built announce URLs,
-/// and every dynamic-endpoint change had to be made and tested twice. A config
-/// that still names one is rejected with the fix — see [`removed_tracker_backend`].
+/// The tracker itself is always sharerr's own, served by this process — one
+/// backend, not two independently built announce URLs to keep in sync on every
+/// dynamic-endpoint change. A config that still names a `backend` is rejected
+/// with the fix — see [`removed_tracker_backend`].
 pub struct TrackerConfig {
     /// **Removed.** Present only so a `sharerr.toml` still setting it fails to
     /// load with an error naming this exact change, rather than a generic
@@ -634,7 +633,7 @@ pub struct LighthouseConfig {
 
 /// Reject any `tracker.backend` value with the migration story.
 ///
-/// The backend choice was removed when the builtin tracker became the only one.
+/// The builtin tracker is the only tracker, so `backend` is no longer a field.
 /// `deny_unknown_fields` alone would say "unknown field `backend`", which reads
 /// like a typo; an operator whose working config just stopped loading deserves the
 /// sentence that says what changed and what to do.
@@ -875,11 +874,11 @@ mod tests {
 
     /// Every writable path must name a field that actually exists on `Config`.
     ///
-    /// This is the check that was missing. The same dotted strings are typed by
-    /// hand in the settings handlers and again in `settings.html`, and are
-    /// generated a third time from `SHARERR_*` environment variables — so a typo in
-    /// any one of them used to compile cleanly and simply stop matching, leaving a
-    /// field that looks editable while the environment has it pinned.
+    /// The same dotted strings are typed by hand in the settings handlers and
+    /// again in `settings.html`, and generated a third time from `SHARERR_*`
+    /// environment variables — a typo in any one compiles cleanly and simply
+    /// stops matching, leaving a field that looks editable while the environment
+    /// has it pinned.
     ///
     /// Walking the serialised form rather than naming fields again keeps this
     /// honest: renaming a field in `Config` breaks this test rather than silently

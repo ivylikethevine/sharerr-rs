@@ -47,8 +47,8 @@ pub(crate) const CAT_BOOKS: u32 = 7000;
 
 /// Every category with its display name, in the order the caps document lists
 /// them. The one table behind [`caps_xml`], Jackett's capability list, and
-/// Jackett's per-result category names — which used to be three hand-written
-/// copies that could disagree about what this instance shares.
+/// Jackett's per-result category names, so the three cannot disagree about
+/// what this instance shares.
 pub(crate) const CATEGORIES: &[(u32, &str)] = &[
     (CAT_MOVIES, "Movies"),
     (CAT_TV, "TV"),
@@ -80,11 +80,12 @@ pub(crate) fn category_name(id: u32) -> &'static str {
 /// under and the parameters the caps document advertises for it.
 ///
 /// One table generates both the `<searching>` block and the dispatcher's accepted
-/// set, because they used to be edited independently: caps advertised
-/// `music-search` while the dispatcher answered `t=music` with "no such function"
-/// — precisely the query a friend's Lidarr sends. Music and book searches
-/// advertise only `q`: [`SearchQuery`] has no artist/album/author fields, and
-/// claiming params that serde drops makes a filtered search match everything.
+/// set, so the two cannot drift apart the way independently edited lists would —
+/// caps advertising `music-search` while the dispatcher answers `t=music` with
+/// "no such function" is exactly the query a friend's Lidarr sends. Music and
+/// book searches advertise only `q`: [`SearchQuery`] has no artist/album/author
+/// fields, and claiming params that serde drops makes a filtered search match
+/// everything.
 const SEARCH_FUNCTIONS: &[(&str, &[&str], &str)] = &[
     ("search", &["search"], "q"),
     (
@@ -216,8 +217,8 @@ pub fn caps_xml() -> String {
 /// **Not cosmetic.** Sonarr and Radarr reject an entire feed whose items have no
 /// `pubDate` — "Each item in the RSS feed must have a pubDate element with a valid
 /// publish date" — so a feed without this cannot be added as an indexer at all.
-/// That was true of every feed sharerr served until a real Sonarr was pointed at
-/// one; the caps document and the item XML both looked fine in isolation.
+/// Not obvious from the caps document or item XML in isolation — only a real
+/// Sonarr integration exposes it.
 ///
 /// An item with no stored timestamp falls back to the Unix epoch rather than being
 /// omitted. A wrong-but-valid date costs an ordering quirk; a missing one costs the
@@ -521,8 +522,8 @@ pub async fn api(
 ///
 /// Torznab answers in XML and Jackett's own API answers the *same search* in JSON.
 /// Running the query twice, once per renderer, is how the two would drift into
-/// disagreeing about what this instance shares — the same mistake `doctor` and the
-/// web UI's probes made before `crate::checks` existed.
+/// disagreeing about what this instance shares — the same class of mistake
+/// `crate::checks` exists to prevent for `doctor` and the web UI's probes.
 pub(crate) struct Matched {
     pub items: Vec<SharedItem>,
     /// Absolute base URL a client fetches `.torrent` files from.
@@ -659,9 +660,9 @@ async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Re
 /// would mean two lookups that could disagree.
 pub(crate) struct Caller {
     scope: PeerScope,
-    /// Which peer row authenticated. Every caller is a real peer now that the
-    /// legacy shared key is gone, so the gossip endpoints — which require one,
-    /// to know who said what — can always resolve it.
+    /// Which peer row authenticated. There is no unauthenticated path, so
+    /// every caller is a real peer, and the gossip endpoints — which require
+    /// one, to know who said what — can always resolve it.
     peer_id: i64,
 }
 
@@ -744,32 +745,7 @@ async fn check_api_key(
                 // Recorded after authenticating, and failure to record is not
                 // failure to authenticate: a read-only or busy database should not
                 // take the feed down.
-                match store.touch_peer(peer.id).await {
-                    // The touch fired, so its five-minute throttle also gates the
-                    // endpoint observation — a Prowlarr RSS burst records one
-                    // sighting, not one per request.
-                    Ok(true) => {
-                        if let Some(remote) = remote {
-                            let now = now_epoch();
-                            if let Err(err) = store
-                                .record_peer_endpoint(
-                                    peer.id,
-                                    sharerr_store::EndpointKind::Api,
-                                    &remote.to_string(),
-                                    now,
-                                    sharerr_store::ObservedVia::Direct,
-                                )
-                                .await
-                            {
-                                tracing::warn!(peer = %peer.label, error = %err, "could not record peer address");
-                            }
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(err) => {
-                        tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
-                    }
-                }
+                record_activity(&store, &peer, remote).await;
                 tracing::debug!(
                     peer = %peer.label,
                     scope = peer.scope.as_str(),
@@ -796,6 +772,41 @@ async fn check_api_key(
 
     tracing::warn!("rejected a torznab request with a bad api key");
     Err(refused())
+}
+
+/// Best-effort: a peer authenticated, so record the sighting, but a failure to
+/// record must not fail the authentication that already succeeded.
+async fn record_activity(
+    store: &sharerr_store::Store,
+    peer: &sharerr_store::Peer,
+    remote: Option<std::net::IpAddr>,
+) {
+    match store.touch_peer(peer.id).await {
+        // The touch fired, so its five-minute throttle also gates the
+        // endpoint observation — a Prowlarr RSS burst records one sighting,
+        // not one per request.
+        Ok(true) => {
+            if let Some(remote) = remote {
+                let now = now_epoch();
+                if let Err(err) = store
+                    .record_peer_endpoint(
+                        peer.id,
+                        sharerr_store::EndpointKind::Api,
+                        &remote.to_string(),
+                        now,
+                        sharerr_store::ObservedVia::Direct,
+                    )
+                    .await
+                {
+                    tracing::warn!(peer = %peer.label, error = %err, "could not record peer address");
+                }
+            }
+        }
+        Ok(false) => {}
+        Err(err) => {
+            tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
+        }
+    }
 }
 
 pub(crate) fn xml(body: String) -> Response {
@@ -958,12 +969,11 @@ mod tests {
         assert!(!xml.contains(r#"name="season""#), "a film has no season");
     }
 
-    /// The bug a real Sonarr found. Sonarr and Radarr refuse an entire feed whose
-    /// items have no `pubDate` — "Each item in the RSS feed must have a pubDate
-    /// element with a valid publish date" — so a friend could not add sharerr as an
-    /// indexer at all. Every other part of the document looked correct in
-    /// isolation, which is why nothing caught it until a real client was pointed at
-    /// it.
+    /// Sonarr and Radarr refuse an entire feed whose items have no `pubDate` —
+    /// "Each item in the RSS feed must have a pubDate element with a valid
+    /// publish date" — so a feed without one cannot be added as an indexer at
+    /// all. Not obvious from reading the document in isolation; only a real
+    /// client catches it.
     #[test]
     fn every_item_has_a_pubdate_or_sonarr_rejects_the_whole_feed() {
         let mut item = episode("Lanternwick.Hollow.S02E01", 2, 1);
@@ -1083,9 +1093,9 @@ mod tests {
     }
 
     /// Advertising a function the dispatcher refuses is exactly the drift that
-    /// once answered a friend's Lidarr `t=music` with "no such function" while
-    /// caps claimed `music-search`. Clients derive `t=` from the caps element
-    /// name, both with and without the dash, so every entry must accept both.
+    /// answers a friend's Lidarr `t=music` with "no such function" while caps
+    /// claims `music-search`. Clients derive `t=` from the caps element name,
+    /// both with and without the dash, so every entry must accept both.
     #[test]
     fn every_advertised_search_function_is_dispatched() {
         for (element, aliases, _) in SEARCH_FUNCTIONS {
@@ -1267,7 +1277,7 @@ mod tests {
     }
 
     /// And the other half of the point: revoking one friend cuts off exactly that
-    /// friend. Under the old single shared key this was not expressible at all.
+    /// friend.
     #[tokio::test]
     async fn revoking_one_peer_closes_the_feed_only_for_them() {
         let (_dir, state) = unconfigured();

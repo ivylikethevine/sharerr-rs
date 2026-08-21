@@ -54,10 +54,9 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
 
 /// Open the credential vault `config` names.
 ///
-/// The one place the master key is read and the vault path is resolved. Five
-/// call sites used to spell this out themselves — the CLI's `vault` verb,
-/// `doctor`, the one-shot `sync`, the syncer, and `ServeState` — each mapping the
-/// error its own way, so changing how the vault is opened meant five edits.
+/// The one place the master key is read and the vault path is resolved, so the
+/// CLI's `vault` verb, `doctor`, the one-shot `sync`, the syncer, and `ServeState`
+/// share one edit instead of five when how the vault opens changes.
 pub fn open_vault(config: &Config) -> anyhow::Result<Vault> {
     let master = master_key_from_env()?;
     Vault::open(config.vault_path(), &master)

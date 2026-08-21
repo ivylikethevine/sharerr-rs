@@ -372,9 +372,9 @@ impl Syncer {
         // and the torrent list plus the store snapshot ride under it instead of
         // queueing behind it. The torrent list is fetched once for the whole
         // pass — the hash set answers "is it still live", and the summaries feed
-        // the seeder's cross-seed search, which once refetched this same list
-        // per item. This is also what makes the loop self-healing: a torrent
-        // removed behind sharerr's back is simply absent here and gets re-added.
+        // the seeder's cross-seed search without a refetch per item. This is
+        // also what makes the loop self-healing: a torrent removed behind
+        // sharerr's back is simply absent here and gets re-added.
         let (discovery, torrents, known_items) = tokio::join!(
             self.discover(),
             self.seeder.qbit.list(None),
@@ -462,7 +462,7 @@ impl Syncer {
         // The sources are independent, so scan them concurrently: the phase
         // costs the slowest source's walk rather than the sum of all of them.
         // `join_all` preserves input order, which keeps the fold — and the log
-        // lines — as stable as the sequential loop was.
+        // lines — stable regardless of which source answers first.
         let results = futures::future::join_all(
             self.sources
                 .iter()

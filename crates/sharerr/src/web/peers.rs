@@ -2,11 +2,11 @@
 //!
 //! # Why per-friend keys
 //!
-//! Until M4 the Torznab feed was guarded by a single `torznab.api_key` handed to
-//! everybody. Two ordinary things were impossible with that: seeing whether a
-//! friend had actually got themselves set up, and cutting one person off without
-//! cutting off everyone. A peer is therefore an identity with its own credential,
-//! and `last_seen` answers the first question directly.
+//! A single `torznab.api_key` shared by everybody makes two ordinary things
+//! impossible: seeing whether a friend actually got set up, and cutting one
+//! person off without cutting off everyone. A peer is therefore an identity
+//! with its own credential, and `last_seen` answers the first question
+//! directly.
 //!
 //! # The key is shown once
 //!

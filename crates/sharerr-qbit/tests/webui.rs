@@ -113,8 +113,8 @@ async fn a_value_that_is_not_key_shaped_is_refused_up_front() {
     assert!(matches!(err, QbitError::MalformedApiKey), "{err:?}");
 }
 
-/// qBittorrent's WebUI is localized, and proxies in front of it commonly are too.
-/// Byte-truncating such a body panicked the process instead of returning an error.
+/// qBittorrent's WebUI is localized, and proxies in front of it commonly are too, so
+/// a byte-based truncation would panic instead of returning an error.
 #[tokio::test]
 async fn a_long_non_ascii_body_does_not_panic() {
     let server = MockServer::start().await;

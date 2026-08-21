@@ -1114,8 +1114,9 @@ async fn with_broken_radarr(h: &mut Harness) -> MockServer {
     radarr
 }
 
-/// "Sonarr has the tag, Radarr does not" is an ordinary setup, and it used to fail
-/// the entire pass — nothing shared from the healthy app, and no withdrawals either.
+/// "Sonarr has the tag, Radarr does not" is an ordinary setup: one broken app must
+/// not fail the whole pass — the healthy app should still share, and nothing
+/// should be withdrawn.
 #[tokio::test]
 async fn one_broken_arr_app_does_not_stop_the_other() {
     let mut h = tagged_harness().await;

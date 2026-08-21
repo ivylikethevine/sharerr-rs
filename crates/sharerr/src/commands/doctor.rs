@@ -157,9 +157,8 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     report.ok(format!("opened {}", config.vault_path().display()));
 
     // Report only which keys are present. Values are never printed, by design.
-    // The password key follows the *configured* client. Demanding qBittorrent's
-    // regardless was a check that failed on a perfectly good Transmission setup —
-    // and told the operator to go and set a credential nothing would ever read.
+    // The password key follows the *configured* client — hardcoding qBittorrent's
+    // would fail a perfectly good Transmission setup that never reads it.
     // The torrent client is satisfied by *either* of its credentials, so it is
     // checked as a pair rather than as two independent keys — demanding both would
     // fail an operator who moved to an API key and, correctly, cleared the
@@ -174,8 +173,8 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     {
         match vault.get(key) {
             Ok(Some(_)) => report.ok(format!("{key} is set")),
-            Ok(None) => report.fail(format!("{key} is missing — {}", fix_hint(key))),
-            Err(err) => report.fail(format!("{key} could not be read: {err}")),
+            Ok(None) => fail_missing(report, key),
+            Err(err) => fail_unreadable(report, key, err),
         }
     }
 
@@ -197,7 +196,7 @@ fn check_torrent_credential(
         Some(key) => match vault.get(key) {
             Ok(value) => value.map(|_| key),
             Err(err) => {
-                report.fail(format!("{key} could not be read: {err}"));
+                fail_unreadable(report, key, err);
                 None
             }
         },
@@ -218,18 +217,15 @@ fn check_torrent_credential(
     // API key alone, so a missing key here is the whole story.
     let Some(password_key) = password_key else {
         if let Some(key) = api_key_key {
-            report.fail(format!("{key} is missing — {}", fix_hint(key)));
+            fail_missing(report, key);
         }
         return;
     };
 
     match vault.get(password_key) {
         Ok(Some(_)) => report.ok(format!("{password_key} is set")),
-        Ok(None) => report.fail(format!(
-            "{password_key} is missing — {}",
-            fix_hint(password_key)
-        )),
-        Err(err) => report.fail(format!("{password_key} could not be read: {err}")),
+        Ok(None) => fail_missing(report, password_key),
+        Err(err) => fail_unreadable(report, password_key, err),
     }
 }
 
@@ -239,6 +235,18 @@ fn check_torrent_credential(
 /// since the UI needs no shell inside the container. Both write the same vault.
 fn fix_hint(key: &str) -> String {
     format!("set it in Settings on the web UI, or run: sharerr vault set {key}")
+}
+
+/// Report that `key` is absent from the vault, with the fix.
+fn fail_missing(report: &mut Report, key: &str) {
+    report.fail(format!("{key} is missing — {}", fix_hint(key)));
+}
+
+/// Report that `key` could not be read from the vault, with the cause chain —
+/// vault errors wrap a source (a decryption or I/O failure), and that source is
+/// what actually tells the operator what to go and fix.
+fn fail_unreadable(report: &mut Report, key: &str, err: impl std::error::Error) {
+    report.fail(format!("{key} could not be read: {}", chain(&err)));
 }
 
 /// Fetch an *optional* secret without reporting its absence.
@@ -266,11 +274,11 @@ fn secret(vault: Option<&Vault>, key: &str, report: &mut Report) -> Option<Secre
     match vault.get(key) {
         Ok(Some(value)) => Some(value),
         Ok(None) => {
-            report.fail(format!("{key} is missing — {}", fix_hint(key)));
+            fail_missing(report, key);
             None
         }
         Err(err) => {
-            report.fail(format!("{key} could not be read: {}", chain(&err)));
+            fail_unreadable(report, key, err);
             None
         }
     }
@@ -354,8 +362,8 @@ async fn check_arr(
             ));
             Vec::new()
         }
-        // Distinct from the above, and it was not previously reported here at all:
-        // a tag that does not exist needs creating, not applying.
+        // Distinct from TagUnused above: a tag that does not exist needs
+        // creating, not applying.
         ArrOutcome::TagMissing { version } => {
             report.ok(format!("{} responded ({version})", service.url));
             report.fail(format!(
@@ -500,7 +508,7 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, fix: bool, report: &
             },
             None => {
                 if let Some(key) = settings.api_key_key {
-                    report.fail(format!("{key} is missing — {}", fix_hint(key)));
+                    fail_missing(report, key);
                 }
                 return;
             }
