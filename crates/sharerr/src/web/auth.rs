@@ -230,7 +230,7 @@ pub async fn setup_submit(
 
     let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // Re-checked here and not only in `setup_page`: two people racing the form on an
@@ -277,7 +277,7 @@ pub async fn login_submit(
 ) -> Response {
     let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let password = SecretString::from(form.password.clone());
@@ -353,7 +353,7 @@ pub async fn change_password(
 
     let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     // Verified before anything is written, and reported in the same words as a

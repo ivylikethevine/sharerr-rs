@@ -655,7 +655,12 @@ pub(crate) fn render_feed(matched: &Matched) -> String {
     feed_xml(&entries)
 }
 
-async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope, peer_token: &str) -> Response {
+async fn search(
+    state: &ServeState,
+    query: &SearchQuery,
+    scope: PeerScope,
+    peer_token: &str,
+) -> Response {
     let matched = match collect(state, query, scope, peer_token).await {
         Ok(matched) => matched,
         Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
@@ -732,7 +737,9 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip());
 
-        check_api_key(state, apikey.as_deref(), remote).await
+        check_api_key(state, apikey.as_deref(), remote)
+            .await
+            .map_err(|rejection| *rejection)
     }
 }
 
@@ -745,11 +752,16 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
 /// No match means the endpoint is closed rather than open: an indexer feed
 /// lists everything this instance shares, and defaulting to unauthenticated
 /// would publish the library to anyone who found the port.
+///
+/// The error is boxed only to keep this `Result` under clippy's
+/// `result_large_err` threshold — `Response` alone is not. The one caller,
+/// [`Caller`]'s `FromRequestParts` impl, unboxes before returning, since its
+/// `Rejection` type is fixed by the trait.
 async fn check_api_key(
     state: &ServeState,
     supplied: Option<&str>,
     remote: Option<std::net::IpAddr>,
-) -> Result<Caller, Response> {
+) -> Result<Caller, Box<Response>> {
     let refused = || {
         xml_status(
             StatusCode::UNAUTHORIZED,
@@ -761,7 +773,7 @@ async fn check_api_key(
     // has no key configured" to an unauthenticated caller would confirm the port
     // belongs to sharerr.
     let Some(supplied) = supplied.filter(|key| !key.is_empty()) else {
-        return Err(refused());
+        return Err(Box::new(refused()));
     };
 
     // One indexed lookup on a SHA-256 of the supplied key.
@@ -795,16 +807,16 @@ async fn check_api_key(
                 // a comparison that might pass — but it also must not be reported as
                 // bad credentials, which would send the operator to the wrong place.
                 tracing::error!(error = %err, "could not check peer keys");
-                return Err(xml_status(
+                return Err(Box::new(xml_status(
                     StatusCode::SERVICE_UNAVAILABLE,
                     error_xml(900, "could not check credentials"),
-                ));
+                )));
             }
         }
     }
 
     tracing::warn!("rejected a torznab request with a bad api key");
-    Err(refused())
+    Err(Box::new(refused()))
 }
 
 /// Best-effort: a peer was just seen (an authenticated feed request, a
@@ -829,7 +841,13 @@ pub(crate) async fn record_sighting(
         Ok(true) => {
             if let Some(addr) = addr
                 && let Err(err) = store
-                    .record_peer_endpoint(peer_id, kind, addr, now_epoch(), sharerr_store::ObservedVia::Direct)
+                    .record_peer_endpoint(
+                        peer_id,
+                        kind,
+                        addr,
+                        now_epoch(),
+                        sharerr_store::ObservedVia::Direct,
+                    )
                     .await
             {
                 tracing::warn!(peer_id, error = %err, "could not record a peer's address");

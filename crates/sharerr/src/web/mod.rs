@@ -69,11 +69,16 @@ impl WebState {
     /// The store, or the one 503 every handler answers with when the database
     /// cannot open. Written here once so handlers cannot drift into inventing
     /// their own failure semantics for the same condition.
-    pub(crate) async fn store_or_503(&self) -> Result<sharerr_store::Store, Response> {
+    ///
+    /// The error is boxed only to keep this `Result` small — `Response` alone
+    /// is well over clippy's `result_large_err` threshold, and every caller
+    /// already destructures with `match` rather than `?`, so unboxing at the
+    /// point of use is one extra `*`.
+    pub(crate) async fn store_or_503(&self) -> Result<sharerr_store::Store, Box<Response>> {
         self.serve
             .store()
             .await
-            .map_err(|reason| (StatusCode::SERVICE_UNAVAILABLE, reason).into_response())
+            .map_err(|reason| Box::new((StatusCode::SERVICE_UNAVAILABLE, reason).into_response()))
     }
 }
 
@@ -114,6 +119,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/arr/{source}", post(settings::save_arr))
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
         .route("/settings/transmission", post(settings::save_transmission))
+        .route("/settings/rtorrent", post(settings::save_rtorrent))
         .route(
             "/settings/torrent-backend",
             post(settings::save_torrent_backend),

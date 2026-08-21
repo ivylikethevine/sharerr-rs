@@ -115,5 +115,5 @@ added later inherits the tolerance instead of needing to remember it.
 Publishing to GHCR happens on a `v*` tag only. A push to `main` builds both
 architectures — that build is load-bearing as the MSRV check — but ships nothing.
 
-The roadmap is `docs/roadmap.md`; the original design brief and the two premises
+The roadmap is `docs/ROADMAP.md`; the original design brief and the two premises
 the implementation disproved are in `docs/design.md`.

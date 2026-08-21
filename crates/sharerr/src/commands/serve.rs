@@ -70,7 +70,10 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // vault). `mount` decides which listener below actually carries the
     // routes; building the router once here means both listeners share one
     // `LighthouseState`, same reasoning as sharing one `Swarms` map.
-    let lighthouse_routes = state.lighthouse_state().await.map(sharerr_lighthouse::routes);
+    let lighthouse_routes = state
+        .lighthouse_state()
+        .await
+        .map(sharerr_lighthouse::routes);
     let lighthouse_mount = config.lighthouse.mount;
 
     // The probes keep their own state and stay outside the web UI's auth layer.
@@ -340,7 +343,10 @@ mod tests {
 
         let dedicated: SocketAddr = "0.0.0.0:9000".parse().unwrap();
 
-        assert!(lighthouse_belongs_on_frontend(LighthouseMount::Frontend, None));
+        assert!(lighthouse_belongs_on_frontend(
+            LighthouseMount::Frontend,
+            None
+        ));
         assert!(lighthouse_belongs_on_frontend(
             LighthouseMount::Frontend,
             Some(dedicated)

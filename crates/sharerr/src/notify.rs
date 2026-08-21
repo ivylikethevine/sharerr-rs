@@ -236,4 +236,159 @@ mod tests {
         assert!(notified.should_notify(1, 1_000).await);
         assert!(notified.should_notify(2, 1_000).await);
     }
+
+    // ------------------------------------------------------------ Webhook
+    //
+    // Built by hand against a wiremock server rather than through `webhook()`
+    // — that function opens the vault, which cannot in this suite (see
+    // CLAUDE.md). `Webhook`'s fields are private but this module's own tests
+    // can still construct one directly, which is exactly the "test the
+    // store-backed logic with the secret already resolved" pattern
+    // `checks::check_qbit` already uses for the same reason.
+
+    fn webhook_to(server: &wiremock::MockServer, kind: NotifyKind) -> Webhook {
+        Webhook {
+            url: url::Url::parse(&server.uri()).unwrap(),
+            kind,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_generic_webhook_posts_event_and_message_as_json() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "event": "sync failed",
+                "message": "could not reach qBittorrent"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        webhook_to(&server, NotifyKind::Generic)
+            .post("sync failed", "could not reach qBittorrent")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_discord_webhook_folds_event_and_message_into_one_content_field() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "content": "**sharerr** — peer gone quiet\nSam has not been seen since 2 day(s) ago"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        webhook_to(&server, NotifyKind::Discord)
+            .post(
+                "peer gone quiet",
+                "Sam has not been seen since 2 day(s) ago",
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_apprise_webhook_sends_a_title_and_body() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "title": "sharerr — sync failed",
+                "body": "could not reach qBittorrent"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        webhook_to(&server, NotifyKind::Apprise)
+            .post("sync failed", "could not reach qBittorrent")
+            .await;
+    }
+
+    /// `post` must never panic or propagate an error outward — a notification
+    /// is best-effort, and a webhook responding with a server error is no
+    /// different from any other unreachable side channel.
+    #[tokio::test]
+    async fn a_failing_webhook_is_swallowed_rather_than_panicking() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        webhook_to(&server, NotifyKind::Generic)
+            .post("sync failed", "whatever")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn posting_to_nothing_listening_does_not_panic() {
+        let port = sharerr_testkit::net::closed_port();
+        let webhook = Webhook {
+            url: url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+            kind: NotifyKind::Generic,
+            client: reqwest::Client::new(),
+        };
+
+        webhook.post("sync failed", "whatever").await;
+    }
+
+    // ------------------------------------------------------- send / quiet loop
+
+    #[tokio::test]
+    async fn send_with_no_webhook_configured_returns_without_erroring() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        // No master key is set, so `webhook()` cannot open the vault — the
+        // same "not configured" outcome an operator who never set one sees.
+        send(&serve, "sync failed", "whatever").await;
+    }
+
+    #[tokio::test]
+    async fn check_quiet_peers_with_the_threshold_off_never_touches_the_vault_or_store() {
+        let (dir, _serve) = crate::state::fixtures::unconfigured();
+        let config = sharerr_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            notifications: sharerr_core::config::NotificationsConfig {
+                peer_quiet_secs: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = Arc::new(ServeState::new(
+            config,
+            dir.path().join("sharerr.toml"),
+            None,
+        ));
+
+        // `0` turns the check off entirely — see `NotificationsConfig::peer_quiet_secs`.
+        // No database exists at this data_dir; a store touch here would fail.
+        assert_eq!(check_quiet_peers(&state).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn check_quiet_peers_with_no_webhook_configured_is_a_silent_no_op() {
+        let (dir, _serve) = crate::state::fixtures::unconfigured();
+        let config = sharerr_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            notifications: sharerr_core::config::NotificationsConfig {
+                peer_quiet_secs: 3600,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let state = Arc::new(ServeState::new(
+            config,
+            dir.path().join("sharerr.toml"),
+            None,
+        ));
+
+        // No master key, so `webhook()` finds nothing to send through and this
+        // returns before ever touching the (nonexistent) database either.
+        assert_eq!(check_quiet_peers(&state).await, Ok(()));
+    }
 }

@@ -29,6 +29,7 @@ use sharerr_core::config::TorrentBackend;
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_core::{Config, MediaSource};
 use sharerr_qbit::QbitClient;
+use sharerr_rtorrent::RtorrentClient;
 use sharerr_transmission::TransmissionClient;
 use url::Url;
 
@@ -343,6 +344,19 @@ pub fn build_torrent_client(
             return Err(
                 "Transmission has no API key — its RPC authenticates with a username and \
                  password. Clear transmission's API key, or select qBittorrent."
+                    .to_owned(),
+            );
+        }
+        (TorrentBackend::Rtorrent, TorrentCredential::Password(password)) => {
+            let username = username.unwrap_or_default();
+            Arc::new(RtorrentClient::new(url, username, password).map_err(|e| chain(&e))?)
+        }
+        // Same reasoning as Transmission above: rTorrent's XML-RPC has no key
+        // auth of its own, only the username/password sent as Basic Auth.
+        (TorrentBackend::Rtorrent, TorrentCredential::ApiKey(_)) => {
+            return Err(
+                "rTorrent has no API key — this authenticates with a username and password \
+                 sent as HTTP Basic Auth. Clear rtorrent's API key, or select qBittorrent."
                     .to_owned(),
             );
         }

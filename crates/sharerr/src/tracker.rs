@@ -34,8 +34,8 @@ use std::sync::Arc;
 use axum::extract::{ConnectInfo, Path, Query, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use sharerr_store::{EndpointKind, Store};
 use serde::Deserialize;
+use sharerr_store::{EndpointKind, Store};
 use sharerr_torrent::announce::{
     self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
 };
@@ -162,8 +162,13 @@ async fn handle_announce(
     let response = state.swarms.announce(&request, addr).await;
 
     if let Some(peer_id) = attributed_to {
-        crate::torznab::record_sighting(&store, peer_id, EndpointKind::Client, Some(&addr.to_string()))
-            .await;
+        crate::torznab::record_sighting(
+            &store,
+            peer_id,
+            EndpointKind::Client,
+            Some(&addr.to_string()),
+        )
+        .await;
     }
 
     tracing::debug!(
@@ -338,7 +343,7 @@ pub struct TorrentFileQuery {
 /// When the request carries a `token` that still resolves to an active peer,
 /// the announce URLs are rewritten in memory — never on disk — to that peer's
 /// own token before the response goes out, the same attribution the feed's
-/// magnet links already carry. Roadmap Stage 2; see `docs/roadmap.md`.
+/// magnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.
 pub async fn torrent_file(
     State(state): State<Arc<TrackerState>>,
     Path(name): Path<String>,
@@ -414,14 +419,14 @@ async fn attributed_bytes(state: &TrackerState, bytes: &[u8], supplied: &str) ->
         }
     };
 
-    let announce = match sharerr_torrent::announce_set_for(&state.serve.endpoint(), Some(&peer.key_hash))
-    {
-        Ok(announce) => announce,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not build a per-peer announce set");
-            return bytes.to_vec();
-        }
-    };
+    let announce =
+        match sharerr_torrent::announce_set_for(&state.serve.endpoint(), Some(&peer.key_hash)) {
+            Ok(announce) => announce,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not build a per-peer announce set");
+                return bytes.to_vec();
+            }
+        };
 
     match sharerr_torrent::rewrite_announce(bytes, &announce) {
         Ok(rewritten) => rewritten,
@@ -512,8 +517,13 @@ mod tests {
             .await
             .unwrap();
 
-        crate::torznab::record_sighting(&store, sam.id, EndpointKind::Client, Some("203.0.113.9:51413"))
-            .await;
+        crate::torznab::record_sighting(
+            &store,
+            sam.id,
+            EndpointKind::Client,
+            Some("203.0.113.9:51413"),
+        )
+        .await;
 
         let endpoints = store.peer_endpoints(sam.id).await.unwrap();
         assert_eq!(endpoints.len(), 1);
@@ -720,7 +730,10 @@ mod tests {
             .await
             .unwrap();
 
-        let built = built_torrent(dir.path(), "http://seed.example:8477/announce/shared-secret");
+        let built = built_torrent(
+            dir.path(),
+            "http://seed.example:8477/announce/shared-secret",
+        );
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
         let rewritten = attributed_bytes(&tracker_state, &built.data, &sam.key_hash).await;

@@ -16,9 +16,9 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use askama::Template;
+use axum::Router;
 use axum::response::Html;
 use axum::routing::get;
-use axum::Router;
 
 use crate::web::templates::{
     ArrSection, EndpointStatus, FilterOption, Glance, ItemRow, ItemsPage, LibraryRow, PathRow,
@@ -64,9 +64,9 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
 /// makes, reproduced here rather than reused because that one builds an axum
 /// `Response` this handler shape does not want.
 fn page<T: Template>(template: T) -> String {
-    template.render().unwrap_or_else(|err| {
-        format!("<pre>failed to render: {err}</pre>")
-    })
+    template
+        .render()
+        .unwrap_or_else(|err| format!("<pre>failed to render: {err}</pre>"))
 }
 
 fn status_page() -> StatusPage {
@@ -137,7 +137,9 @@ fn status_page() -> StatusPage {
                 last_observed: Some("203.0.113.9:51413, 40 minutes ago".to_owned()),
                 last_poll: Some("30 seconds ago".to_owned()),
                 last_success: Some("40 minutes ago".to_owned()),
-                last_error: Some("could not reach the gluetun control server: timed out".to_owned()),
+                last_error: Some(
+                    "could not reach the gluetun control server: timed out".to_owned(),
+                ),
             },
         ],
         swarm_peers: 5,
@@ -172,11 +174,19 @@ struct ServiceLineMock {
 
 impl ServiceLineMock {
     fn ok(name: &'static str, message: &'static str) -> Self {
-        Self { name, message, ok: true }
+        Self {
+            name,
+            message,
+            ok: true,
+        }
     }
 
     fn bad(name: &'static str, message: &'static str) -> Self {
-        Self { name, message, ok: false }
+        Self {
+            name,
+            message,
+            ok: false,
+        }
     }
 
     fn into_line(self) -> crate::web::templates::ServiceLine {
@@ -265,6 +275,11 @@ fn settings_page() -> SettingsPage {
         transmission_password_set: true,
         transmission_label: "sharerr".to_owned(),
 
+        rtorrent_url: "http://seedbox.example/RPC2".to_owned(),
+        rtorrent_username: "sharerr".to_owned(),
+        rtorrent_password_set: false,
+        rtorrent_label: "sharerr".to_owned(),
+
         seeding_upload_limit_kib: "2048".to_owned(),
         seeding_ratio_limit: "2.5".to_owned(),
 
@@ -333,9 +348,18 @@ fn settings_page() -> SettingsPage {
 fn peers_page() -> PeersPage {
     PeersPage {
         scope_options: vec![
-            ScopeOption { value: "all", label: "Everything".to_owned() },
-            ScopeOption { value: "tv", label: "TV only".to_owned() },
-            ScopeOption { value: "movies", label: "Films only".to_owned() },
+            ScopeOption {
+                value: "all",
+                label: "Everything".to_owned(),
+            },
+            ScopeOption {
+                value: "tv",
+                label: "TV only".to_owned(),
+            },
+            ScopeOption {
+                value: "movies",
+                label: "Films only".to_owned(),
+            },
         ],
         signed_in: true,
         peers: vec![
@@ -416,9 +440,7 @@ fn items_page() -> ItemsPage {
                 visible_to: "Sam, Alex".to_owned(),
                 since: "3 months ago".to_owned(),
                 info_hash: Some("ab".repeat(20)),
-                announce_url: Some(
-                    "http://seed.example.com:51413/announce/9f2a7c4e".to_owned(),
-                ),
+                announce_url: Some("http://seed.example.com:51413/announce/9f2a7c4e".to_owned()),
                 token_fp: Some("9f2a7c4e".to_owned()),
                 token_status: TokenStatus::Valid,
                 last_error: None,
@@ -433,9 +455,7 @@ fn items_page() -> ItemsPage {
                 visible_to: "Sam".to_owned(),
                 since: "1 month ago".to_owned(),
                 info_hash: Some("cd".repeat(20)),
-                announce_url: Some(
-                    "http://seed.example.com:51413/announce/OLDTOKEN12".to_owned(),
-                ),
+                announce_url: Some("http://seed.example.com:51413/announce/OLDTOKEN12".to_owned()),
                 token_fp: Some("OLDTOKEN12".to_owned()),
                 token_status: TokenStatus::Stale,
                 last_error: None,
@@ -468,7 +488,9 @@ fn items_page() -> ItemsPage {
                 announce_url: None,
                 token_fp: None,
                 token_status: TokenStatus::None,
-                last_error: Some("qBittorrent rejected the add: category does not exist".to_owned()),
+                last_error: Some(
+                    "qBittorrent rejected the add: category does not exist".to_owned(),
+                ),
             },
             ItemRow {
                 title: "Seaglass & Static".to_owned(),
@@ -480,9 +502,7 @@ fn items_page() -> ItemsPage {
                 visible_to: "no friend's scope covers it".to_owned(),
                 since: "6 days ago".to_owned(),
                 info_hash: Some("ef".repeat(20)),
-                announce_url: Some(
-                    "http://seed.example.com:51413/announce/9f2a7c4e".to_owned(),
-                ),
+                announce_url: Some("http://seed.example.com:51413/announce/9f2a7c4e".to_owned()),
                 token_fp: Some("9f2a7c4e".to_owned()),
                 token_status: TokenStatus::Valid,
                 last_error: None,
@@ -491,25 +511,67 @@ fn items_page() -> ItemsPage {
         total: 132,
         shown: 5,
         source_options: vec![
-            FilterOption { value: "", label: "All sources".to_owned() },
-            FilterOption { value: "sonarr", label: "Sonarr".to_owned() },
-            FilterOption { value: "radarr", label: "Radarr".to_owned() },
-            FilterOption { value: "lidarr", label: "Lidarr".to_owned() },
-            FilterOption { value: "readarr", label: "Readarr".to_owned() },
+            FilterOption {
+                value: "",
+                label: "All sources".to_owned(),
+            },
+            FilterOption {
+                value: "sonarr",
+                label: "Sonarr".to_owned(),
+            },
+            FilterOption {
+                value: "radarr",
+                label: "Radarr".to_owned(),
+            },
+            FilterOption {
+                value: "lidarr",
+                label: "Lidarr".to_owned(),
+            },
+            FilterOption {
+                value: "readarr",
+                label: "Readarr".to_owned(),
+            },
         ],
         state_options: vec![
-            FilterOption { value: "", label: "All states".to_owned() },
-            FilterOption { value: "seeding", label: "Seeding".to_owned() },
-            FilterOption { value: "pending", label: "Pending".to_owned() },
-            FilterOption { value: "failed", label: "Failed".to_owned() },
+            FilterOption {
+                value: "",
+                label: "All states".to_owned(),
+            },
+            FilterOption {
+                value: "seeding",
+                label: "Seeding".to_owned(),
+            },
+            FilterOption {
+                value: "pending",
+                label: "Pending".to_owned(),
+            },
+            FilterOption {
+                value: "failed",
+                label: "Failed".to_owned(),
+            },
         ],
         source_filter: String::new(),
         state_filter: String::new(),
         q: String::new(),
         sort_links: vec![
-            SortLink { label: "Title", href: "/items?sort=title&dir=asc".to_owned(), active: true, dir: "asc" },
-            SortLink { label: "Size", href: "/items?sort=size&dir=asc".to_owned(), active: false, dir: "" },
-            SortLink { label: "Since", href: "/items?sort=since&dir=asc".to_owned(), active: false, dir: "" },
+            SortLink {
+                label: "Title",
+                href: "/items?sort=title&dir=asc".to_owned(),
+                active: true,
+                dir: "asc",
+            },
+            SortLink {
+                label: "Size",
+                href: "/items?sort=size&dir=asc".to_owned(),
+                active: false,
+                dir: "",
+            },
+            SortLink {
+                label: "Since",
+                href: "/items?sort=since&dir=asc".to_owned(),
+                active: false,
+                dir: "",
+            },
         ],
     }
 }
@@ -535,7 +597,10 @@ mod tests {
             ("items", items_page().render().unwrap()),
         ] {
             assert!(html.contains("<!DOCTYPE html>"), "{name}: {html}");
-            assert!(html.len() > 500, "{name} rendered suspiciously small: {html}");
+            assert!(
+                html.len() > 500,
+                "{name} rendered suspiciously small: {html}"
+            );
         }
     }
 
@@ -546,6 +611,9 @@ mod tests {
     fn the_settings_mock_shows_a_populated_transmission_panel() {
         let html = settings_page().render().unwrap();
         assert!(html.contains("http://transmission.example:9091"), "{html}");
-        assert!(html.contains(r#"<option value="transmission" selected>"#), "{html}");
+        assert!(
+            html.contains(r#"<option value="transmission" selected>"#),
+            "{html}"
+        );
     }
 }

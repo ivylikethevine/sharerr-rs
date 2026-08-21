@@ -7,6 +7,14 @@ ordering is a judgement about value, not a schedule. What has already shipped
 lives in [the README](../README.md#what-works-today), not here — this page
 tracks what is still ahead.
 
+## Table of contents
+
+- [Library sources (where tagged content comes from)](#library-sources-where-tagged-content-comes-from)
+- [Torrent clients (what actually seeds)](#torrent-clients-what-actually-seeds)
+- [Indexers (what consumes the feed)](#indexers-what-consumes-the-feed)
+- [Functionality](#functionality)
+- [The lighthouse](#the-lighthouse)
+
 ### Library sources (where tagged content comes from)
 
 Today: **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
@@ -18,13 +26,14 @@ the two shapes of "where content lives" this project actually wants to support.
 
 ### Torrent clients (what actually seeds)
 
-Today: **qBittorrent** and **Transmission**, behind the `TorrentClient` trait in
-`sharerr-client`. That trait is deliberately narrow, which is what made the
-second client tractable — clients disagree about almost everything except "add
-this torrent, with the data already at this path". Announces always go to
-sharerr's own tracker, so a client needs no tracker of its own.
+Today: **qBittorrent**, **Transmission**, and **rTorrent / ruTorrent**, behind
+the `TorrentClient` trait in `sharerr-client`. That trait is deliberately
+narrow, which is what made a second and third client tractable — clients
+disagree about almost everything except "add this torrent, with the data
+already at this path". Announces always go to sharerr's own tracker, so a
+client needs no tracker of its own.
 
-Adding a third is now mostly writing one file. What a new client must answer
+Adding another is mostly writing one file. What a new client must answer
 honestly: whether it can remove a torrent _without_ deleting the data, how it
 replaces a torrent's tracker list in place (`set_trackers`, for endpoint
 rotation), and how it expresses `AddRequest::upload_limit_kib`/`ratio_limit`
@@ -32,10 +41,21 @@ when either is set — the one deliberate exception to "ratios belong to the
 client," a seeding goal stated once at add time through whatever native
 mechanism the client offers for it, same as qBittorrent (inline on
 `torrents/add`) and Transmission (a follow-up `torrent-set`) already do.
+`sharerr-rtorrent` answers the tracker-replacement question honestly by *not*
+fully answering it: rTorrent's XML-RPC has never grown a way to remove a
+tracker (open upstream as
+[rakshasa/rtorrent#165](https://github.com/rakshasa/rtorrent/issues/165)
+since 2013), so `set_trackers` there can only insert a fresh tier ahead of
+whatever is already on the torrent, not replace it — see the crate's module
+docs for the full reasoning.
 
-| Client                   | Notes                                                                                               |
-| ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| **rTorrent / ruTorrent** | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.  |
+**Gap: no tier-2 coverage for rTorrent.** `run_docker_tests.sh` drives real
+Sonarr, Radarr, and qBittorrent containers; it does not drive a real rTorrent.
+`sharerr-rtorrent`'s tests instead run against a hand-mocked XML-RPC server,
+which proves the crate parses the requests and responses it expects — not
+that those are the requests and responses a real rTorrent expects. Standing
+up rTorrent + ruTorrent in the docker compose stack, the same way qBittorrent
+already is, would close this; not yet done.
 
 **Transmission-compatible forks:** not planned as separate work. `sharerr-transmission` has no
 version pinning or fork detection — it only speaks the documented session-id handshake and
@@ -94,6 +114,26 @@ One follow-on stage, deliberately not built yet:
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
+
+**A topology visualization.** Every fact this would draw already exists
+somewhere in the running instance, just spread across separate pages as
+tables: the internal *arr-stack side (this instance's own Sonarr, Radarr,
+qBittorrent/Transmission/rTorrent, and gluetun, plus how a container's own
+view of a path maps to sharerr's and to the torrent client's — see
+`sharerr doctor`'s path-mapping check and the Status page's endpoint table),
+and the external swarm side (this instance's own advertised host/port, each
+peer's known endpoints from [`PeerEndpointView`], and whether each was
+learned by a direct sighting, gossip, or a lighthouse — see "Friends finding
+each other" in the README). Nobody currently has to hold all of that in their
+head at once to answer "why can't Sam see this torrent" or "which of my two
+gluetun tunnels is this port actually on" — a diagram naming each hop's
+IP:port, container name, and last-known-good time would answer it at a
+glance instead of a page of prose. Not started: this is a genuinely new UI
+surface (an SVG or similar diagram, not another table), not an extension of
+an existing page, and touches every subsystem that already tracks an
+endpoint — the tracker, gluetun, gossip, and the lighthouse client all keep
+their own notion of "where things are" today and none of them are wired to a
+shared topology model yet.
 
 ---
 

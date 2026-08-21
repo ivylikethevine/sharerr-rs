@@ -1,4 +1,4 @@
-//! The guided first-run — see `docs/roadmap.md`'s "Setup wizard".
+//! The guided first-run — see `docs/ROADMAP.md`'s "Setup wizard".
 //!
 //! Not a separate configuration path: every step here submits to the very
 //! same `/settings/*` handlers [`super::settings`] exposes, with `?next=`

@@ -1,7 +1,7 @@
 //! Reporting this instance's endpoint to configured lighthouses, and querying
 //! them for a friend gossip cannot currently reach.
 //!
-//! See `docs/roadmap.md`'s "The lighthouse" for the design brief. Gossip
+//! See `docs/ROADMAP.md`'s "The lighthouse" for the design brief. Gossip
 //! (`crate::gossip`) is the primary mechanism — friends relay each other's
 //! signed endpoint records directly — but two friends whose addresses both
 //! rotated while neither was watching have no path back to each other
@@ -131,7 +131,12 @@ fn to_lighthouse_record(record: &gossip::EndpointRecord) -> LighthouseRecord {
 /// record itself is identical every time. A `None` record (no identity or no
 /// advertised endpoint yet, same condition gossip already handles) skips the
 /// pass entirely rather than reporting nothing meaningful.
-async fn report(http: &reqwest::Client, urls: &[Url], peers: &[Peer], own: Option<&LighthouseRecord>) {
+async fn report(
+    http: &reqwest::Client,
+    urls: &[Url],
+    peers: &[Peer],
+    own: Option<&LighthouseRecord>,
+) {
     let Some(record) = own else {
         tracing::debug!("no self-record available yet — skipping lighthouse report");
         return;
@@ -159,7 +164,13 @@ async fn report_one(http: &reqwest::Client, base: &Url, key_hash: &str, record: 
 /// Query every configured lighthouse for every friend who has gone quiet and
 /// whose identity we already know — see the module docs for why a known
 /// pubkey is a prerequisite, not an optimisation.
-async fn lookup_quiet(http: &reqwest::Client, urls: &[Url], peers: &[Peer], vault: &Vault, store: &Store) {
+async fn lookup_quiet(
+    http: &reqwest::Client,
+    urls: &[Url],
+    peers: &[Peer],
+    vault: &Vault,
+    store: &Store,
+) {
     let now = now_epoch();
 
     let lookups = peers
@@ -172,7 +183,14 @@ async fn lookup_quiet(http: &reqwest::Client, urls: &[Url], peers: &[Peer], vaul
 /// One friend's lookup across every configured lighthouse, stopping at the
 /// first that answers — see [`lookup_quiet`] for why peers are independent
 /// but a peer's own lighthouses are tried in order rather than fanned out.
-async fn lookup_quiet_one(http: &reqwest::Client, urls: &[Url], vault: &Vault, store: &Store, peer: &Peer, now: i64) {
+async fn lookup_quiet_one(
+    http: &reqwest::Client,
+    urls: &[Url],
+    vault: &Vault,
+    store: &Store,
+    peer: &Peer,
+    now: i64,
+) {
     let Some(pubkey) = peer.pubkey.as_deref() else {
         return;
     };
@@ -215,7 +233,11 @@ async fn lookup_one(
         "{}/lighthouse/v1/lookup/{key_hash}",
         base.as_str().trim_end_matches('/')
     );
-    let response = http.get(&endpoint).send().await.map_err(|e| error_chain(&e))?;
+    let response = http
+        .get(&endpoint)
+        .send()
+        .await
+        .map_err(|e| error_chain(&e))?;
     if !response.status().is_success() {
         return Err(format!("lookup answered {}", response.status()));
     }
@@ -386,12 +408,18 @@ mod tests {
 
         let (store, peer) = store_with_peer("Alex", "our-key-for-alex").await;
         let record = signed_lighthouse_record(1, "http://203.0.113.9:41234", 1000);
-        store.bind_peer_pubkey(peer.id, &record.pubkey).await.unwrap();
+        store
+            .bind_peer_pubkey(peer.id, &record.pubkey)
+            .await
+            .unwrap();
 
         // The key Alex issued *us*, which we hash to look Alex up.
         let raw_key = "alex-issued-us-this-key";
         vault
-            .put(&secret_keys::peer_gossip_key(peer.id), &SecretString::from(raw_key))
+            .put(
+                &secret_keys::peer_gossip_key(peer.id),
+                &SecretString::from(raw_key),
+            )
             .unwrap();
         lighthouse
             .report(&sharerr_lighthouse::hash_key(raw_key), record.clone())
@@ -417,7 +445,10 @@ mod tests {
         let (store, peer) = store_with_peer("Alex", "our-key-for-alex").await;
         // Bound, but never reported to the lighthouse — every lookup for
         // Alex gets a decoy.
-        store.bind_peer_pubkey(peer.id, "some-pubkey").await.unwrap();
+        store
+            .bind_peer_pubkey(peer.id, "some-pubkey")
+            .await
+            .unwrap();
         vault
             .put(
                 &secret_keys::peer_gossip_key(peer.id),
@@ -443,7 +474,10 @@ mod tests {
         let (store, peer) = store_with_peer("Alex", "our-key-for-alex").await;
         let raw_key = "alex-issued-us-this-key";
         vault
-            .put(&secret_keys::peer_gossip_key(peer.id), &SecretString::from(raw_key))
+            .put(
+                &secret_keys::peer_gossip_key(peer.id),
+                &SecretString::from(raw_key),
+            )
             .unwrap();
         lighthouse
             .report(

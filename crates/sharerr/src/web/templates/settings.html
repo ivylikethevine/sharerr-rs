@@ -45,6 +45,7 @@
   <li><a href="#torrent-client">Torrent client</a></li>
   <li><a href="#qbittorrent">qBittorrent</a></li>
   <li><a href="#transmission">Transmission</a></li>
+  <li><a href="#rtorrent">rTorrent</a></li>
   <li><a href="#seeding">Seeding limits</a></li>
   <li><a href="#tracker">Tracker</a></li>
   <li><a href="#lighthouse">Lighthouse</a></li>
@@ -119,10 +120,11 @@
           {% call lock_attr("torrent_backend") %}{% endcall %}>
     <option value="qbittorrent" {% if torrent_backend == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
     <option value="transmission" {% if torrent_backend == "transmission" %}selected{% endif %}>Transmission</option>
+    <option value="rtorrent" {% if torrent_backend == "rtorrent" %}selected{% endif %}>rTorrent</option>
   </select>
   {% call locked("torrent_backend") %}{% endcall %}
   <p class="hint">
-    Both clients' settings below are kept regardless of which one is
+    Every client's settings below are kept regardless of which one is
     selected, so you can fill in and test a client before switching to it.
   </p>
   <button type="submit">Save</button>
@@ -210,10 +212,57 @@
   <span id="test-transmission"></span>
 </form>
 
+<h2 id="rtorrent">rTorrent</h2>
+<form method="post" action="/settings/rtorrent" class="panel">
+  <label for="rtorrent_url">RPC URL</label>
+  <input id="rtorrent_url" name="url" value="{{ rtorrent_url }}" required
+         placeholder="http://seedbox.example/RPC2"
+         {% call lock_attr("rtorrent.url") %}{% endcall %}>
+  {% call locked("rtorrent.url") %}{% endcall %}
+  <p class="hint">
+    rTorrent has no HTTP server of its own — this is the exact address your
+    reverse proxy answers XML-RPC requests on (commonly <code>/RPC2</code>, or
+    ruTorrent's <code>/plugins/httprpc/action.php</code>), not a base address
+    sharerr appends a path to.
+  </p>
+
+  <label for="rtorrent_username">Username</label>
+  <input id="rtorrent_username" name="username" value="{{ rtorrent_username }}"
+         {% call lock_attr("rtorrent.username") %}{% endcall %}>
+  {% call locked("rtorrent.username") %}{% endcall %}
+
+  <label for="rtorrent_password">Password {% call field_status(rtorrent_password_set) %}{% endcall %}</label>
+  <input id="rtorrent_password" name="password" type="password" autocomplete="off"
+         placeholder="{% call stored(rtorrent_password_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if rtorrent_password_set %}
+  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+  <p class="hint">
+    rTorrent's own XML-RPC has no credential of its own. Username and password
+    are sent as HTTP Basic Auth on every request, for the common case where
+    the reverse proxy in front of it is what enforces access. If yours does
+    not, any placeholder values here are ignored harmlessly.
+  </p>
+
+  <label for="rtorrent_label">Label for sharerr's torrents</label>
+  <input id="rtorrent_label" name="label" value="{{ rtorrent_label }}"
+         {% call lock_attr("rtorrent.label") %}{% endcall %}>
+  {% call locked("rtorrent.label") %}{% endcall %}
+  <p class="hint">
+    rTorrent has no separate category and tag either — this one label stands
+    in for both, stored in rTorrent's <code>d.custom1</code> field.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/rtorrent" hx-target="#test-rtorrent" hx-swap="innerHTML">Test connection</button>
+  <span id="test-rtorrent"></span>
+</form>
+
 <h2 id="seeding">Seeding limits</h2>
 <form method="post" action="/settings/seeding" class="panel">
   <p class="hint">
-    Applied once, when sharerr hands a torrent to qBittorrent or Transmission —
+    Applied once, when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent —
     not retroactively enforced on what is already seeding, and not policed by
     sharerr afterward. From that point on, the client's own seeding engine
     honours the goal the same way it would for any torrent added by hand.

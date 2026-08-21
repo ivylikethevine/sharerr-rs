@@ -115,7 +115,7 @@ pub struct ServeState {
     /// only by the `[gluetun_client]` poller; there is no static configuration
     /// for it, since nothing else in `sharerr.toml` describes the torrent
     /// client's own reachable address. Read today by gossip's self-record;
-    /// see `docs/roadmap.md`'s "a peer with two addresses" for the rest of the
+    /// see `docs/ROADMAP.md`'s "a peer with two addresses" for the rest of the
     /// story.
     client_endpoint: Arc<AdvertisedEndpoint>,
     /// Raised by the gluetun push endpoint so the tracker-facing poller
@@ -336,8 +336,10 @@ impl ServeState {
             GluetunTarget::Tracker => &self.gluetun_tracker_api_key,
             GluetunTarget::Client => &self.gluetun_client_api_key,
         };
-        self.cached_from_vault(cache, |vault| vault.get(target.api_key_secret()).ok().flatten())
-            .await
+        self.cached_from_vault(cache, |vault| {
+            vault.get(target.api_key_secret()).ok().flatten()
+        })
+        .await
     }
 
     /// This instance's gossip signing identity, cached after the first load.

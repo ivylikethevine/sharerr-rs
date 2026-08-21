@@ -90,7 +90,11 @@ impl ArrClient {
 
     /// Turn a non-2xx response into the matching [`ArrError`], `path` named for the
     /// message; otherwise hand the response back for the caller to read the body.
-    async fn check_status(&self, response: reqwest::Response, path: &str) -> Result<reqwest::Response> {
+    async fn check_status(
+        &self,
+        response: reqwest::Response,
+        path: &str,
+    ) -> Result<reqwest::Response> {
         let status = response.status();
         if sharerr_client::is_auth_rejection(status) {
             return Err(ArrError::Unauthorized {

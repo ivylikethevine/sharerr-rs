@@ -391,7 +391,9 @@ impl TorrentClient for TransmissionClient {
             let Some(hash) = hash else {
                 // The add itself already succeeded; a missing hash just means
                 // there is nothing to attach a limit to.
-                tracing::warn!("could not read the added torrent's hash — seeding goal not applied");
+                tracing::warn!(
+                    "could not read the added torrent's hash — seeding goal not applied"
+                );
                 return Ok(());
             };
 

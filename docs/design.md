@@ -4,6 +4,14 @@ The original statement of intent for sharerr, kept verbatim because the
 implementation is answerable to it, followed by the two places where building it
 proved a premise wrong.
 
+## Table of contents
+
+- [The brief](#the-brief)
+- [Corrections the implementation forced](#corrections-the-implementation-forced)
+  - [qBittorrent does not publish an RSS feed](#qbittorrent-does-not-publish-an-rss-feed)
+  - [The no-egress requirement is not enforced by the test stack](#the-no-egress-requirement-is-not-enforced-by-the-test-stack)
+- [What the brief got right](#what-the-brief-got-right)
+
 ## The brief
 
 This is a project that aims to help users with content share that content over
