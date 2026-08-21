@@ -509,7 +509,7 @@ pub async fn api(
     if query.t == "caps" {
         xml(caps_xml())
     } else if is_search_function(&query.t) {
-        search(&state, &query, caller.scope()).await
+        search(&state, &query, caller.scope(), caller.key_hash()).await
     } else {
         xml_status(
             StatusCode::BAD_REQUEST,
@@ -569,6 +569,7 @@ pub(crate) async fn collect(
     state: &ServeState,
     query: &SearchQuery,
     scope: PeerScope,
+    peer_token: &str,
 ) -> Result<Matched, (StatusCode, String)> {
     let store = state.store().await.map_err(|reason| {
         (
@@ -600,15 +601,23 @@ pub(crate) async fn collect(
         .collect();
 
     // The magnet's `tr` tiers: every recently held endpoint, the same list a
-    // freshly built torrent carries, with the announce token when one is set —
+    // freshly built torrent carries, with an announce token when one is set —
     // the magnet is an alternative to the `.torrent`, so it must grant the same
     // right to announce.
-    let token = state.tracker_token().await;
+    //
+    // The token embedded is the *caller's own* `key_hash`, not the shared
+    // instance token — see `crate::tracker`'s `authenticate_token`. This is
+    // what lets a real announce be attributed to this specific friend, and
+    // what makes revoking them reach the tracker, not just the feed. Only
+    // when the operator has a tracker token configured at all: with none
+    // set, announces are unauthenticated for everyone and there is nothing
+    // to attribute, so the URL carries no token segment, same as today.
+    let token = state.tracker_token().await.is_some().then_some(peer_token);
     let announces: Vec<String> = state
         .endpoint()
         .recent()
         .iter()
-        .filter_map(|base| sharerr_torrent::announce_url(base, token.as_deref()).ok())
+        .filter_map(|base| sharerr_torrent::announce_url(base, token).ok())
         .map(|url| url.to_string())
         .collect();
 
@@ -637,8 +646,8 @@ pub(crate) fn render_feed(matched: &Matched) -> String {
     feed_xml(&entries)
 }
 
-async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope) -> Response {
-    let matched = match collect(state, query, scope).await {
+async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope, peer_token: &str) -> Response {
+    let matched = match collect(state, query, scope, peer_token).await {
         Ok(matched) => matched,
         Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
     };
@@ -664,6 +673,10 @@ pub(crate) struct Caller {
     /// every caller is a real peer, and the gossip endpoints — which require
     /// one, to know who said what — can always resolve it.
     peer_id: i64,
+    /// This peer's own `key_hash` — the value now embedded as the tracker
+    /// token in their magnet links, so an announce it grants can be
+    /// attributed back to them. See `crate::tracker`'s `authenticate_token`.
+    key_hash: String,
 }
 
 impl Caller {
@@ -673,6 +686,10 @@ impl Caller {
 
     pub fn peer_id(&self) -> i64 {
         self.peer_id
+    }
+
+    pub fn key_hash(&self) -> &str {
+        &self.key_hash
     }
 }
 
@@ -745,7 +762,13 @@ async fn check_api_key(
                 // Recorded after authenticating, and failure to record is not
                 // failure to authenticate: a read-only or busy database should not
                 // take the feed down.
-                record_activity(&store, &peer, remote).await;
+                record_sighting(
+                    &store,
+                    peer.id,
+                    sharerr_store::EndpointKind::Api,
+                    remote.map(|ip| ip.to_string()).as_deref(),
+                )
+                .await;
                 tracing::debug!(
                     peer = %peer.label,
                     scope = peer.scope.as_str(),
@@ -754,6 +777,7 @@ async fn check_api_key(
                 return Ok(Caller {
                     scope: peer.scope,
                     peer_id: peer.id,
+                    key_hash: peer.key_hash,
                 });
             }
             Ok(None) => {}
@@ -774,37 +798,37 @@ async fn check_api_key(
     Err(refused())
 }
 
-/// Best-effort: a peer authenticated, so record the sighting, but a failure to
-/// record must not fail the authentication that already succeeded.
-async fn record_activity(
+/// Best-effort: a peer was just seen (an authenticated feed request, a
+/// tracker announce naming their own token — any first-hand sighting), so
+/// record it, but a failure to record must never fail whatever already
+/// succeeded to trigger the call. Shared by `torznab`'s own API-key
+/// authentication and `crate::tracker::handle_announce`'s per-peer announce
+/// attribution, since both boil down to the identical throttled
+/// touch-then-record sequence, just for different
+/// [`sharerr_store::EndpointKind`]s and address shapes (a bare source IP
+/// here; `ip:port` for a real BitTorrent announce).
+pub(crate) async fn record_sighting(
     store: &sharerr_store::Store,
-    peer: &sharerr_store::Peer,
-    remote: Option<std::net::IpAddr>,
+    peer_id: i64,
+    kind: sharerr_store::EndpointKind,
+    addr: Option<&str>,
 ) {
-    match store.touch_peer(peer.id).await {
+    match store.touch_peer(peer_id).await {
         // The touch fired, so its five-minute throttle also gates the
         // endpoint observation — a Prowlarr RSS burst records one sighting,
         // not one per request.
         Ok(true) => {
-            if let Some(remote) = remote {
-                let now = now_epoch();
-                if let Err(err) = store
-                    .record_peer_endpoint(
-                        peer.id,
-                        sharerr_store::EndpointKind::Api,
-                        &remote.to_string(),
-                        now,
-                        sharerr_store::ObservedVia::Direct,
-                    )
+            if let Some(addr) = addr
+                && let Err(err) = store
+                    .record_peer_endpoint(peer_id, kind, addr, now_epoch(), sharerr_store::ObservedVia::Direct)
                     .await
-                {
-                    tracing::warn!(peer = %peer.label, error = %err, "could not record peer address");
-                }
+            {
+                tracing::warn!(peer_id, error = %err, "could not record a peer's address");
             }
         }
         Ok(false) => {}
         Err(err) => {
-            tracing::warn!(peer = %peer.label, error = %err, "could not record peer activity");
+            tracing::warn!(peer_id, error = %err, "could not touch a peer's last-seen time");
         }
     }
 }

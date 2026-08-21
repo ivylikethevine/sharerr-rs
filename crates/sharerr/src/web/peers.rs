@@ -216,6 +216,7 @@ pub async fn feed_preview(
         &state.serve,
         &crate::torznab::SearchQuery::default(),
         peer.scope,
+        &peer.key_hash,
     )
     .await
     .map_err(|(status, reason)| (status, reason).into_response())?;

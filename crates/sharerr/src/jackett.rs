@@ -293,7 +293,7 @@ async fn json_results(
     // Scoped to the friend who asked, exactly as the XML feed is. A second surface
     // that forgot to scope would be a way around the setting rather than a
     // rendering of it.
-    let matched = match collect(&state, &query, caller.scope()).await {
+    let matched = match collect(&state, &query, caller.scope(), caller.key_hash()).await {
         Ok(matched) => matched,
         Err((status, reason)) => {
             // Reported in the shape a JSON client can read, rather than as the XML

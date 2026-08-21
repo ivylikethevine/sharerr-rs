@@ -80,48 +80,63 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<PageQuery>)
 // Forms
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+// Every field below that renders as a plain (non-checkbox) HTML input
+// tolerates being entirely absent — even the ones the handler goes on to
+// treat as required — because the input can arrive at the browser
+// *disabled*, either with no master key set (`master_key_present`) or with
+// its config path pinned by a `SHARERR_*` env var (`lock_attr`/`locks`), and
+// a disabled `<input>` submits nothing at all. Without that, axum's `Form`
+// extractor rejects a request missing that key before the handler — and
+// therefore `reject()`'s own styled error page — ever runs, surfacing a bare
+// unstyled "Failed to deserialize form body: missing field `x`" instead.
+// Expressed once per struct via the container-level `#[serde(default)]`
+// (backed by `#[derive(Default)]`, trivial for all-`String`/`Option` fields)
+// rather than repeated per field, so a field added later inherits it
+// automatically instead of needing to remember the attribute. Defaulting to
+// `""` costs nothing: every handler already treats an empty field as
+// "nothing typed" and reports *that* the ordinary, styled way.
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct GeneralForm {
     tag: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct ArrForm {
     url: String,
     api_key: String,
-    #[serde(default)]
     clear_api_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct QbitForm {
     url: String,
     api_key: String,
-    #[serde(default)]
     clear_api_key: Option<String>,
     category: String,
     tag: String,
-    #[serde(default)]
     skip_checking: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct TrackerForm {
     advertised_host: String,
     port: String,
     advertised_url: String,
     token: String,
-    #[serde(default)]
     clear_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct LighthouseForm {
-    #[serde(default)]
     enabled: Option<String>,
     mount: String,
     /// One lighthouse URL per line — see [`parse_lighthouse_urls`].
-    #[serde(default)]
     urls: String,
 }
 
@@ -143,28 +158,27 @@ fn parse_lighthouse_urls(raw: &str) -> anyhow::Result<Vec<String>> {
     Ok(urls)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct GluetunForm {
-    #[serde(default)]
     enabled: Option<String>,
     control_url: String,
     api_key: String,
-    #[serde(default)]
     clear_api_key: Option<String>,
     poll_secs: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct SyncForm {
-    #[serde(default)]
     enabled: Option<String>,
     interval_secs: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct NotificationsForm {
     webhook_url: String,
-    #[serde(default)]
     clear_webhook_url: Option<String>,
     kind: String,
     peer_quiet_secs: String,
@@ -290,8 +304,13 @@ pub async fn save_qbittorrent(
         }
         file.apply([
             Edit::str(config_paths::QBITTORRENT_URL, normalise_url(url)?),
-            Edit::str(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
-            Edit::str(config_paths::QBITTORRENT_TAG, form.tag.trim()),
+            // `str_or_unset` rather than `str`: a blank value here falls back to
+            // the compiled default ("sharerr") instead of writing a literal empty
+            // category/tag — the only way this field arrives blank is an unset
+            // input (no master key yet, or the field is env-locked), never a
+            // deliberate choice, since nothing in the UI offers "blank" as one.
+            Edit::str_or_unset(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
+            Edit::str_or_unset(config_paths::QBITTORRENT_TAG, form.tag.trim()),
             Edit::bool(
                 config_paths::QBITTORRENT_SKIP_CHECKING,
                 checked(&form.skip_checking),
@@ -1074,6 +1093,32 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// A field whose `<input>` can render `disabled` — no master key yet, or
+    /// its config path is pinned by a `SHARERR_*` env var — submits nothing
+    /// at all, so every such field must deserialize from an object that
+    /// omits it entirely, the same as the form struct's derive would see
+    /// from a real `axum_extra::extract::Form` decode of a request missing
+    /// that key. `serde_json` stands in for the wire format here: serde's
+    /// `#[serde(default)]` handling of an absent field is format-agnostic,
+    /// so this exercises the exact same derived `Deserialize` impl a real
+    /// urlencoded POST goes through, without needing a signed-in router
+    /// fixture this crate has no other precedent for.
+    ///
+    /// Before the fix, each of these panicked with serde's own "missing
+    /// field" error — which, through the real extractor, surfaced as a bare
+    /// unstyled 422 instead of ever reaching `reject()`'s styled page.
+    #[test]
+    fn every_lockable_form_field_tolerates_being_entirely_absent() {
+        serde_json::from_str::<GeneralForm>("{}").unwrap();
+        serde_json::from_str::<ArrForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<QbitForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<TrackerForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<LighthouseForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<GluetunForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<SyncForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<NotificationsForm>(r#"{}"#).unwrap();
+    }
 
     #[test]
     fn a_bare_host_gains_a_scheme() {

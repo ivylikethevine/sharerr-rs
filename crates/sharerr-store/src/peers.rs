@@ -271,10 +271,21 @@ impl Store {
     /// the stored hash is a fast one. A revoked peer is `None`: the row is kept for
     /// the operator's benefit, not to keep letting its key in.
     pub async fn peer_by_key(&self, key: &SecretString) -> Result<Option<Peer>> {
+        self.peer_by_key_hash(&hash_key(key)).await
+    }
+
+    /// The active peer whose issued key hashes to `key_hash`, if any.
+    ///
+    /// Unlike [`Self::peer_by_key`], the caller already has the hash — this is
+    /// what a tracker announce token *is* once per-peer attribution is in play
+    /// (see `crates/sharerr/src/tracker.rs`), so there is no raw key to hash
+    /// here. Revoked is `None`, same as `peer_by_key`: the row is kept for the
+    /// operator's benefit, not to keep letting its access in.
+    pub async fn peer_by_key_hash(&self, key_hash: &str) -> Result<Option<Peer>> {
         let row = sqlx::query(&format!(
             "SELECT {PEER_COLUMNS} FROM peers WHERE key_hash = ?1 AND revoked_at IS NULL"
         ))
-        .bind(hash_key(key))
+        .bind(key_hash)
         .fetch_optional(self.pool())
         .await?;
 
@@ -407,6 +418,38 @@ mod tests {
             .unwrap();
 
         assert!(store.peer_by_key(&key("guessed")).await.unwrap().is_none());
+    }
+
+    /// The tracker's per-peer attribution path: the caller already has the
+    /// hash (it *is* the announce token), not the raw key.
+    #[tokio::test]
+    async fn a_peer_is_found_by_the_hash_of_their_key_and_a_revoked_one_is_not() {
+        let store = store().await;
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        let found = store
+            .peer_by_key_hash(&sam.key_hash)
+            .await
+            .unwrap()
+            .expect("the peer's own key hash must resolve them");
+        assert_eq!(found.id, sam.id);
+
+        assert!(
+            store
+                .peer_by_key_hash("not a hash anyone was issued")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        store.revoke_peer(sam.id).await.unwrap();
+        assert!(
+            store.peer_by_key_hash(&sam.key_hash).await.unwrap().is_none(),
+            "a revoked peer's key hash must stop resolving them"
+        );
     }
 
     /// The whole reason peers exist: one friend can be cut off without touching

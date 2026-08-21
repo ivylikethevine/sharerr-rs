@@ -15,6 +15,15 @@
 //! **The token.** When `tracker.token` is in the vault, announce URLs carry it in
 //! the path and a request without it is refused — so possessing the `.torrent` is
 //! what grants the right to announce.
+//!
+//! **Attribution.** The token is not always the one shared instance secret: a
+//! magnet built by [`crate::torznab::collect`] carries the requesting friend's
+//! own [`Peer::key_hash`](sharerr_store::Peer::key_hash) instead, so a real
+//! announce using it can be traced back to them — and revoking that friend
+//! (which already zeroes their `key_hash` out of the active peers) reaches
+//! the tracker too, not just the feed. The instance-wide shared token still
+//! works forever alongside this, unattributed, so nothing seeded before this
+//! existed ever breaks. See [`authenticate_token`].
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,6 +31,7 @@ use std::sync::Arc;
 use axum::extract::{ConnectInfo, Path, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use sharerr_store::{EndpointKind, Store};
 use sharerr_torrent::announce::{
     self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
 };
@@ -124,10 +134,20 @@ async fn handle_announce(
     remote: SocketAddr,
     query: &[u8],
 ) -> Result<Vec<u8>, AnnounceError> {
-    check_token(
+    // Fails closed: an announce this instance cannot check the token for is
+    // no more admissible than one for a hash it cannot check either — see
+    // `is_served`'s own identical reasoning just below.
+    let store = state
+        .serve
+        .store()
+        .await
+        .map_err(|_| AnnounceError::BadToken)?;
+    let attributed_to = authenticate_token(
+        &store,
         state.serve.tracker_token().await.as_deref(),
         token.as_deref(),
-    )?;
+    )
+    .await?;
 
     let request = AnnounceRequest::parse(query)?;
     if !is_served(state, &request.info_hash).await {
@@ -136,6 +156,11 @@ async fn handle_announce(
 
     let addr = request.resolve_addr(remote.ip());
     let response = state.swarms.announce(&request, addr).await;
+
+    if let Some(peer_id) = attributed_to {
+        crate::torznab::record_sighting(&store, peer_id, EndpointKind::Client, Some(&addr.to_string()))
+            .await;
+    }
 
     tracing::debug!(
         info_hash = %hex::encode(request.info_hash),
@@ -167,10 +192,18 @@ async fn handle_scrape(
     token: Option<String>,
     query: Option<String>,
 ) -> Response {
-    if let Err(err) = check_token(
+    let Ok(store) = state.serve.store().await else {
+        return bencode(failure_bencode(&AnnounceError::BadToken.to_string()));
+    };
+    // Scrape is swarm counts, not an announce — nothing here to attribute,
+    // so the resolved peer id (if any) is simply discarded.
+    if let Err(err) = authenticate_token(
+        &store,
         state.serve.tracker_token().await.as_deref(),
         token.as_deref(),
-    ) {
+    )
+    .await
+    {
         return bencode(failure_bencode(&err.to_string()));
     }
 
@@ -219,18 +252,55 @@ async fn is_served(state: &TrackerState, info_hash: &InfoHash) -> bool {
     }
 }
 
-/// Compare the token in the URL against the configured one.
-fn check_token(required: Option<&str>, supplied: Option<&str>) -> Result<(), AnnounceError> {
+/// Which peer, if any, an announce/scrape token identifies, and whether the
+/// request is allowed at all.
+///
+/// Three outcomes, in the order checked:
+///
+/// 1. No token configured on this instance at all → `Ok(None)`, always
+///    allowed. The announce URLs sharerr generates then carry no token
+///    segment either, so an unauthenticated request is the expected shape —
+///    today's default, unchanged.
+/// 2. Matches the instance's own shared legacy token (`tracker.token` in the
+///    vault) → `Ok(None)`, allowed but unattributed. This is what keeps
+///    everything seeded before per-peer attribution existed working, and
+///    what any friend not yet re-synced to a magnet built after it existed
+///    keeps using.
+/// 3. Matches an active peer's own `key_hash` → `Ok(Some(peer.id))`, allowed
+///    and attributed. A revoked peer's hash matches nothing —
+///    `peer_by_key_hash` already excludes them — which is the entire "cut
+///    this friend off reaches the tracker too" payoff: no separate
+///    revocation step exists or is needed here.
+///
+/// Anything else is `Err(AnnounceError::BadToken)`.
+///
+/// Takes `store` and `required` as plain parameters rather than reaching
+/// into `TrackerState` itself: the peer-hash branch is exactly the part
+/// worth testing directly against an in-memory `Store`, with no vault or
+/// master key needed to exercise it.
+async fn authenticate_token(
+    store: &Store,
+    required: Option<&str>,
+    supplied: Option<&str>,
+) -> Result<Option<i64>, AnnounceError> {
     let Some(required) = required else {
-        // No token configured: the announce URLs sharerr generates have no token
-        // segment either, so an unauthenticated announce is the expected shape.
-        return Ok(());
+        return Ok(None);
+    };
+    let Some(supplied) = supplied else {
+        return Err(AnnounceError::BadToken);
     };
 
-    if crate::secrets::constant_time_eq(required, supplied.unwrap_or_default()) {
-        Ok(())
-    } else {
-        Err(AnnounceError::BadToken)
+    if crate::secrets::constant_time_eq(required, supplied) {
+        return Ok(None);
+    }
+
+    match store.peer_by_key_hash(supplied).await {
+        Ok(Some(peer)) => Ok(Some(peer.id)),
+        Ok(None) => Err(AnnounceError::BadToken),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not check a peer's announce token");
+            Err(AnnounceError::BadToken)
+        }
     }
 }
 
@@ -302,18 +372,27 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn an_unconfigured_token_accepts_any_announce() {
-        assert!(check_token(None, None).is_ok());
-        assert!(
-            check_token(None, Some("anything")).is_ok(),
+    use secrecy::SecretString;
+    use sharerr_store::{ObservedVia, PeerScope};
+
+    #[tokio::test]
+    async fn an_unconfigured_token_accepts_any_announce_and_attributes_nothing() {
+        let store = Store::open_in_memory().await.unwrap();
+        assert_eq!(authenticate_token(&store, None, None).await, Ok(None));
+        assert_eq!(
+            authenticate_token(&store, None, Some("anything")).await,
+            Ok(None),
             "a stray path segment is not a reason to refuse"
         );
     }
 
-    #[test]
-    fn a_configured_token_must_match_exactly() {
-        assert!(check_token(Some("s3cret"), Some("s3cret")).is_ok());
+    #[tokio::test]
+    async fn the_shared_legacy_token_still_works_and_stays_unattributed() {
+        let store = Store::open_in_memory().await.unwrap();
+        assert_eq!(
+            authenticate_token(&store, Some("s3cret"), Some("s3cret")).await,
+            Ok(None)
+        );
 
         for wrong in [
             None,
@@ -323,11 +402,58 @@ mod tests {
             Some("S3CRET"),
         ] {
             assert_eq!(
-                check_token(Some("s3cret"), wrong),
+                authenticate_token(&store, Some("s3cret"), wrong).await,
                 Err(AnnounceError::BadToken),
                 "{wrong:?} should not be accepted"
             );
         }
+    }
+
+    /// The whole point: an announce carrying a friend's own `key_hash`
+    /// resolves to them, and revoking them (already possible today, for the
+    /// feed) now silently reaches the tracker too, with no new revocation
+    /// step of its own.
+    #[tokio::test]
+    async fn a_peers_own_key_hash_authenticates_and_attributes_them_until_revoked() {
+        let store = Store::open_in_memory().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            authenticate_token(&store, Some("s3cret"), Some(&sam.key_hash)).await,
+            Ok(Some(sam.id))
+        );
+
+        store.revoke_peer(sam.id).await.unwrap();
+        assert_eq!(
+            authenticate_token(&store, Some("s3cret"), Some(&sam.key_hash)).await,
+            Err(AnnounceError::BadToken),
+            "a revoked friend's own token must stop working"
+        );
+    }
+
+    /// The other half of attribution: once `authenticate_token` names a
+    /// peer, a real client address must land in peer endpoint memory as a
+    /// first-hand [`ObservedVia::Direct`] sighting of their
+    /// [`EndpointKind::Client`] — the actual gap this whole feature closes.
+    #[tokio::test]
+    async fn a_successful_attribution_records_the_clients_address() {
+        let store = Store::open_in_memory().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        crate::torznab::record_sighting(&store, sam.id, EndpointKind::Client, Some("203.0.113.9:51413"))
+            .await;
+
+        let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].kind, EndpointKind::Client);
+        assert_eq!(endpoints[0].via, ObservedVia::Direct);
+        assert_eq!(endpoints[0].addr, "203.0.113.9:51413");
     }
 
     // ------------------------------------------------- router-level coverage
@@ -380,6 +506,65 @@ mod tests {
             body.contains("failure reason"),
             "an unknown hash must be refused, not introduced to peers: {body}"
         );
+    }
+
+    /// End to end, through the real router, for a torrent this instance
+    /// actually shares: the announce is admitted and answered rather than
+    /// refused. No prior test in this module exercises the success path —
+    /// every existing one is a rejection. This fixture has no configured
+    /// vault (see `state::fixtures::unconfigured`), so `tracker.token` is
+    /// unset here and the request is necessarily on the "no token
+    /// configured" path already covered by `authenticate_token`'s own unit
+    /// tests — those, together with `a_successful_attribution_records_the_
+    /// clients_address`, are what prove the peer-hash branch itself works;
+    /// setting up a real vault-backed token for a full router-level version
+    /// of that would mean mutating the process's `SHARERR_MASTER_KEY`,
+    /// which nothing else in this test suite does, for good reason under a
+    /// parallel test runner.
+    #[tokio::test]
+    async fn an_announce_for_a_shared_torrent_is_admitted_and_answered() {
+        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        let hash_hex = "00".repeat(20);
+        store
+            .upsert(&SharedItem {
+                id: None,
+                source: MediaSource::Sonarr,
+                source_id: 1,
+                file_id: 1,
+                spec: MediaSpec::Episode {
+                    series_title: "Lanternwick Hollow".to_owned(),
+                    season: 1,
+                    episode: 1,
+                },
+                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+                size: 1,
+                ids: ExternalIds::default(),
+                info_hash: None,
+                announce_token_fp: None,
+                state: ShareState::Pending,
+                last_error: None,
+                created_at: None,
+            })
+            .await
+            .unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None)
+            .await
+            .unwrap();
+
+        let hash_query = "%00".repeat(20);
+        let (status, body) = get(
+            &state,
+            &format!("/announce?info_hash={hash_query}&peer_id={hash_query}&port=6881"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("failure reason"), "body was: {body}");
     }
 
     /// Every route the tracker claims to serve must actually be wired up. A handler
