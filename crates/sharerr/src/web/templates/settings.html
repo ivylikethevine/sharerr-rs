@@ -42,7 +42,9 @@
 
 <ul class="quicknav">
   <li><a href="#general">General</a></li>
+  <li><a href="#torrent-client">Torrent client</a></li>
   <li><a href="#qbittorrent">qBittorrent</a></li>
+  <li><a href="#transmission">Transmission</a></li>
   <li><a href="#seeding">Seeding limits</a></li>
   <li><a href="#tracker">Tracker</a></li>
   <li><a href="#lighthouse">Lighthouse</a></li>
@@ -110,6 +112,22 @@
   <button type="submit">Save</button>
 </form>
 
+<h2 id="torrent-client">Torrent client</h2>
+<form method="post" action="/settings/torrent-backend" class="panel">
+  <label for="torrent_backend">Which client actually seeds</label>
+  <select id="torrent_backend" name="backend"
+          {% call lock_attr("torrent_backend") %}{% endcall %}>
+    <option value="qbittorrent" {% if torrent_backend == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
+    <option value="transmission" {% if torrent_backend == "transmission" %}selected{% endif %}>Transmission</option>
+  </select>
+  {% call locked("torrent_backend") %}{% endcall %}
+  <p class="hint">
+    Both clients' settings below are kept regardless of which one is
+    selected, so you can fill in and test a client before switching to it.
+  </p>
+  <button type="submit">Save</button>
+</form>
+
 <h2 id="qbittorrent">qBittorrent</h2>
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>
@@ -156,6 +174,40 @@
   <button type="submit">Save</button>
   <button type="button" class="secondary" hx-post="/settings/test/qbittorrent" hx-target="#test-qbittorrent" hx-swap="innerHTML">Test connection</button>
   <span id="test-qbittorrent"></span>
+</form>
+
+<h2 id="transmission">Transmission</h2>
+<form method="post" action="/settings/transmission" class="panel">
+  <label for="transmission_url">URL</label>
+  <input id="transmission_url" name="url" value="{{ transmission_url }}" required
+         {% call lock_attr("transmission.url") %}{% endcall %}>
+  {% call locked("transmission.url") %}{% endcall %}
+
+  <label for="transmission_username">Username</label>
+  <input id="transmission_username" name="username" value="{{ transmission_username }}"
+         {% call lock_attr("transmission.username") %}{% endcall %}>
+  {% call locked("transmission.username") %}{% endcall %}
+
+  <label for="transmission_password">Password {% call field_status(transmission_password_set) %}{% endcall %}</label>
+  <input id="transmission_password" name="password" type="password" autocomplete="off"
+         placeholder="{% call stored(transmission_password_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if transmission_password_set %}
+  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+
+  <label for="transmission_label">Label for sharerr's torrents</label>
+  <input id="transmission_label" name="label" value="{{ transmission_label }}"
+         {% call lock_attr("transmission.label") %}{% endcall %}>
+  {% call locked("transmission.label") %}{% endcall %}
+  <p class="hint">
+    Transmission has no separate category and tag the way qBittorrent does —
+    this one label stands in for both.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/transmission" hx-target="#test-transmission" hx-swap="innerHTML">Test connection</button>
+  <span id="test-transmission"></span>
 </form>
 
 <h2 id="seeding">Seeding limits</h2>

@@ -284,6 +284,10 @@ pub struct SettingsPage {
     /// configured service behind a fold reads as it having vanished.
     pub secondary_arr_configured: bool,
 
+    /// `"qbittorrent"` or `"transmission"` — which client `torrent_backend`
+    /// currently selects to actually seed.
+    pub torrent_backend: &'static str,
+
     pub qbit_url: String,
     /// Whether a qBittorrent API key is stored — the sole credential qBittorrent
     /// authenticates with; there is no username/password fallback.
@@ -291,6 +295,13 @@ pub struct SettingsPage {
     pub qbit_category: String,
     pub qbit_tag: String,
     pub qbit_skip_checking: bool,
+
+    pub transmission_url: String,
+    pub transmission_username: String,
+    /// Whether a Transmission password is stored — its RPC has no API-key
+    /// alternative, unlike qBittorrent.
+    pub transmission_password_set: bool,
+    pub transmission_label: String,
 
     /// Per-torrent upload cap in KiB/s, applied at add time. Empty when unset —
     /// see [`sharerr_core::config::SeedingConfig::upload_limit_kib`].

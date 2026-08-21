@@ -50,6 +50,23 @@ pub enum Command {
     /// Manage the encrypted credential vault.
     #[command(subcommand)]
     Vault(VaultCommand),
+
+    /// Serve every authenticated page with fully populated mock data, for
+    /// spot-checking the web UI's layout in a real browser without a real
+    /// instance behind it.
+    ///
+    /// Reads nothing and touches no vault, database, or `sharerr.toml` — the
+    /// data is invented, not loaded, so this can be run against any checkout
+    /// with no setup at all. Not linked from the running app anywhere; it is
+    /// a development aid, not a feature an operator would use.
+    Preview(PreviewArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PreviewArgs {
+    /// Address to serve the mock pages on.
+    #[arg(long, default_value = "127.0.0.1:4877")]
+    pub bind: std::net::SocketAddr,
 }
 
 #[derive(Debug, Args)]

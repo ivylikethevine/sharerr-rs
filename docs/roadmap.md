@@ -64,15 +64,20 @@ also revokes their tracker access. The instance's original shared token keeps
 working forever alongside this, unattributed, so nothing seeded before this
 existed ever breaks.
 
-Two follow-on stages, deliberately not built yet:
+Stage 2 is done: the Torznab feed's `.torrent` enclosure link now carries the
+requesting friend's own `key_hash` as a `?token=` query parameter (only when a
+tracker token is configured at all — the same condition the magnet's tiers
+already used), and `GET /torrents/{hash}.torrent` rewrites the announce URLs
+it serves to that token, in memory, before the response goes out. The file
+cached on disk is untouched — still the shared instance token, written once by
+the sync loop — so nothing is cached per peer. A request with no token, or one
+that no longer resolves to an active peer (unknown, or since revoked), falls
+back to serving the file exactly as cached: every download link that predates
+this feature keeps working unchanged. See `crate::tracker::torrent_file` in
+`crates/sharerr/src/tracker.rs`.
 
-- **Stage 2 — attribute `.torrent` file downloads too.** Today `GET
-  /torrents/{hash}.torrent` is open (no peer check, only "is this torrent
-  served") and serves one static file, so it still carries the shared legacy
-  token for whoever downloads that way instead of by magnet. Closing this
-  means peer-authenticating that endpoint and rewriting its embedded announce
-  URL per requester in memory (`sharerr_torrent::rewrite_announce` already
-  exists for this) rather than caching a variant per peer on disk.
+One follow-on stage, deliberately not built yet:
+
 - **Stage 3 — graceful rotation of the shared legacy token itself.** Per-peer
   tokens already make expelling one specific friend surgical and instant, with
   zero effect on anyone else — no rollout needed. What is still missing is a

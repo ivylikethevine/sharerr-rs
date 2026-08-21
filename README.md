@@ -97,9 +97,10 @@ setting up — and revoking one person leaves everybody else working. That key i
 also what a magnet from the feed embeds as the announce token, so revoking a
 friend cuts their access to sharerr's own tracker too, not just the feed —
 instantly, and with no effect on anyone else, since nobody else's access ever
-depended on it. This only applies to what a friend fetches by magnet; a
-`.torrent` downloaded directly still carries the one shared fallback token
-today (see [the roadmap](docs/roadmap.md)'s "Per-peer announce tokens").
+depended on it. The same attribution applies whether a friend's Sonarr fetches
+by magnet or downloads the `.torrent` directly — see [the
+roadmap](docs/roadmap.md)'s "Per-peer announce tokens" for what is still
+outstanding (rotating the shared fallback token itself).
 
 You can also scope what each friend sees: everything, or only TV, films, music or
 books. That applies to the feed itself, not just the display — content outside a
@@ -479,8 +480,6 @@ The original design brief, and the two corrections the implementation forced on
 it, are in [docs/design.md](docs/design.md).
 
 ## AI usage
-
-Heavily inspired by:
 
 Heavily inspired by: [Dictionarry/Profilarr's AI Transparency Statement](https://v2.dictionarry.dev/ai-transparency)
 

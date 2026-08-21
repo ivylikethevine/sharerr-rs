@@ -19,7 +19,7 @@
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
 use secrecy::SecretString;
-use sharerr_core::config::secret_keys;
+use sharerr_core::config::{TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
@@ -37,6 +37,8 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
 
     let outcome = if service == "qbittorrent" {
         qbit_badge(&state, &config).await
+    } else if service == "transmission" {
+        transmission_badge(&state, &config).await
     } else if service == "library" {
         library_badge(&config).await
     } else if let Some(kind) = MediaSource::parse(&service) {
@@ -188,11 +190,23 @@ async fn library_badge(config: &Config) -> Outcome {
     Outcome::Good(message)
 }
 
+/// Test whichever torrent client is currently selected to actually seed.
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    // Which client, and therefore which URL and which vault key, is a configuration
-    // choice — the button cannot infer it from the URL, because two clients can
+    torrent_client_badge(state, config, config.torrent_backend).await
+}
+
+/// Test Transmission specifically, regardless of whether it is the backend
+/// currently selected to seed — so an operator filling in its fields can
+/// confirm they work *before* switching `torrent_backend` over to it.
+async fn transmission_badge(state: &WebState, config: &Config) -> Outcome {
+    torrent_client_badge(state, config, TorrentBackend::Transmission).await
+}
+
+async fn torrent_client_badge(state: &WebState, config: &Config, backend: TorrentBackend) -> Outcome {
+    // Which client, and therefore which URL and which vault key, is a
+    // parameter rather than inferred from the URL, because two clients can
     // live on the same host.
-    let client = config.torrent_client();
+    let client = config.torrent_client_for(backend);
 
     // Both secrets are read before choosing, so that an unreadable vault is
     // reported as such rather than as a missing credential. Opened once —
@@ -213,13 +227,7 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
         (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),
     };
 
-    let outcome = check_qbit(
-        config.torrent_backend,
-        client.url,
-        client.username,
-        credential,
-    )
-    .await;
+    let outcome = check_qbit(backend, client.url, client.username, credential).await;
 
     match outcome {
         QbitOutcome::NoCredential => Outcome::Bad("No password stored. Save one first.".to_owned()),

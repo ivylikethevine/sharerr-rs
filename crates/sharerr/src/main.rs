@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         Command::Vault(VaultCommand::Set { key }) => commands::vault::set(&config, &key),
         Command::Vault(VaultCommand::List) => commands::vault::list(&config),
         Command::Vault(VaultCommand::Remove { key }) => commands::vault::remove(&config, &key),
+        Command::Preview(args) => commands::preview::run(args.bind).await,
     }
 }
 

@@ -401,7 +401,19 @@ impl Config {
     /// and vault key must be resolved together — plucking fields from the unused
     /// section is how an operator ends up debugging the wrong service.
     pub fn torrent_client(&self) -> TorrentClientConfig<'_> {
-        match self.torrent_backend {
+        self.torrent_client_for(self.torrent_backend)
+    }
+
+    /// The same resolution as [`Self::torrent_client`], for a specific backend
+    /// rather than whichever one `torrent_backend` currently selects.
+    ///
+    /// What the settings page's "Test connection" button needs: an operator
+    /// filling in Transmission's fields while qBittorrent is still the active
+    /// backend must be able to test *those* credentials, not have the button
+    /// silently test qBittorrent instead because that is what is configured to
+    /// seed right now.
+    pub fn torrent_client_for(&self, backend: TorrentBackend) -> TorrentClientConfig<'_> {
+        match backend {
             TorrentBackend::Qbittorrent => TorrentClientConfig {
                 url: &self.qbittorrent.url,
                 // qBittorrent authenticates by API key alone — see
@@ -998,6 +1010,41 @@ mod tests {
                 "{path:?} must be lowercase to match a SHARERR_* override"
             );
         }
+    }
+
+    /// `torrent_client_for` must resolve each backend's own settings
+    /// regardless of which one `torrent_backend` currently selects — the
+    /// settings page's "Test connection" button for the *other* client
+    /// depends on this: an operator filling in Transmission's fields while
+    /// qBittorrent is still active must be able to test what they just typed.
+    #[test]
+    fn torrent_client_for_ignores_the_currently_selected_backend() {
+        let config = Config {
+            torrent_backend: TorrentBackend::Qbittorrent,
+            qbittorrent: QbitConfig {
+                url: Url::parse("http://qbit.example:8080").unwrap(),
+                ..QbitConfig::default()
+            },
+            transmission: TransmissionConfig {
+                url: Url::parse("http://trans.example:9091").unwrap(),
+                username: "sam".to_owned(),
+                ..TransmissionConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let qbit = config.torrent_client_for(TorrentBackend::Qbittorrent);
+        assert_eq!(qbit.url.as_str(), "http://qbit.example:8080/");
+        assert_eq!(qbit.api_key_key, Some(secret_keys::QBITTORRENT_API_KEY));
+
+        let transmission = config.torrent_client_for(TorrentBackend::Transmission);
+        assert_eq!(transmission.url.as_str(), "http://trans.example:9091/");
+        assert_eq!(transmission.username, Some("sam"));
+        assert_eq!(transmission.password_key, Some(secret_keys::TRANSMISSION_PASSWORD));
+
+        // `torrent_client()` is the same resolution, applied to whichever
+        // backend is actually selected.
+        assert_eq!(config.torrent_client().url, qbit.url);
     }
 
     /// `library` entries round-trip through serde, and a kind outside the four
