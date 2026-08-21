@@ -31,6 +31,47 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Whether anything besides workflow YAML changed. Editing this file (or
+  # runner.yml, pages.yml, ...) can't move a Rust lint, a test result, or a
+  # shellcheck finding, so there is nothing below for those jobs to re-check —
+  # this lets them report "skipped" instead of actually re-running cargo.
+  # zizmor and actionlint are deliberately exempt from this gate: they audit
+  # .github/ itself, so a workflow-only change is exactly the case they exist
+  # to catch.
+  #
+  # Only push and pull_request get filtered. On schedule (the weekly
+  # cargo-deny run) or workflow_dispatch (a human asking for the checks) this
+  # job doesn't even run, and the jobs below treat that skip as "assume yes" —
+  # a diff against the wrong commit must never be the reason a real check goes
+  # quiet.
+  changes:
+    name: detect changes
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # some-with-excludes, not the default `some`: a bare negated pattern
+      # matches nothing on its own (picomatch needs a positive rule to negate
+      # against), and plain `some` would also count workflow files toward a
+      # match since `**` matches those too. This is the combination that
+      # actually means "some changed file lives outside .github/workflows/**".
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            code:
+              - '**'
+              - '!.github/workflows/**'
+
   # See runner.yml: the one place that decides whether a run gets the
   # self-hosted box, so a fork's pull_request run — which executes the fork's
   # own copy of every *other* job below — can never read vars.RUNNER_LABEL
@@ -41,7 +82,8 @@ jobs:
 
   fmt:
     name: rustfmt
-    needs: runner
+    needs: [runner, changes]
+    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
     runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,7 +109,8 @@ jobs:
 
   test:
     name: clippy + tests
-    needs: runner
+    needs: [runner, changes]
+    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
     runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,7 +156,8 @@ jobs:
   # multi-arch matrix. `docker.yml` still catches it — this just catches it first.
   msrv:
     name: msrv (1.88)
-    needs: runner
+    needs: [runner, changes]
+    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
     runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -140,7 +184,8 @@ jobs:
 
   audit:
     name: cargo-deny
-    needs: runner
+    needs: [runner, changes]
+    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
     runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -165,7 +210,8 @@ jobs:
   # block commented out and nothing noticed.
   scripts:
     name: shell + compose
-    needs: runner
+    needs: [runner, changes]
+    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
     runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -239,6 +285,8 @@ jobs:
   # and this job never blocks a merge regardless of which version notices it.
   hadolint:
     name: hadolint (advisory)
+    needs: changes
+    if: needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -291,6 +339,8 @@ jobs:
   # long line in a doc is worth seeing and has never shipped a bug.
   markdownlint:
     name: markdownlint (advisory)
+    needs: changes
+    if: needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
