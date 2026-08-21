@@ -1,5 +1,5 @@
 //! The lighthouse's standalone binary: its own image, its own port, per
-//! `docs/roadmap.md`'s "The lighthouse". See [`sharerr_lighthouse`] for the
+//! `docs/ROADMAP.md`'s "The lighthouse". See [`sharerr_lighthouse`] for the
 //! protocol and the privacy property this serves.
 
 use std::net::SocketAddr;
@@ -10,7 +10,10 @@ use clap::Parser;
 use sharerr_lighthouse::LighthouseState;
 
 #[derive(Debug, Parser)]
-#[command(name = "sharerr-lighthouse", about = "The sharerr lighthouse rendezvous service")]
+#[command(
+    name = "sharerr-lighthouse",
+    about = "The sharerr lighthouse rendezvous service"
+)]
 struct Cli {
     /// Address to listen on.
     #[arg(long, env = "LIGHTHOUSE_BIND", default_value = "0.0.0.0:7878")]
@@ -18,7 +21,11 @@ struct Cli {
     /// Where the decoy secret persists across restarts. Generated on first
     /// run if the file does not exist. Losing it just means decoys reshuffle
     /// after a restart — nothing a real reporter relies on is stored here.
-    #[arg(long, env = "LIGHTHOUSE_SECRET_FILE", default_value = "/data/lighthouse.secret")]
+    #[arg(
+        long,
+        env = "LIGHTHOUSE_SECRET_FILE",
+        default_value = "/data/lighthouse.secret"
+    )]
     secret_file: PathBuf,
 }
 

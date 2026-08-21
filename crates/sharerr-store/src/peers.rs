@@ -447,7 +447,11 @@ mod tests {
 
         store.revoke_peer(sam.id).await.unwrap();
         assert!(
-            store.peer_by_key_hash(&sam.key_hash).await.unwrap().is_none(),
+            store
+                .peer_by_key_hash(&sam.key_hash)
+                .await
+                .unwrap()
+                .is_none(),
             "a revoked peer's key hash must stop resolving them"
         );
     }

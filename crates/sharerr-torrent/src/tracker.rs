@@ -114,22 +114,33 @@ impl TrackerProvider for BuiltinTracker {
     }
 
     async fn announce_set(&self) -> Result<AnnounceSet> {
-        let current = self
-            .endpoint
-            .current()
-            .ok_or(TorrentError::NoAdvertisedHost)?;
-        let primary = announce_url(&current, self.token.as_deref())?;
-
-        let mut tiers = Vec::new();
-        for base in self.endpoint.recent() {
-            tiers.push(announce_url(&base, self.token.as_deref())?);
-        }
-        if tiers.is_empty() {
-            tiers.push(primary.clone());
-        }
-
-        Ok(AnnounceSet { primary, tiers })
+        announce_set_for(&self.endpoint, self.token.as_deref())
     }
+}
+
+/// Build the [`AnnounceSet`] a torrent should carry: the live endpoint as
+/// primary, every recently held endpoint as a fallback tier, all carrying the
+/// same `token`.
+///
+/// Split out of [`BuiltinTracker::announce_set`] so a caller who needs a
+/// *different* token than the one the tracker was constructed with — serving
+/// a `.torrent` with this specific requester's own token rather than the
+/// shared instance one — can build the same shape without a second
+/// `TrackerProvider`. See `crate::tracker::torrent_file` in the `sharerr`
+/// binary.
+pub fn announce_set_for(endpoint: &AdvertisedEndpoint, token: Option<&str>) -> Result<AnnounceSet> {
+    let current = endpoint.current().ok_or(TorrentError::NoAdvertisedHost)?;
+    let primary = announce_url(&current, token)?;
+
+    let mut tiers = Vec::new();
+    for base in endpoint.recent() {
+        tiers.push(announce_url(&base, token)?);
+    }
+    if tiers.is_empty() {
+        tiers.push(primary.clone());
+    }
+
+    Ok(AnnounceSet { primary, tiers })
 }
 
 /// The URL paths peers announce and scrape on.

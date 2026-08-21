@@ -143,7 +143,7 @@ pub struct StatusPage {
     pub healthy: bool,
     /// One row per gluetun poller (tracker, then client) — what each is
     /// pointed at, what it last saw, and what it last failed with. See
-    /// `docs/roadmap.md`'s "gluetun observability" and "a peer with two
+    /// `docs/ROADMAP.md`'s "gluetun observability" and "a peer with two
     /// addresses".
     pub gluetun: Vec<EndpointStatus>,
     /// Live swarm counts from the tracker's own bookkeeping — not a config
@@ -284,6 +284,10 @@ pub struct SettingsPage {
     /// configured service behind a fold reads as it having vanished.
     pub secondary_arr_configured: bool,
 
+    /// `"qbittorrent"`, `"transmission"`, or `"rtorrent"` — which client
+    /// `torrent_backend` currently selects to actually seed.
+    pub torrent_backend: &'static str,
+
     pub qbit_url: String,
     /// Whether a qBittorrent API key is stored — the sole credential qBittorrent
     /// authenticates with; there is no username/password fallback.
@@ -291,6 +295,24 @@ pub struct SettingsPage {
     pub qbit_category: String,
     pub qbit_tag: String,
     pub qbit_skip_checking: bool,
+
+    pub transmission_url: String,
+    pub transmission_username: String,
+    /// Whether a Transmission password is stored — its RPC has no API-key
+    /// alternative, unlike qBittorrent.
+    pub transmission_password_set: bool,
+    pub transmission_label: String,
+
+    /// The exact XML-RPC endpoint — not a base a path is appended to, since
+    /// rTorrent has no one standard path. See `sharerr_rtorrent`'s module
+    /// docs.
+    pub rtorrent_url: String,
+    pub rtorrent_username: String,
+    /// Whether an rTorrent password is stored. rTorrent's own XML-RPC has no
+    /// credential of its own — this authenticates against whatever reverse
+    /// proxy fronts it.
+    pub rtorrent_password_set: bool,
+    pub rtorrent_label: String,
 
     /// Per-torrent upload cap in KiB/s, applied at add time. Empty when unset —
     /// see [`sharerr_core::config::SeedingConfig::upload_limit_kib`].
@@ -328,7 +350,7 @@ pub struct SettingsPage {
     pub gluetun_last_error: Option<String>,
 
     /// The second poller — the torrent client's own tunnel. See
-    /// `docs/roadmap.md`'s "a peer with two addresses".
+    /// `docs/ROADMAP.md`'s "a peer with two addresses".
     pub gluetun_client_control_url: String,
     pub gluetun_client_enabled: bool,
     pub gluetun_client_api_key_set: bool,
@@ -631,7 +653,7 @@ impl TokenStatus {
 }
 
 /// Every file sharerr has discovered, sortable and filterable — the page
-/// `docs/roadmap.md` names as what an operator wants right after setup.
+/// `docs/ROADMAP.md` names as what an operator wants right after setup.
 #[derive(Debug, Template)]
 #[template(path = "items.html")]
 pub struct ItemsPage {

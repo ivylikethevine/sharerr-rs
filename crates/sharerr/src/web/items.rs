@@ -46,7 +46,7 @@ const SORT_COLUMNS: &[(&str, &str)] = &[
 pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>) -> Response {
     let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let (mut items, error) = match store.all_items().await {
@@ -472,5 +472,188 @@ mod tests {
         assert!(state_hint(ShareState::Unshared).is_some());
         assert!(state_hint(ShareState::Seeding).is_none());
         assert!(state_hint(ShareState::Failed).is_none());
+    }
+
+    // -------------------------------------------------------------- page()
+
+    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
+        WebState {
+            serve,
+            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
+        }
+    }
+
+    fn named(source: MediaSource, title: &str, file_id: i64) -> SharedItem {
+        let spec = MediaSpec::Movie {
+            title: title.to_owned(),
+            year: None,
+        };
+        SharedItem {
+            file_id,
+            ..item(source, spec, ShareState::Seeding)
+        }
+    }
+
+    async fn body_of(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_empty_store_renders_rather_than_erroring() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = page(State(state), Query(ItemsQuery::default())).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let html = body_of(response).await;
+        assert!(html.contains('0'), "{html}");
+    }
+
+    #[tokio::test]
+    async fn every_stored_item_is_listed_by_default() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Harborlight", 2))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(page(State(state), Query(ItemsQuery::default())).await).await;
+        assert!(html.contains("Lanternwick Hollow"), "{html}");
+        assert!(html.contains("Harborlight"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn filtering_by_source_narrows_the_list() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Harborlight", 2))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    source: "radarr".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("Harborlight"), "{html}");
+        assert!(!html.contains("Lanternwick Hollow"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_free_text_search_matches_the_title() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Harborlight", 2))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    q: "harbor".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("Harborlight"), "{html}");
+        assert!(!html.contains("Lanternwick Hollow"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn filtering_by_state_narrows_the_list() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&SharedItem {
+                state: ShareState::Failed,
+                ..named(MediaSource::Sonarr, "Broken Show", 1)
+            })
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Harborlight", 2))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    state: "failed".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("Broken Show"), "{html}");
+        assert!(!html.contains("Harborlight"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn sorting_by_title_ascending_orders_the_rows() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&named(MediaSource::Sonarr, "Zebra", 1))
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Apple", 2))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    sort: "title".to_owned(),
+                    dir: "asc".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        let apple_at = html.find("Apple").expect("Apple listed");
+        let zebra_at = html.find("Zebra").expect("Zebra listed");
+        assert!(apple_at < zebra_at, "{html}");
     }
 }

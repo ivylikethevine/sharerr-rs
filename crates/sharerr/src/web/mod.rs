@@ -69,11 +69,16 @@ impl WebState {
     /// The store, or the one 503 every handler answers with when the database
     /// cannot open. Written here once so handlers cannot drift into inventing
     /// their own failure semantics for the same condition.
-    pub(crate) async fn store_or_503(&self) -> Result<sharerr_store::Store, Response> {
+    ///
+    /// The error is boxed only to keep this `Result` small — `Response` alone
+    /// is well over clippy's `result_large_err` threshold, and every caller
+    /// already destructures with `match` rather than `?`, so unboxing at the
+    /// point of use is one extra `*`.
+    pub(crate) async fn store_or_503(&self) -> Result<sharerr_store::Store, Box<Response>> {
         self.serve
             .store()
             .await
-            .map_err(|reason| (StatusCode::SERVICE_UNAVAILABLE, reason).into_response())
+            .map_err(|reason| Box::new((StatusCode::SERVICE_UNAVAILABLE, reason).into_response()))
     }
 }
 
@@ -113,6 +118,12 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/general", post(settings::save_general))
         .route("/settings/arr/{source}", post(settings::save_arr))
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
+        .route("/settings/transmission", post(settings::save_transmission))
+        .route("/settings/rtorrent", post(settings::save_rtorrent))
+        .route(
+            "/settings/torrent-backend",
+            post(settings::save_torrent_backend),
+        )
         .route("/settings/seeding", post(settings::save_seeding))
         .route("/settings/tracker", post(settings::save_tracker))
         .route("/settings/lighthouse", post(settings::save_lighthouse))
@@ -258,7 +269,11 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
 ///
 /// An explicit match rather than a lookup table: the set is a handful of files,
 /// and a match makes it impossible for a path to escape into the filesystem.
-async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
+/// `pub(crate)` rather than private: `commands::preview` reuses this handler
+/// directly, so the mock pages it serves style themselves with the exact same
+/// embedded CSS/JS a real instance does, instead of a second copy that could
+/// drift out of sync with it.
+pub(crate) async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
     let (body, mime) = match file.as_str() {
         "style.css" => (include_str!("assets/style.css"), "text/css; charset=utf-8"),
         "htmx.min.js" => (
@@ -440,6 +455,8 @@ mod tests {
             "/settings/arr/sonarr",
             "/settings/arr/lidarr",
             "/settings/qbittorrent",
+            "/settings/transmission",
+            "/settings/torrent-backend",
             "/settings/seeding",
             "/settings/tracker",
             "/settings/lighthouse",

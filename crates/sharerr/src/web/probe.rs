@@ -19,7 +19,7 @@
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
 use secrecy::SecretString;
-use sharerr_core::config::secret_keys;
+use sharerr_core::config::{TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
@@ -37,6 +37,10 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
 
     let outcome = if service == "qbittorrent" {
         qbit_badge(&state, &config).await
+    } else if service == "transmission" {
+        transmission_badge(&state, &config).await
+    } else if service == "rtorrent" {
+        rtorrent_badge(&state, &config).await
     } else if service == "library" {
         library_badge(&config).await
     } else if let Some(kind) = MediaSource::parse(&service) {
@@ -188,11 +192,32 @@ async fn library_badge(config: &Config) -> Outcome {
     Outcome::Good(message)
 }
 
+/// Test whichever torrent client is currently selected to actually seed.
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    // Which client, and therefore which URL and which vault key, is a configuration
-    // choice — the button cannot infer it from the URL, because two clients can
+    torrent_client_badge(state, config, config.torrent_backend).await
+}
+
+/// Test Transmission specifically, regardless of whether it is the backend
+/// currently selected to seed — so an operator filling in its fields can
+/// confirm they work *before* switching `torrent_backend` over to it.
+async fn transmission_badge(state: &WebState, config: &Config) -> Outcome {
+    torrent_client_badge(state, config, TorrentBackend::Transmission).await
+}
+
+/// Test rTorrent specifically — same reasoning as [`transmission_badge`].
+async fn rtorrent_badge(state: &WebState, config: &Config) -> Outcome {
+    torrent_client_badge(state, config, TorrentBackend::Rtorrent).await
+}
+
+async fn torrent_client_badge(
+    state: &WebState,
+    config: &Config,
+    backend: TorrentBackend,
+) -> Outcome {
+    // Which client, and therefore which URL and which vault key, is a
+    // parameter rather than inferred from the URL, because two clients can
     // live on the same host.
-    let client = config.torrent_client();
+    let client = config.torrent_client_for(backend);
 
     // Both secrets are read before choosing, so that an unreadable vault is
     // reported as such rather than as a missing credential. Opened once —
@@ -213,13 +238,7 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
         (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),
     };
 
-    let outcome = check_qbit(
-        config.torrent_backend,
-        client.url,
-        client.username,
-        credential,
-    )
-    .await;
+    let outcome = check_qbit(backend, client.url, client.username, credential).await;
 
     match outcome {
         QbitOutcome::NoCredential => Outcome::Bad("No password stored. Save one first.".to_owned()),
@@ -243,6 +262,8 @@ mod tests {
 
     use super::*;
     use axum::body::to_bytes;
+    use sharerr_core::config::ServiceConfig;
+    use url::Url;
 
     async fn body_of(outcome: Outcome) -> String {
         let response = outcome.into_fragment();
@@ -272,5 +293,127 @@ mod tests {
                 .await
                 .contains("class=\"error\"")
         );
+    }
+
+    // ------------------------------------------------------------- badges
+    //
+    // No master key is set in this process, so every path that reaches the
+    // vault deterministically finds it unreadable rather than open — see
+    // CLAUDE.md's no-live-vault-in-tests rule. That still exercises a real
+    // branch (`CredentialUnreadable`/an unreadable-vault `Outcome::Bad`),
+    // just never the "credential found and it works" happy path.
+
+    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
+        WebState {
+            serve,
+            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn library_badge_with_nothing_configured_says_so() {
+        let outcome = library_badge(&Config::default()).await;
+        assert!(matches!(outcome, Outcome::Bad(_)));
+        assert!(body_of(outcome).await.contains("No library directories"));
+    }
+
+    #[tokio::test]
+    async fn library_badge_counts_a_real_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        sharerr_testkit::library::tv_library(dir.path()).unwrap();
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: dir.path().to_path_buf(),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+
+        let outcome = library_badge(&config).await;
+        let html = body_of(outcome).await;
+        assert!(html.contains("class=\"ok\""), "{html}");
+        assert!(html.contains("media file(s) found"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn library_badge_reports_a_missing_directory() {
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: std::path::PathBuf::from("/does/not/exist/anywhere"),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+
+        let html = body_of(library_badge(&config).await).await;
+        assert!(html.contains("class=\"error\""), "{html}");
+        assert!(html.contains("does not exist"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn arr_badge_with_no_url_asks_for_one_before_touching_the_vault() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let config = state.serve.config().await;
+
+        let html = body_of(arr_badge(MediaSource::Sonarr, &state, &config).await).await;
+        assert!(html.contains("No URL configured"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn arr_badge_with_a_url_but_no_vault_reports_that_rather_than_no_credential() {
+        let (dir, serve) = crate::state::fixtures::unconfigured();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            sonarr: Some(ServiceConfig {
+                url: Url::parse("http://sonarr.example:8989").unwrap(),
+            }),
+            ..Config::default()
+        };
+        let state = web_state(serve);
+
+        let html = body_of(arr_badge(MediaSource::Sonarr, &state, &config).await).await;
+        assert!(html.contains("class=\"error\""), "{html}");
+    }
+
+    #[tokio::test]
+    async fn torrent_client_badge_with_no_vault_is_reported_as_such_for_every_backend() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let config = state.serve.config().await;
+
+        for backend in [
+            TorrentBackend::Qbittorrent,
+            TorrentBackend::Transmission,
+            TorrentBackend::Rtorrent,
+        ] {
+            let html = body_of(torrent_client_badge(&state, &config, backend).await).await;
+            assert!(html.contains("class=\"error\""), "{backend:?}: {html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_test_endpoint_always_answers_200_even_on_failure() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        // htmx only swaps a 2xx response — see `test`'s own doc comment — so
+        // every one of these must come back 200 despite failing its check.
+        for service in [
+            "qbittorrent",
+            "transmission",
+            "rtorrent",
+            "library",
+            "sonarr",
+            "directory",
+            "not-a-real-service",
+        ] {
+            let response = test(State(state.clone()), Path(service.to_owned())).await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::OK,
+                "{service} must answer 200"
+            );
+        }
     }
 }

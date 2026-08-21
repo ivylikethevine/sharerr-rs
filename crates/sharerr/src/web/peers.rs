@@ -52,7 +52,7 @@ pub struct ScopeForm {
 pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Response {
     let store = match state.store_or_503().await {
         Ok(store) => store,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let key = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
@@ -89,16 +89,16 @@ pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Re
 /// Stop honouring a friend's key, keeping the row so the operator can see it
 /// happened. `revoke_peer`'s `false` — already revoked — is not an error worth
 /// showing.
-pub async fn revoke(
-    State(state): State<WebState>,
-    Path(id): Path<i64>,
-) -> Result<Response, Response> {
-    let store = state.store_or_503().await?;
+pub async fn revoke(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
     let result = store.revoke_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "revoked a friend's key");
     }
-    Ok(applied(&state, result, "revoke that key").await)
+    applied(&state, result, "revoke that key").await
 }
 
 /// Change what a friend is allowed to see.
@@ -106,8 +106,11 @@ pub async fn set_scope(
     State(state): State<WebState>,
     Path(id): Path<i64>,
     Form(form): Form<ScopeForm>,
-) -> Result<Response, Response> {
-    let store = state.store_or_503().await?;
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
     let result = store.set_peer_scope(id, form.scope).await;
     if result.is_ok() {
         tracing::info!(
@@ -116,7 +119,7 @@ pub async fn set_scope(
             "changed what a friend can see"
         );
     }
-    Ok(applied(&state, result, "change that").await)
+    applied(&state, result, "change that").await
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,8 +137,11 @@ pub async fn set_gossip(
     State(state): State<WebState>,
     Path(id): Path<i64>,
     Form(form): Form<GossipForm>,
-) -> Result<Response, Response> {
-    let store = state.store_or_503().await?;
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
 
     let url = form.url.trim();
     let url = if url.is_empty() {
@@ -144,7 +150,7 @@ pub async fn set_gossip(
         match url::Url::parse(url) {
             Ok(parsed) => Some(parsed.to_string()),
             Err(err) => {
-                return Ok(rejected(&state, &format!("{url:?} is not a valid URL: {err}")).await);
+                return rejected(&state, &format!("{url:?} is not a valid URL: {err}")).await;
             }
         }
     };
@@ -155,7 +161,7 @@ pub async fn set_gossip(
     if !key.is_empty() || form.clear_key.is_some() {
         let mut vault = match state.serve.open_vault().await {
             Ok(vault) => vault,
-            Err(reason) => return Ok(rejected(&state, &reason).await),
+            Err(reason) => return rejected(&state, &reason).await,
         };
         let vault_key = secret_keys::peer_gossip_key(id);
         let result = if form.clear_key.is_some() {
@@ -164,7 +170,7 @@ pub async fn set_gossip(
             vault.put(&vault_key, &SecretString::from(key.to_owned()))
         };
         if let Err(err) = result {
-            return Ok(rejected(&state, &format!("could not store the key: {err}")).await);
+            return rejected(&state, &format!("could not store the key: {err}")).await;
         }
     }
 
@@ -172,20 +178,20 @@ pub async fn set_gossip(
     if result.is_ok() {
         tracing::info!(peer_id = id, "updated a friend's gossip settings");
     }
-    Ok(applied(&state, result, "save that").await)
+    applied(&state, result, "save that").await
 }
 
 /// Remove a friend entirely, freeing the name for reuse.
-pub async fn delete(
-    State(state): State<WebState>,
-    Path(id): Path<i64>,
-) -> Result<Response, Response> {
-    let store = state.store_or_503().await?;
+pub async fn delete(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
     let result = store.delete_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "deleted a friend");
     }
-    Ok(applied(&state, result, "delete that friend").await)
+    applied(&state, result, "delete that friend").await
 }
 
 /// The literal XML this friend's Prowlarr would fetch: their scope, their
@@ -198,30 +204,33 @@ pub async fn delete(
 /// could show a field the real feed gets right (or wrong) differently. The
 /// honest test of scoping is not what the rules *say* a friend can see, but
 /// literally what the feed *serves* them, byte for byte.
-pub async fn feed_preview(
-    State(state): State<WebState>,
-    Path(id): Path<i64>,
-) -> Result<Response, Response> {
-    let store = state.store_or_503().await?;
-
-    let peers = store
-        .list_peers()
-        .await
-        .map_err(|err| rejected_response(&format!("could not list friends: {err}")))?;
-    let Some(peer) = peers.into_iter().find(|p| p.id == id) else {
-        return Err((StatusCode::NOT_FOUND, "no such friend").into_response());
+pub async fn feed_preview(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
     };
 
-    let matched = crate::torznab::collect(
+    let peers = match store.list_peers().await {
+        Ok(peers) => peers,
+        Err(err) => return rejected_response(&format!("could not list friends: {err}")),
+    };
+    let Some(peer) = peers.into_iter().find(|p| p.id == id) else {
+        return (StatusCode::NOT_FOUND, "no such friend").into_response();
+    };
+
+    let matched = match crate::torznab::collect(
         &state.serve,
         &crate::torznab::SearchQuery::default(),
         peer.scope,
         &peer.key_hash,
     )
     .await
-    .map_err(|(status, reason)| (status, reason).into_response())?;
+    {
+        Ok(matched) => matched,
+        Err((status, reason)) => return (status, reason).into_response(),
+    };
 
-    Ok(crate::torznab::xml(crate::torznab::render_feed(&matched)))
+    crate::torznab::xml(crate::torznab::render_feed(&matched))
 }
 
 fn rejected_response(message: &str) -> Response {
@@ -259,12 +268,11 @@ async fn build(
             Ok(peers) => {
                 // One extra query per friend; the list is people, not rows —
                 // but run concurrently rather than one round trip at a time.
-                let endpoints = futures::future::join_all(
-                    peers
-                        .iter()
-                        .map(|peer| async { store.peer_endpoints(peer.id).await.unwrap_or_default() }),
-                )
-                .await;
+                let endpoints =
+                    futures::future::join_all(peers.iter().map(|peer| async {
+                        store.peer_endpoints(peer.id).await.unwrap_or_default()
+                    }))
+                    .await;
                 (peers, endpoints, None)
             }
             Err(err) => (
@@ -411,5 +419,242 @@ mod tests {
         };
 
         assert!(row(&peer, &[], false).revoked);
+    }
+
+    // ------------------------------------------------------------- handlers
+    //
+    // All against a real `Store` on a temp `data_dir` — no vault needed for
+    // any of these except `set_gossip`'s key-storage branch, which stays
+    // within this project's no-live-vault-in-tests rule (see CLAUDE.md) by
+    // only ever exercising the "vault would not open" path, never a real
+    // open one.
+
+    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
+        WebState {
+            serve,
+            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_creates_a_peer_that_list_peers_then_sees() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let peers = store.list_peers().await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].label, "Sam");
+    }
+
+    #[tokio::test]
+    async fn adding_a_duplicate_label_is_rejected_rather_than_stored_twice() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("first-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(store.list_peers().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_marks_the_peer_revoked_and_redirects() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = revoke(State(state), Path(sam.id)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let peers = store.list_peers().await.unwrap();
+        assert!(peers[0].revoked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn revoking_an_unknown_peer_still_redirects_rather_than_erroring() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = revoke(State(state), Path(404)).await;
+
+        // `revoke_peer`'s `false` — nothing to revoke — is not an error worth
+        // showing; see the handler's own doc comment.
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn set_scope_changes_what_a_friend_can_see() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = set_scope(
+            State(state),
+            Path(sam.id),
+            Form(ScopeForm {
+                scope: PeerScope::Tv,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let peers = store.list_peers().await.unwrap();
+        assert_eq!(peers[0].scope, PeerScope::Tv);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_the_peer_entirely() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = delete(State(state), Path(sam.id)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert!(store.list_peers().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_gossip_stores_a_valid_url_with_no_key_involved() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = set_gossip(
+            State(state),
+            Path(sam.id),
+            Form(GossipForm {
+                url: "https://sams-sharerr.example".to_owned(),
+                key: String::new(),
+                clear_key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let peers = store.list_peers().await.unwrap();
+        assert_eq!(
+            peers[0].gossip_url.as_deref(),
+            Some("https://sams-sharerr.example/")
+        );
+    }
+
+    #[tokio::test]
+    async fn set_gossip_rejects_a_url_that_does_not_parse() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = set_gossip(
+            State(state),
+            Path(sam.id),
+            Form(GossipForm {
+                url: "not a url".to_owned(),
+                key: String::new(),
+                clear_key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(store.list_peers().await.unwrap()[0].gossip_url.is_none());
+    }
+
+    /// A non-blank key routes through the vault, which cannot open with no
+    /// master key set — the exact condition this suite is limited to for
+    /// anything vault-shaped, per CLAUDE.md.
+    #[tokio::test]
+    async fn set_gossip_with_a_key_fails_cleanly_when_the_vault_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = set_gossip(
+            State(state),
+            Path(sam.id),
+            Form(GossipForm {
+                url: String::new(),
+                key: "a-key-alex-issued-us".to_owned(),
+                clear_key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        // The URL write must not have happened either — a rejected secret
+        // write must not leave a half-applied change behind.
+        assert!(store.list_peers().await.unwrap()[0].gossip_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn feed_preview_answers_not_found_for_an_unknown_peer() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = feed_preview(State(state), Path(404)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn feed_preview_renders_an_empty_feed_for_a_known_peer_with_nothing_shared() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = feed_preview(State(state), Path(sam.id)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
     }
 }

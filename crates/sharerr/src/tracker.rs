@@ -23,14 +23,18 @@
 //! (which already zeroes their `key_hash` out of the active peers) reaches
 //! the tracker too, not just the feed. The instance-wide shared token still
 //! works forever alongside this, unattributed, so nothing seeded before this
-//! existed ever breaks. See [`authenticate_token`].
+//! existed ever breaks. See [`authenticate_token`]. A `.torrent` fetched
+//! directly gets the same treatment: [`torrent_file`] rewrites the announce
+//! URLs it serves per requester, in memory, rather than caching a variant per
+//! peer on disk — see that function's docs.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Path, RawQuery, State};
+use axum::extract::{ConnectInfo, Path, Query, RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use sharerr_store::{EndpointKind, Store};
 use sharerr_torrent::announce::{
     self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
@@ -158,8 +162,13 @@ async fn handle_announce(
     let response = state.swarms.announce(&request, addr).await;
 
     if let Some(peer_id) = attributed_to {
-        crate::torznab::record_sighting(&store, peer_id, EndpointKind::Client, Some(&addr.to_string()))
-            .await;
+        crate::torznab::record_sighting(
+            &store,
+            peer_id,
+            EndpointKind::Client,
+            Some(&addr.to_string()),
+        )
+        .await;
     }
 
     tracing::debug!(
@@ -316,13 +325,29 @@ pub(crate) fn torrent_download_path(info_hash: &str) -> String {
     format!("/torrents/{info_hash}.torrent")
 }
 
+/// The optional query string on a `.torrent` download.
+#[derive(Debug, Deserialize)]
+pub struct TorrentFileQuery {
+    /// A peer's own `key_hash`, the same value [`crate::torznab::Matched::download_url`]
+    /// embeds — see [`torrent_file`].
+    token: Option<String>,
+}
+
 /// `GET /torrents/{info_hash}.torrent` — the file itself.
 ///
 /// Serves out of `data_dir/torrents`, which is where the factory wrote it. The
 /// Torznab feed links here, so this is what a friend's Sonarr actually fetches.
+///
+/// The cached file on disk always carries the shared instance token (or none),
+/// because it is written once by the sync loop and reused for every requester.
+/// When the request carries a `token` that still resolves to an active peer,
+/// the announce URLs are rewritten in memory — never on disk — to that peer's
+/// own token before the response goes out, the same attribution the feed's
+/// magnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.
 pub async fn torrent_file(
     State(state): State<Arc<TrackerState>>,
     Path(name): Path<String>,
+    Query(query): Query<TorrentFileQuery>,
 ) -> Response {
     let Some(hex_hash) = name.strip_suffix(".torrent") else {
         return (StatusCode::NOT_FOUND, "not a torrent").into_response();
@@ -341,27 +366,73 @@ pub async fn torrent_file(
     let config = state.serve.config().await;
     let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex::encode(info_hash));
 
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, "application/x-bittorrent".to_owned()),
-                (
-                    header::CONTENT_DISPOSITION,
-                    format!(
-                        "attachment; filename=\"{}.torrent\"",
-                        hex::encode(info_hash)
-                    ),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
         Err(err) => {
             // The row says seeding but the file is gone — a wiped /data with an
             // intact database, usually. Worth an error line: the friend's Sonarr
             // sees only a failed download.
             tracing::error!(path = %path.display(), error = %err, "torrent file missing");
-            (StatusCode::NOT_FOUND, "torrent file missing").into_response()
+            return (StatusCode::NOT_FOUND, "torrent file missing").into_response();
+        }
+    };
+
+    let bytes = match query.token.as_deref() {
+        Some(supplied) => attributed_bytes(&state, &bytes, supplied).await,
+        None => bytes,
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/x-bittorrent".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}.torrent\"",
+                    hex::encode(info_hash)
+                ),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Rewrite `bytes`' announce URLs to carry `supplied` as the token, when it
+/// resolves to a peer whose access has not been revoked. Any other outcome —
+/// no such peer, a revoked one, a database that will not answer, a rewrite
+/// that fails to parse — falls back to serving `bytes` unchanged: this
+/// parameter only ever narrows attribution, so a caller for whom it cannot be
+/// honoured still gets the same file an unauthenticated download always got.
+async fn attributed_bytes(state: &TrackerState, bytes: &[u8], supplied: &str) -> Vec<u8> {
+    let store = match state.serve.store().await {
+        Ok(store) => store,
+        Err(_) => return bytes.to_vec(),
+    };
+
+    let peer = match store.peer_by_key_hash(supplied).await {
+        Ok(Some(peer)) => peer,
+        Ok(None) => return bytes.to_vec(),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not check a peer's download token");
+            return bytes.to_vec();
+        }
+    };
+
+    let announce =
+        match sharerr_torrent::announce_set_for(&state.serve.endpoint(), Some(&peer.key_hash)) {
+            Ok(announce) => announce,
+            Err(err) => {
+                tracing::warn!(error = %err, "could not build a per-peer announce set");
+                return bytes.to_vec();
+            }
+        };
+
+    match sharerr_torrent::rewrite_announce(bytes, &announce) {
+        Ok(rewritten) => rewritten,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not attribute a .torrent download");
+            bytes.to_vec()
         }
     }
 }
@@ -446,8 +517,13 @@ mod tests {
             .await
             .unwrap();
 
-        crate::torznab::record_sighting(&store, sam.id, EndpointKind::Client, Some("203.0.113.9:51413"))
-            .await;
+        crate::torznab::record_sighting(
+            &store,
+            sam.id,
+            EndpointKind::Client,
+            Some("203.0.113.9:51413"),
+        )
+        .await;
 
         let endpoints = store.peer_endpoints(sam.id).await.unwrap();
         assert_eq!(endpoints.len(), 1);
@@ -608,6 +684,95 @@ mod tests {
         for name in ["..%2f..%2fetc%2fpasswd", "....//etc/passwd"] {
             let (status, _) = get(&state, &format!("/torrents/{name}")).await;
             assert_ne!(status, StatusCode::OK, "{name} was served");
+        }
+    }
+
+    // ------------------------------------------------- per-peer download attribution
+
+    /// Like `unconfigured`, but with an advertised host set — needed for
+    /// anything that builds an [`sharerr_torrent::AnnounceSet`], which fails
+    /// closed with no endpoint configured at all.
+    fn with_advertised_host() -> (tempfile::TempDir, Arc<crate::state::ServeState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = sharerr_core::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        config.tracker.advertised_host = Some("seed.example".to_owned());
+        let path = dir.path().join("sharerr.toml");
+        (
+            dir,
+            Arc::new(crate::state::ServeState::new(config, path, None)),
+        )
+    }
+
+    fn built_torrent(dir: &std::path::Path, announce_url: &str) -> sharerr_torrent::BuiltTorrent {
+        let media = dir.join("movie.mkv");
+        sharerr_testkit::media::write_media_file(&media, 4096, 1).unwrap();
+        let announce = sharerr_torrent::AnnounceSet::single(url::Url::parse(announce_url).unwrap());
+        sharerr_torrent::LavaTorrentFactory
+            .create(&sharerr_torrent::TorrentRequest {
+                path: &media,
+                announce: &announce,
+            })
+            .unwrap()
+    }
+
+    /// The whole point of Stage 2: a `.torrent` download carrying a peer's own
+    /// token gets an announce rewritten to that token, in memory — never the
+    /// shared instance token the cached file on disk actually holds.
+    #[tokio::test]
+    async fn a_downloaded_torrent_is_attributed_to_the_peer_whose_token_it_carries() {
+        let (dir, state) = with_advertised_host();
+        let store = state.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        let built = built_torrent(
+            dir.path(),
+            "http://seed.example:8477/announce/shared-secret",
+        );
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+
+        let rewritten = attributed_bytes(&tracker_state, &built.data, &sam.key_hash).await;
+
+        let announce = sharerr_torrent::read_announce(&rewritten).unwrap().unwrap();
+        assert!(
+            announce.contains(&sam.key_hash),
+            "expected Sam's own token in {announce}"
+        );
+        assert!(
+            !announce.contains("shared-secret"),
+            "the shared instance token must not leak into an attributed download: {announce}"
+        );
+    }
+
+    /// A token that does not resolve to any currently active peer — unknown,
+    /// or belonging to someone since revoked — must not break the download; it
+    /// falls back to serving the file exactly as cached, same as no token at
+    /// all. This is what keeps every download link from before this feature
+    /// existed working unchanged.
+    #[tokio::test]
+    async fn an_unresolvable_token_falls_back_to_the_cached_file_unchanged() {
+        let (dir, state) = with_advertised_host();
+        let store = state.store().await.unwrap();
+        let alex = store
+            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store.revoke_peer(alex.id).await.unwrap();
+
+        let built = built_torrent(dir.path(), "http://seed.example:8477/announce");
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+
+        for token in ["not-a-real-token", &alex.key_hash] {
+            let result = attributed_bytes(&tracker_state, &built.data, token).await;
+            assert_eq!(
+                result, built.data,
+                "token {token:?} should not change the served bytes"
+            );
         }
     }
 }

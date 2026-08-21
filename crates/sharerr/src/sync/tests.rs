@@ -649,7 +649,10 @@ async fn an_add_carries_the_configured_seeding_goal() {
     h.syncer.run(false).await.unwrap();
 
     let live = h.qbit.snapshot().live;
-    assert!(!live.is_empty(), "the tagged library must have shared something");
+    assert!(
+        !live.is_empty(),
+        "the tagged library must have shared something"
+    );
     for torrent in &live {
         assert_eq!(
             multipart_field(&torrent.form, "upLimit").as_deref(),

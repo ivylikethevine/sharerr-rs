@@ -1,0 +1,26 @@
+[package]
+name = "sharerr-rtorrent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rTorrent XML-RPC client for sharerr, shaped so that adding a share never moves or rewrites the media."
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+quick-xml = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+sharerr-client = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+sharerr-testkit = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock = { workspace = true }

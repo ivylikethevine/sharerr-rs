@@ -7,6 +7,14 @@ ordering is a judgement about value, not a schedule. What has already shipped
 lives in [the README](../README.md#what-works-today), not here — this page
 tracks what is still ahead.
 
+## Table of contents
+
+- [Library sources (where tagged content comes from)](#library-sources-where-tagged-content-comes-from)
+- [Torrent clients (what actually seeds)](#torrent-clients-what-actually-seeds)
+- [Indexers (what consumes the feed)](#indexers-what-consumes-the-feed)
+- [Functionality](#functionality)
+- [The lighthouse](#the-lighthouse)
+
 ### Library sources (where tagged content comes from)
 
 Today: **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
@@ -18,13 +26,14 @@ the two shapes of "where content lives" this project actually wants to support.
 
 ### Torrent clients (what actually seeds)
 
-Today: **qBittorrent** and **Transmission**, behind the `TorrentClient` trait in
-`sharerr-client`. That trait is deliberately narrow, which is what made the
-second client tractable — clients disagree about almost everything except "add
-this torrent, with the data already at this path". Announces always go to
-sharerr's own tracker, so a client needs no tracker of its own.
+Today: **qBittorrent**, **Transmission**, and **rTorrent / ruTorrent**, behind
+the `TorrentClient` trait in `sharerr-client`. That trait is deliberately
+narrow, which is what made a second and third client tractable — clients
+disagree about almost everything except "add this torrent, with the data
+already at this path". Announces always go to sharerr's own tracker, so a
+client needs no tracker of its own.
 
-Adding a third is now mostly writing one file. What a new client must answer
+Adding another is mostly writing one file. What a new client must answer
 honestly: whether it can remove a torrent _without_ deleting the data, how it
 replaces a torrent's tracker list in place (`set_trackers`, for endpoint
 rotation), and how it expresses `AddRequest::upload_limit_kib`/`ratio_limit`
@@ -32,10 +41,21 @@ when either is set — the one deliberate exception to "ratios belong to the
 client," a seeding goal stated once at add time through whatever native
 mechanism the client offers for it, same as qBittorrent (inline on
 `torrents/add`) and Transmission (a follow-up `torrent-set`) already do.
+`sharerr-rtorrent` answers the tracker-replacement question honestly by *not*
+fully answering it: rTorrent's XML-RPC has never grown a way to remove a
+tracker (open upstream as
+[rakshasa/rtorrent#165](https://github.com/rakshasa/rtorrent/issues/165)
+since 2013), so `set_trackers` there can only insert a fresh tier ahead of
+whatever is already on the torrent, not replace it — see the crate's module
+docs for the full reasoning.
 
-| Client                   | Notes                                                                                               |
-| ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| **rTorrent / ruTorrent** | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.  |
+**Gap: no tier-2 coverage for rTorrent.** `run_docker_tests.sh` drives real
+Sonarr, Radarr, and qBittorrent containers; it does not drive a real rTorrent.
+`sharerr-rtorrent`'s tests instead run against a hand-mocked XML-RPC server,
+which proves the crate parses the requests and responses it expects — not
+that those are the requests and responses a real rTorrent expects. Standing
+up rTorrent + ruTorrent in the docker compose stack, the same way qBittorrent
+already is, would close this; not yet done.
 
 **Transmission-compatible forks:** not planned as separate work. `sharerr-transmission` has no
 version pinning or fork detection — it only speaks the documented session-id handshake and
@@ -56,39 +76,45 @@ about the indexer direction. No further indexer work is currently planned.
 
 ## Functionality
 
-**Per-peer announce tokens.** Stage 1 is done: a magnet built by the Torznab
-feed carries the requesting friend's own `Peer.key_hash` as its announce
-token instead of the one shared instance secret, so a real announce
-attributes to that friend in peer endpoint memory, and revoking a peer now
-also revokes their tracker access. The instance's original shared token keeps
-working forever alongside this, unattributed, so nothing seeded before this
-existed ever breaks.
-
-Two follow-on stages, deliberately not built yet:
-
-- **Stage 2 — attribute `.torrent` file downloads too.** Today `GET
-  /torrents/{hash}.torrent` is open (no peer check, only "is this torrent
-  served") and serves one static file, so it still carries the shared legacy
-  token for whoever downloads that way instead of by magnet. Closing this
-  means peer-authenticating that endpoint and rewriting its embedded announce
-  URL per requester in memory (`sharerr_torrent::rewrite_announce` already
-  exists for this) rather than caching a variant per peer on disk.
-- **Stage 3 — graceful rotation of the shared legacy token itself.** Per-peer
-  tokens already make expelling one specific friend surgical and instant, with
-  zero effect on anyone else — no rollout needed. What is still missing is a
-  safe way to rotate or retire the *shared fallback* (e.g. if it leaked, or
-  eventually to sunset it once every peer is believed to have moved off it):
-  hold the old and new legacy token valid together, extend the existing
-  `announce_token_fp` fingerprinting to track who is still on the old one, and
-  let the operator finalize once satisfied. This is not a substitute for
-  Stage 1's per-peer revocation — a purely shared, rotating token can never
-  stop an *already-connected* bad actor's live announces, since every peer
-  holding the current value is indistinguishable from any other to the
-  tracker; only a genuinely per-peer credential can do that.
+**Per-peer announce tokens: rotating the shared legacy token.** Per-peer
+attribution for both magnet and `.torrent` download is done — see [the
+README](../README.md#sharing-with-a-friend) for how that works today. It
+makes expelling one specific friend surgical and instant, with zero effect on
+anyone else, so no rollout is needed for that case. What is still missing is
+a safe way to rotate or retire the *shared fallback* token every instance
+still accepts alongside per-peer ones (e.g. if it leaked, or eventually to
+sunset it once every peer is believed to have moved off it): hold the old and
+new legacy token valid together, extend the existing `announce_token_fp`
+fingerprinting to track who is still on the old one, and let the operator
+finalize once satisfied. This is not a substitute for per-peer revocation — a
+purely shared, rotating token can never stop an *already-connected* bad
+actor's live announces, since every peer holding the current value is
+indistinguishable from any other to the tracker; only a genuinely per-peer
+credential can do that.
 
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
+
+**A topology visualization.** Every fact this would draw already exists
+somewhere in the running instance, just spread across separate pages as
+tables: the internal *arr-stack side (this instance's own Sonarr, Radarr,
+qBittorrent/Transmission/rTorrent, and gluetun, plus how a container's own
+view of a path maps to sharerr's and to the torrent client's — see
+`sharerr doctor`'s path-mapping check and the Status page's endpoint table),
+and the external swarm side (this instance's own advertised host/port, each
+peer's known endpoints from [`PeerEndpointView`], and whether each was
+learned by a direct sighting, gossip, or a lighthouse — see "Friends finding
+each other" in the README). Nobody currently has to hold all of that in their
+head at once to answer "why can't Sam see this torrent" or "which of my two
+gluetun tunnels is this port actually on" — a diagram naming each hop's
+IP:port, container name, and last-known-good time would answer it at a
+glance instead of a page of prose. Not started: this is a genuinely new UI
+surface (an SVG or similar diagram, not another table), not an extension of
+an existing page, and touches every subsystem that already tracks an
+endpoint — the tracker, gluetun, gossip, and the lighthouse client all keep
+their own notion of "where things are" today and none of them are wired to a
+shared topology model yet.
 
 ---
 

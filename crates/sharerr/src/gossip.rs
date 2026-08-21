@@ -223,7 +223,7 @@ pub(crate) async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
         });
     }
     // Unlike Tracker/Api, Client is genuinely independent — see
-    // `docs/roadmap.md`'s "a peer with two addresses". Present only once
+    // `docs/ROADMAP.md`'s "a peer with two addresses". Present only once
     // `[gluetun_client]` (or some other future source) has actually observed
     // the torrent client's own address; absent is honest where nothing knows
     // it, rather than repeating the tracker's address as a guess.

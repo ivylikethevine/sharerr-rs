@@ -7,6 +7,21 @@ suite is hermetic and needs none of this.
 Everything in `tests/fixtures/media` is synthetic: invented titles, seeded
 pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhere.
 
+## Table of contents
+
+- [Running it](#running-it)
+- [Exercising the indexer and the tracker](#exercising-the-indexer-and-the-tracker)
+- [The opt-in test suite](#the-opt-in-test-suite)
+- [Seeding tagged content](#seeding-tagged-content)
+  - [The network used to be `internal: true`](#the-network-used-to-be-internal-true)
+- [Views of one library](#views-of-one-library)
+- [Ports](#ports)
+- [The Transmission stack](#the-transmission-stack)
+- [The VPN stack](#the-vpn-stack)
+  - [There is a WireGuard server in the stack](#there-is-a-wireguard-server-in-the-stack)
+  - [Ports](#ports-1)
+- [Tearing down](#tearing-down)
+
 ## Running it
 
 ```bash
@@ -181,13 +196,13 @@ discovery, path resolution, torrent creation, and seeding.
 The mounts deliberately disagree, because in a real deployment they almost always
 do, and identical mounts would hide every path-mapping bug:
 
-| Who | Sees the library at |
-|---|---|
-| Sonarr | `/tv` |
-| Radarr | `/movies` |
-| Lidarr | `/music` |
-| qBittorrent | `/downloads` |
-| sharerr | `/media` |
+| Who         | Sees the library at |
+| ----------- | ------------------- |
+| Sonarr      | `/tv`               |
+| Radarr      | `/movies`           |
+| Lidarr      | `/music`            |
+| qBittorrent | `/downloads`        |
+| sharerr     | `/media`            |
 
 `docker/config/sharerr.toml` maps between them. Every media mount is `:ro` — sharerr
 never needs to write to the content it shares, and the read-only flag turns that
@@ -197,14 +212,14 @@ from a promise into something the kernel enforces.
 
 All bound to `127.0.0.1` so the stack is not exposed on the network.
 
-| Service | Host port |
-|---|---|
-| Sonarr | 18989 |
-| Radarr | 17878 |
-| Lidarr | 18686 |
-| qBittorrent WebUI | 18080 |
-| Prowlarr | 19696 (opt-in — see below) |
-| sharerr | 18477 |
+| Service           | Host port                  |
+| ----------------- | -------------------------- |
+| Sonarr            | 18989                      |
+| Radarr            | 17878                      |
+| Lidarr            | 18686                      |
+| qBittorrent WebUI | 18080                      |
+| Prowlarr          | 19696 (opt-in — see below) |
+| sharerr           | 18477                      |
 
 sharerr's port doubles as the tracker: friends announce to it directly, so in a
 real deployment it has to be reachable from outside the container, not just on
@@ -220,12 +235,12 @@ The same services and the same assertions, seeding through Transmission instead 
 qBittorrent. It exists because the two clients differ in ways that no amount of
 mocking establishes:
 
-| | qBittorrent | Transmission |
-|---|---|---|
-| Tracker | sharerr's own, same as every other client — see "Exercising the indexer and the tracker" above | same |
-| Categories | a category plus tags | one flat list of labels; both collapse into it |
-| Skip hash check | supported | not supported; it always verifies |
-| Credentials | a temporary password printed to the log on first start | given up front by compose |
+|                 | qBittorrent                                                                                    | Transmission                                   |
+| --------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Tracker         | sharerr's own, same as every other client — see "Exercising the indexer and the tracker" above | same                                           |
+| Categories      | a category plus tags                                                                           | one flat list of labels; both collapse into it |
+| Skip hash check | supported                                                                                      | not supported; it always verifies              |
+| Credentials     | a temporary password printed to the log on first start                                         | given up front by compose                      |
 
 Neither client has a tracker of its own to fall back on any more — sharerr's
 builtin tracker is the only one wired up, regardless of `torrent_backend` —
@@ -247,11 +262,11 @@ ecosystem and which nothing exercised until now. `docker/compose.vpn.yml` has th
 full reasoning; the short version is that this is a genuinely different topology,
 not a variation:
 
-| | Plain stack | VPN stack |
-|---|---|---|
+|                       | Plain stack               | VPN stack                                                              |
+| --------------------- | ------------------------- | ---------------------------------------------------------------------- |
 | qBittorrent's address | `http://qbittorrent:8080` | `http://gluetun:8080` — it has no network, and no DNS name, of its own |
-| Its published ports | on `qbittorrent` | on `gluetun`; declaring them on qBittorrent is a compose error |
-| Announce address | the machine | the tunnel's exit |
+| Its published ports   | on `qbittorrent`          | on `gluetun`; declaring them on qBittorrent is a compose error         |
+| Announce address      | the machine               | the tunnel's exit                                                      |
 
 The first row is the one that bites. `qbittorrent:8080` does not merely refuse the
 connection — **the name does not resolve at all** — and the run asserts exactly that
@@ -275,12 +290,12 @@ decides the tunnel is dead and restarts it every twenty seconds.
 
 Offset from the plain stack so both can run at once.
 
-| Service | Host port |
-|---|---|
-| Sonarr | 28989 |
-| Radarr | 27878 |
+| Service           | Host port                    |
+| ----------------- | ---------------------------- |
+| Sonarr            | 28989                        |
+| Radarr            | 27878                        |
 | qBittorrent WebUI | 28080 (published by gluetun) |
-| sharerr | 28477 |
+| sharerr           | 28477                        |
 
 Tear it down with the same two halves as the plain stack, against the other file:
 

@@ -39,6 +39,10 @@ pub mod secret_keys {
     pub const QBITTORRENT_API_KEY: &str = "qbittorrent.api_key";
     /// The Transmission RPC password, when Transmission is the selected backend.
     pub const TRANSMISSION_PASSWORD: &str = "transmission.password";
+    /// rTorrent's Basic Auth password, when rTorrent is the selected backend.
+    /// rTorrent's own XML-RPC has no credential of its own; this authenticates
+    /// against whatever reverse proxy fronts it — see `sharerr_rtorrent`.
+    pub const RTORRENT_PASSWORD: &str = "rtorrent.password";
     /// Shared secret embedded in builtin-tracker announce URLs.
     pub const TRACKER_TOKEN: &str = "tracker.token";
     /// gluetun's control server API key, sent as `X-Api-Key`. Required since
@@ -99,6 +103,7 @@ pub mod secret_keys {
         WHISPARR_API_KEY,
         QBITTORRENT_API_KEY,
         TRANSMISSION_PASSWORD,
+        RTORRENT_PASSWORD,
         TRACKER_TOKEN,
         GLUETUN_API_KEY,
         GLUETUN_CLIENT_API_KEY,
@@ -154,6 +159,9 @@ pub mod config_paths {
     pub const TRANSMISSION_URL: &str = "transmission.url";
     pub const TRANSMISSION_USERNAME: &str = "transmission.username";
     pub const TRANSMISSION_LABEL: &str = "transmission.label";
+    pub const RTORRENT_URL: &str = "rtorrent.url";
+    pub const RTORRENT_USERNAME: &str = "rtorrent.username";
+    pub const RTORRENT_LABEL: &str = "rtorrent.label";
 
     pub const TRACKER_ADVERTISED_HOST: &str = "tracker.advertised_host";
     pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
@@ -225,6 +233,9 @@ pub mod config_paths {
         TRANSMISSION_URL,
         TRANSMISSION_USERNAME,
         TRANSMISSION_LABEL,
+        RTORRENT_URL,
+        RTORRENT_USERNAME,
+        RTORRENT_LABEL,
         TRACKER_ADVERTISED_HOST,
         TRACKER_ADVERTISED_URL,
         TRACKER_PORT,
@@ -271,6 +282,8 @@ pub struct Config {
     pub qbittorrent: QbitConfig,
     /// Only read when `torrent_backend` selects it.
     pub transmission: TransmissionConfig,
+    /// Only read when `torrent_backend` selects it.
+    pub rtorrent: RtorrentConfig,
     pub tracker: TrackerConfig,
     /// A per-torrent upload/ratio goal, applied once at add time — see
     /// [`SeedingConfig`]. Unset by default: no cap, no goal, matching
@@ -316,6 +329,7 @@ impl Default for Config {
             torrent_backend: TorrentBackend::default(),
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
+            rtorrent: RtorrentConfig::default(),
             tracker: TrackerConfig::default(),
             seeding: SeedingConfig::default(),
             lighthouse: LighthouseConfig::default(),
@@ -401,7 +415,19 @@ impl Config {
     /// and vault key must be resolved together — plucking fields from the unused
     /// section is how an operator ends up debugging the wrong service.
     pub fn torrent_client(&self) -> TorrentClientConfig<'_> {
-        match self.torrent_backend {
+        self.torrent_client_for(self.torrent_backend)
+    }
+
+    /// The same resolution as [`Self::torrent_client`], for a specific backend
+    /// rather than whichever one `torrent_backend` currently selects.
+    ///
+    /// What the settings page's "Test connection" button needs: an operator
+    /// filling in Transmission's fields while qBittorrent is still the active
+    /// backend must be able to test *those* credentials, not have the button
+    /// silently test qBittorrent instead because that is what is configured to
+    /// seed right now.
+    pub fn torrent_client_for(&self, backend: TorrentBackend) -> TorrentClientConfig<'_> {
+        match backend {
             TorrentBackend::Qbittorrent => TorrentClientConfig {
                 url: &self.qbittorrent.url,
                 // qBittorrent authenticates by API key alone — see
@@ -430,6 +456,23 @@ impl Config {
                 skip_checking: false,
                 // Seeding goals are backend-agnostic — see `SeedingConfig` — so
                 // the same values apply regardless of which client is selected.
+                upload_limit_kib: self.seeding.upload_limit_kib,
+                ratio_limit: self.seeding.ratio_limit,
+            },
+            TorrentBackend::Rtorrent => TorrentClientConfig {
+                url: &self.rtorrent.url,
+                username: Some(&self.rtorrent.username),
+                password_key: Some(secret_keys::RTORRENT_PASSWORD),
+                // rTorrent's XML-RPC has no key auth of its own — see
+                // `sharerr_rtorrent`'s module docs.
+                api_key_key: None,
+                // Same collapse as Transmission: one free-text slot
+                // (`d.custom1`) stands in for both category and tag.
+                category: &self.rtorrent.label,
+                tag: &self.rtorrent.label,
+                // rTorrent always verifies a torrent's data on start; there is
+                // no documented way to skip it.
+                skip_checking: false,
                 upload_limit_kib: self.seeding.upload_limit_kib,
                 ratio_limit: self.seeding.ratio_limit,
             },
@@ -538,6 +581,7 @@ pub enum TorrentBackend {
     #[default]
     Qbittorrent,
     Transmission,
+    Rtorrent,
 }
 
 impl TorrentBackend {
@@ -545,6 +589,7 @@ impl TorrentBackend {
         match self {
             Self::Qbittorrent => "qbittorrent",
             Self::Transmission => "transmission",
+            Self::Rtorrent => "rtorrent",
         }
     }
 
@@ -555,6 +600,7 @@ impl TorrentBackend {
         match self {
             Self::Qbittorrent => "qBittorrent",
             Self::Transmission => "Transmission",
+            Self::Rtorrent => "rTorrent",
         }
     }
 }
@@ -579,6 +625,37 @@ impl Default for TransmissionConfig {
         Self {
             url: Url::parse("http://localhost:9091").expect("valid literal url"),
             username: "transmission".to_owned(),
+            label: "sharerr".to_owned(),
+        }
+    }
+}
+
+/// How to reach rTorrent, and what to label what sharerr puts there. The
+/// password is in the vault, not here — see [`secret_keys::RTORRENT_PASSWORD`].
+///
+/// Unlike [`QbitConfig`] and [`TransmissionConfig`], `url` is the exact
+/// XML-RPC endpoint rather than a base a fixed path is appended to — see
+/// `sharerr_rtorrent`'s module docs for why rTorrent has no one standard path
+/// to assume.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RtorrentConfig {
+    pub url: Url,
+    pub username: String,
+    /// rTorrent has no categories, only a free-text `d.custom1` slot per
+    /// download. This one value stands in for qBittorrent's category *and*
+    /// its tag, same as [`TransmissionConfig::label`].
+    pub label: String,
+}
+
+impl Default for RtorrentConfig {
+    // A compile-time literal; parsing cannot fail at runtime and `Url` has no const
+    // constructor to say so in the type system.
+    #[allow(clippy::expect_used)]
+    fn default() -> Self {
+        Self {
+            url: Url::parse("http://localhost/RPC2").expect("valid literal url"),
+            username: "rtorrent".to_owned(),
             label: "sharerr".to_owned(),
         }
     }
@@ -658,7 +735,7 @@ impl LighthouseMount {
 /// workspace) as extra routes on one of sharerr's own listeners, instead of
 /// its own separate image and port.
 ///
-/// The design brief in `docs/roadmap.md` wants the lighthouse to be a
+/// The design brief in `docs/ROADMAP.md` wants the lighthouse to be a
 /// deliberately separate deployment — no shared process, no shared port — so
 /// that it can be self-hosted by anyone on neutral ground away from any
 /// particular library. This is the exception to that: a single operator
@@ -998,6 +1075,61 @@ mod tests {
                 "{path:?} must be lowercase to match a SHARERR_* override"
             );
         }
+    }
+
+    /// `torrent_client_for` must resolve each backend's own settings
+    /// regardless of which one `torrent_backend` currently selects — the
+    /// settings page's "Test connection" button for the *other* client
+    /// depends on this: an operator filling in Transmission's fields while
+    /// qBittorrent is still active must be able to test what they just typed.
+    #[test]
+    fn torrent_client_for_ignores_the_currently_selected_backend() {
+        let config = Config {
+            torrent_backend: TorrentBackend::Qbittorrent,
+            qbittorrent: QbitConfig {
+                url: Url::parse("http://qbit.example:8080").unwrap(),
+                ..QbitConfig::default()
+            },
+            transmission: TransmissionConfig {
+                url: Url::parse("http://trans.example:9091").unwrap(),
+                username: "sam".to_owned(),
+                ..TransmissionConfig::default()
+            },
+            rtorrent: RtorrentConfig {
+                url: Url::parse("http://seedbox.example/RPC2").unwrap(),
+                username: "alex".to_owned(),
+                ..RtorrentConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let qbit = config.torrent_client_for(TorrentBackend::Qbittorrent);
+        assert_eq!(qbit.url.as_str(), "http://qbit.example:8080/");
+        assert_eq!(qbit.api_key_key, Some(secret_keys::QBITTORRENT_API_KEY));
+
+        let transmission = config.torrent_client_for(TorrentBackend::Transmission);
+        assert_eq!(transmission.url.as_str(), "http://trans.example:9091/");
+        assert_eq!(transmission.username, Some("sam"));
+        assert_eq!(
+            transmission.password_key,
+            Some(secret_keys::TRANSMISSION_PASSWORD)
+        );
+
+        let rtorrent = config.torrent_client_for(TorrentBackend::Rtorrent);
+        // No trailing slash appended, unlike qBittorrent/Transmission above —
+        // this is the exact RPC endpoint, not a base to join a path onto.
+        assert_eq!(rtorrent.url.as_str(), "http://seedbox.example/RPC2");
+        assert_eq!(rtorrent.username, Some("alex"));
+        assert_eq!(rtorrent.api_key_key, None);
+        assert_eq!(rtorrent.password_key, Some(secret_keys::RTORRENT_PASSWORD));
+        assert!(
+            !rtorrent.skip_checking,
+            "rTorrent cannot skip its hash check"
+        );
+
+        // `torrent_client()` is the same resolution, applied to whichever
+        // backend is actually selected.
+        assert_eq!(config.torrent_client().url, qbit.url);
     }
 
     /// `library` entries round-trip through serde, and a kind outside the four

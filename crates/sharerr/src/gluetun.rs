@@ -37,7 +37,7 @@
 //! [`poll_loop`] is generic over [`GluetunTarget`] rather than assuming there is
 //! one gluetun: `Tracker` keeps the announce/feed address in step, and `Client`
 //! does the same for the torrent client's own tunnel when
-//! it is a *separate* one — see `docker/deploy/dual-vpn/` and `docs/roadmap.md`'s
+//! it is a *separate* one — see `docker/deploy/dual-vpn/` and `docs/ROADMAP.md`'s
 //! "a peer with two addresses". Both share this module's client and error types;
 //! they differ only in which `GluetunConfig`, `AdvertisedEndpoint`,
 //! [`GluetunStatus`] and vault key they read and write, which
@@ -437,7 +437,11 @@ async fn poll_once(
 /// to happen identically at every failure site — logged once per transition
 /// rather than once per poll, or a steady failure (no port granted, control
 /// server down) turns into a warning every interval forever.
-async fn record_error(status: &GluetunStatus, last_error: &mut Option<String>, rendered: String) -> bool {
+async fn record_error(
+    status: &GluetunStatus,
+    last_error: &mut Option<String>,
+    rendered: String,
+) -> bool {
     status.record_err(rendered.clone()).await;
     let changed = last_error.as_deref() != Some(&rendered);
     if changed {

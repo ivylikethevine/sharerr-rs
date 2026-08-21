@@ -22,8 +22,34 @@ Nothing is copied, renamed, re-linked, or moved. That is the constraint the whol
 design is built around.
 
 > **Status: experimental.** This is a personal project and has not had a tagged
-> release. See [the roadmap](docs/roadmap.md) for what works and what does not.
+> release. See [the roadmap](docs/ROADMAP.md) for what works and what does not.
 > Large parts were written with generative AI — see [AI usage](#ai-usage).
+
+## Table of contents
+
+- [What works today](#what-works-today)
+- [Quickstart](#quickstart)
+- [Sharing with a friend](#sharing-with-a-friend)
+  - [The tracker](#the-tracker)
+  - [Seeding limits](#seeding-limits)
+  - [A dynamic endpoint (gluetun)](#a-dynamic-endpoint-gluetun)
+  - [The lighthouse](#the-lighthouse)
+- [Sharing music, books, and more](#sharing-music-books-and-more)
+- [Friends finding each other](#friends-finding-each-other)
+- [Sharing a plain directory, no \*arr app at all](#sharing-a-plain-directory-no-arr-app-at-all)
+- [Authenticating to qBittorrent](#authenticating-to-qbittorrent)
+  - [If a correct key is rejected](#if-a-correct-key-is-rejected)
+- [Using Transmission instead of qBittorrent](#using-transmission-instead-of-qbittorrent)
+- [Using rTorrent / ruTorrent instead of qBittorrent](#using-rtorrent--rutorrent-instead-of-qbittorrent)
+- [The CLI](#the-cli)
+- [Building and testing](#building-and-testing)
+- [Layout](#layout)
+- [AI usage](#ai-usage)
+- [Licence](#licence)
+
+See also: [the configuration reference](docs/CONFIGURATION.md), [the
+roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
+[the security policy](SECURITY.md).
 
 ## What works today
 
@@ -31,7 +57,7 @@ design is built around.
 | -------------------------------------------------------------------------------- | --- |
 | Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr**                  | ✅  |
 | Torrent construction, files never moved                                          | ✅  |
-| Seeding through qBittorrent **or Transmission**                                  | ✅  |
+| Seeding through qBittorrent, Transmission, **or rTorrent/ruTorrent**             | ✅  |
 | Builtin BitTorrent tracker, served by sharerr itself                             | ✅  |
 | Torznab feed for Prowlarr, with magnet links                                     | ✅  |
 | Jackett compatibility: URLs, indexer list, JSON results                          | ✅  |
@@ -97,9 +123,10 @@ setting up — and revoking one person leaves everybody else working. That key i
 also what a magnet from the feed embeds as the announce token, so revoking a
 friend cuts their access to sharerr's own tracker too, not just the feed —
 instantly, and with no effect on anyone else, since nobody else's access ever
-depended on it. This only applies to what a friend fetches by magnet; a
-`.torrent` downloaded directly still carries the one shared fallback token
-today (see [the roadmap](docs/roadmap.md)'s "Per-peer announce tokens").
+depended on it. The same attribution applies whether a friend's Sonarr fetches
+by magnet or downloads the `.torrent` directly — see [the
+roadmap](docs/ROADMAP.md)'s "Per-peer announce tokens" for what is still
+outstanding (rotating the shared fallback token itself).
 
 You can also scope what each friend sees: everything, or only TV, films, music or
 books. That applies to the feed itself, not just the display — content outside a
@@ -228,7 +255,7 @@ endpoint` service, deliberately independent of the rest of sharerr, that a
 peer reports its endpoint to and a friend looks up under the API key that
 peer issued them. A request without a valid key still gets a plausible
 fabricated answer rather than an error, so scraping it yields only noise —
-see `docs/roadmap.md`'s "The lighthouse" for the full design.
+see `docs/ROADMAP.md`'s "The lighthouse" for the full design.
 
 Using one is a Settings → Lighthouse field, `lighthouse.urls` — one or more
 lighthouse base URLs, self-hosted by a friend or by you:
@@ -405,6 +432,49 @@ One difference worth knowing, enforced rather than documented-and-hoped:
   first time and is not something sharerr can fake safely — claiming completeness
   without verifying would mean seeding whatever happens to be at the path.
 
+## Using rTorrent / ruTorrent instead of qBittorrent
+
+rTorrent has no HTTP server of its own, so unlike qBittorrent and Transmission
+above there is no one standard path to guess — `rtorrent.url` is the exact
+address your reverse proxy answers XML-RPC requests on (commonly `/RPC2`, or
+ruTorrent's `/plugins/httprpc/action.php`), not a base address sharerr appends
+a path to:
+
+```toml
+torrent_backend = "rtorrent"
+
+[rtorrent]
+url = "http://seedbox.example/RPC2"
+username = "rtorrent"
+# rTorrent has no categories either — this one value stands in for
+# qBittorrent's category and tag, stored in rTorrent's d.custom1 field.
+label = "sharerr"
+```
+
+Then store the password: `printf %s "$PW" | sharerr vault set rtorrent.password`.
+rTorrent's own XML-RPC has no credential of its own; username and password are
+sent as HTTP Basic Auth on every request, for the common case where the
+reverse proxy in front of the RPC endpoint is what enforces access — if yours
+does not, any placeholder values work.
+
+Two differences worth knowing, same "enforced, not just documented" rule as
+Transmission's above:
+
+- **No skip-checking**, for the same reason as Transmission: rTorrent always
+  verifies a torrent's data against its piece hashes when a download starts.
+- **No per-torrent seed-ratio limit.** rTorrent's ratio enforcement is a
+  `.rtorrent.rc` schedule, not a setting exposed per torrent over XML-RPC — a
+  configured `ratio_limit` is accepted and silently has nothing to attach to.
+  `upload_limit_kib` *is* honoured, through a per-torrent named throttle.
+
+Replacing an already-seeding torrent's trackers — what keeps it announcing
+somewhere alive after your advertised endpoint rotates — is also incomplete
+for rTorrent specifically: its XML-RPC API has never grown a way to remove a
+tracker, so sharerr can only add the new endpoint as a fresh tier ahead of the
+stale one, not replace it outright. Harmless — the stale tier just goes on
+being tried and failing — but see [the roadmap](docs/ROADMAP.md)'s "Torrent
+clients" for the full reasoning.
+
 ## The CLI
 
 The UI covers everything, but each verb has a headless equivalent, which is what a
@@ -470,17 +540,16 @@ bytes. No real content is involved anywhere.
 | `sharerr-client`       | The narrow trait a torrent client backend implements      |
 | `sharerr-qbit`         | qBittorrent WebUI client                                  |
 | `sharerr-transmission` | Transmission RPC client                                   |
+| `sharerr-rtorrent`     | rTorrent XML-RPC client                                   |
 | `sharerr-store`        | Encrypted vault + SQLite store                            |
 | `sharerr-torrent`      | Torrent construction and tracker resolution               |
 | `sharerr-lighthouse`   | The lighthouse rendezvous service — its own binary too    |
 | `sharerr-testkit`      | Synthetic fixtures. Never in a release build              |
 
 The original design brief, and the two corrections the implementation forced on
-it, are in [docs/design.md](docs/design.md).
+it, are in [docs/DESIGN.md](docs/DESIGN.md).
 
 ## AI usage
-
-Heavily inspired by:
 
 Heavily inspired by: [Dictionarry/Profilarr's AI Transparency Statement](https://v2.dictionarry.dev/ai-transparency)
 

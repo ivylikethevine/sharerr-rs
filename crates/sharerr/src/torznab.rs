@@ -533,6 +533,13 @@ pub(crate) struct Matched {
     /// rather than once per item, since they are identical for every release in
     /// it.
     announces_encoded: Vec<String>,
+    /// The caller's own `key_hash`, to embed on `.torrent` download links the
+    /// same way [`Self::magnet_url`] embeds it in announce tiers — so
+    /// `crate::tracker::torrent_file` can serve back an announce rewritten for
+    /// this specific friend instead of the shared instance token. `None` under
+    /// the same condition the magnet omits a token entirely: no tracker token
+    /// configured, so there is nothing to attribute.
+    download_token: Option<String>,
     /// How many items were considered, before filtering.
     pub total: usize,
 }
@@ -540,11 +547,12 @@ pub(crate) struct Matched {
 impl Matched {
     /// The URL for one item's `.torrent`.
     pub fn download_url(&self, item: &SharedItem) -> String {
-        format!(
-            "{}{}",
-            self.base,
-            crate::tracker::torrent_download_path(item.info_hash.as_deref().unwrap_or_default())
-        )
+        let path =
+            crate::tracker::torrent_download_path(item.info_hash.as_deref().unwrap_or_default());
+        match &self.download_token {
+            Some(token) => format!("{}{path}?token={}", self.base, encode_component(token)),
+            None => format!("{}{path}", self.base),
+        }
     }
 
     /// The same release as a magnet URI, or empty when there is no info hash.
@@ -625,6 +633,7 @@ pub(crate) async fn collect(
         items: matched,
         base: config.public_base_url(),
         announces_encoded: announces.iter().map(|a| encode_component(a)).collect(),
+        download_token: token.map(str::to_owned),
         total,
     })
 }
@@ -646,7 +655,12 @@ pub(crate) fn render_feed(matched: &Matched) -> String {
     feed_xml(&entries)
 }
 
-async fn search(state: &ServeState, query: &SearchQuery, scope: PeerScope, peer_token: &str) -> Response {
+async fn search(
+    state: &ServeState,
+    query: &SearchQuery,
+    scope: PeerScope,
+    peer_token: &str,
+) -> Response {
     let matched = match collect(state, query, scope, peer_token).await {
         Ok(matched) => matched,
         Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
@@ -723,7 +737,9 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip());
 
-        check_api_key(state, apikey.as_deref(), remote).await
+        check_api_key(state, apikey.as_deref(), remote)
+            .await
+            .map_err(|rejection| *rejection)
     }
 }
 
@@ -736,11 +752,16 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
 /// No match means the endpoint is closed rather than open: an indexer feed
 /// lists everything this instance shares, and defaulting to unauthenticated
 /// would publish the library to anyone who found the port.
+///
+/// The error is boxed only to keep this `Result` under clippy's
+/// `result_large_err` threshold — `Response` alone is not. The one caller,
+/// [`Caller`]'s `FromRequestParts` impl, unboxes before returning, since its
+/// `Rejection` type is fixed by the trait.
 async fn check_api_key(
     state: &ServeState,
     supplied: Option<&str>,
     remote: Option<std::net::IpAddr>,
-) -> Result<Caller, Response> {
+) -> Result<Caller, Box<Response>> {
     let refused = || {
         xml_status(
             StatusCode::UNAUTHORIZED,
@@ -752,7 +773,7 @@ async fn check_api_key(
     // has no key configured" to an unauthenticated caller would confirm the port
     // belongs to sharerr.
     let Some(supplied) = supplied.filter(|key| !key.is_empty()) else {
-        return Err(refused());
+        return Err(Box::new(refused()));
     };
 
     // One indexed lookup on a SHA-256 of the supplied key.
@@ -786,16 +807,16 @@ async fn check_api_key(
                 // a comparison that might pass — but it also must not be reported as
                 // bad credentials, which would send the operator to the wrong place.
                 tracing::error!(error = %err, "could not check peer keys");
-                return Err(xml_status(
+                return Err(Box::new(xml_status(
                     StatusCode::SERVICE_UNAVAILABLE,
                     error_xml(900, "could not check credentials"),
-                ));
+                )));
             }
         }
     }
 
     tracing::warn!("rejected a torznab request with a bad api key");
-    Err(refused())
+    Err(Box::new(refused()))
 }
 
 /// Best-effort: a peer was just seen (an authenticated feed request, a
@@ -820,7 +841,13 @@ pub(crate) async fn record_sighting(
         Ok(true) => {
             if let Some(addr) = addr
                 && let Err(err) = store
-                    .record_peer_endpoint(peer_id, kind, addr, now_epoch(), sharerr_store::ObservedVia::Direct)
+                    .record_peer_endpoint(
+                        peer_id,
+                        kind,
+                        addr,
+                        now_epoch(),
+                        sharerr_store::ObservedVia::Direct,
+                    )
                     .await
             {
                 tracing::warn!(peer_id, error = %err, "could not record a peer's address");
@@ -1037,6 +1064,39 @@ mod tests {
         assert!(
             xml.contains(r#"<enclosure url="http://seed.example:8477/torrents/x.torrent" length="2147483648" type="application/x-bittorrent"/>"#),
             "{xml}"
+        );
+    }
+
+    /// The `.torrent` download link carries the caller's own token — for
+    /// `crate::tracker::torrent_file` to rewrite the announce it serves back —
+    /// under exactly the same condition `magnet_url`'s tiers do: only when
+    /// there is a tracker token configured at all to attribute against. With
+    /// none set, the link is unchanged from what it has always been.
+    #[test]
+    fn the_download_url_carries_a_peers_token_only_when_one_was_collected() {
+        let item = episode("X.S01E01", 1, 1);
+        let hash = item.info_hash.clone().unwrap();
+
+        let untokened = Matched {
+            items: vec![],
+            base: "http://seed.example:8477".to_owned(),
+            announces_encoded: vec![],
+            download_token: None,
+            total: 0,
+        };
+        assert_eq!(
+            untokened.download_url(&item),
+            format!("http://seed.example:8477/torrents/{hash}.torrent"),
+            "no token configured must leave the link exactly as before this feature"
+        );
+
+        let tokened = Matched {
+            download_token: Some("sams-key-hash".to_owned()),
+            ..untokened
+        };
+        assert_eq!(
+            tokened.download_url(&item),
+            format!("http://seed.example:8477/torrents/{hash}.torrent?token=sams-key-hash")
         );
     }
 

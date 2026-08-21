@@ -386,7 +386,11 @@ mod tests {
 
     #[test]
     fn every_observed_via_round_trips_and_unknown_values_default_to_gossip() {
-        for via in [ObservedVia::Direct, ObservedVia::Gossip, ObservedVia::Lighthouse] {
+        for via in [
+            ObservedVia::Direct,
+            ObservedVia::Gossip,
+            ObservedVia::Lighthouse,
+        ] {
             assert_eq!(ObservedVia::parse(via.as_str()), via);
         }
         assert_eq!(ObservedVia::parse("carrier-pigeon"), ObservedVia::Gossip);

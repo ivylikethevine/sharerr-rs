@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::SecretString;
 use serde::Deserialize;
-use sharerr_core::config::{SyncConfig, config_paths, secret_keys};
+use sharerr_core::config::{SyncConfig, TorrentBackend, config_paths, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Vault, master_key_from_env};
 
@@ -141,6 +141,36 @@ pub struct QbitForm {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+pub struct TransmissionForm {
+    url: String,
+    username: String,
+    password: String,
+    clear_password: Option<String>,
+    label: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RtorrentForm {
+    url: String,
+    username: String,
+    password: String,
+    clear_password: Option<String>,
+    label: String,
+}
+
+/// Which torrent client `torrent_backend` selects — its own tiny form,
+/// separate from either client's own fields, because switching backends and
+/// editing one backend's connection details are different actions with
+/// different save buttons.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentBackendForm {
+    backend: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct TrackerForm {
     advertised_host: String,
     port: String,
@@ -205,22 +235,19 @@ pub struct NotificationsForm {
 /// Repeated inputs, one entry per row. `axum_extra`'s `Form` is what makes this
 /// work — axum's own uses `serde_urlencoded`, which cannot decode repeated keys
 /// into a `Vec`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct PathsForm {
-    #[serde(default)]
     arr: Vec<String>,
-    #[serde(default)]
     sharerr: Vec<String>,
-    #[serde(default)]
     qbit: Vec<String>,
 }
 
 /// The `[[library]]` rows, same repeated-input shape as [`PathsForm`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct LibrariesForm {
-    #[serde(default)]
     path: Vec<String>,
-    #[serde(default)]
     kind: Vec<String>,
 }
 
@@ -342,6 +369,94 @@ pub async fn save_qbittorrent(
     .await
 }
 
+pub async fn save_transmission(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<TransmissionForm>,
+) -> Response {
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::TRANSMISSION_PASSWORD,
+        &form.password,
+        form.clear_password,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    write_config(&state, "transmission", next.next, |file| {
+        let url = form.url.trim();
+        if url.is_empty() {
+            anyhow::bail!("Transmission's URL is required — sharerr cannot seed without it");
+        }
+        file.apply([
+            Edit::str(config_paths::TRANSMISSION_URL, normalise_url(url)?),
+            // `str_or_unset`, not `str`: blank here means the input was never
+            // touched (locked, or no master key yet) and should fall back to
+            // the compiled default, not store a literal empty username/label —
+            // same reasoning as qBittorrent's category and tag above.
+            Edit::str_or_unset(config_paths::TRANSMISSION_USERNAME, form.username.trim()),
+            Edit::str_or_unset(config_paths::TRANSMISSION_LABEL, form.label.trim()),
+        ]);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn save_rtorrent(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<RtorrentForm>,
+) -> Response {
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::RTORRENT_PASSWORD,
+        &form.password,
+        form.clear_password,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    write_config(&state, "rtorrent", next.next, |file| {
+        let url = form.url.trim();
+        if url.is_empty() {
+            anyhow::bail!(
+                "rTorrent's URL is required — sharerr cannot seed without it. This is the \
+                 exact XML-RPC endpoint your reverse proxy answers on, not a base address."
+            );
+        }
+        file.apply([
+            Edit::str(config_paths::RTORRENT_URL, normalise_url(url)?),
+            // `str_or_unset`, not `str` — same reasoning as Transmission above.
+            Edit::str_or_unset(config_paths::RTORRENT_USERNAME, form.username.trim()),
+            Edit::str_or_unset(config_paths::RTORRENT_LABEL, form.label.trim()),
+        ]);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn save_torrent_backend(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<TorrentBackendForm>,
+) -> Response {
+    write_config(&state, "torrent_backend", next.next, |file| {
+        let backend = match form.backend.as_str() {
+            "qbittorrent" => TorrentBackend::Qbittorrent,
+            "transmission" => TorrentBackend::Transmission,
+            "rtorrent" => TorrentBackend::Rtorrent,
+            other => anyhow::bail!("{other:?} is not a torrent client sharerr supports"),
+        };
+        file.apply([Edit::str(config_paths::TORRENT_BACKEND, backend.as_str())]);
+        Ok(())
+    })
+    .await
+}
+
 pub async fn save_tracker(
     State(state): State<WebState>,
     Query(next): Query<NextQuery>,
@@ -433,11 +548,10 @@ pub async fn save_lighthouse(
     .await
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct SeedingForm {
-    #[serde(default)]
     upload_limit_kib: String,
-    #[serde(default)]
     ratio_limit: String,
 }
 
@@ -471,9 +585,12 @@ fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
 }
 
 /// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
-/// hands a torrent to the client — see `docs/roadmap.md`'s "Ratio and
+/// hands a torrent to the client — see `docs/ROADMAP.md`'s "Ratio and
 /// bandwidth control" and [`sharerr_core::config::SeedingConfig`].
-pub async fn save_seeding(State(state): State<WebState>, Form(form): Form<SeedingForm>) -> Response {
+pub async fn save_seeding(
+    State(state): State<WebState>,
+    Form(form): Form<SeedingForm>,
+) -> Response {
     let upload_limit_kib = match parse_upload_limit_kib(&form.upload_limit_kib) {
         Ok(v) => v,
         Err(err) => return reject(&state, &format!("{err:#}")).await,
@@ -520,7 +637,7 @@ pub async fn save_gluetun(
 
 /// The second poller — the torrent client's own tunnel, when it is a separate
 /// one from the tracker's. Same form shape, same rules, a different section:
-/// see `docs/roadmap.md`'s "a peer with two addresses".
+/// see `docs/ROADMAP.md`'s "a peer with two addresses".
 pub async fn save_gluetun_client(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
@@ -723,12 +840,7 @@ pub async fn save_paths(
 ///
 /// Every settings handler goes through here so that no path can skip the
 /// validate-before-write step or forget to invalidate the syncer.
-async fn write_config<F>(
-    state: &WebState,
-    section: &str,
-    next: Option<String>,
-    edit: F,
-) -> Response
+async fn write_config<F>(state: &WebState, section: &str, next: Option<String>, edit: F) -> Response
 where
     F: FnOnce(&mut ConfigFile) -> anyhow::Result<()>,
 {
@@ -1027,11 +1139,23 @@ async fn build_page(
         arrs,
         secondary_arr_configured,
 
+        torrent_backend: config.torrent_backend.as_str(),
+
         qbit_url: config.qbittorrent.url.to_string(),
         qbit_api_key_set: is_set(secret_keys::QBITTORRENT_API_KEY),
         qbit_category: config.qbittorrent.category.clone(),
         qbit_tag: config.qbittorrent.tag.clone(),
         qbit_skip_checking: config.qbittorrent.skip_checking,
+
+        transmission_url: config.transmission.url.to_string(),
+        transmission_username: config.transmission.username.clone(),
+        transmission_password_set: is_set(secret_keys::TRANSMISSION_PASSWORD),
+        transmission_label: config.transmission.label.clone(),
+
+        rtorrent_url: config.rtorrent.url.to_string(),
+        rtorrent_username: config.rtorrent.username.clone(),
+        rtorrent_password_set: is_set(secret_keys::RTORRENT_PASSWORD),
+        rtorrent_label: config.rtorrent.label.clone(),
 
         seeding_upload_limit_kib: config
             .seeding
@@ -1145,6 +1269,9 @@ mod tests {
         serde_json::from_str::<GeneralForm>("{}").unwrap();
         serde_json::from_str::<ArrForm>(r#"{}"#).unwrap();
         serde_json::from_str::<QbitForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<TransmissionForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<RtorrentForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<TorrentBackendForm>(r#"{}"#).unwrap();
         serde_json::from_str::<TrackerForm>(r#"{}"#).unwrap();
         serde_json::from_str::<LighthouseForm>(r#"{}"#).unwrap();
         serde_json::from_str::<GluetunForm>(r#"{}"#).unwrap();
@@ -1178,7 +1305,10 @@ mod tests {
         assert_eq!(urls, vec!["https://one.example/", "https://two.example/"]);
 
         assert_eq!(parse_lighthouse_urls("").unwrap(), Vec::<String>::new());
-        assert_eq!(parse_lighthouse_urls("   \n  \n").unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_lighthouse_urls("   \n  \n").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -1329,6 +1459,213 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn save_transmission_writes_url_username_and_label_to_the_config_file() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        // Blank password with no clear flag never touches the vault — see
+        // `apply_secret`'s early return — same reasoning `save_arr`'s own
+        // config-writing test relies on.
+        let response = save_transmission(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TransmissionForm {
+                url: "transmission:9091".to_owned(),
+                username: "sam".to_owned(),
+                password: String::new(),
+                clear_password: None,
+                label: "shared".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .expect("a successful save redirects"),
+            "/settings?saved=transmission"
+        );
+
+        let written =
+            std::fs::read_to_string(&config_path).expect("save_transmission writes the file");
+        assert!(written.contains("http://transmission:9091/"), "{written}");
+        assert!(written.contains(r#"username = "sam""#), "{written}");
+        assert!(written.contains(r#"label = "shared""#), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_transmission_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config()
+     {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        // A non-blank password routes through `apply_secret`, which opens the
+        // vault — impossible here with no master key set. The handler must
+        // reject before `write_config` ever runs, or the URL/username/label
+        // would land in `sharerr.toml` while the password silently failed to
+        // save beside it.
+        let response = save_transmission(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TransmissionForm {
+                url: "transmission:9091".to_owned(),
+                username: "sam".to_owned(),
+                password: "hunter2".to_owned(),
+                clear_password: None,
+                label: "shared".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            !config_path.exists(),
+            "a rejected secret write must not leave a partial config file behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_rtorrent_writes_url_username_and_label_to_the_config_file() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_rtorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(RtorrentForm {
+                url: "http://seedbox.example/RPC2".to_owned(),
+                username: "sam".to_owned(),
+                password: String::new(),
+                clear_password: None,
+                label: "shared".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .expect("a successful save redirects"),
+            "/settings?saved=rtorrent"
+        );
+
+        let written = std::fs::read_to_string(&config_path).expect("save_rtorrent writes the file");
+        assert!(written.contains("http://seedbox.example/RPC2"), "{written}");
+        assert!(written.contains(r#"username = "sam""#), "{written}");
+        assert!(written.contains(r#"label = "shared""#), "{written}");
+    }
+
+    /// The URL is the exact RPC endpoint, not a base — `normalise_url` must
+    /// not silently append a trailing slash the way a plain-origin URL would
+    /// parse to, or the path a reverse proxy actually listens on would be lost.
+    #[tokio::test]
+    async fn save_rtorrent_preserves_the_exact_rpc_path() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        save_rtorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(RtorrentForm {
+                url: "http://seedbox.example/plugins/httprpc/action.php".to_owned(),
+                username: String::new(),
+                password: String::new(),
+                clear_password: None,
+                label: String::new(),
+            }),
+        )
+        .await;
+
+        let written = std::fs::read_to_string(&config_path).expect("save_rtorrent writes the file");
+        assert!(
+            written.contains("http://seedbox.example/plugins/httprpc/action.php"),
+            "{written}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_rtorrent_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config()
+    {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_rtorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(RtorrentForm {
+                url: "http://seedbox.example/RPC2".to_owned(),
+                username: "sam".to_owned(),
+                password: "hunter2".to_owned(),
+                clear_password: None,
+                label: "shared".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            !config_path.exists(),
+            "a rejected secret write must not leave a partial config file behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_torrent_backend_writes_the_selected_client() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_torrent_backend(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TorrentBackendForm {
+                backend: "transmission".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written =
+            std::fs::read_to_string(&config_path).expect("save_torrent_backend writes the file");
+        assert!(
+            written.contains(r#"torrent_backend = "transmission""#),
+            "{written}"
+        );
+    }
+
+    /// A value that did not come from the `<select>`'s own two `<option>`s —
+    /// hand-crafted or stale from a future backend this build does not know —
+    /// must be refused rather than written, so `sharerr.toml` never ends up
+    /// naming a client [`sharerr_core::config::TorrentBackend`] cannot parse.
+    #[tokio::test]
+    async fn save_torrent_backend_rejects_a_value_that_is_not_a_known_client() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_torrent_backend(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TorrentBackendForm {
+                backend: "deluge".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
     /// The wizard is the only source of `next`, but the value still arrives
     /// through an ordinary query string that a crafted link could set to
     /// anything — a scheme-relative or absolute URL must not survive to
@@ -1340,10 +1677,7 @@ mod tests {
             Some("/wizard/paths".to_owned())
         );
         assert_eq!(sanitize_next(Some("//evil.example".to_owned())), None);
-        assert_eq!(
-            sanitize_next(Some("https://evil.example".to_owned())),
-            None
-        );
+        assert_eq!(sanitize_next(Some("https://evil.example".to_owned())), None);
         assert_eq!(sanitize_next(Some(String::new())), None);
         assert_eq!(sanitize_next(None), None);
     }

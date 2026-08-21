@@ -102,6 +102,7 @@ pub fn normalise_base(base: &Url) -> Url {
 pub enum ClientKind {
     QBittorrent,
     Transmission,
+    Rtorrent,
 }
 
 impl ClientKind {
@@ -110,6 +111,7 @@ impl ClientKind {
         match self {
             Self::QBittorrent => "qBittorrent",
             Self::Transmission => "Transmission",
+            Self::Rtorrent => "rTorrent",
         }
     }
 }

@@ -1,0 +1,49 @@
+title: sharerr
+description: Share your media library with friends, over the tools you already run.
+theme: minima
+
+plugins:
+  - jekyll-relative-links
+  - jekyll-readme-index
+  - jekyll-optional-front-matter
+  - jekyll-titles-from-headings
+
+# None of README.md/docs/*.md carry front matter, so without this they render
+# as bare content with no theme chrome (no <head>, no nav, no styling).
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Rewrite relative links between docs (e.g. docs/ROADMAP.md -> ../README.md) to
+# the .html permalinks Jekyll actually generates, instead of dead .md links.
+relative_links:
+  enabled: true
+  collections: true
+
+# Serve README.md as the site's index page without needing a separate index.md
+# that would just duplicate it.
+readme_index:
+  with_frontmatter: true
+
+# Everything here is source code, build tooling, or agent-facing docs — not part
+# of the published site. Files/dirs starting with . or _ are already ignored by
+# Jekyll by default and don't need listing here.
+exclude:
+  - crates/
+  - docker/
+  - migrations/
+  - tests/
+  - target/
+  - run_docker_tests.sh
+  - Dockerfile
+  - Dockerfile.lighthouse
+  - Justfile
+  - Cargo.toml
+  - Cargo.lock
+  - deny.toml
+  - rustfmt.toml
+  - CLAUDE.md
+  - Gemfile
+  - Gemfile.lock

@@ -1,6 +1,6 @@
 //! The lighthouse: semi-anonymous `key hash -> latest endpoint` rendezvous.
 //!
-//! See `docs/roadmap.md`'s "The lighthouse" for the design brief this
+//! See `docs/ROADMAP.md`'s "The lighthouse" for the design brief this
 //! implements. In short: two friends whose addresses both rotated while
 //! neither was watching have no path back to each other through gossip alone.
 //! The lighthouse is the fallback — a peer reports its current endpoint under
@@ -250,12 +250,14 @@ impl LighthouseState {
         // last day rather than the real clock alone, so two probes minutes
         // apart still get byte-identical answers.
         let offset_bytes = self.derive(b"signed_at", key_hash);
-        let offset = i64::from(u32::from_be_bytes([
-            offset_bytes[0],
-            offset_bytes[1],
-            offset_bytes[2],
-            offset_bytes[3],
-        ]) % 86_400);
+        let offset = i64::from(
+            u32::from_be_bytes([
+                offset_bytes[0],
+                offset_bytes[1],
+                offset_bytes[2],
+                offset_bytes[3],
+            ]) % 86_400,
+        );
         let signed_at = now_epoch() - offset;
 
         let mut signature = self.derive(b"sig-a", key_hash).to_vec();
@@ -305,9 +307,11 @@ async fn report(
     match state.report(&key_hash, record).await {
         Ok(ReportOutcome::Accepted) => (StatusCode::OK, "accepted").into_response(),
         Ok(ReportOutcome::Stale) => (StatusCode::OK, "stale").into_response(),
-        Err(ReportError::BadKeyHash) => {
-            (StatusCode::BAD_REQUEST, "key hash must be 64 hex characters").into_response()
-        }
+        Err(ReportError::BadKeyHash) => (
+            StatusCode::BAD_REQUEST,
+            "key hash must be 64 hex characters",
+        )
+            .into_response(),
         Err(ReportError::InvalidRecord) => {
             (StatusCode::BAD_REQUEST, "record did not verify").into_response()
         }
@@ -318,7 +322,10 @@ async fn report(
 /// JSON shape, real record or decoy. A malformed key hash still gets a
 /// decoy rather than a `400`: a probe that can distinguish "malformed" from
 /// "unknown" learns something it should not.
-async fn lookup(State(state): State<Arc<LighthouseState>>, Path(key_hash): Path<String>) -> Response {
+async fn lookup(
+    State(state): State<Arc<LighthouseState>>,
+    Path(key_hash): Path<String>,
+) -> Response {
     let key_hash = key_hash.to_lowercase();
     let key_hash = if valid_key_hash(&key_hash) {
         key_hash
@@ -427,10 +434,7 @@ mod tests {
         let mut record = signed_record(1, "203.0.113.9:1", 1000);
         record.signature = "00".repeat(64);
 
-        let err = state
-            .report(&hash_key("k"), record)
-            .await
-            .unwrap_err();
+        let err = state.report(&hash_key("k"), record).await.unwrap_err();
         assert_eq!(err, ReportError::InvalidRecord);
     }
 
