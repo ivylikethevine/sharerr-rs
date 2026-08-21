@@ -35,7 +35,10 @@ use sharerr_torrent::title::{self, ParsedTitle};
 /// few levels deep; a walk that is fifty levels down has hit a cycle the
 /// symlink check missed or a pathological tree, and either way should stop
 /// rather than spin.
-const MAX_DEPTH: usize = 16;
+///
+/// Shared with [`crate::pathsuggest`], which indexes the search root under
+/// the same bound for the same reason.
+pub(crate) const MAX_DEPTH: usize = 16;
 
 /// What scanning one library produced.
 #[derive(Debug, Default)]

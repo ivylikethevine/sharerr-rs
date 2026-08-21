@@ -80,6 +80,19 @@ impl MediaSource {
         Self::Whisparr,
     ];
 
+    /// Whether this app's tags apply above the level of one shared item —
+    /// series-level for Sonarr and Whisparr (Whisparr is Sonarr's codebase, see
+    /// [`Self::api_version`]), artist-level for Lidarr, author-level for
+    /// Readarr — so tagging one thing shares its whole run at once. Radarr's
+    /// tags are movie-level, which is naturally per-item, and a directory
+    /// library has no tags to begin with.
+    pub fn has_coarse_tagging(self) -> bool {
+        matches!(
+            self,
+            Self::Sonarr | Self::Whisparr | Self::Lidarr | Self::Readarr
+        )
+    }
+
     /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
     ///
     /// This is *the* decoder for stored and URL-borne source names; a local

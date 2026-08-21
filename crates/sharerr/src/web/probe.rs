@@ -18,6 +18,7 @@
 
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
+use secrecy::SecretString;
 use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
 
@@ -194,15 +195,19 @@ async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
     let client = config.torrent_client();
 
     // Both secrets are read before choosing, so that an unreadable vault is
-    // reported as such rather than as a missing credential.
-    let api_key = match client.api_key_key {
-        Some(key) => state.secret(key).await,
-        None => Ok(None),
+    // reported as such rather than as a missing credential. Opened once —
+    // going through `state.secret` for each key would open (and Argon2-derive)
+    // the vault twice for one badge.
+    let vault = state.serve.open_vault().await;
+    let read = |key: Option<&'static str>| -> Result<Option<SecretString>, String> {
+        match (key, &vault) {
+            (Some(key), Ok(vault)) => vault.get(key).map_err(|err| err.to_string()),
+            (Some(_), Err(reason)) => Err(reason.clone()),
+            (None, _) => Ok(None),
+        }
     };
-    let password = match client.password_key {
-        Some(key) => state.secret(key).await,
-        None => Ok(None),
-    };
+    let api_key = read(client.api_key_key);
+    let password = read(client.password_key);
     let credential = match (api_key, password) {
         (Err(reason), _) | (_, Err(reason)) => Err(reason),
         (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),

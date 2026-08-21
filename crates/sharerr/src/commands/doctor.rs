@@ -55,6 +55,26 @@ impl Report {
     }
 }
 
+/// Prints up to [`MAX_LISTED`] items via `show`, then a "... and N more" line
+/// for the rest — the truncation shape both `check_paths` overflow reports
+/// share.
+fn report_capped<T>(
+    report: &mut Report,
+    items: &[T],
+    mut show: impl FnMut(&mut Report, &T),
+    more_suffix: &str,
+) {
+    for item in items.iter().take(MAX_LISTED) {
+        show(report, item);
+    }
+    if items.len() > MAX_LISTED {
+        report.info(format!(
+            "  ... and {} more{more_suffix}",
+            items.len() - MAX_LISTED
+        ));
+    }
+}
+
 pub async fn run(
     config: &Config,
     config_error: Option<&str>,
@@ -347,10 +367,12 @@ async fn check_arr(
         } => {
             report.ok(format!("{} responded ({app_name} {version})", service.url));
             report.ok(format!("{} file(s) tagged {:?}", items.len(), config.tag));
-            if kind == MediaSource::Sonarr {
-                // Not a defect, but it surprises people: Sonarr has no
-                // episode-level tags, so tagging a series shares all of it.
-                report.info("note: Sonarr tags are series-level, so every episode file is shared");
+            if kind.has_coarse_tagging() {
+                // Not a defect, but it surprises people: these apps have no
+                // per-item tags, so tagging one thing shares its whole run.
+                report.info(format!(
+                    "note: {kind} tags are not per-item, so tagging one thing shares everything under it"
+                ));
             }
             items
         }
@@ -680,7 +702,9 @@ async fn check_gluetun(config: &Config, vault: Option<&Vault>, report: &mut Repo
         }
     };
 
-    let ip = match client.public_ip().await {
+    let (ip_result, port_result) = tokio::join!(client.public_ip(), client.forwarded_port());
+
+    let ip = match ip_result {
         Ok(ip) => {
             report.ok(format!("public IP per {control}: {ip}"));
             Some(ip)
@@ -691,7 +715,7 @@ async fn check_gluetun(config: &Config, vault: Option<&Vault>, report: &mut Repo
         }
     };
 
-    match client.forwarded_port().await {
+    match port_result {
         Ok(port) => report.ok(format!(
             "forwarded port: {port} — the endpoint is resolved dynamically"
         )),
@@ -779,15 +803,12 @@ fn check_paths(config: &Config, discovered: &[Discovered], report: &mut Report) 
     // wording below belongs to this command.
     let paths = checks::check_paths(config, discovered);
 
-    for reason in paths.invalid.iter().take(MAX_LISTED) {
-        report.fail(reason);
-    }
-    if paths.invalid.len() > MAX_LISTED {
-        report.info(format!(
-            "  ... and {} more unresolvable path(s)",
-            paths.invalid.len() - MAX_LISTED
-        ));
-    }
+    report_capped(
+        report,
+        &paths.invalid,
+        |r, reason| r.fail(reason),
+        " unresolvable path(s)",
+    );
 
     if let Some(sample) = &paths.sample {
         report.info(format!(
@@ -821,15 +842,12 @@ fn check_paths(config: &Config, discovered: &[Discovered], report: &mut Report) 
             paths.missing.len(),
             paths.checked
         ));
-        for path in paths.missing.iter().take(MAX_LISTED) {
-            report.info(format!("  {}", path.display()));
-        }
-        if paths.missing.len() > MAX_LISTED {
-            report.info(format!(
-                "  ... and {} more",
-                paths.missing.len() - MAX_LISTED
-            ));
-        }
+        report_capped(
+            report,
+            &paths.missing,
+            |r, path| r.info(format!("  {}", path.display())),
+            "",
+        );
         report.info("fix the [[path_map]] rules so the arr view maps onto sharerr's mount");
     }
 }

@@ -30,10 +30,7 @@ use std::path::{Path, PathBuf};
 
 use sharerr_core::Discovered;
 
-/// Directories deeper than this are not descended into while indexing the
-/// search root — the same bound `library::scan` uses, for the same reason: a
-/// walk this deep has hit a cycle or a pathological tree, not a real library.
-const MAX_DEPTH: usize = 16;
+use crate::library::MAX_DEPTH;
 
 /// One proposed `arr = "..."` / `sharerr = "..."` pair, derived from matching
 /// discovered files against what actually exists under the search root.

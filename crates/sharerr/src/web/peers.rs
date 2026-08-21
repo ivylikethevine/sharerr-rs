@@ -257,11 +257,14 @@ async fn build(
     let (peers, endpoints, list_error) = match state.serve.store().await {
         Ok(store) => match store.list_peers().await {
             Ok(peers) => {
-                // One extra query per friend; the list is people, not rows.
-                let mut endpoints = Vec::with_capacity(peers.len());
-                for peer in &peers {
-                    endpoints.push(store.peer_endpoints(peer.id).await.unwrap_or_default());
-                }
+                // One extra query per friend; the list is people, not rows —
+                // but run concurrently rather than one round trip at a time.
+                let endpoints = futures::future::join_all(
+                    peers
+                        .iter()
+                        .map(|peer| async { store.peer_endpoints(peer.id).await.unwrap_or_default() }),
+                )
+                .await;
                 (peers, endpoints, None)
             }
             Err(err) => (

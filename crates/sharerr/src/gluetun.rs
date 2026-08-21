@@ -100,14 +100,6 @@ impl GluetunTarget {
             Self::Client => secret_keys::GLUETUN_CLIENT_API_KEY,
         }
     }
-
-    /// Index into the per-target arrays `ServeState` keys by this enum.
-    pub(crate) fn index(self) -> usize {
-        match self {
-            Self::Tracker => 0,
-            Self::Client => 1,
-        }
-    }
 }
 
 /// What a gluetun poller last saw and last failed with, so the Diagnostics
@@ -252,7 +244,7 @@ impl GluetunClient {
             })?;
 
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
+        if sharerr_client::is_auth_rejection(status) {
             return Err(GluetunError::Unauthorized {
                 url: self.base.to_string(),
             });

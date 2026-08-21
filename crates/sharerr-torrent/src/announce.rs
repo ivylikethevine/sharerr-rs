@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
+use sharerr_core::endpoint::is_private_ip;
 use tokio::sync::RwLock;
 
 /// How long a client is told to wait before re-announcing.
@@ -158,17 +159,10 @@ impl AnnounceRequest {
     /// the more informed answer.
     pub fn resolve_addr(&self, remote: IpAddr) -> SocketAddr {
         let ip = match self.declared_ip {
-            Some(declared) if is_private(remote) => declared,
+            Some(declared) if is_private_ip(remote) => declared,
             _ => remote,
         };
         SocketAddr::new(ip, self.port)
-    }
-}
-
-fn is_private(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
-        IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
     }
 }
 

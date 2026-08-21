@@ -1,19 +1,11 @@
 # Roadmap
 
-Where sharerr is and where it is going. Status is honest: _Done_ means implemented
-and covered by tests, not merely written.
+Where sharerr is going next.
 
 sharerr is **experimental**. Nothing below is a release commitment, and the
-ordering is a judgement about value, not a schedule.
-
-## Status
-
-| Milestone | Scope                                                                       | Status      |
-| --------- | --------------------------------------------------------------------------- | ----------- |
-| —         | The lighthouse: semi-anonymous endpoint rendezvous, its own image and port  | Done        |
-| —         | Ratio and bandwidth control: per-torrent upload cap and seed-ratio goal     | Done        |
-
----
+ordering is a judgement about value, not a schedule. What has already shipped
+lives in [the README](../README.md#what-works-today), not here — this page
+tracks what is still ahead.
 
 ### Library sources (where tagged content comes from)
 
@@ -45,59 +37,32 @@ mechanism the client offers for it, same as qBittorrent (inline on
 | ------------------------ | ----------------------------------------------------------------------------------------------------- |
 | **rTorrent / ruTorrent** | XML-RPC. Popular on seedboxes, which is exactly where someone would want to share a large library.  |
 
-**Transmission-compatible forks.** Confirmed by inspection: `sharerr-transmission` has no
-version pinning, fork detection, or anything else RPC-version-specific — it only implements the
-documented session-id handshake and standard `torrent-*`/`session-get` methods
-(`crates/sharerr-transmission/src/lib.rs`). The tier-2 suite already drives this same client
-against a real `transmission-daemon` (`docker/compose.transmission.yml`) over genuine RPC, which
-is the same protocol surface a compatible fork would present — there is no fork-specific behavior
-in the client left to separately prove. Standing up a real fork was investigated and set aside:
-the one actively-maintained candidate has no published Docker image, and its own maintainers
-describe its RPC compatibility as imperfect — not a good use of effort to re-confirm what tier-2
-already covers.
+**Transmission-compatible forks:** not planned as separate work. `sharerr-transmission` has no
+version pinning or fork detection — it only speaks the documented session-id handshake and
+standard `torrent-*`/`session-get` methods, which is the same protocol surface a compatible fork
+presents. Standing up a real fork for tier-2 was investigated and set aside: the one
+actively-maintained candidate has no published Docker image and its own maintainers describe its
+RPC compatibility as imperfect.
 
 ### Indexers (what consumes the feed)
 
 Today: **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
-**Sonarr/Radarr/Lidarr direct** (each confirmed against a real instance in the
-tier-2 suite — `docker/compose.test.yml`'s `lidarr` service, seeded the same way
-as Sonarr/Radarr via `seed-arr`, and a real Lidarr accepting sharerr as a Torznab
-indexer over category 3000). **Readarr direct is explicitly out of scope**: this
-project targets small-scale homelab media-file sharing, and books are a
-different, much smaller scale of content than the audio/video files everything
-else here shares — existing Readarr library-source support is unaffected, this
-is only about the indexer direction.
-
-One earlier "should already work" assumption turned out not to (Sonarr direct
-rejected the feed over a missing `pubDate`) — worth remembering the next time
-something in this table looks done just because the shape matches. Confirming
-Lidarr direct surfaced three more, unrelated to Lidarr itself: `seed-arr`'s
-Lidarr schema had to be reverse-engineered against a live container from
-scratch (nothing in the repo named it, unlike Sonarr/Radarr's), and
-`run_docker_tests.sh` turned out to have silently rotted out from under three
-separate drifts nothing had caught since tier-2 is opt-in and CI never runs it:
-a stale `qbittorrent.username` config key (`QbitConfig` has never had one),
-qBittorrent pinned at 5.0.4 while `sharerr-qbit` speaks only the WebUI API key
-introduced in 5.2, and the Torznab feed's `apikey` check being peer-only with no
-shared-secret fallback while the script still tried to vault-set one. All three
-are fixed as part of this work; the tier-2 suite passes end to end again.
+**Sonarr/Radarr/Lidarr direct**, each confirmed against a real instance in the
+tier-2 suite. **Readarr direct is explicitly out of scope**: this project
+targets small-scale homelab media-file sharing, and books are a different,
+much smaller scale of content than the audio/video files everything else here
+shares — existing Readarr library-source support is unaffected, this is only
+about the indexer direction. No further indexer work is currently planned.
 
 ## Functionality
 
-**Per-peer announce tokens.** Stage 1 done: a magnet built by the Torznab feed
-now carries the requesting friend's own `Peer.key_hash` as its announce token,
-rather than the one shared instance secret — reusing a value that already
-existed (the sha256 of their issued API key), not a new credential with its
-own settings page. A real announce presenting a peer's own token is now
-attributed to them in peer endpoint memory (`EndpointKind::Client`,
-`ObservedVia::Direct` — `crates/sharerr/src/tracker.rs`'s
-`authenticate_token`, feeding the same `torznab::record_sighting` the feed's
-own API-key auth uses), closing the "cannot attribute a torrent client's
-address from a direct announce" gap for the common case.
-Revoking a peer — already possible, for the feed — now also, with no extra
-step, revokes their tracker access: their `key_hash` simply stops resolving.
-The instance's original shared token keeps working forever alongside this,
-unattributed, so nothing seeded before this existed ever breaks.
+**Per-peer announce tokens.** Stage 1 is done: a magnet built by the Torznab
+feed carries the requesting friend's own `Peer.key_hash` as its announce
+token instead of the one shared instance secret, so a real announce
+attributes to that friend in peer endpoint memory, and revoking a peer now
+also revokes their tracker access. The instance's original shared token keeps
+working forever alongside this, unattributed, so nothing seeded before this
+existed ever breaks.
 
 Two follow-on stages, deliberately not built yet:
 
@@ -121,20 +86,6 @@ Two follow-on stages, deliberately not built yet:
   holding the current value is indistinguishable from any other to the
   tracker; only a genuinely per-peer credential can do that.
 
-**Ratio and bandwidth control.** Done for the two goals that map identically
-across both clients: a per-torrent upload-speed cap and a seed-ratio goal,
-configured once in Settings → Seeding limits (`[seeding]` in `sharerr.toml`)
-and applied the moment sharerr hands a torrent to the client — qBittorrent
-inline on `torrents/add` (`upLimit`/`ratioLimit`), Transmission via a
-follow-up `torrent-set` naming the just-added hash, since `torrent-add`
-itself takes neither argument. Neither client is polled or re-configured by
-sharerr afterward; each one's own already-running seeding engine does the
-continuous enforcement, matching `sharerr-client`'s "ratios belong to the
-client" design. A time-based seeding goal is deliberately not included:
-qBittorrent's equivalent is total time seeded, but Transmission only offers
-*idle*-time, a different condition, and a field that meant two different
-things per backend would be a footgun rather than a fix.
-
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
@@ -151,25 +102,10 @@ would catch misconfiguration at the point it is introduced.
 
 ## The lighthouse
 
-**Where this stands:** done, both halves. The rendezvous service described below
-is implemented — `crates/sharerr-lighthouse` — as its own binary and image
-(`Dockerfile.lighthouse`) with report/lookup routes, signed-record verification,
-and the deterministic decoy fabrication the privacy property depends on. sharerr
-can also run it embedded on its own frontend or tracker port, toggled from
-Settings → Lighthouse or via `[lighthouse]` in `sharerr.toml` directly, for an
-operator who would rather not run a second container. And a sharerr instance now
-reports its own endpoint to every lighthouse named in `lighthouse.urls` — one
-report per active friend's issued-key hash, since a lighthouse indexes by key
-hash alone — and queries the same list for any friend who has gone quiet,
-`crates/sharerr/src/lighthouse_client.rs`, on the same interval gossip itself
-runs on. A lookup result is only ever trusted, and fed into peer endpoint memory
-as `ObservedVia::Lighthouse` (ranked below both `Direct` and `Gossip`), once it
-both verifies and names the friend's already trust-on-first-use-bound pubkey —
-a friend never gossiped with has nothing to check a lighthouse's answer
-against, so is skipped rather than guessed at. Reporting and querying are
-independent of running the embedded service (`lighthouse.enabled`): an operator
-can consume a friend's lighthouse without hosting one, or host one for friends
-without using it themselves.
+Shipped — see [the README](../README.md#the-lighthouse) for how to use it. The
+design rationale below is kept here because it explains *why* the rendezvous
+works the way it does, which the README's usage-focused section does not
+restate.
 
 Gossip only helps peers who can still reach _somebody_; two friends whose
 addresses both rotated while neither was watching have no path back to each

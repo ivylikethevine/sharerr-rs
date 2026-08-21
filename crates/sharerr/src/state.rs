@@ -89,7 +89,9 @@ pub struct ServeState {
     /// interval, so a default 60-second poll paid 1,440 Argon2 derivations a day,
     /// and both pollers run. Cleared by [`Self::invalidate`], so a key saved
     /// through Settings still takes effect on the next pass without a restart.
-    gluetun_api_keys: RwLock<[Option<Option<SecretString>>; 2]>,
+    gluetun_tracker_api_key: RwLock<Option<Option<SecretString>>>,
+    /// Same as `gluetun_tracker_api_key`, for [`GluetunTarget::Client`].
+    gluetun_client_api_key: RwLock<Option<Option<SecretString>>>,
     /// Raised by [`Self::invalidate`] to cut short whatever the background loop is
     /// sleeping on.
     ///
@@ -157,7 +159,8 @@ impl ServeState {
             tracker_token: RwLock::new(None),
             gossip_identity: RwLock::new(None),
             lighthouse_state: RwLock::new(None),
-            gluetun_api_keys: RwLock::new([None, None]),
+            gluetun_tracker_api_key: RwLock::new(None),
+            gluetun_client_api_key: RwLock::new(None),
             wake: Notify::new(),
             endpoint,
             client_endpoint: Arc::new(AdvertisedEndpoint::new(None)),
@@ -329,17 +332,12 @@ impl ServeState {
     /// there is none". The poller calls this every interval, so without the
     /// cache each call was an Argon2 derivation on a timer.
     pub async fn gluetun_api_key(&self, target: GluetunTarget) -> Option<SecretString> {
-        if let Some(cached) = &self.gluetun_api_keys.read().await[target.index()] {
-            return cached.clone();
-        }
-
-        let key = match self.open_vault().await {
-            Ok(vault) => vault.get(target.api_key_secret()).ok().flatten(),
-            Err(_) => None,
+        let cache = match target {
+            GluetunTarget::Tracker => &self.gluetun_tracker_api_key,
+            GluetunTarget::Client => &self.gluetun_client_api_key,
         };
-
-        self.gluetun_api_keys.write().await[target.index()] = Some(key.clone());
-        key
+        self.cached_from_vault(cache, |vault| vault.get(target.api_key_secret()).ok().flatten())
+            .await
     }
 
     /// This instance's gossip signing identity, cached after the first load.
@@ -426,7 +424,8 @@ impl ServeState {
         // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
         *self.gossip_identity.write().await = None;
-        *self.gluetun_api_keys.write().await = [None, None];
+        *self.gluetun_tracker_api_key.write().await = None;
+        *self.gluetun_client_api_key.write().await = None;
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.

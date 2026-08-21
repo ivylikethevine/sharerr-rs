@@ -96,8 +96,13 @@ async fn run(state: &Arc<ServeState>) {
 
     let own = gossip::self_record(state).await;
     let own = own.as_ref().map(to_lighthouse_record);
-    report(&http, &urls, &peers, own.as_ref()).await;
-    lookup_quiet(&http, &urls, &peers, &vault, &store).await;
+    // Publishing this instance's record and looking up quiet friends touch
+    // disjoint state (own record vs. friends' pubkeys) — independent, so run
+    // them together rather than one after the other.
+    tokio::join!(
+        report(&http, &urls, &peers, own.as_ref()),
+        lookup_quiet(&http, &urls, &peers, &vault, &store)
+    );
 }
 
 /// Convert gossip's `EndpointRecord` to the lighthouse crate's field-for-field
@@ -157,32 +162,41 @@ async fn report_one(http: &reqwest::Client, base: &Url, key_hash: &str, record: 
 async fn lookup_quiet(http: &reqwest::Client, urls: &[Url], peers: &[Peer], vault: &Vault, store: &Store) {
     let now = now_epoch();
 
-    for peer in peers.iter().filter(|p| !p.is_revoked()) {
-        let Some(pubkey) = peer.pubkey.as_deref() else {
-            continue;
-        };
-        let quiet = peer
-            .last_seen_at
-            .is_none_or(|seen| now - seen >= QUIET_THRESHOLD_SECS);
-        if !quiet {
-            continue;
-        }
-        let Ok(Some(key)) = vault.get(&secret_keys::peer_gossip_key(peer.id)) else {
-            continue;
-        };
-        let hash = sharerr_lighthouse::hash_key(key.expose_secret());
+    let lookups = peers
+        .iter()
+        .filter(|p| !p.is_revoked())
+        .map(|peer| lookup_quiet_one(http, urls, vault, store, peer, now));
+    futures::future::join_all(lookups).await;
+}
 
-        for url in urls {
-            match lookup_one(http, url, &hash, pubkey).await {
-                Ok(Some(record)) => {
-                    apply_lookup(store, peer.id, &record).await;
-                    tracing::info!(peer = peer.id, url = %url, "recorded an endpoint via lighthouse");
-                    break;
-                }
-                Ok(None) => {}
-                Err(reason) => {
-                    tracing::debug!(url = %url, reason, "lighthouse lookup failed");
-                }
+/// One friend's lookup across every configured lighthouse, stopping at the
+/// first that answers — see [`lookup_quiet`] for why peers are independent
+/// but a peer's own lighthouses are tried in order rather than fanned out.
+async fn lookup_quiet_one(http: &reqwest::Client, urls: &[Url], vault: &Vault, store: &Store, peer: &Peer, now: i64) {
+    let Some(pubkey) = peer.pubkey.as_deref() else {
+        return;
+    };
+    let quiet = peer
+        .last_seen_at
+        .is_none_or(|seen| now - seen >= QUIET_THRESHOLD_SECS);
+    if !quiet {
+        return;
+    }
+    let Ok(Some(key)) = vault.get(&secret_keys::peer_gossip_key(peer.id)) else {
+        return;
+    };
+    let hash = sharerr_lighthouse::hash_key(key.expose_secret());
+
+    for url in urls {
+        match lookup_one(http, url, &hash, pubkey).await {
+            Ok(Some(record)) => {
+                apply_lookup(store, peer.id, &record).await;
+                tracing::info!(peer = peer.id, url = %url, "recorded an endpoint via lighthouse");
+                break;
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                tracing::debug!(url = %url, reason, "lighthouse lookup failed");
             }
         }
     }
