@@ -1,0 +1,63 @@
+# Checks every external URL in the repo's markdown for dead links.
+#
+# A rotted URL in the docs is worth seeing and has never shipped a bug, so
+# this reports and never blocks — same reasoning as hadolint and markdownlint
+# in ci.yml. Weekly rather than on every push: a link a PR didn't touch does
+# not go stale because of that PR, so checking it on every commit would just
+# be the same round trip repeated for no new information.
+name: Link check
+
+on:
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lychee:
+    name: check links (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Intentionally the newest lychee, not a pin: this is a link checker, not
+      # a style linter, and the freshness that matters is the crawler's own
+      # (redirect handling, retry behaviour), same reasoning as Trivy in
+      # image-scan.yml.
+      - name: Install lychee
+        run: cargo install lychee --locked
+
+      # 200/204/206 are ordinary success; 429 is a server saying "you are
+      # checking too fast", not "the link is dead" — treating it as a failure
+      # would make this job flaky against sites that rate-limit HEAD requests
+      # rather than honest about broken links.
+      - id: check
+        name: Check for dead links
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          ~/.cargo/bin/lychee --accept 200,204,206,429 \
+            --format markdown --output "$RUNNER_TEMP/lychee.md" \
+            '**/*.md'
+          status=$?
+          echo "found=$([ "$status" -ne 0 ] && echo 1 || echo 0)" >>"$GITHUB_OUTPUT"
+          exit "$status"
+
+      - if: steps.check.outputs.found == '1'
+        name: Say so, without failing
+        run: |
+          set -euo pipefail
+          echo "::warning title=lychee::Broken link(s) found in the docs - advisory, not blocking"
+          {
+            echo "### lychee found a broken link"
+            echo
+            cat "$RUNNER_TEMP/lychee.md"
+            echo
+            echo "Advisory only: this job never blocks a merge. Run \`lychee '**/*.md'\`"
+            echo "locally to reproduce."
+          } >>"$GITHUB_STEP_SUMMARY"

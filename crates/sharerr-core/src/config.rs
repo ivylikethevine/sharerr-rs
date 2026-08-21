@@ -515,6 +515,16 @@ impl TorrentBackend {
             Self::Transmission => "transmission",
         }
     }
+
+    /// The name as an operator would write it. Unlike `as_str`, capitalizes
+    /// mid-word where the brand does — `title_case`-ing `as_str` would give
+    /// "Qbittorrent", not "qBittorrent".
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Qbittorrent => "qBittorrent",
+            Self::Transmission => "Transmission",
+        }
+    }
 }
 
 /// How to reach Transmission. The password is in the vault, not here.

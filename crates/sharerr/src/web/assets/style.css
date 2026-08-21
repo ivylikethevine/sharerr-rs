@@ -115,7 +115,10 @@ code {
 
 .card { display: flex; flex-direction: column; gap: 0.35rem; max-width: 26rem; }
 
-label { font-weight: 550; font-size: 0.92rem; margin-top: 0.5rem; }
+/* `display: block` is the point: two adjacent `<label>`s with nothing between
+   them (a checkbox's label right before the next field's) are inline by
+   default and run onto one line otherwise. */
+label { display: block; font-weight: 550; font-size: 0.92rem; margin-top: 0.5rem; }
 
 input[type="text"], input[type="password"], input[type="url"],
 input[type="number"], select, input:not([type]) {
@@ -128,6 +131,16 @@ input[type="number"], select, input:not([type]) {
   font: inherit;
   font-size: 0.95rem;
 }
+
+/* `width: 100%` above makes a `<select>`'s rendered size follow its column,
+   not its own option text — inside a narrow auto-layout table column (the
+   Friends table's "Can see"), that column gets no wider than the table
+   layout's other cues call for, and the selected option's text is clipped
+   with no indication there is more to it. A `min-width` is itself an
+   intrinsic-sizing input to that layout, so it pulls the column wide enough
+   for the longest option ("Everything") without touching every `<select>`'s
+   layout outside a table. */
+select { min-width: 8rem; }
 
 input:disabled, select:disabled {
   opacity: 0.6;
@@ -164,16 +177,25 @@ button.link {
 
 form.inline { display: inline; }
 
-.ok, .warn, .error {
+/* Color only here: this class also lands on a `<span>`/`<dd>` marking one word
+   or one table cell red or green inline (a revoked friend, a failed sync row),
+   and the boxed treatment below is sized for a paragraph, not a word — put on
+   a `<span>` it forces the badge onto its own line with a pill of padding
+   around it. Only `<p>`/`<div>`, the full-width banners, get the box. */
+.ok    { color: var(--ok-ink); }
+.warn  { color: var(--warn-ink); }
+.error { color: var(--error-ink); }
+
+p.ok, p.warn, p.error, div.ok, div.warn, div.error {
   border-radius: 8px;
   padding: 0.7rem 0.9rem;
   margin: 0.85rem 0;
   border: 1px solid transparent;
 }
 
-.ok    { background: var(--ok-bg);    color: var(--ok-ink); }
-.warn  { background: var(--warn-bg);  color: var(--warn-ink); }
-.error { background: var(--error-bg); color: var(--error-ink); }
+p.ok,   div.ok    { background: var(--ok-bg); }
+p.warn, div.warn  { background: var(--warn-bg); }
+p.error,div.error { background: var(--error-bg); }
 
 /* A small pill next to a field's label, so "is this secret already stored"
    reads at a glance instead of depending on placeholder text that vanishes
@@ -213,8 +235,16 @@ form.inline { display: inline; }
 table { border-collapse: collapse; width: 100%; }
 
 /* A table with a column that cannot reasonably wrap — a full URL or hash —
-   scrolls inside its own box instead of forcing the whole page wider. */
+   scrolls inside its own box instead of forcing the whole page wider. That
+   only works if the table is free to grow past the viewport: `width: 100%`
+   above pins it to the container instead, so the auto layout algorithm
+   squeezes every column down to fit rather than ever triggering the scroll —
+   a column holding a full sentence (a state hint) ends up so narrow its text
+   wraps one word per line and clips. `width: auto` here lets the table take
+   the width its content actually needs; `min-width: 100%` keeps it filling
+   the box when that content is narrower than the viewport. */
 .table-scroll { overflow-x: auto; }
+.table-scroll table { width: auto; min-width: 100%; }
 th, td { text-align: left; padding: 0.4rem 0.5rem 0.4rem 0; font-size: 0.92rem; }
 th { color: var(--muted); font-weight: 550; }
 

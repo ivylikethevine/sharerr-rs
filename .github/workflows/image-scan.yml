@@ -1,0 +1,93 @@
+# Scans the image this repo actually publishes, not the base images it starts
+# from — Trivy against `ghcr.io/<repo>:latest`, for fixable HIGH/CRITICAL
+# vulnerabilities in whatever ended up in the runtime layer: the pinned
+# ca-certificates/curl from `apt-get`, plus whatever the Rust binary itself
+# statically links. A CVE landing upstream is not a reason to redden somebody's
+# unrelated PR, so this runs on its own schedule and never blocks a merge —
+# `docker.yml`'s manual-approval gate is what stops a genuinely bad image from
+# reaching `:latest` in the first place; this is what tells you a *previous*
+# one has gone stale.
+name: Image scan
+
+on:
+  schedule:
+    - cron: "37 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  trivy:
+    name: scan published image (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A fresh checkout of this repo, before any `v*` tag has ever been
+      # pushed, has nothing at `:latest` — that is a state worth a quiet
+      # notice, not a red workflow run every Wednesday until the first release.
+      - id: probe
+        name: Check whether an image has been published yet
+        env:
+          DOCKER_CLI_EXPERIMENTAL: enabled
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "${IMAGE}:latest" >/dev/null 2>&1; then
+            echo "exists=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "exists=0" >>"$GITHUB_OUTPUT"
+            echo "::notice title=image-scan::${IMAGE}:latest has not been published yet - nothing to scan"
+          fi
+
+      # Intentionally the newest Trivy and the newest vulnerability database
+      # rather than a pin: a stale scanner is a scanner that stops finding
+      # anything, which is the one failure mode a vulnerability scan cannot
+      # afford — unlike hadolint's or actionlint's pinned versions, where the
+      # findings should only move when the code under test does.
+      - if: steps.probe.outputs.exists == '1'
+        name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - if: steps.probe.outputs.exists == '1'
+        id: scan
+        name: Scan for fixable HIGH/CRITICAL vulnerabilities
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --format table \
+            --exit-code 1 "${IMAGE}:latest" | tee "$RUNNER_TEMP/trivy.out"
+          status=$?
+          echo "found=$([ "$status" -eq 1 ] && echo 1 || echo 0)" >>"$GITHUB_OUTPUT"
+          exit "$status"
+
+      - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '1'
+        name: Say so, without failing
+        run: |
+          set -euo pipefail
+          echo "::warning title=trivy::Fixable HIGH/CRITICAL vulnerabilities in ${IMAGE}:latest - advisory, not blocking"
+          {
+            echo "### Trivy found fixable HIGH/CRITICAL vulnerabilities"
+            echo
+            echo "In \`${IMAGE}:latest\` — see the step above for the full report."
+            echo "Rebuilding and re-tagging \`:latest\` (no code change required) picks up"
+            echo "patched base-image packages; this job never blocks a merge either way."
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '0'
+        name: Say so
+        run: |
+          echo "trivy: no fixable HIGH/CRITICAL vulnerabilities in ${IMAGE}:latest"

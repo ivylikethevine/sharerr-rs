@@ -62,6 +62,7 @@
     Prowlarr.
   </p>
   {% else %}
+  <div class="table-scroll">
   <table>
     <thead>
       <tr><th>Name</th><th>Can see</th><th>Added</th><th>Last seen</th><th></th></tr>
@@ -101,6 +102,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   <p class="hint">
     <strong>Revoke</strong> stops the key working but keeps the row, so you can see
     it happened. <strong>Delete</strong> removes it entirely and frees the name.

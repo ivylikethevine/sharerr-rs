@@ -171,7 +171,7 @@ async fn status_page(State(state): State<WebState>) -> Response {
         // restart, and this banner is how the operator learns that is still needed.
         master_key_present: master_key_from_env().is_ok(),
         tag: config.tag.clone(),
-        client_name: config.torrent_backend.as_str(),
+        client_name: config.torrent_backend.display_name(),
         client_url: config.torrent_client().url.to_string(),
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,

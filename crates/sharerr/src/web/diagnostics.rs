@@ -265,7 +265,7 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
     };
 
     ServiceLine {
-        name: kind.as_str().to_owned(),
+        name: super::settings::title_case(kind.as_str()),
         message,
         ok,
     }

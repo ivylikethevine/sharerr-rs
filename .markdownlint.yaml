@@ -6,9 +6,20 @@
 default: true
 
 # MD013/line-length - Line length
+#
+# README.md is written as flowing prose, not hard-wrapped at a fixed column —
+# GitHub renders it either way, and 80 columns is a print-era convention this
+# repo never adopted.
 MD013:
   line_length: 9999
   tables: false
   stern: false
   code_blocks: false
   heading_line_length: 9999
+
+# MD060/table-column-style - Table pipe spacing ("compact" vs padded columns)
+#
+# This rule wants every table in the repo reformatted to a style nothing here
+# uses, and fires on every existing table in README.md and docker/README.md
+# at once — signal nobody would act on, not a defect worth seeing.
+MD060: false

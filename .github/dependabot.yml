@@ -19,6 +19,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
+    # A week between an action's release and dependabot proposing it here — long
+    # enough for a compromised release to be caught and yanked upstream before
+    # this repo's own CI ever runs it.
+    cooldown:
+      default-days: 7
     groups:
       # The docker/* actions are released together and are used together in one
       # job; separate PRs for each would mean reviewing the same change five times.
@@ -42,6 +47,10 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+    # Same reasoning as the github-actions entry above: give a crates.io release
+    # a week to be caught if it turns out to be a supply-chain problem.
+    cooldown:
+      default-days: 7
     groups:
       minor-and-patch:
         update-types:
@@ -66,5 +75,8 @@ updates:
     open-pull-requests-limit: 2
     commit-message:
       prefix: "docker"
+    # Same reasoning as the other two entries above.
+    cooldown:
+      default-days: 7
     ignore:
       - dependency-name: rust

@@ -31,11 +31,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # See runner.yml: the one place that decides whether a run gets the
+  # self-hosted box, so a fork's pull_request run — which executes the fork's
+  # own copy of every *other* job below — can never read vars.RUNNER_LABEL
+  # straight off this repo and land its own code there.
+  runner:
+    name: pick the runner
+    uses: ./.github/workflows/runner.yml
+
   fmt:
     name: rustfmt
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
 
       # rustfmt.toml sets only stable options (edition 2024, max_width,
       # use_field_init_shorthand), so the stable toolchain is sufficient — this
@@ -54,9 +67,14 @@ jobs:
 
   test:
     name: clippy + tests
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
 
       # See the note in the `fmt` job about naming the toolchain explicitly.
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -95,9 +113,14 @@ jobs:
   # multi-arch matrix. `docker.yml` still catches it — this just catches it first.
   msrv:
     name: msrv (1.88)
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
 
       # Pinned to the workspace's declared rust-version. When that changes, this
       # changes with it — they are the same claim in two places.
@@ -117,9 +140,14 @@ jobs:
 
   audit:
     name: cargo-deny
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
 
       # Advisories, licences, and duplicate/banned crates. The tree includes
       # argon2, chacha20poly1305, rustls and an HTTP server, none of which had any
@@ -137,12 +165,156 @@ jobs:
   # block commented out and nothing noticed.
   scripts:
     name: shell + compose
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
 
       # Would have caught the secret spliced into a remote `sh -c` string.
       - run: shellcheck run_docker_tests.sh
 
       # Schema-validates the compose file without needing the images or a daemon.
       - run: docker compose -f docker/compose.test.yml config -q
+
+  # GitHub Actions security audit: expression injection, untrusted checkouts
+  # feeding privileged jobs, cache/artifact poisoning — the class of bug that
+  # SHA-pinning actions and reading crafted input through env: (see runner.yml)
+  # exist to prevent, checked automatically instead of by convention alone.
+  #
+  # Pinned hosted, not needs.runner: this job installs no apt packages and
+  # never touches the Docker socket, so it has nothing to gain from a
+  # self-hosted box — and it is exactly the job that should not be the one
+  # deciding, by its own runner, whether it trusts that box.
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      # Pinned to a known-good version rather than the newest on every run —
+      # zizmor's own findings should change because the workflows changed, not
+      # because the linter did.
+      - run: pip install --user zizmor==1.29.0
+
+      - name: Audit the workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ~/.local/bin/zizmor --no-progress .github/
+
+  # Bad `needs`, invalid contexts, a step referencing an undefined output — the
+  # workflows are code too, and nothing before this checked their syntax
+  # beyond "does the YAML parse".
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Lint the workflows
+        run: ~/go/bin/actionlint -color
+
+  # Advisory, not a gate: DL3008 (pin every apt package) and its neighbours are
+  # about a Debian mirror's churn, not a defect in this Dockerfile — worth
+  # seeing, never worth reddening a PR over. `.hadolint.yaml` documents the
+  # handful of rules that do not apply here at all (a reason per entry); what
+  # is not in that list still surfaces below.
+  #
+  # Intentionally the newest hadolint release rather than a pin: unlike a
+  # style linter whose findings should only move when the Dockerfile does,
+  # hadolint occasionally adds a rule for a genuinely new class of mistake,
+  # and this job never blocks a merge regardless of which version notices it.
+  hadolint:
+    name: hadolint (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      - name: Install hadolint
+        run: |
+          set -euo pipefail
+          curl -sL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
+            -o /usr/local/bin/hadolint
+          chmod +x /usr/local/bin/hadolint
+
+      - id: lint
+        name: Lint the Dockerfiles
+        run: |
+          set -uo pipefail
+          : >"$RUNNER_TEMP/hadolint.out"
+          hadolint -c .hadolint.yaml Dockerfile Dockerfile.lighthouse >>"$RUNNER_TEMP/hadolint.out" 2>&1
+          status=$?
+          if [ -s "$RUNNER_TEMP/hadolint.out" ]; then
+            cat "$RUNNER_TEMP/hadolint.out"
+            echo "found=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "hadolint: clean across both Dockerfiles"
+            echo "found=0" >>"$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+        continue-on-error: true
+
+      - name: Say so, without failing
+        if: steps.lint.outputs.found == '1'
+        run: |
+          set -euo pipefail
+          echo "::warning title=hadolint::Dockerfile lint findings above - advisory, not blocking"
+          {
+            echo "### hadolint found something"
+            echo
+            echo "Advisory only: this job never blocks a merge. \`.hadolint.yaml\` carries a"
+            echo "reason per silenced rule; anything reaching here is deliberately left visible."
+            echo
+            echo '```'
+            sed -n '1,80p' "$RUNNER_TEMP/hadolint.out"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # Advisory, same reasoning as hadolint above: a heading level or a stray
+  # long line in a doc is worth seeing and has never shipped a bug.
+  markdownlint:
+    name: markdownlint (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      - id: lint
+        continue-on-error: true
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: |
+            **/*.md
+          config: ".markdownlint.yaml"
+
+      - name: Say so, without failing
+        if: steps.lint.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          echo "::warning title=markdownlint::Markdown lint findings above - advisory, not blocking"
+          {
+            echo "### markdownlint found something"
+            echo
+            echo "Advisory only: this job never blocks a merge. See the step above for the"
+            echo "findings, or run \`markdownlint-cli2 '**/*.md'\` locally."
+          } >>"$GITHUB_STEP_SUMMARY"

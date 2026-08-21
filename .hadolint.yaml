@@ -1,0 +1,29 @@
+# hadolint runs advisory-only in CI (see .github/workflows/ci.yml) — nothing
+# here needs to compile clean before it can be ignored, only justified. A
+# rule reaching a build without an entry here is deliberately left visible.
+
+ignored:
+  # Pinning every transitive apt package (cmake, the aarch64 cross toolchain,
+  # ca-certificates, curl) to an exact Debian version is brittle rather than
+  # reproducible: Bookworm's mirror keeps only the latest point release of
+  # each package, so a pinned version routinely disappears before the pin
+  # does. The base image tag is what this build's reproducibility actually
+  # rests on.
+  - DL3008
+  # `$CROSS` in both Dockerfiles is deliberately unquoted: it is either empty
+  # or a space-separated list of package names for `apt-get install`, and
+  # quoting it would collapse that list into one invalid argument instead of
+  # several packages.
+  - SC2086
+  # `USER sharerr` / `USER lighthouse` names an account this same Dockerfile
+  # creates via `useradd --uid 1000`, so it resolves to the same numeric id
+  # either way — naming it is what makes `docker inspect`/`docker ps` say
+  # something a person reads instead of a bare 1000.
+  - DL3066
+  # `LIGHTHOUSE_SECRET_FILE` holds a *path* the process reads a secret from at
+  # runtime, not the secret itself — nothing sensitive is in this ENV value.
+  - DL3064
+  # Only HEALTHCHECK's CMD triggers this, and only because it needs shell
+  # form's `||`: `curl ... || exit 1` has no equivalent in JSON/exec form.
+  # ENTRYPOINT and the ordinary CMD below it are already JSON arrays.
+  - DL3025

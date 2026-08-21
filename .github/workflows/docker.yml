@@ -9,6 +9,14 @@
 # developer's local toolchain is invariably newer, so a build here is the only
 # thing that reliably catches code reaching past the MSRV. That is why pull
 # requests build the image even though they never publish it.
+#
+# A `v*` tag no longer publishes straight to `:latest`/`:X.Y.Z` unattended: `build`
+# pushes the real, fully-built multi-arch image to a provisional tag nobody would
+# discover by browsing GHCR, and `publish` — gated behind a required reviewer, see
+# the `environment: release` comment below — retags exactly that digest onto the
+# tags an operator would actually pull. Nothing rebuilds between the two; a
+# reviewer is approving the bytes that were already built and attested, not asking
+# for a second, unaudited build to happen.
 
 name: Docker
 
@@ -23,9 +31,10 @@ concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only by default; each job below elevates only the permission it needs,
+# rather than every job inheriting `packages: write` whether it pushes or not.
 permissions:
   contents: read
-  packages: write
 
 env:
   # GHCR rejects uppercase paths. `github.repository` happens to be all-lowercase
@@ -34,11 +43,41 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  # See runner.yml: keeps a fork's pull_request build off the self-hosted box
+  # the same way ci.yml does. This workflow's `build` job never pushes on a
+  # fork PR either way (see the login step's condition below), but it still
+  # compiles the fork's own Dockerfile and Rust source, which is exactly the
+  # code a fork PR should not get to run wherever RUNNER_LABEL points.
+  runner:
+    name: pick the runner
+    uses: ./.github/workflows/runner.yml
+
   build:
-    name: build and publish
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    name: build
+    needs: runner
+    runs-on: ${{ needs.runner.outputs.label }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Only actually exercised on a `v*` tag push — see the login step below —
+      # but a job's permissions are fixed before any step's `if:` is evaluated,
+      # so it has to be granted here regardless of which event triggered this run.
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      # The tags this image should carry once approved — computed here from
+      # metadata-action so `publish` promotes exactly what this build decided,
+      # rather than re-deriving the same ref/semver logic a second time.
+      tags: ${{ steps.meta.outputs.tags }}
+      # Where `publish` finds the digest this job actually pushed.
+      pending-ref: ${{ steps.pending.outputs.ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
 
       # QEMU is needed for the arm64 leg, but only barely: the Dockerfile
       # cross-compiles the Rust build natively, so the only emulated work is the
@@ -63,6 +102,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The tags this build *would* publish, computed either way: `publish`
+      # reads this output regardless of whether this run pushes anything today.
       # Also emits the OCI labels, including org.opencontainers.image.source —
       # that label is what links the GHCR package back to this repo and lets it
       # inherit the repo's permissions.
@@ -77,18 +118,27 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha
 
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      # A tag nobody would find by browsing GHCR's tag list, named after the
+      # commit rather than a counter so two runs of the same push never race
+      # each other for it. This is where a `v*` tag's real build actually
+      # lands — `publish` only ever points the human-facing tags at it.
+      - id: pending
+        env:
+          SHA: ${{ github.sha }}
+        run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
+
+      - id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          # Tags only. This used to push on every commit to `main`, which quietly
-          # published an image the project's own commit messages said not to
-          # publish. A push to `main` still *builds* both architectures, so this
-          # job keeps working as the MSRV gate — it just no longer ships the
-          # result. Cutting a `v*` tag is now the deliberate act that publishes,
-          # and it is also what produces `:latest`.
+          # A `v*` tag pushes to the provisional ref above and nowhere else —
+          # the real tags computed by `meta` reach GHCR only once `publish` is
+          # approved. Every other event keeps pushing nothing at all, exactly
+          # as before: PR and branch builds still exist solely to compile,
+          # which is what makes this job double as the MSRV gate.
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref || steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # `mode=min`, not `max`. Exporting the intermediate builder stage would
           # push a multi-GB release target/ tree per architecture into a cache that
@@ -98,3 +148,62 @@ jobs:
           # runtime stage's emulated apt-get, and min covers that.
           cache-from: type=gha
           cache-to: type=gha,mode=min
+
+      # Signed proof that this exact digest was built by this workflow run, from
+      # this commit — checkable later with `gh attestation verify <image> --repo
+      # <owner>/<repo>` against whichever tag `publish` eventually points at it.
+      # `push-to-registry` attaches it to the image in GHCR as an OCI referrer,
+      # so it travels with the digest through the retag `publish` does below
+      # rather than needing to be regenerated against the final tags.
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v2.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # The only job that publishes, and it waits for you.
+  #
+  # `environment: release` is what makes GitHub hold this job pending until a
+  # required reviewer approves it in the web UI. THAT REVIEWER IS NOT CONFIGURED
+  # BY THIS FILE — it is a repo setting, and until it exists the environment
+  # imposes no gate at all and this job runs unattended. One-time setup:
+  # Settings -> Environments -> New environment -> "release" -> tick "Required
+  # reviewers" and add yourself (and anyone else who should be able to approve
+  # a publish).
+  publish:
+    name: publish to GHCR (manual approval)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `imagetools create` needs the buildx CLI but builds nothing and needs no
+      # emulation — it is a registry-side copy of an existing manifest list onto
+      # new tags, which is what makes this job a retag rather than a rebuild.
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Promote the approved image to its real tags
+        env:
+          TAGS: ${{ needs.build.outputs.tags }}
+          PENDING: ${{ needs.build.outputs.pending-ref }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<<"$TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no tags computed by the build job — nothing to promote" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${args[@]}" "$PENDING"

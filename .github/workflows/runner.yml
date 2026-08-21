@@ -1,0 +1,47 @@
+# Picks which runner the rest of a workflow uses, in one place instead of the
+# same expression copy-pasted into every job.
+#
+# `vars.RUNNER_LABEL` names a self-hosted machine, and unlike `secrets.*` it is
+# NOT withheld from a `pull_request` run triggered by a fork — GitHub only
+# scopes secrets that way. `ci.yml` and `docker.yml` both trigger on
+# `pull_request`, and for that event the workflow file that actually runs is
+# the one on the fork's own branch, not this repo's — so a fork PR that simply
+# read `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}` in `runs-on:` would still
+# resolve to the real label and get its own job steps scheduled on it. This
+# job is the fix: it is the one place that checks whether the run is a fork
+# PR, and every other job reads its output instead of the raw variable.
+name: Pick runner
+
+on:
+  workflow_call:
+    outputs:
+      label:
+        description: The runner label every other job in the caller should use.
+        value: ${{ jobs.pick.outputs.label }}
+
+jobs:
+  pick:
+    name: pick the runner
+    # Always hosted, deliberately: this decides whether anything else in the
+    # calling workflow reaches the self-hosted box, so it cannot be the thing
+    # a fork PR could already redirect.
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+    steps:
+      # Through env:, not inlined into the run: line — a template expanded
+      # straight into a shell command is exactly what a crafted PR title or
+      # branch name could abuse if it ever appeared here.
+      - id: pick
+        env:
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          LABEL: ${{ vars.RUNNER_LABEL }}
+        run: |
+          set -euo pipefail
+          if [ "$FORK" = "true" ]; then
+            echo "label=ubuntu-latest" >>"$GITHUB_OUTPUT"
+            echo "::notice title=runner::fork PR - GitHub-hosted only, ignoring RUNNER_LABEL"
+          else
+            echo "label=${LABEL:-ubuntu-latest}" >>"$GITHUB_OUTPUT"
+          fi
