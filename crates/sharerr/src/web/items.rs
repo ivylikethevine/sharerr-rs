@@ -350,6 +350,7 @@ mod tests {
             scope,
             pubkey: None,
             gossip_url: None,
+            key_hash: "hash".to_owned(),
         }
     }
 

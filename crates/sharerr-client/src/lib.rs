@@ -12,6 +12,13 @@
 //! rTorrent disagree about almost everything *except* "add this torrent, with the
 //! data already at this path". Announces always go to sharerr's own tracker, so a
 //! client needs no tracker of its own.
+//!
+//! The one deliberate exception is [`AddRequest::upload_limit_kib`] and
+//! [`AddRequest::ratio_limit`]: an operator-configured seeding goal, stated
+//! once at add time through whichever native mechanism the client already
+//! offers for it. sharerr still runs no scheduling of its own — the client's
+//! own already-running seeding engine does the continuous enforcement, the
+//! same as it would for a torrent added by hand.
 
 use std::fmt::Debug;
 
@@ -219,6 +226,15 @@ pub struct AddRequest<'a> {
     pub skip_checking: bool,
     /// Add without starting. Used by dry runs and tests.
     pub stopped: bool,
+    /// Per-torrent upload cap in KiB/s, applied once at add time. The one
+    /// exception to this trait's "ratios and scheduling belong to the
+    /// client" rule at the module level: sharerr states the goal once here,
+    /// and the client's own seeding engine enforces it from then on —
+    /// sharerr never polls or re-applies it.
+    pub upload_limit_kib: Option<u64>,
+    /// Seed-ratio goal, applied once at add time — same caveat as
+    /// [`Self::upload_limit_kib`].
+    pub ratio_limit: Option<f64>,
 }
 
 impl<'a> AddRequest<'a> {
@@ -231,6 +247,8 @@ impl<'a> AddRequest<'a> {
             tags: None,
             skip_checking: false,
             stopped: false,
+            upload_limit_kib: None,
+            ratio_limit: None,
         }
     }
 
@@ -255,6 +273,19 @@ impl<'a> AddRequest<'a> {
     /// Add the torrent without starting it.
     pub fn stopped(mut self, stopped: bool) -> Self {
         self.stopped = stopped;
+        self
+    }
+
+    /// Cap this torrent's upload speed at `kib` KiB/s, from the moment it is
+    /// added.
+    pub fn upload_limit_kib(mut self, kib: u64) -> Self {
+        self.upload_limit_kib = Some(kib);
+        self
+    }
+
+    /// Set this torrent's seed-ratio goal, from the moment it is added.
+    pub fn ratio_limit(mut self, ratio: f64) -> Self {
+        self.ratio_limit = Some(ratio);
         self
     }
 

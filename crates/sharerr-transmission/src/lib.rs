@@ -378,6 +378,36 @@ impl TorrentClient for TransmissionClient {
             tracing::warn!("Transmission has no skip-checking; it will verify the existing data");
         }
 
+        // `torrent-add` itself takes no ratio/speed arguments — Transmission
+        // only exposes those on `torrent-set`, the same call `set_trackers`
+        // below already uses. Skipped entirely when no goal is configured,
+        // so an ordinary add costs exactly one RPC call as it always has.
+        if request.upload_limit_kib.is_some() || request.ratio_limit.is_some() {
+            let hash = result
+                .get("torrent-added")
+                .or_else(|| result.get("torrent-duplicate"))
+                .and_then(|t| t.get("hashString"))
+                .and_then(Value::as_str);
+            let Some(hash) = hash else {
+                // The add itself already succeeded; a missing hash just means
+                // there is nothing to attach a limit to.
+                tracing::warn!("could not read the added torrent's hash — seeding goal not applied");
+                return Ok(());
+            };
+
+            let mut limits = json!({ "ids": [hash] });
+            if let Some(kib) = request.upload_limit_kib {
+                limits["uploadLimit"] = json!(kib);
+                limits["uploadLimited"] = json!(true);
+            }
+            if let Some(ratio) = request.ratio_limit {
+                limits["seedRatioLimit"] = json!(ratio);
+                // 1 = this torrent's own limit, overriding the session default.
+                limits["seedRatioMode"] = json!(1);
+            }
+            self.rpc("torrent-set", limits).await?;
+        }
+
         Ok(())
     }
 
@@ -634,6 +664,84 @@ mod tests {
                     Url::parse("http://old.example:8477/announce").unwrap(),
                 ],
             )
+            .await
+            .unwrap();
+    }
+
+    /// `torrent-add` itself carries no ratio/speed arguments, so a
+    /// configured seeding goal must land on a follow-up `torrent-set`
+    /// naming the hash the add just reported.
+    #[tokio::test]
+    async fn a_seeding_goal_configured_at_add_time_lands_on_a_follow_up_torrent_set() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(
+                ResponseTemplate::new(409).insert_header(SESSION_HEADER, "session-token-1"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .and(wiremock::matchers::body_string_contains("torrent-add"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(
+                json!({ "torrent-added": { "id": 7, "hashString": "abc123" } }),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .and(wiremock::matchers::body_string_contains("torrent-set"))
+            .and(wiremock::matchers::body_string_contains("uploadLimit"))
+            .and(wiremock::matchers::body_string_contains("seedRatioLimit"))
+            .and(wiremock::matchers::body_string_contains("abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(json!({}))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = b"d8:announce0:e";
+        let request = AddRequest::new(data, "x.torrent", "/downloads")
+            .upload_limit_kib(512)
+            .ratio_limit(2.5);
+        client(&server).add(&request).await.unwrap();
+    }
+
+    /// The common case — no seeding goal configured — must cost exactly the
+    /// one `torrent-add` call it always has, not a silent extra round trip.
+    #[tokio::test]
+    async fn no_seeding_goal_means_no_follow_up_call() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(
+                ResponseTemplate::new(409).insert_header(SESSION_HEADER, "session-token-1"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Exactly one call expected after the handshake — an unwanted
+        // torrent-set would push this past 1 and fail verification on drop.
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(
+                json!({ "torrent-added": { "hashString": "abc123" } }),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = b"d8:announce0:e";
+        client(&server)
+            .add(&AddRequest::new(data, "x.torrent", "/downloads"))
             .await
             .unwrap();
     }

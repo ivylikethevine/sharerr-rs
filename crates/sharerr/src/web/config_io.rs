@@ -36,7 +36,10 @@ pub struct Edit {
 pub enum Setting {
     Str(String),
     Int(i64),
+    Float(f64),
     Bool(bool),
+    /// A TOML array of strings, e.g. `urls = ["a", "b"]`.
+    StrList(Vec<String>),
     /// Remove the key entirely, falling back to the compiled default.
     ///
     /// Distinct from writing an empty string: `sonarr` is `Option<ServiceConfig>`,
@@ -59,10 +62,24 @@ impl Edit {
         }
     }
 
+    pub fn float(path: &'static str, v: f64) -> Self {
+        Self {
+            path,
+            value: Setting::Float(v),
+        }
+    }
+
     pub fn bool(path: &'static str, v: bool) -> Self {
         Self {
             path,
             value: Setting::Bool(v),
+        }
+    }
+
+    pub fn str_list(path: &'static str, v: Vec<String>) -> Self {
+        Self {
+            path,
+            value: Setting::StrList(v),
         }
     }
 
@@ -267,7 +284,11 @@ fn apply_one(doc: &mut DocumentMut, edit: Edit) {
             match edit.value {
                 Setting::Str(s) => table[segment] = value(s),
                 Setting::Int(i) => table[segment] = value(i),
+                Setting::Float(f) => table[segment] = value(f),
                 Setting::Bool(b) => table[segment] = value(b),
+                Setting::StrList(list) => {
+                    table[segment] = value(list.into_iter().collect::<toml_edit::Array>())
+                }
                 Setting::Unset => {
                     table.remove(segment);
                 }
@@ -507,6 +528,37 @@ username = "admin"
         assert!(!config.sync.enabled);
         assert_eq!(config.sync.interval_secs, 1800);
         assert_eq!(config.tracker.port, Some(19000));
+    }
+
+    #[test]
+    fn a_str_list_writes_a_toml_array_and_survives_validation() {
+        let mut file = doc("");
+        file.apply([Edit::str_list(
+            "lighthouse.urls",
+            vec![
+                "https://lighthouse.example.com".to_owned(),
+                "https://second.example.com".to_owned(),
+            ],
+        )]);
+
+        let out = file.to_toml();
+        assert!(out.contains("https://lighthouse.example.com"), "{out}");
+        assert!(out.contains("https://second.example.com"), "{out}");
+
+        let config = crate::settings::validate(&out).expect("valid");
+        assert_eq!(config.lighthouse.urls.len(), 2);
+    }
+
+    #[test]
+    fn a_float_writes_a_toml_float_and_survives_validation() {
+        let mut file = doc("");
+        file.apply([Edit::float("seeding.ratio_limit", 2.5)]);
+
+        let out = file.to_toml();
+        assert!(out.contains("2.5"), "{out}");
+
+        let config = crate::settings::validate(&out).expect("valid");
+        assert_eq!(config.seeding.ratio_limit, Some(2.5));
     }
 
     #[test]

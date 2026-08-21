@@ -294,6 +294,8 @@ impl Syncer {
             category: client_config.category.to_owned(),
             tag: client_config.tag.to_owned(),
             skip_checking: client_config.skip_checking,
+            upload_limit_kib: client_config.upload_limit_kib,
+            ratio_limit: client_config.ratio_limit,
             torrent_dir: config.torrent_dir(),
         };
 

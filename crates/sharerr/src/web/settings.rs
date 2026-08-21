@@ -120,6 +120,27 @@ pub struct LighthouseForm {
     #[serde(default)]
     enabled: Option<String>,
     mount: String,
+    /// One lighthouse URL per line — see [`parse_lighthouse_urls`].
+    #[serde(default)]
+    urls: String,
+}
+
+/// Parse the settings form's lighthouse-URLs textarea: one URL per line,
+/// blank lines dropped. A line that is not a valid URL is an error naming
+/// the line, not a silent drop — same convention as
+/// [`crate::web::config_io::parse_libraries`].
+fn parse_lighthouse_urls(raw: &str) -> anyhow::Result<Vec<String>> {
+    let mut urls = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parsed = url::Url::parse(line)
+            .map_err(|_| anyhow::anyhow!("lighthouse URL {} is not valid: {line:?}", index + 1))?;
+        urls.push(parsed.to_string());
+    }
+    Ok(urls)
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,11 +372,89 @@ pub async fn save_lighthouse(
     let Some(mount) = sharerr_core::config::LighthouseMount::parse(&form.mount) else {
         return reject(&state, "That is not a valid lighthouse listener choice.").await;
     };
+    let urls = match parse_lighthouse_urls(&form.urls) {
+        Ok(urls) => urls,
+        Err(err) => return reject(&state, &format!("{err:#}")).await,
+    };
 
     write_config(&state, "lighthouse", move |file| {
         file.apply([
             Edit::bool(config_paths::LIGHTHOUSE_ENABLED, checked(&form.enabled)),
             Edit::str(config_paths::LIGHTHOUSE_MOUNT, mount.as_str()),
+            if urls.is_empty() {
+                Edit::unset(config_paths::LIGHTHOUSE_URLS)
+            } else {
+                Edit::str_list(config_paths::LIGHTHOUSE_URLS, urls)
+            },
+        ]);
+        Ok(())
+    })
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SeedingForm {
+    #[serde(default)]
+    upload_limit_kib: String,
+    #[serde(default)]
+    ratio_limit: String,
+}
+
+/// A blank field means no goal; anything else must be a whole number of
+/// KiB/s. Named in the error the same way [`parse_lighthouse_urls`] names a
+/// bad line, rather than silently discarding an unparseable value.
+fn parse_upload_limit_kib(raw: &str) -> anyhow::Result<Option<u64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("the upload limit must be a whole number of KiB/s"))
+}
+
+/// A blank field means no goal; anything else must be a positive ratio.
+fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let ratio: f64 = trimmed
+        .parse()
+        .map_err(|_| anyhow::anyhow!("the ratio limit must be a number, e.g. 2.0"))?;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        anyhow::bail!("the ratio limit must be a positive number");
+    }
+    Ok(Some(ratio))
+}
+
+/// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
+/// hands a torrent to the client — see `docs/roadmap.md`'s "Ratio and
+/// bandwidth control" and [`sharerr_core::config::SeedingConfig`].
+pub async fn save_seeding(State(state): State<WebState>, Form(form): Form<SeedingForm>) -> Response {
+    let upload_limit_kib = match parse_upload_limit_kib(&form.upload_limit_kib) {
+        Ok(v) => v,
+        Err(err) => return reject(&state, &format!("{err:#}")).await,
+    };
+    let ratio_limit = match parse_ratio_limit(&form.ratio_limit) {
+        Ok(v) => v,
+        Err(err) => return reject(&state, &format!("{err:#}")).await,
+    };
+
+    write_config(&state, "seeding", move |file| {
+        file.apply([
+            match upload_limit_kib {
+                Some(kib) => Edit::int(
+                    config_paths::SEEDING_UPLOAD_LIMIT_KIB,
+                    i64::try_from(kib).unwrap_or(i64::MAX),
+                ),
+                None => Edit::unset(config_paths::SEEDING_UPLOAD_LIMIT_KIB),
+            },
+            match ratio_limit {
+                Some(ratio) => Edit::float(config_paths::SEEDING_RATIO_LIMIT, ratio),
+                None => Edit::unset(config_paths::SEEDING_RATIO_LIMIT),
+            },
         ]);
         Ok(())
     })
@@ -883,6 +982,17 @@ async fn build_page(
         qbit_tag: config.qbittorrent.tag.clone(),
         qbit_skip_checking: config.qbittorrent.skip_checking,
 
+        seeding_upload_limit_kib: config
+            .seeding
+            .upload_limit_kib
+            .map(|kib| kib.to_string())
+            .unwrap_or_default(),
+        seeding_ratio_limit: config
+            .seeding
+            .ratio_limit
+            .map(|ratio| ratio.to_string())
+            .unwrap_or_default(),
+
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
         tracker_port: config
             .tracker
@@ -893,6 +1003,13 @@ async fn build_page(
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
         lighthouse_enabled: config.lighthouse.enabled,
         lighthouse_mount: config.lighthouse.mount.as_str(),
+        lighthouse_urls: config
+            .lighthouse
+            .urls
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
         gluetun_control_url: url_or_empty(config.gluetun.control_url.as_ref()),
         gluetun_enabled: config.gluetun.enabled,
         gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
@@ -975,6 +1092,45 @@ mod tests {
     fn a_hopeless_url_is_named_rather_than_silently_dropped() {
         let err = normalise_url("http://").expect_err("this cannot be a url");
         assert!(format!("{err:#}").contains("not a valid URL"), "{err:#}");
+    }
+
+    #[test]
+    fn lighthouse_urls_are_one_per_line_and_blank_lines_are_dropped() {
+        let urls =
+            parse_lighthouse_urls("https://one.example\n\n  https://two.example  \n").unwrap();
+        assert_eq!(urls, vec!["https://one.example/", "https://two.example/"]);
+
+        assert_eq!(parse_lighthouse_urls("").unwrap(), Vec::<String>::new());
+        assert_eq!(parse_lighthouse_urls("   \n  \n").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_bad_lighthouse_url_names_its_line_rather_than_silently_dropping() {
+        let err = parse_lighthouse_urls("https://good.example\nnot a url\n")
+            .expect_err("the second line is not a URL");
+        assert!(format!("{err:#}").contains("lighthouse URL 2"), "{err:#}");
+    }
+
+    #[test]
+    fn a_blank_seeding_field_unsets_and_a_valid_one_parses() {
+        assert_eq!(parse_upload_limit_kib("").unwrap(), None);
+        assert_eq!(parse_upload_limit_kib("  ").unwrap(), None);
+        assert_eq!(parse_upload_limit_kib("500").unwrap(), Some(500));
+
+        assert_eq!(parse_ratio_limit("").unwrap(), None);
+        assert_eq!(parse_ratio_limit("2.5").unwrap(), Some(2.5));
+    }
+
+    #[test]
+    fn a_non_numeric_seeding_field_is_named_rather_than_silently_dropped() {
+        let err = parse_upload_limit_kib("lots").expect_err("not a number");
+        assert!(format!("{err:#}").contains("KiB/s"), "{err:#}");
+
+        let err = parse_ratio_limit("lots").expect_err("not a number");
+        assert!(format!("{err:#}").contains("ratio"), "{err:#}");
+
+        let err = parse_ratio_limit("-1").expect_err("a ratio cannot be negative");
+        assert!(format!("{err:#}").contains("positive"), "{err:#}");
     }
 
     #[test]

@@ -159,12 +159,21 @@ pub mod config_paths {
     pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
     pub const TRACKER_PORT: &str = "tracker.port";
 
+    /// Per-torrent upload cap in KiB/s — see [`super::SeedingConfig::upload_limit_kib`].
+    pub const SEEDING_UPLOAD_LIMIT_KIB: &str = "seeding.upload_limit_kib";
+    /// Seed-ratio goal — see [`super::SeedingConfig::ratio_limit`].
+    pub const SEEDING_RATIO_LIMIT: &str = "seeding.ratio_limit";
+
     /// Whether the lighthouse rendezvous service runs as extra routes on one
     /// of this instance's own listeners — see [`super::LighthouseConfig`].
     pub const LIGHTHOUSE_ENABLED: &str = "lighthouse.enabled";
     /// Which listener: `"frontend"` or `"tracker"` — see
     /// [`super::LighthouseMount`].
     pub const LIGHTHOUSE_MOUNT: &str = "lighthouse.mount";
+    /// Lighthouse(s) this instance reports its own endpoint to and queries
+    /// for a quiet friend — independent of whether it also hosts one via
+    /// `LIGHTHOUSE_ENABLED`. See [`super::LighthouseConfig::urls`].
+    pub const LIGHTHOUSE_URLS: &str = "lighthouse.urls";
 
     pub const GLUETUN_ENABLED: &str = "gluetun.enabled";
     pub const GLUETUN_CONTROL_URL: &str = "gluetun.control_url";
@@ -219,8 +228,11 @@ pub mod config_paths {
         TRACKER_ADVERTISED_HOST,
         TRACKER_ADVERTISED_URL,
         TRACKER_PORT,
+        SEEDING_UPLOAD_LIMIT_KIB,
+        SEEDING_RATIO_LIMIT,
         LIGHTHOUSE_ENABLED,
         LIGHTHOUSE_MOUNT,
+        LIGHTHOUSE_URLS,
         GLUETUN_ENABLED,
         GLUETUN_CONTROL_URL,
         GLUETUN_POLL_SECS,
@@ -260,6 +272,10 @@ pub struct Config {
     /// Only read when `torrent_backend` selects it.
     pub transmission: TransmissionConfig,
     pub tracker: TrackerConfig,
+    /// A per-torrent upload/ratio goal, applied once at add time — see
+    /// [`SeedingConfig`]. Unset by default: no cap, no goal, matching
+    /// today's behaviour exactly until an operator opts in.
+    pub seeding: SeedingConfig,
     /// Embedding the lighthouse rendezvous service on one of this instance's
     /// own listeners. Off by default — see [`LighthouseConfig`].
     pub lighthouse: LighthouseConfig,
@@ -301,6 +317,7 @@ impl Default for Config {
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
             tracker: TrackerConfig::default(),
+            seeding: SeedingConfig::default(),
             lighthouse: LighthouseConfig::default(),
             gluetun: GluetunConfig::default(),
             gluetun_client: GluetunConfig::default(),
@@ -396,6 +413,8 @@ impl Config {
                 category: &self.qbittorrent.category,
                 tag: &self.qbittorrent.tag,
                 skip_checking: self.qbittorrent.skip_checking,
+                upload_limit_kib: self.seeding.upload_limit_kib,
+                ratio_limit: self.seeding.ratio_limit,
             },
             TorrentBackend::Transmission => TorrentClientConfig {
                 url: &self.transmission.url,
@@ -409,6 +428,10 @@ impl Config {
                 category: &self.transmission.label,
                 tag: &self.transmission.label,
                 skip_checking: false,
+                // Seeding goals are backend-agnostic — see `SeedingConfig` — so
+                // the same values apply regardless of which client is selected.
+                upload_limit_kib: self.seeding.upload_limit_kib,
+                ratio_limit: self.seeding.ratio_limit,
             },
         }
     }
@@ -438,6 +461,12 @@ pub struct TorrentClientConfig<'a> {
     /// Whether to skip hash-checking on add. Always `false` for Transmission,
     /// which has no such switch.
     pub skip_checking: bool,
+    /// Per-torrent upload cap in KiB/s, applied at add time — see
+    /// [`SeedingConfig::upload_limit_kib`].
+    pub upload_limit_kib: Option<u64>,
+    /// Seed-ratio goal, applied at add time — see
+    /// [`SeedingConfig::ratio_limit`].
+    pub ratio_limit: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -634,11 +663,42 @@ impl LighthouseMount {
 /// not run a second container for it. Off by default; enabling it changes
 /// nothing about the standalone binary, which keeps working the same way for
 /// anyone who wants the separation.
+/// A seed-ratio/bandwidth goal applied once, at the moment sharerr hands a
+/// torrent to the client — never enforced by sharerr itself afterward. Both
+/// fields are backend-agnostic: qBittorrent and Transmission each honour
+/// them through their own already-running seeding engine, via whatever
+/// native mechanism that client offers (see [`Config::torrent_client`]'s
+/// callers, `sharerr-qbit` and `sharerr-transmission`). `None` in either
+/// field leaves that client's own default — uncapped, or whatever its own
+/// global setting already does — untouched.
+///
+/// Deliberately no time-based goal: qBittorrent's equivalent is total time
+/// seeded since completion, but Transmission's only related knob is *idle*
+/// time with no upload/download activity — a materially different
+/// condition. A single field that means two different things depending on
+/// which client is configured would be a footgun, so it is left out rather
+/// than faked.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SeedingConfig {
+    /// Per-torrent upload cap in KiB/s, applied at add time.
+    pub upload_limit_kib: Option<u64>,
+    /// Stop seeding once this ratio is reached, applied at add time.
+    pub ratio_limit: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LighthouseConfig {
     pub enabled: bool,
     pub mount: LighthouseMount,
+    /// Lighthouse(s) this instance uses as a *client*: reports its own
+    /// endpoint to each, and queries each for a friend gossip cannot
+    /// currently reach. Independent of `enabled` — that only controls
+    /// whether this instance also *hosts* one; an operator can consume a
+    /// friend's lighthouse without running one, or run one without using it
+    /// themselves. Empty means this half of the feature is off.
+    pub urls: Vec<Url>,
 }
 
 /// Reject any `tracker.backend` value with the migration story.

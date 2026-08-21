@@ -107,6 +107,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/general", post(settings::save_general))
         .route("/settings/arr/{source}", post(settings::save_arr))
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
+        .route("/settings/seeding", post(settings::save_seeding))
         .route("/settings/tracker", post(settings::save_tracker))
         .route("/settings/lighthouse", post(settings::save_lighthouse))
         .route("/settings/gluetun", post(settings::save_gluetun))
@@ -428,6 +429,7 @@ mod tests {
             "/settings/arr/sonarr",
             "/settings/arr/lidarr",
             "/settings/qbittorrent",
+            "/settings/seeding",
             "/settings/tracker",
             "/settings/lighthouse",
             "/settings/gluetun",

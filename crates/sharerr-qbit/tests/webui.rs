@@ -333,6 +333,52 @@ async fn add_torrent_always_disables_automatic_torrent_management() {
 }
 
 #[tokio::test]
+async fn a_configured_seeding_goal_rides_the_add_request_and_is_omitted_when_unset() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .add_torrent(
+            &AddRequest::new(b"data", "s.torrent", "/downloads")
+                .upload_limit_kib(512)
+                .ratio_limit(2.5),
+        )
+        .await
+        .unwrap();
+
+    let sent = requests_to(&server, "/torrents/add").await;
+    let body = body_text(&sent[0]);
+    assert!(body.contains("name=\"upLimit\""), "body was:\n{body}");
+    // KiB/s converted to the bytes/s the API expects.
+    assert!(body.contains("524288"), "body was:\n{body}");
+    assert!(body.contains("name=\"ratioLimit\""), "body was:\n{body}");
+    assert!(body.contains("2.5"), "body was:\n{body}");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .add_torrent(&AddRequest::new(b"data", "s.torrent", "/downloads"))
+        .await
+        .unwrap();
+
+    let sent = requests_to(&server, "/torrents/add").await;
+    let body = body_text(&sent[0]);
+    assert!(
+        !body.contains("upLimit") && !body.contains("ratioLimit"),
+        "no seeding goal was configured, so neither field should be sent: {body}"
+    );
+}
+
+#[tokio::test]
 async fn skip_checking_is_opt_in() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

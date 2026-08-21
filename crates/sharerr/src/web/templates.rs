@@ -247,6 +247,13 @@ pub struct SettingsPage {
     pub qbit_tag: String,
     pub qbit_skip_checking: bool,
 
+    /// Per-torrent upload cap in KiB/s, applied at add time. Empty when unset —
+    /// see [`sharerr_core::config::SeedingConfig::upload_limit_kib`].
+    pub seeding_upload_limit_kib: String,
+    /// Seed-ratio goal, applied at add time. Empty when unset — see
+    /// [`sharerr_core::config::SeedingConfig::ratio_limit`].
+    pub seeding_ratio_limit: String,
+
     pub tracker_advertised_host: String,
     pub tracker_port: String,
     /// The expressive alternative to host+port: a full base URL with scheme and
@@ -260,6 +267,9 @@ pub struct SettingsPage {
     /// `"frontend"` or `"tracker"` — see
     /// [`sharerr_core::config::LighthouseMount`].
     pub lighthouse_mount: &'static str,
+    /// Lighthouse(s) this instance reports to and queries, one URL per line —
+    /// see [`sharerr_core::config::LighthouseConfig::urls`].
+    pub lighthouse_urls: String,
 
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,

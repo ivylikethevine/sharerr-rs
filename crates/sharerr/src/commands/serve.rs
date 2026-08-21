@@ -174,7 +174,8 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Tracker) => Ok(()),
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Client) => Ok(()),
         () = crate::notify::quiet_peers_loop(Arc::clone(&state)) => Ok(()),
-        () = crate::gossip::exchange_loop(state) => Ok(()),
+        () = crate::gossip::exchange_loop(Arc::clone(&state)) => Ok(()),
+        () = crate::lighthouse_client::sync_loop(state) => Ok(()),
     }
 }
 

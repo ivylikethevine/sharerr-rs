@@ -385,6 +385,7 @@ mod tests {
             scope: PeerScope::All,
             pubkey: None,
             gossip_url: None,
+            key_hash: "hash".to_owned(),
         };
 
         assert_eq!(row(&peer, &[], false).last_seen, "never");
@@ -402,6 +403,7 @@ mod tests {
             scope: PeerScope::Tv,
             pubkey: None,
             gossip_url: None,
+            key_hash: "hash".to_owned(),
         };
 
         assert!(row(&peer, &[], false).revoked);

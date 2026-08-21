@@ -5,6 +5,7 @@ mod gluetun;
 mod gossip;
 mod jackett;
 mod library;
+mod lighthouse_client;
 mod notify;
 mod pathsuggest;
 mod secrets;

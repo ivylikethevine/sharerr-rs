@@ -49,12 +49,21 @@ impl EndpointKind {
 }
 
 /// How an observation arrived.
+///
+/// Trust order, most to least: [`Self::Direct`] (we saw the connection
+/// ourselves) > [`Self::Gossip`] (a mutual friend relayed the subject's own
+/// signed record) > [`Self::Lighthouse`] (a semi-anonymous rendezvous
+/// service answered a lookup) — the lighthouse is the fallback for when
+/// gossip already had no path back to the peer, so it is furthest from a
+/// first-hand sighting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedVia {
     /// We saw the connection ourselves.
     Direct,
     /// A record the subject signed, relayed by a mutual friend.
     Gossip,
+    /// A record the subject signed, retrieved from a lighthouse.
+    Lighthouse,
 }
 
 impl ObservedVia {
@@ -62,16 +71,17 @@ impl ObservedVia {
         match self {
             Self::Direct => "direct",
             Self::Gossip => "gossip",
+            Self::Lighthouse => "lighthouse",
         }
     }
 
     pub fn parse(value: &str) -> Self {
         // Anything unrecognised reads as gossip — the *less* trusted rank, which
         // is the safe direction for a value a newer version may have written.
-        if value == "direct" {
-            Self::Direct
-        } else {
-            Self::Gossip
+        match value {
+            "direct" => Self::Direct,
+            "lighthouse" => Self::Lighthouse,
+            _ => Self::Gossip,
         }
     }
 }
@@ -372,6 +382,14 @@ mod tests {
 
         let peers = store.list_peers().await.unwrap();
         assert_eq!(peers[0].pubkey.as_deref(), Some("aa11"));
+    }
+
+    #[test]
+    fn every_observed_via_round_trips_and_unknown_values_default_to_gossip() {
+        for via in [ObservedVia::Direct, ObservedVia::Gossip, ObservedVia::Lighthouse] {
+            assert_eq!(ObservedVia::parse(via.as_str()), via);
+        }
+        assert_eq!(ObservedVia::parse("carrier-pigeon"), ObservedVia::Gossip);
     }
 
     #[tokio::test]

@@ -10,8 +10,8 @@ ordering is a judgement about value, not a schedule.
 
 | Milestone | Scope                                                                       | Status      |
 | --------- | --------------------------------------------------------------------------- | ----------- |
-| —         | The lighthouse: semi-anonymous endpoint rendezvous, its own image and port  | In progress |
-| —         | Ratio and bandwidth control                                                 | Next        |
+| —         | The lighthouse: semi-anonymous endpoint rendezvous, its own image and port  | Done        |
+| —         | Ratio and bandwidth control: per-torrent upload cap and seed-ratio goal     | Done        |
 
 ---
 
@@ -63,8 +63,19 @@ cannot attribute a torrent client's address from a direct announce and has to
 learn it from gossip instead. Per-peer tokens would close that gap and make
 "cut this friend off" reach the tracker too, not just the feed.
 
-**Ratio and bandwidth control.** No upload limits, no seeding goals. Sharing a
-library with no cap on what it costs you is a real deterrent to running this.
+**Ratio and bandwidth control.** Done for the two goals that map identically
+across both clients: a per-torrent upload-speed cap and a seed-ratio goal,
+configured once in Settings → Seeding limits (`[seeding]` in `sharerr.toml`)
+and applied the moment sharerr hands a torrent to the client — qBittorrent
+inline on `torrents/add` (`upLimit`/`ratioLimit`), Transmission via a
+follow-up `torrent-set` naming the just-added hash, since `torrent-add`
+itself takes neither argument. Neither client is polled or re-configured by
+sharerr afterward; each one's own already-running seeding engine does the
+continuous enforcement, matching `sharerr-client`'s "ratios belong to the
+client" design. A time-based seeding goal is deliberately not included:
+qBittorrent's equivalent is total time seeded, but Transmission only offers
+*idle*-time, a different condition, and a field that meant two different
+things per backend would be a footgun rather than a fix.
 
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
@@ -82,16 +93,25 @@ would catch misconfiguration at the point it is introduced.
 
 ## The lighthouse
 
-**Where this stands:** the rendezvous service described below is implemented —
-`crates/sharerr-lighthouse` — as its own binary and image (`Dockerfile.lighthouse`)
-with report/lookup routes, signed-record verification, and the deterministic decoy
-fabrication the privacy property depends on. sharerr can also run it embedded on
-its own frontend or tracker port, toggled from Settings → Lighthouse or via
-`[lighthouse]` in `sharerr.toml` directly, for an operator who would rather not run
-a second container. Not yet built: the other half, a sharerr instance actually
-reporting its own endpoint to a lighthouse or querying one for a quiet friend —
-today nothing feeds a lighthouse observation into peer endpoint memory. The rest
-of this section is the target design, implemented and not.
+**Where this stands:** done, both halves. The rendezvous service described below
+is implemented — `crates/sharerr-lighthouse` — as its own binary and image
+(`Dockerfile.lighthouse`) with report/lookup routes, signed-record verification,
+and the deterministic decoy fabrication the privacy property depends on. sharerr
+can also run it embedded on its own frontend or tracker port, toggled from
+Settings → Lighthouse or via `[lighthouse]` in `sharerr.toml` directly, for an
+operator who would rather not run a second container. And a sharerr instance now
+reports its own endpoint to every lighthouse named in `lighthouse.urls` — one
+report per active friend's issued-key hash, since a lighthouse indexes by key
+hash alone — and queries the same list for any friend who has gone quiet,
+`crates/sharerr/src/lighthouse_client.rs`, on the same interval gossip itself
+runs on. A lookup result is only ever trusted, and fed into peer endpoint memory
+as `ObservedVia::Lighthouse` (ranked below both `Direct` and `Gossip`), once it
+both verifies and names the friend's already trust-on-first-use-bound pubkey —
+a friend never gossiped with has nothing to check a lighthouse's answer
+against, so is skipped rather than guessed at. Reporting and querying are
+independent of running the embedded service (`lighthouse.enabled`): an operator
+can consume a friend's lighthouse without hosting one, or host one for friends
+without using it themselves.
 
 Gossip only helps peers who can still reach _somebody_; two friends whose
 addresses both rotated while neither was watching have no path back to each

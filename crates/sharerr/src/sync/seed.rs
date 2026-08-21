@@ -42,6 +42,13 @@ pub struct Seeder {
     pub category: String,
     pub tag: String,
     pub skip_checking: bool,
+    /// Per-torrent upload cap in KiB/s, applied at add time. `None` leaves
+    /// the client's own default in effect. See `[seeding]` in
+    /// `sharerr.toml`.
+    pub upload_limit_kib: Option<u64>,
+    /// Seed-ratio goal, applied at add time. `None` leaves the client's own
+    /// default/global ratio setting in effect.
+    pub ratio_limit: Option<f64>,
     /// Where sharerr keeps a copy of each `.torrent` it builds.
     pub torrent_dir: PathBuf,
 }
@@ -52,6 +59,8 @@ impl std::fmt::Debug for Seeder {
             .field("category", &self.category)
             .field("tag", &self.tag)
             .field("skip_checking", &self.skip_checking)
+            .field("upload_limit_kib", &self.upload_limit_kib)
+            .field("ratio_limit", &self.ratio_limit)
             .field("torrent_dir", &self.torrent_dir)
             .finish_non_exhaustive()
     }
@@ -94,13 +103,18 @@ impl Seeder {
 
         let filename = format!("{}.torrent", built.info_hash);
         let save_path = save_path.to_string_lossy();
+        let mut request = AddRequest::new(&built.data, &filename, &save_path)
+            .category(&self.category)
+            .tags(&self.tag)
+            .skip_checking(self.skip_checking);
+        if let Some(kib) = self.upload_limit_kib {
+            request = request.upload_limit_kib(kib);
+        }
+        if let Some(ratio) = self.ratio_limit {
+            request = request.ratio_limit(ratio);
+        }
         self.qbit
-            .add(
-                &AddRequest::new(&built.data, &filename, &save_path)
-                    .category(&self.category)
-                    .tags(&self.tag)
-                    .skip_checking(self.skip_checking),
-            )
+            .add(&request)
             .await
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 

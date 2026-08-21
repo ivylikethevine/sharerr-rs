@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use secrecy::SecretString;
 use serde_json::{Value, json};
-use sharerr_core::config::{PathMapping, ServiceConfig};
+use sharerr_core::config::{PathMapping, SeedingConfig, ServiceConfig};
 use sharerr_core::{Config, MediaSource, ShareState};
 use sharerr_qbit::QbitClient;
 use sharerr_store::Store;
@@ -306,7 +306,7 @@ struct Harness {
 }
 
 /// Build a stack with Sonarr serving `series_json` and the library on disk.
-async fn harness(series_json: Value) -> Harness {
+async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
     let media = tempfile::tempdir().unwrap();
     let torrents = tempfile::tempdir().unwrap();
     let lib = library::tv_library(media.path()).unwrap();
@@ -361,6 +361,7 @@ async fn harness(series_json: Value) -> Harness {
             sharerr: media.path().join("tv"),
             qbit: Some(PathBuf::from(QBIT_PREFIX)),
         }],
+        seeding,
         ..Config::default()
     };
 
@@ -369,6 +370,8 @@ async fn harness(series_json: Value) -> Harness {
         category: "sharerr".to_owned(),
         tag: "sharerr".to_owned(),
         skip_checking: false,
+        upload_limit_kib: seeding.upload_limit_kib,
+        ratio_limit: seeding.ratio_limit,
         torrent_dir: torrents.path().to_path_buf(),
     };
 
@@ -406,14 +409,34 @@ async fn tagged_harness() -> Harness {
         },
         { "id": 12, "title": "Copper Vale Station", "tvdbId": 112233, "tags": [1] },
     ]);
-    harness(series).await
+    harness(series, SeedingConfig::default()).await
+}
+
+/// The default library, with a seeding goal configured — see
+/// `an_add_carries_the_configured_seeding_goal`.
+async fn tagged_harness_with_seeding(seeding: SeedingConfig) -> Harness {
+    let series = json!([
+        {
+            "id": 11,
+            "title": "Lanternwick Hollow",
+            "tvdbId": 918273,
+            "tvMazeId": 4242,
+            "imdbId": "tt7654321",
+            "tags": [library::TAG_ID],
+        },
+        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112233, "tags": [1] },
+    ]);
+    harness(series, seeding).await
 }
 
 /// The same library with the tag removed — what happens after an operator untags.
 async fn untagged_harness() -> Harness {
-    harness(json!([
-        { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918273, "tags": [1] },
-    ]))
+    harness(
+        json!([
+            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918273, "tags": [1] },
+        ]),
+        SeedingConfig::default(),
+    )
     .await
 }
 
@@ -609,6 +632,33 @@ async fn every_add_disables_auto_torrent_management_and_seeds_in_place() {
         assert_eq!(
             multipart_field(&torrent.form, "tags").as_deref(),
             Some("sharerr")
+        );
+    }
+}
+
+/// A configured seeding goal reaches the wire on every add — proving
+/// `Config::seeding` → `Seeder` → `AddRequest` → qBittorrent's `torrents/add`
+/// end to end, not just each hop in isolation.
+#[tokio::test]
+async fn an_add_carries_the_configured_seeding_goal() {
+    let h = tagged_harness_with_seeding(SeedingConfig {
+        upload_limit_kib: Some(500),
+        ratio_limit: Some(2.0),
+    })
+    .await;
+    h.syncer.run(false).await.unwrap();
+
+    let live = h.qbit.snapshot().live;
+    assert!(!live.is_empty(), "the tagged library must have shared something");
+    for torrent in &live {
+        assert_eq!(
+            multipart_field(&torrent.form, "upLimit").as_deref(),
+            Some("512000"),
+            "500 KiB/s converted to bytes/s"
+        );
+        assert_eq!(
+            multipart_field(&torrent.form, "ratioLimit").as_deref(),
+            Some("2")
         );
     }
 }

@@ -55,6 +55,13 @@ impl QbitClient {
     ///   moment the torrent is added.
     /// * `savepath` is the directory the content already occupies, so qBittorrent
     ///   finds it in place and has no reason to move anything.
+    ///
+    /// `upLimit` and `ratioLimit` — both documented `torrents/add` parameters
+    /// (WebAPI 2.8.1+ / qBittorrent 4.4+) — ride the same request when a
+    /// seeding goal is configured, so applying one costs no extra round
+    /// trip. A qBittorrent that predates them ignores the unrecognised form
+    /// fields, the same tolerance the dual `stopped`/`paused` fields above
+    /// already rely on.
     pub async fn add_torrent(&self, request: &AddRequest<'_>) -> Result<()> {
         let build = move |rb: reqwest::RequestBuilder| {
             // Rebuilt per attempt: a multipart Form cannot be cloned for a retry.
@@ -79,6 +86,14 @@ impl QbitClient {
             }
             if let Some(tags) = request.tags {
                 form = form.text("tags", tags.to_owned());
+            }
+            if let Some(kib) = request.upload_limit_kib {
+                // `upLimit` is bytes/s; sharerr's config is KiB/s, matching
+                // qBittorrent's own UI convention.
+                form = form.text("upLimit", (kib * 1024).to_string());
+            }
+            if let Some(ratio) = request.ratio_limit {
+                form = form.text("ratioLimit", ratio.to_string());
             }
 
             rb.multipart(form)

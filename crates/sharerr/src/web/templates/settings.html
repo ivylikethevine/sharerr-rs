@@ -43,6 +43,7 @@
 <ul class="quicknav">
   <li><a href="#general">General</a></li>
   <li><a href="#qbittorrent">qBittorrent</a></li>
+  <li><a href="#seeding">Seeding limits</a></li>
   <li><a href="#tracker">Tracker</a></li>
   <li><a href="#lighthouse">Lighthouse</a></li>
   <li><a href="#gluetun">Gluetun</a></li>
@@ -156,6 +157,31 @@
   <span id="test-qbittorrent"></span>
 </form>
 
+<h2 id="seeding">Seeding limits</h2>
+<form method="post" action="/settings/seeding" class="panel">
+  <p class="hint">
+    Applied once, when sharerr hands a torrent to qBittorrent or Transmission —
+    not retroactively enforced on what is already seeding, and not policed by
+    sharerr afterward. From that point on, the client's own seeding engine
+    honours the goal the same way it would for any torrent added by hand.
+    Leave a field blank for no cap.
+  </p>
+
+  <label for="seeding_upload_limit_kib">Upload limit (KiB/s)</label>
+  <input id="seeding_upload_limit_kib" name="upload_limit_kib" value="{{ seeding_upload_limit_kib }}"
+         inputmode="numeric" placeholder="unlimited"
+         {% call lock_attr("seeding.upload_limit_kib") %}{% endcall %}>
+  {% call locked("seeding.upload_limit_kib") %}{% endcall %}
+
+  <label for="seeding_ratio_limit">Seed ratio goal</label>
+  <input id="seeding_ratio_limit" name="ratio_limit" value="{{ seeding_ratio_limit }}"
+         inputmode="decimal" placeholder="e.g. 2.0"
+         {% call lock_attr("seeding.ratio_limit") %}{% endcall %}>
+  {% call locked("seeding.ratio_limit") %}{% endcall %}
+
+  <button type="submit">Save</button>
+</form>
+
 <h2 id="tracker">Tracker</h2>
 <form method="post" action="/settings/tracker" class="panel">
   <p class="hint">
@@ -233,11 +259,7 @@
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
     gossip alone has no path back — see <code>docs/roadmap.md</code>'s "The
-    lighthouse". This runs the lighthouse service itself as extra routes on
-    one of sharerr's own listeners, for an operator who would rather not run
-    a second container; sharerr does not yet report itself to a lighthouse or
-    query one for a quiet friend, so enabling this only makes the service
-    available, not yet used.
+    lighthouse".
   </p>
 
   <label class="hint">
@@ -263,6 +285,18 @@
     for — self-hosted by anyone, on neutral ground away from any particular
     library — so prefer that unless running a second container is genuinely
     not worth it here.
+  </p>
+
+  <label for="lighthouse_urls">Lighthouses to use</label>
+  <textarea id="lighthouse_urls" name="urls" rows="3" placeholder="https://lighthouse.example.com"
+            {% call lock_attr("lighthouse.urls") %}{% endcall %}>{{ lighthouse_urls }}</textarea>
+  {% call locked("lighthouse.urls") %}{% endcall %}
+  <p class="hint">
+    One URL per line. This instance reports its own endpoint to each of
+    these, and queries each for a friend gossip can no longer reach —
+    independent of whether it also runs the lighthouse above: consuming a
+    friend's lighthouse needs nothing checked above, and running one for
+    friends needs nothing typed here.
   </p>
 
   <button type="submit">Save</button>

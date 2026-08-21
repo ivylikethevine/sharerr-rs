@@ -198,7 +198,7 @@ impl Identity {
 /// the live advertised bases. `None` when the vault (and so the identity) is
 /// unavailable — gossip still relays without it, it just cannot speak for
 /// itself.
-async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
+pub(crate) async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
     let Some(identity) = state.gossip_identity().await else {
         tracing::debug!("no gossip identity available");
         return None;
