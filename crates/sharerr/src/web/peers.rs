@@ -436,6 +436,184 @@ mod tests {
         }
     }
 
+    /// A config whose database path is a directory rather than a file, so
+    /// `Store::open` fails deterministically — the hermetic way to reach the
+    /// `store_or_503`/`build`'s "store unavailable" branches without touching
+    /// the filesystem in a way that depends on real permissions.
+    fn web_state_with_unopenable_store() -> (tempfile::TempDir, WebState) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sharerr.db")).unwrap();
+        let config = sharerr_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            ..sharerr_core::Config::default()
+        };
+        let path = dir.path().join("sharerr.toml");
+        let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+        (dir, web_state(serve))
+    }
+
+    #[tokio::test]
+    async fn the_page_handler_renders() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = page(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_page_reports_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = page(State(state)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "still renders"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_rejects_a_blank_label() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "   ".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn add_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = revoke(State(state), Path(1)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn set_scope_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = set_scope(
+            State(state),
+            Path(1),
+            Form(ScopeForm {
+                scope: PeerScope::Tv,
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn set_gossip_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = set_gossip(
+            State(state),
+            Path(1),
+            Form(GossipForm {
+                url: String::new(),
+                key: String::new(),
+                clear_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = delete(State(state), Path(1)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_preview_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = feed_preview(State(state), Path(1)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// A peer with a recorded endpoint must have it round-trip into the
+    /// rendered row's endpoint list — the branch a peer with none (the tests
+    /// above) cannot exercise.
+    #[tokio::test]
+    async fn build_renders_a_peer_with_a_recorded_endpoint() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let peer = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store
+            .record_peer_endpoint(
+                peer.id,
+                sharerr_store::EndpointKind::Client,
+                "10.0.0.5:51413",
+                now_epoch(),
+                sharerr_store::ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+
+        let state = web_state(serve);
+        let page = build(&state, None, None).await;
+        let row = page
+            .peers
+            .iter()
+            .find(|r| r.label == "Sam")
+            .expect("Sam must be listed");
+        assert_eq!(row.endpoints.len(), 1);
+        assert_eq!(row.endpoints[0].addr, "10.0.0.5:51413");
+        assert_eq!(row.endpoints[0].kind, "client");
+    }
+
     #[tokio::test]
     async fn add_creates_a_peer_that_list_peers_then_sees() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();

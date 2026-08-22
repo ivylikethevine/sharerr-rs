@@ -1731,4 +1731,751 @@ mod tests {
             "/settings?saved=general"
         );
     }
+
+    #[tokio::test]
+    async fn save_general_rejects_a_blank_tag() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_general(
+            State(state),
+            Query(NextQuery::default()),
+            Form(GeneralForm {
+                tag: "   ".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn generate_secret_rejects_a_field_that_is_not_a_known_secret() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = generate_secret(
+            State(state),
+            axum::extract::Path("not-a-real-field".to_owned()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_settings_page_renders_for_a_fresh_unconfigured_instance() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = page(State(state), Query(PageQuery::default())).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn build_page_reports_no_secrets_set_and_no_config_error_for_a_fresh_instance() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+
+        let rendered = build_page(&web_state(serve), None, None).await;
+
+        assert!(rendered.config_error.is_none());
+        assert!(!rendered.qbit_api_key_set);
+        assert!(!rendered.tracker_token_set);
+        // A spare blank row is always appended, even with none configured.
+        assert_eq!(rendered.libraries.len(), 1);
+        assert_eq!(rendered.path_map.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_arr_rejects_a_source_with_no_url_or_api_key() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        // The directory source parses as a `MediaSource` but is configured
+        // through the Libraries section, not this handler.
+        let response = save_arr(
+            State(state),
+            axum::extract::Path(MediaSource::Directory),
+            Query(NextQuery::default()),
+            Form(ArrForm::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_arr_with_a_blank_url_unsets_the_section_rather_than_write_an_empty_one() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_arr(
+            State(state),
+            axum::extract::Path(MediaSource::Sonarr),
+            Query(NextQuery::default()),
+            Form(ArrForm::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).expect("save_arr writes the file");
+        assert!(!written.contains("[sonarr]"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_qbittorrent_rejects_a_malformed_api_key() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_qbittorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(QbitForm {
+                url: "qbit:8080".to_owned(),
+                api_key: "not-a-real-key".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_qbittorrent_requires_a_url() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_qbittorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(QbitForm::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_qbittorrent_writes_category_tag_and_skip_checking() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_qbittorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(QbitForm {
+                url: "qbit:8080".to_owned(),
+                category: "sharerr".to_owned(),
+                tag: "shared".to_owned(),
+                skip_checking: Some("on".to_owned()),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written =
+            std::fs::read_to_string(&config_path).expect("save_qbittorrent writes the file");
+        assert!(written.contains(r#"category = "sharerr""#), "{written}");
+        assert!(written.contains(r#"tag = "shared""#), "{written}");
+        assert!(written.contains("skip_checking = true"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_transmission_requires_a_url() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_transmission(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TransmissionForm::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_rtorrent_requires_a_url() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_rtorrent(
+            State(state),
+            Query(NextQuery::default()),
+            Form(RtorrentForm::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_torrent_backend_accepts_qbittorrent_and_rtorrent_too() {
+        for backend in ["qbittorrent", "rtorrent"] {
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let config_path = serve.config_path().to_path_buf();
+            let state = web_state(serve);
+
+            let response = save_torrent_backend(
+                State(state),
+                Query(NextQuery::default()),
+                Form(TorrentBackendForm {
+                    backend: backend.to_owned(),
+                }),
+            )
+            .await;
+
+            assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+            let written = std::fs::read_to_string(&config_path)
+                .expect("save_torrent_backend writes the file");
+            assert!(
+                written.contains(&format!(r#"torrent_backend = "{backend}""#)),
+                "{written}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_tracker_writes_host_port_and_advertised_url() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_tracker(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TrackerForm {
+                advertised_host: "sharerr.example".to_owned(),
+                port: "51413".to_owned(),
+                advertised_url: "https://sharerr.example".to_owned(),
+                token: String::new(),
+                clear_token: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).expect("save_tracker writes the file");
+        assert!(
+            written.contains(r#"advertised_host = "sharerr.example""#),
+            "{written}"
+        );
+        assert!(written.contains("port = 51413"), "{written}");
+        assert!(
+            written.contains(r#"advertised_url = "https://sharerr.example/""#),
+            "{written}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_tracker_rejects_a_private_advertised_host() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_tracker(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TrackerForm {
+                advertised_host: "192.168.1.20".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_tracker_rejects_a_port_out_of_range() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_tracker(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TrackerForm {
+                port: "not-a-port".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_tracker_with_blank_fields_unsets_them() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_tracker(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TrackerForm::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert!(config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_lighthouse_rejects_an_unknown_mount() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_lighthouse(
+            State(state),
+            Form(LighthouseForm {
+                mount: "not-a-mount".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_lighthouse_rejects_an_invalid_url_in_the_list() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_lighthouse(
+            State(state),
+            Form(LighthouseForm {
+                mount: "frontend".to_owned(),
+                urls: "not a url".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_lighthouse_writes_enabled_mount_and_urls() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_lighthouse(
+            State(state),
+            Form(LighthouseForm {
+                enabled: Some("on".to_owned()),
+                mount: "tracker".to_owned(),
+                urls: "https://lighthouse.example".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written =
+            std::fs::read_to_string(&config_path).expect("save_lighthouse writes the file");
+        assert!(written.contains("enabled = true"), "{written}");
+        assert!(written.contains(r#"mount = "tracker""#), "{written}");
+        assert!(written.contains("https://lighthouse.example/"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_seeding_rejects_a_non_numeric_upload_limit() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_seeding(
+            State(state),
+            Form(SeedingForm {
+                upload_limit_kib: "lots".to_owned(),
+                ratio_limit: String::new(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_seeding_rejects_a_negative_ratio() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_seeding(
+            State(state),
+            Form(SeedingForm {
+                upload_limit_kib: String::new(),
+                ratio_limit: "-1".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_seeding_writes_the_limits() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_seeding(
+            State(state),
+            Form(SeedingForm {
+                upload_limit_kib: "500".to_owned(),
+                ratio_limit: "2.5".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).expect("save_seeding writes the file");
+        assert!(written.contains("upload_limit_kib = 500"), "{written}");
+        assert!(written.contains("ratio_limit = 2.5"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_gluetun_writes_enabled_and_control_url() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_gluetun(
+            State(state),
+            Form(GluetunForm {
+                enabled: Some("on".to_owned()),
+                control_url: "gluetun:8000".to_owned(),
+                poll_secs: "60".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).expect("save_gluetun writes the file");
+        assert!(written.contains("[gluetun]"), "{written}");
+        assert!(written.contains("http://gluetun:8000/"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_gluetun_rejects_a_poll_interval_below_the_floor() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_gluetun(
+            State(state),
+            Form(GluetunForm {
+                poll_secs: "1".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_gluetun_rejects_a_non_numeric_poll_interval() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_gluetun(
+            State(state),
+            Form(GluetunForm {
+                poll_secs: "soon".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_gluetun_client_writes_to_the_client_section() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_gluetun_client(
+            State(state),
+            Form(GluetunForm {
+                control_url: "gluetun-client:8000".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written =
+            std::fs::read_to_string(&config_path).expect("save_gluetun_client writes the file");
+        assert!(written.contains("[gluetun_client]"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_sync_rejects_an_interval_below_the_floor() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_sync(
+            State(state),
+            Form(SyncForm {
+                enabled: None,
+                interval_secs: "1".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_sync_writes_enabled_and_interval() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_sync(
+            State(state),
+            Form(SyncForm {
+                enabled: Some("on".to_owned()),
+                interval_secs: "900".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).expect("save_sync writes the file");
+        assert!(written.contains("enabled = true"), "{written}");
+        assert!(written.contains("interval_secs = 900"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_notifications_rejects_an_invalid_webhook_url() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_notifications(
+            State(state),
+            Form(NotificationsForm {
+                webhook_url: "not a url".to_owned(),
+                kind: "generic".to_owned(),
+                peer_quiet_secs: "600".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_notifications_rejects_an_unknown_kind() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_notifications(
+            State(state),
+            Form(NotificationsForm {
+                kind: "carrier-pigeon".to_owned(),
+                peer_quiet_secs: "600".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_notifications_rejects_a_non_numeric_peer_quiet_threshold() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_notifications(
+            State(state),
+            Form(NotificationsForm {
+                kind: "discord".to_owned(),
+                peer_quiet_secs: "a while".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_notifications_writes_kind_and_peer_quiet_secs() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_notifications(
+            State(state),
+            Form(NotificationsForm {
+                kind: "apprise".to_owned(),
+                peer_quiet_secs: "3600".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written =
+            std::fs::read_to_string(&config_path).expect("save_notifications writes the file");
+        assert!(written.contains(r#"kind = "apprise""#), "{written}");
+        assert!(written.contains("peer_quiet_secs = 3600"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_libraries_rejects_an_unparseable_row() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_libraries(
+            State(state),
+            Form(LibrariesForm {
+                path: vec!["/media/tv".to_owned()],
+                kind: vec!["not-a-kind".to_owned()],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_libraries_writes_a_valid_row() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let dir = serve.config().await.data_dir.clone();
+        let library_path = dir.join("tv");
+        std::fs::create_dir_all(&library_path).expect("make a real directory to point at");
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_libraries(
+            State(state),
+            Form(LibrariesForm {
+                path: vec![library_path.display().to_string()],
+                kind: vec!["tv".to_owned()],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert!(config_path.exists());
+    }
+
+    #[tokio::test]
+    async fn save_paths_rejects_a_short_row() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_paths(
+            State(state),
+            Query(NextQuery::default()),
+            Form(PathsForm {
+                arr: vec!["/data/media".to_owned()],
+                sharerr: vec![],
+                qbit: vec![],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn write_config_falls_back_to_a_replacement_when_the_config_failed_to_load() {
+        let (_dir, serve) = crate::state::fixtures::unloadable();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_general(
+            State(state),
+            Query(NextQuery::default()),
+            Form(GeneralForm {
+                tag: "sharerr".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written =
+            std::fs::read_to_string(&config_path).expect("the replacement file must be written");
+        assert!(written.contains(r#"tag = "sharerr""#), "{written}");
+    }
+
+    #[tokio::test]
+    async fn write_config_reports_a_config_file_that_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        // No config_error is recorded, but the file on disk is not valid TOML —
+        // `ConfigFile::open` must fail, not panic, and no half-written file
+        // should be left behind.
+        std::fs::write(&config_path, "this is not [ valid toml").expect("seed a broken file");
+        let state = web_state(serve);
+
+        let response = save_general(
+            State(state),
+            Query(NextQuery::default()),
+            Form(GeneralForm {
+                tag: "sharerr".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn secrets_present_is_empty_with_no_vault_configured() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config = serve.config().await;
+
+        assert!(secrets_present(&config).await.is_empty());
+    }
+
+    #[test]
+    fn gluetun_last_observed_is_none_until_something_is_observed() {
+        let endpoint = sharerr_core::endpoint::AdvertisedEndpoint::new(None);
+        assert_eq!(gluetun_last_observed(&endpoint), None);
+
+        let base = url::Url::parse("http://gluetun:8000").unwrap();
+        endpoint.observe(base);
+        assert!(gluetun_last_observed(&endpoint).is_some());
+    }
+
+    #[test]
+    fn title_case_capitalises_only_the_first_letter() {
+        assert_eq!(title_case("sonarr"), "Sonarr");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn url_placeholder_names_each_arrs_documented_default_port() {
+        assert_eq!(url_placeholder(MediaSource::Sonarr), "http://sonarr:8989");
+        assert_eq!(url_placeholder(MediaSource::Directory), "");
+    }
 }

@@ -775,4 +775,188 @@ mod tests {
             );
         }
     }
+
+    /// Bytes that do not parse as a `.torrent` at all — the cached file
+    /// somehow corrupted — must still fall back to being served unchanged
+    /// rather than the rewrite attempt propagating a failure to the caller.
+    #[tokio::test]
+    async fn attribution_falls_back_when_the_cached_bytes_do_not_parse_as_a_torrent() {
+        let (_dir, state) = with_advertised_host();
+        let store = state.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+
+        let garbage = b"not a bencoded torrent".to_vec();
+        let result = attributed_bytes(&tracker_state, &garbage, &sam.key_hash).await;
+        assert_eq!(result, garbage);
+    }
+
+    // ------------------------------------------------------------- scrape
+
+    /// A scrape naming no `info_hash` at all is refused with a specific
+    /// reason rather than treated as "tell me about everything" — this
+    /// tracker never enumerates its whole library.
+    #[tokio::test]
+    async fn scrape_with_no_info_hash_is_refused() {
+        let (_dir, state) = unconfigured();
+
+        let (status, body) = get(&state, "/scrape").await;
+        assert_eq!(status, StatusCode::OK, "trackers report refusals in-band");
+        assert!(
+            body.contains("this tracker only scrapes specific torrents"),
+            "{body}"
+        );
+    }
+
+    /// An `info_hash` of the wrong length cannot be a real info hash — refused
+    /// by shape before any store lookup happens.
+    #[tokio::test]
+    async fn scrape_with_a_short_info_hash_is_refused() {
+        let (_dir, state) = unconfigured();
+
+        let (status, body) = get(&state, "/scrape?info_hash=%00").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("info_hash must be exactly 20 bytes"),
+            "{body}"
+        );
+    }
+
+    /// A well-formed hash for a torrent this instance does not share gets an
+    /// empty scrape answer, not a failure — a client scraping something we
+    /// withdrew should learn "no peers", not "something went wrong".
+    #[tokio::test]
+    async fn scrape_for_an_unshared_torrent_is_not_a_failure() {
+        let (_dir, state) = unconfigured();
+        let hash = "%00".repeat(20);
+
+        let (status, body) = get(&state, &format!("/scrape?info_hash={hash}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("failure reason"), "{body}");
+    }
+
+    /// The success path: a torrent this instance actually shares gets real
+    /// scrape counts back rather than the empty-files fallback above.
+    #[tokio::test]
+    async fn scrape_for_a_shared_torrent_reports_it() {
+        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        let hash_hex = "00".repeat(20);
+        store
+            .upsert(&SharedItem {
+                id: None,
+                source: MediaSource::Sonarr,
+                source_id: 1,
+                file_id: 1,
+                spec: MediaSpec::Episode {
+                    series_title: "Lanternwick Hollow".to_owned(),
+                    season: 1,
+                    episode: 1,
+                },
+                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+                size: 1,
+                ids: ExternalIds::default(),
+                info_hash: None,
+                announce_token_fp: None,
+                state: ShareState::Pending,
+                last_error: None,
+                created_at: None,
+            })
+            .await
+            .unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None)
+            .await
+            .unwrap();
+
+        let hash_query = "%00".repeat(20);
+        let (status, body) = get(&state, &format!("/scrape?info_hash={hash_query}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("failure reason"), "{body}");
+    }
+
+    // -------------------------------------------------------- torrent_file
+
+    /// The success path end to end: a cached `.torrent` for a shared torrent
+    /// is served with the right headers and its bytes untouched when no
+    /// per-peer token is supplied.
+    #[tokio::test]
+    async fn torrent_file_serves_the_cached_bytes_for_a_shared_torrent() {
+        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+
+        let (dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        let built = built_torrent(dir.path(), "http://seed.example:8477/announce");
+        let config = state.config().await;
+        let torrent_dir = config.torrent_dir();
+        tokio::fs::create_dir_all(&torrent_dir).await.unwrap();
+        tokio::fs::write(
+            sharerr_torrent::torrent_file_path(&torrent_dir, &built.info_hash),
+            &built.data,
+        )
+        .await
+        .unwrap();
+
+        store
+            .upsert(&SharedItem {
+                id: None,
+                source: MediaSource::Sonarr,
+                source_id: 1,
+                file_id: 1,
+                spec: MediaSpec::Episode {
+                    series_title: "Lanternwick Hollow".to_owned(),
+                    season: 1,
+                    episode: 1,
+                },
+                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+                size: 1,
+                ids: ExternalIds::default(),
+                info_hash: None,
+                announce_token_fp: None,
+                state: ShareState::Pending,
+                last_error: None,
+                created_at: None,
+            })
+            .await
+            .unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None)
+            .await
+            .unwrap();
+
+        let uri = format!("/torrents/{}.torrent", built.info_hash);
+        let state_arc = Arc::new(TrackerState::new(Arc::clone(&state)));
+        let request = Request::builder().uri(&uri).body(Body::empty()).unwrap();
+        let response = routes(state_arc).oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-bittorrent")
+        );
+        let disposition = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap()
+            .to_owned();
+        assert!(disposition.contains(&built.info_hash), "{disposition}");
+
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(bytes.as_ref(), built.data.as_slice());
+    }
 }

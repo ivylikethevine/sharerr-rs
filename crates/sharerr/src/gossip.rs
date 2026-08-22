@@ -569,7 +569,7 @@ async fn exchange_with(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use sharerr_store::PeerScope;
@@ -607,6 +607,41 @@ mod tests {
             ids.push(peer.id);
         }
         (store, ids)
+    }
+
+    fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
+        sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master"))
+            .unwrap()
+    }
+
+    #[test]
+    fn load_or_create_mints_an_identity_and_then_reloads_the_same_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+
+        let minted = Identity::load_or_create(&mut vault).unwrap();
+        let pubkey = minted.pubkey_hex();
+
+        let reloaded = Identity::load_or_create(&mut vault).unwrap();
+        assert_eq!(
+            reloaded.pubkey_hex(),
+            pubkey,
+            "a second load must return the same identity, not mint a fresh one"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_stored_key_is_reported_rather_than_silently_reminted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(
+                secret_keys::IDENTITY_SIGNING_KEY,
+                &SecretString::from("not-hex"),
+            )
+            .unwrap();
+
+        assert!(Identity::load_or_create(&mut vault).is_err());
     }
 
     #[test]
@@ -844,5 +879,320 @@ mod tests {
             !body.contains("203.0.113.9"),
             "a pull must not volunteer records the caller did not prove they know: {body}"
         );
+    }
+
+    // ------------------------------------------------------- outbound exchange
+
+    #[tokio::test]
+    async fn exchange_with_pushes_the_own_record_and_ingests_the_pull() {
+        let server = wiremock::MockServer::start().await;
+        let (store, ids) = store_with(&["Alex"]).await;
+        let alex = identity(1);
+        let own = record_for(&alex, "http://me:1", 1000);
+        let friend = record_for(&identity(2), "http://friend:2", 2000);
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/api/gossip/endpoints"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/gossip/endpoints"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(RecordBatch {
+                    records: vec![friend],
+                }),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        exchange_with(
+            &http,
+            &store,
+            ids[0],
+            &server.uri(),
+            "outbound-key",
+            Some(&own),
+            &[],
+        )
+        .await
+        .unwrap();
+
+        // The pulled record names a peer we don't share with, so it lands as
+        // "unknown" rather than a new row — the assertion that matters here is
+        // that the pull's body actually reached `ingest`, not that it was
+        // accepted.
+        assert_eq!(store.list_peers().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn exchange_with_skips_the_push_when_there_is_no_own_record() {
+        let server = wiremock::MockServer::start().await;
+        let (store, ids) = store_with(&["Alex"]).await;
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(RecordBatch::default()),
+            )
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        exchange_with(&http, &store, ids[0], &server.uri(), "k", None, &[])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn exchange_with_reports_a_non_success_pull_status_as_an_error() {
+        let server = wiremock::MockServer::start().await;
+        let (store, ids) = store_with(&["Alex"]).await;
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::new();
+        let err = exchange_with(&http, &store, ids[0], &server.uri(), "k", None, &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("500"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn exchange_with_reports_an_unreachable_host_as_an_error_naming_the_cause() {
+        let (store, ids) = store_with(&["Alex"]).await;
+        let http = reqwest::Client::new();
+
+        // Port 0 never accepts a connection — a stand-in for "the friend's
+        // sharerr is offline" without depending on any real network.
+        let err = exchange_with(&http, &store, ids[0], "http://127.0.0.1:0", "k", None, &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.starts_with("push: ") || err.starts_with("pull: "),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_exchange_is_a_no_op_when_no_peer_has_a_gossip_url() {
+        let (_dir, state) = served(&["Sam"]).await;
+        assert!(run_exchange(&state).await.is_ok());
+    }
+
+    /// `self_record` and `run_exchange`'s full push/pull path both depend on a
+    /// real identity — which means a vault backed by an actual
+    /// `SHARERR_MASTER_KEY`, not the `state::fixtures::unconfigured()` fixture
+    /// every other test in this module uses (deliberately vault-less, per this
+    /// repo's CLAUDE.md). `secrets.rs` already has a `#[test]` that legitimately
+    /// sets that env var via `figment::Jail`, so — same reasoning as
+    /// `sync::tests::build_succeeds_with_a_configured_library_and_torrent_client`
+    /// — these run inside a `Jail` too, which clears/serializes the env instead
+    /// of racing it, and drive their own runtime rather than `#[tokio::test]`'s
+    /// (which would already hold one on this thread).
+    #[test]
+    fn self_record_signs_the_current_tracker_api_and_client_endpoints() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..sharerr_core::Config::default()
+            };
+            let state = ServeState::new(config, jail.directory().join("sharerr.toml"), None);
+            state
+                .endpoint()
+                .set_static(Some(url::Url::parse("http://198.51.100.5:6881/").unwrap()));
+            state
+                .client_endpoint()
+                .set_static(Some(url::Url::parse("http://198.51.100.9:9091/").unwrap()));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let record = runtime
+                .block_on(self_record(&state))
+                .expect("an identity should mint on first use and the record should sign");
+
+            let kinds: Vec<&str> = record.endpoints.iter().map(|e| e.kind.as_str()).collect();
+            assert!(kinds.contains(&"tracker"), "{kinds:?}");
+            assert!(kinds.contains(&"api"), "{kinds:?}");
+            assert!(
+                kinds.contains(&"client"),
+                "the client endpoint is independent of tracker/api and must appear once observed: {kinds:?}"
+            );
+            assert!(
+                verify(&record).is_ok(),
+                "self_record must sign, not just assemble"
+            );
+            Ok(())
+        });
+    }
+
+    /// The full outbound exchange, end to end: a friend with a stored key and a
+    /// `gossip_url` gets pushed our record and pulled from — proving
+    /// `run_exchange` actually wires `self_record`, the vault-stored per-peer
+    /// key, and `exchange_with` together, not just each piece in isolation.
+    #[test]
+    fn run_exchange_pushes_and_pulls_a_friend_with_a_stored_key_and_url() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(
+                config.clone(),
+                jail.directory().join("sharerr.toml"),
+                None,
+            ));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::path("/api/gossip/endpoints"))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                wiremock::Mock::given(wiremock::matchers::method("GET"))
+                    .and(wiremock::matchers::path("/api/gossip/endpoints"))
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200).set_body_json(RecordBatch::default()),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let store = state.store().await.unwrap();
+                let peer = store
+                    .create_peer("Friend", &SecretString::from("friend-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+                store
+                    .set_peer_gossip_url(peer.id, Some(&server.uri()))
+                    .await
+                    .unwrap();
+
+                // The outbound key `run_exchange` looks up per peer — stored
+                // directly via a `Vault` opened on the same path/master key
+                // `state.open_vault()` will resolve, matching this repo's
+                // convention of exercising vault-backed logic through the plain
+                // `Vault` API rather than routing test setup through the web layer.
+                let mut vault = sharerr_store::Vault::open(
+                    config.vault_path(),
+                    &SecretString::from("a-master-key"),
+                )
+                .unwrap();
+                vault
+                    .put(
+                        &secret_keys::peer_gossip_key(peer.id),
+                        &SecretString::from("outbound-key"),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                run_exchange(&state).await.unwrap();
+            });
+            Ok(())
+        });
+    }
+
+    /// The Debug impl exists specifically so the private signing key can never
+    /// reach a log line — assert the redaction, not just that it compiles.
+    #[test]
+    fn identity_debug_does_not_expose_the_private_key() {
+        let id = identity(7);
+        let debug = format!("{id:?}");
+        assert!(debug.contains(&id.pubkey_hex()));
+        assert!(
+            !debug.contains(&hex::encode([7u8; 32])),
+            "the private key bytes must never appear in Debug output: {debug}"
+        );
+    }
+
+    /// `ingest` treats a record about an already-revoked peer the same as one
+    /// about a total stranger: `unknown`, never applied — revocation must not
+    /// be reversible by a friend simply relaying a record.
+    #[tokio::test]
+    async fn ingest_ignores_a_record_about_a_revoked_peer() {
+        let (store, ids) = store_with(&["Sam"]).await;
+        let sam = identity(1);
+        ingest(&store, ids[0], vec![record_for(&sam, "http://sam:1", 1000)]).await;
+        store.revoke_peer(ids[0]).await.unwrap();
+
+        let summary = ingest(
+            &store,
+            ids[0],
+            vec![record_for(&sam, "http://sam-new:2", 2000)],
+        )
+        .await;
+        assert_eq!(summary.accepted, 0);
+        assert_eq!(summary.unknown, 1);
+    }
+
+    /// An endpoint kind this build does not recognise is skipped rather than
+    /// stored or rejected wholesale — the record around it is still accepted,
+    /// which is what lets a newer sharerr add kinds without breaking older
+    /// friends relaying them.
+    #[tokio::test]
+    async fn an_unknown_endpoint_kind_is_skipped_but_the_record_is_still_accepted() {
+        let (store, ids) = store_with(&["Sam"]).await;
+        let sam = identity(1);
+        let record = sam
+            .sign_record(
+                vec![
+                    RecordEndpoint {
+                        kind: "some-future-kind".to_owned(),
+                        addr: "http://future:1".to_owned(),
+                        observed_at: 1000,
+                    },
+                    RecordEndpoint {
+                        kind: "tracker".to_owned(),
+                        addr: "http://sam:1".to_owned(),
+                        observed_at: 1000,
+                    },
+                ],
+                1000,
+            )
+            .unwrap();
+
+        let summary = ingest(&store, ids[0], vec![record]).await;
+        assert_eq!(summary.accepted, 1);
+
+        let endpoints = store.peer_endpoints(ids[0]).await.unwrap();
+        assert_eq!(endpoints.len(), 1, "only the recognised kind is stored");
+        assert_eq!(endpoints[0].addr, "http://sam:1");
+    }
+
+    /// `self_record` returns `None` — rather than a record with no
+    /// endpoints — when there is no gossip identity to sign with, which is
+    /// the state of a fresh, unconfigured instance.
+    ///
+    /// `state::fixtures::unconfigured()` relies on `SHARERR_MASTER_KEY` being
+    /// absent from the process env, same as `commands::vault`'s no-master-key
+    /// tests — so this needs the same `Jail`-clears-and-serializes treatment to
+    /// stay safe next to this module's own Jail-based tests that legitimately
+    /// set the var (`self_record_signs_the_current_tracker_api_and_client_endpoints`,
+    /// `run_exchange_pushes_and_pulls_a_friend_with_a_stored_key_and_url`).
+    #[test]
+    fn self_record_is_none_without_a_gossip_identity() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, state) = crate::state::fixtures::unconfigured();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            assert!(runtime.block_on(self_record(&state)).is_none());
+            Ok(())
+        });
     }
 }

@@ -5,7 +5,7 @@
 //! what was added, because the property under test — running sync twice changes
 //! nothing the second time — is invisible to a stateless mock.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -775,6 +775,48 @@ async fn an_item_that_loses_its_tag_is_unshared_and_its_torrent_removed() {
     }
 }
 
+/// The withdrawal side of a dry run: it must report what it *would* unshare
+/// without touching qBittorrent or the store — the counterpart to
+/// `an_item_that_loses_its_tag_is_unshared_and_its_torrent_removed`, which
+/// covers the same call with `dry_run: false`.
+#[tokio::test]
+async fn withdraw_untagged_dry_run_counts_without_removing_anything() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    let known = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| (i.key(), i))
+        .collect();
+    let removed = h
+        .syncer
+        .withdraw_untagged(
+            &known,
+            &Default::default(),
+            &HashSet::from([MediaSource::Sonarr]),
+            true,
+        )
+        .await;
+
+    assert_eq!(removed, 2, "a dry run still reports what it would unshare");
+    assert!(
+        h.qbit.snapshot().removed.is_empty(),
+        "a dry run must not remove any torrent"
+    );
+    for item in h.syncer.store().all_items().await.unwrap() {
+        assert_eq!(
+            item.state,
+            ShareState::Seeding,
+            "a dry run must not write the store"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_dry_run_reports_without_writing_anything() {
     let h = tagged_harness().await;
@@ -1328,4 +1370,288 @@ async fn a_run_is_recorded_in_history() {
     assert_eq!(runs[0].summary.discovered, 2);
     assert_eq!(runs[0].summary.added, 2);
     assert!(runs[0].summary.error.is_none());
+}
+
+// --------------------------------------------------------- building from config
+
+/// `build_arr`/`build_client`/`build_tracker` take a plain `&Vault` rather than
+/// going through `ServeState`, so — per this repo's testing conventions — they can
+/// be exercised directly with a vault opened in a tempdir, no `SHARERR_MASTER_KEY`
+/// required.
+fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
+    sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master")).unwrap()
+}
+
+#[test]
+fn build_arr_is_none_when_the_service_is_not_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+    let config = Config::default();
+
+    assert!(
+        super::build_arr(MediaSource::Sonarr, &config, &vault)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn build_arr_fails_with_the_missing_key_named_when_no_credential_is_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+    let config = Config {
+        sonarr: Some(ServiceConfig {
+            url: Url::parse("http://sonarr.example").unwrap(),
+        }),
+        ..Config::default()
+    };
+
+    let err = super::build_arr(MediaSource::Sonarr, &config, &vault).unwrap_err();
+    assert!(format!("{err:#}").contains("sonarr.api_key"), "{err:#}");
+}
+
+#[test]
+fn build_arr_succeeds_once_the_vault_holds_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = vault_in(&dir);
+    vault
+        .put(
+            sharerr_core::config::secret_keys::SONARR_API_KEY,
+            &SecretString::from("a-key"),
+        )
+        .unwrap();
+    let config = Config {
+        sonarr: Some(ServiceConfig {
+            url: Url::parse("http://sonarr.example").unwrap(),
+        }),
+        ..Config::default()
+    };
+
+    assert!(
+        super::build_arr(MediaSource::Sonarr, &config, &vault)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn build_client_fails_naming_the_missing_key_for_the_selected_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+    let config = Config::default(); // defaults to qBittorrent
+
+    let err = super::build_client(&config, &vault).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("qbittorrent.api_key"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn build_client_succeeds_once_the_backends_credential_is_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = vault_in(&dir);
+    vault
+        .put(
+            sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
+            &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+        )
+        .unwrap();
+    let config = Config::default();
+
+    assert!(super::build_client(&config, &vault).is_ok());
+}
+
+#[test]
+fn build_client_reads_the_backend_specific_key_when_the_backend_is_switched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = vault_in(&dir);
+    // Only Transmission's own key is stored — if `build_client` mistakenly kept
+    // reading qBittorrent's key name after the backend switched, this would fail.
+    vault
+        .put(
+            sharerr_core::config::secret_keys::TRANSMISSION_PASSWORD,
+            &SecretString::from("a-password"),
+        )
+        .unwrap();
+    let config = Config {
+        torrent_backend: sharerr_core::config::TorrentBackend::Transmission,
+        ..Config::default()
+    };
+
+    assert!(super::build_client(&config, &vault).is_ok());
+}
+
+/// `Syncer::build` is the one function in this module that reads
+/// `SHARERR_MASTER_KEY` from the process environment (via `secrets::open_vault_async`),
+/// so — same as `secrets.rs`'s own vault-opening tests — it can only be exercised
+/// safely inside a `figment::Jail`, which clears/scopes the env and serializes
+/// against every other Jail-based test in this binary rather than racing them.
+/// A plain `#[tokio::test]` cannot host a `Jail` (its closure needs to drive its
+/// own runtime), hence a `#[test]` with a runtime built inside the closure.
+#[test]
+fn build_fails_without_a_master_key() {
+    figment::Jail::expect_with(|jail| {
+        jail.clear_env();
+        let config = Config {
+            data_dir: jail.directory().to_path_buf(),
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: jail.directory().to_path_buf(),
+                kind: sharerr_core::config::LibraryKind::Movie,
+            }],
+            ..Config::default()
+        };
+        let endpoint = Arc::new(sharerr_core::endpoint::AdvertisedEndpoint::new(None));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(Syncer::build(&config, endpoint))
+            .unwrap_err();
+        assert!(format!("{err:#}").to_lowercase().contains("master key"));
+        Ok(())
+    });
+}
+
+#[test]
+fn build_bails_when_no_library_source_is_configured() {
+    figment::Jail::expect_with(|jail| {
+        jail.clear_env();
+        jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+        let data_dir = jail.directory().to_path_buf();
+        let config = Config {
+            data_dir: data_dir.clone(),
+            ..Config::default() // no sonarr/radarr/etc, no [[library]]
+        };
+
+        // build_client (called before the sources check) needs the qbit
+        // credential in the vault, or the bail this test wants would be masked
+        // by an earlier, unrelated failure.
+        let mut vault =
+            sharerr_store::Vault::open(config.vault_path(), &SecretString::from("a-master-key"))
+                .unwrap();
+        vault
+            .put(
+                sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
+                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            )
+            .unwrap();
+        drop(vault);
+
+        let endpoint = Arc::new(sharerr_core::endpoint::AdvertisedEndpoint::new(None));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(Syncer::build(&config, endpoint))
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no library source"), "{err:#}");
+        Ok(())
+    });
+}
+
+#[test]
+fn build_succeeds_with_a_configured_library_and_torrent_client() {
+    figment::Jail::expect_with(|jail| {
+        jail.clear_env();
+        jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+        let data_dir = jail.directory().to_path_buf();
+        let config = Config {
+            data_dir: data_dir.clone(),
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: data_dir.clone(),
+                kind: sharerr_core::config::LibraryKind::Movie,
+            }],
+            ..Config::default()
+        };
+
+        let mut vault =
+            sharerr_store::Vault::open(config.vault_path(), &SecretString::from("a-master-key"))
+                .unwrap();
+        vault
+            .put(
+                sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
+                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            )
+            .unwrap();
+        drop(vault);
+
+        let endpoint = Arc::new(sharerr_core::endpoint::AdvertisedEndpoint::new(None));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let syncer = runtime.block_on(Syncer::build(&config, endpoint)).unwrap();
+        assert!(format!("{syncer:?}").contains("sharerr"));
+        Ok(())
+    });
+}
+
+#[test]
+fn build_client_reports_the_missing_password_alone_when_theres_no_api_key_option() {
+    // Transmission (and rtorrent) have no `api_key_key` at all, so their "missing
+    // credential" message is the `(None, Some(password))` arm — distinct from
+    // qBittorrent's `(Some(api), None)` arm covered by
+    // `build_client_fails_naming_the_missing_key_for_the_selected_backend`.
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+    let config = Config {
+        torrent_backend: sharerr_core::config::TorrentBackend::Transmission,
+        ..Config::default()
+    };
+
+    let err = super::build_client(&config, &vault).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("transmission.password"),
+        "{err:#}"
+    );
+    assert!(
+        !format!("{err:#}").contains(" or "),
+        "the password-only arm must not read like an either/or, got: {err:#}"
+    );
+}
+
+#[test]
+fn build_tracker_works_with_and_without_a_stored_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+    let endpoint = Arc::new(sharerr_core::endpoint::AdvertisedEndpoint::new(None));
+
+    assert!(super::build_tracker(Arc::clone(&endpoint), &vault).is_ok());
+
+    let mut vault = vault;
+    vault
+        .put(
+            sharerr_core::config::secret_keys::TRACKER_TOKEN,
+            &SecretString::from("a-token"),
+        )
+        .unwrap();
+    assert!(super::build_tracker(endpoint, &vault).is_ok());
+}
+
+// ------------------------------------------------------------ report formatting
+
+#[test]
+fn a_report_with_no_failures_has_no_problems() {
+    let report = SyncReport {
+        discovered: 3,
+        added: 3,
+        ..SyncReport::default()
+    };
+    assert!(!report.has_problems());
+    let text = report.to_string();
+    assert!(text.contains("3 discovered"), "{text}");
+    assert!(!text.contains("could not be scanned"), "{text}");
+}
+
+#[test]
+fn a_report_with_a_failed_source_flags_problems_and_says_so() {
+    let report = SyncReport {
+        sources_failed: 1,
+        ..SyncReport::default()
+    };
+    assert!(report.has_problems());
+    let text = report.to_string();
+    assert!(text.contains("1 source(s) could not be scanned"), "{text}");
+}
+
+#[tokio::test]
+async fn the_debug_impl_names_the_tag_and_source_kinds_without_the_credentials() {
+    let h = tagged_harness().await;
+    let debug = format!("{:?}", h.syncer);
+    assert!(debug.contains("sharerr"), "{debug}");
 }

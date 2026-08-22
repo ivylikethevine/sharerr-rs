@@ -440,6 +440,87 @@ mod tests {
         tracker_waiter.abort();
     }
 
+    /// Mirrors `the_gluetun_refresh_nudge_is_private_only`: the down hook sits
+    /// behind the same private-address check, since it is reachable to the same
+    /// callers (gluetun's down-command, a docker neighbour) and to nothing else.
+    #[tokio::test]
+    async fn the_gluetun_down_hook_is_private_only() {
+        let (_dir, state) = unconfigured();
+        let no_target = Query(GluetunQuery::default());
+
+        let public = ConnectInfo(std::net::SocketAddr::from(([203, 0, 113, 9], 40000)));
+        let (status, _) = gluetun_down(State(Arc::clone(&state)), public, no_target.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
+        let (status, _) = gluetun_down(State(state), private, no_target).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The whole point of `/gluetun/down`: a port gluetun says is dead must not
+    /// linger as `resolve`'s fallback (see [`crate::gluetun::GluetunClient::resolve_base`]),
+    /// so the dynamic history has to be gone, not just re-nudged.
+    #[tokio::test]
+    async fn the_gluetun_down_hook_forgets_the_dynamic_observation() {
+        let (_dir, state) = unconfigured();
+        let endpoint = state.endpoint_for(GluetunTarget::Tracker);
+        endpoint.observe("http://10.0.0.5:51413".parse().unwrap());
+        assert!(
+            endpoint.last_observed().is_some(),
+            "setup: must have observed something"
+        );
+
+        let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
+        gluetun_down(
+            State(Arc::clone(&state)),
+            private,
+            Query(GluetunQuery::default()),
+        )
+        .await;
+
+        assert!(
+            state
+                .endpoint_for(GluetunTarget::Tracker)
+                .last_observed()
+                .is_none(),
+            "the dynamic observation must be forgotten, not merely refreshed"
+        );
+    }
+
+    /// `?target=client` must forget and nudge the *client* poller's endpoint,
+    /// leaving the tracker's own dynamic history untouched.
+    #[tokio::test]
+    async fn a_client_target_only_forgets_the_client_endpoint() {
+        let (_dir, state) = unconfigured();
+        state
+            .endpoint_for(GluetunTarget::Tracker)
+            .observe("http://10.0.0.5:51413".parse().unwrap());
+        state
+            .endpoint_for(GluetunTarget::Client)
+            .observe("http://10.0.0.6:51414".parse().unwrap());
+
+        let private = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 40000)));
+        let query = Query(GluetunQuery {
+            target: Some("client".to_owned()),
+        });
+        gluetun_down(State(Arc::clone(&state)), private, query).await;
+
+        assert!(
+            state
+                .endpoint_for(GluetunTarget::Client)
+                .last_observed()
+                .is_none(),
+            "the client endpoint must have forgotten its observation"
+        );
+        assert!(
+            state
+                .endpoint_for(GluetunTarget::Tracker)
+                .last_observed()
+                .is_some(),
+            "the tracker endpoint must be untouched by a client-targeted call"
+        );
+    }
+
     #[tokio::test]
     async fn ready_reports_503_and_names_what_is_missing() {
         let (_dir, state) = unconfigured();

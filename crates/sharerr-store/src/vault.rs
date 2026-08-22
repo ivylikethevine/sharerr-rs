@@ -732,4 +732,104 @@ mod tests {
         );
         assert!(err.to_string().contains("/nonexistent/master.key"), "{err}");
     }
+
+    #[test]
+    fn decrypting_non_utf8_plaintext_is_reported_as_not_utf8() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = vault_in(&dir, "master");
+
+        // `put` only ever seals a `SecretString`, so invalid-UTF8 plaintext can
+        // only reach `get` via a record sealed directly, bypassing that guarantee —
+        // this exercises the decode-time defense rather than anything reachable
+        // through the public API in normal use.
+        let record = vault.seal("weird", &[0xFF, 0xFE, 0xFD]).unwrap();
+        vault.records.insert("weird".to_owned(), record);
+
+        let err = vault.get("weird").unwrap_err();
+        assert!(matches!(err, VaultError::NotUtf8 { key } if key == "weird"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_vault_whose_path_is_a_directory_is_an_io_error_not_a_panic() {
+        let dir = TempDir::new().unwrap();
+        let as_dir = dir.path().join("vault.bin");
+        std::fs::create_dir(&as_dir).unwrap();
+
+        let err = Vault::open(&as_dir, &secret("master")).unwrap_err();
+        assert!(matches!(err, VaultError::Io { .. }), "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_names_of_a_directory_path_is_an_io_error_not_a_panic() {
+        let dir = TempDir::new().unwrap();
+        let as_dir = dir.path().join("vault.bin");
+        std::fs::create_dir(&as_dir).unwrap();
+
+        let err = Vault::key_names(&as_dir).unwrap_err();
+        assert!(matches!(err, VaultError::Io { .. }), "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_reports_a_create_dir_all_failure() {
+        let dir = TempDir::new().unwrap();
+        // A plain file where `persist` needs to create a directory component —
+        // `create_dir_all` cannot mkdir through a file.
+        let blocking_file = dir.path().join("not-a-directory");
+        std::fs::write(&blocking_file, b"x").unwrap();
+
+        let vault = vault_in(&dir, "master");
+        let vault = Vault {
+            path: blocking_file.join("subdir").join("vault.bin"),
+            ..vault
+        };
+        let err = vault.persist().unwrap_err();
+        assert!(matches!(err, VaultError::Io { .. }), "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_reports_a_write_failure_on_a_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let vault_path = dir.path().join("vault.bin");
+        let vault = vault_in(&dir, "master");
+        let vault = Vault {
+            path: vault_path,
+            ..vault
+        };
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = vault.persist();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(matches!(result.unwrap_err(), VaultError::Io { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_reports_a_rename_failure_when_the_target_is_a_directory() {
+        let dir = TempDir::new().unwrap();
+        let vault = vault_in(&dir, "master");
+
+        let vault_path = dir.path().join("target-is-a-dir");
+        std::fs::create_dir(&vault_path).unwrap();
+        let vault = Vault {
+            path: vault_path,
+            ..vault
+        };
+
+        let err = vault.persist().unwrap_err();
+        assert!(matches!(err, VaultError::Io { .. }), "got {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_permissions_on_a_missing_path_is_an_io_error() {
+        let err = restrict_permissions(Path::new("/nonexistent/definitely-not-here")).unwrap_err();
+        assert!(matches!(err, VaultError::Io { .. }), "got {err:?}");
+    }
 }

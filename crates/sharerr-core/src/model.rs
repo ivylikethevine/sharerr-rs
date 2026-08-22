@@ -458,4 +458,141 @@ mod tests {
         let tags: Vec<&str> = specs.iter().map(MediaSpec::kind_tag).collect();
         assert_eq!(tags, MediaSpec::KIND_TAGS, "KIND_TAGS lists every variant");
     }
+
+    #[test]
+    fn coarse_tagging_is_series_artist_and_author_level_only() {
+        assert!(MediaSource::Sonarr.has_coarse_tagging());
+        assert!(MediaSource::Whisparr.has_coarse_tagging());
+        assert!(MediaSource::Lidarr.has_coarse_tagging());
+        assert!(MediaSource::Readarr.has_coarse_tagging());
+        assert!(!MediaSource::Radarr.has_coarse_tagging());
+        assert!(!MediaSource::Directory.has_coarse_tagging());
+    }
+
+    #[test]
+    fn api_version_matches_the_arr_app() {
+        assert_eq!(MediaSource::Sonarr.api_version(), "v3");
+        assert_eq!(MediaSource::Radarr.api_version(), "v3");
+        assert_eq!(MediaSource::Whisparr.api_version(), "v3");
+        assert_eq!(MediaSource::Lidarr.api_version(), "v1");
+        assert_eq!(MediaSource::Readarr.api_version(), "v1");
+        assert_eq!(MediaSource::Directory.api_version(), "none");
+    }
+
+    fn episode() -> MediaSpec {
+        MediaSpec::Episode {
+            series_title: "Lanternwick Hollow".to_owned(),
+            season: 1,
+            episode: 2,
+        }
+    }
+
+    fn movie(year: Option<u16>) -> MediaSpec {
+        MediaSpec::Movie {
+            title: "Copper Vale".to_owned(),
+            year,
+        }
+    }
+
+    fn track(track: Option<u32>) -> MediaSpec {
+        MediaSpec::Track {
+            artist: "The Verdigris".to_owned(),
+            album: "Static Orchard".to_owned(),
+            track,
+        }
+    }
+
+    fn book() -> MediaSpec {
+        MediaSpec::Book {
+            author: "Marlow Finch".to_owned(),
+            title: "The Quiet Ledger".to_owned(),
+        }
+    }
+
+    #[test]
+    fn title_is_the_searchable_name_per_kind() {
+        assert_eq!(episode().title(), "Lanternwick Hollow");
+        assert_eq!(movie(None).title(), "Copper Vale");
+        assert_eq!(
+            track(None).title(),
+            "Static Orchard",
+            "the album, not the artist"
+        );
+        assert_eq!(book().title(), "The Quiet Ledger");
+    }
+
+    #[test]
+    fn creator_is_only_present_for_music_and_books() {
+        assert_eq!(episode().creator(), None);
+        assert_eq!(movie(None).creator(), None);
+        assert_eq!(track(None).creator(), Some("The Verdigris"));
+        assert_eq!(book().creator(), Some("Marlow Finch"));
+    }
+
+    #[test]
+    fn display_renders_each_kind() {
+        assert_eq!(episode().to_string(), "Lanternwick Hollow S01E02");
+        assert_eq!(movie(Some(1999)).to_string(), "Copper Vale (1999)");
+        assert_eq!(movie(None).to_string(), "Copper Vale");
+        assert_eq!(
+            track(Some(4)).to_string(),
+            "The Verdigris - Static Orchard [04]"
+        );
+        assert_eq!(track(None).to_string(), "The Verdigris - Static Orchard");
+        assert_eq!(book().to_string(), "Marlow Finch - The Quiet Ledger");
+    }
+
+    #[test]
+    fn imdb_bare_strips_the_tt_prefix_regardless_of_source() {
+        assert_eq!(ExternalIds::imdb_bare("tt1234567"), "1234567");
+        assert_eq!(ExternalIds::imdb_bare("1234567"), "1234567");
+        assert_eq!(ExternalIds::imdb_bare("  tt1234567  "), "1234567");
+    }
+
+    #[test]
+    fn imdb_numeric_is_none_without_a_stored_id() {
+        let ids = ExternalIds::default();
+        assert_eq!(ids.imdb_numeric(), None);
+
+        let ids = ExternalIds {
+            imdb: Some("tt42".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(ids.imdb_numeric(), Some("42"));
+    }
+
+    fn discovered() -> Discovered {
+        Discovered {
+            source: MediaSource::Radarr,
+            source_id: 7,
+            file_id: 99,
+            spec: movie(Some(2001)),
+            arr_path: PathBuf::from("/media/movies/copper-vale.mkv"),
+            size: 1024,
+            ids: ExternalIds::default(),
+            scene_name: Some("Copper.Vale.2001.mkv".to_owned()),
+        }
+    }
+
+    #[test]
+    fn shared_item_and_discovered_keys_agree() {
+        let discovered = discovered();
+        let shared = discovered
+            .clone()
+            .into_shared_item("Copper.Vale.2001".to_owned());
+        assert_eq!(discovered.key(), (MediaSource::Radarr, 99));
+        assert_eq!(shared.key(), discovered.key());
+    }
+
+    #[test]
+    fn promoting_a_discovered_item_starts_pending_with_no_history() {
+        let shared = discovered().into_shared_item("Copper.Vale.2001".to_owned());
+        assert_eq!(shared.id, None);
+        assert_eq!(shared.state, ShareState::Pending);
+        assert_eq!(shared.info_hash, None);
+        assert_eq!(shared.announce_token_fp, None);
+        assert_eq!(shared.last_error, None);
+        assert_eq!(shared.created_at, None);
+        assert_eq!(shared.release_title, "Copper.Vale.2001");
+    }
 }

@@ -1000,4 +1000,282 @@ mod tests {
         assert!(!rendered.contains("hunter2"), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
     }
+
+    #[tokio::test]
+    async fn a_non_success_status_is_reported_as_an_api_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).version().await.unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_in_the_body_is_reported_as_malformed() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xff, 0xfe, 0xfd]))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).version().await.unwrap_err();
+        assert!(err.to_string().contains("system.client_version"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn call_str_rejects_a_non_string_reply() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(scalar_response("<array><data></data></array>")),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(&server).version().await.unwrap_err();
+        assert!(err.to_string().contains("expected a string"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn call_multi_rejects_a_non_array_top_level_reply() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(scalar_response("<string>oops</string>")),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(&server).list(None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("expected an array of arrays"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_multi_rejects_a_row_that_is_not_an_array() {
+        let server = MockServer::start().await;
+        // One outer array containing a bare string instead of a per-torrent array.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+                "<array><data><value><string>not-a-row</string></value></data></array>",
+            )))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).list(None).await.unwrap_err();
+        assert!(err.to_string().contains("expected a row array"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn files_maps_path_and_size() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+                "<array><data>\
+                 <value><array><data>\
+                 <value><string>show/episode.mkv</string></value>\
+                 <value><i8>4096</i8></value>\
+                 </data></array></value>\
+                 </data></array>",
+            )))
+            .mount(&server)
+            .await;
+
+        let files = client(&server).files("abc").await.unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "show/episode.mkv");
+        assert_eq!(files[0].size, 4096);
+    }
+
+    /// `add` with an upload limit attaches a named per-torrent throttle,
+    /// looked up via the most recently loaded item's hash — see
+    /// [`RtorrentClient::hash_of_last_add`].
+    #[tokio::test]
+    async fn add_with_upload_limit_sets_a_throttle() {
+        use wiremock::matchers::body_string_contains;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("d.multicall2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+                "<array><data><value><array><data>\
+                 <value><string>ABC123</string></value>\
+                 </data></array></value></data></array>",
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("throttle.up.max.set"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("d.throttle_name.set"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("load.raw_start"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
+            .mount(&server)
+            .await;
+
+        let data = b"x";
+        let request = AddRequest::new(data, "x.torrent", "/downloads").upload_limit_kib(500);
+        client(&server).add(&request).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let bodies: Vec<String> = requests
+            .iter()
+            .map(|r| String::from_utf8(r.body.clone()).unwrap())
+            .collect();
+        assert!(
+            bodies.iter().any(
+                |b| b.contains("throttle.up.max.set") && b.contains("abc123")
+                    || b.contains("throttle.up.max.set")
+            ),
+            "expected a throttle.up.max.set call: {bodies:?}"
+        );
+        assert!(
+            bodies.iter().any(|b| b.contains("d.throttle_name.set")),
+            "expected a d.throttle_name.set call: {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hash_of_last_add_errors_when_nothing_is_loaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(scalar_response("<array><data></data></array>")),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(&server).hash_of_last_add().await.unwrap_err();
+        assert!(err.to_string().contains("no torrents loaded"), "{err}");
+    }
+
+    #[test]
+    fn take2_rejects_a_row_of_the_wrong_length() {
+        let err = take2("f.multicall", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
+        assert!(err.to_string().contains("expected 2"), "{err}");
+    }
+
+    #[test]
+    fn take7_rejects_a_row_of_the_wrong_length() {
+        let err = take7("d.multicall2", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
+        assert!(err.to_string().contains("expected 7"), "{err}");
+    }
+
+    #[test]
+    fn as_str_defaults_to_empty_for_non_string_shapes() {
+        assert_eq!(as_str(&XmlValue::Str("hi".to_owned())), "hi");
+        assert_eq!(as_str(&XmlValue::Int(1)), "");
+        assert_eq!(as_str(&XmlValue::Array(Vec::new())), "");
+        assert_eq!(as_str(&XmlValue::Struct(Vec::new())), "");
+    }
+
+    #[test]
+    fn as_bool_reads_both_int_and_string_truthiness() {
+        assert!(as_bool(&XmlValue::Int(1)));
+        assert!(!as_bool(&XmlValue::Int(0)));
+        assert!(as_bool(&XmlValue::Str("1".to_owned())));
+        assert!(!as_bool(&XmlValue::Str("0".to_owned())));
+        assert!(!as_bool(&XmlValue::Str(String::new())));
+        assert!(!as_bool(&XmlValue::Array(Vec::new())));
+        assert!(!as_bool(&XmlValue::Struct(Vec::new())));
+    }
+
+    #[test]
+    fn as_u64_parses_int_and_string_and_defaults_on_garbage() {
+        assert_eq!(as_u64(&XmlValue::Int(42)), 42);
+        assert_eq!(as_u64(&XmlValue::Str(" 7 ".to_owned())), 7);
+        assert_eq!(as_u64(&XmlValue::Str("not-a-number".to_owned())), 0);
+        assert_eq!(as_u64(&XmlValue::Int(-1)), 0);
+        assert_eq!(as_u64(&XmlValue::Array(Vec::new())), 0);
+    }
+
+    #[test]
+    fn parse_response_without_param_or_fault_is_an_error() {
+        let err = parse_response(
+            "<?xml version=\"1.0\"?><methodResponse><params></params></methodResponse>",
+        )
+        .unwrap_err();
+        assert!(err.contains("no <param> or <fault>"), "{err}");
+    }
+
+    #[test]
+    fn fault_message_falls_back_to_debug_when_faultstring_is_missing() {
+        let value = XmlValue::Struct(vec![("faultCode".to_owned(), XmlValue::Int(-1))]);
+        assert!(fault_message(&value).contains("faultCode"));
+    }
+
+    #[test]
+    fn parse_value_rejects_an_unsupported_type() {
+        let mut reader = Reader::from_str("<boolean>1</boolean>");
+        let err = parse_value(&mut reader).unwrap_err();
+        assert!(err.contains("unsupported XML-RPC value type"), "{err}");
+    }
+
+    #[test]
+    fn parse_value_reports_an_integer_parse_failure() {
+        let mut reader = Reader::from_str("<i8>not-a-number</i8>");
+        let err = parse_value(&mut reader).unwrap_err();
+        assert!(err.contains("parsing"), "{err}");
+    }
+
+    #[test]
+    fn parse_value_reads_an_empty_value_as_an_empty_string() {
+        let mut reader = Reader::from_str("<value></value>");
+        reader.read_event().unwrap(); // consume the opening <value>, as parse_value's caller does
+        let value = parse_value(&mut reader).unwrap();
+        assert_eq!(value, XmlValue::Str(String::new()));
+    }
+
+    #[test]
+    fn parse_array_rejects_an_unexpected_event() {
+        let mut reader = Reader::from_str("<data><oops/></data>");
+        let err = parse_array(&mut reader).unwrap_err();
+        assert!(err.contains("unexpected event inside <data>"), "{err}");
+    }
+
+    #[test]
+    fn parse_struct_rejects_an_unexpected_event() {
+        let mut reader = Reader::from_str("<oops/>");
+        let err = parse_struct(&mut reader).unwrap_err();
+        assert!(err.contains("unexpected event inside <struct>"), "{err}");
+    }
+
+    #[test]
+    fn read_element_text_rejects_an_unexpected_event() {
+        let mut reader = Reader::from_str("<oops/>");
+        let err = read_element_text(&mut reader, b"name").unwrap_err();
+        assert!(err.contains("unexpected event reading <name>"), "{err}");
+    }
+
+    #[test]
+    fn expect_start_rejects_the_wrong_tag() {
+        let mut reader = Reader::from_str("<wrong/>");
+        let err = expect_start(&mut reader, b"value").unwrap_err();
+        assert!(err.contains("expected <value>"), "{err}");
+    }
+
+    #[test]
+    fn expect_end_rejects_the_wrong_tag() {
+        // A self-closing tag produces `Event::Empty`, not `Event::End` — enough
+        // to hit expect_end's "other" branch without quick_xml's own
+        // open/close-tag validation getting in the way first.
+        let mut reader = Reader::from_str("<other/>");
+        let err = expect_end(&mut reader, b"value").unwrap_err();
+        assert!(err.contains("</value>"), "{err}");
+    }
 }

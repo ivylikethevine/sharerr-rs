@@ -470,7 +470,7 @@ async fn resolve_once(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use wiremock::matchers::{method, path};
@@ -689,5 +689,284 @@ mod tests {
             unreachable.public_ip().await.unwrap_err(),
             GluetunError::Unreachable { .. }
         ));
+    }
+
+    /// A non-2xx, non-401 status (nothing 401-shaped catches this first) must
+    /// surface as `Status`, not fall through to a JSON-decode `Malformed` that
+    /// would hide the actual HTTP status from the operator.
+    #[tokio::test]
+    async fn a_non_401_failure_status_is_reported_as_status_not_malformed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(ResponseTemplate::new(404).set_body_raw("not found", "text/plain"))
+            .mount(&server)
+            .await;
+
+        match client(&server).public_ip().await.unwrap_err() {
+            GluetunError::Status { status, path } => {
+                assert_eq!(status, 404);
+                assert_eq!(path, "v1/publicip/ip");
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_query_recognises_only_client_and_defaults_everything_else_to_tracker() {
+        assert_eq!(
+            GluetunTarget::from_query(Some("client")),
+            GluetunTarget::Client
+        );
+        assert_eq!(
+            GluetunTarget::from_query(Some("tracker")),
+            GluetunTarget::Tracker
+        );
+        assert_eq!(
+            GluetunTarget::from_query(Some("bogus")),
+            GluetunTarget::Tracker
+        );
+        assert_eq!(GluetunTarget::from_query(None), GluetunTarget::Tracker);
+    }
+
+    /// Tracker and Client must resolve to genuinely different config sections
+    /// and vault keys — a poller that accidentally shared either would keep two
+    /// independent tunnels in lockstep instead of apart.
+    #[test]
+    fn tracker_and_client_targets_resolve_to_distinct_config_and_secret_keys() {
+        let mut config = Config::default();
+        config.gluetun.poll_secs = 11;
+        config.gluetun_client.poll_secs = 22;
+
+        assert_eq!(GluetunTarget::Tracker.label(), "tracker");
+        assert_eq!(GluetunTarget::Client.label(), "client");
+        assert_eq!(GluetunTarget::Tracker.config(&config).poll_secs, 11);
+        assert_eq!(GluetunTarget::Client.config(&config).poll_secs, 22);
+        assert_ne!(
+            GluetunTarget::Tracker.api_key_secret(),
+            GluetunTarget::Client.api_key_secret()
+        );
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_reflects_record_ok_and_record_err() {
+        let status = GluetunStatus::default();
+        let empty = status.snapshot().await;
+        assert!(empty.last_poll_at.is_none());
+        assert!(empty.last_success_at.is_none());
+        assert!(empty.last_error.is_none());
+
+        status.record_ok().await;
+        let ok = status.snapshot().await;
+        assert!(ok.last_poll_at.is_some());
+        assert!(ok.last_success_at.is_some());
+        assert!(ok.last_error.is_none());
+
+        status.record_err("could not reach it".to_owned()).await;
+        let failed = status.snapshot().await;
+        assert!(failed.last_poll_at.is_some());
+        // A later error must not erase the last time a poll actually succeeded —
+        // that is what tells an operator "it is failing now" apart from
+        // "it never worked".
+        assert_eq!(failed.last_success_at, ok.last_success_at);
+        assert_eq!(failed.last_error.as_deref(), Some("could not reach it"));
+    }
+
+    /// The de-dup that keeps a steady failure (no port granted, control server
+    /// down) from becoming a warning on every single poll forever.
+    #[tokio::test]
+    async fn record_error_only_reports_the_first_occurrence_of_a_message() {
+        let status = GluetunStatus::default();
+        let mut last_error = None;
+
+        assert!(record_error(&status, &mut last_error, "boom".to_owned()).await);
+        assert!(!record_error(&status, &mut last_error, "boom".to_owned()).await);
+        assert!(record_error(&status, &mut last_error, "different boom".to_owned()).await);
+    }
+
+    /// `resolve_once` is a thin, stateless passthrough to `GluetunClient` — it
+    /// needs no `ServeState`, only the HTTP client and address `poll_once`
+    /// already has in hand.
+    #[tokio::test]
+    async fn resolve_once_resolves_against_the_given_control_server() {
+        let server = server_with(
+            serde_json::json!({ "public_ip": "203.0.113.9" }),
+            serde_json::json!({ "port": 41234 }),
+        )
+        .await;
+
+        let http = GluetunClient::http_client().unwrap();
+        let control: Url = server.uri().parse().unwrap();
+        let resolved = resolve_once(http, &control, None, None).await.unwrap();
+        assert_eq!(resolved.as_str(), "http://203.0.113.9:41234/");
+    }
+
+    /// An inactive poller — the default, with no `control_url` configured —
+    /// must not touch the status at all: being off is a choice, not a fault.
+    #[tokio::test]
+    async fn poll_once_is_silent_when_the_poller_is_inactive() {
+        let (_dir, state) = crate::state::fixtures::unconfigured();
+        let target = GluetunTarget::Tracker;
+        let status = state.gluetun_status(target);
+        let endpoint = state.endpoint_for(target);
+        let http = GluetunClient::http_client().map_err(|e| e.to_string());
+        let mut last_error = None;
+
+        let interval = poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+
+        assert_eq!(interval, Duration::from_secs(60), "default poll_secs");
+        assert!(status.snapshot().await.last_poll_at.is_none());
+    }
+
+    /// Active, but no API key available (no vault configured in this fixture) —
+    /// must record the miss rather than sending a request that could only 401.
+    #[tokio::test]
+    async fn poll_once_records_a_missing_api_key_without_polling_gluetun() {
+        let (_dir, state) = crate::state::fixtures::unconfigured();
+        let target = GluetunTarget::Tracker;
+
+        let mut config = state.config().await;
+        config.gluetun.control_url = Some("http://127.0.0.1:9".parse().unwrap());
+        state.replace_config(config).await;
+
+        let status = state.gluetun_status(target);
+        let endpoint = state.endpoint_for(target);
+        let http = GluetunClient::http_client().map_err(|e| e.to_string());
+        let mut last_error = None;
+
+        poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+
+        let snapshot = status.snapshot().await;
+        assert!(snapshot.last_poll_at.is_some());
+        assert!(
+            snapshot
+                .last_error
+                .as_deref()
+                .is_some_and(|e| e.contains(target.api_key_secret())),
+            "{:?}",
+            snapshot.last_error
+        );
+        assert!(
+            last_error.is_some(),
+            "the loop's own dedup state must be updated too"
+        );
+    }
+
+    /// `poll_once`'s two early returns (inactive, no API key) are covered above;
+    /// this — and the failure test beside it — are what's left: the actual
+    /// resolve attempt once both guards are past. That needs a real vault
+    /// holding the target's API key, which means `SHARERR_MASTER_KEY` in the
+    /// process env — see `gossip.rs`'s tests for why that requires a `Jail`
+    /// (clears/serializes the env) and a `#[test]` driving its own runtime
+    /// rather than `#[tokio::test]`, which would already hold one on this
+    /// thread.
+    #[test]
+    fn poll_once_resolves_successfully_and_advertises_the_new_endpoint() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = server_with(
+                    serde_json::json!({ "public_ip": "203.0.113.9" }),
+                    serde_json::json!({ "port": 41234 }),
+                )
+                .await;
+
+                let config = Config {
+                    data_dir: jail.directory().to_path_buf(),
+                    gluetun: GluetunConfig {
+                        control_url: Some(server.uri().parse().unwrap()),
+                        ..GluetunConfig::default()
+                    },
+                    ..Config::default()
+                };
+                let target = GluetunTarget::Tracker;
+
+                let mut vault = sharerr_store::Vault::open(
+                    config.vault_path(),
+                    &SecretString::from("a-master-key"),
+                )
+                .unwrap();
+                vault
+                    .put(target.api_key_secret(), &SecretString::from("a-key"))
+                    .unwrap();
+                drop(vault);
+
+                let state = crate::state::ServeState::new(
+                    config,
+                    jail.directory().join("sharerr.toml"),
+                    None,
+                );
+                let status = state.gluetun_status(target);
+                let endpoint = state.endpoint_for(target);
+                let http = GluetunClient::http_client().map_err(|e| e.to_string());
+                let mut last_error = None;
+
+                poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+
+                let snapshot = status.snapshot().await;
+                assert!(snapshot.last_poll_at.is_some());
+                assert!(snapshot.last_error.is_none(), "{:?}", snapshot.last_error);
+                assert_eq!(
+                    endpoint.current().as_ref().map(Url::as_str),
+                    Some("http://203.0.113.9:41234/"),
+                    "a successful resolve must advertise the new endpoint"
+                );
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn poll_once_records_a_resolve_failure_when_the_control_server_is_unreachable() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let config = Config {
+                    data_dir: jail.directory().to_path_buf(),
+                    gluetun: GluetunConfig {
+                        // Nothing listens on port 9 ("discard") — a stand-in for
+                        // gluetun being unreachable, same trick the missing-key
+                        // test above uses.
+                        control_url: Some("http://127.0.0.1:9".parse().unwrap()),
+                        ..GluetunConfig::default()
+                    },
+                    ..Config::default()
+                };
+                let target = GluetunTarget::Tracker;
+
+                let mut vault = sharerr_store::Vault::open(
+                    config.vault_path(),
+                    &SecretString::from("a-master-key"),
+                )
+                .unwrap();
+                vault
+                    .put(target.api_key_secret(), &SecretString::from("a-key"))
+                    .unwrap();
+                drop(vault);
+
+                let state = crate::state::ServeState::new(
+                    config,
+                    jail.directory().join("sharerr.toml"),
+                    None,
+                );
+                let status = state.gluetun_status(target);
+                let endpoint = state.endpoint_for(target);
+                let http = GluetunClient::http_client().map_err(|e| e.to_string());
+                let mut last_error = None;
+
+                poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+
+                let snapshot = status.snapshot().await;
+                assert!(snapshot.last_poll_at.is_some());
+                assert!(snapshot.last_error.is_some());
+                assert!(last_error.is_some());
+                assert!(endpoint.current().is_none());
+            });
+            Ok(())
+        });
     }
 }

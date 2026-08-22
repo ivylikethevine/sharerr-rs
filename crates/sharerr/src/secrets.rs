@@ -88,7 +88,7 @@ pub async fn open_vault_at(path: std::path::PathBuf) -> anyhow::Result<Vault> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::result_large_err)]
 
     use super::*;
 
@@ -114,5 +114,56 @@ mod tests {
         for wrong in ["", "s3cre", "s3crets", "S3CRET", "s3crey"] {
             assert!(!constant_time_eq("s3cret", wrong), "{wrong:?} was accepted");
         }
+    }
+
+    #[test]
+    fn key_material_is_full_width_and_never_repeats() {
+        let a = random_bytes::<20>().unwrap();
+        let b = random_bytes::<20>().unwrap();
+        assert_eq!(a.len(), 20);
+        assert_ne!(a, b);
+    }
+
+    // Jail scopes the env vars to the closure (and serializes with every other
+    // Jail-based test), which is why this can safely touch SHARERR_MASTER_KEY —
+    // see the note on `sharerr_prefixed_non_config_vars_do_not_break_loading` in
+    // settings.rs for why a plain `std::env::set_var` cannot, in a suite that
+    // does not scope env vars per test.
+    #[test]
+    fn opening_a_vault_without_a_master_key_fails_with_no_side_effects() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Config::default()
+            };
+            assert!(open_vault(&config).is_err());
+            assert!(!config.vault_path().exists());
+            Ok(())
+        });
+    }
+
+    // `Jail::expect_with` is synchronous, but its closure can still host a
+    // freshly-built runtime's `block_on` — that keeps the env mutation scoped
+    // and serialized with every other Jail-based test rather than racing a
+    // plain `std::env::set_var` against the rest of the (parallel) suite.
+    #[test]
+    fn open_vault_at_opens_the_vault_named_by_a_master_key() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let path = jail.directory().join("vault.bin");
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let vault = runtime.block_on(open_vault_at(path)).unwrap();
+            assert!(vault.get("anything").unwrap().is_none());
+
+            runtime
+                .block_on(open_vault_async(&Config {
+                    data_dir: jail.directory().to_path_buf(),
+                    ..Config::default()
+                }))
+                .unwrap();
+            Ok(())
+        });
     }
 }

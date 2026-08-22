@@ -296,9 +296,178 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use async_trait::async_trait;
+    use sharerr_client::{ClientError, ClientKind};
+    use url::Url;
+
+    /// An in-process `TorrentClient` double — no HTTP, so `Seeder`'s own logic
+    /// (as opposed to any one client's wire format) can be exercised alone.
+    /// `files_result` is a closure so a test can fail for one hash and succeed
+    /// for another, the way `find_existing`'s multi-candidate loop needs.
+    type FilesFn = dyn Fn(&str) -> sharerr_client::Result<Vec<TorrentFileEntry>> + Send + Sync;
+
+    #[derive(Default)]
+    struct StubClient {
+        files_result: Option<Box<FilesFn>>,
+        set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
+    }
+
+    impl std::fmt::Debug for StubClient {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("StubClient").finish_non_exhaustive()
+        }
+    }
+
+    #[async_trait]
+    impl TorrentClient for StubClient {
+        fn kind(&self) -> ClientKind {
+            ClientKind::QBittorrent
+        }
+        async fn login(&self) -> sharerr_client::Result<()> {
+            Ok(())
+        }
+        async fn version(&self) -> sharerr_client::Result<String> {
+            Ok("stub".to_owned())
+        }
+        async fn list(
+            &self,
+            _category: Option<&str>,
+        ) -> sharerr_client::Result<Vec<TorrentSummary>> {
+            Ok(Vec::new())
+        }
+        async fn files(&self, hash: &str) -> sharerr_client::Result<Vec<TorrentFileEntry>> {
+            match &self.files_result {
+                Some(f) => f(hash),
+                None => Ok(Vec::new()),
+            }
+        }
+        async fn add(&self, _request: &AddRequest<'_>) -> sharerr_client::Result<()> {
+            Ok(())
+        }
+        async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
+            Ok(())
+        }
+        async fn set_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
+            self.set_trackers_calls
+                .lock()
+                .unwrap()
+                .push((hash.to_owned(), urls.to_vec()));
+            Ok(())
+        }
+    }
+
+    fn seeder(qbit: Arc<dyn TorrentClient>, torrent_dir: PathBuf) -> Seeder {
+        Seeder {
+            qbit,
+            category: "sharerr".to_owned(),
+            tag: "sharerr".to_owned(),
+            skip_checking: true,
+            upload_limit_kib: None,
+            ratio_limit: None,
+            torrent_dir,
+        }
+    }
+
+    #[test]
+    fn the_debug_impl_names_the_configuration_without_the_client() {
+        let seeder = seeder(Arc::new(StubClient::default()), PathBuf::from("/torrents"));
+        let text = format!("{seeder:?}");
+        assert!(text.contains("sharerr"), "{text}");
+        assert!(text.contains("skip_checking"), "{text}");
+    }
+
+    #[test]
+    fn could_contain_is_false_for_an_empty_save_path() {
+        let existing = torrent("aa", "", "");
+        assert!(!could_contain(&existing, Path::new("/downloads/tv/x.mkv")));
+    }
+
+    #[tokio::test]
+    async fn find_existing_skips_a_torrent_whose_files_cannot_be_listed() {
+        // "aa" fails to list, "bb" succeeds and does not contain the target —
+        // the search must survive the failure and keep looking rather than
+        // stopping (or wrongly reporting a match) at the first error.
+        let client = StubClient {
+            files_result: Some(Box::new(|hash| match hash {
+                "aa" => Err(ClientError::Config("boom".to_owned())),
+                _ => Ok(vec![file("other.mkv")]),
+            })),
+            ..StubClient::default()
+        };
+        let seeder = seeder(Arc::new(client), PathBuf::from("/torrents"));
+        let torrents = [
+            torrent("aa", "/downloads/tv", ""),
+            torrent("bb", "/downloads/tv", ""),
+        ];
+
+        let found = seeder
+            .find_existing(&torrents, Path::new("/downloads/tv/target.mkv"))
+            .await
+            .unwrap();
+        assert_eq!(found, None);
+    }
+
+    #[tokio::test]
+    async fn refresh_announce_with_no_cached_file_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let seeder = seeder(Arc::new(StubClient::default()), dir.path().to_path_buf());
+        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+
+        let changed = seeder
+            .refresh_announce("deadbeef", &announce)
+            .await
+            .unwrap();
+        assert!(!changed);
+    }
+
+    #[tokio::test]
+    async fn refresh_announce_updates_the_client_and_rewrites_a_stale_cached_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
+        let built = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &old_announce,
+            })
+            .unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        std::fs::create_dir(&torrent_dir).unwrap();
+        std::fs::write(
+            torrent_file_path(&torrent_dir, &built.info_hash),
+            &built.data,
+        )
+        .unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), torrent_dir.clone());
+        let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
+
+        let changed = seeder
+            .refresh_announce(&built.info_hash, &new_announce)
+            .await
+            .unwrap();
+        assert!(changed);
+        assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
+
+        let rewritten = std::fs::read(torrent_file_path(&torrent_dir, &built.info_hash)).unwrap();
+        let current = sharerr_torrent::read_announce(&rewritten).unwrap();
+        assert_eq!(current.as_deref(), Some("http://new.example/announce"));
+
+        // Running it again against the now-current file must be a no-op.
+        let changed_again = seeder
+            .refresh_announce(&built.info_hash, &new_announce)
+            .await
+            .unwrap();
+        assert!(!changed_again);
+        assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
+    }
 
     fn torrent(hash: &str, save_path: &str, content_path: &str) -> TorrentSummary {
         TorrentSummary {

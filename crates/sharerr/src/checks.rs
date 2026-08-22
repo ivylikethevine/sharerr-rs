@@ -448,7 +448,8 @@ mod tests {
 
     use super::*;
     use serde_json::json;
-    use wiremock::MockServer;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 
@@ -658,5 +659,297 @@ mod tests {
             matches!(unreadable, ArrOutcome::CredentialUnreadable(_)),
             "got {unreadable:?}"
         );
+    }
+
+    /// Every other state's `into_items` must be an honest empty, not a panic —
+    /// callers summing across services rely on that.
+    #[test]
+    fn arr_outcome_into_items_is_empty_unless_ready() {
+        assert!(ArrOutcome::NotConfigured.into_items().is_empty());
+        assert!(ArrOutcome::AuthRejected.into_items().is_empty());
+
+        let item = sharerr_core::Discovered {
+            source: MediaSource::Sonarr,
+            source_id: 1,
+            file_id: 2,
+            spec: sharerr_core::MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: "/tv/Gilded.Ferry.2019.mkv".into(),
+            size: 2,
+            ids: sharerr_core::ExternalIds::default(),
+            scene_name: None,
+        };
+        let ready = ArrOutcome::Ready {
+            version: "4.0".to_owned(),
+            app_name: "Sonarr".to_owned(),
+            items: vec![item],
+        };
+        assert_eq!(ready.into_items().len(), 1);
+    }
+
+    #[test]
+    fn dir_outcome_into_items_is_empty_unless_ready() {
+        assert!(DirOutcome::Missing.into_items().is_empty());
+        assert!(DirOutcome::Empty.into_items().is_empty());
+
+        let item = sharerr_core::Discovered {
+            source: MediaSource::Directory,
+            source_id: 0,
+            file_id: 0,
+            spec: sharerr_core::MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: "/movies/Gilded.Ferry.2019.mkv".into(),
+            size: 2,
+            ids: sharerr_core::ExternalIds::default(),
+            scene_name: None,
+        };
+        let ready = DirOutcome::Ready {
+            skipped: 3,
+            items: vec![item],
+        };
+        assert_eq!(ready.into_items().len(), 1);
+    }
+
+    #[test]
+    fn path_report_is_failure_and_readable_reflect_missing_and_invalid() {
+        let clean = PathReport {
+            checked: 5,
+            ..PathReport::default()
+        };
+        assert!(!clean.is_failure());
+        assert_eq!(clean.readable(), 5);
+
+        let broken = PathReport {
+            checked: 5,
+            missing: vec!["/tv/gone.mkv".into()],
+            invalid: vec!["not absolute".to_owned()],
+            ..PathReport::default()
+        };
+        assert!(broken.is_failure());
+        assert_eq!(broken.readable(), 3);
+    }
+
+    /// The finding `check_paths` exists to surface: a mapped path that does not
+    /// exist on disk, counted as unmapped only when nothing matched — here a
+    /// rule matches, so it must not be.
+    #[test]
+    fn check_paths_flags_a_missing_file_after_a_rule_applies() {
+        use sharerr_core::config::PathMapping;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            path_map: vec![PathMapping {
+                arr: "/tv".into(),
+                sharerr: dir.path().to_path_buf(),
+                qbit: None,
+            }],
+            ..Config::default()
+        };
+        let item = sharerr_core::Discovered {
+            source: MediaSource::Sonarr,
+            source_id: 1,
+            file_id: 2,
+            spec: sharerr_core::MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: "/tv/Gilded.Ferry.2019.mkv".into(),
+            size: 2,
+            ids: sharerr_core::ExternalIds::default(),
+            scene_name: None,
+        };
+
+        let report = check_paths(&config, &[item]);
+        assert_eq!(report.rules, 1);
+        assert_eq!(report.checked, 1);
+        assert_eq!(report.unmapped, 0, "a rule did match");
+        assert_eq!(report.missing.len(), 1);
+        assert!(report.is_failure());
+    }
+
+    /// A source path that never made it through the *arr's own absolute-path
+    /// contract must be reported as invalid, not silently passed through.
+    #[test]
+    fn check_paths_reports_a_relative_arr_path_as_invalid() {
+        let item = sharerr_core::Discovered {
+            source: MediaSource::Sonarr,
+            source_id: 1,
+            file_id: 2,
+            spec: sharerr_core::MediaSpec::Movie {
+                title: "Gilded Ferry".to_owned(),
+                year: Some(2019),
+            },
+            arr_path: "relative/Gilded.Ferry.2019.mkv".into(),
+            size: 2,
+            ids: sharerr_core::ExternalIds::default(),
+            scene_name: None,
+        };
+
+        let report = check_paths(&Config::default(), &[item]);
+        assert_eq!(report.invalid.len(), 1);
+        assert!(report.missing.is_empty());
+        assert!(report.is_failure());
+    }
+
+    #[test]
+    fn build_torrent_client_rejects_a_credential_the_backend_cannot_use() {
+        let url = Url::parse("http://localhost:8080").unwrap();
+
+        let err = build_torrent_client(
+            TorrentBackend::Qbittorrent,
+            &url,
+            None,
+            TorrentCredential::Password(SecretString::from("hunter2")),
+        )
+        .unwrap_err();
+        assert!(err.contains("API key"), "{err}");
+
+        let err = build_torrent_client(
+            TorrentBackend::Transmission,
+            &url,
+            None,
+            TorrentCredential::ApiKey(SecretString::from(API_KEY)),
+        )
+        .unwrap_err();
+        assert!(err.contains("username and password"), "{err}");
+
+        let err = build_torrent_client(
+            TorrentBackend::Rtorrent,
+            &url,
+            None,
+            TorrentCredential::ApiKey(SecretString::from(API_KEY)),
+        )
+        .unwrap_err();
+        assert!(err.contains("username and password"), "{err}");
+    }
+
+    #[test]
+    fn build_torrent_client_builds_a_qbit_client_from_a_valid_api_key() {
+        let url = Url::parse("http://localhost:8080").unwrap();
+        let client = build_torrent_client(
+            TorrentBackend::Qbittorrent,
+            &url,
+            None,
+            TorrentCredential::ApiKey(SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86")),
+        )
+        .unwrap();
+        assert_eq!(client.kind(), ClientKind::QBittorrent);
+    }
+
+    #[test]
+    fn torrent_credential_prefers_an_api_key_over_a_password() {
+        let key = SecretString::from(API_KEY);
+        let password = SecretString::from("hunter2");
+
+        let chosen = TorrentCredential::choose(Some(key), Some(password.clone())).unwrap();
+        assert!(matches!(chosen, TorrentCredential::ApiKey(_)));
+        assert_eq!(chosen.noun(), "API key");
+
+        let chosen = TorrentCredential::choose(None, Some(password)).unwrap();
+        assert!(matches!(chosen, TorrentCredential::Password(_)));
+        assert_eq!(chosen.noun(), "username or password");
+
+        assert!(TorrentCredential::choose(None, None).is_none());
+    }
+
+    #[tokio::test]
+    async fn check_qbit_distinguishes_a_missing_from_an_unreadable_credential() {
+        let url = Url::parse("http://localhost:8080").unwrap();
+
+        let missing = check_qbit(TorrentBackend::Qbittorrent, &url, None, Ok(None)).await;
+        assert!(matches!(missing, QbitOutcome::NoCredential), "{missing:?}");
+
+        let unreadable = check_qbit(
+            TorrentBackend::Qbittorrent,
+            &url,
+            None,
+            Err("no master key".to_owned()),
+        )
+        .await;
+        assert!(
+            matches!(unreadable, QbitOutcome::CredentialUnreadable(_)),
+            "{unreadable:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_qbit_signs_in_and_reports_the_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/app/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+            .mount(&server)
+            .await;
+
+        let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
+            "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
+        ))));
+        let outcome = check_qbit(
+            TorrentBackend::Qbittorrent,
+            &base(&server),
+            None,
+            credential,
+        )
+        .await;
+
+        match outcome {
+            QbitOutcome::Ready { version, kind, .. } => {
+                assert_eq!(version, "v5.2.3");
+                assert_eq!(kind, ClientKind::QBittorrent);
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// BUG (pre-existing, not fixed here): `check_qbit` only classifies
+    /// `login()`'s error into `AuthRejected`/`Unreachable`/`Failed` — the
+    /// `version()` call right after it maps *any* error to `Failed`
+    /// unconditionally. For qBittorrent, whose `login()` is a no-op that always
+    /// returns `Ok(())` (auth is a per-request bearer token, no handshake),
+    /// that means a rejected key here can never come back as `AuthRejected`
+    /// despite the enum existing specifically to distinguish that from a
+    /// generic failure. This test pins the actual (degraded) behavior; if
+    /// `check_qbit` starts classifying the `version()` error the same way as
+    /// `login()`'s, this should be updated to expect `AuthRejected`.
+    #[tokio::test]
+    async fn check_qbit_reports_a_rejected_key_as_a_generic_failure_not_auth_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/app/version"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
+            "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
+        ))));
+        let outcome = check_qbit(
+            TorrentBackend::Qbittorrent,
+            &base(&server),
+            None,
+            credential,
+        )
+        .await;
+
+        assert!(matches!(outcome, QbitOutcome::Failed(_)), "{outcome:?}");
+    }
+
+    /// Same gap as above, for an unreachable host: see the BUG note on
+    /// `check_qbit_reports_a_rejected_key_as_a_generic_failure_not_auth_rejected`.
+    #[tokio::test]
+    async fn check_qbit_reports_an_unreachable_client_as_a_generic_failure_not_unreachable() {
+        let port = sharerr_testkit::net::closed_port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+
+        let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
+            "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
+        ))));
+        let outcome = check_qbit(TorrentBackend::Qbittorrent, &url, None, credential).await;
+
+        assert!(matches!(outcome, QbitOutcome::Failed(_)), "{outcome:?}");
     }
 }
