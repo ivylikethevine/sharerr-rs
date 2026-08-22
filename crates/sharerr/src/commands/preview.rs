@@ -21,10 +21,11 @@ use axum::response::Html;
 use axum::routing::get;
 
 use crate::web::templates::{
-    ArrSection, EndpointStatus, FilterOption, Glance, ItemRow, ItemsPage, LibraryRow, PathRow,
-    PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow, ScopeOption,
-    SettingsPage, SortLink, StatusPage, TokenStatus,
+    ArrSection, EdgeStyle, EndpointStatus, FilterOption, Glance, ItemRow, ItemsPage, LibraryRow,
+    NodeStatus, PathRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow,
+    ScopeOption, SettingsPage, SortLink, StatusPage, TokenStatus, TopologyPage,
 };
+use crate::web::topology::{Channel, FriendNode, SourceNode, layout};
 
 /// Serve the mock pages on `bind` until the process is killed.
 ///
@@ -41,13 +42,15 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .route("/settings", get(|| async { Html(page(settings_page())) }))
         .route("/peers", get(|| async { Html(page(peers_page())) }))
         .route("/items", get(|| async { Html(page(items_page())) }))
+        .route("/topology", get(|| async { Html(page(topology_page())) }))
+        .route("/debug", get(|| async { Html(page(debug_page())) }))
         .route("/assets/{file}", get(crate::web::asset));
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
 
-    println!("mock UI serving on http://{bind}/ — /settings, /peers, /items");
+    println!("mock UI serving on http://{bind}/ — /settings, /peers, /items, /topology, /debug");
     println!(
         "htmx buttons (Test connection, revoke, delete) have nothing live to call \
          and will not do anything; everything else renders exactly as it would \
@@ -196,6 +199,156 @@ impl ServiceLineMock {
     }
 }
 
+/// Built from the real `layout()` function rather than hand-copied
+/// coordinates, so this preview cannot silently drift from what the diagram
+/// actually draws — the one fixture on this page that reuses production
+/// logic instead of a fully hand-populated struct, because coordinates are
+/// exactly the kind of value that goes stale quietly.
+fn topology_page() -> TopologyPage {
+    use crate::web::templates::NodeIcon;
+    use crate::web::topology::{
+        ACCENT_ARR, ACCENT_LIBRARY, address_line, line, peer_color, truncate,
+    };
+
+    let sources = vec![
+        SourceNode {
+            label: "Sonarr".to_owned(),
+            icon: NodeIcon::Arr,
+            lines: vec![
+                address_line("url", "http://sonarr.example:8989"),
+                line("version", "v4.0.1"),
+                line("tagged", "12 file(s)"),
+            ],
+            status: NodeStatus::Ok,
+            accent: ACCENT_ARR,
+        },
+        SourceNode {
+            label: "Radarr".to_owned(),
+            icon: NodeIcon::Arr,
+            lines: vec![
+                address_line("url", "http://radarr.example:7878"),
+                line("", "Unreachable"),
+            ],
+            status: NodeStatus::Error,
+            accent: ACCENT_ARR,
+        },
+        SourceNode {
+            label: "extras".to_owned(),
+            icon: NodeIcon::Library,
+            lines: vec![
+                line("path", "/media/extras"),
+                line("files", "8 shareable"),
+                line("skipped", "2 unclassified"),
+            ],
+            status: NodeStatus::Ok,
+            accent: ACCENT_LIBRARY,
+        },
+    ];
+
+    let seen = |addr: &str, style: EdgeStyle, edge_label: &str| Channel {
+        addr: Some(addr.to_owned()),
+        style,
+        edge_label: edge_label.to_owned(),
+    };
+    let unseen = || Channel {
+        addr: None,
+        style: EdgeStyle::None,
+        edge_label: String::new(),
+    };
+
+    let friends = vec![
+        FriendNode {
+            label: "Sam".to_owned(),
+            accent: peer_color(0),
+            indexer: seen("203.0.113.9:38412", EdgeStyle::Solid, "direct 4m"),
+            client: seen("203.0.113.9:51413", EdgeStyle::Solid, "direct 4m"),
+        },
+        FriendNode {
+            label: "Alex".to_owned(),
+            accent: peer_color(1),
+            indexer: seen("198.51.100.7:38412", EdgeStyle::Dashed, "gossip 2h"),
+            client: unseen(),
+        },
+        FriendNode {
+            label: "Riley".to_owned(),
+            accent: peer_color(2),
+            indexer: seen("203.0.113.44:38412", EdgeStyle::Dotted, "lighthouse 1d"),
+            client: seen("203.0.113.44:51413", EdgeStyle::Dotted, "lighthouse 1d"),
+        },
+        FriendNode {
+            label: truncate("a very long friend name indeed"),
+            accent: peer_color(3),
+            indexer: unseen(),
+            client: unseen(),
+        },
+    ];
+
+    let (nodes, edges, width, height) = layout(
+        &sources,
+        &[
+            address_line("address", "http://seed.example.com:51413/"),
+            line("swarm", "3 peer(s), 2 seeding"),
+        ],
+        NodeStatus::Ok,
+        "qBittorrent",
+        &[
+            address_line("url", "http://qbittorrent.example:8080"),
+            line("version", "qBittorrent v5.2.0"),
+        ],
+        NodeStatus::Ok,
+        "2 of 20 missing",
+        &friends,
+    );
+
+    let address = |full: &str| crate::web::templates::AddressCell {
+        masked: crate::web::topology::mask_address(full),
+        full: full.to_owned(),
+    };
+    let swarms = vec![
+        crate::web::templates::SwarmRow {
+            title: "Lanternwick Hollow S02E04".to_owned(),
+            complete: 2,
+            incomplete: 1,
+            peers: vec![
+                address("203.0.113.9:51413"),
+                address("198.51.100.7:6881"),
+                address("203.0.113.44:51413"),
+            ],
+            more: 0,
+        },
+        crate::web::templates::SwarmRow {
+            title: "Copper Vale (2019)".to_owned(),
+            complete: 1,
+            incomplete: 0,
+            peers: vec![address("203.0.113.9:38412")],
+            more: 5,
+        },
+    ];
+
+    TopologyPage {
+        signed_in: true,
+        width,
+        height,
+        nodes,
+        swarms,
+        edges,
+    }
+}
+
+fn debug_page() -> crate::web::templates::DebugPage {
+    let tracker = "http://seed.example.com:51413/";
+    let feed = "http://seed.example.com:8477";
+    crate::web::templates::DebugPage {
+        signed_in: true,
+        tracker_base: Some(tracker.to_owned()),
+        client_base: Some("http://203.0.113.9:51413/".to_owned()),
+        feed_base: feed.to_owned(),
+        bind: "0.0.0.0:8477".to_owned(),
+        tracker_bind: Some("0.0.0.0:51413".to_owned()),
+        script: crate::web::debug::script_for(Some(tracker), feed),
+    }
+}
+
 fn settings_page() -> SettingsPage {
     let mut locks = BTreeMap::new();
     locks.insert("data_dir".to_owned(), "SHARERR_DATA_DIR".to_owned());
@@ -261,6 +414,9 @@ fn settings_page() -> SettingsPage {
         secondary_arr_configured: true,
 
         torrent_backend: "transmission",
+        // qBittorrent's key is set below while Transmission is selected, so
+        // the "other clients" fold renders in its opened state here.
+        unselected_client_configured: true,
 
         qbit_url: "http://qbit.example:8080".to_owned(),
         qbit_api_key_set: true,
@@ -312,6 +468,7 @@ fn settings_page() -> SettingsPage {
         revealed: None,
 
         sync_enabled: true,
+        checks_reachability: true,
         sync_interval_secs: 900,
 
         notifications_webhook_set: true,

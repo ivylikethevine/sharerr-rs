@@ -1,0 +1,105 @@
+{% extends "layout.html" %}
+{% block title %}Topology — sharerr{% endblock %}
+
+{% block content %}
+<h1>Topology</h1>
+
+<p class="hint">
+  How this instance connects to everything around it: sources on the left,
+  this instance and its torrent client in the middle, friends on the right.
+  Solid means directly observed, dashed means learned through gossip, dotted
+  means learned from a lighthouse. Each friend's box and its lines share one
+  color, so it is easy to trace which lines belong to whom.
+</p>
+
+<p class="hint">
+  <label>
+    <input type="checkbox" id="topo-hide-addresses" checked>
+    Hide the second half of every IP and port
+  </label>
+</p>
+
+<div class="panel wide">
+  <div class="table-scroll">
+    <svg viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}"
+         role="img" aria-label="Topology diagram">
+      {% for edge in edges %}
+      {% if let Some(dash) = edge.style.dasharray() %}
+      <line class="topo-edge" x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"
+            stroke="{{ edge.accent }}" stroke-dasharray="{{ dash }}"></line>
+      {% if !edge.label.is_empty() %}
+      <text class="topo-edge-label" text-anchor="middle"
+            x="{{ (edge.x1 + edge.x2) / 2 }}" y="{{ (edge.y1 + edge.y2) / 2 - 4 }}">{{ edge.label }}</text>
+      {% endif %}
+      {% endif %}
+      {% endfor %}
+
+      {% for node in nodes %}
+      <g class="topo-node topo-node--{{ node.status.css_class() }}">
+        <title>{{ node.label }}{% for l in node.lines %} — {% if !l.tag.is_empty() %}{{ l.tag }}: {% endif %}{{ l.text }}{% endfor %}</title>
+        <rect class="topo-node-box" x="{{ node.x }}" y="{{ node.y }}" width="{{ node.w }}" height="{{ node.h }}" rx="10"></rect>
+        <rect class="topo-node-accent" x="{{ node.x }}" y="{{ node.y }}" width="5" height="{{ node.h }}" rx="2.5" fill="{{ node.accent }}"></rect>
+        <path class="topo-icon" d="{{ node.icon.path() }}" stroke="{{ node.accent }}"
+              transform="translate({{ node.x + 16 }},{{ node.y + 8 }})"></path>
+        <text class="topo-node-label" x="{{ node.x + 40 }}" y="{{ node.y + 24 }}">{{ node.label }}</text>
+        {% for l in node.lines %}
+        {% if !l.tag.is_empty() %}
+        <text class="topo-line-tag" x="{{ node.x + 18 }}" y="{{ l.y }}">{{ l.tag }}</text>
+        {% endif %}
+        <text class="topo-line-value topo-address" x="{{ node.x + 82 }}" y="{{ l.y }}"
+              data-full="{{ l.text }}" data-masked="{{ l.masked }}">{{ l.masked }}</text>
+        {% endfor %}
+      </g>
+      {% endfor %}
+    </svg>
+  </div>
+</div>
+
+<h2>Active swarms</h2>
+<div class="panel wide">
+  {% if swarms.is_empty() %}
+  <p class="hint">No torrent has a live peer right now.</p>
+  {% else %}
+  <p class="hint">
+    Who is actually connected right now, per torrent — the diagram above only
+    summarizes this as the single peer count on the sharerr box.
+  </p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Torrent</th><th>Peers</th><th>Connected from</th></tr></thead>
+    <tbody>
+      {% for swarm in swarms %}
+      <tr>
+        <td>{{ swarm.title }}</td>
+        <td>{{ swarm.complete }} complete, {{ swarm.incomplete }} incomplete</td>
+        <td>
+          {% for peer in swarm.peers %}
+          <code class="topo-address" data-full="{{ peer.full }}" data-masked="{{ peer.masked }}">{{ peer.masked }}</code>{% if !loop.last %}, {% endif %}
+          {% endfor %}
+          {% if swarm.more > 0 %}
+          <span class="hint">… and {{ swarm.more }} more</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+
+<script>
+(function () {
+  var toggle = document.getElementById("topo-hide-addresses");
+  var addresses = document.querySelectorAll(".topo-address");
+  function apply() {
+    for (var i = 0; i < addresses.length; i++) {
+      var el = addresses[i];
+      el.textContent = toggle.checked ? el.getAttribute("data-masked") : el.getAttribute("data-full");
+    }
+  }
+  toggle.addEventListener("change", apply);
+  apply();
+})();
+</script>
+{% endblock %}

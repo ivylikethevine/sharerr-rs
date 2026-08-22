@@ -363,13 +363,13 @@ async fn authenticate_token(
         return Ok(TokenAuth::default());
     }
 
-    if let Some(previous) = previous {
-        if crate::secrets::constant_time_eq(previous, supplied) {
-            return Ok(TokenAuth {
-                via_previous: true,
-                ..TokenAuth::default()
-            });
-        }
+    if let Some(previous) = previous
+        && crate::secrets::constant_time_eq(previous, supplied)
+    {
+        return Ok(TokenAuth {
+            via_previous: true,
+            ..TokenAuth::default()
+        });
     }
 
     match store.peer_by_key_hash(supplied).await {

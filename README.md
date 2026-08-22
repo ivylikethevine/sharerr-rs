@@ -36,6 +36,8 @@ design is built around.
   - [The lighthouse](#the-lighthouse)
 - [Sharing music, books, and more](#sharing-music-books-and-more)
 - [Friends finding each other](#friends-finding-each-other)
+- [Topology](#topology)
+  - [Checking that you are actually reachable](#checking-that-you-are-actually-reachable)
 - [Sharing a plain directory, no \*arr app at all](#sharing-a-plain-directory-no-arr-app-at-all)
 - [Authenticating to qBittorrent](#authenticating-to-qbittorrent)
   - [If a correct key is rejected](#if-a-correct-key-is-rejected)
@@ -72,6 +74,9 @@ roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Dynamic endpoint from gluetun: rotating exit IP and forwarded port               | ✅ |
 | Peer endpoint memory and signed endpoint gossip between friends                  | ✅ |
 | The lighthouse: rendezvous for a friend whose address rotated while unwatched    | ✅ |
+| Topology diagram: sources, this instance, and friends in one picture             | ✅ |
+| Live per-torrent swarm view: who is connected to each torrent right now          | ✅ |
+| Reachability script for checking from outside your network (`/debug`)            | ✅ |
 | Plex as a library source                                                         | ❌ |
 
 ## Quickstart
@@ -363,6 +368,52 @@ already know — nobody learns of a peer they are not already sharing with.
 Set it up per friend on the Friends page: their sharerr's URL, and the key they
 issued you (from _their_ Friends page). Leave both empty and your instance still
 answers their pulls and accepts their pushes; it just never initiates.
+
+## Topology
+
+The **Topology** page is one diagram of how this instance connects to
+everything around it: configured library sources on the left, this instance
+and its torrent client in the middle, friends on the right. It draws nothing
+new — every fact on it already lives on Settings' connection tests, Status'
+networking panel and path-mapping table, or the Friends page's endpoint list —
+it just puts them in one place, since "why can't Sam see this torrent" or
+"which of my two gluetun tunnels is this port actually on" otherwise means
+checking three pages by hand.
+
+Each box carries an icon for what kind of thing it is and a tagged row per
+detail, so an address is never left to be identified by position. A solid line
+to a friend means their address was seen directly; dashed means gossip relayed
+it; dotted means a lighthouse answered it; no line at all means that friend's
+sharerr has not been heard from yet. Every friend gets their own colour, shared
+between their box and the lines reaching it, so which lines belong to whom is
+readable at a glance. Under the diagram, **Active swarms** lists who is
+connected to each torrent right now, from the tracker's own bookkeeping.
+
+Addresses are redacted by default: an IPv4 keeps its first two octets and hides
+the last two (`203.0.113.9` shows as `203.0.•••.•`), and a port keeps only its
+leading half. The first half is what you recognise as your own network; the
+second half is what identifies one machine on it — so the page stays readable
+to you and stays safe to screenshot. A checkbox at the top reveals the real
+values.
+
+### Checking that you are actually reachable
+
+Two separate things, because they answer different questions.
+
+Settings → Automatic checks has an opt-in **reachability** probe. With it on,
+the Topology page dials this instance's own advertised tracker and feed
+addresses and reports whether they answer. It is off by default, and a failure
+there says *could not confirm* rather than "your port is shut" — a host
+dialling its own public address is exercising NAT hairpinning, which plenty of
+perfectly working routers refuse.
+
+The **Debug** page is the version that settles it. It shows what sharerr
+believes its own addresses are, and hands you a `bash` + `curl` script with
+those addresses already filled in. Run it from somewhere else — a friend's
+machine, a phone off wifi, a VPS — and it reports plainly whether the tracker
+and the feed are reachable from outside. Any HTTP status counts as reachable:
+the feed answering `401` still proves the port is open and sharerr is behind
+it.
 
 ## Sharing a plain directory, no *arr app at all
 

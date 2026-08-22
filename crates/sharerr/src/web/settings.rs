@@ -183,6 +183,12 @@ pub struct TrackerForm {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
+pub struct ChecksForm {
+    reachability: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct LighthouseForm {
     enabled: Option<String>,
     mount: String,
@@ -741,6 +747,19 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
     .await
 }
 
+/// The opt-in reachability probe — see
+/// [`sharerr_core::config::ChecksConfig`] for why it is off by default.
+pub async fn save_checks(State(state): State<WebState>, Form(form): Form<ChecksForm>) -> Response {
+    write_config(&state, "checks", None, |file| {
+        file.apply([Edit::bool(
+            config_paths::CHECKS_REACHABILITY,
+            checked(&form.reachability),
+        )]);
+        Ok(())
+    })
+    .await
+}
+
 /// A webhook fired on sync failure or a peer going quiet.
 ///
 /// The URL is a vault secret — see
@@ -968,12 +987,12 @@ fn rotate_tracker_token_in(vault: &mut Vault, new_value: &str) -> Result<(), Str
     let current = vault
         .get(secret_keys::TRACKER_TOKEN)
         .map_err(|err| format!("reading the current announce token: {err}"))?;
-    if let Some(current) = &current {
-        if current.expose_secret() != new_value {
-            vault
-                .put(secret_keys::TRACKER_TOKEN_PREVIOUS, current)
-                .map_err(|err| format!("preserving the previous announce token: {err}"))?;
-        }
+    if let Some(current) = &current
+        && current.expose_secret() != new_value
+    {
+        vault
+            .put(secret_keys::TRACKER_TOKEN_PREVIOUS, current)
+            .map_err(|err| format!("preserving the previous announce token: {err}"))?;
     }
 
     vault
@@ -1087,6 +1106,27 @@ pub(super) async fn reject(state: &WebState, message: &str) -> Response {
 /// An HTML checkbox submits nothing at all when unticked, so absence is `false`.
 fn checked(field: &Option<String>) -> bool {
     field.is_some()
+}
+
+/// Whether a torrent client other than the selected one already holds a
+/// credential — what decides if the fold those live in starts open.
+///
+/// Keyed on the stored credential rather than the URL, because every client's
+/// URL carries a default (`http://localhost:8080` and friends) and so is never
+/// empty; a stored secret is the only signal that someone deliberately set one
+/// of these up.
+fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool) -> bool {
+    [
+        TorrentBackend::Qbittorrent,
+        TorrentBackend::Transmission,
+        TorrentBackend::Rtorrent,
+    ]
+    .into_iter()
+    .filter(|backend| *backend != config.torrent_backend)
+    .any(|backend| {
+        let client = config.torrent_client_for(backend);
+        client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
+    })
 }
 
 /// An unset URL renders as an empty field, not `None`.
@@ -1255,6 +1295,7 @@ async fn build_page(
         secondary_arr_configured,
 
         torrent_backend: config.torrent_backend.as_str(),
+        unselected_client_configured: unselected_client_configured(&config, &is_set),
 
         qbit_url: config.qbittorrent.url.to_string(),
         qbit_api_key_set: is_set(secret_keys::QBITTORRENT_API_KEY),
@@ -1325,6 +1366,7 @@ async fn build_page(
         revealed: None,
 
         sync_enabled: config.sync.enabled,
+        checks_reachability: config.checks.reachability,
         sync_interval_secs: config.sync.interval_secs,
 
         notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),

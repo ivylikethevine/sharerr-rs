@@ -214,6 +214,17 @@ pub struct SwarmStats {
     pub seeders: usize,
 }
 
+/// One swarm's live peers — see [`Swarms::snapshots`].
+#[derive(Debug, Clone)]
+pub struct SwarmView {
+    pub info_hash: InfoHash,
+    pub peers: Vec<SocketAddr>,
+    /// Peers with the whole thing.
+    pub complete: usize,
+    /// Peers still downloading.
+    pub incomplete: usize,
+}
+
 /// The answer to one announce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnounceResponse {
@@ -300,6 +311,38 @@ impl Swarms {
             }
         }
         stats
+    }
+
+    /// Every swarm with at least one live peer right now, each with its
+    /// peers' raw addresses — the detail [`Self::stats`]'s totals
+    /// deliberately do not carry, for a view that wants to name who is
+    /// actually connected to which torrent rather than just how many.
+    pub async fn snapshots(&self) -> Vec<SwarmView> {
+        let swarms = self.inner.read().await;
+        let now = Instant::now();
+
+        let mut result = Vec::new();
+        for (info_hash, swarm) in swarms.iter() {
+            let mut peers = Vec::new();
+            let (mut complete, mut incomplete) = (0, 0);
+            for peer in swarm.values().filter(|peer| peer.is_live(now)) {
+                peers.push(peer.addr);
+                if peer.left == 0 {
+                    complete += 1;
+                } else {
+                    incomplete += 1;
+                }
+            }
+            if !peers.is_empty() {
+                result.push(SwarmView {
+                    info_hash: *info_hash,
+                    peers,
+                    complete,
+                    incomplete,
+                });
+            }
+        }
+        result
     }
 
     /// Seeder and leecher counts for one hash, for `/scrape`.

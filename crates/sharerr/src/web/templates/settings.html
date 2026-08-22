@@ -36,24 +36,160 @@
 </form>
 {% endmacro %}
 
+{# Each torrent client's own form, as a macro so the selected one can render
+   inline while the other two sit behind a fold — see the "Torrent client"
+   section below. #}
+{% macro qbittorrent_section() %}
+<form method="post" action="/settings/qbittorrent" class="panel">
+  <label for="qbit_url">URL</label>
+  <input id="qbit_url" name="url" value="{{ qbit_url }}" required
+         {% call lock_attr("qbittorrent.url") %}{% endcall %}>
+  {% call locked("qbittorrent.url") %}{% endcall %}
+
+  <label for="qbit_api_key">API key {% call field_status(qbit_api_key_set) %}{% endcall %}</label>
+  <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if qbit_api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
+  {% endif %}
+  <p class="hint">
+    Generate one under Options &rarr; Web UI &rarr; API key (qBittorrent 5.2 or
+    newer). This is the only credential sharerr uses to sign in — it does not
+    expire the way a session does, and rotating the key in qBittorrent
+    invalidates the old one immediately.
+  </p>
+
+  <label for="qbit_category">Category for sharerr's torrents</label>
+  <input id="qbit_category" name="category" value="{{ qbit_category }}"
+         {% call lock_attr("qbittorrent.category") %}{% endcall %}>
+  {% call locked("qbittorrent.category") %}{% endcall %}
+
+  <label for="qbit_tag">Tag for sharerr's torrents</label>
+  <input id="qbit_tag" name="tag" value="{{ qbit_tag }}"
+         {% call lock_attr("qbittorrent.tag") %}{% endcall %}>
+  {% call locked("qbittorrent.tag") %}{% endcall %}
+
+  <label class="hint">
+    <input type="checkbox" name="skip_checking" value="1" {% if qbit_skip_checking %}checked{% endif %}
+           {% call lock_attr("qbittorrent.skip_checking") %}{% endcall %}>
+    Skip the hash check when adding a torrent
+  </label>
+  {% call locked("qbittorrent.skip_checking") %}{% endcall %}
+  <p class="hint">
+    On by default — faster on a large library. Turn it off while you're still
+    confirming your path mappings: with it on, a wrong mapping seeds mismatched
+    data instead of qBittorrent catching it.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/qbittorrent" hx-target="#test-qbittorrent" hx-swap="innerHTML">Test connection</button>
+  <span id="test-qbittorrent"></span>
+</form>
+{% endmacro %}
+
+{% macro transmission_section() %}
+<form method="post" action="/settings/transmission" class="panel">
+  <label for="transmission_url">URL</label>
+  <input id="transmission_url" name="url" value="{{ transmission_url }}" required
+         {% call lock_attr("transmission.url") %}{% endcall %}>
+  {% call locked("transmission.url") %}{% endcall %}
+
+  <label for="transmission_username">Username</label>
+  <input id="transmission_username" name="username" value="{{ transmission_username }}"
+         {% call lock_attr("transmission.username") %}{% endcall %}>
+  {% call locked("transmission.username") %}{% endcall %}
+
+  <label for="transmission_password">Password {% call field_status(transmission_password_set) %}{% endcall %}</label>
+  <input id="transmission_password" name="password" type="password" autocomplete="off"
+         placeholder="{% call stored(transmission_password_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if transmission_password_set %}
+  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+
+  <label for="transmission_label">Label for sharerr's torrents</label>
+  <input id="transmission_label" name="label" value="{{ transmission_label }}"
+         {% call lock_attr("transmission.label") %}{% endcall %}>
+  {% call locked("transmission.label") %}{% endcall %}
+  <p class="hint">
+    Transmission has no separate category and tag the way qBittorrent does —
+    this one label stands in for both.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/transmission" hx-target="#test-transmission" hx-swap="innerHTML">Test connection</button>
+  <span id="test-transmission"></span>
+</form>
+{% endmacro %}
+
+{% macro rtorrent_section() %}
+<form method="post" action="/settings/rtorrent" class="panel">
+  <label for="rtorrent_url">RPC URL</label>
+  <input id="rtorrent_url" name="url" value="{{ rtorrent_url }}" required
+         placeholder="http://seedbox.example/RPC2"
+         {% call lock_attr("rtorrent.url") %}{% endcall %}>
+  {% call locked("rtorrent.url") %}{% endcall %}
+  <p class="hint">
+    rTorrent has no HTTP server of its own — this is the exact address your
+    reverse proxy answers XML-RPC requests on (commonly <code>/RPC2</code>, or
+    ruTorrent's <code>/plugins/httprpc/action.php</code>), not a base address
+    sharerr appends a path to.
+  </p>
+
+  <label for="rtorrent_username">Username</label>
+  <input id="rtorrent_username" name="username" value="{{ rtorrent_username }}"
+         {% call lock_attr("rtorrent.username") %}{% endcall %}>
+  {% call locked("rtorrent.username") %}{% endcall %}
+
+  <label for="rtorrent_password">Password {% call field_status(rtorrent_password_set) %}{% endcall %}</label>
+  <input id="rtorrent_password" name="password" type="password" autocomplete="off"
+         placeholder="{% call stored(rtorrent_password_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if rtorrent_password_set %}
+  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+  <p class="hint">
+    rTorrent's own XML-RPC has no credential of its own. Username and password
+    are sent as HTTP Basic Auth on every request, for the common case where
+    the reverse proxy in front of it is what enforces access. If yours does
+    not, any placeholder values here are ignored harmlessly.
+  </p>
+
+  <label for="rtorrent_label">Label for sharerr's torrents</label>
+  <input id="rtorrent_label" name="label" value="{{ rtorrent_label }}"
+         {% call lock_attr("rtorrent.label") %}{% endcall %}>
+  {% call locked("rtorrent.label") %}{% endcall %}
+  <p class="hint">
+    rTorrent has no separate category and tag either — this one label stands
+    in for both, stored in rTorrent's <code>d.custom1</code> field.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/rtorrent" hx-target="#test-rtorrent" hx-swap="innerHTML">Test connection</button>
+  <span id="test-rtorrent"></span>
+</form>
+{% endmacro %}
+
 
 {% block content %}
 <h1>Settings</h1>
 
+{# Ordered required-first: everything above the "Optional" divider has to be
+   right before sharerr shares anything at all, and everything below it has a
+   working default or is a feature an instance can simply not use. #}
 <ul class="quicknav">
   <li><a href="#general">General</a></li>
+  <li><a href="#library-sources">Library sources</a></li>
   <li><a href="#torrent-client">Torrent client</a></li>
-  <li><a href="#qbittorrent">qBittorrent</a></li>
-  <li><a href="#transmission">Transmission</a></li>
-  <li><a href="#rtorrent">rTorrent</a></li>
-  <li><a href="#seeding">Seeding limits</a></li>
   <li><a href="#tracker">Tracker</a></li>
-  <li><a href="#lighthouse">Lighthouse</a></li>
-  <li><a href="#gluetun">Gluetun</a></li>
   <li><a href="#path-mappings">Path mappings</a></li>
+  <li><a href="#seeding">Seeding limits</a></li>
+  <li><a href="#gluetun">Gluetun</a></li>
+  <li><a href="#lighthouse">Lighthouse</a></li>
   <li><a href="#periodic-sync">Sync</a></li>
+  <li><a href="#checks">Checks</a></li>
   <li><a href="#notifications">Notifications</a></li>
-  <li><a href="#library-directories">Libraries</a></li>
   <li><a href="#your-account">Account</a></li>
 </ul>
 
@@ -113,6 +249,68 @@
   <button type="submit">Save</button>
 </form>
 
+<h2 id="library-sources">Library sources</h2>
+<p class="hint">
+  Where sharerr finds media to share: *arr apps, plain directories, or both —
+  configure whichever you use and leave the rest blank. Without at least one of
+  these there is nothing to share, and sharerr will do nothing.
+</p>
+
+{% for arr in arrs %}
+{% if arr.primary %}
+<h3>{{ arr.title }}</h3>
+{% call arr_section(arr) %}{% endcall %}
+{% endif %}
+{% endfor %}
+
+{# The long tail of *arr apps, folded so the page is not a wall of identical
+   forms. Starts open whenever one of them is configured — a configured service
+   disappearing behind a fold reads as it having vanished. #}
+<details class="fold" {% if secondary_arr_configured %}open{% endif %}>
+  <summary>More *arr apps — Lidarr (music), Readarr (books), Whisparr</summary>
+  {% for arr in arrs %}
+  {% if !arr.primary %}
+  <h3>{{ arr.title }}</h3>
+  {% call arr_section(arr) %}{% endcall %}
+  {% endif %}
+  {% endfor %}
+</details>
+
+<h3 id="library-directories">Library directories</h3>
+<form method="post" action="/settings/libraries" class="panel">
+  <p class="hint">
+    Plain folders shared without any *arr app — everything in each one is shared,
+    treated as the kind you pick. No external ids travel with these, so a
+    friend's app matches them by release name alone. Blank rows are ignored, so
+    use the spare row at the bottom to add one.
+  </p>
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Directory as sharerr sees it</th><th>Kind</th></tr>
+    </thead>
+    <tbody>
+      {% for row in libraries %}
+      <tr>
+        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
+        <td>
+          <select name="kind">
+            <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
+            <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
+            <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
+            <option value="book" {% if row.kind == "book" %}selected{% endif %}>Books</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/library" hx-target="#test-library" hx-swap="innerHTML">Test directories</button>
+  <span id="test-library"></span>
+</form>
+
 <h2 id="torrent-client">Torrent client</h2>
 <form method="post" action="/settings/torrent-backend" class="panel">
   <label for="torrent_backend">Which client actually seeds</label>
@@ -124,165 +322,48 @@
   </select>
   {% call locked("torrent_backend") %}{% endcall %}
   <p class="hint">
-    Every client's settings below are kept regardless of which one is
-    selected, so you can fill in and test a client before switching to it.
+    Saving a different client here swaps which settings show below. Every
+    client's settings are kept either way, so nothing is lost by switching.
   </p>
   <button type="submit">Save</button>
 </form>
 
-<h2 id="qbittorrent">qBittorrent</h2>
-<form method="post" action="/settings/qbittorrent" class="panel">
-  <label for="qbit_url">URL</label>
-  <input id="qbit_url" name="url" value="{{ qbit_url }}" required
-         {% call lock_attr("qbittorrent.url") %}{% endcall %}>
-  {% call locked("qbittorrent.url") %}{% endcall %}
+{# Only the selected client's settings render inline; the other two sit behind
+   the fold below. All three are still saved and kept — this is about which one
+   an operator is actually looking at, not about which are configurable. #}
+{% if torrent_backend == "qbittorrent" %}
+<h3 id="qbittorrent">qBittorrent</h3>
+{% call qbittorrent_section() %}{% endcall %}
+{% else if torrent_backend == "transmission" %}
+<h3 id="transmission">Transmission</h3>
+{% call transmission_section() %}{% endcall %}
+{% else %}
+<h3 id="rtorrent">rTorrent</h3>
+{% call rtorrent_section() %}{% endcall %}
+{% endif %}
 
-  <label for="qbit_api_key">API key {% call field_status(qbit_api_key_set) %}{% endcall %}</label>
-  <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if qbit_api_key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
+{# Starts open when an unselected client already holds a credential — same
+   reasoning as the secondary *arr fold: a configured service vanishing behind
+   a fold reads as it having been lost. #}
+<details class="fold" {% if unselected_client_configured %}open{% endif %}>
+  <summary>Other torrent clients — fill one in before switching to it</summary>
+  <p class="hint">
+    These are not what seeds right now. Settings saved here are kept, so a
+    client can be configured and tested before it is selected above.
+  </p>
+  {% if torrent_backend != "qbittorrent" %}
+  <h3>qBittorrent</h3>
+  {% call qbittorrent_section() %}{% endcall %}
   {% endif %}
-  <p class="hint">
-    Generate one under Options &rarr; Web UI &rarr; API key (qBittorrent 5.2 or
-    newer). This is the only credential sharerr uses to sign in — it does not
-    expire the way a session does, and rotating the key in qBittorrent
-    invalidates the old one immediately.
-  </p>
-
-  <label for="qbit_category">Category for sharerr's torrents</label>
-  <input id="qbit_category" name="category" value="{{ qbit_category }}"
-         {% call lock_attr("qbittorrent.category") %}{% endcall %}>
-  {% call locked("qbittorrent.category") %}{% endcall %}
-
-  <label for="qbit_tag">Tag for sharerr's torrents</label>
-  <input id="qbit_tag" name="tag" value="{{ qbit_tag }}"
-         {% call lock_attr("qbittorrent.tag") %}{% endcall %}>
-  {% call locked("qbittorrent.tag") %}{% endcall %}
-
-  <label class="hint">
-    <input type="checkbox" name="skip_checking" value="1" {% if qbit_skip_checking %}checked{% endif %}
-           {% call lock_attr("qbittorrent.skip_checking") %}{% endcall %}>
-    Skip the hash check when adding a torrent
-  </label>
-  {% call locked("qbittorrent.skip_checking") %}{% endcall %}
-  <p class="hint">
-    On by default — faster on a large library. Turn it off while you're still
-    confirming your path mappings: with it on, a wrong mapping seeds mismatched
-    data instead of qBittorrent catching it.
-  </p>
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/qbittorrent" hx-target="#test-qbittorrent" hx-swap="innerHTML">Test connection</button>
-  <span id="test-qbittorrent"></span>
-</form>
-
-<h2 id="transmission">Transmission</h2>
-<form method="post" action="/settings/transmission" class="panel">
-  <label for="transmission_url">URL</label>
-  <input id="transmission_url" name="url" value="{{ transmission_url }}" required
-         {% call lock_attr("transmission.url") %}{% endcall %}>
-  {% call locked("transmission.url") %}{% endcall %}
-
-  <label for="transmission_username">Username</label>
-  <input id="transmission_username" name="username" value="{{ transmission_username }}"
-         {% call lock_attr("transmission.username") %}{% endcall %}>
-  {% call locked("transmission.username") %}{% endcall %}
-
-  <label for="transmission_password">Password {% call field_status(transmission_password_set) %}{% endcall %}</label>
-  <input id="transmission_password" name="password" type="password" autocomplete="off"
-         placeholder="{% call stored(transmission_password_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if transmission_password_set %}
-  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% if torrent_backend != "transmission" %}
+  <h3>Transmission</h3>
+  {% call transmission_section() %}{% endcall %}
   {% endif %}
-
-  <label for="transmission_label">Label for sharerr's torrents</label>
-  <input id="transmission_label" name="label" value="{{ transmission_label }}"
-         {% call lock_attr("transmission.label") %}{% endcall %}>
-  {% call locked("transmission.label") %}{% endcall %}
-  <p class="hint">
-    Transmission has no separate category and tag the way qBittorrent does —
-    this one label stands in for both.
-  </p>
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/transmission" hx-target="#test-transmission" hx-swap="innerHTML">Test connection</button>
-  <span id="test-transmission"></span>
-</form>
-
-<h2 id="rtorrent">rTorrent</h2>
-<form method="post" action="/settings/rtorrent" class="panel">
-  <label for="rtorrent_url">RPC URL</label>
-  <input id="rtorrent_url" name="url" value="{{ rtorrent_url }}" required
-         placeholder="http://seedbox.example/RPC2"
-         {% call lock_attr("rtorrent.url") %}{% endcall %}>
-  {% call locked("rtorrent.url") %}{% endcall %}
-  <p class="hint">
-    rTorrent has no HTTP server of its own — this is the exact address your
-    reverse proxy answers XML-RPC requests on (commonly <code>/RPC2</code>, or
-    ruTorrent's <code>/plugins/httprpc/action.php</code>), not a base address
-    sharerr appends a path to.
-  </p>
-
-  <label for="rtorrent_username">Username</label>
-  <input id="rtorrent_username" name="username" value="{{ rtorrent_username }}"
-         {% call lock_attr("rtorrent.username") %}{% endcall %}>
-  {% call locked("rtorrent.username") %}{% endcall %}
-
-  <label for="rtorrent_password">Password {% call field_status(rtorrent_password_set) %}{% endcall %}</label>
-  <input id="rtorrent_password" name="password" type="password" autocomplete="off"
-         placeholder="{% call stored(rtorrent_password_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if rtorrent_password_set %}
-  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% if torrent_backend != "rtorrent" %}
+  <h3>rTorrent</h3>
+  {% call rtorrent_section() %}{% endcall %}
   {% endif %}
-  <p class="hint">
-    rTorrent's own XML-RPC has no credential of its own. Username and password
-    are sent as HTTP Basic Auth on every request, for the common case where
-    the reverse proxy in front of it is what enforces access. If yours does
-    not, any placeholder values here are ignored harmlessly.
-  </p>
-
-  <label for="rtorrent_label">Label for sharerr's torrents</label>
-  <input id="rtorrent_label" name="label" value="{{ rtorrent_label }}"
-         {% call lock_attr("rtorrent.label") %}{% endcall %}>
-  {% call locked("rtorrent.label") %}{% endcall %}
-  <p class="hint">
-    rTorrent has no separate category and tag either — this one label stands
-    in for both, stored in rTorrent's <code>d.custom1</code> field.
-  </p>
-
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/rtorrent" hx-target="#test-rtorrent" hx-swap="innerHTML">Test connection</button>
-  <span id="test-rtorrent"></span>
-</form>
-
-<h2 id="seeding">Seeding limits</h2>
-<form method="post" action="/settings/seeding" class="panel">
-  <p class="hint">
-    Applied once, when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent —
-    not retroactively enforced on what is already seeding, and not policed by
-    sharerr afterward. From that point on, the client's own seeding engine
-    honours the goal the same way it would for any torrent added by hand.
-    Leave a field blank for no cap.
-  </p>
-
-  <label for="seeding_upload_limit_kib">Upload limit (KiB/s)</label>
-  <input id="seeding_upload_limit_kib" name="upload_limit_kib" value="{{ seeding_upload_limit_kib }}"
-         inputmode="numeric" placeholder="unlimited"
-         {% call lock_attr("seeding.upload_limit_kib") %}{% endcall %}>
-  {% call locked("seeding.upload_limit_kib") %}{% endcall %}
-
-  <label for="seeding_ratio_limit">Seed ratio goal</label>
-  <input id="seeding_ratio_limit" name="ratio_limit" value="{{ seeding_ratio_limit }}"
-         inputmode="decimal" placeholder="e.g. 2.0"
-         {% call lock_attr("seeding.ratio_limit") %}{% endcall %}>
-  {% call locked("seeding.ratio_limit") %}{% endcall %}
-
-  <button type="submit">Save</button>
-</form>
+</details>
 
 <h2 id="tracker">Tracker</h2>
 <form method="post" action="/settings/tracker" class="panel">
@@ -379,49 +460,60 @@
 </form>
 {% endif %}
 
-<h2 id="lighthouse">Lighthouse</h2>
-<form method="post" action="/settings/lighthouse" class="panel">
+<h2 id="path-mappings">Path mappings</h2>
+<form method="post" action="/settings/paths" class="panel">
   <p class="hint">
-    Rendezvous for a friend whose address rotated while yours did too, so
-    gossip alone has no path back — see <a href="https://github.com/ivyduggan/sharerr-rs/blob/main/docs/ROADMAP.md#the-lighthouse">the roadmap's "The lighthouse"</a>.
+    How the *arr apps, sharerr, and qBittorrent each see the same library. Leave
+    the table empty if all three agree. Blank rows are ignored, so use the spare
+    row at the bottom to add one.
+  </p>
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>As Sonarr/Radarr report it</th><th>As sharerr sees it</th><th>As qBittorrent sees it</th></tr>
+    </thead>
+    <tbody>
+      {% for row in path_map %}
+      <tr>
+        <td><input name="arr" value="{{ row.arr }}" placeholder="/tv"></td>
+        <td><input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"></td>
+        <td><input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+</form>
+
+<hr>
+<p class="hint">
+  Everything above has to be right before sharerr shares anything. Everything
+  below is optional — each has a working default, or is a feature an instance
+  can simply not use.
+</p>
+
+<h2 id="seeding">Seeding limits</h2>
+<form method="post" action="/settings/seeding" class="panel">
+  <p class="hint">
+    Applied once, when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent —
+    not retroactively enforced on what is already seeding, and not policed by
+    sharerr afterward. From that point on, the client's own seeding engine
+    honours the goal the same way it would for any torrent added by hand.
+    Leave a field blank for no cap.
   </p>
 
-  <label class="hint">
-    <input type="checkbox" name="enabled" value="1" {% if lighthouse_enabled %}checked{% endif %}
-           {% call lock_attr("lighthouse.enabled") %}{% endcall %}>
-    Run the lighthouse on this instance
-  </label>
-  {% call locked("lighthouse.enabled") %}{% endcall %}
+  <label for="seeding_upload_limit_kib">Upload limit (KiB/s)</label>
+  <input id="seeding_upload_limit_kib" name="upload_limit_kib" value="{{ seeding_upload_limit_kib }}"
+         inputmode="numeric" placeholder="unlimited"
+         {% call lock_attr("seeding.upload_limit_kib") %}{% endcall %}>
+  {% call locked("seeding.upload_limit_kib") %}{% endcall %}
 
-  <label for="lighthouse_mount">Listener</label>
-  <select id="lighthouse_mount" name="mount" {% call lock_attr("lighthouse.mount") %}{% endcall %}>
-    <option value="frontend" {% if lighthouse_mount == "frontend" %}selected{% endif %}>
-      Frontend — this server's own port
-    </option>
-    <option value="tracker" {% if lighthouse_mount == "tracker" %}selected{% endif %}>
-      Tracker — the dedicated tracker listener if set, otherwise the frontend port
-    </option>
-  </select>
-  {% call locked("lighthouse.mount") %}{% endcall %}
-  <p class="hint">
-    Which port carries the lighthouse's routes. Its own image and port
-    (<code>sharerr-lighthouse</code>) is the deployment the design is built
-    for — self-hosted by anyone, on neutral ground away from any particular
-    library — so prefer that unless running a second container is genuinely
-    not worth it here.
-  </p>
-
-  <label for="lighthouse_urls">Lighthouses to use</label>
-  <textarea id="lighthouse_urls" name="urls" rows="3" placeholder="https://lighthouse.example.com"
-            {% call lock_attr("lighthouse.urls") %}{% endcall %}>{{ lighthouse_urls }}</textarea>
-  {% call locked("lighthouse.urls") %}{% endcall %}
-  <p class="hint">
-    One URL per line. This instance reports its own endpoint to each of
-    these, and queries each for a friend gossip can no longer reach —
-    independent of whether it also runs the lighthouse above: consuming a
-    friend's lighthouse needs nothing checked above, and running one for
-    friends needs nothing typed here.
-  </p>
+  <label for="seeding_ratio_limit">Seed ratio goal</label>
+  <input id="seeding_ratio_limit" name="ratio_limit" value="{{ seeding_ratio_limit }}"
+         inputmode="decimal" placeholder="e.g. 2.0"
+         {% call lock_attr("seeding.ratio_limit") %}{% endcall %}>
+  {% call locked("seeding.ratio_limit") %}{% endcall %}
 
   <button type="submit">Save</button>
 </form>
@@ -566,29 +658,50 @@
   </form>
 </details>
 
-<h2 id="path-mappings">Path mappings</h2>
-<form method="post" action="/settings/paths" class="panel">
+<h2 id="lighthouse">Lighthouse</h2>
+<form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
-    How the *arr apps, sharerr, and qBittorrent each see the same library. Leave
-    the table empty if all three agree. Blank rows are ignored, so use the spare
-    row at the bottom to add one.
+    Rendezvous for a friend whose address rotated while yours did too, so
+    gossip alone has no path back — see <a href="https://github.com/ivyduggan/sharerr-rs/blob/main/docs/ROADMAP.md#the-lighthouse">the roadmap's "The lighthouse"</a>.
   </p>
-  <div class="table-scroll">
-  <table>
-    <thead>
-      <tr><th>As Sonarr/Radarr report it</th><th>As sharerr sees it</th><th>As qBittorrent sees it</th></tr>
-    </thead>
-    <tbody>
-      {% for row in path_map %}
-      <tr>
-        <td><input name="arr" value="{{ row.arr }}" placeholder="/tv"></td>
-        <td><input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"></td>
-        <td><input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
+
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if lighthouse_enabled %}checked{% endif %}
+           {% call lock_attr("lighthouse.enabled") %}{% endcall %}>
+    Run the lighthouse on this instance
+  </label>
+  {% call locked("lighthouse.enabled") %}{% endcall %}
+
+  <label for="lighthouse_mount">Listener</label>
+  <select id="lighthouse_mount" name="mount" {% call lock_attr("lighthouse.mount") %}{% endcall %}>
+    <option value="frontend" {% if lighthouse_mount == "frontend" %}selected{% endif %}>
+      Frontend — this server's own port
+    </option>
+    <option value="tracker" {% if lighthouse_mount == "tracker" %}selected{% endif %}>
+      Tracker — the dedicated tracker listener if set, otherwise the frontend port
+    </option>
+  </select>
+  {% call locked("lighthouse.mount") %}{% endcall %}
+  <p class="hint">
+    Which port carries the lighthouse's routes. Its own image and port
+    (<code>sharerr-lighthouse</code>) is the deployment the design is built
+    for — self-hosted by anyone, on neutral ground away from any particular
+    library — so prefer that unless running a second container is genuinely
+    not worth it here.
+  </p>
+
+  <label for="lighthouse_urls">Lighthouses to use</label>
+  <textarea id="lighthouse_urls" name="urls" rows="3" placeholder="https://lighthouse.example.com"
+            {% call lock_attr("lighthouse.urls") %}{% endcall %}>{{ lighthouse_urls }}</textarea>
+  {% call locked("lighthouse.urls") %}{% endcall %}
+  <p class="hint">
+    One URL per line. This instance reports its own endpoint to each of
+    these, and queries each for a friend gossip can no longer reach —
+    independent of whether it also runs the lighthouse above: consuming a
+    friend's lighthouse needs nothing checked above, and running one for
+    friends needs nothing typed here.
+  </p>
+
   <button type="submit">Save</button>
 </form>
 
@@ -607,6 +720,26 @@
   {% call locked("sync.interval_secs") %}{% endcall %}
   <p class="hint">Minimum 60.</p>
 
+  <button type="submit">Save</button>
+</form>
+
+<h2 id="checks">Automatic checks</h2>
+<form method="post" action="/settings/checks" class="panel">
+  <label class="hint">
+    <input type="checkbox" name="reachability" value="1" {% if checks_reachability %}checked{% endif %}
+           {% call lock_attr("checks.reachability") %}{% endcall %}>
+    Check that the advertised tracker and feed addresses accept connections
+  </label>
+  {% call locked("checks.reachability") %}{% endcall %}
+  <p class="hint">
+    Off by default. When on, the Topology page dials this instance's own
+    advertised tracker and feed addresses and reports whether they answer.
+    A failure here means <em>could not confirm</em>, not "your port is
+    shut" — an instance dialling its own public address is exercising NAT
+    hairpinning, which plenty of working routers simply do not do. The
+    reliable test is still from outside; see the
+    <a href="/debug">debug page</a> for a script that does exactly that.
+  </p>
   <button type="submit">Save</button>
 </form>
 
@@ -650,68 +783,6 @@
 
   <button type="submit">Save</button>
 </form>
-
-<hr>
-<p class="hint">
-  Everything above is what sharerr needs to run. Below is where it finds media to
-  share: plain directories, *arr apps, or both — configure whichever you use and
-  leave the rest blank.
-</p>
-
-<h2 id="library-directories">Library directories</h2>
-<form method="post" action="/settings/libraries" class="panel">
-  <p class="hint">
-    Plain folders shared without any *arr app — everything in each one is shared,
-    treated as the kind you pick. No external ids travel with these, so a
-    friend's app matches them by release name alone. Blank rows are ignored, so
-    use the spare row at the bottom to add one.
-  </p>
-  <div class="table-scroll">
-  <table>
-    <thead>
-      <tr><th>Directory as sharerr sees it</th><th>Kind</th></tr>
-    </thead>
-    <tbody>
-      {% for row in libraries %}
-      <tr>
-        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
-        <td>
-          <select name="kind">
-            <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
-            <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
-            <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
-            <option value="book" {% if row.kind == "book" %}selected{% endif %}>Books</option>
-          </select>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  <button type="submit">Save</button>
-  <button type="button" class="secondary" hx-post="/settings/test/library" hx-target="#test-library" hx-swap="innerHTML">Test directories</button>
-  <span id="test-library"></span>
-</form>
-
-{% for arr in arrs %}
-{% if arr.primary %}
-<h2>{{ arr.title }}</h2>
-{% call arr_section(arr) %}{% endcall %}
-{% endif %}
-{% endfor %}
-
-{# The long tail of *arr apps, folded so the page is not a wall of identical
-   forms. Starts open whenever one of them is configured — a configured service
-   disappearing behind a fold reads as it having vanished. #}
-<details class="fold" {% if secondary_arr_configured %}open{% endif %}>
-  <summary>More *arr apps — Lidarr (music), Readarr (books), Whisparr</summary>
-  {% for arr in arrs %}
-  {% if !arr.primary %}
-  <h3>{{ arr.title }}</h3>
-  {% call arr_section(arr) %}{% endcall %}
-  {% endif %}
-  {% endfor %}
-</details>
 
 <h2 id="your-account">Your account</h2>
 <form method="post" action="/settings/account/password" class="panel">
