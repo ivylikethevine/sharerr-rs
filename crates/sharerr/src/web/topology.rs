@@ -871,15 +871,29 @@ pub(crate) fn layout(
 
         // Each channel's edge lands on its own row, so which line a given
         // connection belongs to is readable without counting.
+        //
+        // The two edges converge on the same point at the sharerr end, so when
+        // both channels were learned the same way at the same time — the
+        // common case, since one gossip exchange carries both — their labels
+        // landed on top of each other and rendered as unreadable doubled text.
+        // Identical labels are drawn once.
         let row_y = |index: i32| y + NODE_HEAD_H + index * NODE_LINE_H - NODE_LINE_H / 3;
+        let duplicate_label = friend.indexer.style != EdgeStyle::None
+            && friend.client.style != EdgeStyle::None
+            && friend.indexer.edge_label == friend.client.edge_label;
         for (channel, index) in [(&friend.indexer, 0), (&friend.client, 1)] {
             if channel.style != EdgeStyle::None {
+                let label = if duplicate_label && index == 1 {
+                    String::new()
+                } else {
+                    channel.edge_label.clone()
+                };
                 edges.push(Edge {
                     x1: sharerr_right,
                     y1: sharerr_mid_y,
                     x2: friends_x,
                     y2: row_y(index),
-                    label: channel.edge_label.clone(),
+                    label,
                     style: channel.style,
                     accent: friend.accent,
                 });
@@ -1051,6 +1065,47 @@ mod tests {
         );
 
         assert_eq!(edges.len(), 2, "the sharerr-client edge plus one channel");
+    }
+
+    /// Both of a peer's edges converge on the same point at the sharerr end,
+    /// so two identical labels render as doubled, unreadable text. One
+    /// gossip exchange carries both channels, which makes identical labels
+    /// the common case rather than the exception.
+    #[test]
+    fn two_channels_learned_the_same_way_are_labelled_once() {
+        let same = || Channel {
+            addr: Some("203.0.113.5:1".to_owned()),
+            style: EdgeStyle::Dashed,
+            edge_label: "gossip 2h".to_owned(),
+        };
+        let friends = vec![FriendNode {
+            label: "Sam".to_owned(),
+            accent: peer_color(0),
+            indexer: same(),
+            client: same(),
+        }];
+
+        let (_, edges, ..) = layout(
+            &[],
+            &[line("address", "")],
+            NodeStatus::Unknown,
+            "qBittorrent",
+            &[line("version", "")],
+            NodeStatus::Unknown,
+            "",
+            &friends,
+        );
+
+        let labelled = edges.iter().filter(|e| e.label == "gossip 2h").count();
+        assert_eq!(labelled, 1, "the duplicate label must be drawn once");
+        // Both edges are still drawn — only the second one's text is dropped.
+        assert_eq!(
+            edges
+                .iter()
+                .filter(|e| e.style == EdgeStyle::Dashed)
+                .count(),
+            2
+        );
     }
 
     /// The tallest lane decides the diagram's height; a lane with fewer rows

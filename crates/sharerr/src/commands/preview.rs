@@ -712,26 +712,19 @@ fn items_page() -> ItemsPage {
         source_filter: String::new(),
         state_filter: String::new(),
         q: String::new(),
-        sort_links: vec![
-            SortLink {
-                label: "Title",
-                href: "/items?sort=title&dir=asc".to_owned(),
-                active: true,
-                dir: "asc",
-            },
-            SortLink {
-                label: "Size",
-                href: "/items?sort=size&dir=asc".to_owned(),
-                active: false,
-                dir: "",
-            },
-            SortLink {
-                label: "Since",
-                href: "/items?sort=since&dir=asc".to_owned(),
-                active: false,
-                dir: "",
-            },
-        ],
+        // Built from the real column list rather than a hand-written subset:
+        // the table's header count has to match its body's cell count, and a
+        // fixture listing three of the five columns rendered every header
+        // one place left of the data it belonged to.
+        sort_links: crate::web::items::SORT_COLUMNS
+            .iter()
+            .map(|(field, label)| SortLink {
+                label,
+                href: format!("/items?sort={field}&dir=asc"),
+                active: *field == "since",
+                dir: if *field == "since" { "desc" } else { "" },
+            })
+            .collect(),
     }
 }
 

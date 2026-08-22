@@ -373,6 +373,26 @@ button.link:hover { color: var(--accent-hover); }
 
 form.inline { display: inline; }
 
+/* A filter row: several short controls side by side, wrapping on a narrow
+   screen. The app's default stacked label/input is right for a settings form
+   an operator reads top to bottom, and wrong for a toolbar above a table. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem 1rem;
+}
+.filter-bar .field { display: flex; flex-direction: column; gap: 0.3rem; }
+.filter-bar .field label { margin: 0; }
+.filter-bar input, .filter-bar select { margin: 0; }
+.filter-bar input { min-width: 14rem; }
+.filter-bar button { margin: 0; }
+.filter-bar .filter-count {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-left: auto;
+}
+
 /* Color only here: this class also lands on a `<span>`/`<dd>` marking one word
    or one table cell red or green inline (a revoked friend, a failed sync row),
    and the boxed treatment below is sized for a paragraph, not a word — put on
@@ -431,12 +451,29 @@ svg text { font-family: inherit; }
 .topo-node--error .topo-node-box { stroke: var(--error-ink); fill: var(--error-bg); }
 
 /* `main` is capped at 46rem, which is right for prose and forms and much too
-   narrow for a three-lane diagram. This breaks one block out of that column
-   and centres it on the viewport instead, so the diagram gets the width it
-   needs without every other page changing shape. */
+   narrow for a wide table or a three-lane diagram. This breaks one block out
+   of that column and centres it on the viewport instead, so the block that
+   needs width gets it without every other page changing shape. */
 .wide {
   width: min(96vw, 1600px);
   margin-left: calc(50% - min(48vw, 800px));
+}
+
+/* A value that is long by nature — a 40-character info hash, a full announce
+   URL — clipped to a readable width with the whole thing on hover, rather
+   than left to squeeze every other column in the row down to one word per
+   line. */
+/* A short value — a relative timestamp, a size — that reads worse broken
+   across lines than it does pushing the table one column wider. */
+.nowrap { white-space: nowrap; }
+
+.truncate {
+  display: inline-block;
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
 }
 
 .topo-node-label {
@@ -497,9 +534,13 @@ svg text { font-family: inherit; }
 /* Status page's headline numbers — the first thing an operator should be able
    to read at a glance, so they get more visual weight than an ordinary
    definition list. Falls back to a single column below ~26rem per card. */
+/* 10rem rather than 11: there are four glance stats and the content column is
+   46rem, and the wider floor fitted only three per row — leaving the fourth
+   stranded on a line of its own, which reads as a fifth thing that failed to
+   load rather than as part of the same strip. */
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
   gap: 0.75rem;
   margin: 1rem 0;
   padding: 0;

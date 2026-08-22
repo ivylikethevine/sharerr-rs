@@ -13,34 +13,40 @@
 <p class="error" role="alert">{{ message }}</p>
 {% endif %}
 
-<form method="get" action="/items" class="panel">
-  <label for="q">Search</label>
-  <input id="q" name="q" value="{{ q }}" placeholder="title or release name" autocomplete="off">
+{# Laid out as a row rather than the stacked label/input every other form on
+   this app uses: three short controls stacked filled most of a screen before
+   the table an operator came here to read even started. #}
+<form method="get" action="/items" class="panel filter-bar">
+  <div class="field">
+    <label for="q">Search</label>
+    <input id="q" name="q" value="{{ q }}" placeholder="title or release name" autocomplete="off">
+  </div>
 
-  <label for="source">Source</label>
-  <select id="source" name="source">
-    <option value=""{% if source_filter.is_empty() %} selected{% endif %}>Any</option>
-    {% for option in source_options %}
-    <option value="{{ option.value }}"{% if source_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
-    {% endfor %}
-  </select>
+  <div class="field">
+    <label for="source">Source</label>
+    <select id="source" name="source">
+      <option value=""{% if source_filter.is_empty() %} selected{% endif %}>Any</option>
+      {% for option in source_options %}
+      <option value="{{ option.value }}"{% if source_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
 
-  <label for="state">State</label>
-  <select id="state" name="state">
-    <option value=""{% if state_filter.is_empty() %} selected{% endif %}>Any</option>
-    {% for option in state_options %}
-    <option value="{{ option.value }}"{% if state_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
-    {% endfor %}
-  </select>
+  <div class="field">
+    <label for="state">State</label>
+    <select id="state" name="state">
+      <option value=""{% if state_filter.is_empty() %} selected{% endif %}>Any</option>
+      {% for option in state_options %}
+      <option value="{{ option.value }}"{% if state_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
 
   <button type="submit">Filter</button>
+  <span class="filter-count">Showing {{ shown }} of {{ total }} item(s).</span>
 </form>
 
-<p class="hint">
-  Showing {{ shown }} of {{ total }} item(s).
-</p>
-
-<div class="panel">
+<div class="panel wide">
   {% if items.is_empty() %}
   <p class="hint">Nothing matches. Widen the filters above, or run a sync.</p>
   {% else %}
@@ -62,7 +68,7 @@
     <tbody>
       {% for item in items %}
       <tr>
-        <td>{{ item.since }}</td>
+        <td class="nowrap">{{ item.since }}</td>
         <td>
           {{ item.title }}
           <span class="hint">({{ item.kind }})</span>
@@ -71,7 +77,7 @@
           {% endif %}
         </td>
         <td>{{ item.source_label }}</td>
-        <td>{{ item.size }}</td>
+        <td class="nowrap">{{ item.size }}</td>
         <td>
           {{ item.state_label }}
           {% if let Some(hint) = item.state_hint %}
@@ -85,16 +91,21 @@
           {{ item.visible_to }}
           {% endif %}
         </td>
+        {# A 40-character hash and a full announce URL are both far wider than
+           anything else in the row, and left at full width they squeezed the
+           title and state columns down to one word per line. Shown short with
+           the whole value on hover and selectable in full via the title
+           attribute. #}
         <td>
           {% if let Some(hash) = item.info_hash %}
-          <code>{{ hash }}</code>
+          <code class="truncate" title="{{ hash }}">{{ hash }}</code>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
         </td>
         <td>
           {% if let Some(url) = item.announce_url %}
-          <code>{{ url }}</code>
+          <code class="truncate" title="{{ url }}">{{ url }}</code>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
