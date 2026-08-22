@@ -142,16 +142,8 @@ pub struct StatusPage {
     /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
     /// One row per gluetun poller (tracker, then client) — what each is
-    /// pointed at, what it last saw, and what it last failed with. See
-    /// `docs/ROADMAP.md`'s "gluetun observability" and "a peer with two
-    /// addresses".
+    /// pointed at, what it last saw, and what it last failed with.
     pub gluetun: Vec<EndpointStatus>,
-    /// Live swarm counts from the tracker's own bookkeeping — not a config
-    /// check like the rest of the page, but the other half of "is networking
-    /// actually working": credentials can all be green while no peer has
-    /// ever announced.
-    pub swarm_peers: usize,
-    pub swarm_seeders: usize,
     /// The last few sync runs, newest first — the glance above only shows the
     /// single latest one.
     pub runs: Vec<RunRow>,
@@ -327,6 +319,14 @@ pub struct SettingsPage {
     /// path prefix. Empty when unset.
     pub tracker_advertised_url: String,
     pub tracker_token_set: bool,
+    /// Whether a rotation is in progress — the previous token is still being
+    /// accepted alongside the current one. See
+    /// `crate::web::settings::rotate_tracker_token`.
+    pub tracker_token_previous_set: bool,
+    /// Rendered relative time the previous token was last actually used to
+    /// authenticate, or `None` when either no rotation is in progress or
+    /// nothing has used it since this process started.
+    pub tracker_token_previous_last_used: Option<String>,
 
     /// Whether the embedded lighthouse (`crates/sharerr-lighthouse`, run as
     /// extra routes on one of this instance's own listeners) is on.
@@ -454,8 +454,6 @@ pub struct DiagnosticsData {
     pub readable: usize,
     pub healthy: bool,
     pub gluetun: Vec<EndpointStatus>,
-    pub swarm_peers: usize,
-    pub swarm_seeders: usize,
     pub runs: Vec<RunRow>,
 }
 

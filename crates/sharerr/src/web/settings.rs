@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sharerr_core::config::{SyncConfig, TorrentBackend, config_paths, secret_keys};
 use sharerr_core::{Config, MediaSource};
@@ -41,22 +41,24 @@ use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
 /// Mint a fresh secret and show it once.
 ///
 /// Only the tracker token is minted this way — a friend's own key, generated
-/// on the Friends page, is what opens the Torznab feed to them.
+/// on the Friends page, is what opens the Torznab feed to them. Minting it
+/// goes through [`rotate_tracker_token`], the same as hand-typing one in
+/// [`save_tracker`], so a generated token gets the same rotation grace period
+/// a typed one does.
 pub async fn generate_secret(
     State(state): State<WebState>,
     axum::extract::Path(field): axum::extract::Path<String>,
 ) -> Response {
-    let key = match field.as_str() {
-        "tracker" => secret_keys::TRACKER_TOKEN,
-        _ => return reject(&state, "There is no such secret to generate.").await,
-    };
+    if field != "tracker" {
+        return reject(&state, "There is no such secret to generate.").await;
+    }
 
     let generated = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
         Ok(generated) => generated,
         Err(reason) => return reject(&state, &reason).await,
     };
 
-    if let Err(message) = apply_secret(&state, key, &generated, None).await {
+    if let Err(message) = rotate_tracker_token(&state, &generated).await {
         return reject(&state, &message).await;
     }
 
@@ -462,14 +464,15 @@ pub async fn save_tracker(
     Query(next): Query<NextQuery>,
     Form(form): Form<TrackerForm>,
 ) -> Response {
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::TRACKER_TOKEN,
-        &form.token,
-        form.clear_token,
-    )
-    .await
-    {
+    let token = form.token.trim();
+    let outcome = if form.clear_token.is_some() {
+        clear_tracker_token(&state).await
+    } else if !token.is_empty() {
+        rotate_tracker_token(&state, token).await
+    } else {
+        Ok(())
+    };
+    if let Err(message) = outcome {
         return reject(&state, &message).await;
     }
 
@@ -515,6 +518,17 @@ pub async fn save_tracker(
         Ok(())
     })
     .await
+}
+
+/// Retire the previous announce token a rotation kept valid — the explicit
+/// "I'm satisfied, cut it off" step. Vault-only, no config file involved, so
+/// this does not go through [`write_config`]; it redirects the same way that
+/// helper's success path does.
+pub async fn finalize_tracker(State(state): State<WebState>) -> Response {
+    if let Err(message) = finalize_tracker_token(&state).await {
+        return reject(&state, &message).await;
+    }
+    Redirect::to("/settings?saved=tracker").into_response()
 }
 
 /// The embedded lighthouse: on/off, plus which of sharerr's own listeners
@@ -636,8 +650,7 @@ pub async fn save_gluetun(
 }
 
 /// The second poller — the torrent client's own tunnel, when it is a separate
-/// one from the tracker's. Same form shape, same rules, a different section:
-/// see `docs/ROADMAP.md`'s "a peer with two addresses".
+/// one from the tracker's. Same form shape, same rules, a different section.
 pub async fn save_gluetun_client(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
@@ -938,6 +951,108 @@ async fn apply_secret(
     Ok(())
 }
 
+/// The vault-mutation core of a rotation, over a plain `&mut Vault` rather
+/// than a `WebState` — so it can be unit tested against a vault opened
+/// directly with a hand-picked key, no `SHARERR_MASTER_KEY` in the process
+/// env required. See the module-level testing-tiers note in `CLAUDE.md`:
+/// nothing else in this suite touches the real process env for exactly this
+/// reason — it cannot be scoped per test under a parallel runner.
+///
+/// Preserves the value it replaces as [`secret_keys::TRACKER_TOKEN_PREVIOUS`]
+/// so nothing already relying on it breaks mid-rotation — see
+/// `crate::tracker::authenticate_token`. A no-op previous-slot write when
+/// `new_value` already matches the current token: retyping the same value is
+/// not a rotation, and treating it as one would make a double-submit look
+/// like a real one happened.
+fn rotate_tracker_token_in(vault: &mut Vault, new_value: &str) -> Result<(), String> {
+    let current = vault
+        .get(secret_keys::TRACKER_TOKEN)
+        .map_err(|err| format!("reading the current announce token: {err}"))?;
+    if let Some(current) = &current {
+        if current.expose_secret() != new_value {
+            vault
+                .put(secret_keys::TRACKER_TOKEN_PREVIOUS, current)
+                .map_err(|err| format!("preserving the previous announce token: {err}"))?;
+        }
+    }
+
+    vault
+        .put(secret_keys::TRACKER_TOKEN, &SecretString::from(new_value))
+        .map_err(|err| format!("storing the announce token: {err}"))
+}
+
+/// [`rotate_tracker_token_in`], plus the live-process bookkeeping a rotation
+/// through the running instance needs: dropping the cached syncer and the
+/// cached token values (both would otherwise keep enforcing what was true
+/// before this call), and resetting the previous-token usage status — a
+/// fresh rotation means "unknown again" for whether the newly-demoted token
+/// is still in use, since the prior answer described a different token.
+///
+/// The one place both [`save_tracker`]'s hand-typed path and
+/// [`generate_secret`]'s minted path meet, so a rotation behaves identically
+/// either way.
+async fn rotate_tracker_token(state: &WebState, new_value: &str) -> Result<(), String> {
+    let mut vault = state.serve.open_vault().await?;
+    rotate_tracker_token_in(&mut vault, new_value)?;
+    tracing::info!("tracker token rotated through the web ui");
+
+    state.serve.invalidate("the tracker token rotated").await;
+    state.serve.legacy_token_status().reset().await;
+    Ok(())
+}
+
+/// Turn the announce-token requirement off entirely: removes both the
+/// current and previous tokens. Leaving a previous token behind would be a
+/// forgotten, never-checked-again secret — with no current token configured,
+/// `authenticate_token`'s first branch admits every announce before either
+/// vault key is even read.
+fn clear_tracker_token_in(vault: &mut Vault) -> Result<(), String> {
+    vault
+        .remove(secret_keys::TRACKER_TOKEN)
+        .map_err(|err| format!("removing the announce token: {err}"))?;
+    vault
+        .remove(secret_keys::TRACKER_TOKEN_PREVIOUS)
+        .map_err(|err| format!("removing the previous announce token: {err}"))?;
+    Ok(())
+}
+
+async fn clear_tracker_token(state: &WebState) -> Result<(), String> {
+    let mut vault = state.serve.open_vault().await?;
+    clear_tracker_token_in(&mut vault)?;
+    tracing::info!("tracker token cleared through the web ui");
+
+    state
+        .serve
+        .invalidate("the tracker token was cleared")
+        .await;
+    state.serve.legacy_token_status().reset().await;
+    Ok(())
+}
+
+/// Finish a rotation: stop accepting the previous token, leaving the current
+/// one untouched. Anything still announcing with the previous token is cut
+/// off from here on — the explicit step an operator takes once satisfied
+/// nothing needs it any more.
+fn finalize_tracker_token_in(vault: &mut Vault) -> Result<(), String> {
+    vault
+        .remove(secret_keys::TRACKER_TOKEN_PREVIOUS)
+        .map_err(|err| format!("removing the previous announce token: {err}"))?;
+    Ok(())
+}
+
+async fn finalize_tracker_token(state: &WebState) -> Result<(), String> {
+    let mut vault = state.serve.open_vault().await?;
+    finalize_tracker_token_in(&mut vault)?;
+    tracing::info!("tracker token rotation finalized through the web ui");
+
+    state
+        .serve
+        .invalidate("the tracker rotation was finalized")
+        .await;
+    state.serve.legacy_token_status().reset().await;
+    Ok(())
+}
+
 /// Which vault keys currently hold a value.
 ///
 /// Reads the names straight out of the file rather than opening the vault. They
@@ -1176,6 +1291,13 @@ async fn build_page(
             .unwrap_or_default(),
         tracker_advertised_url: url_or_empty(config.tracker.advertised_url.as_ref()),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
+        tracker_token_previous_set: is_set(secret_keys::TRACKER_TOKEN_PREVIOUS),
+        tracker_token_previous_last_used: state
+            .serve
+            .legacy_token_status()
+            .snapshot()
+            .await
+            .map(super::peers::ago),
         lighthouse_enabled: config.lighthouse.enabled,
         lighthouse_mount: config.lighthouse.mount.as_str(),
         lighthouse_urls: config
@@ -1246,7 +1368,7 @@ async fn build_page(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
 
@@ -2036,6 +2158,215 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
         assert!(config_path.exists());
+    }
+
+    // ------------------------------------------------------ token rotation
+    //
+    // `rotate_tracker_token_in`/`clear_tracker_token_in`/
+    // `finalize_tracker_token_in` take a plain `&mut Vault` rather than a
+    // `WebState`, specifically so they can be tested against a vault opened
+    // directly with a hand-picked key — no `SHARERR_MASTER_KEY` in the real
+    // process env, and so none of the risk `CLAUDE.md`'s testing-tiers note
+    // warns about (a parallel test runner cannot scope a real env var per
+    // test — `figment::Jail`'s own scoping only covers other `Jail` users,
+    // not the many plain `unconfigured()`-based tests elsewhere in this same
+    // file that assert on there being *no* master key).
+
+    fn open_test_vault(dir: &tempfile::TempDir) -> Vault {
+        Vault::open(
+            dir.path().join("vault.bin"),
+            &SecretString::from("test-key"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rotating_a_first_token_sets_it_with_no_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open_test_vault(&dir);
+
+        rotate_tracker_token_in(&mut vault, "first-token").unwrap();
+
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "first-token"
+        );
+        assert!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The whole point of rotation: the value a second rotation replaces is
+    /// preserved, not dropped, and a third rotation only ever keeps the
+    /// *immediately* prior value — a single-generation grace window, not a
+    /// chain.
+    #[test]
+    fn rotating_again_shifts_the_current_token_to_previous_and_only_keeps_one_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open_test_vault(&dir);
+
+        rotate_tracker_token_in(&mut vault, "first-token").unwrap();
+        rotate_tracker_token_in(&mut vault, "second-token").unwrap();
+
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "second-token"
+        );
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "first-token"
+        );
+
+        rotate_tracker_token_in(&mut vault, "third-token").unwrap();
+
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "third-token"
+        );
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "second-token",
+            "the first token must not linger once a second rotation has happened"
+        );
+    }
+
+    /// Retyping the same value the token already holds is not a rotation —
+    /// there is nothing to preserve, and treating it as one would make an
+    /// accidental double-submit look like a real rotation happened.
+    #[test]
+    fn rotating_to_the_same_value_is_a_no_op_for_the_previous_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open_test_vault(&dir);
+
+        rotate_tracker_token_in(&mut vault, "same-token").unwrap();
+        rotate_tracker_token_in(&mut vault, "same-token").unwrap();
+
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "same-token"
+        );
+        assert!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn clearing_the_token_removes_both_current_and_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open_test_vault(&dir);
+        rotate_tracker_token_in(&mut vault, "first-token").unwrap();
+        rotate_tracker_token_in(&mut vault, "second-token").unwrap();
+
+        clear_tracker_token_in(&mut vault).unwrap();
+
+        assert!(vault.get(secret_keys::TRACKER_TOKEN).unwrap().is_none());
+        assert!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .unwrap()
+                .is_none(),
+            "turning the requirement off must not leave a forgotten previous token"
+        );
+    }
+
+    #[test]
+    fn finalizing_removes_only_the_previous_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = open_test_vault(&dir);
+        rotate_tracker_token_in(&mut vault, "first-token").unwrap();
+        rotate_tracker_token_in(&mut vault, "second-token").unwrap();
+
+        finalize_tracker_token_in(&mut vault).unwrap();
+
+        assert_eq!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN)
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "second-token",
+            "finalizing must not touch the current token"
+        );
+        assert!(
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Neither the hand-typed path (`save_tracker`) nor the minted path
+    /// (`generate_secret`) can touch the vault without one, same as every
+    /// other secret-writing handler in this file — this is the regression
+    /// check that rewiring both onto `rotate_tracker_token` did not lose
+    /// that failure mode, without needing a real openable vault to prove it.
+    #[tokio::test]
+    async fn save_tracker_with_a_token_rejects_when_the_vault_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_tracker(
+            State(state),
+            Query(NextQuery::default()),
+            Form(TrackerForm {
+                token: "typed-token".to_owned(),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn generate_secret_rejects_when_the_vault_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response =
+            generate_secret(State(state), axum::extract::Path("tracker".to_owned())).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn finalize_tracker_rejects_when_the_vault_cannot_open() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = finalize_tracker(State(state)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

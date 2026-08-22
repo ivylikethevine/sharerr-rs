@@ -20,6 +20,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::gluetun::{GluetunStatus, GluetunTarget};
 use crate::notify::QuietNotified;
 use crate::sync::Syncer;
+use crate::tracker::LegacyTokenStatus;
 
 /// How soon to retry building the syncer after the first failure.
 ///
@@ -75,6 +76,10 @@ pub struct ServeState {
     /// there is no token". Cleared by [`Self::invalidate`], so changing it through
     /// the UI takes effect without a restart.
     tracker_token: RwLock<Option<Option<String>>>,
+    /// The tracker token a rotation just replaced, cached the same way and
+    /// for the same reason as `tracker_token` — see
+    /// [`crate::web::settings::rotate_tracker_token`].
+    tracker_token_previous: RwLock<Option<Option<String>>>,
     /// This instance's gossip signing identity, cached for the same reason as
     /// `tracker_token` — loading it means opening the vault, and the pull side of
     /// gossip is asked on every friend's poll.
@@ -114,9 +119,7 @@ pub struct ServeState {
     /// `docker/deploy/dual-vpn/`) that rotate on unrelated schedules. Populated
     /// only by the `[gluetun_client]` poller; there is no static configuration
     /// for it, since nothing else in `sharerr.toml` describes the torrent
-    /// client's own reachable address. Read today by gossip's self-record;
-    /// see `docs/ROADMAP.md`'s "a peer with two addresses" for the rest of the
-    /// story.
+    /// client's own reachable address. Read today by gossip's self-record.
     client_endpoint: Arc<AdvertisedEndpoint>,
     /// Raised by the gluetun push endpoint so the tracker-facing poller
     /// re-asks its control server *now* instead of at the next tick — the
@@ -131,6 +134,9 @@ pub struct ServeState {
     gluetun_status: Arc<GluetunStatus>,
     /// The client-facing counterpart of `gluetun_status`.
     gluetun_client_status: Arc<GluetunStatus>,
+    /// When the previous shared tracker token was last actually used — see
+    /// [`LegacyTokenStatus`].
+    legacy_token_status: Arc<LegacyTokenStatus>,
     /// The tracker's live swarms. Owned here rather than by the tracker router
     /// because two consumers need one copy: however many listeners carry
     /// `/announce`, and the status page's "n peers connected" line.
@@ -157,6 +163,7 @@ impl ServeState {
             syncer: RwLock::new(Err("still starting up".to_owned())),
             recovery_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
+            tracker_token_previous: RwLock::new(None),
             gossip_identity: RwLock::new(None),
             lighthouse_state: RwLock::new(None),
             gluetun_tracker_api_key: RwLock::new(None),
@@ -168,6 +175,7 @@ impl ServeState {
             client_endpoint_refresh: Notify::new(),
             gluetun_status: Arc::new(GluetunStatus::default()),
             gluetun_client_status: Arc::new(GluetunStatus::default()),
+            legacy_token_status: Arc::new(LegacyTokenStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
             quiet_notified: Arc::new(QuietNotified::default()),
         }
@@ -325,6 +333,25 @@ impl ServeState {
         .await
     }
 
+    /// The token a rotation just replaced, still accepted alongside
+    /// [`Self::tracker_token`] until the operator finalizes it away — see
+    /// [`crate::tracker::authenticate_token`].
+    pub async fn tracker_token_previous(&self) -> Option<String> {
+        self.cached_from_vault(&self.tracker_token_previous, |vault| {
+            vault
+                .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
+                .ok()
+                .flatten()
+                .map(|secret| secret.expose_secret().to_owned())
+        })
+        .await
+    }
+
+    /// When the previous shared tracker token was last actually used.
+    pub fn legacy_token_status(&self) -> Arc<LegacyTokenStatus> {
+        Arc::clone(&self.legacy_token_status)
+    }
+
     /// A gluetun poller's control-server API key, cached after the first read.
     ///
     /// Same shape and same reasoning as [`Self::tracker_token`]: the outer
@@ -425,6 +452,7 @@ impl ServeState {
         // These are vault values too, so a credential change has to drop them or
         // the tracker and the feed keep enforcing the old ones.
         *self.tracker_token.write().await = None;
+        *self.tracker_token_previous.write().await = None;
         *self.gossip_identity.write().await = None;
         *self.gluetun_tracker_api_key.write().await = None;
         *self.gluetun_client_api_key.write().await = None;
@@ -896,6 +924,10 @@ mod tests {
                 // guards against a changed return value, not the caching path
                 // itself — `cached_from_vault`'s doc comment covers the intent.
                 assert!(state.tracker_token().await.is_none());
+
+                // Same shape, same reasoning, no rotation in progress yet.
+                assert!(state.tracker_token_previous().await.is_none());
+                assert!(state.tracker_token_previous().await.is_none());
 
                 assert!(
                     state

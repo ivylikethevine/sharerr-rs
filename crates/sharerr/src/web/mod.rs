@@ -126,6 +126,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         )
         .route("/settings/seeding", post(settings::save_seeding))
         .route("/settings/tracker", post(settings::save_tracker))
+        .route(
+            "/settings/tracker/finalize",
+            post(settings::finalize_tracker),
+        )
         .route("/settings/lighthouse", post(settings::save_lighthouse))
         .route("/settings/gluetun", post(settings::save_gluetun))
         .route(
@@ -207,8 +211,6 @@ async fn status_page(State(state): State<WebState>) -> Response {
         readable: diag.readable,
         healthy: diag.healthy,
         gluetun: diag.gluetun,
-        swarm_peers: diag.swarm_peers,
-        swarm_seeders: diag.swarm_seeders,
         runs: diag.runs,
     })
 }

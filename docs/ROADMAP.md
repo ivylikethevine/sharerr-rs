@@ -9,11 +9,29 @@ tracks what is still ahead.
 
 ## Table of contents
 
+- [What's left](#whats-left)
 - [Library sources (where tagged content comes from)](#library-sources-where-tagged-content-comes-from)
 - [Torrent clients (what actually seeds)](#torrent-clients-what-actually-seeds)
 - [Indexers (what consumes the feed)](#indexers-what-consumes-the-feed)
 - [Functionality](#functionality)
 - [The lighthouse](#the-lighthouse)
+
+### What's left
+
+Three open items remain, ordered smallest first — by how much they touch, not
+how long they'd take to get right:
+
+1. **[rTorrent tier-2 coverage](#torrent-clients-what-actually-seeds).** Test
+   infrastructure only: wire a real rTorrent + ruTorrent container into
+   `run_docker_tests.sh`, the way qBittorrent already is. No application code
+   changes.
+2. **[Request flow](#functionality).** A new inbound request queue and
+   approve step — touches the sync engine and the web UI on both sides of a
+   friendship, not just one subsystem.
+3. **[A topology visualization](#functionality).** The largest: a shared
+   topology model spanning the tracker, gluetun, gossip, and the lighthouse
+   client — none of which currently agree on one — plus a genuinely new
+   diagram UI to render it.
 
 ### Library sources (where tagged content comes from)
 
@@ -75,22 +93,6 @@ shares — existing Readarr library-source support is unaffected, this is only
 about the indexer direction. No further indexer work is currently planned.
 
 ## Functionality
-
-**Per-peer announce tokens: rotating the shared legacy token.** Per-peer
-attribution for both magnet and `.torrent` download is done — see [the
-README](../README.md#sharing-with-a-friend) for how that works today. It
-makes expelling one specific friend surgical and instant, with zero effect on
-anyone else, so no rollout is needed for that case. What is still missing is
-a safe way to rotate or retire the *shared fallback* token every instance
-still accepts alongside per-peer ones (e.g. if it leaked, or eventually to
-sunset it once every peer is believed to have moved off it): hold the old and
-new legacy token valid together, extend the existing `announce_token_fp`
-fingerprinting to track who is still on the old one, and let the operator
-finalize once satisfied. This is not a substitute for per-peer revocation — a
-purely shared, rotating token can never stop an *already-connected* bad
-actor's live announces, since every peer holding the current value is
-indistinguishable from any other to the tracker; only a genuinely per-peer
-credential can do that.
 
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.

@@ -351,17 +351,39 @@
 
 <form method="post" action="/settings/generate/tracker" class="panel">
   <p class="hint">sharerr is serving its own tracker on this instance.</p>
+  {% if tracker_token_previous_set %}
+  <p class="warn">
+    Rotation in progress — the previous token is still accepted, so nothing
+    holding an older <code>.torrent</code> is cut off yet.
+    {% if let Some(last_used) = tracker_token_previous_last_used %}
+    Last used {{ last_used }}.
+    {% else %}
+    Not seen since this instance last started.
+    {% endif %}
+    Finish it below once nothing needs the old one any more.
+  </p>
+  {% endif %}
   <button type="submit" class="secondary" {% if !master_key_present %}disabled{% endif %}>
-    {% if tracker_token_set %}Replace the announce token{% else %}Generate an announce token{% endif %}
+    {% if tracker_token_set %}Rotate the announce token{% else %}Generate an announce token{% endif %}
   </button>
 </form>
+
+{% if tracker_token_previous_set %}
+<form method="post" action="/settings/tracker/finalize" class="panel">
+  <p class="hint">
+    Stops accepting the previous announce token — anything still announcing
+    with it is cut off from then on. Do this once you are confident nothing
+    needs it any more.
+  </p>
+  <button type="submit" class="secondary">Finish rotation — retire the previous token</button>
+</form>
+{% endif %}
 
 <h2 id="lighthouse">Lighthouse</h2>
 <form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
-    gossip alone has no path back — see <code>docs/roadmap.md</code>'s "The
-    lighthouse".
+    gossip alone has no path back — see <a href="https://github.com/ivyduggan/sharerr-rs/blob/main/docs/ROADMAP.md#the-lighthouse">the roadmap's "The lighthouse"</a>.
   </p>
 
   <label class="hint">
@@ -478,8 +500,7 @@
 </form>
 
 {# Folded unless it is already pointed at something — a second tunnel is the
-   exception, and most instances never touch this panel. See
-   docs/roadmap.md's "a peer with two addresses". #}
+   exception, and most instances never touch this panel. #}
 <details class="fold" {% if gluetun_client_configured %}open{% endif %}>
   <summary>Gluetun — torrent client's own tunnel</summary>
   <form method="post" action="/settings/gluetun/client" class="panel">

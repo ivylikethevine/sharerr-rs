@@ -45,6 +45,16 @@ pub mod secret_keys {
     pub const RTORRENT_PASSWORD: &str = "rtorrent.password";
     /// Shared secret embedded in builtin-tracker announce URLs.
     pub const TRACKER_TOKEN: &str = "tracker.token";
+    /// The previous value of [`TRACKER_TOKEN`], kept valid alongside the
+    /// current one during a rotation so nothing already relying on it breaks
+    /// mid-flight.
+    ///
+    /// Same reasoning as [`IDENTITY_SIGNING_KEY`] for staying out of [`ALL`]:
+    /// this is never typed into a field of its own, only populated as a side
+    /// effect of rotating [`TRACKER_TOKEN`] — see `rotate_tracker_token` in
+    /// `sharerr::web::settings`. `vault list` still shows it if present, since
+    /// that reads the vault file directly rather than filtering by `ALL`.
+    pub const TRACKER_TOKEN_PREVIOUS: &str = "tracker.token_previous";
     /// gluetun's control server API key, sent as `X-Api-Key`. Required since
     /// gluetun v3.40 made `apikey` the default auth type for the control
     /// server; without it every request comes back `401`.

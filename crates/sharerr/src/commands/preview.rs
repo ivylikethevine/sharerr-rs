@@ -142,8 +142,6 @@ fn status_page() -> StatusPage {
                 ),
             },
         ],
-        swarm_peers: 5,
-        swarm_seeders: 3,
         runs: vec![
             RunRow {
                 when: "4 minutes ago".to_owned(),
@@ -287,6 +285,10 @@ fn settings_page() -> SettingsPage {
         tracker_port: "51413".to_owned(),
         tracker_advertised_url: String::new(),
         tracker_token_set: true,
+        // Exercises the rotation-in-progress UI: a previous token still
+        // being accepted, seen recently.
+        tracker_token_previous_set: true,
+        tracker_token_previous_last_used: Some("14 minutes ago".to_owned()),
 
         lighthouse_enabled: true,
         lighthouse_mount: "tracker",

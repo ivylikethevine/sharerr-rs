@@ -49,29 +49,30 @@ design is built around.
 
 See also: [the configuration reference](docs/CONFIGURATION.md), [the
 roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
-[the security policy](SECURITY.md).
+[the security policy](docs/SECURITY.md).
 
 ## What works today
 
-|                                                                                  |     |
-| -------------------------------------------------------------------------------- | --- |
-| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr**                  | ✅  |
-| Torrent construction, files never moved                                          | ✅  |
-| Seeding through qBittorrent, Transmission, **or rTorrent/ruTorrent**             | ✅  |
-| Builtin BitTorrent tracker, served by sharerr itself                             | ✅  |
-| Torznab feed for Prowlarr, with magnet links                                     | ✅  |
-| Jackett compatibility: URLs, indexer list, JSON results                          | ✅  |
-| Web UI: setup, settings, connection tests                                        | ✅  |
-| Path-mapping diagnostics in the browser                                          | ✅  |
-| Friend/peer management: per-friend keys, revoke, last-seen                       | ✅  |
-| Per-friend scoping: this friend sees TV, that one films                          | ✅  |
-| Per-friend announce-token attribution: revoking a friend cuts tracker access too | ✅  |
-| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal           | ✅  |
-| Plain directory sharing, no *arr app at all                                      | ✅  |
-| Dynamic endpoint from gluetun: rotating exit IP and forwarded port               | ✅  |
-| Peer endpoint memory and signed endpoint gossip between friends                  | ✅  |
-| The lighthouse: rendezvous for a friend whose address rotated while unwatched    | ✅  |
-| Plex as a library source                                                         | ❌  |
+|                                                                                  |   |
+|----------------------------------------------------------------------------------|---|
+| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr**                  | ✅ |
+| Torrent construction, files never moved                                          | ✅ |
+| Seeding through qBittorrent, Transmission, **or rTorrent/ruTorrent**             | ✅ |
+| Builtin BitTorrent tracker, served by sharerr itself                             | ✅ |
+| Torznab feed for Prowlarr, with magnet links                                     | ✅ |
+| Jackett compatibility: URLs, indexer list, JSON results                          | ✅ |
+| Web UI: setup, settings, connection tests                                        | ✅ |
+| Path-mapping diagnostics in the browser                                          | ✅ |
+| Friend/peer management: per-friend keys, revoke, last-seen                       | ✅ |
+| Per-friend scoping: this friend sees TV, that one films                          | ✅ |
+| Per-friend announce-token attribution: revoking a friend cuts tracker access too | ✅ |
+| Safe rotation of the shared fallback announce token: old and new both work       | ✅ |
+| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal           | ✅ |
+| Plain directory sharing, no *arr app at all                                      | ✅ |
+| Dynamic endpoint from gluetun: rotating exit IP and forwarded port               | ✅ |
+| Peer endpoint memory and signed endpoint gossip between friends                  | ✅ |
+| The lighthouse: rendezvous for a friend whose address rotated while unwatched    | ✅ |
+| Plex as a library source                                                         | ❌ |
 
 ## Quickstart
 
@@ -124,9 +125,7 @@ also what a magnet from the feed embeds as the announce token, so revoking a
 friend cuts their access to sharerr's own tracker too, not just the feed —
 instantly, and with no effect on anyone else, since nobody else's access ever
 depended on it. The same attribution applies whether a friend's Sonarr fetches
-by magnet or downloads the `.torrent` directly — see [the
-roadmap](docs/ROADMAP.md)'s "Per-peer announce tokens" for what is still
-outstanding (rotating the shared fallback token itself).
+by magnet or downloads the `.torrent` directly.
 
 You can also scope what each friend sees: everything, or only TV, films, music or
 books. That applies to the feed itself, not just the display — content outside a
@@ -171,7 +170,15 @@ client seeds, and it answers only for torrents sharerr made — it will not act 
 a tracker for anything else, whoever asks. Optionally generate an announce token
 under Settings → Tracker: it is embedded in the announce URL of every torrent
 built afterwards, so holding the `.torrent` is what grants the right to announce.
-Note that changing the token invalidates torrents already published.
+
+Rotating that token — "Rotate the announce token" — does not cut off torrents
+already published. The token it replaces keeps working, unattributed, alongside
+the new one until you explicitly finish the rotation from Settings; the page
+shows whether (and when) anything has used the old token since the rotation, so
+you can wait until nothing has for a while before finishing. This is a safety
+net for the *shared* token specifically, not a substitute for per-friend
+revocation above — a shared token can never single out one already-connected
+peer, only stop admitting it.
 
 (There used to be a second option here — qBittorrent's embedded tracker — and it
 was removed: two tracker backends meant two independently built announce URLs,

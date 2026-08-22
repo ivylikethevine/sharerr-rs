@@ -27,6 +27,12 @@
 //! directly gets the same treatment: [`torrent_file`] rewrites the announce
 //! URLs it serves per requester, in memory, rather than caching a variant per
 //! peer on disk — see that function's docs.
+//!
+//! **Rotating the shared token.** Overwriting `tracker.token` outright would
+//! instantly lock out everyone still relying on the old value. Instead a
+//! rotation (`crate::web::settings::rotate_tracker_token`) keeps the previous
+//! value valid too, unattributed, until the operator finalizes it away — see
+//! [`authenticate_token`] and [`LegacyTokenStatus`].
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -53,6 +59,36 @@ pub struct TrackerState {
     /// Borrowed from [`ServeState`], not owned: the status page reads the same
     /// swarms this router writes.
     pub swarms: Arc<Swarms>,
+}
+
+/// When the previous (rotated-out) shared tracker token was last actually
+/// used, so an operator deciding whether to finalize a rotation — see
+/// `crate::web::settings::finalize_tracker_token` — can tell "nothing has
+/// announced with it in a week" from "no idea, it might still be in use".
+///
+/// Process-lifetime only, on the same reasoning `crate::gluetun::GluetunStatus`
+/// is: losing this on restart is an honest reset back to "unknown", not a
+/// correctness problem, so it is not worth a migration to persist.
+#[derive(Debug, Default)]
+pub struct LegacyTokenStatus {
+    last_used_at: tokio::sync::RwLock<Option<i64>>,
+}
+
+impl LegacyTokenStatus {
+    async fn record_used(&self) {
+        *self.last_used_at.write().await = Some(sharerr_core::endpoint::now_epoch());
+    }
+
+    /// Cleared when a rotation replaces which token is "previous", or when
+    /// that token is finalized away — either way, whatever this used to track
+    /// no longer applies.
+    pub async fn reset(&self) {
+        *self.last_used_at.write().await = None;
+    }
+
+    pub async fn snapshot(&self) -> Option<i64> {
+        *self.last_used_at.read().await
+    }
 }
 
 impl TrackerState {
@@ -146,12 +182,16 @@ async fn handle_announce(
         .store()
         .await
         .map_err(|_| AnnounceError::BadToken)?;
-    let attributed_to = authenticate_token(
+    let auth = authenticate_token(
         &store,
         state.serve.tracker_token().await.as_deref(),
+        state.serve.tracker_token_previous().await.as_deref(),
         token.as_deref(),
     )
     .await?;
+    if auth.via_previous {
+        state.serve.legacy_token_status().record_used().await;
+    }
 
     let request = AnnounceRequest::parse(query)?;
     if !is_served(state, &request.info_hash).await {
@@ -161,7 +201,7 @@ async fn handle_announce(
     let addr = request.resolve_addr(remote.ip());
     let response = state.swarms.announce(&request, addr).await;
 
-    if let Some(peer_id) = attributed_to {
+    if let Some(peer_id) = auth.attributed_to {
         crate::torznab::record_sighting(
             &store,
             peer_id,
@@ -206,14 +246,19 @@ async fn handle_scrape(
     };
     // Scrape is swarm counts, not an announce — nothing here to attribute,
     // so the resolved peer id (if any) is simply discarded.
-    if let Err(err) = authenticate_token(
+    match authenticate_token(
         &store,
         state.serve.tracker_token().await.as_deref(),
+        state.serve.tracker_token_previous().await.as_deref(),
         token.as_deref(),
     )
     .await
     {
-        return bencode(failure_bencode(&err.to_string()));
+        Ok(auth) if auth.via_previous => {
+            state.serve.legacy_token_status().record_used().await;
+        }
+        Ok(_) => {}
+        Err(err) => return bencode(failure_bencode(&err.to_string())),
     }
 
     let params = announce::parse_query(query.unwrap_or_default().as_bytes());
@@ -261,50 +306,77 @@ async fn is_served(state: &TrackerState, info_hash: &InfoHash) -> bool {
     }
 }
 
+/// The result of checking an announce/scrape token: whether the request is
+/// allowed at all, which peer (if any) it should be attributed to, and
+/// whether it was allowed specifically via the rotated-out previous token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TokenAuth {
+    attributed_to: Option<i64>,
+    via_previous: bool,
+}
+
 /// Which peer, if any, an announce/scrape token identifies, and whether the
 /// request is allowed at all.
 ///
-/// Three outcomes, in the order checked:
+/// Four outcomes, in the order checked:
 ///
-/// 1. No token configured on this instance at all → `Ok(None)`, always
-///    allowed. The announce URLs sharerr generates then carry no token
-///    segment either, so an unauthenticated request is the expected shape —
-///    today's default, unchanged.
+/// 1. No token configured on this instance at all → open, always allowed.
+///    The announce URLs sharerr generates then carry no token segment
+///    either, so an unauthenticated request is the expected shape — today's
+///    default, unchanged.
 /// 2. Matches the instance's own shared legacy token (`tracker.token` in the
-///    vault) → `Ok(None)`, allowed but unattributed. This is what keeps
-///    everything seeded before per-peer attribution existed working, and
-///    what any friend not yet re-synced to a magnet built after it existed
-///    keeps using.
-/// 3. Matches an active peer's own `key_hash` → `Ok(Some(peer.id))`, allowed
-///    and attributed. A revoked peer's hash matches nothing —
-///    `peer_by_key_hash` already excludes them — which is the entire "cut
-///    this friend off reaches the tracker too" payoff: no separate
-///    revocation step exists or is needed here.
+///    vault) → allowed but unattributed. This is what keeps everything
+///    seeded before per-peer attribution existed working, and what any
+///    friend not yet re-synced to a magnet built after it existed keeps
+///    using.
+/// 3. Matches the *previous* shared legacy token, if a rotation is in
+///    progress → allowed, unattributed, `via_previous: true`. See
+///    `crate::web::settings::rotate_tracker_token`: this is the whole point
+///    of holding the old value a little longer instead of overwriting it in
+///    place.
+/// 4. Matches an active peer's own `key_hash` → allowed and attributed. A
+///    revoked peer's hash matches nothing — `peer_by_key_hash` already
+///    excludes them — which is the entire "cut this friend off reaches the
+///    tracker too" payoff: no separate revocation step exists or is needed
+///    here.
 ///
 /// Anything else is `Err(AnnounceError::BadToken)`.
 ///
-/// Takes `store` and `required` as plain parameters rather than reaching
-/// into `TrackerState` itself: the peer-hash branch is exactly the part
-/// worth testing directly against an in-memory `Store`, with no vault or
+/// Takes `store`, `required`, and `previous` as plain parameters rather than
+/// reaching into `TrackerState` itself: the peer-hash branch is exactly the
+/// part worth testing directly against an in-memory `Store`, with no vault or
 /// master key needed to exercise it.
 async fn authenticate_token(
     store: &Store,
     required: Option<&str>,
+    previous: Option<&str>,
     supplied: Option<&str>,
-) -> Result<Option<i64>, AnnounceError> {
+) -> Result<TokenAuth, AnnounceError> {
     let Some(required) = required else {
-        return Ok(None);
+        return Ok(TokenAuth::default());
     };
     let Some(supplied) = supplied else {
         return Err(AnnounceError::BadToken);
     };
 
     if crate::secrets::constant_time_eq(required, supplied) {
-        return Ok(None);
+        return Ok(TokenAuth::default());
+    }
+
+    if let Some(previous) = previous {
+        if crate::secrets::constant_time_eq(previous, supplied) {
+            return Ok(TokenAuth {
+                via_previous: true,
+                ..TokenAuth::default()
+            });
+        }
     }
 
     match store.peer_by_key_hash(supplied).await {
-        Ok(Some(peer)) => Ok(Some(peer.id)),
+        Ok(Some(peer)) => Ok(TokenAuth {
+            attributed_to: Some(peer.id),
+            ..TokenAuth::default()
+        }),
         Ok(None) => Err(AnnounceError::BadToken),
         Err(err) => {
             tracing::warn!(error = %err, "could not check a peer's announce token");
@@ -447,12 +519,30 @@ mod tests {
     use sharerr_store::{ObservedVia, PeerScope};
 
     #[tokio::test]
+    async fn legacy_token_status_reflects_record_used_and_reset() {
+        let status = LegacyTokenStatus::default();
+        assert!(status.snapshot().await.is_none());
+
+        status.record_used().await;
+        assert!(status.snapshot().await.is_some());
+
+        status.reset().await;
+        assert!(
+            status.snapshot().await.is_none(),
+            "a rotation or a finalize must clear the previous reading"
+        );
+    }
+
+    #[tokio::test]
     async fn an_unconfigured_token_accepts_any_announce_and_attributes_nothing() {
         let store = Store::open_in_memory().await.unwrap();
-        assert_eq!(authenticate_token(&store, None, None).await, Ok(None));
         assert_eq!(
-            authenticate_token(&store, None, Some("anything")).await,
-            Ok(None),
+            authenticate_token(&store, None, None, None).await,
+            Ok(TokenAuth::default())
+        );
+        assert_eq!(
+            authenticate_token(&store, None, None, Some("anything")).await,
+            Ok(TokenAuth::default()),
             "a stray path segment is not a reason to refuse"
         );
     }
@@ -461,8 +551,8 @@ mod tests {
     async fn the_shared_legacy_token_still_works_and_stays_unattributed() {
         let store = Store::open_in_memory().await.unwrap();
         assert_eq!(
-            authenticate_token(&store, Some("s3cret"), Some("s3cret")).await,
-            Ok(None)
+            authenticate_token(&store, Some("s3cret"), None, Some("s3cret")).await,
+            Ok(TokenAuth::default())
         );
 
         for wrong in [
@@ -473,11 +563,54 @@ mod tests {
             Some("S3CRET"),
         ] {
             assert_eq!(
-                authenticate_token(&store, Some("s3cret"), wrong).await,
+                authenticate_token(&store, Some("s3cret"), None, wrong).await,
                 Err(AnnounceError::BadToken),
                 "{wrong:?} should not be accepted"
             );
         }
+    }
+
+    /// The whole reason a rotation holds two tokens at once: whatever still
+    /// carries the old one keeps working, unattributed, and is flagged as
+    /// having used the previous token specifically so the operator can see
+    /// it before finalizing.
+    #[tokio::test]
+    async fn a_rotation_in_progress_still_accepts_the_previous_token() {
+        let store = Store::open_in_memory().await.unwrap();
+        assert_eq!(
+            authenticate_token(
+                &store,
+                Some("new-token"),
+                Some("old-token"),
+                Some("old-token")
+            )
+            .await,
+            Ok(TokenAuth {
+                attributed_to: None,
+                via_previous: true,
+            })
+        );
+        assert_eq!(
+            authenticate_token(
+                &store,
+                Some("new-token"),
+                Some("old-token"),
+                Some("new-token")
+            )
+            .await,
+            Ok(TokenAuth::default()),
+            "the current token must not be reported as the previous one"
+        );
+        assert_eq!(
+            authenticate_token(
+                &store,
+                Some("new-token"),
+                Some("old-token"),
+                Some("neither-of-these")
+            )
+            .await,
+            Err(AnnounceError::BadToken)
+        );
     }
 
     /// The whole point: an announce carrying a friend's own `key_hash`
@@ -493,13 +626,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            authenticate_token(&store, Some("s3cret"), Some(&sam.key_hash)).await,
-            Ok(Some(sam.id))
+            authenticate_token(&store, Some("s3cret"), None, Some(&sam.key_hash)).await,
+            Ok(TokenAuth {
+                attributed_to: Some(sam.id),
+                via_previous: false,
+            })
         );
 
         store.revoke_peer(sam.id).await.unwrap();
         assert_eq!(
-            authenticate_token(&store, Some("s3cret"), Some(&sam.key_hash)).await,
+            authenticate_token(&store, Some("s3cret"), None, Some(&sam.key_hash)).await,
             Err(AnnounceError::BadToken),
             "a revoked friend's own token must stop working"
         );
