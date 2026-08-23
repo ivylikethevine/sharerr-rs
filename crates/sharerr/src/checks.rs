@@ -222,6 +222,61 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
     report
 }
 
+/// Whether one advertised address actually accepts a connection.
+///
+/// Deliberately a *TCP* connect and nothing more: an HTTP request would need
+/// a credential for the feed and would confuse "the port is closed" with "the
+/// port is open and answered 401", which have completely different fixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReachOutcome {
+    /// Nothing to dial — no advertised address is configured yet.
+    NotConfigured,
+    /// The address is set but could not be parsed into a host and port.
+    Unusable(String),
+    Reachable,
+    Refused(String),
+    TimedOut,
+}
+
+impl ReachOutcome {
+    /// Whether this is a clean pass. A refusal is deliberately *not* a
+    /// failure worth alarming over on its own — see [`check_reachable`].
+    pub fn is_reachable(&self) -> bool {
+        matches!(self, Self::Reachable)
+    }
+}
+
+/// How long to wait for the connect before calling it a timeout.
+const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Dial `base`'s host and port and report what happened.
+///
+/// The caveat that shapes every message built from this: an instance dialling
+/// its *own* public address from inside its own network is exercising NAT
+/// hairpinning, which plenty of routers simply do not do — so a failure here
+/// means "could not confirm", never "your port is closed". That is also why
+/// the check is opt-in (`[checks] reachability`) rather than always-on.
+pub async fn check_reachable(base: Option<&Url>) -> ReachOutcome {
+    let Some(base) = base else {
+        return ReachOutcome::NotConfigured;
+    };
+    let Some(host) = base.host_str() else {
+        return ReachOutcome::Unusable(format!("{base} has no host"));
+    };
+    let Some(port) = base.port_or_known_default() else {
+        return ReachOutcome::Unusable(format!("{base} has no port"));
+    };
+    // An IPv6 literal arrives bracketed from the URL and unbracketed from the
+    // resolver, so the brackets come off before either is dialled.
+    let target = format!("{}:{port}", host.trim_matches(['[', ']']));
+
+    match tokio::time::timeout(REACH_TIMEOUT, tokio::net::TcpStream::connect(&target)).await {
+        Ok(Ok(_)) => ReachOutcome::Reachable,
+        Ok(Err(err)) => ReachOutcome::Refused(err.to_string()),
+        Err(_) => ReachOutcome::TimedOut,
+    }
+}
+
 /// What a `[[library]]` directory turned out to be.
 ///
 /// The same decide-once contract as [`ArrOutcome`]: `doctor`, the settings

@@ -211,6 +211,17 @@ impl Store {
         row.as_ref().map(row_to_item).transpose()
     }
 
+    /// One item by its info hash — the tracker's live swarms are keyed by
+    /// hash, not `(source, file_id)`, so a topology view naming which torrent
+    /// a swarm belongs to needs this instead of [`Self::get`].
+    pub async fn item_by_info_hash(&self, info_hash: &str) -> Result<Option<SharedItem>> {
+        let row = sqlx::query(&format!("{SELECT_COLUMNS} WHERE info_hash = ?1"))
+            .bind(info_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(row_to_item).transpose()
+    }
+
     /// Insert or update by the natural key `(source, file_id)`.
     ///
     /// `created_at` is preserved across updates; re-running discovery must not

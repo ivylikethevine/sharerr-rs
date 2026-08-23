@@ -1,6 +1,6 @@
 # Security policy
 
-sharerr is **experimental** — see [the README](README.md) — and has not had a
+sharerr is **experimental** — see [the README](../README.md) — and has not had a
 tagged release. There is exactly one line of support: the `main` branch
 (mirrored to `:main` on GHCR) and `dev`, the branch active development
 happens on. There are no older versions to patch.
@@ -26,11 +26,11 @@ tracker over HTTP. Anything that could read, write, or bypass authentication
 for any of those is in scope: vault or session handling, the auth guard
 around the settings routes, the per-peer key model behind the feed and
 tracker, and the lighthouse rendezvous service's privacy properties (see
-[the roadmap](docs/ROADMAP.md#the-lighthouse) for what those are supposed to
+[the roadmap](ROADMAP.md#the-lighthouse) for what those are supposed to
 guarantee).
 
 A few things are **by design**, not a vulnerability report waiting to
-happen — see [the README](README.md#quickstart) before reporting:
+happen — see [the README](../README.md#quickstart) before reporting:
 
 - **The session cookie is not sent over TLS.** sharerr is meant to run on a
   LAN; put it behind a TLS-terminating proxy if that does not describe your

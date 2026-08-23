@@ -9,11 +9,29 @@ tracks what is still ahead.
 
 ## Table of contents
 
+- [What's left](#whats-left)
 - [Library sources (where tagged content comes from)](#library-sources-where-tagged-content-comes-from)
 - [Torrent clients (what actually seeds)](#torrent-clients-what-actually-seeds)
 - [Indexers (what consumes the feed)](#indexers-what-consumes-the-feed)
 - [Functionality](#functionality)
+- [Publishing to crates.io](#publishing-to-cratesio)
 - [The lighthouse](#the-lighthouse)
+
+### What's left
+
+Three open items remain, ordered smallest first — by how much they touch, not
+how long they'd take to get right:
+
+1. **[rTorrent tier-2 coverage](#torrent-clients-what-actually-seeds).** Test
+   infrastructure only: wire a real rTorrent + ruTorrent container into
+   `run_docker_tests.sh`, the way qBittorrent already is. No application code
+   changes.
+2. **[Request flow](#functionality).** A new inbound request queue and
+   approve step — touches the sync engine and the web UI on both sides of a
+   friendship, not just one subsystem.
+3. **[Publishing to crates.io](#publishing-to-cratesio).** Two concrete
+   packaging blockers plus nine crates' worth of release process — no new
+   behaviour, but not a one-commit job either.
 
 ### Library sources (where tagged content comes from)
 
@@ -76,45 +94,49 @@ about the indexer direction. No further indexer work is currently planned.
 
 ## Functionality
 
-**Per-peer announce tokens: rotating the shared legacy token.** Per-peer
-attribution for both magnet and `.torrent` download is done — see [the
-README](../README.md#sharing-with-a-friend) for how that works today. It
-makes expelling one specific friend surgical and instant, with zero effect on
-anyone else, so no rollout is needed for that case. What is still missing is
-a safe way to rotate or retire the *shared fallback* token every instance
-still accepts alongside per-peer ones (e.g. if it leaked, or eventually to
-sunset it once every peer is believed to have moved off it): hold the old and
-new legacy token valid together, extend the existing `announce_token_fp`
-fingerprinting to track who is still on the old one, and let the operator
-finalize once satisfied. This is not a substitute for per-peer revocation — a
-purely shared, rotating token can never stop an *already-connected* bad
-actor's live announces, since every peer holding the current value is
-indistinguishable from any other to the tracker; only a genuinely per-peer
-credential can do that.
-
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
 
-**A topology visualization.** Every fact this would draw already exists
-somewhere in the running instance, just spread across separate pages as
-tables: the internal *arr-stack side (this instance's own Sonarr, Radarr,
-qBittorrent/Transmission/rTorrent, and gluetun, plus how a container's own
-view of a path maps to sharerr's and to the torrent client's — see
-`sharerr doctor`'s path-mapping check and the Status page's endpoint table),
-and the external swarm side (this instance's own advertised host/port, each
-peer's known endpoints from [`PeerEndpointView`], and whether each was
-learned by a direct sighting, gossip, or a lighthouse — see "Friends finding
-each other" in the README). Nobody currently has to hold all of that in their
-head at once to answer "why can't Sam see this torrent" or "which of my two
-gluetun tunnels is this port actually on" — a diagram naming each hop's
-IP:port, container name, and last-known-good time would answer it at a
-glance instead of a page of prose. Not started: this is a genuinely new UI
-surface (an SVG or similar diagram, not another table), not an extension of
-an existing page, and touches every subsystem that already tracks an
-endpoint — the tracker, gluetun, gossip, and the lighthouse client all keep
-their own notion of "where things are" today and none of them are wired to a
-shared topology model yet.
+## Publishing to crates.io
+
+`cargo install sharerr` (and `sharerr-lighthouse`) as an alternative to the
+Docker image. Nothing about the code makes this impossible — the two hard
+crates.io requirements, `license` and `description`, are already set on every
+crate, internal dependencies already carry both a `path` and a `version`, there
+is no `build.rs`, and sqlx here builds queries at runtime rather than through
+the compile-time-checked macros, so no live database or `.sqlx` cache is needed
+at build time. Two specific things are in the way, though, and neither is
+obvious until a publish is actually attempted:
+
+**The migrations live outside the crate that embeds them.**
+`sharerr-store/src/db.rs` calls `sqlx::migrate!("../../migrations")`, reaching
+up to the repository root. `cargo package` only includes files under the
+crate's own directory, and crates.io's verification build unpacks exactly that
+tarball — so the path resolves to nothing and the crate fails to compile both
+there and for anyone consuming it. The migrations directory has to move under
+`crates/sharerr-store/` first.
+
+**`sharerr-testkit` is `publish = false`, but is depended on with a version.**
+Cargo drops a dev-dependency from the published manifest only when it is
+path-only; one carrying a version stays in, and would demand a
+`sharerr-testkit` on crates.io that by definition cannot exist. Six crates
+(`sharerr-arr`, `sharerr-qbit`, `sharerr-rtorrent`, `sharerr-transmission`,
+`sharerr-torrent`, `sharerr`) reach it through `{ workspace = true }`, which
+supplies a version from the root table, so each needs an explicit path-only
+`[dev-dependencies]` entry instead.
+
+Beyond those: nine crates would have to be published in dependency order
+before `cargo publish -p sharerr` succeeds (`sharerr-lighthouse` is
+independent of the rest and can go on its own). There are currently no git
+tags at all, and no crates.io step in CI, so the release process itself is
+new work rather than an extension of the existing `v*`-tagged GHCR build.
+
+Worth deciding before starting: a `cargo install` user gets a binary whose
+defaults (`/data`, `/config/sharerr.toml`) describe the container's
+filesystem, not theirs. Those are overridable today, but shipping to people
+who are *not* using the image probably means changing the defaults or being
+loud about them in the README.
 
 ---
 

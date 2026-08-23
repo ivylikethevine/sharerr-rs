@@ -85,8 +85,8 @@
           </form>
           {% endif %}
         </td>
-        <td>{{ peer.created }}</td>
-        <td>{{ peer.last_seen }}</td>
+        <td class="nowrap">{{ peer.created }}</td>
+        <td class="nowrap">{{ peer.last_seen }}</td>
         <td class="actions">
           {% if !peer.revoked %}
           <a href="/peers/{{ peer.id }}/feed" target="_blank" rel="noopener">View feed XML</a>
@@ -118,6 +118,16 @@
   friend noticing a moved address is enough for everyone who already knows them.
   Records are signed by the friend they describe; nobody can rewrite anyone
   else's address.
+</p>
+{# Said once, above every friend's card, rather than repeated inside each of
+   them: with several friends configured the same three lines rendered several
+   times over, which reads as noise rather than help. #}
+<p class="hint">
+  Both fields on each card below describe <em>their</em> instance: the URL you
+  reach their sharerr on, and the key they generated for you on their Friends
+  page. With both set, your sharerr exchanges endpoint records with theirs
+  directly. Leave them empty and yours still answers their pulls — it just
+  never initiates.
 </p>
 
 {% for peer in peers %}
@@ -157,11 +167,6 @@
     {% if peer.gossip_key_set %}
     <label class="hint"><input type="checkbox" name="clear_key" value="1"> Remove the stored key</label>
     {% endif %}
-    <p class="hint">
-      Both fields describe <em>their</em> instance: the URL you reach their
-      sharerr on, and the key they generated for you on their Friends page. With
-      these set, your sharerr exchanges endpoint records with theirs directly.
-    </p>
     <button type="submit">Save</button>
   </form>
 </div>

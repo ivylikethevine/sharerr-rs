@@ -45,6 +45,16 @@ pub mod secret_keys {
     pub const RTORRENT_PASSWORD: &str = "rtorrent.password";
     /// Shared secret embedded in builtin-tracker announce URLs.
     pub const TRACKER_TOKEN: &str = "tracker.token";
+    /// The previous value of [`TRACKER_TOKEN`], kept valid alongside the
+    /// current one during a rotation so nothing already relying on it breaks
+    /// mid-flight.
+    ///
+    /// Same reasoning as [`IDENTITY_SIGNING_KEY`] for staying out of [`ALL`]:
+    /// this is never typed into a field of its own, only populated as a side
+    /// effect of rotating [`TRACKER_TOKEN`] — see `rotate_tracker_token` in
+    /// `sharerr::web::settings`. `vault list` still shows it if present, since
+    /// that reads the vault file directly rather than filtering by `ALL`.
+    pub const TRACKER_TOKEN_PREVIOUS: &str = "tracker.token_previous";
     /// gluetun's control server API key, sent as `X-Api-Key`. Required since
     /// gluetun v3.40 made `apikey` the default auth type for the control
     /// server; without it every request comes back `401`.
@@ -198,6 +208,9 @@ pub mod config_paths {
     pub const SYNC_ENABLED: &str = "sync.enabled";
     pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
 
+    /// Opt-in reachability probe — see [`super::ChecksConfig::reachability`].
+    pub const CHECKS_REACHABILITY: &str = "checks.reachability";
+
     /// Which webhook shape to send — see [`super::NotifyKind`]. The URL itself
     /// is a vault secret, [`super::secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
     pub const NOTIFICATIONS_KIND: &str = "notifications.kind";
@@ -252,6 +265,7 @@ pub mod config_paths {
         GLUETUN_CLIENT_POLL_SECS,
         SYNC_ENABLED,
         SYNC_INTERVAL_SECS,
+        CHECKS_REACHABILITY,
         NOTIFICATIONS_KIND,
         NOTIFICATIONS_PEER_QUIET_SECS,
     ];
@@ -302,6 +316,8 @@ pub struct Config {
     /// `gluetun` above already covers it.
     pub gluetun_client: GluetunConfig,
     pub sync: SyncConfig,
+    /// Opt-in active checks — see [`ChecksConfig`].
+    pub checks: ChecksConfig,
     /// A webhook fired on sync failure or a peer going quiet. The URL itself is
     /// a vault secret — see [`secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
     pub notifications: NotificationsConfig,
@@ -336,6 +352,7 @@ impl Default for Config {
             gluetun: GluetunConfig::default(),
             gluetun_client: GluetunConfig::default(),
             sync: SyncConfig::default(),
+            checks: ChecksConfig::default(),
             notifications: NotificationsConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
@@ -859,6 +876,22 @@ impl Default for GluetunConfig {
     }
 }
 
+/// Optional active checks the UI can run against this instance's own
+/// externally advertised addresses.
+///
+/// Off by default, and deliberately opt-in: the check dials sharerr's *own*
+/// public address from inside its own network, which many NAT setups refuse
+/// even when the port is perfectly reachable from outside (hairpinning).
+/// Running it unasked would report a scary failure on a healthy instance, so
+/// the operator turns it on when they want the answer.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChecksConfig {
+    /// Dial the advertised tracker and feed addresses and report whether they
+    /// accept a TCP connection.
+    pub reachability: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 /// Whether and how often `serve` reconciles in the background.
@@ -1061,6 +1094,15 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// The reachability probe dials this instance's own public address from
+    /// inside its own network, which NAT hairpinning breaks on plenty of
+    /// working setups — so it has to stay off unless an operator asks for it,
+    /// or a healthy instance reports a scary failure nobody went looking for.
+    #[test]
+    fn the_reachability_check_is_off_by_default() {
+        assert!(!Config::default().checks.reachability);
     }
 
     /// The environment scan lowercases `SHARERR_*` and turns `__` into `.`, so a

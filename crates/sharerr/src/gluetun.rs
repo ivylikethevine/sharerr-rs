@@ -37,8 +37,8 @@
 //! [`poll_loop`] is generic over [`GluetunTarget`] rather than assuming there is
 //! one gluetun: `Tracker` keeps the announce/feed address in step, and `Client`
 //! does the same for the torrent client's own tunnel when
-//! it is a *separate* one — see `docker/deploy/dual-vpn/` and `docs/ROADMAP.md`'s
-//! "a peer with two addresses". Both share this module's client and error types;
+//! it is a *separate* one — see `docker/deploy/dual-vpn/`. Both share this
+//! module's client and error types;
 //! they differ only in which `GluetunConfig`, `AdvertisedEndpoint`,
 //! [`GluetunStatus`] and vault key they read and write, which
 //! [`GluetunTarget`]'s methods resolve.

@@ -35,7 +35,7 @@ pub struct ItemsQuery {
 }
 
 /// Sortable columns, in the order the header row offers them.
-const SORT_COLUMNS: &[(&str, &str)] = &[
+pub(crate) const SORT_COLUMNS: &[(&str, &str)] = &[
     ("since", "Since"),
     ("title", "Title"),
     ("source", "Source"),
@@ -655,5 +655,22 @@ mod tests {
         let apple_at = html.find("Apple").expect("Apple listed");
         let zebra_at = html.find("Zebra").expect("Zebra listed");
         assert!(apple_at < zebra_at, "{html}");
+    }
+
+    /// The header row is `sort_links` plus four fixed columns, and the body
+    /// row is nine cells — so a `sort_links` of any other length silently
+    /// renders every header against the wrong column. `commands::preview`
+    /// shipped exactly that bug by hand-writing three of the five, which is
+    /// why this asserts on the constant rather than on one page render.
+    #[test]
+    fn the_sortable_columns_plus_the_fixed_ones_match_the_body_row() {
+        const FIXED_HEADERS: usize = 4; // Visible to, Info hash, Announce URL, Token
+        const BODY_CELLS: usize = 9;
+
+        assert_eq!(
+            SORT_COLUMNS.len() + FIXED_HEADERS,
+            BODY_CELLS,
+            "items.html's header count must match its body row"
+        );
     }
 }

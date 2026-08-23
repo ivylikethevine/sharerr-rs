@@ -23,6 +23,18 @@
   --warn-ink: #7a5312;
   --error-bg: #fbeaea;
   --error-ink: #8c2b2b;
+  /* The topology diagram's category and per-peer palette — kept apart from
+     the ok/warn/error tokens above so a node's health color and its
+     category/identity color never compete for the same hue. */
+  --topo-arr: #3d6fb4;
+  --topo-library: #7d5aa8;
+  --topo-client: #b06a2c;
+  --topo-peer-1: #2f8f8f;
+  --topo-peer-2: #c0498a;
+  --topo-peer-3: #5b5fc7;
+  --topo-peer-4: #8a6440;
+  --topo-peer-5: #3d92c9;
+  --topo-peer-6: #9c5fc0;
   --shadow-sm: 0 1px 2px rgba(20, 21, 26, 0.04);
   --shadow-md: 0 4px 14px rgba(20, 21, 26, 0.06);
   --radius: 10px;
@@ -50,6 +62,15 @@
     --warn-ink: #e2b96b;
     --error-bg: #3a1e1e55;
     --error-ink: #e79595;
+    --topo-arr: #6f9fdb;
+    --topo-library: #ab8bd6;
+    --topo-client: #d99a5c;
+    --topo-peer-1: #5fc4c4;
+    --topo-peer-2: #e07fb3;
+    --topo-peer-3: #9092e0;
+    --topo-peer-4: #c7a074;
+    --topo-peer-5: #74bfe8;
+    --topo-peer-6: #c98fe0;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
     --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
   }
@@ -352,6 +373,26 @@ button.link:hover { color: var(--accent-hover); }
 
 form.inline { display: inline; }
 
+/* A filter row: several short controls side by side, wrapping on a narrow
+   screen. The app's default stacked label/input is right for a settings form
+   an operator reads top to bottom, and wrong for a toolbar above a table. */
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem 1rem;
+}
+.filter-bar .field { display: flex; flex-direction: column; gap: 0.3rem; }
+.filter-bar .field label { margin: 0; }
+.filter-bar input, .filter-bar select { margin: 0; }
+.filter-bar input { min-width: 14rem; }
+.filter-bar button { margin: 0; }
+.filter-bar .filter-count {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-left: auto;
+}
+
 /* Color only here: this class also lands on a `<span>`/`<dd>` marking one word
    or one table cell red or green inline (a revoked friend, a failed sync row),
    and the boxed treatment below is sized for a paragraph, not a word — put on
@@ -389,6 +430,97 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
 .field-status--unset { background: transparent; color: var(--muted); border: 1px solid var(--line-strong); }
 .field-status--stale { background: var(--error-bg); color: var(--error-ink); }
 
+/* The topology diagram. A node's box color is its health — the same
+   ok/warn/error language every other page's badges already use (`.ok`/
+   `.warn`/`.error` above; `--hint` is Unknown, the same neutral a `.hint`
+   paragraph uses: not a fault, just nothing to report yet). The thin accent
+   bar on its left edge is a second, independent color channel: a category
+   for a source/instance/client node, or — for a friend — a color unique to
+   that one peer, shared with both edges reaching their box, so a peer's box
+   and its lines read as one connected thing without needing to trace them
+   by position alone. */
+svg text { font-family: inherit; }
+
+.topo-node-box {
+  stroke-width: 1.5;
+  stroke: var(--line-strong);
+  fill: var(--panel-2);
+}
+.topo-node--ok .topo-node-box    { stroke: var(--ok-ink);    fill: var(--ok-bg); }
+.topo-node--warn .topo-node-box  { stroke: var(--warn-ink);  fill: var(--warn-bg); }
+.topo-node--error .topo-node-box { stroke: var(--error-ink); fill: var(--error-bg); }
+
+/* `main` is capped at 46rem, which is right for prose and forms and much too
+   narrow for a wide table or a three-lane diagram. This breaks one block out
+   of that column and centres it on the viewport instead, so the block that
+   needs width gets it without every other page changing shape. */
+.wide {
+  width: min(96vw, 1600px);
+  margin-left: calc(50% - min(48vw, 800px));
+}
+
+/* A value that is long by nature — a 40-character info hash, a full announce
+   URL — clipped to a readable width with the whole thing on hover, rather
+   than left to squeeze every other column in the row down to one word per
+   line. */
+/* A short value — a relative timestamp, a size — that reads worse broken
+   across lines than it does pushing the table one column wider. */
+.nowrap { white-space: nowrap; }
+
+.truncate {
+  display: inline-block;
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.topo-node-label {
+  font-size: 0.92rem;
+  font-weight: 650;
+  fill: var(--ink);
+}
+
+.topo-icon {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* A detail row is a tag/value pair on one baseline: the tag naming what the
+   value is, so an address is never left to be identified by position alone. */
+.topo-line-tag {
+  font-size: 0.72rem;
+  font-weight: 600;
+  fill: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.topo-line-value {
+  font-size: 0.8rem;
+  fill: var(--muted);
+}
+
+.topo-edge {
+  stroke-width: 2;
+  fill: none;
+}
+/* A halo the same color as the page behind it, painted before the glyph
+   fill, so a label stays readable wherever it happens to cross a line or a
+   box — cheaper and more robust than computing an exact background pill
+   width for text whose length is not known until render time. */
+.topo-edge-label {
+  font-size: 0.78rem;
+  font-weight: 650;
+  fill: var(--ink);
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
 .facts {
   display: grid;
   grid-template-columns: minmax(8rem, auto) 1fr;
@@ -402,9 +534,13 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
 /* Status page's headline numbers — the first thing an operator should be able
    to read at a glance, so they get more visual weight than an ordinary
    definition list. Falls back to a single column below ~26rem per card. */
+/* 10rem rather than 11: there are four glance stats and the content column is
+   46rem, and the wider floor fitted only three per row — leaving the fourth
+   stranded on a line of its own, which reads as a fifth thing that failed to
+   load rather than as part of the same strip. */
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
   gap: 0.75rem;
   margin: 1rem 0;
   padding: 0;

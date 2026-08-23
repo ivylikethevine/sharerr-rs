@@ -142,16 +142,8 @@ pub struct StatusPage {
     /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
     /// One row per gluetun poller (tracker, then client) — what each is
-    /// pointed at, what it last saw, and what it last failed with. See
-    /// `docs/ROADMAP.md`'s "gluetun observability" and "a peer with two
-    /// addresses".
+    /// pointed at, what it last saw, and what it last failed with.
     pub gluetun: Vec<EndpointStatus>,
-    /// Live swarm counts from the tracker's own bookkeeping — not a config
-    /// check like the rest of the page, but the other half of "is networking
-    /// actually working": credentials can all be green while no peer has
-    /// ever announced.
-    pub swarm_peers: usize,
-    pub swarm_seeders: usize,
     /// The last few sync runs, newest first — the glance above only shows the
     /// single latest one.
     pub runs: Vec<RunRow>,
@@ -285,8 +277,13 @@ pub struct SettingsPage {
     pub secondary_arr_configured: bool,
 
     /// `"qbittorrent"`, `"transmission"`, or `"rtorrent"` — which client
-    /// `torrent_backend` currently selects to actually seed.
+    /// `torrent_backend` currently selects to actually seed. Only this one's
+    /// settings render inline; the other two sit behind a fold.
     pub torrent_backend: &'static str,
+    /// Whether a torrent client *other* than the selected one already holds a
+    /// credential — the fold those live in starts open in that case, same
+    /// reasoning as [`Self::secondary_arr_configured`].
+    pub unselected_client_configured: bool,
 
     pub qbit_url: String,
     /// Whether a qBittorrent API key is stored — the sole credential qBittorrent
@@ -327,6 +324,14 @@ pub struct SettingsPage {
     /// path prefix. Empty when unset.
     pub tracker_advertised_url: String,
     pub tracker_token_set: bool,
+    /// Whether a rotation is in progress — the previous token is still being
+    /// accepted alongside the current one. See
+    /// `crate::web::settings::rotate_tracker_token`.
+    pub tracker_token_previous_set: bool,
+    /// Rendered relative time the previous token was last actually used to
+    /// authenticate, or `None` when either no rotation is in progress or
+    /// nothing has used it since this process started.
+    pub tracker_token_previous_last_used: Option<String>,
 
     /// Whether the embedded lighthouse (`crates/sharerr-lighthouse`, run as
     /// extra routes on one of this instance's own listeners) is on.
@@ -368,6 +373,10 @@ pub struct SettingsPage {
 
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
+
+    /// Whether the opt-in reachability probe is on — see
+    /// [`sharerr_core::config::ChecksConfig`].
+    pub checks_reachability: bool,
 
     /// Whether a webhook URL is stored — see
     /// `secret_keys::NOTIFICATIONS_WEBHOOK_URL`.
@@ -454,8 +463,6 @@ pub struct DiagnosticsData {
     pub readable: usize,
     pub healthy: bool,
     pub gluetun: Vec<EndpointStatus>,
-    pub swarm_peers: usize,
-    pub swarm_seeders: usize,
     pub runs: Vec<RunRow>,
 }
 
@@ -648,6 +655,216 @@ impl TokenStatus {
             Self::None => "field-status--unset",
             Self::Valid => "field-status--set",
             Self::Stale => "field-status--stale",
+        }
+    }
+}
+
+/// This instance's own addresses plus a copy-pasteable script for checking
+/// them from another machine — see [`crate::web::debug`] for why the script
+/// exists rather than a button that runs the check here.
+#[derive(Debug, Template)]
+#[template(path = "debug.html")]
+pub struct DebugPage {
+    pub signed_in: bool,
+    pub tracker_base: Option<String>,
+    pub client_base: Option<String>,
+    pub feed_base: String,
+    pub bind: String,
+    pub tracker_bind: Option<String>,
+    pub script: String,
+}
+
+/// A picture of how this instance connects to everything around it: the
+/// library sources it discovers from, itself and its torrent client, and the
+/// friends it shares with — one glance instead of the four separate pages
+/// (Settings' connection tests, Status' networking panel and path-mapping
+/// table, Friends' endpoint list) each fact otherwise lives on. See the
+/// README's "Topology" section.
+///
+/// Rendered as an inline `<svg>` in `topology.html`, not a raw string built
+/// in Rust — every label here is an ordinary Askama `{{ }}` interpolation and
+/// gets escaped exactly like any other page's text, so a peer's operator-typed
+/// `label` cannot become markup. [`Node`]/[`Edge`] carry precomputed pixel
+/// coordinates rather than abstract positions, the same way every other page
+/// here precomputes display strings (`ago()`, `human_size()`) before the
+/// template ever sees them — the template only draws what it is given.
+#[derive(Debug, Template)]
+#[template(path = "topology.html")]
+pub struct TopologyPage {
+    pub signed_in: bool,
+    pub width: i32,
+    pub height: i32,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    /// Torrents with at least one peer connected right now, each with its
+    /// live peers named — the raw swarm data the diagram above summarizes
+    /// only as a single "N peer(s)" count on the sharerr box. Only torrents
+    /// with a live peer are listed; an idle share has nothing to show here.
+    pub swarms: Vec<SwarmRow>,
+}
+
+/// One torrent's live swarm, for the "Active swarms" table below the
+/// diagram.
+#[derive(Debug, Clone)]
+pub struct SwarmRow {
+    pub title: String,
+    pub complete: usize,
+    pub incomplete: usize,
+    pub peers: Vec<AddressCell>,
+    /// How many live peers exist beyond what `peers` lists — capped the same
+    /// way `doctor`'s `report_capped` caps a long list, so one very popular
+    /// torrent cannot turn this into a page of addresses.
+    pub more: usize,
+}
+
+/// One peer's address, full and redacted — see [`Node::sublabel_masked`]'s
+/// doc comment for what the redaction is and why.
+#[derive(Debug, Clone)]
+pub struct AddressCell {
+    pub full: String,
+    pub masked: String,
+}
+
+/// One box in the diagram: a source, this instance, its torrent client, or a
+/// friend.
+#[derive(Debug, Clone)]
+pub struct Node {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// The glyph drawn beside the label, naming what *kind* of thing this is
+    /// without spending a word on it.
+    pub icon: NodeIcon,
+    pub label: String,
+    /// Detail rows under the label, each with its own short tag naming what
+    /// the value is ("url", "indexer", "client") — an unlabelled address is
+    /// the thing this page was hardest to read without.
+    pub lines: Vec<NodeLine>,
+    pub status: NodeStatus,
+    /// Which color groups this node with others: a category (source kind,
+    /// this instance, the torrent client) or, for a friend, a color unique
+    /// to that one peer — so a friend's box and the edges reaching it read
+    /// as one connected thing at a glance. A CSS `var(--...)` reference,
+    /// applied to the box's left accent bar and its icon.
+    pub accent: &'static str,
+}
+
+/// One detail row inside a [`Node`].
+#[derive(Debug, Clone)]
+pub struct NodeLine {
+    /// A short word naming what `text` is. Empty for a value that speaks for
+    /// itself (a status phrase like "Unreachable").
+    pub tag: &'static str,
+    /// Baseline for this row, filled in by `topology::layout` once the node's
+    /// own position is known — the template does no arithmetic of its own, the
+    /// same way every other page here hands the template finished values.
+    pub y: i32,
+    pub text: String,
+    /// `text` with the host half of any IPv4 literal and the tail of any port
+    /// replaced by `•` — what the "hide addresses" toggle (on by default,
+    /// see `topology.html`'s inline script) shows instead. Equal to `text`
+    /// when the line carries no address at all.
+    pub masked: String,
+}
+
+/// Which glyph a [`Node`] draws. Stroke-drawn 16×16 paths rather than an icon
+/// font or an image set: the container ships as one static binary with no
+/// asset pipeline (see `assets/style.css`'s own note), and five small paths
+/// cost nothing next to either of those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeIcon {
+    /// An *arr app — drawn as a film frame.
+    Arr,
+    /// A `[[library]]` directory — a folder.
+    Library,
+    /// This instance, which is also the tracker — a broadcast mast.
+    Instance,
+    /// The torrent client — a download arrow.
+    Client,
+    /// A friend — a person.
+    Friend,
+}
+
+impl NodeIcon {
+    /// The `d` of a 16×16 glyph, positioned by the template's `transform`.
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Arr => "M2 3.5h12v9H2zM5.5 3.5v9M10.5 3.5v9",
+            Self::Library => "M2 12.5v-9h4l1.5 2H14v7z",
+            Self::Instance => {
+                "M8 6.5a1.5 1.5 0 100 3 1.5 1.5 0 000-3zM4.8 4.3a4.5 4.5 0 000 7.4\
+                 M11.2 4.3a4.5 4.5 0 010 7.4M8 10v3.5"
+            }
+            Self::Client => "M8 3v6.5M5.2 7.7 8 10.5l2.8-2.8M3.5 13h9",
+            Self::Friend => "M8 7.5a2 2 0 100-4 2 2 0 000 4zM4 13a4 4 0 018 0",
+        }
+    }
+}
+
+/// A node's health, driving the same ok/warn/error color language
+/// Status/Items already use — so the diagram's colors mean the same thing the
+/// tables it summarizes already taught the operator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStatus {
+    Ok,
+    Warn,
+    Error,
+    /// Configured but not yet checked, or nothing to check — a library
+    /// directory before its first scan, a friend never yet seen.
+    Unknown,
+}
+
+impl NodeStatus {
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warn => "warn",
+            Self::Error => "error",
+            Self::Unknown => "hint",
+        }
+    }
+}
+
+/// One connection between two [`Node`]s.
+#[derive(Debug, Clone)]
+pub struct Edge {
+    pub x1: i32,
+    pub y1: i32,
+    pub x2: i32,
+    pub y2: i32,
+    /// Empty renders as an unlabeled line.
+    pub label: String,
+    pub style: EdgeStyle,
+    /// Same meaning as [`Node::accent`] — a source edge matches its source's
+    /// category color, a friend's two edges match that friend's unique
+    /// color, and the sharerr-to-client edge is left neutral.
+    pub accent: &'static str,
+}
+
+/// How an edge was learned, or whatever else distinguishes one connection
+/// from another — mirrors `sharerr_store::ObservedVia`'s own trust order
+/// (direct firmest, lighthouse least) as a line style instead of a word,
+/// since a diagram is exactly the place that reads faster as a glyph than a
+/// sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeStyle {
+    Solid,
+    Dashed,
+    Dotted,
+    /// Nothing observed yet — no line at all, just the two boxes.
+    None,
+}
+
+impl EdgeStyle {
+    /// The SVG `stroke-dasharray` value, or `None` when [`Self::None`] means
+    /// the edge should not be drawn at all.
+    pub fn dasharray(self) -> Option<&'static str> {
+        match self {
+            Self::Solid => Some("none"),
+            Self::Dashed => Some("6 4"),
+            Self::Dotted => Some("1.5 4"),
+            Self::None => None,
         }
     }
 }

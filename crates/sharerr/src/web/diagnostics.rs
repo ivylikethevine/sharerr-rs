@@ -127,7 +127,6 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     };
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
-    let swarm = state.serve.swarms().stats().await;
     let runs = recent_run_rows(state).await;
     let gluetun = vec![
         endpoint_status(
@@ -168,8 +167,6 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
             qbit: sample.qbit.display().to_string(),
         }),
         gluetun,
-        swarm_peers: swarm.peers,
-        swarm_seeders: swarm.seeders,
         runs,
     }
 }
@@ -351,8 +348,6 @@ mod tests {
         // No missing/invalid paths at all is a healthy report, even though
         // nothing was actually checked.
         assert!(data.healthy);
-        assert_eq!(data.swarm_peers, 0);
-        assert_eq!(data.swarm_seeders, 0);
         assert!(data.runs.is_empty());
         assert_eq!(data.gluetun.len(), 2);
         // `enabled` defaults to true for both pollers — it is independent of

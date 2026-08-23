@@ -19,7 +19,8 @@ pub mod title;
 pub mod tracker;
 
 pub use announce::{
-    AnnounceError, AnnounceRequest, AnnounceResponse, Event, InfoHash, SwarmStats, Swarms,
+    AnnounceError, AnnounceRequest, AnnounceResponse, Event, InfoHash, SwarmStats, SwarmView,
+    Swarms,
 };
 pub use error::{Result, TorrentError};
 pub use factory::{

@@ -128,7 +128,7 @@ pub async fn run(
     }
 
     report.section("tracker");
-    check_tracker(config, &mut report);
+    check_tracker(config, vault.as_ref(), &mut report);
     check_reachability(config, &mut report).await;
 
     report.section("paths");
@@ -663,7 +663,7 @@ async fn check_qbit_category(
 
 // ------------------------------------------------------------------ tracker
 
-fn check_tracker(config: &Config, report: &mut Report) {
+fn check_tracker(config: &Config, vault: Option<&Vault>, report: &mut Report) {
     // The one way the builtin tracker can look configured and still not work:
     // `doctor` and `sync` are one-shot commands, and the announce endpoint
     // only exists while `serve` is running.
@@ -671,6 +671,13 @@ fn check_tracker(config: &Config, report: &mut Report) {
         "announces are answered by `sharerr serve`; a one-shot sync builds \
          correct torrents whose announces fail until it is running",
     );
+
+    if quiet_secret(vault, secret_keys::TRACKER_TOKEN_PREVIOUS).is_some() {
+        report.info(
+            "a previous announce token is still accepted alongside the current one — \
+             finish the rotation from Settings once nothing needs the old one any more",
+        );
+    }
 
     match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
         Ok(Some(base)) => report.ok(format!(
@@ -1226,7 +1233,7 @@ mod tests {
         let config = Config::default();
         let mut report = Report::default();
 
-        check_tracker(&config, &mut report);
+        check_tracker(&config, None, &mut report);
 
         assert_eq!(report.failures, 1);
     }
@@ -1242,7 +1249,7 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_tracker(&config, &mut report);
+        check_tracker(&config, None, &mut report);
 
         assert_eq!(report.failures, 0);
     }
@@ -1258,7 +1265,7 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_tracker(&config, &mut report);
+        check_tracker(&config, None, &mut report);
 
         assert_eq!(report.failures, 0);
     }
@@ -1276,9 +1283,38 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_tracker(&config, &mut report);
+        check_tracker(&config, None, &mut report);
 
         assert_eq!(report.failures, 1);
+    }
+
+    /// A previous token left over from an in-progress rotation is purely
+    /// informational — it must not turn an otherwise-healthy tracker section
+    /// into a warning or a failure.
+    #[test]
+    fn a_previous_announce_token_does_not_affect_the_failure_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        vault
+            .put(
+                secret_keys::TRACKER_TOKEN_PREVIOUS,
+                &SecretString::from("old"),
+            )
+            .unwrap();
+
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("box.lan".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_tracker(&config, Some(&vault), &mut report);
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
     }
 
     // ---------------------------------------------------------- check_database

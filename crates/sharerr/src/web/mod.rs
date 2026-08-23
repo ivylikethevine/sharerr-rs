@@ -15,12 +15,14 @@
 
 pub mod auth;
 pub mod config_io;
+pub mod debug;
 pub mod diagnostics;
 pub mod items;
 pub mod peers;
 pub mod probe;
 pub mod settings;
 pub mod templates;
+pub mod topology;
 pub mod wizard;
 
 use std::sync::Arc;
@@ -103,6 +105,8 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         // bookmark or a link in an issue still lands somewhere useful.
         .route("/diagnostics", get(|| async { Redirect::to("/") }))
         .route("/items", get(items::page))
+        .route("/topology", get(topology::page))
+        .route("/debug", get(debug::page))
         .route("/peers", get(peers::page).post(peers::add))
         .route("/peers/{id}/scope", post(peers::set_scope))
         .route("/peers/{id}/gossip", post(peers::set_gossip))
@@ -126,6 +130,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         )
         .route("/settings/seeding", post(settings::save_seeding))
         .route("/settings/tracker", post(settings::save_tracker))
+        .route(
+            "/settings/tracker/finalize",
+            post(settings::finalize_tracker),
+        )
         .route("/settings/lighthouse", post(settings::save_lighthouse))
         .route("/settings/gluetun", post(settings::save_gluetun))
         .route(
@@ -135,6 +143,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/libraries", post(settings::save_libraries))
         .route("/settings/paths", post(settings::save_paths))
         .route("/settings/sync", post(settings::save_sync))
+        .route("/settings/checks", post(settings::save_checks))
         .route(
             "/settings/notifications",
             post(settings::save_notifications),
@@ -207,8 +216,6 @@ async fn status_page(State(state): State<WebState>) -> Response {
         readable: diag.readable,
         healthy: diag.healthy,
         gluetun: diag.gluetun,
-        swarm_peers: diag.swarm_peers,
-        swarm_seeders: diag.swarm_seeders,
         runs: diag.runs,
     })
 }
@@ -470,6 +477,18 @@ mod tests {
         };
 
         let response = status_page(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_topology_page_renders_for_a_fresh_unconfigured_instance() {
+        let (_dir, serve) = unconfigured();
+        let state = WebState {
+            serve,
+            sessions: Arc::new(Sessions::default()),
+        };
+
+        let response = topology::page(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
