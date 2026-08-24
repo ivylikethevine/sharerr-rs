@@ -869,6 +869,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "fd-lock"
+version = "4.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
+dependencies = [
+ "cfg-if",
+ "rustix",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2680,6 +2691,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
+ "fd-lock",
  "getrandom 0.4.3",
  "hex",
  "secrecy",
@@ -2713,12 +2725,14 @@ dependencies = [
  "async-trait",
  "hex",
  "lava_torrent",
+ "sha2",
  "sharerr-core",
  "sharerr-testkit",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "url",
 ]
 

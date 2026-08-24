@@ -234,6 +234,8 @@ impl Vault {
     pub fn put(&mut self, key: &str, value: &SecretString) -> Result<()> {
         let record = self.seal(key, value.expose_secret().as_bytes())?;
         let _guard = write_lock();
+        let mut file_lock = cross_process_lock(&self.path)?;
+        let _file_guard = lock_write(&mut file_lock, &self.path)?;
         self.reload()?;
         self.records.insert(key.to_owned(), record);
         self.persist()
@@ -242,6 +244,8 @@ impl Vault {
     /// Remove a value. Returns whether it was present.
     pub fn remove(&mut self, key: &str) -> Result<bool> {
         let _guard = write_lock();
+        let mut file_lock = cross_process_lock(&self.path)?;
+        let _file_guard = lock_write(&mut file_lock, &self.path)?;
         self.reload()?;
         let existed = self.records.remove(key).is_some();
         if existed {
@@ -388,15 +392,53 @@ impl Vault {
 /// cannot interleave their read-modify-writes or rename each other's
 /// half-written `vault.tmp` into place. Process-wide rather than per-`Vault`
 /// because the handles are independent values that never see each other.
-/// A *separate process* (`sharerr vault set` against a running `serve`) is
-/// not covered — that needs a file lock, which std only grew after this
-/// crate's MSRV.
+/// Held alongside [`cross_process_lock`], which covers a *separate* process
+/// (`sharerr vault set` against a running `serve`) the same way.
 fn write_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // A poisoned lock only means another writer panicked mid-mutation; the
     // file itself is always either the old or the new version (tmp + rename).
     LOCK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Open (creating if absent) the sibling `.lock` file used to serialise vault
+/// mutations across processes.
+///
+/// This locks a dedicated file rather than the vault itself because
+/// [`Vault::persist`] replaces the vault file via `rename` — an `flock` held
+/// on the pre-rename inode would stop guarding the path the moment the next
+/// writer opens it fresh. A lock file that is never renamed has no such gap.
+fn cross_process_lock(vault_path: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+    let lock_path = vault_path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| VaultError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| VaultError::Io {
+            path: lock_path,
+            source,
+        })?;
+    Ok(fd_lock::RwLock::new(file))
+}
+
+/// Block until the cross-process lock is held, reporting failure against the
+/// `.lock` path (not the caller's file descriptor) so the error is legible.
+fn lock_write<'a>(
+    lock: &'a mut fd_lock::RwLock<std::fs::File>,
+    vault_path: &Path,
+) -> Result<fd_lock::RwLockWriteGuard<'a, std::fs::File>> {
+    lock.write().map_err(|source| VaultError::Io {
+        path: vault_path.with_extension("lock"),
+        source,
+    })
 }
 
 #[cfg(unix)]
@@ -635,6 +677,37 @@ mod tests {
             .get("radarr.api_key")
             .expect_err("AAD mismatch must be detected");
         assert!(matches!(err, VaultError::WrongKey), "got {err:?}");
+    }
+
+    #[test]
+    fn cross_process_lock_blocks_a_concurrent_writer() {
+        // Simulates a separate `sharerr vault set` process racing a running
+        // `serve`: two independent lock handles on the same vault path, as
+        // two processes would have, rather than the in-process `write_lock`
+        // mutex a single `Vault` handle already serialises through.
+        let dir = TempDir::new().unwrap();
+        let vault_path = dir.path().join("vault.bin");
+
+        let mut first = cross_process_lock(&vault_path).unwrap();
+        let _held = first.write().unwrap();
+
+        let mut second = cross_process_lock(&vault_path).unwrap();
+        let err = second.try_write().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn cross_process_lock_releases_when_dropped() {
+        let dir = TempDir::new().unwrap();
+        let vault_path = dir.path().join("vault.bin");
+
+        {
+            let mut first = cross_process_lock(&vault_path).unwrap();
+            let _held = first.write().unwrap();
+        }
+
+        let mut second = cross_process_lock(&vault_path).unwrap();
+        assert!(second.try_write().is_ok());
     }
 
     #[test]

@@ -11,6 +11,7 @@ supported, see [`SUPPORTED.md`](SUPPORTED.md).
 - [Readarr as a direct indexer](#readarr-as-a-direct-indexer)
 - [Transmission-compatible forks, as their own tier-2 target](#transmission-compatible-forks-as-their-own-tier-2-target)
 - [qBittorrent's embedded tracker as a second backend](#qbittorrents-embedded-tracker-as-a-second-backend)
+- [Publishing to crates.io](#publishing-to-cratesio)
 
 ## Media-server library sources (Jellyfin, Emby, Plex)
 
@@ -46,3 +47,13 @@ handling had to be made twice. A `sharerr.toml` still naming
 `tracker.backend` fails to load with an error saying exactly this. See
 [`DESIGN.md`](DESIGN.md)'s "Corrections the implementation forced" for the
 fuller reasoning.
+
+## Publishing to crates.io
+
+Decided against. `cargo install sharerr` as an alternative to the Docker
+image was investigated in the roadmap and found technically feasible —
+the migrations-outside-the-crate and `sharerr-testkit` dev-dependency
+issues both had known fixes — but the project isn't taking on a nine-crate
+dependency-ordered release process for a distribution path this project
+doesn't intend to support. The Docker image remains the only supported way
+to run sharerr.

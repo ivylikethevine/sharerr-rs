@@ -548,7 +548,7 @@ mod tests {
         mount_handshake_then(&server, ok_body(json!({}))).await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads/tv")
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads/tv")
             .category("sharerr")
             .tags("shared");
         client(&server).add(&request).await.unwrap();
@@ -702,7 +702,7 @@ mod tests {
             .await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads")
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads")
             .upload_limit_kib(512)
             .ratio_limit(2.5);
         client(&server).add(&request).await.unwrap();
@@ -736,7 +736,7 @@ mod tests {
 
         let data = b"d8:announce0:e";
         client(&server)
-            .add(&AddRequest::new(data, "x.torrent", "/downloads"))
+            .add(&AddRequest::new(data, "abc123", "x.torrent", "/downloads"))
             .await
             .unwrap();
     }

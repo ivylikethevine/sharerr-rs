@@ -337,9 +337,14 @@ impl TorrentClient for RtorrentClient {
             // rTorrent has no direct "set this torrent's upload cap" call —
             // the mechanism is a named per-torrent throttle: define one at the
             // requested rate, then assign the torrent to it. The throttle name
-            // only has to be unique, so the hash rTorrent just assigned it
-            // works and needs no bookkeeping of its own.
-            let hash = self.hash_of_last_add().await?;
+            // only has to be unique, so the torrent's own info hash works and
+            // needs no bookkeeping of its own. Using `request.info_hash`
+            // rather than asking rTorrent which torrent it loaded last avoids
+            // a race: `load.raw_start` loads asynchronously, so immediately
+            // afterward "last loaded" is not reliably "the one just added",
+            // especially with a `view.sort_current` configured in
+            // `.rtorrent.rc`.
+            let hash = request.info_hash.to_ascii_lowercase();
             let throttle_name = format!("sharerr-{hash}");
             // `throttle.up` is `(name, rate)` with the rate in KiB/s — the
             // same unit `AddRequest::upload_limit_kib` carries, so no
@@ -398,28 +403,6 @@ impl TorrentClient for RtorrentClient {
             "inserted a fresh tracker tier; rTorrent cannot remove the stale one"
         );
         Ok(())
-    }
-}
-
-impl RtorrentClient {
-    /// The hash of whatever this client most recently `load.raw*`-ed, for
-    /// attaching a throttle immediately after `add`. `d.multicall2` ordering
-    /// is unspecified, so this asks for the single most recently loaded item
-    /// via the `main` view's natural load order rather than guessing.
-    async fn hash_of_last_add(&self) -> Result<String> {
-        let rows = self
-            .call_multi(
-                "d.multicall2",
-                &[Param::Str(MAIN_VIEW), Param::Str("d.hash=")],
-            )
-            .await?;
-        rows.last()
-            .and_then(|row| row.first())
-            .map(|v| as_str(v).to_ascii_lowercase())
-            .ok_or_else(|| ClientError::Malformed {
-                kind: KIND,
-                detail: "no torrents loaded after add — could not attach a throttle".to_owned(),
-            })
     }
 }
 
@@ -932,7 +915,7 @@ mod tests {
             .await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads/tv")
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads/tv")
             .category("sharerr")
             .tags("shared");
         client(&server).add(&request).await.unwrap();
@@ -964,7 +947,7 @@ mod tests {
             .await;
 
         let data = b"x";
-        let request = AddRequest::new(data, "x.torrent", "/downloads").stopped(true);
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads").stopped(true);
         client(&server).add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -1018,7 +1001,7 @@ mod tests {
 
         let data = b"x";
         client(&server)
-            .add(&AddRequest::new(data, "x.torrent", "/downloads"))
+            .add(&AddRequest::new(data, "abc123", "x.torrent", "/downloads"))
             .await
             .unwrap();
 
@@ -1162,22 +1145,12 @@ mod tests {
     }
 
     /// `add` with an upload limit attaches a named per-torrent throttle,
-    /// looked up via the most recently loaded item's hash — see
-    /// [`RtorrentClient::hash_of_last_add`].
+    /// named from `AddRequest::info_hash` rather than a follow-up lookup.
     #[tokio::test]
     async fn add_with_upload_limit_sets_a_throttle() {
         use wiremock::matchers::body_string_contains;
 
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("d.multicall2"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
-                "<array><data><value><array><data>\
-                 <value><string>ABC123</string></value>\
-                 </data></array></value></data></array>",
-            )))
-            .mount(&server)
-            .await;
         Mock::given(method("POST"))
             .and(body_string_contains("<methodName>throttle.up</methodName>"))
             .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
@@ -1195,7 +1168,9 @@ mod tests {
             .await;
 
         let data = b"x";
-        let request = AddRequest::new(data, "x.torrent", "/downloads").upload_limit_kib(500);
+        // Mixed case, to exercise the throttle name's lowercasing.
+        let request =
+            AddRequest::new(data, "ABC123", "x.torrent", "/downloads").upload_limit_kib(500);
         client(&server).add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -1219,21 +1194,6 @@ mod tests {
             bodies.iter().any(|b| b.contains("d.throttle_name.set")),
             "expected a d.throttle_name.set call: {bodies:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn hash_of_last_add_errors_when_nothing_is_loaded() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(scalar_response("<array><data></data></array>")),
-            )
-            .mount(&server)
-            .await;
-
-        let err = client(&server).hash_of_last_add().await.unwrap_err();
-        assert!(err.to_string().contains("no torrents loaded"), "{err}");
     }
 
     #[test]

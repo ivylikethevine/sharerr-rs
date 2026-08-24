@@ -119,7 +119,7 @@ impl Seeder {
 
         let filename = format!("{}.torrent", built.info_hash);
         let save_path = save_path.to_string_lossy();
-        let mut request = AddRequest::new(&built.data, &filename, &save_path)
+        let mut request = AddRequest::new(&built.data, &built.info_hash, &filename, &save_path)
             .category(&self.category)
             .tags(&self.tag)
             .skip_checking(self.skip_checking);

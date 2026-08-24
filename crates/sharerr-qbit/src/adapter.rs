@@ -286,7 +286,7 @@ mod tests {
             .await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads");
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
         let client = mocked_client(&server).await;
         client.add(&request).await.unwrap();
 
@@ -304,7 +304,7 @@ mod tests {
             .await;
 
         let data = b"not really a torrent";
-        let request = AddRequest::new(data, "x.torrent", "/downloads");
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
         let client = mocked_client(&server).await;
         let err = client.add(&request).await.unwrap_err();
         assert!(

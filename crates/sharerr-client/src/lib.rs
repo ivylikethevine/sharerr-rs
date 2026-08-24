@@ -243,6 +243,12 @@ pub struct TorrentFileEntry {
 pub struct AddRequest<'a> {
     /// The `.torrent` file's bytes.
     pub data: &'a [u8],
+    /// The torrent's info hash, lowercase hex. The caller always has this —
+    /// it built the `.torrent` file — so a client implementation that needs
+    /// to address the torrent it just added (rTorrent, to attach a
+    /// per-torrent throttle) can use it directly instead of guessing which
+    /// of the client's torrents was the one just added.
+    pub info_hash: &'a str,
     /// Filename for the upload. Cosmetic, but clients log it.
     pub filename: &'a str,
     /// Directory holding the existing content, as the *client* sees it.
@@ -272,9 +278,10 @@ pub struct AddRequest<'a> {
 }
 
 impl<'a> AddRequest<'a> {
-    pub fn new(data: &'a [u8], filename: &'a str, save_path: &'a str) -> Self {
+    pub fn new(data: &'a [u8], info_hash: &'a str, filename: &'a str, save_path: &'a str) -> Self {
         Self {
             data,
+            info_hash,
             filename,
             save_path,
             category: None,
@@ -415,7 +422,8 @@ mod tests {
     #[test]
     fn tags_split_the_way_every_client_expects_to_receive_them() {
         let data = b"x";
-        let request = AddRequest::new(data, "a.torrent", "/downloads").tags("sharerr, shared ,");
+        let request =
+            AddRequest::new(data, "abc123", "a.torrent", "/downloads").tags("sharerr, shared ,");
         assert_eq!(request.tag_list(), vec!["sharerr", "shared"]);
     }
 
@@ -423,7 +431,7 @@ mod tests {
     fn a_request_with_no_tags_has_no_tags_rather_than_one_empty_one() {
         let data = b"x";
         assert!(
-            AddRequest::new(data, "a.torrent", "/downloads")
+            AddRequest::new(data, "abc123", "a.torrent", "/downloads")
                 .tag_list()
                 .is_empty()
         );
@@ -433,7 +441,7 @@ mod tests {
     #[test]
     fn the_defaults_verify_and_start() {
         let data = b"x";
-        let request = AddRequest::new(data, "a.torrent", "/downloads");
+        let request = AddRequest::new(data, "abc123", "a.torrent", "/downloads");
         assert!(!request.skip_checking, "skipping the check must be opt-in");
         assert!(!request.stopped);
     }

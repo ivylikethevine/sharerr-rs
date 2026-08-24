@@ -286,9 +286,14 @@ async fn add_torrent_always_disables_automatic_torrent_management() {
     let torrent = b"d8:announce4:faked4:infod4:name4:teseee";
     client(&server)
         .add_torrent(
-            &AddRequest::new(torrent, "share.torrent", "/downloads/tv/Lanternwick Hollow")
-                .category("sharerr")
-                .tags("sharerr"),
+            &AddRequest::new(
+                torrent,
+                "abc123",
+                "share.torrent",
+                "/downloads/tv/Lanternwick Hollow",
+            )
+            .category("sharerr")
+            .tags("sharerr"),
         )
         .await
         .unwrap();
@@ -343,7 +348,7 @@ async fn a_configured_seeding_goal_rides_the_add_request_and_is_omitted_when_uns
 
     client(&server)
         .add_torrent(
-            &AddRequest::new(b"data", "s.torrent", "/downloads")
+            &AddRequest::new(b"data", "abc123", "s.torrent", "/downloads")
                 .upload_limit_kib(512)
                 .ratio_limit(2.5),
         )
@@ -366,7 +371,12 @@ async fn a_configured_seeding_goal_rides_the_add_request_and_is_omitted_when_uns
         .await;
 
     client(&server)
-        .add_torrent(&AddRequest::new(b"data", "s.torrent", "/downloads"))
+        .add_torrent(&AddRequest::new(
+            b"data",
+            "abc123",
+            "s.torrent",
+            "/downloads",
+        ))
         .await
         .unwrap();
 
@@ -388,7 +398,9 @@ async fn skip_checking_is_opt_in() {
         .await;
 
     client(&server)
-        .add_torrent(&AddRequest::new(b"data", "s.torrent", "/downloads").skip_checking(true))
+        .add_torrent(
+            &AddRequest::new(b"data", "abc123", "s.torrent", "/downloads").skip_checking(true),
+        )
         .await
         .unwrap();
 
@@ -408,6 +420,7 @@ async fn a_rejected_torrent_is_an_error_despite_the_200() {
     let err = client(&server)
         .add_torrent(&AddRequest::new(
             b"not a torrent",
+            "abc123",
             "bad.torrent",
             "/downloads",
         ))
