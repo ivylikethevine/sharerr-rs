@@ -42,12 +42,14 @@ since 2013), so `set_trackers` there can only insert a fresh tier ahead of
 whatever is already on the torrent, not replace it — see the crate's module
 docs for the full reasoning.
 
-rTorrent's coverage has one known gap: `run_docker_tests.sh` drives real
-Sonarr, Radarr, and qBittorrent containers, but not a real rTorrent —
-`sharerr-rtorrent`'s tier-2 tests run against a hand-mocked XML-RPC server
-instead, which proves the crate parses the requests and responses it
-expects, not that those are the requests and responses a real rTorrent
-expects. Tracked as open work in [the roadmap](ROADMAP.md).
+`run_docker_tests.sh --rtorrent` drives a real rTorrent + ruTorrent container
+(`crazymax/rtorrent-rutorrent`) through the same tier-2 suite the plain and
+Transmission stacks use — confirming the requests and responses a real
+rTorrent actually sends, not just the ones the crate's hand-mocked unit
+tests expect. It already caught two bugs neither a hand-mocked server nor a
+human reading rTorrent's docs had: `d.multicall2` rejects every call
+without a leading empty parameter, and a real rTorrent answers an empty
+result with a self-closing `<data/>` rather than `<data></data>`.
 
 ## Indexers (what consumes the feed)
 

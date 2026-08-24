@@ -29,6 +29,7 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     // sharerr command.
     "E2E_MEDIA",
     "E2E_COMPOSE",
+    "E2E_LIDARR",
 ];
 
 const fn strip_prefix(var: &str) -> &str {

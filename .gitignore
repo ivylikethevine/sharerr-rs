@@ -13,6 +13,7 @@
 /docker/state
 /docker/state-vpn
 /docker/state-tm
+/docker/state-rt
 
 # Never commit a master key.
 .env

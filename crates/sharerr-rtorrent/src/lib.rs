@@ -65,14 +65,17 @@
 //!   stale address alongside it, forever, which is harmless beyond a wasted
 //!   announce attempt per interval.
 //!
-//! # No live rTorrent in this project's test suite
+//! # A hand-mocked server proves the parser, not the protocol
 //!
 //! Every call this crate makes is verified against a hand-mocked XML-RPC
 //! server in the tests below, which proves this crate parses the requests
 //! and responses it expects — not that those are the requests and responses
-//! a real rTorrent expects. Unlike qBittorrent and Transmission, this
-//! project's tier-2 suite (`run_docker_tests.sh`) does not drive a real
-//! rTorrent instance; see `docs/ROADMAP.md` for that gap.
+//! a real rTorrent sends. `run_docker_tests.sh --rtorrent` covers that half:
+//! the same tier-2 suite qBittorrent and Transmission run, against a real
+//! `crazymax/rtorrent-rutorrent` container. It is what actually caught two
+//! bugs the mock could not have: `d.multicall2` needs a leading empty
+//! parameter or a real rTorrent rejects it outright, and an empty result
+//! comes back as a self-closing `<data/>` rather than `<data></data>`.
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -239,6 +242,13 @@ impl TorrentClient for RtorrentClient {
             .call_multi(
                 "d.multicall2",
                 &[
+                    // The empty string is required, not optional padding: a real
+                    // rTorrent rejects `d.multicall2` outright ("invalid target")
+                    // without it, in every version tested. It stands in for the
+                    // pre-multicall2 API's now-removed "default target" argument —
+                    // see the method's own name, keeping the "2" despite dropping
+                    // that argument's *meaning*, not its position.
+                    Param::Str(""),
                     Param::Str(MAIN_VIEW),
                     Param::Str("d.hash="),
                     Param::Str("d.name="),
@@ -604,16 +614,25 @@ fn parse_value(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Stri
 }
 
 fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
-    expect_start(reader, b"data")?;
     let mut items = Vec::new();
-    loop {
-        match next_structural(reader)? {
-            Event::Start(e) if e.name().as_ref() == b"value" => {
-                items.push(parse_value(reader)?);
+    match next_structural(reader)? {
+        Event::Start(e) if e.name().as_ref() == b"data" => loop {
+            match next_structural(reader)? {
+                Event::Start(e) if e.name().as_ref() == b"value" => {
+                    items.push(parse_value(reader)?);
+                }
+                Event::End(e) if e.name().as_ref() == b"data" => break,
+                other => return Err(format!("unexpected event inside <data>: {other:?}")),
             }
-            Event::End(e) if e.name().as_ref() == b"data" => break,
-            other => return Err(format!("unexpected event inside <data>: {other:?}")),
-        }
+        },
+        // A real rTorrent sends a self-closing `<data/>` for an empty array
+        // (confirmed against 0.16.20) rather than `<data></data>` — the
+        // hand-mocked server this crate's own tests use never produced this
+        // shape, since nothing wrote it that way by hand. `Event::Empty` is
+        // the whole element in one event, with no matching `End` to break a
+        // loop on, so it has to be handled before entering one.
+        Event::Empty(e) if e.name().as_ref() == b"data" => {}
+        other => return Err(format!("expected <data>, got {other:?}")),
     }
     expect_end(reader, b"array")?;
     Ok(XmlValue::Array(items))
@@ -830,6 +849,30 @@ mod tests {
             inner.push_str("</data></array></value>");
         }
         scalar_response(&format!("<array><data>{inner}</data></array>"))
+    }
+
+    /// The bug a hand-mocked server cannot catch by construction: rTorrent
+    /// rejects `d.multicall2` with "invalid parameters: invalid target"
+    /// unless the first parameter is an empty string — confirmed against a
+    /// real rTorrent 0.16.20, where this project's own hand-mocked tests
+    /// (which never checked the request body at all) had missed it. The
+    /// empty string stands in for the pre-`d.multicall2` API's now-removed
+    /// "default target" argument.
+    #[tokio::test]
+    async fn listing_sends_the_required_empty_leading_parameter() {
+        use wiremock::matchers::body_string_contains;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                "<param><value><string></string></value></param>\
+                 <param><value><string>main</string></value></param>",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_body(&[])))
+            .mount(&server)
+            .await;
+
+        client(&server).list(None).await.unwrap();
     }
 
     #[tokio::test]
@@ -1278,6 +1321,18 @@ mod tests {
         let mut reader = Reader::from_str("<data><oops/></data>");
         let err = parse_array(&mut reader).unwrap_err();
         assert!(err.contains("unexpected event inside <data>"), "{err}");
+    }
+
+    /// The bug a hand-mocked server cannot catch by construction: a real
+    /// rTorrent (confirmed against 0.16.20) sends a self-closing `<data/>`
+    /// for an empty array, not `<data></data>` — nothing in this crate's own
+    /// tests ever produced a response shaped that way by hand.
+    #[test]
+    fn parse_array_reads_a_self_closing_data_tag_as_empty() {
+        let mut reader = Reader::from_str("<array><data/></array>");
+        reader.read_event().unwrap(); // consume the opening <array>, as parse_array's caller does
+        let value = parse_array(&mut reader).unwrap();
+        assert_eq!(value, XmlValue::Array(Vec::new()));
     }
 
     #[test]

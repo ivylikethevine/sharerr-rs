@@ -17,6 +17,7 @@ pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhe
 - [Views of one library](#views-of-one-library)
 - [Ports](#ports)
 - [The Transmission stack](#the-transmission-stack)
+- [The rTorrent stack](#the-rtorrent-stack)
 - [The VPN stack](#the-vpn-stack)
   - [There is a WireGuard server in the stack](#there-is-a-wireguard-server-in-the-stack)
   - [Ports](#ports-1)
@@ -249,6 +250,37 @@ an announce URL from sharerr's own tracker.
 
 Ports are offset again (38989, 37878, 39091, 38477) so all three stacks can run at
 once.
+
+## The rTorrent stack
+
+```bash
+./run_docker_tests.sh --rtorrent
+```
+
+The same services and the same assertions, seeding through rTorrent instead of
+qBittorrent. Unlike the Transmission stack, the point here is not a difference in
+behaviour an operator would notice — it is that `sharerr-rtorrent`'s unit tests run
+against a hand-mocked XML-RPC server, which proves the crate parses the requests
+and responses it *expects*, not the ones a real rTorrent sends. The XML-RPC parser
+and throttle-method bugs fixed on 2026-08-24 were exactly the kind that server
+could not have caught.
+
+The image is `crazymax/rtorrent-rutorrent`, which bundles rTorrent, ruTorrent, and
+an nginx proxy that answers plain HTTP XML-RPC POSTs over rTorrent's SCGI socket —
+the "some HTTP proxy in front of the RPC endpoint" shape `sharerr-rtorrent`'s module
+docs describe, since rTorrent itself speaks nothing but SCGI. No `.htpasswd` is
+populated, so the proxy's Basic Auth is off; `[rtorrent]` in `docker/config-rt/`
+carries a placeholder username and the vault a placeholder password, both ignored.
+
+|                 | qBittorrent                                                | rTorrent                                          |
+| --------------- | ----------------------------------------------------------- | -------------------------------------------------- |
+| Tracker         | sharerr's own — see "Exercising the indexer and the tracker" above | same                                         |
+| Categories      | a category plus tags                                        | one free-text `d.custom1` slot; both collapse into it |
+| Skip hash check | supported                                                    | not supported; it always verifies                  |
+| Credentials     | a temporary password printed to the log on first start      | none — the RPC proxy has no auth configured         |
+
+Ports are offset again (48989, 47878, 48477, plus 48000 for the XML-RPC endpoint and
+48080 for ruTorrent's own web UI) so all four stacks can run at once.
 
 ## The VPN stack
 

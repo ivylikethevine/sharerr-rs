@@ -6,6 +6,7 @@
 #   ./run_docker_tests.sh                the plain stack
 #   ./run_docker_tests.sh --vpn          qBittorrent behind gluetun
 #   ./run_docker_tests.sh --transmission Transmission instead of qBittorrent
+#   ./run_docker_tests.sh --rtorrent     rTorrent instead of qBittorrent
 #
 # The --vpn variant is the same suite against a genuinely different topology: the
 # torrent client has no address of its own, its ports belong to the VPN container,
@@ -26,12 +27,14 @@ cd "$(dirname "$(readlink -f "$0")")"
 # VPN stack so both can be up at once.
 VPN=0
 TM=0
+RT=0
 case "${1:-}" in
     --vpn) VPN=1 ;;
     --transmission) TM=1 ;;
+    --rtorrent) RT=1 ;;
     "") ;;
     *)
-        echo "usage: $0 [--vpn|--transmission]" >&2
+        echo "usage: $0 [--vpn|--transmission|--rtorrent]" >&2
         exit 2
         ;;
 esac
@@ -41,6 +44,18 @@ if ((TM)); then
     STATE=docker/state-tm
     SONARR_PORT=38989 RADARR_PORT=37878 QBIT_PORT=39091 SHARERR_PORT=38477
     QBIT_SERVICE=transmission
+    LIDARR=0
+elif ((RT)); then
+    COMPOSE=(docker compose -f docker/compose.rtorrent.yml)
+    STATE=docker/state-rt
+    SONARR_PORT=48989 RADARR_PORT=47878 SHARERR_PORT=48477
+    # Waited on via ruTorrent's own web UI (port 8080), not the XML-RPC port
+    # (8000): a plain GET against the XML-RPC endpoint is not a valid XML-RPC
+    # call and nginx answers 502, so it cannot tell "still starting" from
+    # "up". ruTorrent's index page only starts answering once both nginx and
+    # rTorrent's RPC are ready, which makes it the honest readiness signal.
+    QBIT_PORT=48080
+    QBIT_SERVICE=rtorrent
     LIDARR=0
 elif ((VPN)); then
     COMPOSE=(docker compose -f docker/compose.vpn.yml)
@@ -264,6 +279,11 @@ if ((TM)); then
     # Transmission is given its credentials up front by compose, so there is no
     # temporary password to scrape — and its vault key is a different one.
     QBITTORRENT_PW=transmission-test-password
+elif ((RT)); then
+    # The RPC proxy in this stack has no `.htpasswd` populated, so it ignores
+    # whatever Basic Auth it is sent — see compose.rtorrent.yml. Nothing to
+    # scrape; the vault entry only has to exist.
+    QBITTORRENT_PW=rtorrent-test-password
 else
     if ! QBITTORRENT_PW=$("${COMPOSE[@]}" logs qbittorrent 2>/dev/null |
         grep -i 'temporary password' | awk '{print $NF}' | tail -n 1) ||
@@ -289,6 +309,8 @@ vault_set radarr.api_key "$RADARR_KEY"
 ((LIDARR)) && vault_set lidarr.api_key "$LIDARR_KEY"
 if ((TM)); then
     vault_set transmission.password "$QBITTORRENT_PW"
+elif ((RT)); then
+    vault_set rtorrent.password "$QBITTORRENT_PW"
 else
     vault_set qbittorrent.api_key "$QBITTORRENT_KEY"
 fi
@@ -516,6 +538,39 @@ if ((TM)); then
     echo "transmission: torrents carry an announce URL from sharerr's own tracker"
 fi
 
+# 6f2. What only the rTorrent stack can prove: the real XML-RPC parser and
+#      multicall response shapes rather than the hand-mocked server
+#      `sharerr-rtorrent`'s unit tests use — see compose.rtorrent.yml.
+if ((RT)); then
+    # Same reasoning as the Transmission check above: a config that silently
+    # fell back to qBittorrent must show up here, not three steps later as a
+    # confusing connection-refused.
+    doctor_out=$("${COMPOSE[@]}" exec -T sharerr sharerr doctor 2>&1 || true)
+    if ! grep -qi "rtorrent" <<<"$doctor_out"; then
+        echo "error: doctor did not report rTorrent — is torrent_backend being read?" >&2
+        echo "$doctor_out" >&2
+        exit 1
+    fi
+    echo "rtorrent: doctor reports the configured client"
+
+    # rTorrent has no tracker of its own either, so the same announce-URL
+    # property matters here — and unlike qBittorrent/Transmission, building
+    # this torrent went through a real `load.raw_start` and a real
+    # `d.tracker.insert`/`d.directory_base.set`, not a mock.
+    hash=$("${COMPOSE[@]}" exec -T sharerr sh -c 'ls /data/torrents/*.torrent 2>/dev/null | head -1')
+    if [[ -z $hash ]]; then
+        echo "error: no .torrent was built, so the announce URL cannot be checked" >&2
+        exit 1
+    fi
+    if ! "${COMPOSE[@]}" exec -T sharerr \
+        grep -aq "localhost:$SHARERR_PORT/announce" "$hash"; then
+        echo "error: the built torrent does not announce to sharerr's own tracker" >&2
+        "${COMPOSE[@]}" exec -T sharerr sh -c "grep -ao 'http[^\"]*announce[^\"]*' '$hash'" >&2 || true
+        exit 1
+    fi
+    echo "rtorrent: torrents carry an announce URL from sharerr's own tracker"
+fi
+
 # 6d. The assertions that only mean something in the VPN topology.
 if ((VPN)); then
     # qBittorrent has no address of its own here, so the name in sharerr.toml has
@@ -570,7 +625,13 @@ echo "web ui guard ok"
 #    running.
 if ((TM)); then
     export SHARERR_E2E_COMPOSE=docker/compose.transmission.yml
+elif ((RT)); then
+    export SHARERR_E2E_COMPOSE=docker/compose.rtorrent.yml
 elif ((VPN)); then
     export SHARERR_E2E_COMPOSE=docker/compose.vpn.yml
 fi
+# Only the plain stack carries a Lidarr container — see the `LIDARR` note
+# above — so only it tags music. Without this, the suite's discovered-file
+# count assumes music was tagged on every stack and fails on the other three.
+export SHARERR_E2E_LIDARR=$LIDARR
 cargo test -p sharerr --features e2e -- --ignored --test-threads=1
