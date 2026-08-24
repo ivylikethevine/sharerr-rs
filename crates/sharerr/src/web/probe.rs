@@ -24,7 +24,8 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use crate::checks::{
-    ArrOutcome, DirOutcome, QbitOutcome, TorrentCredential, check_arr, check_library, check_qbit,
+    ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_library, check_qbit,
+    resolve_torrent_credential,
 };
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
@@ -192,9 +193,12 @@ async fn library_badge(config: &Config) -> Outcome {
     Outcome::Good(message)
 }
 
-/// Test whichever torrent client is currently selected to actually seed.
+/// Test qBittorrent specifically, regardless of whether it is the backend
+/// currently selected — the button sits under the qBittorrent heading and
+/// must report on the credentials just saved there, not on whichever client
+/// happens to be selected.
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    torrent_client_badge(state, config, config.torrent_backend).await
+    torrent_client_badge(state, config, TorrentBackend::Qbittorrent).await
 }
 
 /// Test Transmission specifically, regardless of whether it is the backend
@@ -219,24 +223,16 @@ async fn torrent_client_badge(
     // live on the same host.
     let client = config.torrent_client_for(backend);
 
-    // Both secrets are read before choosing, so that an unreadable vault is
-    // reported as such rather than as a missing credential. Opened once —
-    // going through `state.secret` for each key would open (and Argon2-derive)
-    // the vault twice for one badge.
+    // Opened once — going through `state.secret` for each key would open (and
+    // Argon2-derive) the vault twice for one badge.
     let vault = state.serve.open_vault().await;
-    let read = |key: Option<&'static str>| -> Result<Option<SecretString>, String> {
-        match (key, &vault) {
-            (Some(key), Ok(vault)) => vault.get(key).map_err(|err| err.to_string()),
-            (Some(_), Err(reason)) => Err(reason.clone()),
-            (None, _) => Ok(None),
+    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
+        match &vault {
+            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
+            Err(reason) => Err(reason.clone()),
         }
     };
-    let api_key = read(client.api_key_key);
-    let password = read(client.password_key);
-    let credential = match (api_key, password) {
-        (Err(reason), _) | (_, Err(reason)) => Err(reason),
-        (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),
-    };
+    let credential = resolve_torrent_credential(&client, &secret);
 
     let outcome = check_qbit(backend, client.url, client.username, credential).await;
 
@@ -446,11 +442,7 @@ mod tests {
         let state = web_state(serve);
         let config = state.serve.config().await;
 
-        for backend in [
-            TorrentBackend::Qbittorrent,
-            TorrentBackend::Transmission,
-            TorrentBackend::Rtorrent,
-        ] {
+        for backend in TorrentBackend::ALL.iter().copied() {
             let html = body_of(torrent_client_badge(&state, &config, backend).await).await;
             assert!(html.contains("class=\"error\""), "{backend:?}: {html}");
         }

@@ -88,8 +88,20 @@ pub struct NextQuery {
 /// `?next=` cannot turn a settings save into an open redirect. `next` only
 /// ever comes from a URL this crate rendered, but the value still arrives
 /// through the query string of a request nothing else validates.
+///
+/// "Own path" means a single leading `/` followed by nothing a browser or a
+/// `Location` header would reinterpret: no second `/` or `\\` (browsers
+/// normalise `/\\evil.example` to the scheme-relative `//evil.example`), no
+/// control characters or whitespace (a CR/LF fails `HeaderValue` and turns a
+/// successful save into a 500), and nothing outside printable ASCII at all —
+/// every path this crate renders into `?next=` is plain ASCII.
 fn sanitize_next(next: Option<String>) -> Option<String> {
-    next.filter(|path| path.starts_with('/') && !path.starts_with("//"))
+    next.filter(|path| {
+        let mut chars = path.chars();
+        chars.next() == Some('/')
+            && !matches!(path.chars().nth(1), Some('/') | Some('\\'))
+            && path.chars().all(|c| c.is_ascii_graphic() && c != '\\')
+    })
 }
 
 pub async fn page(State(state): State<WebState>, Query(query): Query<PageQuery>) -> Response {
@@ -304,12 +316,7 @@ pub async fn save_arr(
     };
     let section = source.as_str();
 
-    if let Err(message) = apply_secret(&state, secret_key, &form.api_key, form.clear_api_key).await
-    {
-        return reject(&state, &message).await;
-    }
-
-    write_config(&state, section, next.next, |file| {
+    let pending = match prepare_config(&state, |file| {
         let url = form.url.trim();
         if url.is_empty() {
             // Removing the whole table, not just the URL: each *arr section is
@@ -322,6 +329,17 @@ pub async fn save_arr(
         Ok(())
     })
     .await
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
+
+    if let Err(message) = apply_secret(&state, secret_key, &form.api_key, form.clear_api_key).await
+    {
+        return reject(&state, &message).await;
+    }
+
+    commit_config(&state, section, next.next, pending).await
 }
 
 pub async fn save_qbittorrent(
@@ -342,18 +360,7 @@ pub async fn save_qbittorrent(
         .await;
     }
 
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::QBITTORRENT_API_KEY,
-        &form.api_key,
-        form.clear_api_key,
-    )
-    .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    write_config(&state, "qbittorrent", next.next, |file| {
+    let pending = match prepare_config(&state, |file| {
         let url = form.url.trim();
         if url.is_empty() {
             anyhow::bail!("qBittorrent's URL is required — sharerr cannot seed without it");
@@ -375,6 +382,23 @@ pub async fn save_qbittorrent(
         Ok(())
     })
     .await
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::QBITTORRENT_API_KEY,
+        &form.api_key,
+        form.clear_api_key,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    commit_config(&state, "qbittorrent", next.next, pending).await
 }
 
 pub async fn save_transmission(
@@ -382,18 +406,7 @@ pub async fn save_transmission(
     Query(next): Query<NextQuery>,
     Form(form): Form<TransmissionForm>,
 ) -> Response {
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::TRANSMISSION_PASSWORD,
-        &form.password,
-        form.clear_password,
-    )
-    .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    write_config(&state, "transmission", next.next, |file| {
+    let pending = match prepare_config(&state, |file| {
         let url = form.url.trim();
         if url.is_empty() {
             anyhow::bail!("Transmission's URL is required — sharerr cannot seed without it");
@@ -410,16 +423,14 @@ pub async fn save_transmission(
         Ok(())
     })
     .await
-}
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
 
-pub async fn save_rtorrent(
-    State(state): State<WebState>,
-    Query(next): Query<NextQuery>,
-    Form(form): Form<RtorrentForm>,
-) -> Response {
     if let Err(message) = apply_secret(
         &state,
-        secret_keys::RTORRENT_PASSWORD,
+        secret_keys::TRANSMISSION_PASSWORD,
         &form.password,
         form.clear_password,
     )
@@ -428,7 +439,15 @@ pub async fn save_rtorrent(
         return reject(&state, &message).await;
     }
 
-    write_config(&state, "rtorrent", next.next, |file| {
+    commit_config(&state, "transmission", next.next, pending).await
+}
+
+pub async fn save_rtorrent(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<RtorrentForm>,
+) -> Response {
+    let pending = match prepare_config(&state, |file| {
         let url = form.url.trim();
         if url.is_empty() {
             anyhow::bail!(
@@ -445,6 +464,23 @@ pub async fn save_rtorrent(
         Ok(())
     })
     .await
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::RTORRENT_PASSWORD,
+        &form.password,
+        form.clear_password,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    commit_config(&state, "rtorrent", next.next, pending).await
 }
 
 pub async fn save_torrent_backend(
@@ -453,11 +489,11 @@ pub async fn save_torrent_backend(
     Form(form): Form<TorrentBackendForm>,
 ) -> Response {
     write_config(&state, "torrent_backend", next.next, |file| {
-        let backend = match form.backend.as_str() {
-            "qbittorrent" => TorrentBackend::Qbittorrent,
-            "transmission" => TorrentBackend::Transmission,
-            "rtorrent" => TorrentBackend::Rtorrent,
-            other => anyhow::bail!("{other:?} is not a torrent client sharerr supports"),
+        let Some(backend) = TorrentBackend::parse(&form.backend) else {
+            anyhow::bail!(
+                "{:?} is not a torrent client sharerr supports",
+                form.backend
+            );
         };
         file.apply([Edit::str(config_paths::TORRENT_BACKEND, backend.as_str())]);
         Ok(())
@@ -470,19 +506,7 @@ pub async fn save_tracker(
     Query(next): Query<NextQuery>,
     Form(form): Form<TrackerForm>,
 ) -> Response {
-    let token = form.token.trim();
-    let outcome = if form.clear_token.is_some() {
-        clear_tracker_token(&state).await
-    } else if !token.is_empty() {
-        rotate_tracker_token(&state, token).await
-    } else {
-        Ok(())
-    };
-    if let Err(message) = outcome {
-        return reject(&state, &message).await;
-    }
-
-    write_config(&state, "tracker", next.next, |file| {
+    let pending = match prepare_config(&state, |file| {
         let host = form.advertised_host.trim();
         if !host.is_empty() {
             // Wrong at save time is loud; wrong after the fact is a torrent nobody
@@ -524,6 +548,27 @@ pub async fn save_tracker(
         Ok(())
     })
     .await
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
+
+    let token = form.token.trim();
+    if let Err(message) = secret_keys::validate_value(secret_keys::TRACKER_TOKEN, token) {
+        return reject(&state, &message).await;
+    }
+    let outcome = if form.clear_token.is_some() {
+        clear_tracker_token(&state).await
+    } else if !token.is_empty() {
+        rotate_tracker_token(&state, token).await
+    } else {
+        Ok(())
+    };
+    if let Err(message) = outcome {
+        return reject(&state, &message).await;
+    }
+
+    commit_config(&state, "tracker", next.next, pending).await
 }
 
 /// Retire the previous announce token a rotation kept valid — the explicit
@@ -684,13 +729,7 @@ async fn save_gluetun_section(
     poll_secs_path: &'static str,
     api_key_secret: &'static str,
 ) -> Response {
-    if let Err(message) =
-        apply_secret(&state, api_key_secret, &form.api_key, form.clear_api_key).await
-    {
-        return reject(&state, &message).await;
-    }
-
-    write_config(&state, section, None, move |file| {
+    let pending = match prepare_config(&state, move |file| {
         file.apply([Edit::bool(enabled_path, checked(&form.enabled))]);
 
         let url = form.control_url.trim();
@@ -716,6 +755,18 @@ async fn save_gluetun_section(
         Ok(())
     })
     .await
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
+
+    if let Err(message) =
+        apply_secret(&state, api_key_secret, &form.api_key, form.clear_api_key).await
+    {
+        return reject(&state, &message).await;
+    }
+
+    commit_config(&state, section, None, pending).await
 }
 
 pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>) -> Response {
@@ -775,18 +826,7 @@ pub async fn save_notifications(
         return reject(&state, "That does not look like a valid webhook URL.").await;
     }
 
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
-        webhook,
-        form.clear_webhook_url,
-    )
-    .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    write_config(&state, "notifications", None, |file| {
+    let pending = match prepare_config(&state, |file| {
         let Some(kind) = sharerr_core::config::NotifyKind::parse(form.kind.trim()) else {
             anyhow::bail!("{:?} is not a known notification kind", form.kind);
         };
@@ -802,6 +842,23 @@ pub async fn save_notifications(
         Ok(())
     })
     .await
+    {
+        Ok(pending) => pending,
+        Err(message) => return reject(&state, &message).await,
+    };
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+        webhook,
+        form.clear_webhook_url,
+    )
+    .await
+    {
+        return reject(&state, &message).await;
+    }
+
+    commit_config(&state, "notifications", None, pending).await
 }
 
 pub async fn save_libraries(
@@ -870,33 +927,79 @@ pub async fn save_paths(
 
 /// Open the config file, let `edit` mutate it, then validate, write, and reload.
 ///
-/// Every settings handler goes through here so that no path can skip the
-/// validate-before-write step or forget to invalidate the syncer.
+/// Every settings handler goes through here — or through the two halves,
+/// [`prepare_config`] then [`commit_config`], when it also has a secret to
+/// store — so that no path can skip the validate-before-write step or forget
+/// to invalidate the syncer.
 async fn write_config<F>(state: &WebState, section: &str, next: Option<String>, edit: F) -> Response
 where
     F: FnOnce(&mut ConfigFile) -> anyhow::Result<()>,
 {
+    match prepare_config(state, edit).await {
+        Ok(pending) => commit_config(state, section, next, pending).await,
+        Err(message) => reject(state, &message).await,
+    }
+}
+
+/// An edited, validated `sharerr.toml` that has not been written yet.
+///
+/// Carries the config-write lock, so between [`prepare_config`] and
+/// [`commit_config`] no other save can open the file — dropping it without
+/// committing simply releases the lock and writes nothing.
+struct PendingConfig<'a> {
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+    file: ConfigFile,
+    path: std::path::PathBuf,
+}
+
+/// The first half of [`write_config`]: open, edit, and **validate** the
+/// document, without writing it.
+///
+/// A handler that also stores a secret calls this first and the vault second:
+/// the form's plain fields are checked before anything irreversible happens,
+/// so a rejected save leaves the vault as it was. The other order — vault
+/// first, validate second — committed the credential, invalidated the syncer,
+/// and in `save_tracker`'s case consumed the one-slot rotation grace period,
+/// while the error page implied nothing had been saved.
+async fn prepare_config<'a, F>(state: &'a WebState, edit: F) -> Result<PendingConfig<'a>, String>
+where
+    F: FnOnce(&mut ConfigFile) -> anyhow::Result<()>,
+{
+    let guard = state.serve.lock_config_write().await;
     let path = state.serve.config_path().to_path_buf();
 
     let mut file = if state.serve.config_error().await.is_some() {
         replacement_for(state, &path).await
     } else {
-        match ConfigFile::open(&path) {
-            Ok(file) => file,
-            Err(err) => return reject(state, &format!("{err:#}")).await,
-        }
+        ConfigFile::open(&path).map_err(|err| format!("{err:#}"))?
     };
 
-    if let Err(err) = edit(&mut file) {
-        return reject(state, &format!("{err:#}")).await;
-    }
+    edit(&mut file).map_err(|err| format!("{err:#}"))?;
+    // `save` validates again before writing; this pass is what lets a caller
+    // reject *before* touching the vault.
+    crate::settings::validate(&file.to_toml()).map_err(|err| format!("{err:#}"))?;
 
-    match file.save() {
+    Ok(PendingConfig {
+        _guard: guard,
+        file,
+        path,
+    })
+}
+
+/// The second half of [`write_config`]: write the prepared document, swap
+/// the new config in, and redirect.
+async fn commit_config(
+    state: &WebState,
+    section: &str,
+    next: Option<String>,
+    pending: PendingConfig<'_>,
+) -> Response {
+    match pending.file.save() {
         Ok(config) => {
             // Swap the new config in *and* drop the cached syncer, so the change is
             // live within one recovery interval instead of at the next restart.
             state.serve.replace_config(config).await;
-            tracing::info!(section, path = %path.display(), "settings saved");
+            tracing::info!(section, path = %pending.path.display(), "settings saved");
             let destination = sanitize_next(next).unwrap_or_else(|| "/settings".to_owned());
             Redirect::to(&format!("{destination}?saved={section}")).into_response()
         }
@@ -1116,17 +1219,14 @@ fn checked(field: &Option<String>) -> bool {
 /// empty; a stored secret is the only signal that someone deliberately set one
 /// of these up.
 fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool) -> bool {
-    [
-        TorrentBackend::Qbittorrent,
-        TorrentBackend::Transmission,
-        TorrentBackend::Rtorrent,
-    ]
-    .into_iter()
-    .filter(|backend| *backend != config.torrent_backend)
-    .any(|backend| {
-        let client = config.torrent_client_for(backend);
-        client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
-    })
+    TorrentBackend::ALL
+        .iter()
+        .copied()
+        .filter(|backend| *backend != config.torrent_backend)
+        .any(|backend| {
+            let client = config.torrent_client_for(backend);
+            client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
+        })
 }
 
 /// An unset URL renders as an empty field, not `None`.
@@ -1166,6 +1266,25 @@ async fn gluetun_last_error(
 /// on another network, and typing one is almost always a copy-paste of the
 /// `server.bind` value instead.
 fn validate_advertised_host(host: &str) -> anyhow::Result<()> {
+    // A host, not a URL: `Url::parse(&format!("http://{host}:{port}"))` accepts
+    // `https://seed.example` (host `https`, path `//seed.example`) and
+    // `seed.example/sharerr` (the port lands in the path) without complaint,
+    // and either yields a base nothing can announce to.
+    if host.contains("://") || host.contains('/') {
+        anyhow::bail!(
+            "{host:?} should be a bare host name or address — no scheme or path. Use \
+             `advertised_url` for a full URL"
+        );
+    }
+    if host.chars().any(|c| c.is_whitespace()) {
+        anyhow::bail!("{host:?} contains whitespace");
+    }
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        anyhow::bail!(
+            "{host:?} should not carry a port — the tracker port is its own setting — and an \
+             IPv6 address must be written in brackets"
+        );
+    }
     if host.eq_ignore_ascii_case("localhost") {
         anyhow::bail!(
             "{host:?} only resolves on this machine — a friend elsewhere could never reach it"
@@ -1896,6 +2015,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sanitize_next_accepts_only_a_plain_local_path() {
+        let ok = |s: &str| sanitize_next(Some(s.to_owned())).as_deref() == Some(s);
+        let refused = |s: &str| sanitize_next(Some(s.to_owned())).is_none();
+
+        assert!(ok("/settings"));
+        assert!(ok("/wizard/step?x=1&y=2#top"));
+        assert!(ok("/"));
+
+        assert!(refused("https://evil.example"));
+        assert!(refused("//evil.example"));
+        // Browsers normalise a backslash to a slash in special-scheme URLs.
+        assert!(refused("/\\evil.example"));
+        assert!(refused("/settings\\..\\x"));
+        // A CR/LF is not a valid `HeaderValue`; the save must not become a 500.
+        assert!(refused("/settings\r\nSet-Cookie: x=y"));
+        assert!(refused("/settings x"));
+        assert!(refused("/sett\u{e9}ings"));
+        assert!(refused("settings"));
+        assert!(refused(""));
+        assert!(sanitize_next(None).is_none());
+    }
+
     #[tokio::test]
     async fn save_general_rejects_a_blank_tag() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
@@ -2163,6 +2305,21 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
         assert!(!config_path.exists());
+    }
+
+    #[test]
+    fn validate_advertised_host_wants_a_bare_host() {
+        assert!(validate_advertised_host("seed.example").is_ok());
+        assert!(validate_advertised_host("203.0.113.5").is_ok());
+        assert!(validate_advertised_host("[2001:db8::1]").is_ok());
+
+        assert!(validate_advertised_host("https://seed.example").is_err());
+        assert!(validate_advertised_host("seed.example/sharerr").is_err());
+        assert!(validate_advertised_host("seed.example:8477").is_err());
+        assert!(validate_advertised_host("2001:db8::1").is_err());
+        assert!(validate_advertised_host("seed example").is_err());
+        assert!(validate_advertised_host("localhost").is_err());
+        assert!(validate_advertised_host("192.168.1.5").is_err());
     }
 
     #[tokio::test]

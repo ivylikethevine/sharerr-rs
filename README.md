@@ -49,9 +49,11 @@ design is built around.
 - [AI usage](#ai-usage)
 - [Licence](#licence)
 
-See also: [the configuration reference](docs/CONFIGURATION.md), [the
-roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
-[the security policy](docs/SECURITY.md).
+See also: [the configuration reference](docs/CONFIGURATION.md), [supported
+services](docs/SUPPORTED.md), [what's deliberately not
+supported](docs/UNSUPPORTED.md), [the roadmap](docs/ROADMAP.md), [the
+original design brief](docs/DESIGN.md), and [the security
+policy](docs/SECURITY.md).
 
 ## What works today
 
@@ -77,7 +79,12 @@ roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Topology diagram: sources, this instance, and friends in one picture             | ✅ |
 | Live per-torrent swarm view: who is connected to each torrent right now          | ✅ |
 | Reachability script for checking from outside your network (`/debug`)            | ✅ |
-| Plex as a library source                                                         | ❌ |
+
+Full detail on which *arr apps, torrent clients, and indexers are supported —
+and the trait/seam each plugs into — is [`docs/SUPPORTED.md`](docs/SUPPORTED.md).
+For things tried and deliberately left out (a media-server library source,
+Readarr as a direct indexer, and more), see
+[`docs/UNSUPPORTED.md`](docs/UNSUPPORTED.md).
 
 ## Quickstart
 
@@ -530,8 +537,9 @@ somewhere alive after your advertised endpoint rotates — is also incomplete
 for rTorrent specifically: its XML-RPC API has never grown a way to remove a
 tracker, so sharerr can only add the new endpoint as a fresh tier ahead of the
 stale one, not replace it outright. Harmless — the stale tier just goes on
-being tried and failing — but see [the roadmap](docs/ROADMAP.md)'s "Torrent
-clients" for the full reasoning.
+being tried and failing — but see
+[`docs/SUPPORTED.md`](docs/SUPPORTED.md)'s "Torrent clients" for the full
+reasoning.
 
 ## The CLI
 
@@ -560,7 +568,7 @@ accepting a save that would be silently discarded.
 
 ## Building and testing
 
-Rust **1.88** or newer (the workspace sets `rust-version`; `docker build .` is the
+Rust **1.98** or newer (the workspace sets `rust-version`; `docker build .` is the
 de-facto MSRV check, since a local toolchain is invariably newer).
 
 ```bash

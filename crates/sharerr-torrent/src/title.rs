@@ -19,7 +19,10 @@
 
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use sharerr_core::MediaSpec;
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::is_combining_mark;
 
 /// Group tag applied to titles sharerr synthesises, so they are identifiable as
 /// not having come from a real scene release.
@@ -224,9 +227,33 @@ fn join_title(tokens: &[&str]) -> String {
     tokens.join(" ").trim_matches(['-', ' ']).to_owned()
 }
 
+/// Decompose accented and other compatibility characters into a base letter
+/// plus combining marks (NFKD) — `é` becomes `e` + a combining acute accent —
+/// and drop the marks, so the ASCII filters below keep the bare base letter
+/// rather than either discarding the whole character or, worse, treating the
+/// combining mark as a word-breaking separator and splitting the base letter
+/// away from the rest of the word (`Amélie` would otherwise transliterate to
+/// `Ame.lie`, not `Amelie`). This recovers Latin-script titles but not
+/// scripts with no ASCII-equivalent base letter at all (CJK, Cyrillic, ...),
+/// which still fall through to [`ascii_fallback`].
+fn transliterate(s: &str) -> String {
+    s.nfkd().filter(|c| !is_combining_mark(*c)).collect()
+}
+
+/// A short, stable placeholder for a title with nothing ASCII-transliterable
+/// in it, derived from the title's bytes so different untransliterable
+/// titles get different placeholders rather than colliding on one literal
+/// `"unknown"`. Shared between [`dotted`] and [`loose_eq`] so a title
+/// sharerr synthesises from this placeholder is recognised by `loose_eq` as
+/// describing the title it came from.
+fn ascii_fallback(title: &str) -> String {
+    let digest = Sha256::digest(title.to_lowercase().as_bytes());
+    format!("unknown{}", hex::encode(&digest[..4]))
+}
+
 /// Scene names are dot-separated with no spaces.
 fn dotted(title: &str) -> String {
-    let cleaned: String = title
+    let cleaned: String = transliterate(title)
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' })
         .collect::<String>()
@@ -235,7 +262,12 @@ fn dotted(title: &str) -> String {
         .join(".");
 
     if cleaned.is_empty() {
-        "Unknown".to_owned()
+        // `ascii_fallback` already starts with "unknown"; capitalise to match
+        // this function's own style ("Unknown", not "unknown") without
+        // changing the value `loose_eq`'s ASCII filter and lowercasing later
+        // reduce it back to.
+        let id = ascii_fallback(title);
+        format!("Unknown.{}", &id["unknown".len()..])
     } else {
         cleaned
     }
@@ -255,10 +287,19 @@ fn strip_extension(name: &str) -> &str {
 /// Compare titles ignoring case, separators, and punctuation.
 fn loose_eq(a: &str, b: &str) -> bool {
     let key = |s: &str| -> String {
-        s.chars()
+        let ascii: String = transliterate(s)
+            .chars()
             .filter(|c| c.is_ascii_alphanumeric())
             .map(|c| c.to_ascii_lowercase())
-            .collect()
+            .collect();
+        if ascii.is_empty() {
+            // Same placeholder `dotted` would have synthesised from this
+            // title, so a title with no ASCII-transliterable content still
+            // matches the release sharerr generated for it.
+            ascii_fallback(s)
+        } else {
+            ascii
+        }
     };
     key(a) == key(b)
 }
@@ -379,6 +420,8 @@ mod tests {
             ("Harrowmere: The Second Age", 1, 1),
             ("A Show With  Odd   Spacing", 3, 9),
             ("Numbers 1917 In The Title", 4, 2),
+            ("Amélie's Café", 1, 1),
+            ("千と千尋の神隠し", 1, 1),
         ] {
             let spec = MediaSpec::Episode {
                 series_title: series.to_owned(),
@@ -400,6 +443,8 @@ mod tests {
             ("Harrowmere", Some(2024)),
             ("Punctuation: A Movie!", Some(1999)),
             ("No Year Known", None),
+            ("Amélie", Some(2001)),
+            ("千と千尋の神隠し", Some(2001)),
         ] {
             let spec = MediaSpec::Movie {
                 title: name.to_owned(),
@@ -424,6 +469,58 @@ mod tests {
         let title = synthesize(&episode());
         assert_eq!(title, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
         assert!(!title.contains(' '), "scene names carry no spaces: {title}");
+    }
+
+    /// The trap this exists to avoid: dropping combining marks by filtering
+    /// on `char::is_ascii_alphanumeric` alone splits an accented word into
+    /// two ("Am" + "lie") instead of recovering the unaccented letter.
+    #[test]
+    fn accented_titles_are_transliterated_not_split() {
+        let spec = MediaSpec::Movie {
+            title: "Amélie".to_owned(),
+            year: Some(2001),
+        };
+        let title = synthesize(&spec);
+        assert_eq!(title, "Amelie.2001.WEB-DL.x264-SHARERR");
+    }
+
+    /// A script with no ASCII-transliterable form at all (CJK, here) used to
+    /// collapse to the literal `"Unknown"` — indistinguishable from any other
+    /// untransliterable title, and a collision risk for `describes`.
+    #[test]
+    fn a_title_with_no_ascii_form_gets_a_stable_placeholder_not_the_literal_unknown() {
+        let title = synthesize(&MediaSpec::Movie {
+            title: "千と千尋の神隠し".to_owned(),
+            year: Some(2001),
+        });
+        assert_ne!(title, "Unknown.2001.WEB-DL.x264-SHARERR");
+        assert!(
+            title.starts_with("Unknown."),
+            "still recognisable as a placeholder: {title}"
+        );
+    }
+
+    /// Two different untransliterable titles must not collapse onto the same
+    /// placeholder and therefore be treated as describing the same content.
+    #[test]
+    fn two_different_untransliterable_titles_get_different_placeholders() {
+        let a = synthesize(&MediaSpec::Movie {
+            title: "千と千尋の神隠し".to_owned(),
+            year: Some(2001),
+        });
+        let b = synthesize(&MediaSpec::Movie {
+            title: "となりのトトロ".to_owned(),
+            year: Some(1988),
+        });
+        assert_ne!(a, b);
+        assert!(
+            !parse(&a).describes(&MediaSpec::Movie {
+                title: "となりのトトロ".to_owned(),
+                year: Some(1988),
+            }),
+            "a release synthesised for one untransliterable title must not \
+             describe an unrelated one: {a:?}"
+        );
     }
 
     // ---------------------------------------------------------- resolution

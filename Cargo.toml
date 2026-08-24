@@ -7,11 +7,12 @@ version = "0.1.0"
 edition = "2024"
 # Above edition 2024's 1.85 floor for two reasons: `settings::strip_prefix` needs
 # `str::split_at_checked` in a const context (1.86), and the reconciliation loop
-# and title resolution use let-chains (1.88).
+# and title resolution use let-chains (1.88). Raised to 1.98 on 2026-08-24 to
+# track current stable rather than because anything past 1.88 is in use yet.
 #
 # The Dockerfile pins this same toolchain, which makes `docker build` the de-facto
 # MSRV check — a local toolchain is invariably newer and will not catch a breach.
-rust-version = "1.88"
+rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/ivyduggan/sharerr-rs"
 
@@ -44,6 +45,9 @@ clap = "4.6.6"
 # nothing next to the HTTP request carrying it. `rand_core` stays off — key
 # material comes from the same `getrandom` path as every other secret.
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
+# Cross-process advisory `flock` on the vault's lock file. `std::fs::File::lock`
+# does the same job but landed in Rust 1.89, one past this workspace's MSRV.
+fd-lock = "4.0.4"
 figment = "0.10.19"
 # The facade over the futures-util that reqwest and axum already pull in;
 # used for join_all over dynamically-sized sets of independent requests.
@@ -83,6 +87,10 @@ toml_edit = "0.22"
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# NFKD decomposition for synthesized release titles: pulls the base letter out
+# of an accented character (`é` -> `e` + combining accent) before the ASCII
+# filter runs, so e.g. `Amélie` transliterates to `Amelie` instead of `Am.lie`.
+unicode-normalization = "0.1.25"
 url = "2.5.8"
 wiremock = "0.6.5"
 zeroize = "1.9.0"

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use secrecy::SecretString;
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::{ClientKind, TorrentClient};
-use sharerr_core::config::TorrentBackend;
+use sharerr_core::config::{TorrentBackend, TorrentClientConfig};
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_core::{Config, MediaSource};
 use sharerr_qbit::QbitClient;
@@ -75,10 +75,10 @@ impl ArrOutcome {
     /// Every other state yields nothing, which is the honest answer: a service that
     /// could not be reached contributed no files, and callers summing across
     /// services want that to be an empty list rather than an error to handle.
-    pub fn into_items(self) -> Vec<Discovered> {
+    pub fn items(&self) -> &[Discovered] {
         match self {
             Self::Ready { items, .. } => items,
-            _ => Vec::new(),
+            _ => &[],
         }
     }
 }
@@ -222,6 +222,122 @@ pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
     report
 }
 
+/// What `[[library]]` scanning produced — distinguishing a completed scan
+/// (however many libraries turned out empty, missing, or unreadable) from
+/// the blocking scan task itself panicking partway through. See
+/// [`snapshot`]'s docs for why that distinction has to survive out of this
+/// function rather than being flattened away.
+#[derive(Debug)]
+pub enum LibraryScan {
+    Scanned(Vec<(sharerr_core::config::LibraryConfig, DirOutcome)>),
+    /// The blocking scan task panicked. Carries the panic's message.
+    Panicked(String),
+}
+
+/// Everything [`snapshot`] gathers, unrendered.
+#[derive(Debug)]
+pub struct Snapshot {
+    pub sources: Vec<(MediaSource, ArrOutcome)>,
+    pub libraries: LibraryScan,
+    pub paths: PathReport,
+}
+
+/// Probe every configured *arr source and scan every `[[library]]`
+/// directory, then resolve everything either found through the path
+/// mapping — the full gather both `web::diagnostics::gather` and
+/// `web::topology::gather` need before they can render their own view of
+/// "is this instance healthy".
+///
+/// Before this existed, each page ran its own copy of this sequence, and the
+/// copies had already drifted: a panicked library scan produced a synthetic
+/// "did not complete" line on the diagnostics page and silently vanished
+/// from the topology page. One function used by both closes that gap the
+/// same way [`resolve_torrent_credential`] closed the credential-resolution
+/// one.
+///
+/// The arr probes (network) and the library scan (filesystem) touch
+/// disjoint state, so they run concurrently rather than one after the
+/// other — wall time is the slower of the two, not their sum.
+/// Path-checking still runs after both: it needs everything either phase
+/// discovered.
+pub async fn snapshot(
+    config: &Config,
+    secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
+) -> Snapshot {
+    let sources_fut = async {
+        futures::future::join_all(
+            config
+                .configured_sources()
+                .into_iter()
+                // `configured_sources` yields only *arr apps, each of which has a key.
+                .filter_map(|kind| {
+                    sharerr_core::config::secret_keys::api_key_for(kind).map(|key| (kind, key))
+                })
+                .map(|(kind, key)| {
+                    let api_key = secret(key);
+                    async move {
+                        let url = config.service(kind).map(|s| &s.url);
+                        (kind, check_arr(kind, url, api_key, &config.tag).await)
+                    }
+                }),
+        )
+        .await
+    };
+
+    // Filesystem-bound, off the async loop: a container pinned to one CPU has
+    // exactly one runtime worker, and a slow mount must not stall /health and
+    // every other request for the duration of the walk.
+    let libraries_fut = async {
+        let libraries = config.library.clone();
+        tokio::task::spawn_blocking(move || {
+            libraries
+                .into_iter()
+                .map(|library| {
+                    let outcome = check_library(&library);
+                    (library, outcome)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+    };
+
+    let (sources, libraries) = tokio::join!(sources_fut, libraries_fut);
+
+    let libraries = match libraries {
+        Ok(scanned) => LibraryScan::Scanned(scanned),
+        // A panicked scan must not make a configured [[library]] install look
+        // identical to one with no libraries at all — see `LibraryScan`.
+        Err(err) => LibraryScan::Panicked(err.to_string()),
+    };
+
+    let mut discovered: Vec<Discovered> = Vec::new();
+    for (_, outcome) in &sources {
+        discovered.extend(outcome.items().iter().cloned());
+    }
+    if let LibraryScan::Scanned(scanned) = &libraries {
+        for (_, outcome) in scanned {
+            discovered.extend(outcome.items().iter().cloned());
+        }
+    }
+
+    // Filesystem-bound too, and depends on everything either phase above
+    // discovered, so it cannot start until both are done.
+    let paths = {
+        let config = config.clone();
+        tokio::task::spawn_blocking(move || check_paths(&config, &discovered))
+            .await
+            // A panicked walk renders as an empty report rather than a 500;
+            // the source/library lines still carry the useful half of the page.
+            .unwrap_or_default()
+    };
+
+    Snapshot {
+        sources,
+        libraries,
+        paths,
+    }
+}
+
 /// Whether one advertised address actually accepts a connection.
 ///
 /// Deliberately a *TCP* connect and nothing more: an HTTP request would need
@@ -302,11 +418,11 @@ pub enum DirOutcome {
 
 impl DirOutcome {
     /// The discovered files, if the scan got that far — same honest-empty
-    /// contract as [`ArrOutcome::into_items`].
-    pub fn into_items(self) -> Vec<Discovered> {
+    /// contract as [`ArrOutcome::items`].
+    pub fn items(&self) -> &[Discovered] {
         match self {
             Self::Ready { items, .. } => items,
-            _ => Vec::new(),
+            _ => &[],
         }
     }
 }
@@ -422,7 +538,7 @@ pub fn build_torrent_client(
 ///
 /// Kept as one value rather than two optional arguments so that "which credential
 /// is in play" is decided once, by [`TorrentCredential::choose`], instead of at
-/// every call site — three of which resolve secrets from three different places.
+/// every call site — see [`resolve_torrent_credential`], which is that one place.
 #[derive(Debug)]
 pub enum TorrentCredential {
     Password(SecretString),
@@ -449,6 +565,32 @@ impl TorrentCredential {
             Self::ApiKey(_) => "API key",
         }
     }
+}
+
+/// Read whichever of `client`'s vault keys are configured and resolve them to a
+/// credential, via `secret` — the one place this decision is made.
+///
+/// Before this existed, `sync::build_client`, `web::probe::torrent_client_badge`,
+/// and `web::topology::client_node` each read both keys and called
+/// [`TorrentCredential::choose`] themselves, and `commands::doctor::check_qbit`
+/// picked a variant by hand without calling `choose` at all — four places that
+/// could each drift on what "resolve the configured credential" means. `secret`
+/// stays generic over the error type each caller already reports failures as
+/// (an owned `String` describing what went wrong), rather than forcing every
+/// caller through one concrete vault or reporting type.
+pub fn resolve_torrent_credential(
+    client: &TorrentClientConfig<'_>,
+    secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
+) -> Result<Option<TorrentCredential>, String> {
+    let api_key = match client.api_key_key {
+        Some(key) => secret(key)?,
+        None => None,
+    };
+    let password = match client.password_key {
+        Some(key) => secret(key)?,
+        None => None,
+    };
+    Ok(TorrentCredential::choose(api_key, password))
 }
 
 /// Sign in to the configured torrent client and read its version.
@@ -651,6 +793,48 @@ mod tests {
         }
     }
 
+    /// The point of `snapshot`: what `diagnostics` and `topology` used to
+    /// gather separately — an arr probe and a library scan — merges into one
+    /// path check, and a library that scanned cleanly comes back as
+    /// `LibraryScan::Scanned` rather than lost or misreported.
+    #[tokio::test]
+    async fn snapshot_merges_arr_and_library_discoveries_into_the_path_check() {
+        use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Gilded.Ferry.2019.mkv"), b"xx").unwrap();
+
+        let config = Config {
+            library: vec![LibraryConfig {
+                path: dir.path().to_path_buf(),
+                kind: LibraryKind::Movie,
+            }],
+            ..Config::default()
+        };
+        // No *arr apps configured, so `configured_sources()` is empty and
+        // this closure is never actually called — present only to satisfy
+        // `snapshot`'s signature.
+        let secret = |_: &'static str| -> Result<Option<SecretString>, String> { Ok(None) };
+
+        let snap = snapshot(&config, &secret).await;
+
+        assert!(snap.sources.is_empty(), "no *arr apps were configured");
+        match &snap.libraries {
+            LibraryScan::Scanned(scanned) => {
+                assert_eq!(scanned.len(), 1);
+                match &scanned[0].1 {
+                    DirOutcome::Ready { items, .. } => assert_eq!(items.len(), 1),
+                    other => panic!("got {other:?}"),
+                }
+            }
+            other => panic!("got {other:?}"),
+        }
+        assert_eq!(
+            snap.paths.checked, 1,
+            "the library's one file must have reached the path check"
+        );
+    }
+
     /// A directory item resolving through no rule is by design, not a
     /// misconfiguration — the warning is reserved for paths another container
     /// reported.
@@ -716,12 +900,12 @@ mod tests {
         );
     }
 
-    /// Every other state's `into_items` must be an honest empty, not a panic —
+    /// Every other state's `items` must be an honest empty, not a panic —
     /// callers summing across services rely on that.
     #[test]
-    fn arr_outcome_into_items_is_empty_unless_ready() {
-        assert!(ArrOutcome::NotConfigured.into_items().is_empty());
-        assert!(ArrOutcome::AuthRejected.into_items().is_empty());
+    fn arr_outcome_items_is_empty_unless_ready() {
+        assert!(ArrOutcome::NotConfigured.items().is_empty());
+        assert!(ArrOutcome::AuthRejected.items().is_empty());
 
         let item = sharerr_core::Discovered {
             source: MediaSource::Sonarr,
@@ -741,13 +925,13 @@ mod tests {
             app_name: "Sonarr".to_owned(),
             items: vec![item],
         };
-        assert_eq!(ready.into_items().len(), 1);
+        assert_eq!(ready.items().len(), 1);
     }
 
     #[test]
-    fn dir_outcome_into_items_is_empty_unless_ready() {
-        assert!(DirOutcome::Missing.into_items().is_empty());
-        assert!(DirOutcome::Empty.into_items().is_empty());
+    fn dir_outcome_items_is_empty_unless_ready() {
+        assert!(DirOutcome::Missing.items().is_empty());
+        assert!(DirOutcome::Empty.items().is_empty());
 
         let item = sharerr_core::Discovered {
             source: MediaSource::Directory,
@@ -766,7 +950,7 @@ mod tests {
             skipped: 3,
             items: vec![item],
         };
-        assert_eq!(ready.into_items().len(), 1);
+        assert_eq!(ready.items().len(), 1);
     }
 
     #[test]

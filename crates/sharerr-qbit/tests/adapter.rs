@@ -119,9 +119,12 @@ async fn add_remove_and_set_trackers_succeed_through_the_trait() {
         .await;
 
     let qbit = client(&server);
-    TorrentClient::add(&qbit, &AddRequest::new(b"data", "s.torrent", "/downloads"))
-        .await
-        .unwrap();
+    TorrentClient::add(
+        &qbit,
+        &AddRequest::new(b"data", "abc123", "s.torrent", "/downloads"),
+    )
+    .await
+    .unwrap();
     TorrentClient::remove(&qbit, "aabbcc").await.unwrap();
     TorrentClient::set_trackers(
         &qbit,

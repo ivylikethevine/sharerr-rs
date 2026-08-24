@@ -1,0 +1,111 @@
+# The same stack, seeding through rTorrent instead of qBittorrent.
+#
+#   ./run_docker_tests.sh --rtorrent
+#
+# rTorrent is the third torrent client sharerr supports, and the reason it is
+# worth its own stack rather than trusting the hand-mocked XML-RPC server in
+# `sharerr-rtorrent`'s unit tests: the parser and throttle-method bugs fixed on
+# 2026-08-24 were exactly the kind a hand-mocked server cannot catch — a real
+# rTorrent's actual multicall response shapes and command set are the only
+# thing that can.
+#
+# `crazymax/rtorrent-rutorrent` bundles rTorrent, ruTorrent, and an nginx proxy
+# that answers plain HTTP XML-RPC POSTs over rTorrent's SCGI socket — which is
+# exactly the "some HTTP proxy in front of the RPC endpoint" shape
+# `sharerr-rtorrent`'s module docs describe, unlike qBittorrent and
+# Transmission, which speak HTTP natively. No `.htpasswd` is populated under
+# `/passwd`, so the proxy's Basic Auth is off entirely — the same "a proxy
+# with no such gate simply ignores the header" case `sharerr-rtorrent`'s docs
+# already cover, so `[rtorrent]` below can carry any placeholder username and
+# the vault any placeholder password.
+#
+# Everything else — the *arr apps, the fixtures, the deliberately-disagreeing
+# mounts — is identical to `compose.test.yml`. No Lidarr, same reasoning as
+# the Transmission stack: this exists to prove a client/protocol concern, not
+# indexer coverage.
+#
+# Ports are offset again so this can run alongside the other stacks.
+
+name: sharerr-rt-test
+
+x-puid: &puid "${SHARERR_TEST_UID:-1000}"
+x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
+
+services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.15
+    container_name: sharerr-rt-test-sonarr
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-rt/sonarr:/config
+      - ../tests/fixtures/media/tv:/tv:ro
+    ports:
+      - "127.0.0.1:48989:8989"
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.14.0
+    container_name: sharerr-rt-test-radarr
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-rt/radarr:/config
+      - ../tests/fixtures/media/movies:/movies:ro
+    ports:
+      - "127.0.0.1:47878:7878"
+
+  rtorrent:
+    # Pinned like the rest. Actively maintained (unlike the abandoned
+    # `linuxserver/rutorrent`, last published in 2021) — see the image's own
+    # GitHub, crazy-max/docker-rtorrent-rutorrent.
+    image: crazymax/rtorrent-rutorrent:5.3.12-0.16.20
+    container_name: sharerr-rt-test-rtorrent
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 32000
+        hard: 40000
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - rtorrent-data:/data
+      # rTorrent's view of the same files, at a third path — the same
+      # deliberately-disagreeing mounts as the qBittorrent stack. Read-only:
+      # rTorrent only ever hash-checks on add, never writes to sharerr's media.
+      - ../tests/fixtures/media:/downloads:ro
+      # Left empty on purpose — see the module comment above on why the RPC
+      # proxy's Basic Auth is off for this stack.
+      - rtorrent-passwd:/passwd
+    ports:
+      # The XML-RPC endpoint `[rtorrent].url` in sharerr.toml points at.
+      - "127.0.0.1:48000:8000"
+      # ruTorrent's own web UI — not something sharerr talks to, published
+      # only so a human can open it and look, the same as qBittorrent's.
+      - "127.0.0.1:48080:8080"
+
+  sharerr:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sharerr-rt-test-sharerr
+    depends_on: [sonarr, radarr, rtorrent]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      - ./config-rt:/config
+      - sharerr-data:/data
+      - ../tests/fixtures/media:/media:ro
+    ports:
+      - "127.0.0.1:48477:8477"
+
+volumes:
+  rtorrent-data:
+  rtorrent-passwd:
+  sharerr-data:

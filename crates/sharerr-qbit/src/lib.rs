@@ -16,7 +16,7 @@
 //!
 //! let torrent: Vec<u8> = Vec::new(); // built by sharerr-torrent
 //! qbit.add_torrent(
-//!     &AddRequest::new(&torrent, "share.torrent", "/downloads/tv/Some Show")
+//!     &AddRequest::new(&torrent, "abc123", "share.torrent", "/downloads/tv/Some Show")
 //!         .category("sharerr")
 //!         .tags("sharerr"),
 //! )

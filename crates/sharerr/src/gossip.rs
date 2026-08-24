@@ -34,7 +34,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
-use sharerr_core::endpoint::now_epoch;
+use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
 use sharerr_store::{EndpointKind, ObservedVia, Store};
 
 use crate::state::ServeState;
@@ -279,9 +279,22 @@ pub async fn ingest(
         }
     };
 
+    let now = now_epoch();
+
     for record in records.into_iter().take(MAX_RECORDS) {
         if let Err(reason) = verify(&record) {
             tracing::debug!(reason, "rejected a gossip record");
+            summary.invalid += 1;
+            continue;
+        }
+        // A `signed_at` further in the future than clock skew explains is
+        // treated the same as a bad signature: shape freshness is decided
+        // purely by comparing `signed_at` values below, so an unclamped
+        // future one would lock the subject's slot — every genuine update
+        // reads as `stale` — until this host's clock catches up to it, which
+        // for a wildly wrong sender clock is never.
+        if record.signed_at > now.saturating_add(MAX_FUTURE_SKEW_SECS) {
+            tracing::debug!("rejected a gossip record signed too far in the future");
             summary.invalid += 1;
             continue;
         }
@@ -449,15 +462,30 @@ pub async fn push(
 /// Periodically exchange records with every friend whose sharerr we know how to
 /// reach. Never returns.
 pub async fn exchange_loop(state: Arc<ServeState>) {
+    // Built once and reused for the life of the poller — the same pattern
+    // gluetun::poll_loop uses, and for the same reason: `reqwest::Client` is
+    // an Arc internally, so building a fresh one every exchange discards a
+    // live connection pool for nothing. A build failure is kept rather than
+    // retried every interval; nothing here can fix a broken TLS backend by
+    // trying again in fifteen minutes.
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string());
+
     loop {
-        if let Err(reason) = run_exchange(&state).await {
+        let outcome = match &http {
+            Ok(http) => run_exchange(&state, http).await,
+            Err(reason) => Err(reason.clone()),
+        };
+        if let Err(reason) = outcome {
             tracing::debug!(reason, "gossip exchange skipped");
         }
         tokio::time::sleep(EXCHANGE_INTERVAL).await;
     }
 }
 
-async fn run_exchange(state: &Arc<ServeState>) -> Result<(), String> {
+async fn run_exchange(state: &Arc<ServeState>, http: &reqwest::Client) -> Result<(), String> {
     let store = state.store().await?;
     let peers = store.list_peers().await.map_err(|e| e.to_string())?;
 
@@ -474,17 +502,18 @@ async fn run_exchange(state: &Arc<ServeState>) -> Result<(), String> {
     let known: Vec<&str> = peers.iter().filter_map(|p| p.pubkey.as_deref()).collect();
     let own = self_record(state).await;
 
+    // Opened fresh every exchange, unlike `http` above: a peer's outbound key
+    // can rotate between ticks (a re-friending, a revoke-and-reissue), and a
+    // stale in-memory copy would gossip under a key the peer no longer
+    // recognises. `http` carries no such per-tick state, which is the whole
+    // difference.
     let vault = state.open_vault().await?;
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
 
     // Concurrently: the friends are independent hosts behind independent keys,
     // and each exchange can sit on the 15s timeout above. In series, one friend
     // behind a dead tunnel delayed every friend after them — with five friends
     // and two unreachable, a single pass burned 30s of wall time doing nothing.
-    let (http, store, own, known) = (&http, &store, own.as_ref(), &known);
+    let (store, own, known) = (&store, own.as_ref(), &known);
     let exchanges = outbound.into_iter().filter_map(|peer| {
         let Ok(Some(key)) = vault.get(&secret_keys::peer_gossip_key(peer.id)) else {
             tracing::debug!(peer = %peer.label, "no outbound key stored — skipping gossip");
@@ -740,6 +769,28 @@ mod tests {
         assert_eq!(endpoints[0].addr, "http://new:2");
     }
 
+    /// A `signed_at` further in the future than clock skew explains is
+    /// rejected outright, not merely deferred: accepting it would let it win
+    /// every freshness comparison forever, past the point the sender's clock
+    /// is fixed.
+    #[tokio::test]
+    async fn a_record_signed_too_far_in_the_future_is_rejected() {
+        let (store, ids) = store_with(&["Alex"]).await;
+        let alex = identity(1);
+        let far_future = now_epoch() + MAX_FUTURE_SKEW_SECS + 3600;
+
+        let summary = ingest(
+            &store,
+            ids[0],
+            vec![record_for(&alex, "http://a:1", far_future)],
+        )
+        .await;
+
+        assert_eq!(summary.accepted, 0);
+        assert_eq!(summary.invalid, 1);
+        assert!(store.peer_endpoints(ids[0]).await.unwrap().is_empty());
+    }
+
     /// A record about a pubkey no peer row carries is ignored: gossip must not
     /// teach us about strangers.
     #[tokio::test]
@@ -986,7 +1037,8 @@ mod tests {
     #[tokio::test]
     async fn run_exchange_is_a_no_op_when_no_peer_has_a_gossip_url() {
         let (_dir, state) = served(&["Sam"]).await;
-        assert!(run_exchange(&state).await.is_ok());
+        let http = reqwest::Client::new();
+        assert!(run_exchange(&state, &http).await.is_ok());
     }
 
     /// `self_record` and `run_exchange`'s full push/pull path both depend on a
@@ -1101,7 +1153,8 @@ mod tests {
                     .unwrap();
                 drop(vault);
 
-                run_exchange(&state).await.unwrap();
+                let http = reqwest::Client::new();
+                run_exchange(&state, &http).await.unwrap();
             });
             Ok(())
         });

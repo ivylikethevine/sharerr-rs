@@ -43,6 +43,21 @@ fn compose_file() -> String {
     std::env::var("SHARERR_E2E_COMPOSE").unwrap_or_else(|_| "docker/compose.test.yml".to_owned())
 }
 
+/// Whether the running stack tags music through a Lidarr container.
+///
+/// Only the plain stack carries one — Transmission, rTorrent, and VPN exist to
+/// prove a client/topology concern, not indexer coverage, and duplicating the
+/// Lidarr flow into all three would triple that cost for no additional
+/// coverage of what those stacks are actually for; see `LIDARR` in
+/// `run_docker_tests.sh`. Defaults to `true` so driving this suite by hand
+/// against the plain stack, without the script setting the variable, keeps
+/// today's assumption.
+fn lidarr_configured() -> bool {
+    std::env::var("SHARERR_E2E_LIDARR")
+        .ok()
+        .is_none_or(|v| v != "0")
+}
+
 /// Identity of a file in the sense that matters here: *is it still the same file,
 /// in the same place, unmodified?*
 #[derive(Debug, PartialEq, Eq)]
@@ -164,10 +179,18 @@ fn a_real_sync_never_moves_or_rewrites_the_library() {
 
     // Without this the test passes vacuously: a sync that discovers nothing also
     // moves nothing. The count comes from the same fixtures `seed-arr` tags, so it
-    // cannot drift from what Sonarr and Radarr were told about.
+    // cannot drift from what Sonarr and Radarr were told about — except for music,
+    // which only the plain stack's Lidarr container tags at all; every other stack
+    // (Transmission, rTorrent, VPN) exists to prove a client/topology concern, not
+    // indexer coverage, and carries no Lidarr — see `LIDARR` in
+    // `run_docker_tests.sh`.
     let expected = sharerr_testkit::library::tv_files(&media).len()
         + sharerr_testkit::library::movie_files(&media).len()
-        + sharerr_testkit::library::music_files(&media).len();
+        + if lidarr_configured() {
+            sharerr_testkit::library::music_files(&media).len()
+        } else {
+            0
+        };
     assert!(
         report.contains(&format!("{expected} discovered")),
         "expected {expected} tagged file(s) — is the stack seeded? got: {report}"

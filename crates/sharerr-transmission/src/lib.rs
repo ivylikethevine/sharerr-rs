@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, is_auth_rejection, normalise_base,
+    http_client, is_auth_rejection, normalise_base,
 };
 use tokio::sync::RwLock;
 use url::Url;
@@ -77,9 +77,7 @@ impl TransmissionClient {
     /// suffix is appended here so an operator cannot get it subtly wrong. A base
     /// with a path (a reverse-proxy subpath) is preserved.
     pub fn new(base: &Url, username: &str, password: SecretString) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))?;
+        let http = http_client()?;
         let base = normalise_base(base);
         let endpoint = base
             .join(RPC_PATH)
@@ -93,14 +91,6 @@ impl TransmissionClient {
             password,
             session: Arc::new(RwLock::new(None)),
         })
-    }
-
-    fn unreachable(&self, err: &reqwest::Error) -> ClientError {
-        ClientError::Unreachable {
-            kind: KIND,
-            url: self.base.to_string(),
-            detail: error_chain(err),
-        }
     }
 
     /// Issue one RPC call, paying the session handshake if the server asks.
@@ -122,7 +112,10 @@ impl TransmissionClient {
                 request = request.header(SESSION_HEADER, session);
             }
 
-            let response = request.send().await.map_err(|e| self.unreachable(&e))?;
+            let response = request
+                .send()
+                .await
+                .map_err(|e| sharerr_client::unreachable(KIND, self.base.as_str(), &e))?;
             let status = response.status();
 
             if status == reqwest::StatusCode::CONFLICT && attempt == 0 {
@@ -555,7 +548,7 @@ mod tests {
         mount_handshake_then(&server, ok_body(json!({}))).await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads/tv")
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads/tv")
             .category("sharerr")
             .tags("shared");
         client(&server).add(&request).await.unwrap();
@@ -709,7 +702,7 @@ mod tests {
             .await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads")
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads")
             .upload_limit_kib(512)
             .ratio_limit(2.5);
         client(&server).add(&request).await.unwrap();
@@ -743,7 +736,7 @@ mod tests {
 
         let data = b"d8:announce0:e";
         client(&server)
-            .add(&AddRequest::new(data, "x.torrent", "/downloads"))
+            .add(&AddRequest::new(data, "abc123", "x.torrent", "/downloads"))
             .await
             .unwrap();
     }

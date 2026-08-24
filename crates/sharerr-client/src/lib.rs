@@ -23,6 +23,7 @@
 use std::fmt::Debug;
 
 use async_trait::async_trait;
+use std::time::Duration;
 use url::Url;
 
 /// Enough of an error body to identify the problem, bounded so a stray HTML error
@@ -80,6 +81,37 @@ pub fn split_tags(raw: &str) -> Vec<&str> {
 /// ignore the other.
 pub fn is_auth_rejection(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN
+}
+
+/// The request timeout every torrent-client HTTP client is built with.
+///
+/// A host that accepts the TCP connection and then stalls — a VPN namespace
+/// half-up, a reverse proxy whose SCGI backend has wedged — would otherwise
+/// block the sequential sync loop forever, with `/ready` still reporting
+/// ready. Sixty seconds is generous for an RPC call and short enough that
+/// the loop reports the stall on the same pass.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Build the `reqwest::Client` a torrent client speaks through: the shared
+/// [`DEFAULT_TIMEOUT`], nothing else. One place so a client cannot forget the
+/// timeout — two of the three already had.
+pub fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(DEFAULT_TIMEOUT)
+        .build()
+        .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))
+}
+
+/// Wrap a transport-level failure as [`ClientError::Unreachable`], with the
+/// cause chain rendered via [`error_chain`]. Lifted out of
+/// `sharerr-transmission` and `sharerr-rtorrent`, which built this identically
+/// apart from which field held the URL a client speaks to.
+pub fn unreachable(kind: ClientKind, url: &str, err: &reqwest::Error) -> ClientError {
+    ClientError::Unreachable {
+        kind,
+        url: url.to_owned(),
+        detail: error_chain(err),
+    }
 }
 
 /// A copy of `base` whose path ends in `/`, so `Url::join` appends rather than
@@ -211,6 +243,12 @@ pub struct TorrentFileEntry {
 pub struct AddRequest<'a> {
     /// The `.torrent` file's bytes.
     pub data: &'a [u8],
+    /// The torrent's info hash, lowercase hex. The caller always has this —
+    /// it built the `.torrent` file — so a client implementation that needs
+    /// to address the torrent it just added (rTorrent, to attach a
+    /// per-torrent throttle) can use it directly instead of guessing which
+    /// of the client's torrents was the one just added.
+    pub info_hash: &'a str,
     /// Filename for the upload. Cosmetic, but clients log it.
     pub filename: &'a str,
     /// Directory holding the existing content, as the *client* sees it.
@@ -240,9 +278,10 @@ pub struct AddRequest<'a> {
 }
 
 impl<'a> AddRequest<'a> {
-    pub fn new(data: &'a [u8], filename: &'a str, save_path: &'a str) -> Self {
+    pub fn new(data: &'a [u8], info_hash: &'a str, filename: &'a str, save_path: &'a str) -> Self {
         Self {
             data,
+            info_hash,
             filename,
             save_path,
             category: None,
@@ -383,7 +422,8 @@ mod tests {
     #[test]
     fn tags_split_the_way_every_client_expects_to_receive_them() {
         let data = b"x";
-        let request = AddRequest::new(data, "a.torrent", "/downloads").tags("sharerr, shared ,");
+        let request =
+            AddRequest::new(data, "abc123", "a.torrent", "/downloads").tags("sharerr, shared ,");
         assert_eq!(request.tag_list(), vec!["sharerr", "shared"]);
     }
 
@@ -391,7 +431,7 @@ mod tests {
     fn a_request_with_no_tags_has_no_tags_rather_than_one_empty_one() {
         let data = b"x";
         assert!(
-            AddRequest::new(data, "a.torrent", "/downloads")
+            AddRequest::new(data, "abc123", "a.torrent", "/downloads")
                 .tag_list()
                 .is_empty()
         );
@@ -401,7 +441,7 @@ mod tests {
     #[test]
     fn the_defaults_verify_and_start() {
         let data = b"x";
-        let request = AddRequest::new(data, "a.torrent", "/downloads");
+        let request = AddRequest::new(data, "abc123", "a.torrent", "/downloads");
         assert!(!request.skip_checking, "skipping the check must be opt-in");
         assert!(!request.stopped);
     }

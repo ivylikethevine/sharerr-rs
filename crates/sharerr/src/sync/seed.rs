@@ -21,6 +21,22 @@ use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, torrent_file_path};
 
+/// What [`Seeder::refresh_announce`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceRefresh {
+    /// The cached `.torrent` already announced to the current endpoint; the
+    /// client was not touched.
+    Current,
+    /// The client's tracker list and the cached file were both brought up to
+    /// date.
+    Updated,
+    /// There is no cached `.torrent` to compare against, so nothing was
+    /// checked or changed — the client may well still announce with an old
+    /// token, and recording it as confirmed would show "Valid" for a torrent
+    /// nobody has looked at.
+    NoCachedTorrent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedOutcome {
     /// A torrent already covering this file was found; nothing was added.
@@ -75,11 +91,20 @@ impl Seeder {
     /// large library one full-library round trip per file. A snapshot is
     /// sound: torrents this pass adds are single-file and each discovered item is
     /// a distinct file, so a later item can never be covered by an earlier add.
+    ///
+    /// `known_info_hash` is the hash sharerr last recorded for this item, if
+    /// any — set when the client no longer has the torrent (a reinstall, a
+    /// wiped session) but sharerr's own cache under `torrent_dir` might still.
+    /// Reusing that cached `.torrent` skips re-hashing the file, which for a
+    /// media library is gigabytes of CPU `find_existing` above cannot save
+    /// this call from, since the whole reason this path is reached is that
+    /// `torrents` no longer contains a match.
     pub async fn seed(
         &self,
         paths: &ResolvedPaths,
         announce: &AnnounceSet,
         torrents: &[TorrentSummary],
+        known_info_hash: Option<&str>,
     ) -> Result<SeedOutcome> {
         if let Some(existing) = self.find_existing(torrents, &paths.qbit).await? {
             tracing::info!(
@@ -92,7 +117,13 @@ impl Seeder {
             });
         }
 
-        let built = self.build(paths, announce).await?;
+        let (info_hash, data) = match self.reuse_cached(known_info_hash, announce).await {
+            Some(reused) => reused,
+            None => {
+                let built = self.build(paths, announce).await?;
+                (built.info_hash, built.data)
+            }
+        };
 
         // qBittorrent needs the directory the content sits in, not the file.
         let save_path = paths
@@ -101,9 +132,9 @@ impl Seeder {
             .map(Path::to_path_buf)
             .with_context(|| format!("{} has no parent directory", paths.qbit.display()))?;
 
-        let filename = format!("{}.torrent", built.info_hash);
+        let filename = format!("{info_hash}.torrent");
         let save_path = save_path.to_string_lossy();
-        let mut request = AddRequest::new(&built.data, &filename, &save_path)
+        let mut request = AddRequest::new(&data, &info_hash, &filename, &save_path)
             .category(&self.category)
             .tags(&self.tag)
             .skip_checking(self.skip_checking);
@@ -118,27 +149,116 @@ impl Seeder {
             .await
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 
-        Ok(SeedOutcome::Added {
-            info_hash: built.info_hash,
-        })
+        Ok(SeedOutcome::Added { info_hash })
+    }
+
+    /// Read back the `.torrent` sharerr cached for `known_info_hash`, bringing
+    /// its announce up to date if the endpoint has since moved, instead of
+    /// rebuilding it from the media file (see [`Self::seed`]).
+    ///
+    /// `None` covers every reason to fall back to a full rebuild — no known
+    /// hash, nothing cached under it, or the cached file being unreadable —
+    /// uniformly and without failing the item: a corrupt or missing cache
+    /// entry is recoverable by rebuilding, so none of these are worth more
+    /// than a warning.
+    async fn reuse_cached(
+        &self,
+        known_info_hash: Option<&str>,
+        announce: &AnnounceSet,
+    ) -> Option<(String, Vec<u8>)> {
+        let hash = known_info_hash?;
+        let path = torrent_file_path(&self.torrent_dir, hash);
+
+        let data = match tokio::fs::read(&path).await {
+            Ok(data) => data,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(err) => {
+                tracing::warn!(
+                    info_hash = hash,
+                    path = %path.display(),
+                    %err,
+                    "could not read the cached .torrent — rebuilding instead"
+                );
+                return None;
+            }
+        };
+
+        let current = match sharerr_torrent::read_announce(&data) {
+            Ok(current) => current,
+            Err(err) => {
+                tracing::warn!(
+                    info_hash = hash,
+                    path = %path.display(),
+                    %err,
+                    "cached .torrent could not be parsed — rebuilding instead"
+                );
+                return None;
+            }
+        };
+        if current.as_deref() == Some(announce.primary.as_str()) {
+            tracing::info!(
+                info_hash = hash,
+                "reusing the cached .torrent for a vanished torrent — skipping the rebuild"
+            );
+            return Some((hash.to_owned(), data));
+        }
+
+        let rewritten = match sharerr_torrent::rewrite_announce(&data, announce) {
+            Ok(rewritten) => rewritten,
+            Err(err) => {
+                tracing::warn!(
+                    info_hash = hash,
+                    path = %path.display(),
+                    %err,
+                    "could not rewrite the cached .torrent's announce — rebuilding instead"
+                );
+                return None;
+            }
+        };
+        if let Err(err) = tokio::fs::write(&path, &rewritten).await {
+            // The rewritten bytes are still handed to the client below; only
+            // the on-disk cache failed to update, and the next pass to touch
+            // this item will simply try the write again.
+            tracing::warn!(
+                info_hash = hash,
+                path = %path.display(),
+                %err,
+                "could not update the cached .torrent on disk"
+            );
+        }
+
+        tracing::info!(
+            info_hash = hash,
+            from = current.as_deref().unwrap_or("(none)"),
+            to = %announce.primary,
+            "reusing the cached .torrent for a vanished torrent, with its announce refreshed"
+        );
+        Some((hash.to_owned(), rewritten))
     }
 
     /// Bring one already-seeding torrent's announce URLs up to date, in both
     /// places they live: the cached `.torrent` the feed serves, and the tracker
     /// list inside the torrent client.
     ///
-    /// Returns whether anything was stale. The client is updated **before** the
-    /// file is rewritten: the file's announce is what the next pass compares
-    /// against, so if the client update fails the comparison stays stale and the
-    /// whole step is retried — the opposite order would record success it did not
-    /// achieve.
-    pub async fn refresh_announce(&self, info_hash: &str, announce: &AnnounceSet) -> Result<bool> {
+    /// The client is updated **before** the file is rewritten: the file's
+    /// announce is what the next pass compares against, so if the client
+    /// update fails the comparison stays stale and the whole step is retried
+    /// — the opposite order would record success it did not achieve.
+    pub async fn refresh_announce(
+        &self,
+        info_hash: &str,
+        announce: &AnnounceSet,
+    ) -> Result<AnnounceRefresh> {
         let path = torrent_file_path(&self.torrent_dir, info_hash);
         let data = match tokio::fs::read(&path).await {
             Ok(data) => data,
             // Nothing cached means nothing to compare or serve; the torrent in
-            // the client still works, so this is not worth failing the item over.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            // the client still works, so this is not worth failing the item
+            // over — but nothing here has confirmed what it announces to
+            // either, which the caller must not mistake for "current".
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AnnounceRefresh::NoCachedTorrent);
+            }
             Err(err) => {
                 return Err(err).with_context(|| format!("reading {}", path.display()));
             }
@@ -147,7 +267,7 @@ impl Seeder {
         let current = sharerr_torrent::read_announce(&data)
             .with_context(|| format!("parsing {}", path.display()))?;
         if current.as_deref() == Some(announce.primary.as_str()) {
-            return Ok(false);
+            return Ok(AnnounceRefresh::Current);
         }
 
         self.qbit
@@ -167,7 +287,7 @@ impl Seeder {
             to = %announce.primary,
             "announce URLs refreshed"
         );
-        Ok(true)
+        Ok(AnnounceRefresh::Updated)
     }
 
     /// Build the `.torrent` and keep a copy on disk.
@@ -313,6 +433,7 @@ mod tests {
     struct StubClient {
         files_result: Option<Box<FilesFn>>,
         set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
+        add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
     }
 
     impl std::fmt::Debug for StubClient {
@@ -344,7 +465,11 @@ mod tests {
                 None => Ok(Vec::new()),
             }
         }
-        async fn add(&self, _request: &AddRequest<'_>) -> sharerr_client::Result<()> {
+        async fn add(&self, request: &AddRequest<'_>) -> sharerr_client::Result<()> {
+            self.add_calls
+                .lock()
+                .unwrap()
+                .push((request.info_hash.to_owned(), request.data.to_vec()));
             Ok(())
         }
         async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
@@ -416,11 +541,11 @@ mod tests {
         let seeder = seeder(Arc::new(StubClient::default()), dir.path().to_path_buf());
         let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
 
-        let changed = seeder
+        let outcome = seeder
             .refresh_announce("deadbeef", &announce)
             .await
             .unwrap();
-        assert!(!changed);
+        assert_eq!(outcome, AnnounceRefresh::NoCachedTorrent);
     }
 
     #[tokio::test]
@@ -449,11 +574,11 @@ mod tests {
         let seeder = seeder(client.clone(), torrent_dir.clone());
         let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
 
-        let changed = seeder
+        let outcome = seeder
             .refresh_announce(&built.info_hash, &new_announce)
             .await
             .unwrap();
-        assert!(changed);
+        assert_eq!(outcome, AnnounceRefresh::Updated);
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
 
         let rewritten = std::fs::read(torrent_file_path(&torrent_dir, &built.info_hash)).unwrap();
@@ -461,12 +586,162 @@ mod tests {
         assert_eq!(current.as_deref(), Some("http://new.example/announce"));
 
         // Running it again against the now-current file must be a no-op.
-        let changed_again = seeder
+        let outcome_again = seeder
             .refresh_announce(&built.info_hash, &new_announce)
             .await
             .unwrap();
-        assert!(!changed_again);
+        assert_eq!(outcome_again, AnnounceRefresh::Current);
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
+    }
+
+    /// The behaviour item 3 of the roadmap's "Open work" existed to fix: a
+    /// torrent the client no longer has (a reinstall, a wiped session) must
+    /// not be re-hashed from the media file when sharerr's own cache under
+    /// `torrent_dir` already has the very `.torrent` that was built for it.
+    /// The media file is deleted before `seed` runs — if it fell back to
+    /// `build`, hashing a now-missing file would fail the call, so success
+    /// here is itself proof the cache was used.
+    #[tokio::test]
+    async fn seed_reuses_a_cached_torrent_for_a_vanished_client_entry_with_a_current_announce() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+        let built = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &announce,
+            })
+            .unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        std::fs::create_dir(&torrent_dir).unwrap();
+        std::fs::write(
+            torrent_file_path(&torrent_dir, &built.info_hash),
+            &built.data,
+        )
+        .unwrap();
+        std::fs::remove_file(&media).unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), torrent_dir.clone());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+
+        let outcome = seeder
+            .seed(&paths, &announce, &[], Some(&built.info_hash))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SeedOutcome::Added {
+                info_hash: built.info_hash.clone()
+            }
+        );
+
+        let add_calls = client.add_calls.lock().unwrap();
+        assert_eq!(add_calls.len(), 1);
+        assert_eq!(add_calls[0].0, built.info_hash);
+        assert_eq!(add_calls[0].1, built.data, "the cached bytes, unmodified");
+    }
+
+    /// As above, but the endpoint moved since the `.torrent` was cached: the
+    /// announce must be brought up to date, in the bytes handed to the
+    /// client *and* in the on-disk cache — the same guarantee
+    /// `refresh_announce` gives an already-seeding torrent — without ever
+    /// touching the (deleted) media file.
+    #[tokio::test]
+    async fn seed_reuses_and_refreshes_a_stale_cached_torrent_for_a_vanished_client_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
+        let built = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &old_announce,
+            })
+            .unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        std::fs::create_dir(&torrent_dir).unwrap();
+        std::fs::write(
+            torrent_file_path(&torrent_dir, &built.info_hash),
+            &built.data,
+        )
+        .unwrap();
+        std::fs::remove_file(&media).unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), torrent_dir.clone());
+        let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+
+        let outcome = seeder
+            .seed(&paths, &new_announce, &[], Some(&built.info_hash))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SeedOutcome::Added {
+                info_hash: built.info_hash.clone()
+            }
+        );
+
+        let add_calls = client.add_calls.lock().unwrap();
+        assert_eq!(add_calls.len(), 1);
+        assert_eq!(add_calls[0].0, built.info_hash);
+        let handed_to_client = sharerr_torrent::read_announce(&add_calls[0].1).unwrap();
+        assert_eq!(
+            handed_to_client.as_deref(),
+            Some("http://new.example/announce")
+        );
+
+        let cached = std::fs::read(torrent_file_path(&torrent_dir, &built.info_hash)).unwrap();
+        assert_eq!(
+            sharerr_torrent::read_announce(&cached).unwrap().as_deref(),
+            Some("http://new.example/announce"),
+            "the on-disk cache must be refreshed too, not just the bytes sent to the client"
+        );
+    }
+
+    /// No cache under the known hash (never cached, or the file was lost) —
+    /// `seed` must still fall back to a full rebuild rather than failing the
+    /// item, exactly as it did before `known_info_hash` existed.
+    #[tokio::test]
+    async fn seed_falls_back_to_building_when_the_known_hash_has_nothing_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), torrent_dir);
+        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+
+        let outcome = seeder
+            .seed(&paths, &announce, &[], Some("stale-hash-nothing-cached"))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, SeedOutcome::Added { .. }));
+        assert_eq!(client.add_calls.lock().unwrap().len(), 1);
     }
 
     fn torrent(hash: &str, save_path: &str, content_path: &str) -> TorrentSummary {

@@ -173,7 +173,29 @@ pub enum ReportOutcome {
 pub enum ReportError {
     BadKeyHash,
     InvalidRecord,
+    /// `signed_at` is further in the future than any clock skew explains.
+    /// Freshness is decided by comparing `signed_at` values, so without this
+    /// a single record stamped `i64::MAX` would lock its slot forever.
+    FutureTimestamp,
+    /// The table is at capacity and this key hash is not in it. The POST is
+    /// unauthenticated, so an unbounded map is a memory DoS; refusing new
+    /// keys rather than evicting old ones means a flood cannot displace the
+    /// records real peers depend on.
+    Full,
 }
+
+/// How far ahead of this host's clock a `signed_at` may be and still be
+/// accepted.
+pub const MAX_FUTURE_SKEW_SECS: i64 = 5 * 60;
+
+/// How long a record is kept after it was signed. A sharerr instance
+/// re-reports on a timer measured in minutes; anything this old belongs to an
+/// instance that has gone away.
+pub const RECORD_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// The most key hashes held at once. Each entry is bounded by the request
+/// body limit; this bounds the count.
+pub const MAX_RECORDS: usize = 10_000;
 
 impl LighthouseState {
     pub fn new(decoy_secret: [u8; 32]) -> Self {
@@ -191,18 +213,33 @@ impl LighthouseState {
         key_hash: &str,
         record: EndpointRecord,
     ) -> Result<ReportOutcome, ReportError> {
-        if !valid_key_hash(key_hash) {
+        // Lowercased before anything else: `lookup` lowercases too, and a
+        // mixed-case entry would be unreachable *and* bypass the per-hash
+        // staleness check (2^64 case variants of one logical hash).
+        let key_hash = key_hash.to_ascii_lowercase();
+        if !valid_key_hash(&key_hash) {
             return Err(ReportError::BadKeyHash);
         }
         verify(&record).map_err(|_| ReportError::InvalidRecord)?;
+        let now = now_epoch();
+        if record.signed_at > now.saturating_add(MAX_FUTURE_SKEW_SECS) {
+            return Err(ReportError::FutureTimestamp);
+        }
 
         let mut records = self.records.write().await;
-        if let Some(existing) = records.get(key_hash)
+        if let Some(existing) = records.get(&key_hash)
             && existing.record.signed_at >= record.signed_at
         {
             return Ok(ReportOutcome::Stale);
         }
-        records.insert(key_hash.to_owned(), Stored { record });
+        if !records.contains_key(&key_hash) && records.len() >= MAX_RECORDS {
+            records
+                .retain(|_, stored| now.saturating_sub(stored.record.signed_at) < RECORD_TTL_SECS);
+            if records.len() >= MAX_RECORDS {
+                return Err(ReportError::Full);
+            }
+        }
+        records.insert(key_hash, Stored { record });
         Ok(ReportOutcome::Accepted)
     }
 
@@ -215,13 +252,6 @@ impl LighthouseState {
             return stored.record.clone();
         }
         self.decoy(key_hash)
-    }
-
-    /// Every key hash currently held, for the standalone binary's own
-    /// diagnostics. Not exposed over HTTP — nothing should ever be able to
-    /// enumerate what the lighthouse knows about.
-    pub async fn known_key_hashes(&self) -> usize {
-        self.records.read().await.len()
     }
 
     fn decoy(&self, key_hash: &str) -> EndpointRecord {
@@ -314,6 +344,14 @@ async fn report(
             .into_response(),
         Err(ReportError::InvalidRecord) => {
             (StatusCode::BAD_REQUEST, "record did not verify").into_response()
+        }
+        Err(ReportError::FutureTimestamp) => (
+            StatusCode::BAD_REQUEST,
+            "signed_at is in the future — check the reporting host's clock",
+        )
+            .into_response(),
+        Err(ReportError::Full) => {
+            (StatusCode::SERVICE_UNAVAILABLE, "lighthouse is full").into_response()
         }
     }
 }

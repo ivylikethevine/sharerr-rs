@@ -155,6 +155,18 @@ pub async fn set_gossip(
         }
     };
 
+    // The URL is written first, and only then the key: `set_peer_gossip_url`
+    // answers whether the peer exists at all, and a `POST` for a peer that
+    // was deleted from another tab used to store an orphan `peer.gossip.{id}`
+    // in the vault that nothing could ever remove. The URL half is what the
+    // vault half is *for*, so a peer that cannot take the URL takes no key.
+    let result = store.set_peer_gossip_url(id, url.as_deref()).await;
+    match result {
+        Ok(true) => {}
+        Ok(false) => return rejected(&state, "there is no friend with that id any more").await,
+        Err(err) => return rejected(&state, &format!("could not save that: {err}")).await,
+    }
+
     // The key is optional and write-only, same rules as every stored secret:
     // blank means leave alone, the checkbox means clear.
     let key = form.key.trim();
@@ -174,11 +186,8 @@ pub async fn set_gossip(
         }
     }
 
-    let result = store.set_peer_gossip_url(id, url.as_deref()).await;
-    if result.is_ok() {
-        tracing::info!(peer_id = id, "updated a friend's gossip settings");
-    }
-    applied(&state, result, "save that").await
+    tracing::info!(peer_id = id, "updated a friend's gossip settings");
+    Redirect::to("/peers").into_response()
 }
 
 /// Remove a friend entirely, freeing the name for reuse.
@@ -190,6 +199,21 @@ pub async fn delete(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
     let result = store.delete_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "deleted a friend");
+        // The row is gone; the friend's gossip key must not outlive it as an
+        // orphan only `sharerr vault list` can see. Best-effort: a vault that
+        // will not open now is a startup problem the operator already knows
+        // about, not a reason to fail a delete that has already happened.
+        // `peers.id` is AUTOINCREMENT, so a leftover can never re-attach.
+        match state.serve.open_vault().await {
+            Ok(mut vault) => {
+                if let Err(err) = vault.remove(&secret_keys::peer_gossip_key(id)) {
+                    tracing::warn!(peer_id = id, error = %err, "could not remove the friend's gossip key");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(peer_id = id, error = %err, "could not open the vault to remove the friend's gossip key");
+            }
+        }
     }
     applied(&state, result, "delete that friend").await
 }
@@ -305,7 +329,10 @@ async fn build(
             .collect(),
         error: error.or(list_error),
         revealed,
-        feed_url: format!("{}/api", config.public_base_url()),
+        // The live endpoint, not `config.public_base_url()` — see
+        // `ServeState::public_base_url`'s docs: a gluetun-only deployment
+        // must advertise the resolved address here too.
+        feed_url: format!("{}/api", state.serve.public_base_url().await),
     }
 }
 
@@ -343,6 +370,29 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
     }
 }
 
+/// Which relative-time bucket a moment falls into, and the whole-unit count
+/// within it. `ago` and `topology::compact_ago` share this ladder and differ
+/// only in the words they wrap it in — this is the one function whose
+/// thresholds a single test can cover for both.
+pub(crate) enum AgoBucket {
+    Now,
+    Minutes(i64),
+    Hours(i64),
+    Days(i64),
+}
+
+pub(crate) fn ago_bucket(epoch_secs: i64) -> AgoBucket {
+    // Includes negative values, which mean a clock that moved backwards.
+    let seconds = now_epoch().saturating_sub(epoch_secs);
+
+    match seconds {
+        s if s < 60 => AgoBucket::Now,
+        s if s < 3_600 => AgoBucket::Minutes(s / 60),
+        s if s < 86_400 => AgoBucket::Hours(s / 3_600),
+        s => AgoBucket::Days(s / 86_400),
+    }
+}
+
 /// Coarse relative time.
 ///
 /// Relative rather than absolute because the question is always "recently?", never
@@ -350,14 +400,11 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
 /// usually does not have configured. `pub(crate)` because the status page's
 /// one-glance line answers the same "recently?" question.
 pub(crate) fn ago(epoch_secs: i64) -> String {
-    let seconds = now_epoch().saturating_sub(epoch_secs);
-
-    match seconds {
-        // Includes negative values, which mean a clock that moved backwards.
-        s if s < 60 => "just now".to_owned(),
-        s if s < 3_600 => format!("{} minute(s) ago", s / 60),
-        s if s < 86_400 => format!("{} hour(s) ago", s / 3_600),
-        s => format!("{} day(s) ago", s / 86_400),
+    match ago_bucket(epoch_secs) {
+        AgoBucket::Now => "just now".to_owned(),
+        AgoBucket::Minutes(n) => format!("{n} minute(s) ago"),
+        AgoBucket::Hours(n) => format!("{n} hour(s) ago"),
+        AgoBucket::Days(n) => format!("{n} day(s) ago"),
     }
 }
 
@@ -459,6 +506,22 @@ mod tests {
 
         let response = page(State(state)).await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// On a gluetun-only deployment (no static `tracker.advertised_host`),
+    /// `feed_url` must track the live resolved endpoint — not fall back to
+    /// `http://localhost:<port>`, which only works from the box sharerr
+    /// itself runs on.
+    #[tokio::test]
+    async fn the_feed_url_tracks_the_live_endpoint_not_localhost() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .endpoint()
+            .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
+        let state = web_state(serve);
+
+        let page = build(&state, None, None).await;
+        assert_eq!(page.feed_url, "http://203.0.113.9:41234/api");
     }
 
     #[tokio::test]

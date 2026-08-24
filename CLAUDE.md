@@ -32,7 +32,7 @@ already produced one confidently wrong conclusion here.
 
 ## MSRV
 
-`rust-version` is 1.88, and the Dockerfile pins the same toolchain, which makes
+`rust-version` is 1.98, and the Dockerfile pins the same toolchain, which makes
 `docker build .` the **de-facto MSRV check** — a local toolchain is invariably
 newer and will not catch a breach. Two have shipped unnoticed this way
 (`str::split_at_checked` in a const context, then let-chains). Build the image

@@ -119,6 +119,29 @@ pub mod secret_keys {
         GLUETUN_CLIENT_API_KEY,
         NOTIFICATIONS_WEBHOOK_URL,
     ];
+
+    /// Whether `value` is a usable value for `key` — the checks every path
+    /// that stores a secret (the web UI and `sharerr vault set`) must agree
+    /// on, so a value one accepts cannot be one the other would have refused.
+    ///
+    /// Only [`TRACKER_TOKEN`] has a shape today: it becomes one path segment
+    /// of every announce URL, unencoded, and the tracker route matches one
+    /// segment. A `/`, `?`, `#` or `%` — a pasted base64 value like
+    /// `ab/cd+ef==` — makes every announce URL 404 and truncates the token
+    /// read back out of the URL.
+    pub fn validate_value(key: &str, value: &str) -> Result<(), String> {
+        if key == TRACKER_TOKEN {
+            let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~');
+            if !value.chars().all(allowed) {
+                return Err(format!(
+                    "{TRACKER_TOKEN} may only contain letters, digits, `-`, `_`, `.` and `~`: \
+                     it becomes one segment of every announce URL, unencoded. Use \
+                     \"Generate\" or a hex value"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Dotted paths of the settings the web UI can write back to `sharerr.toml`.
@@ -602,6 +625,9 @@ pub enum TorrentBackend {
 }
 
 impl TorrentBackend {
+    /// Every backend sharerr can drive.
+    pub const ALL: &'static [Self] = &[Self::Qbittorrent, Self::Transmission, Self::Rtorrent];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Qbittorrent => "qbittorrent",
@@ -619,6 +645,11 @@ impl TorrentBackend {
             Self::Transmission => "Transmission",
             Self::Rtorrent => "rTorrent",
         }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|b| b.as_str() == value)
     }
 }
 

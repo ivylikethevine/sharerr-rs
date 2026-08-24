@@ -41,13 +41,11 @@ pub struct ResolvedPaths {
 /// Translates one file path between the *arr view, sharerr's view, and
 /// qBittorrent's view of the same library.
 pub struct PathResolver {
-    /// Sorted longest-prefix-first so nested mounts resolve to the most specific rule.
     maps: Vec<PathMapping>,
 }
 
 impl PathResolver {
-    pub fn new(mut maps: Vec<PathMapping>) -> Self {
-        maps.sort_by_key(|m| std::cmp::Reverse(m.arr.components().count()));
+    pub fn new(maps: Vec<PathMapping>) -> Self {
         Self { maps }
     }
 
@@ -77,27 +75,26 @@ impl PathResolver {
             return Err(PathError::NotAbsolute(arr_path.to_path_buf()));
         }
 
-        for map in &self.maps {
-            // `strip_prefix` compares whole components, so `/tv` does not match
-            // `/tv-archive/...` the way a string prefix check would.
-            if let Ok(rest) = arr_path.strip_prefix(&map.arr) {
-                let sharerr = map.sharerr.join(rest);
-                let qbit = map.qbit.as_ref().unwrap_or(&map.sharerr).join(rest);
-                return Ok(ResolvedPaths {
+        Ok(
+            match most_specific_match(&self.maps, |m| &m.arr, arr_path) {
+                Some((map, rest)) => {
+                    let sharerr = map.sharerr.join(&rest);
+                    let qbit = map.qbit.as_ref().unwrap_or(&map.sharerr).join(&rest);
+                    ResolvedPaths {
+                        arr: arr_path.to_path_buf(),
+                        sharerr,
+                        qbit,
+                        mapping_applied: true,
+                    }
+                }
+                None => ResolvedPaths {
                     arr: arr_path.to_path_buf(),
-                    sharerr,
-                    qbit,
-                    mapping_applied: true,
-                });
-            }
-        }
-
-        Ok(ResolvedPaths {
-            arr: arr_path.to_path_buf(),
-            sharerr: arr_path.to_path_buf(),
-            qbit: arr_path.to_path_buf(),
-            mapping_applied: false,
-        })
+                    sharerr: arr_path.to_path_buf(),
+                    qbit: arr_path.to_path_buf(),
+                    mapping_applied: false,
+                },
+            },
+        )
     }
 
     /// Resolve a path sharerr itself discovered — a `[[library]]` file.
@@ -106,26 +103,25 @@ impl PathResolver {
     /// a `[[path_map]]` whose `arr` prefix happens to match the library would
     /// otherwise translate the path into one that exists nowhere. The only
     /// translation that can apply is sharerr→qbit, taken from the most specific
-    /// rule that spells out a distinct `qbit` prefix. With no such rule the path
-    /// passes through to all three views, which is correct when qBittorrent
-    /// shares sharerr's mounts.
+    /// rule whose `sharerr` prefix matches — the same most-specific-wins choice
+    /// [`Self::resolve`] makes on the arr side, via the same [`most_specific_match`].
+    /// A more specific rule that leaves `qbit` unset still wins the match and
+    /// still means "no translation" rather than falling through to a less
+    /// specific rule that happens to define one: two sources of the same file
+    /// (an *arr-reported path and a directory scan) must resolve to the same
+    /// qBittorrent path, or a `skip_checking` add can point at the wrong one.
+    /// With no matching rule at all the path passes through to all three views,
+    /// which is correct when qBittorrent shares sharerr's mounts.
     pub fn resolve_sharerr(&self, path: &Path) -> Result<ResolvedPaths, PathError> {
         if !path.is_absolute() {
             return Err(PathError::NotAbsolute(path.to_path_buf()));
         }
 
-        let translated = self
-            .maps
-            .iter()
-            .filter_map(|map| {
-                let qbit_prefix = map.qbit.as_ref()?;
-                let rest = path.strip_prefix(&map.sharerr).ok()?;
-                Some((map.sharerr.components().count(), qbit_prefix.join(rest)))
-            })
-            .max_by_key(|(specificity, _)| *specificity);
-
-        let (mapping_applied, qbit) = match translated {
-            Some((_, qbit)) => (true, qbit),
+        let (mapping_applied, qbit) = match most_specific_match(&self.maps, |m| &m.sharerr, path) {
+            Some((map, rest)) => match &map.qbit {
+                Some(qbit_prefix) => (true, qbit_prefix.join(&rest)),
+                None => (false, path.to_path_buf()),
+            },
             None => (false, path.to_path_buf()),
         };
         Ok(ResolvedPaths {
@@ -135,6 +131,37 @@ impl PathResolver {
             mapping_applied,
         })
     }
+}
+
+/// The single most specific configured mapping whose prefix (as picked by
+/// `prefix_of`) matches `path`, and the path remaining after stripping it.
+///
+/// "Most specific" means the longest prefix by component count, not by
+/// configuration order — [`PathResolver::resolve`] and
+/// [`PathResolver::resolve_sharerr`] used to each implement their own version
+/// of this, and disagreed on what "most specific" meant when a matching rule
+/// didn't define the field the caller needed: `resolve` already let its most
+/// specific *arr* match win even without a `qbit` override, but
+/// `resolve_sharerr` skipped a specific match lacking `qbit` and fell through
+/// to a less specific rule that had one — producing two different
+/// qBittorrent paths for the same file depending on whether it was reached
+/// via an *arr report or a library scan. One function, used by both, removes
+/// the chance of that drifting apart again.
+fn most_specific_match<'m>(
+    maps: &'m [PathMapping],
+    prefix_of: impl Fn(&PathMapping) -> &Path,
+    path: &Path,
+) -> Option<(&'m PathMapping, PathBuf)> {
+    maps.iter()
+        // `strip_prefix` compares whole components, so `/tv` does not match
+        // `/tv-archive/...` the way a string prefix check would.
+        .filter_map(|map| {
+            let prefix = prefix_of(map);
+            let rest = path.strip_prefix(prefix).ok()?;
+            Some((prefix.components().count(), map, rest.to_path_buf()))
+        })
+        .max_by_key(|(specificity, _, _)| *specificity)
+        .map(|(_, map, rest)| (map, rest))
 }
 
 #[cfg(test)]
@@ -253,5 +280,30 @@ mod tests {
         let out = r.resolve_sharerr(Path::new("/media/x.mkv")).unwrap();
         assert_eq!(out.qbit, PathBuf::from("/media/x.mkv"));
         assert!(!out.mapping_applied);
+    }
+
+    /// The bug `resolve` and `resolve_sharerr` used to disagree on: a specific
+    /// rule with no `qbit` override sits ahead of a general rule that has one.
+    /// `resolve` already let the specific arr-side match win outright, with no
+    /// fallback to the general rule's `qbit`; `resolve_sharerr` used to skip
+    /// the specific match (it has no `qbit`) and fall through to the general
+    /// one instead, producing a second, different qBittorrent path for the
+    /// same file. Both entry points must now agree.
+    #[test]
+    fn a_specific_rule_without_qbit_wins_over_a_general_rule_with_one() {
+        let r = PathResolver::new(vec![
+            map("/tv", "/media", Some("/downloads")),
+            map("/tv/extras", "/media/extras", None),
+        ]);
+
+        let via_arr = r.resolve(Path::new("/tv/extras/x.mkv")).unwrap();
+        assert_eq!(via_arr.qbit, PathBuf::from("/media/extras/x.mkv"));
+
+        let via_directory_scan = r.resolve_sharerr(Path::new("/media/extras/x.mkv")).unwrap();
+        assert_eq!(
+            via_directory_scan.qbit, via_arr.qbit,
+            "the same file must resolve to the same qBittorrent path regardless of entry point"
+        );
+        assert!(!via_directory_scan.mapping_applied);
     }
 }

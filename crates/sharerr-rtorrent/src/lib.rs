@@ -47,7 +47,12 @@
 //!   schedule keyed to a *view*, not a per-torrent XML-RPC setting — there is
 //!   nothing this trait's `ratio_limit` can attach to. `upload_limit_kib`
 //!   *is* honoured, via a per-torrent named throttle
-//!   (`d.throttle_name.set` + `throttle.up.max.set`).
+//!   (`throttle.up = name,rate_kib` to define it, `d.throttle_name.set` to
+//!   attach it). Note the shape: `throttle.up` takes the rate in **KiB/s**
+//!   and `throttle.up.max` is a *getter* with no `.set` variant — an earlier
+//!   version of this crate called `throttle.up.max.set` with a bytes/s
+//!   value, which faulted after the torrent had already loaded, so every
+//!   item was recorded failed while it was actually live.
 //! - **No tracker removal.** rTorrent's XML-RPC API has never grown a way to
 //!   remove a tracker from an already-loaded torrent (tracked upstream as
 //!   [rakshasa/rtorrent#165](https://github.com/rakshasa/rtorrent/issues/165),
@@ -60,14 +65,17 @@
 //!   stale address alongside it, forever, which is harmless beyond a wasted
 //!   announce attempt per interval.
 //!
-//! # No live rTorrent in this project's test suite
+//! # A hand-mocked server proves the parser, not the protocol
 //!
 //! Every call this crate makes is verified against a hand-mocked XML-RPC
 //! server in the tests below, which proves this crate parses the requests
 //! and responses it expects — not that those are the requests and responses
-//! a real rTorrent expects. Unlike qBittorrent and Transmission, this
-//! project's tier-2 suite (`run_docker_tests.sh`) does not drive a real
-//! rTorrent instance; see `docs/ROADMAP.md` for that gap.
+//! a real rTorrent sends. `run_docker_tests.sh --rtorrent` covers that half:
+//! the same tier-2 suite qBittorrent and Transmission run, against a real
+//! `crazymax/rtorrent-rutorrent` container. It is what actually caught two
+//! bugs the mock could not have: `d.multicall2` needs a leading empty
+//! parameter or a real rTorrent rejects it outright, and an empty result
+//! comes back as a self-closing `<data/>` rather than `<data></data>`.
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -76,7 +84,7 @@ use quick_xml::reader::Reader;
 use secrecy::{ExposeSecret, SecretString};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, is_auth_rejection,
+    http_client, is_auth_rejection,
 };
 use url::Url;
 
@@ -110,23 +118,13 @@ impl RtorrentClient {
     /// module docs for why this is the full RPC URL, not a base to append a
     /// path to.
     pub fn new(endpoint: &Url, username: &str, password: SecretString) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))?;
+        let http = http_client()?;
         Ok(Self {
             http,
             endpoint: endpoint.clone(),
             username: username.to_owned(),
             password,
         })
-    }
-
-    fn unreachable(&self, err: &reqwest::Error) -> ClientError {
-        ClientError::Unreachable {
-            kind: KIND,
-            url: self.endpoint.to_string(),
-            detail: error_chain(err),
-        }
     }
 
     /// Issue one XML-RPC call and return its single decoded return value.
@@ -141,7 +139,7 @@ impl RtorrentClient {
             .body(body)
             .send()
             .await
-            .map_err(|e| self.unreachable(&e))?;
+            .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
 
         let status = response.status();
         if is_auth_rejection(status) {
@@ -244,6 +242,13 @@ impl TorrentClient for RtorrentClient {
             .call_multi(
                 "d.multicall2",
                 &[
+                    // The empty string is required, not optional padding: a real
+                    // rTorrent rejects `d.multicall2` outright ("invalid target")
+                    // without it, in every version tested. It stands in for the
+                    // pre-multicall2 API's now-removed "default target" argument —
+                    // see the method's own name, keeping the "2" despite dropping
+                    // that argument's *meaning*, not its position.
+                    Param::Str(""),
                     Param::Str(MAIN_VIEW),
                     Param::Str("d.hash="),
                     Param::Str("d.name="),
@@ -342,14 +347,22 @@ impl TorrentClient for RtorrentClient {
             // rTorrent has no direct "set this torrent's upload cap" call —
             // the mechanism is a named per-torrent throttle: define one at the
             // requested rate, then assign the torrent to it. The throttle name
-            // only has to be unique, so the hash rTorrent just assigned it
-            // works and needs no bookkeeping of its own.
-            let hash = self.hash_of_last_add().await?;
+            // only has to be unique, so the torrent's own info hash works and
+            // needs no bookkeeping of its own. Using `request.info_hash`
+            // rather than asking rTorrent which torrent it loaded last avoids
+            // a race: `load.raw_start` loads asynchronously, so immediately
+            // afterward "last loaded" is not reliably "the one just added",
+            // especially with a `view.sort_current` configured in
+            // `.rtorrent.rc`.
+            let hash = request.info_hash.to_ascii_lowercase();
             let throttle_name = format!("sharerr-{hash}");
-            let bytes_per_sec = (kib * 1024).to_string();
+            // `throttle.up` is `(name, rate)` with the rate in KiB/s — the
+            // same unit `AddRequest::upload_limit_kib` carries, so no
+            // conversion. See the module docs for the getter/setter trap.
+            let rate_kib = kib.to_string();
             self.call(
-                "throttle.up.max.set",
-                &[Param::Str(&throttle_name), Param::Str(&bytes_per_sec)],
+                "throttle.up",
+                &[Param::Str(&throttle_name), Param::Str(&rate_kib)],
             )
             .await?;
             self.call(
@@ -400,28 +413,6 @@ impl TorrentClient for RtorrentClient {
             "inserted a fresh tracker tier; rTorrent cannot remove the stale one"
         );
         Ok(())
-    }
-}
-
-impl RtorrentClient {
-    /// The hash of whatever this client most recently `load.raw*`-ed, for
-    /// attaching a throttle immediately after `add`. `d.multicall2` ordering
-    /// is unspecified, so this asks for the single most recently loaded item
-    /// via the `main` view's natural load order rather than guessing.
-    async fn hash_of_last_add(&self) -> Result<String> {
-        let rows = self
-            .call_multi(
-                "d.multicall2",
-                &[Param::Str(MAIN_VIEW), Param::Str("d.hash=")],
-            )
-            .await?;
-        rows.last()
-            .and_then(|row| row.first())
-            .map(|v| as_str(v).to_ascii_lowercase())
-            .ok_or_else(|| ClientError::Malformed {
-                kind: KIND,
-                detail: "no torrents loaded after add — could not attach a throttle".to_owned(),
-            })
     }
 }
 
@@ -540,11 +531,14 @@ enum XmlValue {
 /// Decode one `methodResponse` body into its single return value, or the
 /// message from a `<fault>`.
 fn parse_response(body: &str) -> std::result::Result<XmlValue, String> {
+    // No `trim_text`: it trims every text *fragment*, and an entity reference
+    // splits one string into several, so `Tom &amp; Jerry` would come back as
+    // `Tom&Jerry` — a path that no longer exists. Whitespace between tags is
+    // skipped by `next_structural` instead, only where a tag is expected.
     let mut reader = Reader::from_str(body);
-    reader.config_mut().trim_text(true);
 
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        match next_structural(&mut reader)? {
             Event::Start(e) if e.name().as_ref() == b"fault" => {
                 expect_start(&mut reader, b"value")?;
                 let value = parse_value(&mut reader)?;
@@ -578,11 +572,20 @@ fn fault_message(value: &XmlValue) -> String {
 /// Read one `<value>...</value>` tree, assuming the opening `<value>` tag was
 /// just consumed by the caller.
 fn parse_value(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
-    let tag = match reader.read_event().map_err(|e| e.to_string())? {
+    let tag = match next_structural(reader)? {
         Event::End(e) if e.name().as_ref() == b"value" => return Ok(XmlValue::Str(String::new())),
+        // A bare `<value>text</value>` is an implicit string; its text may be
+        // split across several events by entity references, exactly like an
+        // explicit `<string>`.
         Event::Text(t) => {
-            let text = t.decode().map_err(|e| e.to_string())?.into_owned();
-            expect_end(reader, b"value")?;
+            let mut text = t.decode().map_err(|e| e.to_string())?.into_owned();
+            read_text_until_end(reader, b"value", &mut text)?;
+            return Ok(XmlValue::Str(text));
+        }
+        Event::GeneralRef(r) => {
+            let mut text = String::new();
+            push_general_ref(&r, &mut text)?;
+            read_text_until_end(reader, b"value", &mut text)?;
             return Ok(XmlValue::Str(text));
         }
         Event::Start(e) => e.name().as_ref().to_vec(),
@@ -611,16 +614,25 @@ fn parse_value(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Stri
 }
 
 fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
-    expect_start(reader, b"data")?;
     let mut items = Vec::new();
-    loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Start(e) if e.name().as_ref() == b"value" => {
-                items.push(parse_value(reader)?);
+    match next_structural(reader)? {
+        Event::Start(e) if e.name().as_ref() == b"data" => loop {
+            match next_structural(reader)? {
+                Event::Start(e) if e.name().as_ref() == b"value" => {
+                    items.push(parse_value(reader)?);
+                }
+                Event::End(e) if e.name().as_ref() == b"data" => break,
+                other => return Err(format!("unexpected event inside <data>: {other:?}")),
             }
-            Event::End(e) if e.name().as_ref() == b"data" => break,
-            other => return Err(format!("unexpected event inside <data>: {other:?}")),
-        }
+        },
+        // A real rTorrent sends a self-closing `<data/>` for an empty array
+        // (confirmed against 0.16.20) rather than `<data></data>` — the
+        // hand-mocked server this crate's own tests use never produced this
+        // shape, since nothing wrote it that way by hand. `Event::Empty` is
+        // the whole element in one event, with no matching `End` to break a
+        // loop on, so it has to be handled before entering one.
+        Event::Empty(e) if e.name().as_ref() == b"data" => {}
+        other => return Err(format!("expected <data>, got {other:?}")),
     }
     expect_end(reader, b"array")?;
     Ok(XmlValue::Array(items))
@@ -629,7 +641,7 @@ fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Stri
 fn parse_struct(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
     let mut members = Vec::new();
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        match next_structural(reader)? {
             Event::Start(e) if e.name().as_ref() == b"member" => {
                 expect_start(reader, b"name")?;
                 let name = read_element_text(reader, b"name")?;
@@ -645,26 +657,83 @@ fn parse_struct(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Str
     Ok(XmlValue::Struct(members))
 }
 
+/// The text content of `<tag>…</tag>`, whose opening tag the caller has just
+/// consumed.
+///
+/// quick-xml does not expand entities on its own: `Tom &amp; Jerry` arrives
+/// as `Text("Tom ") / GeneralRef("amp") / Text(" Jerry")`, so a torrent name
+/// or path holding `&`, `<`, or `>` — which rTorrent escapes on the way out —
+/// is several events, not one. Anything less than a loop here broke every
+/// `list()`/`files()` call the moment one such name existed.
 fn read_element_text(
     reader: &mut Reader<&[u8]>,
     tag: &[u8],
 ) -> std::result::Result<String, String> {
-    match reader.read_event().map_err(|e| e.to_string())? {
-        Event::End(e) if e.name().as_ref() == tag => Ok(String::new()),
-        Event::Text(t) => {
-            let text = t.decode().map_err(|e| e.to_string())?.into_owned();
-            expect_end(reader, tag)?;
-            Ok(text)
+    let mut text = String::new();
+    read_text_until_end(reader, tag, &mut text)?;
+    Ok(text)
+}
+
+/// Append every text and entity event up to `</tag>` onto `text`.
+fn read_text_until_end(
+    reader: &mut Reader<&[u8]>,
+    tag: &[u8],
+    text: &mut String,
+) -> std::result::Result<(), String> {
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::End(e) if e.name().as_ref() == tag => return Ok(()),
+            Event::Text(t) => text.push_str(&t.decode().map_err(|e| e.to_string())?),
+            Event::CData(c) => text.push_str(&String::from_utf8_lossy(&c)),
+            Event::GeneralRef(r) => push_general_ref(&r, text)?,
+            other => {
+                return Err(format!(
+                    "unexpected event reading <{}>: {other:?}",
+                    String::from_utf8_lossy(tag)
+                ));
+            }
         }
-        other => Err(format!(
-            "unexpected event reading <{}>: {other:?}",
-            String::from_utf8_lossy(tag)
-        )),
+    }
+}
+
+/// Resolve one entity reference: the five XML predefined names plus numeric
+/// character references. rTorrent emits nothing else, and a DTD-defined
+/// entity in an XML-RPC reply would be a malformed response anyway.
+fn push_general_ref(
+    r: &quick_xml::events::BytesRef<'_>,
+    text: &mut String,
+) -> std::result::Result<(), String> {
+    if let Some(ch) = r.resolve_char_ref().map_err(|e| e.to_string())? {
+        text.push(ch);
+        return Ok(());
+    }
+    let name = r.decode().map_err(|e| e.to_string())?;
+    let ch = match name.as_ref() {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        other => return Err(format!("unknown entity reference &{other};")),
+    };
+    text.push(ch);
+    Ok(())
+}
+
+/// The next event that is not whitespace-only text — what every position
+/// expecting a tag wants, with `trim_text` deliberately off (see
+/// [`parse_response`]).
+fn next_structural<'a>(reader: &mut Reader<&'a [u8]>) -> std::result::Result<Event<'a>, String> {
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Text(t) if t.iter().all(u8::is_ascii_whitespace) => continue,
+            other => return Ok(other),
+        }
     }
 }
 
 fn expect_start(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(), String> {
-    match reader.read_event().map_err(|e| e.to_string())? {
+    match next_structural(reader)? {
         Event::Start(e) if e.name().as_ref() == tag => Ok(()),
         other => Err(format!(
             "expected <{}>, got {other:?}",
@@ -674,7 +743,7 @@ fn expect_start(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(
 }
 
 fn expect_end(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(), String> {
-    match reader.read_event().map_err(|e| e.to_string())? {
+    match next_structural(reader)? {
         Event::End(e) if e.name().as_ref() == tag => Ok(()),
         other => Err(format!(
             "expected </{}>, got {other:?}",
@@ -782,6 +851,30 @@ mod tests {
         scalar_response(&format!("<array><data>{inner}</data></array>"))
     }
 
+    /// The bug a hand-mocked server cannot catch by construction: rTorrent
+    /// rejects `d.multicall2` with "invalid parameters: invalid target"
+    /// unless the first parameter is an empty string — confirmed against a
+    /// real rTorrent 0.16.20, where this project's own hand-mocked tests
+    /// (which never checked the request body at all) had missed it. The
+    /// empty string stands in for the pre-`d.multicall2` API's now-removed
+    /// "default target" argument.
+    #[tokio::test]
+    async fn listing_sends_the_required_empty_leading_parameter() {
+        use wiremock::matchers::body_string_contains;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                "<param><value><string></string></value></param>\
+                 <param><value><string>main</string></value></param>",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_body(&[])))
+            .mount(&server)
+            .await;
+
+        client(&server).list(None).await.unwrap();
+    }
+
     #[tokio::test]
     async fn listing_maps_hash_paths_category_and_seeding_state() {
         let server = MockServer::start().await;
@@ -865,7 +958,7 @@ mod tests {
             .await;
 
         let data = b"d8:announce0:e";
-        let request = AddRequest::new(data, "x.torrent", "/downloads/tv")
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads/tv")
             .category("sharerr")
             .tags("shared");
         client(&server).add(&request).await.unwrap();
@@ -897,7 +990,7 @@ mod tests {
             .await;
 
         let data = b"x";
-        let request = AddRequest::new(data, "x.torrent", "/downloads").stopped(true);
+        let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads").stopped(true);
         client(&server).add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -951,7 +1044,7 @@ mod tests {
 
         let data = b"x";
         client(&server)
-            .add(&AddRequest::new(data, "x.torrent", "/downloads"))
+            .add(&AddRequest::new(data, "abc123", "x.torrent", "/downloads"))
             .await
             .unwrap();
 
@@ -1095,24 +1188,14 @@ mod tests {
     }
 
     /// `add` with an upload limit attaches a named per-torrent throttle,
-    /// looked up via the most recently loaded item's hash — see
-    /// [`RtorrentClient::hash_of_last_add`].
+    /// named from `AddRequest::info_hash` rather than a follow-up lookup.
     #[tokio::test]
     async fn add_with_upload_limit_sets_a_throttle() {
         use wiremock::matchers::body_string_contains;
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(body_string_contains("d.multicall2"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
-                "<array><data><value><array><data>\
-                 <value><string>ABC123</string></value>\
-                 </data></array></value></data></array>",
-            )))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("throttle.up.max.set"))
+            .and(body_string_contains("<methodName>throttle.up</methodName>"))
             .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
             .mount(&server)
             .await;
@@ -1128,7 +1211,9 @@ mod tests {
             .await;
 
         let data = b"x";
-        let request = AddRequest::new(data, "x.torrent", "/downloads").upload_limit_kib(500);
+        // Mixed case, to exercise the throttle name's lowercasing.
+        let request =
+            AddRequest::new(data, "ABC123", "x.torrent", "/downloads").upload_limit_kib(500);
         client(&server).add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -1137,31 +1222,21 @@ mod tests {
             .map(|r| String::from_utf8(r.body.clone()).unwrap())
             .collect();
         assert!(
-            bodies.iter().any(
-                |b| b.contains("throttle.up.max.set") && b.contains("abc123")
-                    || b.contains("throttle.up.max.set")
-            ),
-            "expected a throttle.up.max.set call: {bodies:?}"
+            bodies
+                .iter()
+                .any(|b| b.contains("<methodName>throttle.up</methodName>")
+                    && b.contains("sharerr-abc123")
+                    && b.contains("<string>500</string>")),
+            "expected a throttle.up call naming the throttle at 500 KiB/s: {bodies:?}"
+        );
+        assert!(
+            !bodies.iter().any(|b| b.contains("throttle.up.max")),
+            "throttle.up.max has no .set variant and must never be called: {bodies:?}"
         );
         assert!(
             bodies.iter().any(|b| b.contains("d.throttle_name.set")),
             "expected a d.throttle_name.set call: {bodies:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn hash_of_last_add_errors_when_nothing_is_loaded() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(scalar_response("<array><data></data></array>")),
-            )
-            .mount(&server)
-            .await;
-
-        let err = client(&server).hash_of_last_add().await.unwrap_err();
-        assert!(err.to_string().contains("no torrents loaded"), "{err}");
     }
 
     #[test]
@@ -1248,6 +1323,18 @@ mod tests {
         assert!(err.contains("unexpected event inside <data>"), "{err}");
     }
 
+    /// The bug a hand-mocked server cannot catch by construction: a real
+    /// rTorrent (confirmed against 0.16.20) sends a self-closing `<data/>`
+    /// for an empty array, not `<data></data>` — nothing in this crate's own
+    /// tests ever produced a response shaped that way by hand.
+    #[test]
+    fn parse_array_reads_a_self_closing_data_tag_as_empty() {
+        let mut reader = Reader::from_str("<array><data/></array>");
+        reader.read_event().unwrap(); // consume the opening <array>, as parse_array's caller does
+        let value = parse_array(&mut reader).unwrap();
+        assert_eq!(value, XmlValue::Array(Vec::new()));
+    }
+
     #[test]
     fn parse_struct_rejects_an_unexpected_event() {
         let mut reader = Reader::from_str("<oops/>");
@@ -1260,6 +1347,36 @@ mod tests {
         let mut reader = Reader::from_str("<oops/>");
         let err = read_element_text(&mut reader, b"name").unwrap_err();
         assert!(err.contains("unexpected event reading <name>"), "{err}");
+    }
+
+    #[test]
+    fn parse_response_expands_entity_references_in_strings_and_bare_values() {
+        // rTorrent escapes `&`, `<` and `>` in names and paths; quick-xml hands
+        // those back as separate `GeneralRef` events, which used to abort the
+        // whole reply as malformed.
+        let body = "<?xml version=\"1.0\"?><methodResponse><params><param><value>\
+                    <array><data>\
+                    <value><string>Tom &amp; Jerry &lt;1940&gt; &#x263A; &#9731;</string></value>\
+                    <value>a &amp; b</value>\
+                    <value><string></string></value>\
+                    </data></array></value></param></params></methodResponse>";
+        let parsed = parse_response(body).unwrap();
+        assert_eq!(
+            parsed,
+            XmlValue::Array(vec![
+                XmlValue::Str("Tom & Jerry <1940> ☺ ☃".to_owned()),
+                XmlValue::Str("a & b".to_owned()),
+                XmlValue::Str(String::new()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_response_rejects_an_unknown_entity() {
+        let body = "<?xml version=\"1.0\"?><methodResponse><params><param><value>\
+                    <string>&nbsp;</string></value></param></params></methodResponse>";
+        let err = parse_response(body).unwrap_err();
+        assert!(err.contains("unknown entity reference &nbsp;"), "{err}");
     }
 
     #[test]

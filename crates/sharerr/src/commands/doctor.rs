@@ -124,7 +124,27 @@ pub async fn run(
 
     if config.gluetun.control_url.is_some() {
         report.section("gluetun");
-        check_gluetun(config, vault.as_ref(), &mut report).await;
+        check_gluetun(
+            config,
+            vault.as_ref(),
+            crate::gluetun::GluetunTarget::Tracker,
+            &mut report,
+        )
+        .await;
+    }
+    // Independent of the tracker's tunnel above — a dual-VPN deployment keeps
+    // the torrent client behind its own, and a broken client-tunnel key would
+    // otherwise never surface here, only in `serve`'s live poller (see
+    // `web/diagnostics.rs`, which already checks both).
+    if config.gluetun_client.control_url.is_some() {
+        report.section("gluetun (torrent client)");
+        check_gluetun(
+            config,
+            vault.as_ref(),
+            crate::gluetun::GluetunTarget::Client,
+            &mut report,
+        )
+        .await;
     }
 
     report.section("tracker");
@@ -516,31 +536,41 @@ async fn check_qbit(config: &Config, vault: Option<&Vault>, fix: bool, report: &
     let settings = config.torrent_client();
     let (url, label) = (settings.url, settings.category);
 
-    // An API key, when stored, is what will authenticate — so it is what `doctor`
-    // must test. Read quietly: its absence is the ordinary case and the password
-    // check below is the one that reports.
-    let api_key = settings
-        .api_key_key
-        .and_then(|key| quiet_secret(vault, key));
-    // Cloned before `credential` consumes it: the category check below needs its
-    // own qBittorrent-specific client, since "category" is not a concept the
-    // generic `TorrentClient` trait carries — Transmission has none.
-    let api_key_for_category = api_key.clone();
+    // Read quietly first — via the same `resolve_torrent_credential` every
+    // other caller resolves a torrent-client credential through — and only go
+    // back for the loud, reported read below once it's clear nothing resolved.
+    // Reading loud unconditionally would report a broken password even when an
+    // API key already won, the exact false failure "quiet" used to avoid.
+    let quiet = |key: &'static str| -> Result<Option<SecretString>, String> {
+        Ok(quiet_secret(vault, key))
+    };
+    // `quiet` never returns `Err`, so this never falls into the `Err` arm.
+    let credential = checks::resolve_torrent_credential(&settings, &quiet).unwrap_or(None);
 
-    let credential = match api_key {
-        Some(api_key) => checks::TorrentCredential::ApiKey(api_key),
-        None => match settings.password_key {
-            Some(password_key) => match secret(vault, password_key, report) {
-                Some(password) => checks::TorrentCredential::Password(password),
-                None => return,
-            },
-            None => {
-                if let Some(key) = settings.api_key_key {
-                    fail_missing(report, key);
+    // Cloned out before `credential` is unwrapped below: the category check
+    // further down needs its own qBittorrent-specific client, since "category"
+    // is not a concept the generic `TorrentClient` trait carries — Transmission
+    // has none.
+    let api_key_for_category = match &credential {
+        Some(checks::TorrentCredential::ApiKey(key)) => Some(key.clone()),
+        _ => None,
+    };
+
+    let credential = match credential {
+        Some(credential) => credential,
+        None => {
+            match settings.password_key {
+                Some(password_key) => {
+                    secret(vault, password_key, report);
                 }
-                return;
+                None => {
+                    if let Some(key) = settings.api_key_key {
+                        fail_missing(report, key);
+                    }
+                }
             }
-        },
+            return;
+        }
     };
     let noun = credential.noun();
 
@@ -700,13 +730,27 @@ fn check_tracker(config: &Config, vault: Option<&Vault>, report: &mut Report) {
 /// What gluetun's control server says the world sees, next to what the config
 /// advertises — the mismatch this catches is a hand-typed address the tunnel no
 /// longer holds.
-async fn check_gluetun(config: &Config, vault: Option<&Vault>, report: &mut Report) {
+///
+/// Runs against either tunnel a dual-VPN deployment might configure —
+/// `target` picks `[gluetun]` (the tracker's) or `[gluetun_client]` (the
+/// torrent client's own, independent of the tracker's) — the same
+/// [`crate::gluetun::GluetunTarget`] the live poller in `serve` and
+/// `web/diagnostics.rs` already distinguish between. Before this took a
+/// target, only the tracker's tunnel was ever checked, so a broken
+/// `[gluetun_client]` key produced a clean `doctor` report despite the live
+/// poller for it failing continuously.
+async fn check_gluetun(
+    config: &Config,
+    vault: Option<&Vault>,
+    target: crate::gluetun::GluetunTarget,
+    report: &mut Report,
+) {
     // Guarded by the caller; the arm exists because the function is total.
-    let Some(control) = &config.gluetun.control_url else {
+    let Some(control) = &target.config(config).control_url else {
         return;
     };
 
-    let api_key = quiet_secret(vault, sharerr_core::config::secret_keys::GLUETUN_API_KEY);
+    let api_key = quiet_secret(vault, target.api_key_secret());
     let client = match crate::gluetun::GluetunClient::new(control, api_key) {
         Ok(client) => client,
         Err(err) => {
@@ -737,8 +781,11 @@ async fn check_gluetun(config: &Config, vault: Option<&Vault>, report: &mut Repo
 
     // The mismatch worth naming: a static advertised host that is not the
     // tunnel's exit. A DNS name cannot be compared without resolving it, so only
-    // literal addresses are checked.
-    if let Some(ip) = ip
+    // literal addresses are checked. Only meaningful for the tracker's own
+    // tunnel — `tracker.advertised_host` is what friends reach *this instance*
+    // on, which the torrent client's separate tunnel has no bearing on.
+    if target == crate::gluetun::GluetunTarget::Tracker
+        && let Some(ip) = ip
         && let Some(host) = config.tracker.advertised_host.as_deref()
         && let Ok(advertised) = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>()
         && advertised != ip
@@ -1701,7 +1748,13 @@ mod tests {
     #[tokio::test]
     async fn check_gluetun_with_no_control_url_does_nothing() {
         let mut report = Report::default();
-        check_gluetun(&Config::default(), None, &mut report).await;
+        check_gluetun(
+            &Config::default(),
+            None,
+            crate::gluetun::GluetunTarget::Tracker,
+            &mut report,
+        )
+        .await;
         assert_eq!(report.failures, 0);
         assert_eq!(report.warnings, 0);
     }
@@ -1716,7 +1769,13 @@ mod tests {
         let config = gluetun_config(&Url::parse(&server.uri()).unwrap());
         let mut report = Report::default();
 
-        check_gluetun(&config, None, &mut report).await;
+        check_gluetun(
+            &config,
+            None,
+            crate::gluetun::GluetunTarget::Tracker,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 0);
         assert_eq!(report.warnings, 0);
@@ -1738,7 +1797,13 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_gluetun(&config, None, &mut report).await;
+        check_gluetun(
+            &config,
+            None,
+            crate::gluetun::GluetunTarget::Tracker,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 0);
         assert_eq!(report.warnings, 1);
@@ -1760,10 +1825,90 @@ mod tests {
         let config = gluetun_config(&Url::parse(&server.uri()).unwrap());
         let mut report = Report::default();
 
-        check_gluetun(&config, None, &mut report).await;
+        check_gluetun(
+            &config,
+            None,
+            crate::gluetun::GluetunTarget::Tracker,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 1);
         assert_eq!(report.warnings, 1);
+    }
+
+    /// The bug this parameterisation fixes: a dual-VPN operator's
+    /// `[gluetun_client]` tunnel used to never be checked by `doctor` at all,
+    /// so a broken client-tunnel key produced a clean report.
+    #[tokio::test]
+    async fn check_gluetun_checks_the_client_tunnel_when_asked() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/publicip/ip"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/openvpn/portforwarded"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let config = Config {
+            gluetun_client: sharerr_core::config::GluetunConfig {
+                control_url: Some(Url::parse(&server.uri()).unwrap()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_gluetun(
+            &config,
+            None,
+            crate::gluetun::GluetunTarget::Client,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(
+            report.failures, 1,
+            "the broken client tunnel must be caught"
+        );
+    }
+
+    /// `tracker.advertised_host` names where *this instance* is reached — it
+    /// has no bearing on the torrent client's separate tunnel, so a mismatch
+    /// there must not be reported against the client target.
+    #[tokio::test]
+    async fn check_gluetun_does_not_compare_the_advertised_host_for_the_client_target() {
+        let server = gluetun_server(
+            serde_json::json!({ "public_ip": "203.0.113.9" }),
+            serde_json::json!({ "port": 41234 }),
+        )
+        .await;
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("198.51.100.1".to_owned()),
+                ..Config::default().tracker
+            },
+            gluetun_client: sharerr_core::config::GluetunConfig {
+                control_url: Some(Url::parse(&server.uri()).unwrap()),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let mut report = Report::default();
+
+        check_gluetun(
+            &config,
+            None,
+            crate::gluetun::GluetunTarget::Client,
+            &mut report,
+        )
+        .await;
+
+        assert_eq!(report.failures, 0);
+        assert_eq!(report.warnings, 0);
     }
 
     // ------------------------------------------------------- check_reachability

@@ -141,8 +141,8 @@ fronts the RPC endpoint (the standard way ruTorrent's `httprpc` plugin is
 secured). Any placeholder values work if your proxy has no such gate.
 
 rTorrent cannot skip its hash check, and has no per-torrent seed-ratio limit
-— see [the roadmap](ROADMAP.md#torrent-clients-what-actually-seeds) for both
-gaps and the tracker-replacement limitation.
+— see [`SUPPORTED.md`](SUPPORTED.md#torrent-clients-what-actually-seeds) for
+both gaps and the tracker-replacement limitation.
 
 ## `[seeding]`
 
