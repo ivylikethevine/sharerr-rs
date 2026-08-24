@@ -449,11 +449,7 @@ mod tests {
         let state = web_state(serve);
         let config = state.serve.config().await;
 
-        for backend in [
-            TorrentBackend::Qbittorrent,
-            TorrentBackend::Transmission,
-            TorrentBackend::Rtorrent,
-        ] {
+        for backend in TorrentBackend::ALL.iter().copied() {
             let html = body_of(torrent_client_badge(&state, &config, backend).await).await;
             assert!(html.contains("class=\"error\""), "{backend:?}: {html}");
         }

@@ -81,7 +81,7 @@ use quick_xml::reader::Reader;
 use secrecy::{ExposeSecret, SecretString};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, http_client, is_auth_rejection,
+    http_client, is_auth_rejection,
 };
 use url::Url;
 
@@ -124,14 +124,6 @@ impl RtorrentClient {
         })
     }
 
-    fn unreachable(&self, err: &reqwest::Error) -> ClientError {
-        ClientError::Unreachable {
-            kind: KIND,
-            url: self.endpoint.to_string(),
-            detail: error_chain(err),
-        }
-    }
-
     /// Issue one XML-RPC call and return its single decoded return value.
     async fn call(&self, method: &str, params: &[Param<'_>]) -> Result<XmlValue> {
         let body = request_xml(method, params);
@@ -144,7 +136,7 @@ impl RtorrentClient {
             .body(body)
             .send()
             .await
-            .map_err(|e| self.unreachable(&e))?;
+            .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
 
         let status = response.status();
         if is_auth_rejection(status) {

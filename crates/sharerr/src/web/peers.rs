@@ -367,6 +367,29 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
     }
 }
 
+/// Which relative-time bucket a moment falls into, and the whole-unit count
+/// within it. `ago` and `topology::compact_ago` share this ladder and differ
+/// only in the words they wrap it in — this is the one function whose
+/// thresholds a single test can cover for both.
+pub(crate) enum AgoBucket {
+    Now,
+    Minutes(i64),
+    Hours(i64),
+    Days(i64),
+}
+
+pub(crate) fn ago_bucket(epoch_secs: i64) -> AgoBucket {
+    // Includes negative values, which mean a clock that moved backwards.
+    let seconds = now_epoch().saturating_sub(epoch_secs);
+
+    match seconds {
+        s if s < 60 => AgoBucket::Now,
+        s if s < 3_600 => AgoBucket::Minutes(s / 60),
+        s if s < 86_400 => AgoBucket::Hours(s / 3_600),
+        s => AgoBucket::Days(s / 86_400),
+    }
+}
+
 /// Coarse relative time.
 ///
 /// Relative rather than absolute because the question is always "recently?", never
@@ -374,14 +397,11 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
 /// usually does not have configured. `pub(crate)` because the status page's
 /// one-glance line answers the same "recently?" question.
 pub(crate) fn ago(epoch_secs: i64) -> String {
-    let seconds = now_epoch().saturating_sub(epoch_secs);
-
-    match seconds {
-        // Includes negative values, which mean a clock that moved backwards.
-        s if s < 60 => "just now".to_owned(),
-        s if s < 3_600 => format!("{} minute(s) ago", s / 60),
-        s if s < 86_400 => format!("{} hour(s) ago", s / 3_600),
-        s => format!("{} day(s) ago", s / 86_400),
+    match ago_bucket(epoch_secs) {
+        AgoBucket::Now => "just now".to_owned(),
+        AgoBucket::Minutes(n) => format!("{n} minute(s) ago"),
+        AgoBucket::Hours(n) => format!("{n} hour(s) ago"),
+        AgoBucket::Days(n) => format!("{n} day(s) ago"),
     }
 }
 

@@ -102,6 +102,18 @@ pub fn http_client() -> Result<reqwest::Client> {
         .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))
 }
 
+/// Wrap a transport-level failure as [`ClientError::Unreachable`], with the
+/// cause chain rendered via [`error_chain`]. Lifted out of
+/// `sharerr-transmission` and `sharerr-rtorrent`, which built this identically
+/// apart from which field held the URL a client speaks to.
+pub fn unreachable(kind: ClientKind, url: &str, err: &reqwest::Error) -> ClientError {
+    ClientError::Unreachable {
+        kind,
+        url: url.to_owned(),
+        detail: error_chain(err),
+    }
+}
+
 /// A copy of `base` whose path ends in `/`, so `Url::join` appends rather than
 /// replacing the last segment. This is what makes reverse-proxy subpaths
 /// (`http://host/sonarr/`) work.

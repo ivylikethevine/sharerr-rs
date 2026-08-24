@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, http_client, is_auth_rejection, normalise_base,
+    http_client, is_auth_rejection, normalise_base,
 };
 use tokio::sync::RwLock;
 use url::Url;
@@ -93,14 +93,6 @@ impl TransmissionClient {
         })
     }
 
-    fn unreachable(&self, err: &reqwest::Error) -> ClientError {
-        ClientError::Unreachable {
-            kind: KIND,
-            url: self.base.to_string(),
-            detail: error_chain(err),
-        }
-    }
-
     /// Issue one RPC call, paying the session handshake if the server asks.
     ///
     /// Retries exactly once on 409. A second 409 means something other than a
@@ -120,7 +112,10 @@ impl TransmissionClient {
                 request = request.header(SESSION_HEADER, session);
             }
 
-            let response = request.send().await.map_err(|e| self.unreachable(&e))?;
+            let response = request
+                .send()
+                .await
+                .map_err(|e| sharerr_client::unreachable(KIND, self.base.as_str(), &e))?;
             let status = response.status();
 
             if status == reqwest::StatusCode::CONFLICT && attempt == 0 {

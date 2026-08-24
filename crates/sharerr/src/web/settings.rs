@@ -489,11 +489,11 @@ pub async fn save_torrent_backend(
     Form(form): Form<TorrentBackendForm>,
 ) -> Response {
     write_config(&state, "torrent_backend", next.next, |file| {
-        let backend = match form.backend.as_str() {
-            "qbittorrent" => TorrentBackend::Qbittorrent,
-            "transmission" => TorrentBackend::Transmission,
-            "rtorrent" => TorrentBackend::Rtorrent,
-            other => anyhow::bail!("{other:?} is not a torrent client sharerr supports"),
+        let Some(backend) = TorrentBackend::parse(&form.backend) else {
+            anyhow::bail!(
+                "{:?} is not a torrent client sharerr supports",
+                form.backend
+            );
         };
         file.apply([Edit::str(config_paths::TORRENT_BACKEND, backend.as_str())]);
         Ok(())
@@ -1219,17 +1219,14 @@ fn checked(field: &Option<String>) -> bool {
 /// empty; a stored secret is the only signal that someone deliberately set one
 /// of these up.
 fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool) -> bool {
-    [
-        TorrentBackend::Qbittorrent,
-        TorrentBackend::Transmission,
-        TorrentBackend::Rtorrent,
-    ]
-    .into_iter()
-    .filter(|backend| *backend != config.torrent_backend)
-    .any(|backend| {
-        let client = config.torrent_client_for(backend);
-        client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
-    })
+    TorrentBackend::ALL
+        .iter()
+        .copied()
+        .filter(|backend| *backend != config.torrent_backend)
+        .any(|backend| {
+            let client = config.torrent_client_for(backend);
+            client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
+        })
 }
 
 /// An unset URL renders as an empty field, not `None`.

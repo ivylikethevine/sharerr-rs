@@ -625,6 +625,9 @@ pub enum TorrentBackend {
 }
 
 impl TorrentBackend {
+    /// Every backend sharerr can drive.
+    pub const ALL: &'static [Self] = &[Self::Qbittorrent, Self::Transmission, Self::Rtorrent];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Qbittorrent => "qbittorrent",
@@ -642,6 +645,11 @@ impl TorrentBackend {
             Self::Transmission => "Transmission",
             Self::Rtorrent => "rTorrent",
         }
+    }
+
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|b| b.as_str() == value)
     }
 }
 

@@ -872,8 +872,9 @@ async fn a_missing_file_fails_only_its_own_item() {
 #[tokio::test]
 async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
     let h = tagged_harness().await;
-    let announce =
-        sharerr_torrent::AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+    let announce = sharerr_torrent::AnnounceSet::single(
+        Url::parse("http://tracker.example/announce").unwrap(),
+    );
     let item = sharerr_core::Discovered {
         source: MediaSource::Sonarr,
         source_id: 99,

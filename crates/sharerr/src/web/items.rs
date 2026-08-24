@@ -282,16 +282,20 @@ fn token_status(item: &SharedItem, current_token_fp: Option<&str>) -> TokenStatu
     }
 }
 
-/// The announce URL a freshly built torrent would carry right now: the same
-/// construction `BuiltinTracker::announce_set` uses, computed live rather
-/// than stored so it always reflects whatever the endpoint currently
-/// resolves to. `None` when nothing is configured to announce to yet.
+/// The announce URL a freshly built torrent would carry right now, with the
+/// token itself replaced by a `<token>` placeholder: the same construction
+/// `BuiltinTracker::announce_set` uses, computed live rather than stored so
+/// it always reflects whatever the endpoint currently resolves to, but never
+/// rendering a live secret to the page — the token's own fingerprint is
+/// shown separately per row via [`token_status`]. `None` when nothing is
+/// configured to announce to yet.
 async fn current_announce_url(state: &crate::state::ServeState) -> Option<String> {
     let base = state.endpoint().current()?;
-    let token = state.tracker_token().await;
-    sharerr_torrent::announce_url(&base, token.as_deref())
-        .ok()
-        .map(|url| url.to_string())
+    let url = sharerr_torrent::announce_url(&base, None).ok()?;
+    match state.tracker_token().await {
+        Some(_) => Some(format!("{url}/<token>")),
+        None => Some(url.to_string()),
+    }
 }
 
 /// A byte count as a person reads it — binary units, one decimal past the first,

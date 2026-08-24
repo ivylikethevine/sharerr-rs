@@ -637,14 +637,14 @@ fn channel(endpoints: &[PeerEndpoint], kind: EndpointKind) -> Channel {
 
 /// A relative time short enough to fit beside a line in a fixed-width
 /// column gap — `peers::ago`'s "N minute(s) ago" is the right length for a
-/// table cell, not an edge label.
+/// table cell, not an edge label. Shares `peers::ago_bucket`'s ladder, just
+/// wrapped in shorter words.
 fn compact_ago(epoch_secs: i64) -> String {
-    let seconds = sharerr_core::endpoint::now_epoch().saturating_sub(epoch_secs);
-    match seconds {
-        s if s < 60 => "now".to_owned(),
-        s if s < 3_600 => format!("{}m", s / 60),
-        s if s < 86_400 => format!("{}h", s / 3_600),
-        s => format!("{}d", s / 86_400),
+    match super::peers::ago_bucket(epoch_secs) {
+        super::peers::AgoBucket::Now => "now".to_owned(),
+        super::peers::AgoBucket::Minutes(n) => format!("{n}m"),
+        super::peers::AgoBucket::Hours(n) => format!("{n}h"),
+        super::peers::AgoBucket::Days(n) => format!("{n}d"),
     }
 }
 
