@@ -60,6 +60,119 @@ const INTERVAL: Duration = Duration::from_secs(900);
 /// for something that, when it happens at all, happens on the order of days.
 const QUIET_THRESHOLD_SECS: i64 = 3600;
 
+/// What the lighthouse poller last did, so the UI can say whether reporting is
+/// actually working.
+///
+/// Modelled on [`crate::gluetun::GluetunStatus`], and for the same reason: a
+/// poller that runs on a timer and logs its failures is invisible to an
+/// operator who is not tailing logs. Lighthouse needed it more than gluetun
+/// did — a refused report means friends who have gone quiet cannot find this
+/// instance at all, and until now the only trace of that was one `warn!` line
+/// every fifteen minutes.
+///
+/// Per-lighthouse rather than one aggregate: with two configured and one
+/// refusing, an aggregate "last error" reads as though everything is broken,
+/// and the fix (re-issue a key, or drop that URL) applies to exactly one of
+/// them.
+#[derive(Debug, Default)]
+pub struct LighthouseStatus {
+    inner: tokio::sync::RwLock<StatusInner>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct StatusInner {
+    last_pass_at: Option<i64>,
+    /// Keyed by lighthouse URL. A `BTreeMap` so the rendered order is stable
+    /// between page loads rather than following a hash seed.
+    reports: std::collections::BTreeMap<String, ReportOutcome>,
+    last_recovery_at: Option<i64>,
+    last_recovery_peer: Option<String>,
+    lookups_attempted: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ReportOutcome {
+    last_success_at: Option<i64>,
+    last_error: Option<String>,
+}
+
+/// A read-only snapshot of a [`LighthouseStatus`], for rendering.
+#[derive(Debug, Clone, Default)]
+pub struct LighthouseSnapshot {
+    /// When the report-and-lookup pass last ran to completion. `None` before
+    /// the first one, which — with a 15 minute interval — is a real state an
+    /// operator can land on right after configuring one.
+    pub last_pass_at: Option<i64>,
+    /// One row per lighthouse this instance has actually tried, newest state.
+    pub lighthouses: Vec<LighthouseReport>,
+    /// When a lookup last recovered a friend's address, and whose. The only
+    /// evidence a lighthouse has ever earned its keep — everything else here
+    /// says the machinery is running, not that it has helped.
+    pub last_recovery_at: Option<i64>,
+    pub last_recovery_peer: Option<String>,
+    /// Lookups attempted in the last pass. Zero is the normal, healthy case:
+    /// it means no friend has gone quiet.
+    pub lookups_attempted: usize,
+}
+
+/// One lighthouse's report state.
+#[derive(Debug, Clone)]
+pub struct LighthouseReport {
+    pub url: String,
+    pub last_success_at: Option<i64>,
+    /// The refusal, verbatim — a 403 (the key hash is pinned to a different
+    /// keypair) and a 503 (that lighthouse is full) have entirely different
+    /// fixes, so the status code is the useful half.
+    pub last_error: Option<String>,
+}
+
+impl LighthouseStatus {
+    async fn record_pass(&self) {
+        self.inner.write().await.last_pass_at = Some(now_epoch());
+    }
+
+    async fn record_report_ok(&self, url: &Url) {
+        let mut inner = self.inner.write().await;
+        let entry = inner.reports.entry(url.to_string()).or_default();
+        entry.last_success_at = Some(now_epoch());
+        entry.last_error = None;
+    }
+
+    async fn record_report_err(&self, url: &Url, reason: String) {
+        let mut inner = self.inner.write().await;
+        inner.reports.entry(url.to_string()).or_default().last_error = Some(reason);
+    }
+
+    async fn record_lookups(&self, attempted: usize) {
+        self.inner.write().await.lookups_attempted = attempted;
+    }
+
+    async fn record_recovery(&self, peer_label: &str) {
+        let mut inner = self.inner.write().await;
+        inner.last_recovery_at = Some(now_epoch());
+        inner.last_recovery_peer = Some(peer_label.to_owned());
+    }
+
+    pub async fn snapshot(&self) -> LighthouseSnapshot {
+        let inner = self.inner.read().await;
+        LighthouseSnapshot {
+            last_pass_at: inner.last_pass_at,
+            lighthouses: inner
+                .reports
+                .iter()
+                .map(|(url, outcome)| LighthouseReport {
+                    url: url.clone(),
+                    last_success_at: outcome.last_success_at,
+                    last_error: outcome.last_error.clone(),
+                })
+                .collect(),
+            last_recovery_at: inner.last_recovery_at,
+            last_recovery_peer: inner.last_recovery_peer.clone(),
+            lookups_attempted: inner.lookups_attempted,
+        }
+    }
+}
+
 /// Report to, and query, every configured lighthouse on a timer. Never
 /// returns.
 pub async fn sync_loop(state: Arc<ServeState>) {
@@ -104,13 +217,17 @@ async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
 
     let own = gossip::self_record(state).await;
     let own = own.as_ref().map(to_lighthouse_record);
+    let status = state.lighthouse_status();
     // Publishing this instance's record and looking up quiet friends touch
     // disjoint state (own record vs. friends' pubkeys) — independent, so run
     // them together rather than one after the other.
     tokio::join!(
-        report(http, &urls, &peers, own.as_ref()),
-        lookup_quiet(http, &urls, &peers, &vault, &store)
+        report(http, &urls, &peers, own.as_ref(), &status),
+        lookup_quiet(http, &urls, &peers, &vault, &store, &status)
     );
+    // Stamped after both halves finish, so "last pass" means a completed one
+    // rather than one that started and is still in flight.
+    status.record_pass().await;
 }
 
 /// Convert gossip's `EndpointRecord` to the lighthouse crate's field-for-field
@@ -144,6 +261,7 @@ async fn report(
     urls: &[Url],
     peers: &[Peer],
     own: Option<&LighthouseRecord>,
+    status: &LighthouseStatus,
 ) {
     let Some(record) = own else {
         tracing::debug!("no self-record available yet — skipping lighthouse report");
@@ -153,7 +271,7 @@ async fn report(
     let mut attempts = Vec::new();
     for peer in peers.iter().filter(|p| !p.is_revoked()) {
         for url in urls {
-            attempts.push(report_one(http, url, &peer.key_hash, record));
+            attempts.push(report_one(http, url, &peer.key_hash, record, status));
         }
     }
     futures::future::join_all(attempts).await;
@@ -177,7 +295,13 @@ async fn report(
 ///
 /// A transport failure stays at `debug`: a lighthouse being briefly
 /// unreachable is ordinary, and this runs on a timer.
-async fn report_one(http: &reqwest::Client, base: &Url, key_hash: &str, record: &LighthouseRecord) {
+async fn report_one(
+    http: &reqwest::Client,
+    base: &Url,
+    key_hash: &str,
+    record: &LighthouseRecord,
+    tracked: &LighthouseStatus,
+) {
     let endpoint = format!(
         "{}/lighthouse/v1/report/{key_hash}",
         base.as_str().trim_end_matches('/')
@@ -185,18 +309,27 @@ async fn report_one(http: &reqwest::Client, base: &Url, key_hash: &str, record: 
     let response = match http.post(&endpoint).json(record).send().await {
         Ok(response) => response,
         Err(err) => {
-            tracing::debug!(url = %base, reason = %error_chain(&err), "lighthouse report failed");
+            let reason = error_chain(&err);
+            tracing::debug!(url = %base, reason = %reason, "lighthouse report failed");
+            // Recorded even though it stays at `debug`: a lighthouse that has
+            // been unreachable for a day is worth seeing on a page, even
+            // though any single failure is ordinary.
+            tracked.record_report_err(base, reason).await;
             return;
         }
     };
 
     let status = response.status();
     if status.is_success() {
+        tracked.record_report_ok(base).await;
         return;
     }
     // The body is a short reason string; a lighthouse that answered at all
     // will have one, and it is the most useful half of this line.
     let reason = response.text().await.unwrap_or_default();
+    tracked
+        .record_report_err(base, format!("answered {status}: {}", reason.trim()))
+        .await;
     tracing::warn!(
         url = %base,
         %status,
@@ -215,14 +348,32 @@ async fn lookup_quiet(
     peers: &[Peer],
     vault: &Vault,
     store: &Store,
+    status: &LighthouseStatus,
 ) {
     let now = now_epoch();
 
-    let lookups = peers
+    let quiet: Vec<&Peer> = peers
         .iter()
         .filter(|p| !p.is_revoked())
-        .map(|peer| lookup_quiet_one(http, urls, vault, store, peer, now));
+        .filter(|p| is_quiet(p, now))
+        .collect();
+    // Counted here rather than inside the per-peer call, so the number means
+    // "friends this pass had reason to look up" — zero being the healthy case,
+    // not a sign the poller did nothing.
+    status.record_lookups(quiet.len()).await;
+
+    let lookups = quiet
+        .into_iter()
+        .map(|peer| lookup_quiet_one(http, urls, vault, store, peer, status));
     futures::future::join_all(lookups).await;
+}
+
+/// Whether a peer has been silent long enough to be worth a lighthouse
+/// lookup. Split out so [`lookup_quiet`] can count the quiet ones before
+/// spawning the lookups, and so the threshold has one test to its name.
+fn is_quiet(peer: &Peer, now: i64) -> bool {
+    peer.last_seen_at
+        .is_none_or(|seen| now - seen >= QUIET_THRESHOLD_SECS)
 }
 
 /// One friend's lookup across every configured lighthouse, stopping at the
@@ -234,17 +385,11 @@ async fn lookup_quiet_one(
     vault: &Vault,
     store: &Store,
     peer: &Peer,
-    now: i64,
+    status: &LighthouseStatus,
 ) {
     let Some(pubkey) = peer.pubkey.as_deref() else {
         return;
     };
-    let quiet = peer
-        .last_seen_at
-        .is_none_or(|seen| now - seen >= QUIET_THRESHOLD_SECS);
-    if !quiet {
-        return;
-    }
     let Ok(Some(key)) = vault.get(&secret_keys::peer_gossip_key(peer.id)) else {
         return;
     };
@@ -254,6 +399,7 @@ async fn lookup_quiet_one(
         match lookup_one(http, url, &hash, pubkey).await {
             Ok(Some(record)) => {
                 apply_lookup(store, peer.id, &record).await;
+                status.record_recovery(&peer.label).await;
                 tracing::info!(peer = peer.id, url = %url, "recorded an endpoint via lighthouse");
                 break;
             }
@@ -328,6 +474,113 @@ mod tests {
     use sharerr_store::PeerScope;
 
     use super::*;
+
+    fn a_url(raw: &str) -> Url {
+        Url::parse(raw).unwrap()
+    }
+
+    /// A refused report is the state this whole type exists for: friends who
+    /// have gone quiet cannot find this instance, and before the status was
+    /// tracked the only trace was one log line every fifteen minutes.
+    #[tokio::test]
+    async fn a_refusal_is_recorded_against_the_lighthouse_that_refused() {
+        let status = LighthouseStatus::default();
+        let good = a_url("https://good.example");
+        let bad = a_url("https://bad.example");
+
+        status.record_report_ok(&good).await;
+        status
+            .record_report_err(&bad, "answered 403: pinned elsewhere".to_owned())
+            .await;
+
+        let snapshot = status.snapshot().await;
+        assert_eq!(snapshot.lighthouses.len(), 2);
+
+        let bad_row = snapshot
+            .lighthouses
+            .iter()
+            .find(|r| r.url.contains("bad.example"))
+            .unwrap();
+        assert_eq!(
+            bad_row.last_error.as_deref(),
+            Some("answered 403: pinned elsewhere")
+        );
+
+        // The healthy one must not inherit the other's failure — with two
+        // configured, an aggregate error reads as though both are broken.
+        let good_row = snapshot
+            .lighthouses
+            .iter()
+            .find(|r| r.url.contains("good.example"))
+            .unwrap();
+        assert!(good_row.last_error.is_none());
+        assert!(good_row.last_success_at.is_some());
+    }
+
+    /// A lighthouse that starts working again must stop reporting the old
+    /// refusal, or the page accuses a working setup forever.
+    #[tokio::test]
+    async fn a_later_success_clears_the_previous_refusal() {
+        let status = LighthouseStatus::default();
+        let url = a_url("https://lighthouse.example");
+
+        status
+            .record_report_err(&url, "answered 503".to_owned())
+            .await;
+        status.record_report_ok(&url).await;
+
+        let snapshot = status.snapshot().await;
+        assert_eq!(snapshot.lighthouses.len(), 1);
+        assert!(snapshot.lighthouses[0].last_error.is_none());
+    }
+
+    /// A failure after a success keeps the success timestamp: "last accepted 2
+    /// days ago, now refusing" is a much more useful line than either half.
+    #[tokio::test]
+    async fn a_refusal_keeps_the_last_success_timestamp() {
+        let status = LighthouseStatus::default();
+        let url = a_url("https://lighthouse.example");
+
+        status.record_report_ok(&url).await;
+        status
+            .record_report_err(&url, "answered 403".to_owned())
+            .await;
+
+        let snapshot = status.snapshot().await;
+        assert!(snapshot.lighthouses[0].last_success_at.is_some());
+        assert!(snapshot.lighthouses[0].last_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_recovery_records_who_was_found() {
+        let status = LighthouseStatus::default();
+        assert!(status.snapshot().await.last_recovery_at.is_none());
+
+        status.record_recovery("Riley").await;
+
+        let snapshot = status.snapshot().await;
+        assert_eq!(snapshot.last_recovery_peer.as_deref(), Some("Riley"));
+        assert!(snapshot.last_recovery_at.is_some());
+    }
+
+    /// The threshold `lookup_quiet` counts on. A friend seen a minute ago is
+    /// not worth a lighthouse lookup; one never seen at all always is.
+    #[tokio::test]
+    async fn quietness_is_measured_against_the_threshold() {
+        let now = 1_000_000;
+        let (_store, mut peer) = store_with_peer("Alex", "alex-key").await;
+
+        peer.last_seen_at = Some(now - 60);
+        assert!(!is_quiet(&peer, now));
+
+        peer.last_seen_at = Some(now - QUIET_THRESHOLD_SECS);
+        assert!(is_quiet(&peer, now));
+
+        // Never seen at all: the friend has the key but has never used it, so
+        // a lighthouse is exactly the thing that might find them.
+        peer.last_seen_at = None;
+        assert!(is_quiet(&peer, now));
+    }
 
     /// Sign a record the same way `sharerr_lighthouse`'s own private
     /// `signable_bytes` would — that function is not reachable from outside
@@ -423,7 +676,14 @@ mod tests {
 
         let own = signed_lighthouse_record(1, "http://203.0.113.9:41234", 1000);
         let http = reqwest::Client::new();
-        report(&http, &[url], &peers, Some(&own)).await;
+        report(
+            &http,
+            &[url],
+            &peers,
+            Some(&own),
+            &LighthouseStatus::default(),
+        )
+        .await;
 
         let for_alex = lighthouse.lookup(&alex.key_hash).await;
         assert_eq!(for_alex, own);
@@ -457,7 +717,14 @@ mod tests {
 
         let own = signed_lighthouse_record(1, "203.0.113.9:41234", now);
         let http = reqwest::Client::new();
-        report(&http, &[url], &peers, Some(&own)).await;
+        report(
+            &http,
+            &[url],
+            &peers,
+            Some(&own),
+            &LighthouseStatus::default(),
+        )
+        .await;
 
         assert_eq!(
             lighthouse.lookup(&alex.key_hash).await.endpoints[0].addr,
@@ -478,7 +745,7 @@ mod tests {
         let peers = store.list_peers().await.unwrap();
 
         let http = reqwest::Client::new();
-        report(&http, &[url], &peers, None).await;
+        report(&http, &[url], &peers, None, &LighthouseStatus::default()).await;
 
         // Nothing was ever reported, so a lookup surfaces only a decoy.
         let looked_up = lighthouse.lookup(&alex.key_hash).await;
@@ -513,7 +780,15 @@ mod tests {
 
         let peers = store.list_peers().await.unwrap();
         let http = reqwest::Client::new();
-        lookup_quiet(&http, &[url], &peers, &vault, &store).await;
+        lookup_quiet(
+            &http,
+            &[url],
+            &peers,
+            &vault,
+            &store,
+            &LighthouseStatus::default(),
+        )
+        .await;
 
         let endpoints = store.peer_endpoints(peer.id).await.unwrap();
         assert_eq!(endpoints.len(), 1);
@@ -543,7 +818,15 @@ mod tests {
 
         let peers = store.list_peers().await.unwrap();
         let http = reqwest::Client::new();
-        lookup_quiet(&http, &[url], &peers, &vault, &store).await;
+        lookup_quiet(
+            &http,
+            &[url],
+            &peers,
+            &vault,
+            &store,
+            &LighthouseStatus::default(),
+        )
+        .await;
 
         assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
     }
@@ -574,7 +857,15 @@ mod tests {
 
         let peers = store.list_peers().await.unwrap();
         let http = reqwest::Client::new();
-        lookup_quiet(&http, &[url], &peers, &vault, &store).await;
+        lookup_quiet(
+            &http,
+            &[url],
+            &peers,
+            &vault,
+            &store,
+            &LighthouseStatus::default(),
+        )
+        .await;
 
         assert!(
             store.peer_endpoints(peer.id).await.unwrap().is_empty(),

@@ -21,9 +21,10 @@ use axum::response::Html;
 use axum::routing::get;
 
 use crate::web::templates::{
-    ArrSection, EdgeStyle, EndpointStatus, FilterOption, Glance, ItemRow, ItemsPage, LibraryRow,
-    NodeStatus, PathRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow,
-    ScopeOption, SettingsPage, SortLink, StatusPage, TokenStatus, TopologyPage,
+    ArrSection, ClientCheck, ClientMismatch, EdgeStyle, EndpointStatus, FilterOption, Glance,
+    ItemRow, ItemsPage, LibraryRow, LighthouseRow, LighthouseView, NodeStatus, PathRow,
+    PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow, ScopeOption,
+    SettingsPage, SortLink, StateCount, StatusPage, TokenStatus, TopologyPage,
 };
 use crate::web::topology::{Channel, FriendNode, SourceNode, layout};
 
@@ -84,6 +85,7 @@ fn status_page() -> StatusPage {
             friends_total: 3,
             swarm_peers: 5,
             swarm_seeders: 3,
+            swarm_torrents: 4,
         }),
         blocked: None,
         config_error: None,
@@ -97,9 +99,21 @@ fn status_page() -> StatusPage {
         config_path: "/config/sharerr.toml".to_owned(),
 
         services: vec![
-            ServiceLineMock::ok("Sonarr", "reachable, tag present"),
-            ServiceLineMock::ok("Radarr", "reachable, tag present"),
-            ServiceLineMock::bad("Lidarr", "could not reach it: connection refused"),
+            ServiceLineMock::ok(
+                "Sonarr",
+                "reachable, tag present",
+                "http://sonarr.example:8989/",
+            ),
+            ServiceLineMock::ok(
+                "Radarr",
+                "reachable, tag present",
+                "http://radarr.example:7878/",
+            ),
+            ServiceLineMock::bad(
+                "Lidarr",
+                "could not reach it: connection refused",
+                "http://lidarr.example:8686/",
+            ),
         ]
         .into_iter()
         .map(ServiceLineMock::into_line)
@@ -148,20 +162,50 @@ fn status_page() -> StatusPage {
         runs: vec![
             RunRow {
                 when: "4 minutes ago".to_owned(),
+                when_absolute: "2024-05-06 11:18:04 UTC".to_owned(),
+                took: "12s".to_owned(),
                 summary: "2 added, 1 failed".to_owned(),
                 failed: false,
             },
             RunRow {
                 when: "19 minutes ago".to_owned(),
+                when_absolute: "2024-05-06 11:03:41 UTC".to_owned(),
+                took: "under a second".to_owned(),
                 summary: "up to date".to_owned(),
                 failed: false,
             },
             RunRow {
                 when: "34 minutes ago".to_owned(),
+                when_absolute: "2024-05-06 10:48:22 UTC".to_owned(),
+                took: "2m 5s".to_owned(),
                 summary: "could not reach qBittorrent".to_owned(),
                 failed: true,
             },
         ],
+        // One accepting and one refusing, so the preview shows both the row
+        // shape and the warning verdict that a partial failure produces.
+        lighthouse: Some(LighthouseView {
+            configured: 2,
+            last_pass: Some("6 minutes ago".to_owned()),
+            healthy: false,
+            rows: vec![
+                LighthouseRow {
+                    url: "https://lighthouse.example".to_owned(),
+                    last_success: Some("6 minutes ago".to_owned()),
+                    last_error: None,
+                },
+                LighthouseRow {
+                    url: "https://beacon.example".to_owned(),
+                    last_success: Some("2 days ago".to_owned()),
+                    last_error: Some(
+                        "answered 403 Forbidden: key hash is pinned to another identity".to_owned(),
+                    ),
+                },
+            ],
+            last_recovery: Some("3 days ago".to_owned()),
+            last_recovery_peer: Some("Riley".to_owned()),
+            lookups_attempted: 1,
+        }),
     }
 }
 
@@ -171,22 +215,25 @@ struct ServiceLineMock {
     name: &'static str,
     message: &'static str,
     ok: bool,
+    url: &'static str,
 }
 
 impl ServiceLineMock {
-    fn ok(name: &'static str, message: &'static str) -> Self {
+    fn ok(name: &'static str, message: &'static str, url: &'static str) -> Self {
         Self {
             name,
             message,
             ok: true,
+            url,
         }
     }
 
-    fn bad(name: &'static str, message: &'static str) -> Self {
+    fn bad(name: &'static str, message: &'static str, url: &'static str) -> Self {
         Self {
             name,
             message,
             ok: false,
+            url,
         }
     }
 
@@ -195,6 +242,7 @@ impl ServiceLineMock {
             name: self.name.to_owned(),
             message: self.message.to_owned(),
             ok: self.ok,
+            url: self.url.to_owned(),
         }
     }
 }
@@ -327,6 +375,24 @@ fn topology_page() -> TopologyPage {
 
     TopologyPage {
         signed_in: true,
+        // One absent and one paused, so the preview exercises both halves of
+        // the disagreement and the warning verdict they produce.
+        client_check: Some(ClientCheck {
+            expected: 20,
+            confirmed: 18,
+            absent: vec![ClientMismatch {
+                title: "Copper Vale (2019)".to_owned(),
+                hash: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd".to_owned(),
+            }],
+            more_absent: 0,
+            idle: vec![ClientMismatch {
+                title: "Lanternwick Hollow S01E01".to_owned(),
+                hash: "abababababababababababababababababababab".to_owned(),
+            }],
+            more_idle: 0,
+            error: None,
+            healthy: false,
+        }),
         width,
         height,
         nodes,
@@ -528,8 +594,11 @@ fn peers_page() -> PeersPage {
                 scope: "all",
                 scope_label: "everything",
                 created: "3 months ago".to_owned(),
+                created_absolute: "2024-02-08 14:02:11 UTC".to_owned(),
                 last_seen: "12 minutes ago".to_owned(),
+                last_seen_absolute: "2024-05-06 11:10:52 UTC".to_owned(),
                 revoked: false,
+                revoked_when: String::new(),
                 pubkey_short: Some("a1b2c3d4…e5f6".to_owned()),
                 gossip_url: "https://sams-sharerr.example:8477".to_owned(),
                 gossip_key_set: true,
@@ -554,8 +623,11 @@ fn peers_page() -> PeersPage {
                 scope: "tv",
                 scope_label: "TV only",
                 created: "1 month ago".to_owned(),
+                created_absolute: "2024-04-05 09:37:20 UTC".to_owned(),
                 last_seen: "never".to_owned(),
+                last_seen_absolute: String::new(),
                 revoked: false,
+                revoked_when: String::new(),
                 pubkey_short: None,
                 gossip_url: String::new(),
                 gossip_key_set: false,
@@ -567,8 +639,11 @@ fn peers_page() -> PeersPage {
                 scope: "movies",
                 scope_label: "films only",
                 created: "8 months ago".to_owned(),
+                created_absolute: "2023-09-12 20:14:03 UTC".to_owned(),
                 last_seen: "5 months ago".to_owned(),
+                last_seen_absolute: "2023-12-19 07:55:38 UTC".to_owned(),
                 revoked: true,
+                revoked_when: "5 months ago".to_owned(),
                 pubkey_short: Some("9f8e7d6c…1a2b".to_owned()),
                 gossip_url: String::new(),
                 gossip_key_set: false,
@@ -588,9 +663,27 @@ fn items_page() -> ItemsPage {
     ItemsPage {
         signed_in: true,
         error: None,
+        state_counts: vec![
+            StateCount {
+                label: "Seeding".to_owned(),
+                count: 128,
+            },
+            StateCount {
+                label: "Pending".to_owned(),
+                count: 2,
+            },
+            StateCount {
+                label: "Failed".to_owned(),
+                count: 2,
+            },
+        ],
         items: vec![
             ItemRow {
                 title: "Lanternwick Hollow S01E01".to_owned(),
+                release_title: "Lanternwick.Hollow.S01E01.1080p.WEB-DL.DD5.1.H.264-SYNTH"
+                    .to_owned(),
+                arr_path: "/data/tv/Lanternwick Hollow/Season 01/Lanternwick Hollow S01E01.mkv"
+                    .to_owned(),
                 kind: "episode",
                 source_label: "Sonarr".to_owned(),
                 size: "1.9 GiB".to_owned(),
@@ -603,9 +696,13 @@ fn items_page() -> ItemsPage {
                 token_fp: Some("9f2a7c4e".to_owned()),
                 token_status: TokenStatus::Valid,
                 last_error: None,
+                created_by_sharerr: true,
+                since_absolute: "2024-02-14 09:21:07 UTC".to_owned(),
             },
             ItemRow {
                 title: "Harborlight (2019)".to_owned(),
+                release_title: "Harborlight.2019.2160p.UHD.BluRay.x265-SYNTH".to_owned(),
+                arr_path: "/data/movies/Harborlight (2019)/Harborlight (2019).mkv".to_owned(),
                 kind: "movie",
                 source_label: "Radarr".to_owned(),
                 size: "8.1 GiB".to_owned(),
@@ -618,9 +715,15 @@ fn items_page() -> ItemsPage {
                 token_fp: Some("OLDTOKEN12".to_owned()),
                 token_status: TokenStatus::Stale,
                 last_error: None,
+                created_by_sharerr: false,
+                since_absolute: "2024-04-02 17:44:55 UTC".to_owned(),
             },
             ItemRow {
                 title: "Lanternwick Hollow S02E04".to_owned(),
+                release_title: "Lanternwick.Hollow.S02E04.1080p.WEB-DL.DD5.1.H.264-SYNTH"
+                    .to_owned(),
+                arr_path: "/data/tv/Lanternwick Hollow/Season 02/Lanternwick Hollow S02E04.mkv"
+                    .to_owned(),
                 kind: "episode",
                 source_label: "Sonarr".to_owned(),
                 size: "2.0 GiB".to_owned(),
@@ -633,9 +736,13 @@ fn items_page() -> ItemsPage {
                 token_fp: None,
                 token_status: TokenStatus::None,
                 last_error: None,
+                created_by_sharerr: false,
+                since_absolute: "2024-05-06 11:20:31 UTC".to_owned(),
             },
             ItemRow {
                 title: "Midnight Frequency".to_owned(),
+                release_title: "Midnight.Frequency-2023-FLAC-SYNTH".to_owned(),
+                arr_path: "/data/music/Static Meridian/Midnight Frequency.flac".to_owned(),
                 kind: "track",
                 source_label: "Lidarr".to_owned(),
                 size: "8.4 MiB".to_owned(),
@@ -650,9 +757,13 @@ fn items_page() -> ItemsPage {
                 last_error: Some(
                     "qBittorrent rejected the add: category does not exist".to_owned(),
                 ),
+                created_by_sharerr: false,
+                since_absolute: "2024-05-06 10:42:12 UTC".to_owned(),
             },
             ItemRow {
                 title: "Seaglass & Static".to_owned(),
+                release_title: "Seaglass.and.Static.2021.RETAIL.EPUB-SYNTH".to_owned(),
+                arr_path: "/data/books/Seaglass & Static/Seaglass & Static.epub".to_owned(),
                 kind: "book",
                 source_label: "Readarr".to_owned(),
                 size: "1.2 MiB".to_owned(),
@@ -665,6 +776,8 @@ fn items_page() -> ItemsPage {
                 token_fp: Some("9f2a7c4e".to_owned()),
                 token_status: TokenStatus::Valid,
                 last_error: None,
+                created_by_sharerr: false,
+                since_absolute: "2024-04-30 08:05:44 UTC".to_owned(),
             },
         ],
         total: 132,

@@ -55,8 +55,98 @@
   </div>
 </div>
 
+{# Omitted when the client could not be reached at all: the diagram's own
+   client node already says so, and a table of zeros here would read as
+   "nothing is seeding" rather than "could not ask". #}
+{% if let Some(check) = client_check %}
+<section class="wide">
+<h2>Torrent client</h2>
+<div class="panel">
+  <p class="hint">
+    Everything else on this page reports what sharerr <em>believes</em>. This
+    asks the torrent client what it is actually doing — the only way to notice
+    a torrent removed or paused behind sharerr's back, which leaves the store
+    saying "Seeding" with nothing serving the file.
+  </p>
+
+  {% if let Some(reason) = check.error %}
+  <p class="error">
+    The client answered, but its torrent list could not be read: {{ reason }}
+  </p>
+  {% else if check.healthy %}
+  <p class="ok">
+    All {{ check.expected }} torrent(s) sharerr is sharing are present in the
+    client and seeding.
+  </p>
+  {% else %}
+  <p class="warn">
+    {{ check.confirmed }} of {{ check.expected }} torrent(s) sharerr is sharing
+    are actually seeding in the client.
+  </p>
+
+  {% if !check.absent.is_empty() %}
+  <h3>Not in the client</h3>
+  <p class="hint">
+    sharerr believes these are shared, but the client does not have them —
+    removed there without sharerr being told. Nothing is serving these files.
+  </p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Torrent</th><th>Info hash</th></tr></thead>
+    <tbody>
+      {% for row in check.absent %}
+      <tr>
+        <td>{{ row.title }}</td>
+        <td class="nowrap">
+          <code class="truncate" title="{{ row.hash }}">{{ row.hash }}</code>
+          <button type="button" class="link micro" data-copy-text="{{ row.hash }}"
+                  aria-label="Copy the info hash for {{ row.title }}">copy</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if check.more_absent > 0 %}
+  <p class="hint">… and {{ check.more_absent }} more.</p>
+  {% endif %}
+  {% endif %}
+
+  {% if !check.idle.is_empty() %}
+  <h3>In the client, not seeding</h3>
+  <p class="hint">
+    The client has these but is not uploading them — paused, errored, or still
+    checking. Fixable in the client itself; sharerr will not restart them.
+  </p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Torrent</th><th>Info hash</th></tr></thead>
+    <tbody>
+      {% for row in check.idle %}
+      <tr>
+        <td>{{ row.title }}</td>
+        <td class="nowrap">
+          <code class="truncate" title="{{ row.hash }}">{{ row.hash }}</code>
+          <button type="button" class="link micro" data-copy-text="{{ row.hash }}"
+                  aria-label="Copy the info hash for {{ row.title }}">copy</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if check.more_idle > 0 %}
+  <p class="hint">… and {{ check.more_idle }} more.</p>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+</div>
+</section>
+{% endif %}
+
+<section class="wide">
 <h2>Active swarms</h2>
-<div class="panel wide">
+<div class="panel">
   {% if swarms.is_empty() %}
   <p class="hint">No torrent has a live peer right now.</p>
   {% else %}
@@ -87,6 +177,7 @@
   </div>
   {% endif %}
 </div>
+</section>
 
 <script>
 (function () {

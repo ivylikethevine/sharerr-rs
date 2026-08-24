@@ -343,13 +343,16 @@ fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: b
         scope: peer.scope.as_str(),
         scope_label: peer.scope.label(),
         created: ago(peer.created_at),
+        created_absolute: absolute(peer.created_at),
         last_seen: match peer.last_seen_at {
             Some(at) => ago(at),
             // The answer an operator is actually looking for: the friend has the
             // key but has never used it, so they have not finished setting up.
             None => "never".to_owned(),
         },
+        last_seen_absolute: peer.last_seen_at.map(absolute).unwrap_or_default(),
         revoked: peer.is_revoked(),
+        revoked_when: peer.revoked_at.map(ago).unwrap_or_default(),
         // Truncated: this is a recogniser, not a copy source — the full key
         // travels peer-to-peer inside signed records, never through this page.
         pubkey_short: peer
@@ -408,11 +411,70 @@ pub(crate) fn ago(epoch_secs: i64) -> String {
     }
 }
 
+/// The absolute instant behind a relative string, for a `title=` tooltip.
+///
+/// `ago` answers "recently?", which is nearly always the question — but not
+/// "which of these two happened first" once both of them read "3 day(s) ago".
+/// UTC with no conversion: a container's local zone is usually unset, so an
+/// offset here would be a guess dressed up as a fact. Formatted by hand rather
+/// than through `time`'s `format_description!`, which needs the `macros`
+/// feature the workspace does not enable.
+pub(crate) fn absolute(epoch_secs: i64) -> String {
+    let Ok(at) = time::OffsetDateTime::from_unix_timestamp(epoch_secs) else {
+        // Only reachable for a timestamp outside year ±9999 — a corrupt row
+        // rather than anything an operator did. An empty title just omits the
+        // tooltip, which beats rendering "invalid" next to a real time.
+        return String::new();
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
+}
+
+/// How long something took, given a start and an end.
+///
+/// Sync runs span seconds to minutes, so the units stay coarse: the useful
+/// signal is "this pass is taking much longer than the last one", never the
+/// exact millisecond.
+pub(crate) fn took(started_at: i64, finished_at: i64) -> String {
+    match finished_at.saturating_sub(started_at) {
+        // A clock that moved backwards mid-run. Reporting a negative duration
+        // would read as a bug in sharerr rather than in the host's clock.
+        s if s < 0 => String::new(),
+        0 => "under a second".to_owned(),
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m {}s", s / 60, s % 60),
+        s => format!("{}h {}m", s / 3_600, (s % 3_600) / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_run_duration_reads_in_the_coarsest_useful_unit() {
+        assert_eq!(took(100, 100), "under a second");
+        assert_eq!(took(100, 145), "45s");
+        assert_eq!(took(100, 100 + 125), "2m 5s");
+        assert_eq!(took(100, 100 + 7_260), "2h 1m");
+        // A clock that jumped backwards reports nothing rather than "-5s".
+        assert_eq!(took(200, 100), "");
+    }
+
+    #[test]
+    fn an_absolute_timestamp_is_utc_and_needs_no_timezone() {
+        assert_eq!(absolute(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(absolute(1_700_000_000), "2023-11-14 22:13:20 UTC");
+    }
 
     #[test]
     fn relative_times_read_the_way_a_person_would_say_them() {

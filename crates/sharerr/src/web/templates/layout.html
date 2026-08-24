@@ -33,6 +33,50 @@
 
 {% if signed_in %}
 <script>
+// Copy-to-clipboard for any `[data-copy]` (copies the text of the element the
+// selector names) or `[data-copy-text]` (copies the attribute itself).
+// Delegated from the document so it covers rows rendered on any page without
+// each template shipping its own handler.
+(function () {
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy], [data-copy-text]");
+    if (!button) return;
+
+    var text = button.hasAttribute("data-copy-text")
+      ? button.getAttribute("data-copy-text")
+      : (document.querySelector(button.getAttribute("data-copy")) || {}).textContent;
+    if (text == null) return;
+
+    var note = button.parentNode.querySelector("[data-copy-note]");
+    var say = function (message) {
+      if (!note) return;
+      note.textContent = message;
+      // Cleared again so a stale "Copied." does not sit next to a value the
+      // operator has since changed their mind about.
+      window.setTimeout(function () { note.textContent = ""; }, 2000);
+    };
+
+    // `navigator.clipboard` needs a secure context, which a plain-HTTP LAN
+    // instance is not — so fall back to selecting the value for a manual copy
+    // rather than silently doing nothing.
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () { say(" Copied."); });
+      return;
+    }
+
+    var source = button.hasAttribute("data-copy")
+      ? document.querySelector(button.getAttribute("data-copy"))
+      : button.previousElementSibling;
+    if (!source) { say(" Copy manually: " + text); return; }
+    var range = document.createRange();
+    range.selectNodeContents(source);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    say(" Selected — press Ctrl+C.");
+  });
+})();
+
 (function () {
   var path = location.pathname;
   var links = document.querySelectorAll(".bar nav a[href]");

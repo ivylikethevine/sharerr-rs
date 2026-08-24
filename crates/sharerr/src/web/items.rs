@@ -55,6 +55,21 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     };
     let total = items.len();
 
+    // Counted here, before the filters below narrow `items`: the tally answers
+    // "what is the state of the library", which a filtered count cannot.
+    let state_counts = ShareState::ALL
+        .iter()
+        .filter_map(|state| {
+            let count = items.iter().filter(|item| item.state == *state).count();
+            // A state nothing is in is noise in a strip meant to be read at a
+            // glance, so it is left out rather than shown as a zero.
+            (count > 0).then(|| crate::web::templates::StateCount {
+                label: title_case(state.as_str()),
+                count,
+            })
+        })
+        .collect();
+
     let needle = query.q.trim().to_lowercase();
     if !needle.is_empty() {
         items.retain(|item| {
@@ -146,6 +161,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         error,
         total,
         shown: items.len(),
+        state_counts,
         items: items
             .iter()
             .map(|item| {
@@ -245,6 +261,8 @@ fn row(
 ) -> ItemRow {
     ItemRow {
         title: item.spec.title().to_owned(),
+        release_title: item.release_title.clone(),
+        arr_path: item.arr_path.display().to_string(),
         kind: item.spec.kind_tag(),
         source_label: title_case(item.source.as_str()),
         size: human_size(item.size),
@@ -260,6 +278,11 @@ fn row(
         token_fp: item.announce_token_fp.clone(),
         token_status: token_status(item, current_token_fp),
         last_error: item.last_error.clone(),
+        created_by_sharerr: item.created_by_sharerr,
+        since_absolute: item
+            .created_at
+            .map(super::peers::absolute)
+            .unwrap_or_default(),
     }
 }
 
@@ -504,6 +527,54 @@ mod tests {
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 
+    /// The search box above the table matches on `release_title`, so a row that
+    /// does not show it leaves the operator filtering against a string they
+    /// cannot read. `arr_path` is the first thing to check when an item will
+    /// not share, and was previously only visible as one sample on `/`.
+    #[test]
+    fn a_row_carries_the_release_title_and_the_arr_path() {
+        let mut source_item = item(
+            MediaSource::Sonarr,
+            MediaSpec::Movie {
+                title: "Harborlight".to_owned(),
+                year: Some(2019),
+            },
+            ShareState::Seeding,
+        );
+        source_item.release_title = "Harborlight.2019.2160p-SYNTH".to_owned();
+        source_item.arr_path = "/data/movies/Harborlight (2019)/Harborlight.mkv".into();
+
+        let row = row(&source_item, &[], None, None);
+
+        assert_eq!(row.release_title, "Harborlight.2019.2160p-SYNTH");
+        assert_eq!(
+            row.arr_path,
+            "/data/movies/Harborlight (2019)/Harborlight.mkv"
+        );
+        // The two are deliberately different strings — conflating them stalls
+        // seeding at 0%, which is why both are worth showing side by side.
+        assert_ne!(row.title, row.release_title);
+    }
+
+    /// Withdrawing an item sharerr did not create leaves the torrent alone, so
+    /// which case a row is in changes what the operator should expect.
+    #[test]
+    fn a_row_says_whether_sharerr_created_the_torrent() {
+        let spec = MediaSpec::Movie {
+            title: "Harborlight".to_owned(),
+            year: None,
+        };
+
+        let mine = item(MediaSource::Radarr, spec.clone(), ShareState::Seeding);
+        assert!(row(&mine, &[], None, None).created_by_sharerr);
+
+        let reused = SharedItem {
+            created_by_sharerr: false,
+            ..item(MediaSource::Radarr, spec, ShareState::Seeding)
+        };
+        assert!(!row(&reused, &[], None, None).created_by_sharerr);
+    }
+
     #[tokio::test]
     async fn an_empty_store_renders_rather_than_erroring() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
@@ -563,6 +634,45 @@ mod tests {
 
         assert!(html.contains("Harborlight"), "{html}");
         assert!(!html.contains("Lanternwick Hollow"), "{html}");
+    }
+
+    /// The tally describes the library, not the current view — a filtered
+    /// count could not answer "how much of what I have is actually seeding",
+    /// which is the question the page exists for.
+    #[tokio::test]
+    async fn the_state_tally_survives_a_filter() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+            .await
+            .unwrap();
+        store
+            .upsert(&SharedItem {
+                state: ShareState::Failed,
+                ..named(MediaSource::Radarr, "Harborlight", 2)
+            })
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    source: "sonarr".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        // Only the Sonarr row is listed...
+        assert!(!html.contains("Harborlight"), "{html}");
+        // ...but the filtered-out Failed item is still counted in the tally.
+        assert!(html.contains("1 Seeding"), "{html}");
+        assert!(html.contains("1 Failed"), "{html}");
     }
 
     #[tokio::test]

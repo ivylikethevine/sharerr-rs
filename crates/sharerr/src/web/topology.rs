@@ -21,8 +21,8 @@ use sharerr_store::{EndpointKind, ObservedVia, PeerEndpoint};
 
 use super::WebState;
 use super::templates::{
-    AddressCell, Edge, EdgeStyle, Node, NodeIcon, NodeLine, NodeStatus, SwarmRow, TopologyPage,
-    render,
+    AddressCell, ClientCheck, ClientMismatch, Edge, EdgeStyle, Node, NodeIcon, NodeLine,
+    NodeStatus, SwarmRow, TopologyPage, render,
 };
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
@@ -232,7 +232,8 @@ async fn gather(state: &WebState) -> TopologyPage {
     };
 
     let (instance_lines, instance_status) = instance_lines(&config, state).await;
-    let (client_label, client_lines, client_status) = client_node(&config, state, &secret).await;
+    let (client_label, client_lines, client_status, client_check) =
+        client_node(&config, state, &secret).await;
 
     let friends = friend_nodes(state).await;
     let swarms = swarm_rows(state).await;
@@ -255,7 +256,110 @@ async fn gather(state: &WebState) -> TopologyPage {
         nodes,
         edges,
         swarms,
+        client_check,
     }
+}
+
+/// How many mismatched torrents to name before summarising the rest. A
+/// library whose client was wiped has *every* torrent absent, and a page
+/// listing ten thousand of them buries the one line that explains it.
+const MAX_MISMATCHES: usize = 20;
+
+/// Compare what the store believes is seeding against what the client is
+/// actually doing with it.
+///
+/// Pure, and takes plain `(hash, title)` pairs rather than a `SharedItem` or a
+/// live client, so the interesting half — which side of a disagreement a
+/// torrent falls on — is testable without either. See `CLAUDE.md` on
+/// preferring store-backed logic as plain parameters.
+///
+/// Hashes are compared lowercased: `TorrentSummary::hash` documents itself as
+/// lowercase hex, but a hash that came from a `.torrent` sharerr did not build
+/// has no such guarantee, and a case mismatch here would report every torrent
+/// as absent.
+pub(crate) fn reconcile(
+    expected: &[(String, String)],
+    listed: &[sharerr_client::TorrentSummary],
+) -> ClientCheck {
+    use std::collections::HashMap;
+
+    let present: HashMap<String, bool> = listed
+        .iter()
+        .map(|t| (t.hash.to_lowercase(), t.is_seeding))
+        .collect();
+
+    let mut absent = Vec::new();
+    let mut idle = Vec::new();
+    let mut confirmed = 0usize;
+
+    for (hash, title) in expected {
+        match present.get(&hash.to_lowercase()) {
+            Some(true) => confirmed += 1,
+            Some(false) => idle.push(ClientMismatch {
+                title: title.clone(),
+                hash: hash.clone(),
+            }),
+            None => absent.push(ClientMismatch {
+                title: title.clone(),
+                hash: hash.clone(),
+            }),
+        }
+    }
+
+    let more_absent = absent.len().saturating_sub(MAX_MISMATCHES);
+    let more_idle = idle.len().saturating_sub(MAX_MISMATCHES);
+    absent.truncate(MAX_MISMATCHES);
+    idle.truncate(MAX_MISMATCHES);
+
+    ClientCheck {
+        expected: expected.len(),
+        confirmed,
+        healthy: more_absent == 0 && more_idle == 0 && absent.is_empty() && idle.is_empty(),
+        absent,
+        more_absent,
+        idle,
+        more_idle,
+        error: None,
+    }
+}
+
+/// The `ClientCheck` for a client that answered the version probe but not the
+/// listing. Distinct from an unreachable client, which produces no check at
+/// all — here sharerr *can* talk to it and still cannot say what it holds.
+fn client_check_failed(reason: String) -> ClientCheck {
+    ClientCheck {
+        expected: 0,
+        confirmed: 0,
+        absent: Vec::new(),
+        more_absent: 0,
+        idle: Vec::new(),
+        more_idle: 0,
+        error: Some(reason),
+        healthy: false,
+    }
+}
+
+/// What the store says should be seeding, as `(info hash, title)` pairs.
+///
+/// An item with no info hash has no torrent yet, so there is nothing for the
+/// client to be holding — it is not a disagreement, and counting it as one
+/// would make every pending item look like a fault.
+async fn expected_seeding(state: &WebState) -> Vec<(String, String)> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    let Ok(items) = store.all_items().await else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| item.state == sharerr_core::ShareState::Seeding)
+        .filter_map(|item| {
+            item.info_hash
+                .as_ref()
+                .map(|hash| (hash.clone(), item.spec.title().to_owned()))
+        })
+        .collect()
 }
 
 /// Every torrent with a live peer right now, each with its connected
@@ -387,7 +491,7 @@ async fn client_node(
     config: &Config,
     state: &WebState,
     secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
-) -> (String, Vec<NodeLine>, NodeStatus) {
+) -> (String, Vec<NodeLine>, NodeStatus, Option<ClientCheck>) {
     let backend = config.torrent_backend;
     let client = config.torrent_client_for(backend);
 
@@ -397,33 +501,76 @@ async fn client_node(
     let label = backend.display_name().to_owned();
 
     let mut lines = vec![address_line("url", client.url.to_string())];
+    // `Ready` carries the authenticated client precisely so a caller with more
+    // to ask does not build a second one — see `QbitOutcome::Ready`. This page
+    // has more to ask: every other check reports what sharerr *believes*, and
+    // only the client can say what it is actually doing.
+    let mut check = None;
     let status = match outcome {
-        QbitOutcome::Ready { version, kind, .. } => {
+        QbitOutcome::Ready {
+            version,
+            kind,
+            client: connected,
+        } => {
             lines.push(line("version", format!("{kind} v{version}")));
-            NodeStatus::Ok
+            // `None` rather than sharerr's own category: a torrent moved to a
+            // different category is still seeding the file, and filtering here
+            // would report it as absent. The hashes are the join key, so the
+            // category adds nothing but a way to be wrong.
+            let reconciled = match connected.list(None).await {
+                Ok(listed) => reconcile(&expected_seeding(state).await, &listed),
+                Err(err) => client_check_failed(sharerr_client::error_chain(&err)),
+            };
+            lines.push(line(
+                "seeding",
+                if let Some(reason) = &reconciled.error {
+                    format!("could not list: {reason}")
+                } else {
+                    format!("{} of {}", reconciled.confirmed, reconciled.expected)
+                },
+            ));
+            let degraded = !reconciled.healthy;
+            check = Some(reconciled);
+            // A client that is reachable but not seeding what sharerr thinks
+            // is not "Ok" — that is exactly the state this check exists to
+            // stop looking healthy.
+            if degraded {
+                NodeStatus::Warn
+            } else {
+                NodeStatus::Ok
+            }
         }
         QbitOutcome::NoCredential => {
             lines.push(line("", "No credential stored"));
             NodeStatus::Error
         }
-        QbitOutcome::CredentialUnreadable(_) => {
+        // Each of these carries the reason it failed. Collapsing it to the bare
+        // category left the diagram saying "Unreachable" where the answer —
+        // wrong port, refused connection, expired certificate — was already in
+        // hand. `line` truncates to the node's width, and the node's <title>
+        // repeats every line for the full text on hover.
+        QbitOutcome::CredentialUnreadable(reason) => {
             lines.push(line("", "Vault unreadable"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
-        QbitOutcome::BadUrl(_) => {
+        QbitOutcome::BadUrl(reason) => {
             lines.push(line("", "Misconfigured"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
-        QbitOutcome::Unreachable(_) => {
+        QbitOutcome::Unreachable(reason) => {
             lines.push(line("", "Unreachable"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
         QbitOutcome::AuthRejected => {
             lines.push(line("", "Credential rejected"));
             NodeStatus::Error
         }
-        QbitOutcome::Failed(_) => {
+        QbitOutcome::Failed(reason) => {
             lines.push(line("", "Failed"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
     };
@@ -432,7 +579,7 @@ async fn client_node(
         lines.push(line("gluetun", reason));
     }
 
-    (label, lines, status)
+    (label, lines, status, check)
 }
 
 fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> SourceNode {
@@ -910,6 +1057,108 @@ mod tests {
 
     use super::*;
     use crate::web::auth::Sessions;
+
+    fn summary(hash: &str, seeding: bool) -> sharerr_client::TorrentSummary {
+        sharerr_client::TorrentSummary {
+            hash: hash.to_owned(),
+            name: "whatever".to_owned(),
+            save_path: "/downloads".to_owned(),
+            content_path: "/downloads/whatever".to_owned(),
+            category: String::new(),
+            tags: Vec::new(),
+            is_seeding: seeding,
+        }
+    }
+
+    fn expect(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(h, t)| ((*h).to_owned(), (*t).to_owned()))
+            .collect()
+    }
+
+    /// The whole point of asking the client: the store still says `Seeding`
+    /// for a torrent somebody removed there, and nothing else contradicts it.
+    #[test]
+    fn a_torrent_missing_from_the_client_is_reported_absent() {
+        let check = reconcile(
+            &expect(&[("aabb", "Kept"), ("ccdd", "Removed")]),
+            &[summary("aabb", true)],
+        );
+
+        assert_eq!(check.expected, 2);
+        assert_eq!(check.confirmed, 1);
+        assert_eq!(check.absent.len(), 1);
+        assert_eq!(check.absent[0].title, "Removed");
+        assert!(check.idle.is_empty());
+        assert!(!check.healthy);
+    }
+
+    /// Held but paused is a different problem from not held at all, and has a
+    /// different fix — so the two must not be collapsed into one count.
+    #[test]
+    fn a_paused_torrent_is_idle_rather_than_absent() {
+        let check = reconcile(&expect(&[("aabb", "Paused")]), &[summary("aabb", false)]);
+
+        assert_eq!(check.confirmed, 0);
+        assert!(check.absent.is_empty());
+        assert_eq!(check.idle.len(), 1);
+        assert_eq!(check.idle[0].title, "Paused");
+        assert!(!check.healthy);
+    }
+
+    #[test]
+    fn everything_seeding_is_healthy() {
+        let check = reconcile(
+            &expect(&[("aabb", "One"), ("ccdd", "Two")]),
+            &[summary("aabb", true), summary("ccdd", true)],
+        );
+
+        assert_eq!(check.confirmed, 2);
+        assert!(check.healthy);
+        assert!(check.error.is_none());
+    }
+
+    /// `TorrentSummary::hash` documents itself as lowercase, but a hash from a
+    /// torrent sharerr did not build carries no such guarantee — and comparing
+    /// case-sensitively would report every one of them as absent.
+    #[test]
+    fn hashes_compare_without_regard_to_case() {
+        let check = reconcile(
+            &expect(&[("AABBCCDD", "Shouty")]),
+            &[summary("aabbccdd", true)],
+        );
+
+        assert_eq!(check.confirmed, 1);
+        assert!(check.healthy);
+    }
+
+    /// A wiped client would otherwise render ten thousand rows and bury the
+    /// one line that explains it.
+    #[test]
+    fn a_long_list_of_mismatches_is_capped_and_counted() {
+        let pairs: Vec<(String, String)> = (0..MAX_MISMATCHES + 5)
+            .map(|i| (format!("{i:040x}"), format!("Item {i}")))
+            .collect();
+
+        let check = reconcile(&pairs, &[]);
+
+        assert_eq!(check.absent.len(), MAX_MISMATCHES);
+        assert_eq!(check.more_absent, 5);
+        assert!(!check.healthy);
+    }
+
+    /// A client that answered the version probe but not the listing is not the
+    /// same as a healthy one — the counts are meaningless, and saying "0 of 0
+    /// seeding" would be a lie rather than an absence of information.
+    #[test]
+    fn a_failed_listing_is_not_healthy() {
+        let check = client_check_failed("connection reset".to_owned());
+
+        assert!(!check.healthy);
+        assert_eq!(check.error.as_deref(), Some("connection reset"));
+        assert_eq!(check.expected, 0);
+    }
 
     fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
         WebState {

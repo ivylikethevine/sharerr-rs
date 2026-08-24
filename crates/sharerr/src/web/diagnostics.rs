@@ -19,7 +19,9 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use super::peers::ago;
-use super::templates::{DiagnosticsData, EndpointStatus, RunRow, SampleRow, ServiceLine};
+use super::templates::{
+    DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunRow, SampleRow, ServiceLine,
+};
 use crate::checks::{self, ArrOutcome, DirOutcome};
 use crate::gluetun::GluetunTarget;
 
@@ -79,6 +81,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
                 name: "library".to_owned(),
                 message: format!("the scan did not complete: {err}"),
                 ok: false,
+                url: String::new(),
             });
         }
     }
@@ -129,7 +132,53 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         }),
         gluetun,
         runs,
+        lighthouse: lighthouse_view(state, &config).await,
     }
+}
+
+/// What the lighthouse poller is doing, or `None` when none is configured.
+///
+/// Reads the running poller's own record rather than probing anything: a
+/// lighthouse is contacted on a 15-minute timer, and dialling one from a page
+/// load would report on a request the poller never made.
+async fn lighthouse_view(
+    state: &WebState,
+    config: &sharerr_core::config::Config,
+) -> Option<LighthouseView> {
+    let configured = config.lighthouse.urls.len();
+    if configured == 0 {
+        return None;
+    }
+
+    let snapshot = state.serve.lighthouse_status().snapshot().await;
+    let rows: Vec<LighthouseRow> = snapshot
+        .lighthouses
+        .iter()
+        .map(|report| LighthouseRow {
+            url: report.url.clone(),
+            last_success: report.last_success_at.map(ago),
+            last_error: report.last_error.clone(),
+        })
+        .collect();
+
+    // Healthy means every configured lighthouse has accepted a report and none
+    // is currently failing. A URL the poller has not reached yet has no row at
+    // all, so a short row list is itself a failure to report — which is why
+    // this compares against `configured` rather than against `rows.len()`.
+    let accepting = rows
+        .iter()
+        .filter(|row| row.last_success.is_some() && row.last_error.is_none())
+        .count();
+
+    Some(LighthouseView {
+        configured,
+        last_pass: snapshot.last_pass_at.map(ago),
+        healthy: accepting == configured,
+        rows,
+        last_recovery: snapshot.last_recovery_at.map(ago),
+        last_recovery_peer: snapshot.last_recovery_peer.clone(),
+        lookups_attempted: snapshot.lookups_attempted,
+    })
 }
 
 /// The last few sync runs, newest first — "is the last one healthy" is the
@@ -149,6 +198,10 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
             let Some(finished_at) = run.finished_at else {
                 return RunRow {
                     when: ago(run.started_at),
+                    when_absolute: super::peers::absolute(run.started_at),
+                    // Nothing to measure to yet, and "0s" would read as a run
+                    // that finished instantly rather than one still going.
+                    took: String::new(),
                     summary: "still running".to_owned(),
                     failed: false,
                 };
@@ -156,6 +209,8 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
             let (summary, failed) = run.summary.describe(true);
             RunRow {
                 when: ago(finished_at),
+                when_absolute: super::peers::absolute(finished_at),
+                took: super::peers::took(run.started_at, finished_at),
                 summary,
                 failed,
             }
@@ -200,17 +255,17 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
                 config.tag
             ),
         ),
-        ArrOutcome::TagUnused { .. } => (
+        ArrOutcome::TagUnused { version } => (
             true,
             format!(
-                "connected, but nothing carries the {:?} tag yet",
+                "connected, but nothing carries the {:?} tag yet (v{version})",
                 config.tag
             ),
         ),
-        ArrOutcome::TagMissing { .. } => (
+        ArrOutcome::TagMissing { version } => (
             false,
             format!(
-                "no tag named {:?} exists there — create it first",
+                "no tag named {:?} exists there — create it first (v{version})",
                 config.tag
             ),
         ),
@@ -226,6 +281,13 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
         name: super::settings::title_case(kind.as_str()),
         message,
         ok,
+        // Already in hand from the config this function was passed. A line
+        // reading "could not reach it: connection refused" is far more
+        // actionable next to the address that was actually dialled.
+        url: config
+            .service(kind)
+            .map(|service| service.url.to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -260,6 +322,8 @@ fn describe_library(
         name: format!("library {}", library.path.display()),
         message,
         ok,
+        // The path is the identity here, and it is already in `name`.
+        url: String::new(),
     }
 }
 
@@ -590,6 +654,57 @@ mod tests {
         assert_ne!(missing.message, unused.message);
         assert!(missing.message.contains("no tag named"));
         assert!(unused.message.contains("nothing carries"));
+        // Both outcomes carry the version they were told, and both used to
+        // discard it — leaving the page unable to say which *arr it reached.
+        assert!(missing.message.contains("1.0"), "{}", missing.message);
+        assert!(unused.message.contains("1.0"), "{}", unused.message);
+    }
+
+    /// "could not reach it" is only actionable next to the address that was
+    /// actually dialled — the cause is usually a typo visible in the URL.
+    #[test]
+    fn describe_carries_the_address_it_was_talking_to() {
+        let config = Config {
+            radarr: Some(ServiceConfig {
+                url: Url::parse("http://radarr.example:7878").unwrap(),
+            }),
+            ..Config::default()
+        };
+
+        let line = describe(
+            MediaSource::Radarr,
+            &config,
+            &ArrOutcome::Unreachable("connection refused".to_owned()),
+        );
+
+        assert!(line.url.contains("radarr.example:7878"), "{}", line.url);
+    }
+
+    /// A service with no section at all has no address to name, and must not
+    /// invent one — the line still has to render.
+    #[test]
+    fn an_unconfigured_service_reports_no_address() {
+        let line = describe(
+            MediaSource::Radarr,
+            &base_config(),
+            &ArrOutcome::NotConfigured,
+        );
+
+        assert!(line.url.is_empty());
+        assert!(!line.message.is_empty());
+    }
+
+    /// A library line is identified by its path, which is already the name —
+    /// a URL there would be a second, emptier identity.
+    #[test]
+    fn a_library_line_has_no_address() {
+        let library = LibraryConfig {
+            path: std::path::PathBuf::from("/media/tv"),
+            kind: LibraryKind::Tv,
+        };
+        let line = describe_library(&library, &DirOutcome::Empty);
+
+        assert!(line.url.is_empty());
     }
 
     #[test]

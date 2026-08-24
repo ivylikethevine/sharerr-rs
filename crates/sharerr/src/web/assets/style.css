@@ -40,6 +40,38 @@
   --radius: 10px;
   --radius-sm: 7px;
   --ease: 150ms cubic-bezier(0.2, 0, 0, 1);
+
+  /* Spacing. `--sp-N` is N × 4px (N × 0.25rem): the name is the value, so a
+     reader never has to look it up, and a step added later needs no renaming.
+     This governs margin, padding and gap only — every width, min-width,
+     max-width, grid track floor and breakpoint below keeps its own literal,
+     because those are sized against content (a 40-character hash, the longest
+     <option>, a comfortable measure) rather than against this rhythm. */
+  --sp-05: 0.125rem; /*  2px */
+  --sp-1: 0.25rem;   /*  4px */
+  --sp-2: 0.5rem;    /*  8px */
+  --sp-3: 0.75rem;   /* 12px */
+  --sp-4: 1rem;      /* 16px */
+  --sp-5: 1.25rem;   /* 20px */
+  --sp-6: 1.5rem;    /* 24px */
+  --sp-8: 2rem;      /* 32px */
+  --sp-10: 2.5rem;   /* 40px */
+  --sp-12: 3rem;     /* 48px */
+
+  /* Named for the job, so the whole page rhythm retunes from three lines. */
+  --flow: var(--sp-4);         /* between two blocks in a flow */
+  --section-gap: var(--sp-10); /* above an <h2> or a wide section */
+  --panel-pad: var(--sp-6);
+
+  /* Type. Whole pixels at a 16px root, so nothing lands on a half-pixel. */
+  --text-2xs: 0.75rem;    /* 12px — uppercase micro-labels */
+  --text-xs: 0.8125rem;   /* 13px — table headers, diagram detail */
+  --text-sm: 0.875rem;    /* 14px — hints, pills, secondary chrome */
+  --text-md: 0.9375rem;   /* 15px — labels, fields, buttons, table cells */
+  --text-base: 1rem;      /* 16px — body prose, h3 */
+  --text-lg: 1.125rem;    /* 18px — h2, summary, brand, lede */
+  --text-xl: 1.375rem;    /* 22px — a stat's headline number */
+  --text-2xl: 1.625rem;   /* 26px — h1 */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -93,10 +125,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* The 5rem foot stays a literal: it is scroll runway under the last block so a
+   page does not end flush against the viewport, not part of the rhythm. */
 main {
   max-width: 46rem;
   margin: 0 auto;
-  padding: 2rem 1.25rem 5rem;
+  padding: var(--sp-8) var(--sp-5) 5rem;
 }
 
 /* Screen-reader-only until focused, so keyboard users can jump past the nav
@@ -108,7 +142,7 @@ main {
   z-index: 100;
   background: var(--accent);
   color: var(--accent-ink);
-  padding: 0.6rem 1rem;
+  padding: var(--sp-2) var(--sp-4);
   border-radius: 0 0 var(--radius-sm) 0;
   font-weight: 600;
   text-decoration: none;
@@ -125,9 +159,9 @@ main {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: var(--sp-4);
   flex-wrap: wrap;
-  padding: 0.85rem 1.25rem;
+  padding: var(--sp-3) var(--sp-5);
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -137,14 +171,15 @@ main {
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: var(--sp-2);
   font-weight: 700;
-  font-size: 1.05rem;
+  font-size: var(--text-lg);
   letter-spacing: -0.01em;
   color: var(--ink);
   text-decoration: none;
 }
 
+/* A drawn dot sized against the brand text, not a spacing step. */
 .brand::before {
   content: "";
   width: 0.6rem;
@@ -154,20 +189,22 @@ main {
   box-shadow: 0 0 0 3px var(--accent-wash);
 }
 
+/* Not `--sp-1`: the nav sits at the edge of wrapping on a narrow window, and
+   +2px across six gaps is enough to move where it breaks. */
 .bar nav {
   display: flex;
   align-items: center;
-  gap: 0.15rem;
+  gap: var(--sp-05);
   flex-wrap: wrap;
 }
 
 .bar nav a {
-  padding: 0.4rem 0.65rem;
+  padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-sm);
   color: var(--muted);
   text-decoration: none;
   font-weight: 550;
-  font-size: 0.94rem;
+  font-size: var(--text-md);
   transition: background var(--ease), color var(--ease);
 }
 
@@ -191,34 +228,63 @@ a:hover { color: var(--accent-hover); }
   border-radius: 4px;
 }
 
-h1 { font-size: 1.65rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.5rem; }
+h1 { font-size: var(--text-2xl); font-weight: 700; letter-spacing: -0.02em; margin: 0 0 var(--sp-2); }
 h2 {
-  font-size: 1.12rem;
+  font-size: var(--text-lg);
   font-weight: 650;
   letter-spacing: -0.01em;
-  margin: 2.5rem 0 0.6rem;
-  padding-bottom: 0.4rem;
+  margin: var(--section-gap) 0 var(--sp-2);
+  padding-bottom: var(--sp-2);
   border-bottom: 1px solid var(--line);
 }
-h3 { font-size: 1rem; font-weight: 650; letter-spacing: -0.01em; margin: 1.4rem 0 0.4rem; }
+h3 { font-size: var(--text-base); font-weight: 650; letter-spacing: -0.01em; margin: var(--sp-6) 0 var(--sp-2); }
+
+/* ---- Vertical rhythm -------------------------------------------------
+   One rule owns the gap between two blocks: the top margin of the second.
+   Nothing carries a bottom margin, so two neighbours can never disagree about
+   the distance between them (or collapse to whichever is larger), and a
+   container's first child can never push its padding open — which is what made
+   a `.panel` opening with an <h3> sit 1.4rem lower inside than one opening with
+   a table, and what let `.facts` (no bottom margin at all) collide the Friends
+   page's "Seen at" row into the next form's first label.
+
+   `:where()` holds this at zero specificity deliberately: it is the default,
+   not a fight. A field's own tighter pairing — `label`, `input`, `.locked` —
+   is a plain element or class rule below and still wins. */
+:where(main, section, .panel, .card, details.fold,
+       div.ok, div.warn, div.error) > * { margin-block: 0; }
+
+:where(main, section, .panel, .card, details.fold,
+       div.ok, div.warn, div.error) > * + * { margin-block-start: var(--flow); }
+
+/* A heading owns the gap on both sides of itself: a large one above, because it
+   opens a section, and a small one below, because the rule under an <h2> has to
+   read as belonging to the block it introduces. This second rule is what makes
+   the small one stick — without it the heading's bottom margin collapses
+   against the flow gap and every heading drifts a step away from what it
+   labels. */
+:where(main, section, .panel, .card, details.fold) > :is(h1, h2, h3) + * {
+  margin-top: 0;
+}
+:where(main, section, .panel, .card, details.fold) > :first-child { margin-top: 0; }
 
 /* The disclosure the secondary service sections fold into. The summary is
    styled to sit in the heading rhythm, so closed it reads as one more section
    title rather than a widget. */
 details.fold {
-  margin-top: 2.5rem;
+  margin-top: var(--section-gap);
 }
 details.fold > summary {
   cursor: pointer;
-  font-size: 1.12rem;
+  font-size: var(--text-lg);
   font-weight: 650;
   letter-spacing: -0.01em;
-  padding-bottom: 0.4rem;
+  padding-bottom: var(--sp-2);
   border-bottom: 1px solid var(--line);
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: var(--sp-2);
 }
 details.fold > summary::-webkit-details-marker { display: none; }
 details.fold > summary::before {
@@ -230,10 +296,13 @@ details.fold > summary::before {
 details.fold[open] > summary::before { transform: rotate(90deg); }
 details.fold > summary:hover { color: var(--accent); }
 
-.lede { color: var(--muted); font-size: 1.02rem; max-width: 42rem; }
+.lede { color: var(--muted); font-size: var(--text-lg); max-width: 42rem; }
 .hint { color: var(--muted); }
-.hint { font-size: 0.9rem; }
+.hint { font-size: var(--text-sm); }
 
+/* `em` rather than a spacing token on purpose: a `<code>` pill has to shrink
+   with the text around it, so the same rule works inside a `<th>` and inside a
+   `.hint` as well as in body prose. */
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.87em;
@@ -242,16 +311,35 @@ code {
   border-radius: 5px;
 }
 
+/* A `<pre>` holds a whole script (the Debug page's reachability check), and the
+   inline pill above — background, padding, rounded corners — repeats per line
+   inside one, boxing every line separately. The block owns the presentation;
+   the `<code>` inside it is only there for semantics. */
+pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--text-sm); }
+pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+/* No `margin` here: the flow rule above owns the gap to whatever precedes. */
 .card, .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow-sm);
-  padding: 1.35rem;
-  margin: 1rem 0;
+  padding: var(--panel-pad);
 }
 
-.card { display: flex; flex-direction: column; gap: 0.35rem; max-width: 26rem; }
+/* No `gap`: this is a flex container, where gap *adds* to the flow rule's
+   margins rather than collapsing with them, so every field would drift. */
+.card { display: flex; flex-direction: column; max-width: 26rem; }
+
+/* Two sibling panels with no heading between them — Settings' Tracker section
+   has three — sat one flow step apart while each carried its own padding, so
+   they read as one blob rather than three things. */
+.panel + .panel { margin-top: var(--sp-6); }
 
 /* Auth pages (sign-in, claim-instance) put their only content in a `.card`;
    centering it here — rather than in the page templates — keeps every other
@@ -263,26 +351,26 @@ main:has(> form.card) {
   justify-content: center;
 }
 main:has(> form.card) h1 { text-align: center; }
-main:has(> form.card) > .card { margin: 1.5rem auto 0; width: 100%; }
+main:has(> form.card) > .card { margin: var(--sp-6) auto 0; width: 100%; }
 main:has(> form.card) > p.error { max-width: 26rem; margin-left: auto; margin-right: auto; }
 
 /* `display: block` is the point: two adjacent `<label>`s with nothing between
    them (a checkbox's label right before the next field's) are inline by
    default and run onto one line otherwise. */
-label { display: block; font-weight: 550; font-size: 0.92rem; margin-top: 0.9rem; }
+label { display: block; font-weight: 550; font-size: var(--text-md); margin-top: var(--sp-4); }
 label:first-child { margin-top: 0; }
 
 input[type="text"], input[type="password"], input[type="url"],
 input[type="number"], select, input:not([type]) {
   width: 100%;
-  margin-top: 0.3rem;
-  padding: 0.55rem 0.65rem;
+  margin-top: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   background: var(--panel-2);
   color: var(--ink);
   font: inherit;
-  font-size: 0.95rem;
+  font-size: var(--text-md);
   transition: border-color var(--ease), box-shadow var(--ease);
 }
 
@@ -300,7 +388,7 @@ input[type="number"]:focus, select:focus, input:not([type]):focus {
 
 input[type="checkbox"] {
   width: auto;
-  margin: 0 0.45rem 0 0;
+  margin: 0 var(--sp-2) 0 0;
   accent-color: var(--accent);
   vertical-align: -2px;
 }
@@ -322,16 +410,16 @@ input:disabled, select:disabled {
 
 button, a.button {
   align-self: flex-start;
-  margin-top: 1.1rem;
-  margin-right: 0.6rem;
-  padding: 0.55rem 1.1rem;
+  margin-top: var(--sp-4);
+  margin-right: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: var(--accent);
   color: var(--accent-ink);
   font: inherit;
   font-weight: 600;
-  font-size: 0.93rem;
+  font-size: var(--text-md);
   cursor: pointer;
   transition: background var(--ease), box-shadow var(--ease), transform var(--ease);
 }
@@ -367,6 +455,11 @@ button.link {
 }
 button.link:hover { color: var(--accent-hover); }
 
+/* A copy control sitting beside the value it copies, in a table cell or a
+   fact row. Small and quiet: it is an escape hatch for a value clipped by
+   `.truncate`, not something to draw the eye down a column of them. */
+button.micro { font-size: var(--text-2xs); margin-left: var(--sp-1); }
+
 /* htmx toggles this class on the element mid-request; a busy "Test connection"
    button should read as busy rather than silently doing nothing for a beat. */
 .htmx-request { opacity: 0.65; cursor: progress; }
@@ -380,16 +473,20 @@ form.inline { display: inline; }
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: 0.75rem 1rem;
+  gap: var(--sp-3) var(--sp-4);
 }
-.filter-bar .field { display: flex; flex-direction: column; gap: 0.3rem; }
+/* This is a `.panel` too, so the flow rule would give every control after the
+   first a margin *on top of* the flex gap. Flex margins do not collapse. */
+.filter-bar > * { margin: 0; }
+.filter-bar .field { display: flex; flex-direction: column; gap: var(--sp-1); }
 .filter-bar .field label { margin: 0; }
-.filter-bar input, .filter-bar select { margin: 0; }
 .filter-bar input { min-width: 14rem; }
-.filter-bar button { margin: 0; }
+/* `button`'s own `align-self: flex-start` outranks the container's
+   `align-items: flex-end`, which floated Filter above the inputs it submits. */
+.filter-bar button { align-self: flex-end; }
 .filter-bar .filter-count {
   color: var(--muted);
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
   margin-left: auto;
 }
 
@@ -402,10 +499,12 @@ form.inline { display: inline; }
 .warn  { color: var(--warn-ink); }
 .error { color: var(--error-ink); }
 
+/* No `margin`: a banner is a block in the page flow like any other, and the
+   flow rule spaces it. Giving it its own margin is what made a banner sit
+   closer to its neighbours than two paragraphs sit to each other. */
 p.ok, p.warn, p.error, div.ok, div.warn, div.error {
   border-radius: var(--radius);
-  padding: 0.8rem 1rem;
-  margin: 0.85rem 0;
+  padding: var(--sp-3) var(--sp-4);
   border: 1px solid transparent;
   box-shadow: var(--shadow-sm);
 }
@@ -419,11 +518,11 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
    the moment the input is focused. */
 .field-status {
   display: inline-block;
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   font-weight: 650;
-  padding: 0.08rem 0.55rem;
+  padding: var(--sp-05) var(--sp-2);
   border-radius: 999px;
-  margin-left: 0.4rem;
+  margin-left: var(--sp-2);
   vertical-align: middle;
 }
 .field-status--set   { background: var(--ok-bg);    color: var(--ok-ink); }
@@ -453,11 +552,26 @@ svg text { font-family: inherit; }
 /* `main` is capped at 46rem, which is right for prose and forms and much too
    narrow for a wide table or a three-lane diagram. This breaks one block out
    of that column and centres it on the viewport instead, so the block that
-   needs width gets it without every other page changing shape. */
+   needs width gets it without every other page changing shape.
+
+   Put it on a `<section class="wide">` wrapping the heading *and* the block it
+   labels whenever there is a heading. On the panel alone, the <h2> and its
+   underline stayed behind in the 46rem column while the thing they named
+   started ~340px further left. A block with no heading — the topology
+   diagram — can still carry `.wide` directly. */
 .wide {
   width: min(96vw, 1600px);
   margin-left: calc(50% - min(48vw, 800px));
 }
+
+/* A second breakout inside the first would double the offset and run off
+   screen. This also makes the markup forgiving: a `.panel.wide` left inside a
+   new wrapper degrades to an ordinary panel rather than breaking the page. */
+.wide .wide { width: auto; margin-left: 0; }
+
+/* A wide section opens like an <h2> does. Needed explicitly because the
+   heading is now the section's first child, so its own top margin is zeroed. */
+main > * + section { margin-top: var(--section-gap); }
 
 /* A value that is long by nature — a 40-character info hash, a full announce
    URL — clipped to a readable width with the whole thing on hover, rather
@@ -477,7 +591,7 @@ svg text { font-family: inherit; }
 }
 
 .topo-node-label {
-  font-size: 0.92rem;
+  font-size: var(--text-md);
   font-weight: 650;
   fill: var(--ink);
 }
@@ -492,14 +606,14 @@ svg text { font-family: inherit; }
 /* A detail row is a tag/value pair on one baseline: the tag naming what the
    value is, so an address is never left to be identified by position alone. */
 .topo-line-tag {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   font-weight: 600;
   fill: var(--faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 .topo-line-value {
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   fill: var(--muted);
 }
 
@@ -512,7 +626,7 @@ svg text { font-family: inherit; }
    box — cheaper and more robust than computing an exact background pill
    width for text whose length is not known until render time. */
 .topo-edge-label {
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 650;
   fill: var(--ink);
   paint-order: stroke;
@@ -521,14 +635,15 @@ svg text { font-family: inherit; }
   stroke-linejoin: round;
 }
 
+/* No `margin`: the flow rule spaces this like any other block, which is what
+   stops the Friends page's last fact colliding with the form below it. */
 .facts {
   display: grid;
   grid-template-columns: minmax(8rem, auto) 1fr;
-  gap: 0.55rem 1rem;
-  margin: 1.25rem 0 0;
+  gap: var(--sp-2) var(--sp-4);
 }
 
-.facts dt { color: var(--muted); font-size: 0.92rem; }
+.facts dt { color: var(--muted); font-size: var(--text-md); }
 .facts dd { margin: 0; }
 
 /* Status page's headline numbers — the first thing an operator should be able
@@ -541,58 +656,62 @@ svg text { font-family: inherit; }
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
-  gap: 0.75rem;
-  margin: 1rem 0;
+  gap: var(--sp-3);
   padding: 0;
 }
 .stat {
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: 0.85rem 1rem;
+  padding: var(--sp-3) var(--sp-4);
 }
 .stat dt {
-  margin: 0 0 0.3rem;
+  margin: 0 0 var(--sp-1);
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 650;
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.stat dd { margin: 0; font-size: 0.95rem; line-height: 1.4; }
-.stat dd strong { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.01em; }
+.stat dd { margin: 0; font-size: var(--text-md); line-height: 1.4; }
+.stat dd strong { font-size: var(--text-xl); font-weight: 700; letter-spacing: -0.01em; }
 
 /* Settings is one long page of sections; a row of jump links at the top turns
    it back into something navigable without JS or a fixed sidebar. */
 .quicknav {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0 0 1.5rem;
+  gap: var(--sp-2);
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 .quicknav a {
   display: inline-block;
-  padding: 0.3rem 0.7rem;
+  padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
   background: var(--panel-2);
   text-decoration: none;
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
   font-weight: 550;
   transition: border-color var(--ease), color var(--ease), background var(--ease);
 }
 .quicknav a:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-wash); }
 
+/* A pill strip introduces what follows it, so it wants more air below than the
+   flow default — expressed on the *next* block, so only one side of the gap
+   ever carries a margin and neighbours can never disagree. */
+.quicknav + *, .wizard-steps + * { margin-top: var(--sp-6); }
+
 .locked {
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
   color: var(--warn-ink);
   background: var(--warn-bg);
   border-radius: 6px;
-  padding: 0.35rem 0.55rem;
-  margin: 0.35rem 0 0;
+  padding: var(--sp-1) var(--sp-2);
+  margin: var(--sp-1) 0 0;
 }
 
 /* The wizard's step indicator: `.current` marks where the operator is —
@@ -601,18 +720,18 @@ svg text { font-family: inherit; }
 .wizard-steps {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0 0 1.5rem;
+  gap: var(--sp-2);
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 .wizard-steps li {
-  padding: 0.3rem 0.75rem;
+  padding: var(--sp-1) var(--sp-3);
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
   background: var(--panel-2);
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
   font-weight: 550;
 }
 .wizard-steps li.current {
@@ -634,8 +753,8 @@ table { border-collapse: collapse; width: 100%; }
    the box when that content is narrower than the viewport. */
 .table-scroll { overflow-x: auto; }
 .table-scroll table { width: auto; min-width: 100%; }
-th, td { text-align: left; padding: 0.55rem 0.6rem 0.55rem 0; font-size: 0.92rem; border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 650; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+th, td { text-align: left; padding: var(--sp-2) var(--sp-2) var(--sp-2) 0; font-size: var(--text-md); border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 650; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.03em; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: var(--accent-wash); }
 
@@ -646,16 +765,16 @@ tr.revoked td .error { text-decoration: none; }
 tr.revoked:hover td { background: transparent; }
 
 /* Revoke/Delete sit together on one row without wrapping onto two lines. */
-td.actions { display: flex; gap: 0.75rem; white-space: nowrap; }
+td.actions { display: flex; gap: var(--sp-3); white-space: nowrap; }
 
 /* Path lists on the diagnostics page: many similar strings, so they want to be
    scannable and monospaced rather than prose. */
-.paths { margin: 0.5rem 0 0; padding-left: 1.25rem; }
-.paths li { font-size: 0.9rem; margin: 0.2rem 0; }
+.paths { padding-left: var(--sp-5); }
+.paths li { font-size: var(--text-sm); margin: var(--sp-1) 0; }
 .paths code { word-break: break-all; }
 
 @media (max-width: 32rem) {
-  main { padding: 1.5rem 1rem 4rem; }
-  .bar { padding: 0.7rem 1rem; }
-  h1 { font-size: 1.4rem; }
+  main { padding: var(--sp-6) var(--sp-4) 4rem; }
+  .bar { padding: var(--sp-3) var(--sp-4); }
+  h1 { font-size: var(--text-xl); }
 }

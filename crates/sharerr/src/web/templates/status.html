@@ -40,6 +40,7 @@
       no peers announcing right now
       {% else %}
       <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
+      <br><span class="hint">across {{ glance.swarm_torrents }} torrent(s)</span>
       {% endif %}
     </dd>
   </div>
@@ -105,11 +106,18 @@
   {% else %}
   <div class="table-scroll">
   <table>
-    <thead><tr><th>When</th><th>Result</th></tr></thead>
+    <thead><tr><th>When</th><th>Took</th><th>Result</th></tr></thead>
     <tbody>
       {% for run in runs %}
       <tr>
-        <td>{{ run.when }}</td>
+        <td class="nowrap"{% if !run.when_absolute.is_empty() %} title="{{ run.when_absolute }}"{% endif %}>{{ run.when }}</td>
+        <td class="nowrap">
+          {% if run.took.is_empty() %}
+          <span class="hint">—</span>
+          {% else %}
+          {{ run.took }}
+          {% endif %}
+        </td>
         <td>
           {% if run.failed %}
           <span class="error">{{ run.summary }}</span>
@@ -173,6 +181,92 @@
   </p>
 </div>
 
+{# Omitted entirely when no lighthouse is configured: it is an opt-in fallback
+   for friends gossip cannot reach, and most instances never set one up. #}
+{% if let Some(lighthouse) = lighthouse %}
+<h2>Lighthouse</h2>
+<div class="panel">
+  <p class="hint">
+    The fallback for finding a friend whose address changed while nobody was
+    watching. This instance publishes its own endpoint to each lighthouse under
+    the hash of the key it issued that friend — if a lighthouse is refusing
+    those reports, friends who have gone quiet cannot find their way back.
+  </p>
+
+  {% if lighthouse.healthy %}
+  <p class="ok">
+    All {{ lighthouse.configured }} lighthouse(s) are accepting this instance's
+    endpoint reports.
+  </p>
+  {% else %}
+  <p class="warn">
+    Not every configured lighthouse is accepting reports — see below. Gossip is
+    unaffected; only friends who have already gone quiet are.
+  </p>
+  {% endif %}
+
+  <dl class="facts">
+    <dt>Last pass</dt>
+    <dd>
+      {% if let Some(when) = lighthouse.last_pass %}
+      {{ when }}
+      {% else %}
+      <span class="hint">not yet — the first runs within 15 minutes of startup</span>
+      {% endif %}
+    </dd>
+    <dt>Friends looked up</dt>
+    <dd>
+      {% if lighthouse.lookups_attempted == 0 %}
+      <span class="hint">none were quiet enough to need it</span>
+      {% else %}
+      {{ lighthouse.lookups_attempted }} in the last pass
+      {% endif %}
+    </dd>
+    <dt>Last recovery</dt>
+    <dd>
+      {% if let Some(when) = lighthouse.last_recovery %}
+      {% if let Some(who) = lighthouse.last_recovery_peer %}{{ who }}, {% endif %}{{ when }}
+      {% else %}
+      <span class="hint">never — no friend has been found this way yet</span>
+      {% endif %}
+    </dd>
+  </dl>
+
+  {% if lighthouse.rows.is_empty() %}
+  <p class="hint">
+    No lighthouse has been contacted yet, so there is nothing to report on.
+  </p>
+  {% else %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Lighthouse</th><th>Last accepted</th><th>Last refusal</th></tr></thead>
+    <tbody>
+      {% for row in lighthouse.rows %}
+      <tr>
+        <td><code>{{ row.url }}</code></td>
+        <td class="nowrap">
+          {% if let Some(when) = row.last_success %}
+          <span class="ok">{{ when }}</span>
+          {% else %}
+          <span class="hint">never</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if let Some(reason) = row.last_error %}
+          <span class="error">{{ reason }}</span>
+          {% else %}
+          <span class="hint">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <h2>Services</h2>
 <div class="panel">
   {% if services.is_empty() %}
@@ -181,7 +275,14 @@
   <dl class="facts">
     {% for service in services %}
     <dt>{{ service.name }}</dt>
-    <dd class="{% if service.ok %}ok{% else %}error{% endif %}">{{ service.message }}</dd>
+    <dd>
+      <span class="{% if service.ok %}ok{% else %}error{% endif %}">{{ service.message }}</span>
+      {# "could not reach it" is far more actionable next to the address that
+         was actually dialled — a typo in the URL is the usual cause. #}
+      {% if !service.url.is_empty() %}
+      <br><code>{{ service.url }}</code>
+      {% endif %}
+    </dd>
     {% endfor %}
   </dl>
   {% endif %}

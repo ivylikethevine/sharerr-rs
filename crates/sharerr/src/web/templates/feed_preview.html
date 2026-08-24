@@ -20,6 +20,7 @@
   </p>
   {% else %}
   <p class="hint">{{ total }} release(s).</p>
+  <div class="table-scroll">
   <table>
     <thead>
       <tr><th>Title</th><th>Category</th><th>Size</th><th></th></tr>
@@ -40,6 +41,7 @@
       {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </div>
 {% endblock %}

@@ -141,6 +141,11 @@ pub struct ServeState {
     gluetun_status: Arc<GluetunStatus>,
     /// The client-facing counterpart of `gluetun_status`.
     gluetun_client_status: Arc<GluetunStatus>,
+    /// What the lighthouse poller last reported and looked up. Lighthouse was
+    /// the one background subsystem with no observability at all — a refused
+    /// report means quiet friends cannot find this instance, and the only
+    /// trace of it was a log line every fifteen minutes.
+    lighthouse_status: Arc<crate::lighthouse_client::LighthouseStatus>,
     /// When the previous shared tracker token was last actually used — see
     /// [`LegacyTokenStatus`].
     legacy_token_status: Arc<LegacyTokenStatus>,
@@ -183,6 +188,7 @@ impl ServeState {
             client_endpoint_refresh: Notify::new(),
             gluetun_status: Arc::new(GluetunStatus::default()),
             gluetun_client_status: Arc::new(GluetunStatus::default()),
+            lighthouse_status: Arc::new(crate::lighthouse_client::LighthouseStatus::default()),
             legacy_token_status: Arc::new(LegacyTokenStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
             quiet_notified: Arc::new(QuietNotified::default()),
@@ -247,6 +253,11 @@ impl ServeState {
             GluetunTarget::Tracker => Arc::clone(&self.gluetun_status),
             GluetunTarget::Client => Arc::clone(&self.gluetun_client_status),
         }
+    }
+
+    /// What the lighthouse poller last reported and looked up.
+    pub fn lighthouse_status(&self) -> Arc<crate::lighthouse_client::LighthouseStatus> {
+        Arc::clone(&self.lighthouse_status)
     }
 
     /// Ask the background loop to run a pass soon, without invalidating the

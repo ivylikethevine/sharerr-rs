@@ -16,19 +16,30 @@
 
 {% if let Some(new) = revealed %}
 <div class="ok" role="status">
-  <h2>{{ new.label }}'s key</h2>
+  <p><strong>{{ new.label }}'s key</strong></p>
   <p class="error">
     Copy it now — this is the only time it is shown. sharerr stores only a hash of
     it and cannot show it again. If it is lost, delete this friend and add them
     back.
   </p>
-  <p><code>{{ new.key }}</code></p>
+  <p>
+    <code>{{ new.key }}</code>
+    <button type="button" class="link micro" data-copy-text="{{ new.key }}"
+            aria-label="Copy the key">copy</button>
+    <span class="hint" data-copy-note></span>
+  </p>
   <p class="hint">
     In their Prowlarr: add a <em>Generic Torznab</em> indexer with this URL and
     this key.
   </p>
   <dl class="facts">
-    <dt>Feed URL</dt><dd><code>{{ feed_url }}</code></dd>
+    <dt>Feed URL</dt>
+    <dd>
+      <code>{{ feed_url }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ feed_url }}"
+              aria-label="Copy the feed URL">copy</button>
+      <span class="hint" data-copy-note></span>
+    </dd>
   </dl>
 </div>
 {% endif %}
@@ -54,6 +65,7 @@
   <button type="submit">Generate a key</button>
 </form>
 
+<section class="wide">
 <h2>Sharing with {{ peers.len() }} friend(s)</h2>
 <div class="panel">
   {% if peers.is_empty() %}
@@ -70,7 +82,12 @@
     <tbody>
       {% for peer in peers %}
       <tr{% if peer.revoked %} class="revoked"{% endif %}>
-        <td>{{ peer.label }}{% if peer.revoked %} <span class="error">(revoked)</span>{% endif %}</td>
+        <td>
+          {{ peer.label }}
+          {% if peer.revoked %}
+          <span class="error">(revoked{% if !peer.revoked_when.is_empty() %} {{ peer.revoked_when }}{% endif %})</span>
+          {% endif %}
+        </td>
         <td>
           {% if peer.revoked %}
           {{ peer.scope_label }}
@@ -85,8 +102,8 @@
           </form>
           {% endif %}
         </td>
-        <td class="nowrap">{{ peer.created }}</td>
-        <td class="nowrap">{{ peer.last_seen }}</td>
+        <td class="nowrap" title="{{ peer.created_absolute }}">{{ peer.created }}</td>
+        <td class="nowrap"{% if !peer.last_seen_absolute.is_empty() %} title="{{ peer.last_seen_absolute }}"{% endif %}>{{ peer.last_seen }}</td>
         <td class="actions">
           {% if !peer.revoked %}
           <a href="/peers/{{ peer.id }}/feed" target="_blank" rel="noopener">View feed XML</a>
@@ -109,6 +126,7 @@
   </p>
   {% endif %}
 </div>
+</section>
 
 {% if !peers.is_empty() %}
 <h2>Where friends are</h2>

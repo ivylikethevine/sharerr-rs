@@ -217,6 +217,7 @@ async fn status_page(State(state): State<WebState>) -> Response {
         healthy: diag.healthy,
         gluetun: diag.gluetun,
         runs: diag.runs,
+        lighthouse: diag.lighthouse,
     })
 }
 
@@ -269,6 +270,7 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
         friends_total: active.len(),
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
+        swarm_torrents: swarm.swarms,
     })
 }
 
