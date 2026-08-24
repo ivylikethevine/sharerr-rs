@@ -16,10 +16,10 @@ tracks what is still ahead.
 
 ### What's left
 
-One feature-sized item — **[request flow](#functionality)** — plus the open
-items from the 2026-08-21 code review. All of them, features and findings
-alike, are ranked together in [Open work, by scope](#open-work-by-scope)
-below.
+One feature-sized item — **[request flow](#functionality)**. The 2026-08-21
+code review is otherwise closed out: what is left of it is a single entry kept
+only so its documented behaviour reads as a decision rather than an oversight.
+Both are in [Open work, by scope](#open-work-by-scope) below.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
 and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
@@ -37,10 +37,11 @@ Everything still ahead, in one list, smallest first — by how much each item
 touches, not how long it would take to get right. The review items come from
 a whole-codebase pass on 2026-08-21 (8 finder angles, every candidate
 independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
-= depends on ordering/config); eighteen batches of fixes landed on 2026-08-24
-(the eighteenth: the OpenAPI document — [`openapi.json`](openapi.json),
-generated from the handlers themselves by `sharerr openapi`, covering every
-machine-facing route) and what is listed here is what remains. File references
+= depends on ordering/config); nineteen batches of fixes landed on 2026-08-24
+(the nineteenth: the lighthouse's `report` now pins a key hash to the first
+keypair that claims it, so a leaked key hash can no longer be used to displace
+the genuine record — and a refused report is logged by the reporting instance
+instead of vanishing) and what is listed here is what remains. File references
 are as of the review commit and may have drifted.
 
 ### Small — one function or one file
@@ -52,18 +53,7 @@ are as of the review commit and may have drifted.
 
 ### Large — a protocol, a data model, or a release process
 
-2. **Lighthouse `report` is unpinned — CONFIRMED.** `key_hash` is SHA-256 of
-    the shared API key, never bound to `record.pubkey`; `verify()` only checks
-    the record is self-consistent under whatever pubkey it carries. Anyone who
-    learns a key hash (a URL path segment, visible in proxy logs) can displace
-    the genuine record with one under their own keypair. The client catches
-    the impersonation (`record.pubkey != expected_pubkey` → decoy) but the
-    legitimate record is gone and rendezvous for that pair breaks. The
-    future-timestamp clamp, capacity cap with TTL sweep, and lowercase
-    canonicalisation are done. _Fix:_ first-writer pins the pubkey for that
-    key hash and later reports must carry the same one, or derive `key_hash`
-    from the pubkey as well as the key — either way a wire-format decision.
-3. **Request flow** — a new inbound request queue and approve step, touching
+2. **Request flow** — a new inbound request queue and approve step, touching
     the sync engine and the web UI on both sides of a friendship; see
     [Functionality](#functionality).
 
@@ -104,3 +94,13 @@ without the peer's public key, and never verifying for anyone. The deterministic
 fallback where signing is unavailable: derive the decoy from a keyed hash of the
 queried key hash, so decoys are at least stable across probes rather than fresh
 noise that flags itself by changing.
+
+A verifiable record answers "is this really them?" but not "does this keypair
+belong under this key hash?" — and a key hash is a URL path segment, so it is
+visible in every proxy log along the way. So a key hash is claimed by the first
+keypair to report under it and holds that claim until the record ages out,
+which is the same trust-on-first-use gossip binds a peer's identity with. That
+keeps the rendezvous working under a leaked key hash, where before an attacker
+could mint a record of their own and displace the real one. What it cannot do
+is protect a key hash nobody has claimed yet: whoever reports first wins, and
+if that is an attacker the pair needs a new key rather than a new lighthouse.

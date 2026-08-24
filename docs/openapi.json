@@ -1326,6 +1326,16 @@
               }
             }
           },
+          "403": {
+            "description": "A record signed by a different keypair already stands under this key hash. The first keypair to claim one keeps it until its record expires.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "503": {
             "description": "At capacity and nothing was old enough to evict.",
             "content": {

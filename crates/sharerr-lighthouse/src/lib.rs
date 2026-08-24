@@ -34,6 +34,24 @@
 //! decoy's signature is random bytes, indistinguishable on the wire from a
 //! real one to anyone without the peer's public key, and it never verifies
 //! for anyone.
+//!
+//! # What the report side does *not* hide
+//!
+//! The privacy property above is a property of [`lookup`], and only of
+//! [`lookup`]. Reporting answers honestly: `accepted`, `stale`, or a refusal
+//! naming its reason. That means someone who guesses a key hash and posts a
+//! record of their own can learn whether that key hash is in use, which a
+//! lookup would never tell them.
+//!
+//! That is a deliberate trade and not an oversight. The alternative — a report
+//! endpoint that swallows every outcome into the same answer — would leave a
+//! peer whose reports are being refused with no way to find out, and the two
+//! reasons a report gets refused are both things an operator has to act on:
+//! the table is full, or the key hash is claimed by another keypair. A silent
+//! failure there means an instance that believes it is reachable and is not.
+//!
+//! [`LighthouseState::report`]'s own docs cover the pinning that second
+//! refusal comes from.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -191,6 +209,10 @@ pub enum ReportError {
     /// keys rather than evicting old ones means a flood cannot displace the
     /// records real peers depend on.
     Full,
+    /// A record already stands under this key hash, signed by a *different*
+    /// keypair. See [`LighthouseState::report`] — the first keypair to claim
+    /// a key hash keeps it.
+    PubkeyMismatch,
 }
 
 /// How far ahead of this host's clock a `signed_at` may be and still be
@@ -217,6 +239,41 @@ impl LighthouseState {
     /// Store a peer-signed record under a key hash, unless it is no newer
     /// than what is already there. Rejects anything that does not verify —
     /// no unsigned garbage is ever stored, only ever fabricated on lookup.
+    ///
+    /// # Why a signature alone is not enough
+    ///
+    /// [`verify`] only establishes that a record is self-consistent: signed by
+    /// whatever pubkey it happens to carry. It says nothing about whether that
+    /// pubkey has any business being under *this* key hash — and a key hash is
+    /// a URL path segment, so it travels through every proxy log between a
+    /// peer and the lighthouse. Anyone who reads one could mint a record under
+    /// their own keypair and displace the genuine one. The friend looking it
+    /// up would not be fooled — they compare `pubkey` against the identity
+    /// they already hold and read a mismatch as a decoy — but the real record
+    /// would be gone, and rendezvous for that pair simply stops working.
+    ///
+    /// So the first keypair to report under a key hash **pins** it, and later
+    /// reports must carry the same `pubkey` or be refused. That is the same
+    /// trust-on-first-use gossip already uses to bind a peer's identity, and
+    /// unlike the alternative — deriving the key hash from the pubkey as well
+    /// as the key — it needs no change to what goes over the wire, so it does
+    /// not break every instance already reporting.
+    ///
+    /// Two consequences worth stating rather than discovering:
+    ///
+    /// * **A pin lapses when its record does.** Once a record is older than
+    ///   [`RECORD_TTL_SECS`] its slot is free again, pubkey included. That is
+    ///   what makes key rotation possible at all: stop reporting, wait out the
+    ///   TTL, report with the new keypair. An instance reporting on its normal
+    ///   timer never comes close to it.
+    /// * **Whoever reports first wins, including an attacker.** Someone who
+    ///   learns a key hash before the legitimate peer has ever reported can
+    ///   claim the slot and hold it. They still cannot impersonate anyone —
+    ///   the lookup side catches that — but they can deny that pair the
+    ///   rendezvous. The remedy is the operator's: issue that friend a new
+    ///   key, which is a new key hash. Trust-on-first-use has no better answer
+    ///   than that, and the window is the gap between issuing a key and the
+    ///   instance's next report.
     pub async fn report(
         &self,
         key_hash: &str,
@@ -236,10 +293,26 @@ impl LighthouseState {
         }
 
         let mut records = self.records.write().await;
-        if let Some(existing) = records.get(&key_hash)
-            && existing.record.signed_at >= record.signed_at
-        {
-            return Ok(ReportOutcome::Stale);
+        if let Some(existing) = records.get(&key_hash) {
+            // An expired record no longer holds its pubkey — see the rotation
+            // path in the doc comment. Decided here rather than left to the
+            // capacity sweep below, which only runs when the table is full and
+            // would make rotation depend on how busy the lighthouse is.
+            let expired = now.saturating_sub(existing.record.signed_at) >= RECORD_TTL_SECS;
+
+            // Before the staleness check, not after: a displacement attempt
+            // that also happens to be stale is still a displacement attempt,
+            // and an operator reading `stale` would go looking at clocks.
+            if !expired && !existing.record.pubkey.eq_ignore_ascii_case(&record.pubkey) {
+                return Err(ReportError::PubkeyMismatch);
+            }
+
+            // Applied whether or not the slot expired: `signed_at` only ever
+            // moves forward for a given reporter, and a record that has aged
+            // out is still no reason to accept an older one over it.
+            if existing.record.signed_at >= record.signed_at {
+                return Ok(ReportOutcome::Stale);
+            }
         }
         if !records.contains_key(&key_hash) && records.len() >= MAX_RECORDS {
             records
@@ -356,6 +429,10 @@ impl LighthouseState {
         (status = 400, description = "The key hash was not 64 hex characters, the \
                                       signature did not verify, or `signed_at` is in \
                                       the future.", body = String),
+        (status = 403, description = "A record signed by a different keypair already \
+                                      stands under this key hash. The first keypair to \
+                                      claim one keeps it until its record expires.",
+         body = String),
         (status = 503, description = "At capacity and nothing was old enough to evict.",
          body = String),
     ),
@@ -384,6 +461,11 @@ async fn report(
         Err(ReportError::Full) => {
             (StatusCode::SERVICE_UNAVAILABLE, "lighthouse is full").into_response()
         }
+        Err(ReportError::PubkeyMismatch) => (
+            StatusCode::FORBIDDEN,
+            "this key hash is already claimed by a different keypair",
+        )
+            .into_response(),
     }
 }
 
@@ -538,6 +620,163 @@ mod tests {
 
         let record = state.lookup(&key_hash).await;
         assert_eq!(record.endpoints[0].addr, "203.0.113.9:2");
+    }
+
+    /// The displacement this pinning exists to stop: a second keypair, whose
+    /// record is perfectly well signed, arriving under a key hash somebody
+    /// else already holds.
+    #[tokio::test]
+    async fn a_second_keypair_cannot_displace_the_record_under_a_key_hash() {
+        let state = state();
+        let key_hash = hash_key("friend-shared-secret");
+
+        // Stamped now, not at some small absolute number: a record older
+        // than the TTL would exercise the rotation path below instead of the
+        // pin, and pass while proving nothing.
+        let now = now_epoch();
+        state
+            .report(&key_hash, signed_record(1, "203.0.113.9:41234", now))
+            .await
+            .unwrap();
+
+        // Signed, self-consistent, and newer — everything `verify` checks. The
+        // only thing wrong with it is whose key signed it.
+        let attacker = signed_record(2, "198.51.100.4:6881", now + 60);
+        assert!(verify(&attacker).is_ok(), "the attack is a *valid* record");
+        let err = state.report(&key_hash, attacker).await.unwrap_err();
+        assert_eq!(err, ReportError::PubkeyMismatch);
+
+        let record = state.lookup(&key_hash).await;
+        assert_eq!(
+            record.endpoints[0].addr, "203.0.113.9:41234",
+            "the genuine record must still be there"
+        );
+        assert_eq!(record.pubkey, signed_record(1, "x", 0).pubkey);
+    }
+
+    /// A mismatch is reported as a mismatch even when the intruding record is
+    /// also stale — otherwise an operator chasing a displacement attempt reads
+    /// `stale` and goes looking at clocks instead.
+    #[tokio::test]
+    async fn a_stale_report_from_another_keypair_is_still_a_mismatch() {
+        let state = state();
+        let key_hash = hash_key("k");
+        let now = now_epoch();
+        state
+            .report(&key_hash, signed_record(1, "203.0.113.9:1", now))
+            .await
+            .unwrap();
+
+        let err = state
+            .report(&key_hash, signed_record(2, "198.51.100.4:1", now - 5000))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ReportError::PubkeyMismatch);
+    }
+
+    /// The rotation path: a pin lasts exactly as long as the record holding
+    /// it. Without this a peer that regenerated its identity could never
+    /// report under an already-issued key again, and the operator's only
+    /// remedy would be to re-issue every friend's key.
+    #[tokio::test]
+    async fn a_new_keypair_may_claim_a_key_hash_once_the_old_record_has_expired() {
+        let state = state();
+        let key_hash = hash_key("k");
+
+        // Signed a day past the TTL, so it is expired however long ago "now"
+        // is — the state has no clock of its own to wind forward.
+        let expired = now_epoch() - RECORD_TTL_SECS - 86_400;
+        state
+            .report(&key_hash, signed_record(1, "203.0.113.9:1", expired))
+            .await
+            .unwrap();
+
+        let outcome = state
+            .report(&key_hash, signed_record(2, "198.51.100.4:1", now_epoch()))
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReportOutcome::Accepted);
+        assert_eq!(
+            state.lookup(&key_hash).await.pubkey,
+            signed_record(2, "x", 0).pubkey
+        );
+    }
+
+    /// The same keypair reporting again is the ordinary case and must stay
+    /// ordinary — this runs every few minutes for every friend.
+    #[tokio::test]
+    async fn the_pinned_keypair_keeps_reporting_normally() {
+        let state = state();
+        let key_hash = hash_key("k");
+
+        let now = now_epoch();
+        for (at, addr) in [(now - 300, "203.0.113.9:1"), (now, "203.0.113.9:2")] {
+            let outcome = state
+                .report(&key_hash, signed_record(1, addr, at))
+                .await
+                .unwrap();
+            assert_eq!(outcome, ReportOutcome::Accepted);
+        }
+        assert_eq!(
+            state.lookup(&key_hash).await.endpoints[0].addr,
+            "203.0.113.9:2"
+        );
+    }
+
+    /// Hex case is not identity. A record whose pubkey differs from the pinned
+    /// one only in case is the same key, and refusing it would strand a peer
+    /// whose encoder disagreed with ours about capitalisation.
+    #[tokio::test]
+    async fn a_pinned_pubkey_is_matched_regardless_of_hex_case() {
+        let state = state();
+        let key_hash = hash_key("k");
+        let now = now_epoch();
+        state
+            .report(&key_hash, signed_record(1, "203.0.113.9:1", now - 300))
+            .await
+            .unwrap();
+
+        let mut same_key = signed_record(1, "203.0.113.9:2", now);
+        same_key.pubkey = same_key.pubkey.to_uppercase();
+        // The signature covers the pubkey *as written*, so re-sign for the
+        // uppercase spelling — otherwise this would be rejected as unsigned
+        // and prove nothing about the pin.
+        let signing = SigningKey::from_bytes(&[1u8; 32]);
+        let bytes =
+            signable_bytes(&same_key.pubkey, &same_key.endpoints, same_key.signed_at).unwrap();
+        same_key.signature = hex::encode(signing.sign(&bytes).to_bytes());
+
+        let outcome = state.report(&key_hash, same_key).await.unwrap();
+        assert_eq!(outcome, ReportOutcome::Accepted);
+    }
+
+    /// The refusal has to reach the reporter as its own status: the client
+    /// logs on it, and 403 is the one answer that means "stop retrying and
+    /// look at your keys".
+    #[tokio::test]
+    async fn the_report_route_answers_a_mismatch_with_403() {
+        let state = state();
+        let key_hash = hash_key("k");
+        let now = now_epoch();
+        state
+            .report(&key_hash, signed_record(1, "203.0.113.9:1", now))
+            .await
+            .unwrap();
+
+        let app = routes(state);
+        let body = serde_json::to_vec(&signed_record(2, "198.51.100.4:1", now + 60)).unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/lighthouse/v1/report/{key_hash}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

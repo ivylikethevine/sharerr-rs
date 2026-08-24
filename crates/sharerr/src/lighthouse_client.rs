@@ -159,14 +159,51 @@ async fn report(
     futures::future::join_all(attempts).await;
 }
 
+/// Publish one record, and — unlike a fire-and-forget POST — say something
+/// when the lighthouse refuses it.
+///
+/// A refusal used to be invisible here: only a transport error was logged, so
+/// a 403 or a 503 looked exactly like a successful report. Both of the answers
+/// that mean "your endpoint is not being published" need an operator, and an
+/// instance that believes it is reachable and is not is the worst shape this
+/// can fail in:
+///
+/// * **403** — the key hash is pinned to a different keypair. Either this
+///   instance's identity was regenerated, or somebody else claimed the slot
+///   first. Issuing that friend a new key is the way out; see
+///   `sharerr_lighthouse::LighthouseState::report`.
+/// * **503** — that lighthouse is at capacity and has no room for a key hash
+///   it has not seen before.
+///
+/// A transport failure stays at `debug`: a lighthouse being briefly
+/// unreachable is ordinary, and this runs on a timer.
 async fn report_one(http: &reqwest::Client, base: &Url, key_hash: &str, record: &LighthouseRecord) {
     let endpoint = format!(
         "{}/lighthouse/v1/report/{key_hash}",
         base.as_str().trim_end_matches('/')
     );
-    if let Err(err) = http.post(&endpoint).json(record).send().await {
-        tracing::debug!(url = %base, reason = %error_chain(&err), "lighthouse report failed");
+    let response = match http.post(&endpoint).json(record).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::debug!(url = %base, reason = %error_chain(&err), "lighthouse report failed");
+            return;
+        }
+    };
+
+    let status = response.status();
+    if status.is_success() {
+        return;
     }
+    // The body is a short reason string; a lighthouse that answered at all
+    // will have one, and it is the most useful half of this line.
+    let reason = response.text().await.unwrap_or_default();
+    tracing::warn!(
+        url = %base,
+        %status,
+        reason = reason.trim(),
+        "a lighthouse refused this instance's endpoint report — friends who have \
+         gone quiet will not find it there"
+    );
 }
 
 /// Query every configured lighthouse for every friend who has gone quiet and
@@ -392,6 +429,46 @@ mod tests {
         assert_eq!(for_alex, own);
         let for_blair = lighthouse.lookup(&blair.key_hash).await;
         assert_eq!(for_blair, own);
+    }
+
+    /// A refused report must leave the pass intact: every *other* friend's
+    /// key hash still gets published, and nothing panics or aborts. One
+    /// lighthouse holding a pin against this instance cannot be allowed to
+    /// stop it reaching the others.
+    #[tokio::test]
+    async fn a_refused_report_does_not_stop_the_rest_of_the_pass() {
+        let (lighthouse, url) = spawn_lighthouse().await;
+        let (store, alex) = store_with_peer("Alex", "alex-key").await;
+        let blair = store
+            .create_peer("Blair", &SecretString::from("blair-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let peers = store.list_peers().await.unwrap();
+
+        // Somebody else got to Alex's key hash first, with their own keypair.
+        let now = sharerr_core::endpoint::now_epoch();
+        lighthouse
+            .report(
+                &alex.key_hash,
+                signed_lighthouse_record(9, "198.51.100.4:6881", now),
+            )
+            .await
+            .unwrap();
+
+        let own = signed_lighthouse_record(1, "203.0.113.9:41234", now);
+        let http = reqwest::Client::new();
+        report(&http, &[url], &peers, Some(&own)).await;
+
+        assert_eq!(
+            lighthouse.lookup(&alex.key_hash).await.endpoints[0].addr,
+            "198.51.100.4:6881",
+            "the squatter's record stands; ours was refused"
+        );
+        assert_eq!(
+            lighthouse.lookup(&blair.key_hash).await,
+            own,
+            "Blair's key hash was never claimed, so that report must still land"
+        );
     }
 
     #[tokio::test]

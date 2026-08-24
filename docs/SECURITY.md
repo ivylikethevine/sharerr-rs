@@ -40,6 +40,18 @@ happen — see [the README](../README.md#quickstart) before reporting:
 - **The lighthouse answers an invalid key with a plausible fabricated
   record rather than an error.** That is the anti-scraping property the
   design is built around, not information leakage.
+- **The lighthouse's `report` endpoint answers honestly**, so posting a
+  record of your own under a guessed key hash reveals whether that key hash
+  is in use — something a lookup would never tell you. The report side is
+  deliberately not covered by the fabrication property: a peer whose reports
+  are being refused has to be able to find out, or it sits believing it is
+  reachable when it is not.
+- **The first keypair to report under a key hash keeps it** until that
+  record ages out. Someone who learns a key hash before the legitimate peer
+  has ever reported can claim the slot and deny that pair the rendezvous.
+  They cannot impersonate anyone — a friend compares the record's `pubkey`
+  against the identity they already hold — and the remedy is to issue that
+  friend a new key. Trust-on-first-use has no better answer.
 
 ## What is out of scope
 
