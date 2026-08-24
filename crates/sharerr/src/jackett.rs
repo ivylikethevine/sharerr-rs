@@ -139,8 +139,10 @@ struct Capability {
 /// extractor means every filter a client sends is accepted and ignored, because
 /// a client that sends one and gets an error learns nothing useful.
 async fn indexers(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
-    let config = state.config().await;
-    let base = config.public_base_url();
+    // The live endpoint, not `config.public_base_url()` — see
+    // `ServeState::public_base_url`'s docs: a gluetun-only deployment must
+    // advertise the resolved address here too, not just in the feed.
+    let base = state.public_base_url().await;
 
     let entry = IndexerEntry {
         id: INDEXER_ID,
@@ -519,6 +521,24 @@ mod tests {
             !list[0]["caps"].as_array().unwrap().is_empty(),
             "a client decides what to search from these"
         );
+    }
+
+    /// On a gluetun-only deployment (no static `tracker.advertised_host`),
+    /// `site_link` must track the live resolved endpoint — not fall back to
+    /// `http://localhost:<port>`, which only works from the box sharerr
+    /// itself runs on.
+    #[tokio::test]
+    async fn the_site_link_tracks_the_live_endpoint_not_localhost() {
+        let (_dir, state) = with_peer().await;
+        state
+            .endpoint()
+            .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
+
+        let (status, body) = send(&state, "/api/v2.0/indexers?apikey=sam-key").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let json = parse(&body);
+        assert_eq!(json[0]["site_link"], "http://203.0.113.9:41234");
     }
 
     /// Jackett's own filter, accepted rather than rejected — sharerr's one indexer

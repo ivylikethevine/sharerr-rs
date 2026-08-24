@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
@@ -621,7 +622,15 @@ impl Syncer {
             return Err(missing());
         }
 
-        let outcome = self.seeder.seed(&paths, announce, torrents).await?;
+        let outcome = self
+            .seeder
+            .seed(
+                &paths,
+                announce,
+                torrents,
+                known.and_then(|k| k.info_hash.as_deref()),
+            )
+            .await?;
         self.store
             .set_seeding(
                 item.source,
@@ -721,29 +730,23 @@ fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option
 
 /// Construct whichever torrent client the configuration selects.
 ///
-/// Both branches read their credential from the vault under their own keys, so an
-/// operator switching backends does not silently keep authenticating with the other
-/// client's credential. Where the client supports one, a stored API key is used in
-/// preference to the password — see `TorrentCredential::choose`.
+/// Reads its credential from the vault under `client`'s own keys, so an operator
+/// switching backends does not silently keep authenticating with the other
+/// client's credential — see `checks::resolve_torrent_credential`, which is what
+/// every other caller resolving a torrent-client credential goes through too.
 fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>> {
     let client = config.torrent_client();
+    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
+        vault.get(key).map_err(|err| err.to_string())
+    };
 
-    let api_key = match client.api_key_key {
-        Some(key) => vault.get(key)?,
-        None => None,
-    };
-    let password = match client.password_key {
-        Some(key) => vault.get(key)?,
-        None => None,
-    };
-    let credential =
-        crate::checks::TorrentCredential::choose(api_key, password).with_context(|| {
-            match (client.api_key_key, client.password_key) {
-                (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
-                (Some(api), None) => format!("no {api} in the vault"),
-                (None, Some(password)) => format!("no {password} in the vault"),
-                (None, None) => "no credential configured for this torrent client".to_owned(),
-            }
+    let credential = crate::checks::resolve_torrent_credential(&client, &secret)
+        .map_err(|reason| anyhow::anyhow!(reason))?
+        .with_context(|| match (client.api_key_key, client.password_key) {
+            (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
+            (Some(api), None) => format!("no {api} in the vault"),
+            (None, Some(password)) => format!("no {password} in the vault"),
+            (None, None) => "no credential configured for this torrent client".to_owned(),
         })?;
 
     crate::checks::build_torrent_client(

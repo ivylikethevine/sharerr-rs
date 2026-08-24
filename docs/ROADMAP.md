@@ -37,11 +37,13 @@ Everything still ahead, in one list, smallest first — by how much each item
 touches, not how long it would take to get right. The review items come from
 a whole-codebase pass on 2026-08-21 (8 finder angles, every candidate
 independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
-= depends on ordering/config); nine batches of fixes landed on 2026-08-24
-(the ninth: `dotted()`/`loose_eq()` NFKD-transliteration, plus a stable
-per-title placeholder for scripts with no ASCII form instead of a colliding
-literal `"Unknown"`) and what is listed here is what remains. File
-references are as of the review commit and may have drifted.
+= depends on ordering/config); fifteen batches of fixes landed on 2026-08-24
+(the fifteenth: `ServeState::public_base_url` — the `.torrent`/site links in
+`torznab.rs`, `jackett.rs`, and the peers page now track the live
+gluetun-resolved endpoint, the same one the magnet tiers already used,
+instead of the static-only `Config::public_base_url`) and what is listed
+here is what remains. File references are as of the review commit and may
+have drifted.
 
 ### Small — one function or one file
 
@@ -52,46 +54,7 @@ references are as of the review commit and may have drifted.
 
 ### Medium — one subsystem, a few files
 
-2. **Vanished torrent re-hashes although the `.torrent` is cached.**
-   `sync/seed.rs` `share()` never passes `known.info_hash` to `seed()`, so
-   `find_existing` → `build()` runs `LavaTorrentFactory.create` (gigabytes
-   of CPU) and rewrites the very file that already exists — after a client
-   reinstall or wiped session, every item. _Fix:_ pass the hash in; if the
-   cached file reads, `rewrite_announce` it (the logic `refresh_announce`
-   already has) and `add` those bytes.
-3. **Torrent-client credential resolution exists four times** — `sync/mod.rs`,
-   `web/probe.rs`, `commands/doctor.rs`, `web/topology.rs`, each with its
-   own semantics (`doctor` never calls `TorrentCredential::choose`);
-   `checks.rs` already admits "three of which resolve secrets from three
-   different places". _Fix:_ one `resolve_torrent_credential` next to
-   `checks::build_torrent_client`.
-4. **`doctor` and `sync` only check the tracker's gluetun tunnel.**
-   `doctor.rs` reads only `config.gluetun.control_url` + `GLUETUN_API_KEY`;
-   `[gluetun_client]` is never checked, while `gluetun.rs` and
-   `web/diagnostics.rs` cover both. A dual-VPN operator with a wrong
-   client-tunnel key gets a clean `doctor`.
-5. **Per-tick `reqwest::Client` rebuild and vault re-open** — `gossip.rs`
-   (per exchange), `lighthouse_client.rs` (per tick), `notify.rs` (per
-   event) each build a fresh client and open the vault (Argon2, ~19 MiB).
-   `gluetun.rs` keeps one client and documents why. Gossip's per-peer keys
-   legitimately need the vault; the client rebuild does not.
-6. **`topology::gather` duplicates `diagnostics::gather`**, and both run the
-    arr probes and the library scan sequentially, already diverging
-    (diagnostics reports a panicked scan; topology drops it). _Fix:_ one
-    `checks::snapshot(...)` with `tokio::join!` — wall time of the two slowest
-    pages drops from sum to max.
-7. **Feed `.torrent` links are `http://localhost:<port>/…` on a gluetun-only
-    deployment — CONFIRMED.** `torznab.rs` `Matched::download_url`, Jackett's
-    `site_link`, and the peers page's `feed_url` all come from
-    `Config::public_base_url()`, which only knows the static advertised base
-    and otherwise yields `http://localhost:<bind port>` — while the magnet
-    tiers in the same response use the live `endpoint().recent()`. On the
-    README-recommended setup (no `advertised_host`) a friend's Sonarr grabs
-    `http://localhost:8477/torrents/<hash>.torrent` on _their_ box and
-    fails; the `magneturl` is correct and the feed preview looks healthy.
-    _Fix:_ route the `.torrent`/site links through the same
-    `AdvertisedEndpoint`.
-8. **rTorrent tier-2 coverage.** Test infrastructure only: wire a real
+2. **rTorrent tier-2 coverage.** Test infrastructure only: wire a real
     rTorrent + ruTorrent container into `run_docker_tests.sh`, the way
     qBittorrent already is — see [Torrent
     clients](SUPPORTED.md#torrent-clients-what-actually-seeds). The XML-RPC
@@ -100,7 +63,7 @@ references are as of the review commit and may have drifted.
 
 ### Large — a protocol, a data model, or a release process
 
-9. **A "Reused" pre-existing torrent — CONFIRMED.** `sync/seed.rs`
+3. **A "Reused" pre-existing torrent — CONFIRMED.** `sync/seed.rs`
     `find_existing` matches _any_ torrent in the client (fed by `list(None)`,
     not just sharerr's category) and returns `SeedOutcome::Reused` without
     `set_trackers` or a cached `.torrent`; `set_seeding` then records it as
@@ -113,7 +76,7 @@ references are as of the review commit and may have drifted.
     sharerr's tracker and cache the `.torrent` bytes from the client; and
     record `created_by_sharerr` per item so untag only removes what sharerr
     added.
-10. **Lighthouse `report` is unpinned — CONFIRMED.** `key_hash` is SHA-256 of
+4. **Lighthouse `report` is unpinned — CONFIRMED.** `key_hash` is SHA-256 of
     the shared API key, never bound to `record.pubkey`; `verify()` only checks
     the record is self-consistent under whatever pubkey it carries. Anyone who
     learns a key hash (a URL path segment, visible in proxy logs) can displace
@@ -124,7 +87,7 @@ references are as of the review commit and may have drifted.
     canonicalisation are done. _Fix:_ first-writer pins the pubkey for that
     key hash and later reports must carry the same one, or derive `key_hash`
     from the pubkey as well as the key — either way a wire-format decision.
-11. **Request flow** — a new inbound request queue and approve step, touching
+5. **Request flow** — a new inbound request queue and approve step, touching
     the sync engine and the web UI on both sides of a friendship; see
     [Functionality](#functionality).
 

@@ -206,6 +206,27 @@ impl ServeState {
         Arc::clone(&self.endpoint)
     }
 
+    /// The base URL clients should fetch `.torrent` files and feed endpoints
+    /// from right now.
+    ///
+    /// Unlike [`Config::public_base_url`], which only ever knows the
+    /// statically configured address, this reflects gluetun's live
+    /// resolution the same way the magnet tiers a torznab response carries
+    /// already do via `endpoint().recent()` — the feed and the tracker share
+    /// one advertised address, so a `.torrent` download link must track it
+    /// too. Falls back to the static address, then to
+    /// `http://localhost:<bind port>`, in the same order
+    /// `Config::public_base_url` does.
+    pub async fn public_base_url(&self) -> String {
+        match self.endpoint().current() {
+            Some(base) => sharerr_core::endpoint::base_string(&base),
+            None => format!(
+                "http://localhost:{}",
+                self.config().await.server.bind.port()
+            ),
+        }
+    }
+
     /// The live advertised address of the torrent client — see the field
     /// comment on `client_endpoint`.
     pub fn client_endpoint(&self) -> Arc<AdvertisedEndpoint> {

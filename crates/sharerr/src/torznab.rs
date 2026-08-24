@@ -611,7 +611,6 @@ pub(crate) async fn collect(
         )
     })?;
 
-    let config = state.config().await;
     let total = items.len();
     // The needle is constant across the whole request, so it is normalised once
     // here rather than once per candidate item.
@@ -644,7 +643,13 @@ pub(crate) async fn collect(
 
     Ok(Matched {
         items: matched,
-        base: config.public_base_url(),
+        // The live endpoint, not `config.public_base_url()` — see
+        // `ServeState::public_base_url`'s docs. The magnet tiers above
+        // already use the live `endpoint().recent()`; the `.torrent`
+        // download link must track the same address, or a gluetun-only
+        // deployment hands out a `.torrent` pointing at
+        // `http://localhost:<port>` on the friend's own box.
+        base: state.public_base_url().await,
         announces_encoded: announces.iter().map(|a| encode_component(a)).collect(),
         download_token: token.map(str::to_owned),
         total,
@@ -1111,6 +1116,25 @@ mod tests {
             tokened.download_url(&item),
             format!("http://seed.example:8477/torrents/{hash}.torrent?token=sams-key-hash")
         );
+    }
+
+    /// The bug this exists to catch: on a gluetun-only deployment (no static
+    /// `tracker.advertised_host`), the `.torrent` download link must track
+    /// the live resolved endpoint the magnet tiers already use via
+    /// `endpoint().recent()` — not fall back to `http://localhost:<port>`,
+    /// which only works from the box sharerr itself runs on.
+    #[tokio::test]
+    async fn the_download_base_tracks_the_live_endpoint_not_localhost() {
+        let (_dir, state) = with_peer().await;
+        state
+            .endpoint()
+            .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
+
+        let matched = collect(&state, &SearchQuery::default(), PeerScope::All, "sam-key")
+            .await
+            .unwrap();
+
+        assert_eq!(matched.base, "http://203.0.113.9:41234");
     }
 
     /// The magnet is the whole release in one URI: identity, display name,

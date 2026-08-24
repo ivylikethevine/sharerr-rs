@@ -329,7 +329,10 @@ async fn build(
             .collect(),
         error: error.or(list_error),
         revealed,
-        feed_url: format!("{}/api", config.public_base_url()),
+        // The live endpoint, not `config.public_base_url()` — see
+        // `ServeState::public_base_url`'s docs: a gluetun-only deployment
+        // must advertise the resolved address here too.
+        feed_url: format!("{}/api", state.serve.public_base_url().await),
     }
 }
 
@@ -503,6 +506,22 @@ mod tests {
 
         let response = page(State(state)).await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// On a gluetun-only deployment (no static `tracker.advertised_host`),
+    /// `feed_url` must track the live resolved endpoint — not fall back to
+    /// `http://localhost:<port>`, which only works from the box sharerr
+    /// itself runs on.
+    #[tokio::test]
+    async fn the_feed_url_tracks_the_live_endpoint_not_localhost() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .endpoint()
+            .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
+        let state = web_state(serve);
+
+        let page = build(&state, None, None).await;
+        assert_eq!(page.feed_url, "http://203.0.113.9:41234/api");
     }
 
     #[tokio::test]

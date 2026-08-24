@@ -7,11 +7,12 @@ version = "0.1.0"
 edition = "2024"
 # Above edition 2024's 1.85 floor for two reasons: `settings::strip_prefix` needs
 # `str::split_at_checked` in a const context (1.86), and the reconciliation loop
-# and title resolution use let-chains (1.88).
+# and title resolution use let-chains (1.88). Raised to 1.98 on 2026-08-24 to
+# track current stable rather than because anything past 1.88 is in use yet.
 #
 # The Dockerfile pins this same toolchain, which makes `docker build` the de-facto
 # MSRV check — a local toolchain is invariably newer and will not catch a breach.
-rust-version = "1.88"
+rust-version = "1.98"
 license = "MIT"
 repository = "https://github.com/ivyduggan/sharerr-rs"
 

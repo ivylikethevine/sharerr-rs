@@ -15,7 +15,7 @@
 # The two pins drift asymmetrically: raising `rust-version` in Cargo.toml without
 # this line fails loudly here, but raising this line without Cargo.toml fails
 # nowhere — the MSRV check silently starts testing a newer toolchain. Change both.
-FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS builder
 
 # Supplied by BuildKit. Names the architecture of the *runtime* image, not of this
 # stage — which is the whole point of the split.

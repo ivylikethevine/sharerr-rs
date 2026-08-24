@@ -63,13 +63,31 @@ const QUIET_THRESHOLD_SECS: i64 = 3600;
 /// Report to, and query, every configured lighthouse on a timer. Never
 /// returns.
 pub async fn sync_loop(state: Arc<ServeState>) {
+    // Built once and reused for the life of the poller — same reasoning as
+    // `gossip::exchange_loop` and `gluetun::poll_loop`: `reqwest::Client` is
+    // an Arc internally, so rebuilding one every pass discards a live
+    // connection pool for nothing. A build failure disables lighthouse
+    // reporting/lookup for the process's life rather than retrying every
+    // fifteen minutes; nothing here can fix a broken TLS backend by trying
+    // again.
+    let http = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(http) => http,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not build the lighthouse HTTP client — lighthouse is disabled");
+            return;
+        }
+    };
+
     loop {
-        run(&state).await;
+        run(&state, &http).await;
         tokio::time::sleep(INTERVAL).await;
     }
 }
 
-async fn run(state: &Arc<ServeState>) {
+async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
     let urls = state.config().await.lighthouse.urls;
     if urls.is_empty() {
         return;
@@ -83,16 +101,6 @@ async fn run(state: &Arc<ServeState>) {
     let Ok(peers) = store.list_peers().await else {
         return;
     };
-    let http = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not build the lighthouse client");
-            return;
-        }
-    };
 
     let own = gossip::self_record(state).await;
     let own = own.as_ref().map(to_lighthouse_record);
@@ -100,8 +108,8 @@ async fn run(state: &Arc<ServeState>) {
     // disjoint state (own record vs. friends' pubkeys) — independent, so run
     // them together rather than one after the other.
     tokio::join!(
-        report(&http, &urls, &peers, own.as_ref()),
-        lookup_quiet(&http, &urls, &peers, &vault, &store)
+        report(http, &urls, &peers, own.as_ref()),
+        lookup_quiet(http, &urls, &peers, &vault, &store)
     );
 }
 
@@ -504,7 +512,8 @@ mod tests {
 
         // Nothing to assert beyond "returns instead of hanging or panicking" —
         // the point is exercising the empty-`urls` early return.
-        run(&state).await;
+        let http = reqwest::Client::new();
+        run(&state, &http).await;
     }
 
     /// `open_vault` reads `SHARERR_MASTER_KEY` from the real process env, and
@@ -537,7 +546,8 @@ mod tests {
                 assert!(state.store().await.is_ok());
                 assert!(state.open_vault().await.is_err());
 
-                run(&state).await;
+                let http = reqwest::Client::new();
+                run(&state, &http).await;
             });
             Ok(())
         });

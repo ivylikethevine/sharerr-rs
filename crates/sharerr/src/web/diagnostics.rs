@@ -14,8 +14,6 @@
 //! a second page to click through to answered no one's question.
 
 use secrecy::SecretString;
-use sharerr_arr::Discovered;
-use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::{Config, MediaSource};
 
@@ -53,78 +51,41 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         }
     };
 
-    // The services are independent, so the page waits for the slowest of them
-    // rather than the sum of all five.
-    let outcomes = futures::future::join_all(
-        config
-            .configured_sources()
-            .into_iter()
-            // `configured_sources` yields only *arr apps, each of which has a key.
-            .filter_map(|kind| secret_keys::api_key_for(kind).map(|key| (kind, key)))
-            .map(|(kind, key)| {
-                let api_key = api_key(key);
-                let config = &config;
-                async move {
-                    let url = config.service(kind).map(|s| &s.url);
-                    (
-                        kind,
-                        checks::check_arr(kind, url, api_key, &config.tag).await,
-                    )
-                }
-            }),
-    )
-    .await;
+    // Shared with `web::topology::gather` — see `checks::snapshot`'s docs for
+    // why the arr probes, library scan, and path check live there instead of
+    // being duplicated per page.
+    let checks::Snapshot {
+        sources,
+        libraries,
+        paths,
+    } = checks::snapshot(&config, &api_key).await;
 
-    let mut services = Vec::new();
-    let mut discovered: Vec<Discovered> = Vec::new();
-    for (kind, outcome) in outcomes {
-        services.push(describe(kind, &config, &outcome));
-        discovered.extend(outcome.into_items());
-    }
-
-    // The directory scans are filesystem-bound; off the async loop for the same
-    // reason as `check_paths` below.
-    let libraries = config.library.clone();
-    let library_lines = match tokio::task::spawn_blocking(move || {
-        libraries
-            .iter()
-            .map(|library| {
-                let outcome = checks::check_library(library);
-                (describe_library(library, &outcome), outcome.into_items())
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    {
-        Ok(lines) => lines,
-        // A panicked scan must not make a configured [[library]] install look
-        // identical to one with no libraries at all.
-        Err(err) => vec![(
-            ServiceLine {
+    let mut services: Vec<ServiceLine> = sources
+        .iter()
+        .map(|(kind, outcome)| describe(*kind, &config, outcome))
+        .collect();
+    match &libraries {
+        checks::LibraryScan::Scanned(scanned) => {
+            services.extend(
+                scanned
+                    .iter()
+                    .map(|(library, outcome)| describe_library(library, outcome)),
+            );
+        }
+        checks::LibraryScan::Panicked(err) => {
+            // A panicked scan must not make a configured [[library]] install
+            // look identical to one with no libraries at all.
+            services.push(ServiceLine {
                 name: "library".to_owned(),
                 message: format!("the scan did not complete: {err}"),
                 ok: false,
-            },
-            Vec::new(),
-        )],
-    };
-    for (line, items) in library_lines {
-        services.push(line);
-        discovered.extend(items);
+            });
+        }
     }
 
-    // `check_paths` stats every discovered file. On a container pinned to one
-    // CPU there is exactly one worker thread, so running it inline would stall
-    // /health and every other request for the duration of the walk.
-    let scanned = !discovered.is_empty();
-    let paths = {
-        let config = config.clone();
-        tokio::task::spawn_blocking(move || checks::check_paths(&config, &discovered))
-            .await
-            // A panicked walk renders as an empty report rather than a 500; the
-            // service lines above still carry the useful half of the page.
-            .unwrap_or_default()
-    };
+    // `paths.checked` is `discovered.len()` from `checks::snapshot` — nonzero
+    // exactly when either phase found something.
+    let scanned = paths.checked > 0;
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
     let runs = recent_run_rows(state).await;

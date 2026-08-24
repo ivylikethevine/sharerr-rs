@@ -568,7 +568,7 @@ accepting a save that would be silently discarded.
 
 ## Building and testing
 
-Rust **1.88** or newer (the workspace sets `rust-version`; `docker build .` is the
+Rust **1.98** or newer (the workspace sets `rust-version`; `docker build .` is the
 de-facto MSRV check, since a local toolchain is invariably newer).
 
 ```bash

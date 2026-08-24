@@ -16,7 +16,6 @@ use std::path::Path;
 use axum::extract::State;
 use axum::response::Response;
 use secrecy::SecretString;
-use sharerr_core::config::secret_keys;
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{EndpointKind, ObservedVia, PeerEndpoint};
 
@@ -25,7 +24,7 @@ use super::templates::{
     AddressCell, Edge, EdgeStyle, Node, NodeIcon, NodeLine, NodeStatus, SwarmRow, TopologyPage,
     render,
 };
-use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome, TorrentCredential};
+use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
 
 /// A label longer than this is cut with an ellipsis rather than left to blow
@@ -181,63 +180,45 @@ async fn gather(state: &WebState) -> TopologyPage {
         }
     };
 
-    let mut sources = Vec::new();
-    let mut discovered = Vec::new();
+    // Shared with `web::diagnostics::gather` — see `checks::snapshot`'s docs
+    // for why the arr probes, library scan, and path check live there instead
+    // of being duplicated per page.
+    let checks::Snapshot {
+        sources: probed,
+        libraries,
+        paths,
+    } = checks::snapshot(&config, &secret).await;
 
-    let outcomes = futures::future::join_all(
-        config
-            .configured_sources()
-            .into_iter()
-            .filter_map(|kind| secret_keys::api_key_for(kind).map(|key| (kind, key)))
-            .map(|(kind, key)| {
-                let api_key = secret(key);
-                let config = &config;
-                async move {
-                    let url = config.service(kind).map(|s| &s.url);
-                    (
-                        kind,
-                        checks::check_arr(kind, url, api_key, &config.tag).await,
-                    )
-                }
-            }),
-    )
-    .await;
-    for (kind, outcome) in outcomes {
-        sources.push(arr_node(
-            kind,
-            config.service(kind).map(|s| &s.url),
-            &outcome,
-        ));
-        discovered.extend(outcome.into_items());
+    let mut sources: Vec<SourceNode> = probed
+        .iter()
+        .map(|(kind, outcome)| arr_node(*kind, config.service(*kind).map(|s| &s.url), outcome))
+        .collect();
+    match &libraries {
+        checks::LibraryScan::Scanned(scanned) => {
+            sources.extend(
+                scanned
+                    .iter()
+                    .map(|(library, outcome)| library_node(&library.path, outcome)),
+            );
+        }
+        checks::LibraryScan::Panicked(err) => {
+            // Previously silently dropped here while `diagnostics::gather`
+            // reported it — see `checks::snapshot`'s docs. A configured
+            // [[library]] must not vanish from the diagram just because its
+            // scan panicked.
+            sources.push(SourceNode {
+                label: "library".to_owned(),
+                icon: NodeIcon::Library,
+                lines: vec![line("", format!("the scan did not complete: {err}"))],
+                status: NodeStatus::Error,
+                accent: ACCENT_LIBRARY,
+            });
+        }
     }
 
-    // Filesystem-bound, same as `diagnostics::gather` — off the async loop so
-    // a slow mount cannot stall the single worker thread a pinned container
-    // may be running on.
-    let libraries = config.library.clone();
-    let library_results = tokio::task::spawn_blocking(move || {
-        libraries
-            .iter()
-            .map(|library| {
-                let outcome = checks::check_library(library);
-                (library_node(&library.path, &outcome), outcome.into_items())
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .unwrap_or_default();
-    for (node, items) in library_results {
-        sources.push(node);
-        discovered.extend(items);
-    }
-
-    let scanned = !discovered.is_empty();
-    let paths = {
-        let config = config.clone();
-        tokio::task::spawn_blocking(move || checks::check_paths(&config, &discovered))
-            .await
-            .unwrap_or_default()
-    };
+    // `paths.checked` is `discovered.len()` from `checks::snapshot` — nonzero
+    // exactly when either phase found something.
+    let scanned = paths.checked > 0;
     let path_edge_label = if !scanned {
         String::new()
     } else if paths.is_failure() {
@@ -410,12 +391,7 @@ async fn client_node(
     let backend = config.torrent_backend;
     let client = config.torrent_client_for(backend);
 
-    let api_key = secret_or_none(client.api_key_key, secret);
-    let password = secret_or_none(client.password_key, secret);
-    let credential = match (api_key, password) {
-        (Err(reason), _) | (_, Err(reason)) => Err(reason),
-        (Ok(api_key), Ok(password)) => Ok(TorrentCredential::choose(api_key, password)),
-    };
+    let credential = checks::resolve_torrent_credential(&client, secret);
 
     let outcome = checks::check_qbit(backend, client.url, client.username, credential).await;
     let label = backend.display_name().to_owned();
@@ -457,16 +433,6 @@ async fn client_node(
     }
 
     (label, lines, status)
-}
-
-fn secret_or_none(
-    key: Option<&'static str>,
-    secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
-) -> Result<Option<SecretString>, String> {
-    match key {
-        Some(key) => secret(key),
-        None => Ok(None),
-    }
 }
 
 fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> SourceNode {

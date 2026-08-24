@@ -69,6 +69,33 @@ struct Webhook {
     client: reqwest::Client,
 }
 
+/// The HTTP client every notification shares, built once for the life of the
+/// process rather than once per call.
+///
+/// `webhook()` is the single choke point both callers reach a client
+/// through — [`send`], a per-event notification, and `check_quiet_peers`, a
+/// per-tick batch — so caching it here covers both the same way
+/// `gossip::exchange_loop` and `lighthouse_client::sync_loop` cache theirs
+/// for their own loops. Unlike those, `send` has no enclosing loop to build
+/// the client ahead of, hence the lazy static instead of a hoisted local.
+fn http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            match reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+            {
+                Ok(client) => Some(client),
+                Err(err) => {
+                    tracing::warn!(error = %err, "could not build the notification HTTP client");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
 /// The configured webhook, or `None` when there is none to send through.
 async fn webhook(state: &ServeState) -> Option<Webhook> {
     let vault = state.open_vault().await.ok()?;
@@ -82,21 +109,10 @@ async fn webhook(state: &ServeState) -> Option<Webhook> {
         return None;
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!(error = %err, "could not build the notification client");
-            return None;
-        }
-    };
-
     Some(Webhook {
         url,
         kind: state.config().await.notifications.kind,
-        client,
+        client: http_client()?.clone(),
     })
 }
 

@@ -80,14 +80,14 @@ impl GluetunTarget {
         }
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Tracker => "tracker",
             Self::Client => "client",
         }
     }
 
-    fn config(self, config: &Config) -> &GluetunConfig {
+    pub(crate) fn config(self, config: &Config) -> &GluetunConfig {
         match self {
             Self::Tracker => &config.gluetun,
             Self::Client => &config.gluetun_client,
