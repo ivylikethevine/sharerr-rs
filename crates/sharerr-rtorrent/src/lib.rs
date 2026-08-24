@@ -47,7 +47,12 @@
 //!   schedule keyed to a *view*, not a per-torrent XML-RPC setting — there is
 //!   nothing this trait's `ratio_limit` can attach to. `upload_limit_kib`
 //!   *is* honoured, via a per-torrent named throttle
-//!   (`d.throttle_name.set` + `throttle.up.max.set`).
+//!   (`throttle.up = name,rate_kib` to define it, `d.throttle_name.set` to
+//!   attach it). Note the shape: `throttle.up` takes the rate in **KiB/s**
+//!   and `throttle.up.max` is a *getter* with no `.set` variant — an earlier
+//!   version of this crate called `throttle.up.max.set` with a bytes/s
+//!   value, which faulted after the torrent had already loaded, so every
+//!   item was recorded failed while it was actually live.
 //! - **No tracker removal.** rTorrent's XML-RPC API has never grown a way to
 //!   remove a tracker from an already-loaded torrent (tracked upstream as
 //!   [rakshasa/rtorrent#165](https://github.com/rakshasa/rtorrent/issues/165),
@@ -76,7 +81,7 @@ use quick_xml::reader::Reader;
 use secrecy::{ExposeSecret, SecretString};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, is_auth_rejection,
+    error_chain, http_client, is_auth_rejection,
 };
 use url::Url;
 
@@ -110,9 +115,7 @@ impl RtorrentClient {
     /// module docs for why this is the full RPC URL, not a base to append a
     /// path to.
     pub fn new(endpoint: &Url, username: &str, password: SecretString) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))?;
+        let http = http_client()?;
         Ok(Self {
             http,
             endpoint: endpoint.clone(),
@@ -346,10 +349,13 @@ impl TorrentClient for RtorrentClient {
             // works and needs no bookkeeping of its own.
             let hash = self.hash_of_last_add().await?;
             let throttle_name = format!("sharerr-{hash}");
-            let bytes_per_sec = (kib * 1024).to_string();
+            // `throttle.up` is `(name, rate)` with the rate in KiB/s — the
+            // same unit `AddRequest::upload_limit_kib` carries, so no
+            // conversion. See the module docs for the getter/setter trap.
+            let rate_kib = kib.to_string();
             self.call(
-                "throttle.up.max.set",
-                &[Param::Str(&throttle_name), Param::Str(&bytes_per_sec)],
+                "throttle.up",
+                &[Param::Str(&throttle_name), Param::Str(&rate_kib)],
             )
             .await?;
             self.call(
@@ -540,11 +546,14 @@ enum XmlValue {
 /// Decode one `methodResponse` body into its single return value, or the
 /// message from a `<fault>`.
 fn parse_response(body: &str) -> std::result::Result<XmlValue, String> {
+    // No `trim_text`: it trims every text *fragment*, and an entity reference
+    // splits one string into several, so `Tom &amp; Jerry` would come back as
+    // `Tom&Jerry` — a path that no longer exists. Whitespace between tags is
+    // skipped by `next_structural` instead, only where a tag is expected.
     let mut reader = Reader::from_str(body);
-    reader.config_mut().trim_text(true);
 
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        match next_structural(&mut reader)? {
             Event::Start(e) if e.name().as_ref() == b"fault" => {
                 expect_start(&mut reader, b"value")?;
                 let value = parse_value(&mut reader)?;
@@ -578,11 +587,20 @@ fn fault_message(value: &XmlValue) -> String {
 /// Read one `<value>...</value>` tree, assuming the opening `<value>` tag was
 /// just consumed by the caller.
 fn parse_value(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
-    let tag = match reader.read_event().map_err(|e| e.to_string())? {
+    let tag = match next_structural(reader)? {
         Event::End(e) if e.name().as_ref() == b"value" => return Ok(XmlValue::Str(String::new())),
+        // A bare `<value>text</value>` is an implicit string; its text may be
+        // split across several events by entity references, exactly like an
+        // explicit `<string>`.
         Event::Text(t) => {
-            let text = t.decode().map_err(|e| e.to_string())?.into_owned();
-            expect_end(reader, b"value")?;
+            let mut text = t.decode().map_err(|e| e.to_string())?.into_owned();
+            read_text_until_end(reader, b"value", &mut text)?;
+            return Ok(XmlValue::Str(text));
+        }
+        Event::GeneralRef(r) => {
+            let mut text = String::new();
+            push_general_ref(&r, &mut text)?;
+            read_text_until_end(reader, b"value", &mut text)?;
             return Ok(XmlValue::Str(text));
         }
         Event::Start(e) => e.name().as_ref().to_vec(),
@@ -614,7 +632,7 @@ fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Stri
     expect_start(reader, b"data")?;
     let mut items = Vec::new();
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        match next_structural(reader)? {
             Event::Start(e) if e.name().as_ref() == b"value" => {
                 items.push(parse_value(reader)?);
             }
@@ -629,7 +647,7 @@ fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Stri
 fn parse_struct(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
     let mut members = Vec::new();
     loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
+        match next_structural(reader)? {
             Event::Start(e) if e.name().as_ref() == b"member" => {
                 expect_start(reader, b"name")?;
                 let name = read_element_text(reader, b"name")?;
@@ -645,26 +663,83 @@ fn parse_struct(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Str
     Ok(XmlValue::Struct(members))
 }
 
+/// The text content of `<tag>…</tag>`, whose opening tag the caller has just
+/// consumed.
+///
+/// quick-xml does not expand entities on its own: `Tom &amp; Jerry` arrives
+/// as `Text("Tom ") / GeneralRef("amp") / Text(" Jerry")`, so a torrent name
+/// or path holding `&`, `<`, or `>` — which rTorrent escapes on the way out —
+/// is several events, not one. Anything less than a loop here broke every
+/// `list()`/`files()` call the moment one such name existed.
 fn read_element_text(
     reader: &mut Reader<&[u8]>,
     tag: &[u8],
 ) -> std::result::Result<String, String> {
-    match reader.read_event().map_err(|e| e.to_string())? {
-        Event::End(e) if e.name().as_ref() == tag => Ok(String::new()),
-        Event::Text(t) => {
-            let text = t.decode().map_err(|e| e.to_string())?.into_owned();
-            expect_end(reader, tag)?;
-            Ok(text)
+    let mut text = String::new();
+    read_text_until_end(reader, tag, &mut text)?;
+    Ok(text)
+}
+
+/// Append every text and entity event up to `</tag>` onto `text`.
+fn read_text_until_end(
+    reader: &mut Reader<&[u8]>,
+    tag: &[u8],
+    text: &mut String,
+) -> std::result::Result<(), String> {
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::End(e) if e.name().as_ref() == tag => return Ok(()),
+            Event::Text(t) => text.push_str(&t.decode().map_err(|e| e.to_string())?),
+            Event::CData(c) => text.push_str(&String::from_utf8_lossy(&c)),
+            Event::GeneralRef(r) => push_general_ref(&r, text)?,
+            other => {
+                return Err(format!(
+                    "unexpected event reading <{}>: {other:?}",
+                    String::from_utf8_lossy(tag)
+                ));
+            }
         }
-        other => Err(format!(
-            "unexpected event reading <{}>: {other:?}",
-            String::from_utf8_lossy(tag)
-        )),
+    }
+}
+
+/// Resolve one entity reference: the five XML predefined names plus numeric
+/// character references. rTorrent emits nothing else, and a DTD-defined
+/// entity in an XML-RPC reply would be a malformed response anyway.
+fn push_general_ref(
+    r: &quick_xml::events::BytesRef<'_>,
+    text: &mut String,
+) -> std::result::Result<(), String> {
+    if let Some(ch) = r.resolve_char_ref().map_err(|e| e.to_string())? {
+        text.push(ch);
+        return Ok(());
+    }
+    let name = r.decode().map_err(|e| e.to_string())?;
+    let ch = match name.as_ref() {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        other => return Err(format!("unknown entity reference &{other};")),
+    };
+    text.push(ch);
+    Ok(())
+}
+
+/// The next event that is not whitespace-only text — what every position
+/// expecting a tag wants, with `trim_text` deliberately off (see
+/// [`parse_response`]).
+fn next_structural<'a>(reader: &mut Reader<&'a [u8]>) -> std::result::Result<Event<'a>, String> {
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Text(t) if t.iter().all(u8::is_ascii_whitespace) => continue,
+            other => return Ok(other),
+        }
     }
 }
 
 fn expect_start(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(), String> {
-    match reader.read_event().map_err(|e| e.to_string())? {
+    match next_structural(reader)? {
         Event::Start(e) if e.name().as_ref() == tag => Ok(()),
         other => Err(format!(
             "expected <{}>, got {other:?}",
@@ -674,7 +749,7 @@ fn expect_start(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(
 }
 
 fn expect_end(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(), String> {
-    match reader.read_event().map_err(|e| e.to_string())? {
+    match next_structural(reader)? {
         Event::End(e) if e.name().as_ref() == tag => Ok(()),
         other => Err(format!(
             "expected </{}>, got {other:?}",
@@ -1112,7 +1187,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(body_string_contains("throttle.up.max.set"))
+            .and(body_string_contains("<methodName>throttle.up</methodName>"))
             .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
             .mount(&server)
             .await;
@@ -1137,11 +1212,16 @@ mod tests {
             .map(|r| String::from_utf8(r.body.clone()).unwrap())
             .collect();
         assert!(
-            bodies.iter().any(
-                |b| b.contains("throttle.up.max.set") && b.contains("abc123")
-                    || b.contains("throttle.up.max.set")
-            ),
-            "expected a throttle.up.max.set call: {bodies:?}"
+            bodies
+                .iter()
+                .any(|b| b.contains("<methodName>throttle.up</methodName>")
+                    && b.contains("sharerr-abc123")
+                    && b.contains("<string>500</string>")),
+            "expected a throttle.up call naming the throttle at 500 KiB/s: {bodies:?}"
+        );
+        assert!(
+            !bodies.iter().any(|b| b.contains("throttle.up.max")),
+            "throttle.up.max has no .set variant and must never be called: {bodies:?}"
         );
         assert!(
             bodies.iter().any(|b| b.contains("d.throttle_name.set")),
@@ -1260,6 +1340,36 @@ mod tests {
         let mut reader = Reader::from_str("<oops/>");
         let err = read_element_text(&mut reader, b"name").unwrap_err();
         assert!(err.contains("unexpected event reading <name>"), "{err}");
+    }
+
+    #[test]
+    fn parse_response_expands_entity_references_in_strings_and_bare_values() {
+        // rTorrent escapes `&`, `<` and `>` in names and paths; quick-xml hands
+        // those back as separate `GeneralRef` events, which used to abort the
+        // whole reply as malformed.
+        let body = "<?xml version=\"1.0\"?><methodResponse><params><param><value>\
+                    <array><data>\
+                    <value><string>Tom &amp; Jerry &lt;1940&gt; &#x263A; &#9731;</string></value>\
+                    <value>a &amp; b</value>\
+                    <value><string></string></value>\
+                    </data></array></value></param></params></methodResponse>";
+        let parsed = parse_response(body).unwrap();
+        assert_eq!(
+            parsed,
+            XmlValue::Array(vec![
+                XmlValue::Str("Tom & Jerry <1940> ☺ ☃".to_owned()),
+                XmlValue::Str("a & b".to_owned()),
+                XmlValue::Str(String::new()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_response_rejects_an_unknown_entity() {
+        let body = "<?xml version=\"1.0\"?><methodResponse><params><param><value>\
+                    <string>&nbsp;</string></value></param></params></methodResponse>";
+        let err = parse_response(body).unwrap_err();
+        assert!(err.contains("unknown entity reference &nbsp;"), "{err}");
     }
 
     #[test]

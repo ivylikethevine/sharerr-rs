@@ -34,7 +34,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
-use sharerr_core::endpoint::now_epoch;
+use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
 use sharerr_store::{EndpointKind, ObservedVia, Store};
 
 use crate::state::ServeState;
@@ -279,9 +279,22 @@ pub async fn ingest(
         }
     };
 
+    let now = now_epoch();
+
     for record in records.into_iter().take(MAX_RECORDS) {
         if let Err(reason) = verify(&record) {
             tracing::debug!(reason, "rejected a gossip record");
+            summary.invalid += 1;
+            continue;
+        }
+        // A `signed_at` further in the future than clock skew explains is
+        // treated the same as a bad signature: shape freshness is decided
+        // purely by comparing `signed_at` values below, so an unclamped
+        // future one would lock the subject's slot — every genuine update
+        // reads as `stale` — until this host's clock catches up to it, which
+        // for a wildly wrong sender clock is never.
+        if record.signed_at > now.saturating_add(MAX_FUTURE_SKEW_SECS) {
+            tracing::debug!("rejected a gossip record signed too far in the future");
             summary.invalid += 1;
             continue;
         }
@@ -738,6 +751,28 @@ mod tests {
         assert_eq!(summary.stale, 1);
         let endpoints = store.peer_endpoints(ids[0]).await.unwrap();
         assert_eq!(endpoints[0].addr, "http://new:2");
+    }
+
+    /// A `signed_at` further in the future than clock skew explains is
+    /// rejected outright, not merely deferred: accepting it would let it win
+    /// every freshness comparison forever, past the point the sender's clock
+    /// is fixed.
+    #[tokio::test]
+    async fn a_record_signed_too_far_in_the_future_is_rejected() {
+        let (store, ids) = store_with(&["Alex"]).await;
+        let alex = identity(1);
+        let far_future = now_epoch() + MAX_FUTURE_SKEW_SECS + 3600;
+
+        let summary = ingest(
+            &store,
+            ids[0],
+            vec![record_for(&alex, "http://a:1", far_future)],
+        )
+        .await;
+
+        assert_eq!(summary.accepted, 0);
+        assert_eq!(summary.invalid, 1);
+        assert!(store.peer_endpoints(ids[0]).await.unwrap().is_empty());
     }
 
     /// A record about a pubkey no peer row carries is ignored: gossip must not

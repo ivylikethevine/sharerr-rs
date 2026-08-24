@@ -15,23 +15,17 @@ tracks what is still ahead.
 - [Indexers (what consumes the feed)](#indexers-what-consumes-the-feed)
 - [Functionality](#functionality)
 - [Publishing to crates.io](#publishing-to-cratesio)
+- [Open work, by scope](#open-work-by-scope)
 - [The lighthouse](#the-lighthouse)
 
 ### What's left
 
-Three open items remain, ordered smallest first — by how much they touch, not
-how long they'd take to get right:
-
-1. **[rTorrent tier-2 coverage](#torrent-clients-what-actually-seeds).** Test
-   infrastructure only: wire a real rTorrent + ruTorrent container into
-   `run_docker_tests.sh`, the way qBittorrent already is. No application code
-   changes.
-2. **[Request flow](#functionality).** A new inbound request queue and
-   approve step — touches the sync engine and the web UI on both sides of a
-   friendship, not just one subsystem.
-3. **[Publishing to crates.io](#publishing-to-cratesio).** Two concrete
-   packaging blockers plus nine crates' worth of release process — no new
-   behaviour, but not a one-commit job either.
+Three feature-sized items — **[rTorrent tier-2
+coverage](#torrent-clients-what-actually-seeds)**, **[request
+flow](#functionality)**, and **[publishing to crates.io](#publishing-to-cratesio)**
+— plus the open items from the 2026-08-21 code review. All of them, features
+and findings alike, are ranked together in [Open work, by
+scope](#open-work-by-scope) below.
 
 ### Library sources (where tagged content comes from)
 
@@ -137,6 +131,148 @@ defaults (`/data`, `/config/sharerr.toml`) describe the container's
 filesystem, not theirs. Those are overridable today, but shipping to people
 who are *not* using the image probably means changing the defaults or being
 loud about them in the README.
+
+## Open work, by scope
+
+Everything still ahead, in one list, smallest first — by how much each item
+touches, not how long it would take to get right. The review items come from
+a whole-codebase pass on 2026-08-21 (8 finder angles, every candidate
+independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
+= depends on ordering/config); four batches of fixes landed on 2026-08-24
+and what is listed here is what remains. File references are as of the review
+commit and may have drifted.
+
+### Small — one function or one file
+
+1. **Items page renders the full announce URL, token included —
+   CONFIRMED.** `items.rs` `current_announce_url` builds
+   `announce_url(&base, tracker_token())` and `items.html` prints it per row,
+   contradicting `settings.rs`'s "a stored secret is never rendered back".
+   Behind `require_auth`, and the token already ships inside every
+   `.torrent`. *Fix:* render `announce_url(base, None)` with a `…/<token>`
+   placeholder, or the token's fingerprint.
+2. **Duplicated `fn unreachable`** — `sharerr-transmission` and
+   `sharerr-rtorrent` are byte-identical apart from `base` vs `endpoint`.
+   Lift next to `sharerr_client::http_client()`.
+3. **`ago`/`compact_ago` — PLAUSIBLE.** `peers.rs` and `topology.rs` share the
+   60/3600/86400 ladder; `compact_ago`'s doc says the *format* difference is
+   intentional. Optionally express both through one function so one test
+   covers both thresholds.
+4. **`TorrentBackend` lacks `ALL` + `parse()`** — unlike `LighthouseMount`,
+   `NotifyKind`, `LibraryKind`, `MediaSource`. Hand-matched in `web/probe.rs`,
+   `web/settings.rs` (twice), the probe tests, and `web/mod.rs`'s per-backend
+   routes; a fourth client means ~7 sites, and missing the probe arm makes its
+   Test button say "Unknown service".
+5. **Dual-token admission on the items page** — `items.rs` `token_status`
+   consults only the current fingerprint, so a previous-token item renders
+   Stale while the tracker admits it. The doc comment frames that as
+   intended; listed so the decision is a decision.
+
+### Medium — one subsystem, a few files
+
+6. **Vault mutations across processes — CONFIRMED, partly fixed.**
+   `Vault::put`/`remove` now reload under a process-wide mutex, which covers
+   every writer inside `serve`; `sharerr vault set` against a running `serve`
+   is still last-write-wins with a shared `vault.tmp`. *Fix:* a file lock —
+   `std::fs::File::lock` is Rust 1.89, one past the MSRV, so `fd-lock`/`fs4`.
+7. **`hash_of_last_add` can throttle an unrelated torrent — PLAUSIBLE.**
+   `sharerr-rtorrent` takes `rows.last()` of `d.multicall2(main, d.hash=)`
+   after `load.raw_start`; rTorrent loads asynchronously, a duplicate hash is
+   only logged, and `main` honours any `view.sort_current` in `.rtorrent.rc`.
+   *Fix:* carry the info hash on `AddRequest` — the caller (`factory.rs`)
+   already knows it — and stop guessing.
+8. **`resolve_sharerr` and `resolve()` disagree — PLAUSIBLE.** `paths.rs`
+   `resolve()` is first-match-in-order with `qbit.unwrap_or(sharerr)`;
+   `resolve_sharerr()` is most-specific-match over only rules *with* `qbit`.
+   A specific rule without `qbit` ahead of a general one with it yields two
+   qBittorrent paths for one file by entry point; with `skip_checking =
+   true` the torrent points at a non-existent file. *Fix:* one
+   most-specific-match resolver used by both.
+9. **`dotted()`/`loose_eq()` drop every non-ASCII character — CONFIRMED.**
+   `title.rs` maps anything non-ASCII-alphanumeric to a space and empty to
+   `"Unknown"`: `千と千尋の神隠し (2001)` → `Unknown.2001.WEB-DL…` (every CJK,
+   Cyrillic, Greek title collapses to the same name); `Amélie` → `Am.lie`,
+   loose key `amlie`. The release title is the only matchable data for
+   directory-sourced items. *Fix:* NFKD-transliterate before the ASCII
+   filter, and fall back to the hash rather than `Unknown`.
+10. **Vanished torrent re-hashes although the `.torrent` is cached.**
+    `sync/seed.rs` `share()` never passes `known.info_hash` to `seed()`, so
+    `find_existing` → `build()` runs `LavaTorrentFactory.create` (gigabytes
+    of CPU) and rewrites the very file that already exists — after a client
+    reinstall or wiped session, every item. *Fix:* pass the hash in; if the
+    cached file reads, `rewrite_announce` it (the logic `refresh_announce`
+    already has) and `add` those bytes.
+11. **Torrent-client credential resolution exists four times** — `sync/mod.rs`,
+    `web/probe.rs`, `commands/doctor.rs`, `web/topology.rs`, each with its
+    own semantics (`doctor` never calls `TorrentCredential::choose`);
+    `checks.rs` already admits "three of which resolve secrets from three
+    different places". *Fix:* one `resolve_torrent_credential` next to
+    `checks::build_torrent_client`.
+12. **`doctor` and `sync` only check the tracker's gluetun tunnel.**
+    `doctor.rs` reads only `config.gluetun.control_url` + `GLUETUN_API_KEY`;
+    `[gluetun_client]` is never checked, while `gluetun.rs` and
+    `web/diagnostics.rs` cover both. A dual-VPN operator with a wrong
+    client-tunnel key gets a clean `doctor`.
+13. **Per-tick `reqwest::Client` rebuild and vault re-open** — `gossip.rs`
+    (per exchange), `lighthouse_client.rs` (per tick), `notify.rs` (per
+    event) each build a fresh client and open the vault (Argon2, ~19 MiB).
+    `gluetun.rs` keeps one client and documents why. Gossip's per-peer keys
+    legitimately need the vault; the client rebuild does not.
+14. **`topology::gather` duplicates `diagnostics::gather`**, and both run the
+    arr probes and the library scan sequentially, already diverging
+    (diagnostics reports a panicked scan; topology drops it). *Fix:* one
+    `checks::snapshot(...)` with `tokio::join!` — wall time of the two slowest
+    pages drops from sum to max.
+15. **Feed `.torrent` links are `http://localhost:<port>/…` on a gluetun-only
+    deployment — CONFIRMED.** `torznab.rs` `Matched::download_url`, Jackett's
+    `site_link`, and the peers page's `feed_url` all come from
+    `Config::public_base_url()`, which only knows the static advertised base
+    and otherwise yields `http://localhost:<bind port>` — while the magnet
+    tiers in the same response use the live `endpoint().recent()`. On the
+    README-recommended setup (no `advertised_host`) a friend's Sonarr grabs
+    `http://localhost:8477/torrents/<hash>.torrent` on *their* box and
+    fails; the `magneturl` is correct and the feed preview looks healthy.
+    *Fix:* route the `.torrent`/site links through the same
+    `AdvertisedEndpoint`.
+16. **rTorrent tier-2 coverage.** Test infrastructure only: wire a real
+    rTorrent + ruTorrent container into `run_docker_tests.sh`, the way
+    qBittorrent already is — see [Torrent
+    clients](#torrent-clients-what-actually-seeds). The XML-RPC parser and
+    throttle-method bugs fixed on 2026-08-24 were exactly the kind the
+    hand-mocked server cannot catch.
+
+### Large — a protocol, a data model, or a release process
+
+17. **A "Reused" pre-existing torrent — CONFIRMED.** `sync/seed.rs`
+    `find_existing` matches *any* torrent in the client (fed by `list(None)`,
+    not just sharerr's category) and returns `SeedOutcome::Reused` without
+    `set_trackers` or a cached `.torrent`; `set_seeding` then records it as
+    Seeding with the current token fingerprint. When library path ==
+    download path, or an operator cross-seeds: (a) `tracker::torrent_file`
+    404s on every friend download and the local client never announces to
+    sharerr's tracker, so friends join an empty swarm; (b) removing the tag
+    makes `withdraw_untagged` `remove()` a torrent sharerr did not create —
+    against the "preserve existing torrents" rule. *Fix:* on reuse, insert
+    sharerr's tracker and cache the `.torrent` bytes from the client; and
+    record `created_by_sharerr` per item so untag only removes what sharerr
+    added.
+18. **Lighthouse `report` is unpinned — CONFIRMED.** `key_hash` is SHA-256 of
+    the shared API key, never bound to `record.pubkey`; `verify()` only checks
+    the record is self-consistent under whatever pubkey it carries. Anyone who
+    learns a key hash (a URL path segment, visible in proxy logs) can displace
+    the genuine record with one under their own keypair. The client catches
+    the impersonation (`record.pubkey != expected_pubkey` → decoy) but the
+    legitimate record is gone and rendezvous for that pair breaks. The
+    future-timestamp clamp, capacity cap with TTL sweep, and lowercase
+    canonicalisation are done. *Fix:* first-writer pins the pubkey for that
+    key hash and later reports must carry the same one, or derive `key_hash`
+    from the pubkey as well as the key — either way a wire-format decision.
+19. **Publishing to crates.io** — two concrete packaging blockers plus nine
+    crates' worth of release process; see [its own
+    section](#publishing-to-cratesio).
+20. **Request flow** — a new inbound request queue and approve step, touching
+    the sync engine and the web UI on both sides of a friendship; see
+    [Functionality](#functionality).
 
 ---
 

@@ -14,6 +14,22 @@ use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, Share
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+/// Serialises [`Store::from_options`] within this process.
+///
+/// `ServeState::store()` and `Syncer::build` each open their own pool
+/// against the same file independently, so on a fresh start (or an upgrade
+/// with a pending migration) they can race each other in two ways: the very
+/// first connection's WAL/pragma setup against a brand new file can itself
+/// return `SQLITE_BUSY` immediately rather than waiting out `busy_timeout`,
+/// and sqlx-sqlite's own migration `lock`/`unlock` are no-ops over
+/// migrations that are plain `CREATE TABLE`/`ALTER TABLE ADD COLUMN` with no
+/// `IF NOT EXISTS`, so a migration loser fails with "already exists". Either
+/// way the feed answers 503, or the syncer is marked blocked until the next
+/// retry. This only needs to be process-wide, not cross-process: two `serve`
+/// processes pointed at the same database file is already a
+/// misconfiguration this project does not support.
+static MIGRATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
@@ -87,6 +103,12 @@ impl Store {
     }
 
     async fn from_options(opts: SqliteConnectOptions, max_connections: u32) -> Result<Self> {
+        // Held across both connecting and migrating: on a brand new file the
+        // very first connection's WAL/pragma setup can itself race a second
+        // pool doing the same (`SQLITE_BUSY`, immediate rather than retried —
+        // `busy_timeout` does not cover it), before either reaches
+        // `MIGRATOR.run`. See `MIGRATE_LOCK`.
+        let _guard = MIGRATE_LOCK.lock().await;
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             // Recycling a connection is ordinarily harmless, but for `:memory:` the
@@ -1116,5 +1138,21 @@ mod tests {
         drop(store);
         let reopened = Store::open(&path).await.unwrap();
         assert_eq!(reopened.all_items().await.unwrap().len(), 1);
+    }
+
+    /// `ServeState::store()` and `Syncer::build` each open their own pool
+    /// against the same file independently, so on a fresh start they can
+    /// both reach `MIGRATOR.run` at once — see `MIGRATE_LOCK`. Without it
+    /// this races on sqlx-sqlite's own migration lock being a no-op and the
+    /// migrations having no `IF NOT EXISTS`: the loser fails with "already
+    /// exists".
+    #[tokio::test]
+    async fn concurrent_first_opens_against_a_fresh_file_both_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sharerr.db");
+
+        let (a, b) = tokio::join!(Store::open(&path), Store::open(&path));
+        a.unwrap();
+        b.unwrap();
     }
 }

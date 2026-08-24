@@ -28,7 +28,7 @@ use sharerr_store::{RunSummary, Store, Vault};
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
-use seed::{SeedOutcome, Seeder};
+use seed::{AnnounceRefresh, SeedOutcome, Seeder};
 
 /// A short, non-secret fingerprint of a tracker token — truncated SHA-256, hex.
 ///
@@ -528,7 +528,7 @@ impl Syncer {
                     // Either branch means the live torrent now genuinely
                     // matches `announce.primary` — a no-op refresh is still a
                     // confirmation, not merely "nothing to do".
-                    Ok(_) => {
+                    Ok(AnnounceRefresh::Current | AnnounceRefresh::Updated) => {
                         let fp = token_fingerprint(announce);
                         if let Err(err) = self
                             .store
@@ -542,6 +542,14 @@ impl Syncer {
                             );
                         }
                     }
+                    // Nothing was compared, so nothing is confirmed: leave
+                    // the stored fingerprint alone and the items page keeps
+                    // showing this one as not-yet-current rather than Valid.
+                    Ok(AnnounceRefresh::NoCachedTorrent) => tracing::debug!(
+                        item = %item.spec,
+                        info_hash = %hash,
+                        "no cached .torrent to confirm the announce URL against"
+                    ),
                     Err(err) => tracing::warn!(
                         item = %item.spec,
                         error = format!("{err:#}"),
@@ -550,6 +558,23 @@ impl Syncer {
                 }
             }
             return Ok(Step::Unchanged);
+        }
+
+        // Path mapping only ever substitutes the prefix (`PathResolver::resolve`
+        // joins the mapped root to `rest`, the part after `strip_prefix`), so the
+        // file's basename is identical under `item.arr_path` and under
+        // `paths.sharerr` once resolved. That means the release title can be
+        // computed now, without waiting on resolution to succeed.
+        let release_title = title::resolve(&item.spec, item.scene_name.as_deref(), &item.arr_path);
+
+        if !dry_run {
+            // Record before anything can fail — including resolution itself. A
+            // `NotAbsolute` path (e.g. a Windows `C:\tv\…` path from Sonarr) used
+            // to fail here before any row existed, so the `Failed` state set by
+            // the caller below matched zero rows: the run summary said "1
+            // failed" but the items page had no row and no `last_error`.
+            let record = item.clone().into_shared_item(release_title.clone());
+            self.store.upsert(&record).await?;
         }
 
         let paths = self
@@ -577,10 +602,6 @@ impl Syncer {
             }
         };
 
-        // Resolution only reads the path, never the file, so it works even for a
-        // file that is missing — which is what lets the row below be complete.
-        let release_title = title::resolve(&item.spec, item.scene_name.as_deref(), &paths.sharerr);
-
         // `try_exists` rather than a blocking `exists()`: this runs per item on
         // the async loop, against a mount that may be remote.
         if dry_run {
@@ -595,14 +616,6 @@ impl Syncer {
             );
             return Ok(Step::Added);
         }
-
-        // Record before anything can fail. Two reasons: if the process dies
-        // mid-add the item is on file as Pending and the next run retries it, and
-        // a failure below has a row to attach its `last_error` to. Without this,
-        // the most common failure — a file sharerr cannot see — would leave no
-        // trace at all beyond a log line.
-        let record = item.clone().into_shared_item(release_title);
-        self.store.upsert(&record).await?;
 
         if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
             return Err(missing());

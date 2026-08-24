@@ -177,21 +177,7 @@ async fn handle_announce(
     // Fails closed: an announce this instance cannot check the token for is
     // no more admissible than one for a hash it cannot check either — see
     // `is_served`'s own identical reasoning just below.
-    let store = state
-        .serve
-        .store()
-        .await
-        .map_err(|_| AnnounceError::BadToken)?;
-    let auth = authenticate_token(
-        &store,
-        state.serve.tracker_token().await.as_deref(),
-        state.serve.tracker_token_previous().await.as_deref(),
-        token.as_deref(),
-    )
-    .await?;
-    if auth.via_previous {
-        state.serve.legacy_token_status().record_used().await;
-    }
+    let (store, auth) = authenticate(state, token.as_deref()).await?;
 
     let request = AnnounceRequest::parse(query)?;
     if !is_served(state, &request.info_hash).await {
@@ -241,24 +227,10 @@ async fn handle_scrape(
     token: Option<String>,
     query: Option<String>,
 ) -> Response {
-    let Ok(store) = state.serve.store().await else {
-        return bencode(failure_bencode(&AnnounceError::BadToken.to_string()));
-    };
     // Scrape is swarm counts, not an announce — nothing here to attribute,
     // so the resolved peer id (if any) is simply discarded.
-    match authenticate_token(
-        &store,
-        state.serve.tracker_token().await.as_deref(),
-        state.serve.tracker_token_previous().await.as_deref(),
-        token.as_deref(),
-    )
-    .await
-    {
-        Ok(auth) if auth.via_previous => {
-            state.serve.legacy_token_status().record_used().await;
-        }
-        Ok(_) => {}
-        Err(err) => return bencode(failure_bencode(&err.to_string())),
+    if let Err(err) = authenticate(state, token.as_deref()).await {
+        return bencode(failure_bencode(&err.to_string()));
     }
 
     let params = announce::parse_query(query.unwrap_or_default().as_bytes());
@@ -342,6 +314,36 @@ struct TokenAuth {
 ///
 /// Anything else is `Err(AnnounceError::BadToken)`.
 ///
+/// The one admission path for announce and scrape alike: store, both vault
+/// tokens, [`authenticate_token`], and the previous-token usage bookkeeping.
+///
+/// Fails closed: an announce this instance cannot check the token for — a
+/// store that will not open, or a vault that will not open — is no more
+/// admissible than one for a hash it cannot check either (see `is_served`).
+/// The vault half matters: `tracker_token()`'s `None` cannot tell "no token
+/// configured" from "could not read the vault", and admitting on the latter
+/// silently turned enforcement off after a transient error.
+async fn authenticate(
+    state: &TrackerState,
+    supplied: Option<&str>,
+) -> Result<(Store, TokenAuth), AnnounceError> {
+    let store = state
+        .serve
+        .store()
+        .await
+        .map_err(|_| AnnounceError::BadToken)?;
+    let (current, previous) = state.serve.tracker_tokens().await.map_err(|err| {
+        tracing::warn!(error = %err, "refusing announces: the vault could not be opened");
+        AnnounceError::BadToken
+    })?;
+    let auth =
+        authenticate_token(&store, current.as_deref(), previous.as_deref(), supplied).await?;
+    if auth.via_previous {
+        state.serve.legacy_token_status().record_used().await;
+    }
+    Ok((store, auth))
+}
+
 /// Takes `store`, `required`, and `previous` as plain parameters rather than
 /// reaching into `TrackerState` itself: the peer-hash branch is exactly the
 /// part worth testing directly against an in-memory `Store`, with no vault or

@@ -178,9 +178,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     })
 }
 
-fn urlencode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
-}
+use crate::torznab::encode_component as urlencode;
 
 /// Whether `scope` would show `item` in the Torznab feed — the same rule
 /// `Store::seeding_items` applies in SQL, restated over an in-memory item so this

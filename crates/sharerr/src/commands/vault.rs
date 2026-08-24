@@ -106,6 +106,9 @@ fn validate_secret(key: &str, raw: &str) -> Result<SecretString> {
     if trimmed.is_empty() {
         bail!("refusing to store an empty value for {key:?}");
     }
+    if let Err(message) = secret_keys::validate_value(key, trimmed) {
+        bail!("{message}");
+    }
 
     Ok(SecretString::from(trimmed.to_owned()))
 }
@@ -187,6 +190,14 @@ mod tests {
             err.to_string()
                 .contains("refusing to store an empty value for \"sonarr.api_key\"")
         );
+    }
+
+    #[test]
+    fn validate_secret_rejects_a_tracker_token_that_cannot_be_a_url_segment() {
+        let err = validate_secret(secret_keys::TRACKER_TOKEN, "ab/cd+ef==").unwrap_err();
+        assert!(err.to_string().contains("announce URL"), "{err}");
+        // Other keys are free-form.
+        assert!(validate_secret(secret_keys::RTORRENT_PASSWORD, "ab/cd+ef==").is_ok());
     }
 
     #[test]

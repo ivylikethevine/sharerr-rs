@@ -158,7 +158,12 @@ impl AnnounceRequest {
     /// LAN, or traffic arriving through a reverse proxy — where the parameter is
     /// the more informed answer.
     pub fn resolve_addr(&self, remote: IpAddr) -> SocketAddr {
-        let ip = match self.declared_ip {
+        // A listener bound to `[::]` sees IPv4 peers as `::ffff:a.b.c.d`.
+        // Canonicalised so the private-address check sees the real v4
+        // address and the peer lands in `peers`, not packed 16+2 into
+        // `peers6` where no v4-only client can use it.
+        let remote = remote.to_canonical();
+        let ip = match self.declared_ip.map(|ip| ip.to_canonical()) {
             Some(declared) if is_private_ip(remote) => declared,
             _ => remote,
         };
@@ -404,8 +409,11 @@ impl AnnounceResponse {
         if compact {
             put_bytes(&mut out, &pack_compact(&v4));
         } else {
+            // The dictionary form has no separate `peers6`: every peer goes
+            // in the one list, v6 included, or a `compact=0` client in a v6
+            // swarm sees counts but an empty list forever.
             out.push(b'l');
-            for addr in &v4 {
+            for addr in v4.iter().chain(v6.iter()) {
                 out.push(b'd');
                 put_key(&mut out, "ip");
                 put_bytes(&mut out, addr.ip().to_string().as_bytes());

@@ -257,6 +257,20 @@ impl AdvertisedEndpoint {
     }
 }
 
+/// How far ahead of this host's clock a peer-supplied timestamp
+/// (`EndpointRecord::signed_at`, a gossiped `observed_at`) may be and still
+/// be trusted.
+///
+/// A stale timestamp erodes on its own as real time passes it; a
+/// too-future one does not — left unchecked it locks out every genuine
+/// update behind it until this host's clock catches up to it, which for a
+/// clock set wildly wrong is never. Used at every point that ingests a
+/// peer's own clock: `sharerr::gossip::ingest` and
+/// `Store::record_peer_endpoint`; the lighthouse (a separate crate, no
+/// friend relationship to reuse this constant through) enforces the same
+/// five minutes independently.
+pub const MAX_FUTURE_SKEW_SECS: i64 = 5 * 60;
+
 /// Current Unix time in seconds, saturating to `0` if the clock is somehow
 /// before the epoch. The one place this is computed; reused wherever a
 /// timestamp is stamped onto a row or a record.

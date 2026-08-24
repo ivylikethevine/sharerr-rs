@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    error_chain, is_auth_rejection, normalise_base,
+    error_chain, http_client, is_auth_rejection, normalise_base,
 };
 use tokio::sync::RwLock;
 use url::Url;
@@ -77,9 +77,7 @@ impl TransmissionClient {
     /// suffix is appended here so an operator cannot get it subtly wrong. A base
     /// with a path (a reverse-proxy subpath) is preserved.
     pub fn new(base: &Url, username: &str, password: SecretString) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .build()
-            .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))?;
+        let http = http_client()?;
         let base = normalise_base(base);
         let endpoint = base
             .join(RPC_PATH)

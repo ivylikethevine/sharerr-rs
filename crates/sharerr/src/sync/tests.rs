@@ -863,6 +863,53 @@ async fn a_missing_file_fails_only_its_own_item() {
     );
 }
 
+/// The specific way `resolve_for` can fail that a missing *file* cannot: a
+/// path the *arr app reported that is not absolute at all, e.g. a Windows
+/// `C:\tv\…` path from Sonarr, which `Path::is_absolute()` rejects on Linux.
+/// This must still leave a row behind for the caller's `Failed` state to
+/// attach a reason to — before the fix, the error propagated out of `share`
+/// before the "record before anything can fail" upsert ever ran.
+#[tokio::test]
+async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
+    let h = tagged_harness().await;
+    let announce =
+        sharerr_torrent::AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+    let item = sharerr_core::Discovered {
+        source: MediaSource::Sonarr,
+        source_id: 99,
+        file_id: 999,
+        spec: sharerr_core::MediaSpec::Episode {
+            series_title: "Windowsy Show".to_owned(),
+            season: 1,
+            episode: 1,
+        },
+        arr_path: PathBuf::from(r"C:\tv\Windowsy Show\ep.mkv"),
+        size: 1024,
+        ids: sharerr_core::ExternalIds::default(),
+        scene_name: None,
+    };
+
+    let result = h
+        .syncer
+        .share(&item, &announce, &HashSet::new(), &[], None, false)
+        .await;
+    let Err(err) = result else {
+        panic!("an unresolvable path must fail");
+    };
+    assert!(format!("{err:#}").contains("resolving"), "{err:#}");
+
+    let stored = h
+        .syncer
+        .store()
+        .get(MediaSource::Sonarr, 999)
+        .await
+        .unwrap();
+    assert!(
+        stored.is_some(),
+        "a row must exist for the run summary's Failed state to attach to"
+    );
+}
+
 /// Self-healing: a torrent removed behind sharerr's back is re-added, rather than
 /// the row sitting at Seeding forever while nothing seeds.
 #[tokio::test]

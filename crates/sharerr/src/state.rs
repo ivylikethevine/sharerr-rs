@@ -59,6 +59,13 @@ pub struct ServeState {
     /// that the file can be repaired. Behind a lock because a successful settings
     /// save clears it — the write proved the file parses.
     config_error: RwLock<Option<String>>,
+    /// Serialises every read-modify-write of `sharerr.toml` through the web
+    /// UI. The per-field `RwLock`s above protect the in-memory `Config`; this
+    /// protects the *file*: two section saves (two tabs, wizard plus
+    /// settings, an htmx double-submit) each open the document, apply only
+    /// their own edits, and rename over each other — the loser's edits vanish
+    /// and the last `replace_config` installs a `Config` missing them.
+    config_write: tokio::sync::Mutex<()>,
     /// Opened independently of the syncer, because login has to work *before* any
     /// credential exists. Going through `syncer.store()` would mean nobody could
     /// log in to fix the very thing blocking the syncer.
@@ -156,6 +163,7 @@ impl ServeState {
             config: RwLock::new(config),
             config_path: config_path.into(),
             config_error: RwLock::new(config_error),
+            config_write: tokio::sync::Mutex::new(()),
             store: RwLock::new(None),
             // Replaced by the first `ensure_ready`, which the background loop runs
             // the moment `run` starts polling it. Only observable in the sliver
@@ -253,6 +261,12 @@ impl ServeState {
     }
 
     /// Why `sharerr.toml` could not be loaded, or `None` when it was.
+    /// Hold this across an open → edit → save of `sharerr.toml` — see the
+    /// field's own doc comment.
+    pub async fn lock_config_write(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.config_write.lock().await
+    }
+
     pub async fn config_error(&self) -> Option<String> {
         self.config_error.read().await.clone()
     }
@@ -294,36 +308,62 @@ impl ServeState {
     }
 
     /// Read `cache`, or fill it by opening the vault and deriving a value with
-    /// `load`, caching the result either way.
+    /// `load`, caching the result.
     ///
     /// The shape shared by [`Self::tracker_token`], [`Self::gossip_identity`],
     /// and [`Self::lighthouse_state`]: each differs only in which lock it
     /// touches and how it derives a value from an opened vault. The outer
     /// `None` means "not looked up yet", `Some(None)` means "looked up, and
-    /// there is none" — a vault that will not open yields `None` here too,
-    /// which is correct rather than merely convenient: without a vault there
-    /// is nothing to read.
+    /// there is none".
+    ///
+    /// A vault that will not open is `Err` and is **not** cached: the next
+    /// call tries again. Caching it as "there is none" looked correct — with
+    /// no vault there is nothing to read — but for the tracker it turned a
+    /// transient error (a master-key file briefly unreadable during a mount
+    /// or rotation) into token enforcement silently switched off until the
+    /// next settings save. The cost of not caching is one Argon2 derivation
+    /// per call for as long as the vault stays broken, which is the right
+    /// place to spend it.
+    async fn try_cached_from_vault<T: Clone>(
+        &self,
+        cache: &RwLock<Option<Option<T>>>,
+        load: impl FnOnce(Vault) -> Option<T>,
+    ) -> Result<Option<T>, String> {
+        if let Some(cached) = &*cache.read().await {
+            return Ok(cached.clone());
+        }
+
+        let value = load(self.open_vault().await?);
+        *cache.write().await = Some(value.clone());
+        Ok(value)
+    }
+
+    /// [`Self::try_cached_from_vault`] for the accessors where an unopenable
+    /// vault genuinely means "absent" — a gossip identity or lighthouse seed
+    /// that cannot be loaded is simply not there yet — rather than a reason
+    /// to refuse anything.
     async fn cached_from_vault<T: Clone>(
         &self,
         cache: &RwLock<Option<Option<T>>>,
         load: impl FnOnce(Vault) -> Option<T>,
     ) -> Option<T> {
-        if let Some(cached) = &*cache.read().await {
-            return cached.clone();
-        }
-
-        let value = match self.open_vault().await {
-            Ok(vault) => load(vault),
-            Err(_) => None,
-        };
-
-        *cache.write().await = Some(value.clone());
-        value
+        self.try_cached_from_vault(cache, load)
+            .await
+            .unwrap_or_default()
     }
 
     /// The token the builtin tracker requires in announce URLs, if any.
+    ///
+    /// `None` when there is none *or* the vault could not be opened — fine
+    /// for rendering ("is a token configured?"), not for admission: the
+    /// tracker goes through [`Self::tracker_tokens`], which keeps the two
+    /// apart.
     pub async fn tracker_token(&self) -> Option<String> {
-        self.cached_from_vault(&self.tracker_token, |vault| {
+        self.try_tracker_token().await.unwrap_or_default()
+    }
+
+    async fn try_tracker_token(&self) -> Result<Option<String>, String> {
+        self.try_cached_from_vault(&self.tracker_token, |vault| {
             vault
                 .get(secret_keys::TRACKER_TOKEN)
                 .ok()
@@ -333,11 +373,27 @@ impl ServeState {
         .await
     }
 
+    /// Both announce tokens — `(current, previous)` — for the tracker's
+    /// admission check, or `Err` when the vault could not be opened so the
+    /// tracker can fail *closed*, the same way it already does for a store
+    /// that will not open. `Ok((None, _))` is the genuine "no token
+    /// required" answer and only ever comes from an opened vault.
+    pub async fn tracker_tokens(&self) -> Result<(Option<String>, Option<String>), String> {
+        let current = self.try_tracker_token().await?;
+        let previous = self.try_tracker_token_previous().await?;
+        Ok((current, previous))
+    }
+
     /// The token a rotation just replaced, still accepted alongside
     /// [`Self::tracker_token`] until the operator finalizes it away — see
     /// [`crate::tracker::authenticate_token`].
+    #[cfg(test)]
     pub async fn tracker_token_previous(&self) -> Option<String> {
-        self.cached_from_vault(&self.tracker_token_previous, |vault| {
+        self.try_tracker_token_previous().await.unwrap_or_default()
+    }
+
+    async fn try_tracker_token_previous(&self) -> Result<Option<String>, String> {
+        self.try_cached_from_vault(&self.tracker_token_previous, |vault| {
             vault
                 .get(secret_keys::TRACKER_TOKEN_PREVIOUS)
                 .ok()

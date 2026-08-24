@@ -155,6 +155,18 @@ pub async fn set_gossip(
         }
     };
 
+    // The URL is written first, and only then the key: `set_peer_gossip_url`
+    // answers whether the peer exists at all, and a `POST` for a peer that
+    // was deleted from another tab used to store an orphan `peer.gossip.{id}`
+    // in the vault that nothing could ever remove. The URL half is what the
+    // vault half is *for*, so a peer that cannot take the URL takes no key.
+    let result = store.set_peer_gossip_url(id, url.as_deref()).await;
+    match result {
+        Ok(true) => {}
+        Ok(false) => return rejected(&state, "there is no friend with that id any more").await,
+        Err(err) => return rejected(&state, &format!("could not save that: {err}")).await,
+    }
+
     // The key is optional and write-only, same rules as every stored secret:
     // blank means leave alone, the checkbox means clear.
     let key = form.key.trim();
@@ -174,11 +186,8 @@ pub async fn set_gossip(
         }
     }
 
-    let result = store.set_peer_gossip_url(id, url.as_deref()).await;
-    if result.is_ok() {
-        tracing::info!(peer_id = id, "updated a friend's gossip settings");
-    }
-    applied(&state, result, "save that").await
+    tracing::info!(peer_id = id, "updated a friend's gossip settings");
+    Redirect::to("/peers").into_response()
 }
 
 /// Remove a friend entirely, freeing the name for reuse.
@@ -190,6 +199,21 @@ pub async fn delete(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
     let result = store.delete_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "deleted a friend");
+        // The row is gone; the friend's gossip key must not outlive it as an
+        // orphan only `sharerr vault list` can see. Best-effort: a vault that
+        // will not open now is a startup problem the operator already knows
+        // about, not a reason to fail a delete that has already happened.
+        // `peers.id` is AUTOINCREMENT, so a leftover can never re-attach.
+        match state.serve.open_vault().await {
+            Ok(mut vault) => {
+                if let Err(err) = vault.remove(&secret_keys::peer_gossip_key(id)) {
+                    tracing::warn!(peer_id = id, error = %err, "could not remove the friend's gossip key");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(peer_id = id, error = %err, "could not open the vault to remove the friend's gossip key");
+            }
+        }
     }
     applied(&state, result, "delete that friend").await
 }

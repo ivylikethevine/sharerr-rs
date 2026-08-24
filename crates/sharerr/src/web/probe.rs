@@ -192,9 +192,12 @@ async fn library_badge(config: &Config) -> Outcome {
     Outcome::Good(message)
 }
 
-/// Test whichever torrent client is currently selected to actually seed.
+/// Test qBittorrent specifically, regardless of whether it is the backend
+/// currently selected — the button sits under the qBittorrent heading and
+/// must report on the credentials just saved there, not on whichever client
+/// happens to be selected.
 async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    torrent_client_badge(state, config, config.torrent_backend).await
+    torrent_client_badge(state, config, TorrentBackend::Qbittorrent).await
 }
 
 /// Test Transmission specifically, regardless of whether it is the backend

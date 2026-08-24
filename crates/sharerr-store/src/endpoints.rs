@@ -7,6 +7,7 @@
 //! sharerr. The history is short and newest-first: a reconnect that briefly
 //! returns an old exit is remembered rather than trusted.
 
+use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
 use sqlx::Row;
 
 use crate::db::{Store, StoreError};
@@ -113,6 +114,12 @@ impl Store {
         observed_at: i64,
         via: ObservedVia,
     ) -> Result<()> {
+        // Clamped, not rejected: an observation is still worth keeping even
+        // from a peer whose clock runs fast, but an unclamped future
+        // timestamp would win every `excluded.observed_at > …` comparison
+        // below forever, past the point the sender's clock is fixed — see
+        // `MAX_FUTURE_SKEW_SECS`.
+        let observed_at = observed_at.min(now_epoch().saturating_add(MAX_FUTURE_SKEW_SECS));
         sqlx::query(
             "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
@@ -310,6 +317,34 @@ mod tests {
         let endpoints = store.peer_endpoints(peer).await.unwrap();
         assert_eq!(endpoints[0].observed_at, 500);
         assert_eq!(endpoints[0].via, ObservedVia::Direct);
+    }
+
+    /// A wildly future `observed_at` — a sender's clock set wrong — is
+    /// clamped rather than trusted outright: an unclamped one would win every
+    /// later comparison forever, past the point the sender's clock is fixed.
+    #[tokio::test]
+    async fn a_far_future_observed_at_is_clamped() {
+        let (store, peer) = store_with_peer().await;
+        let far_future = now_epoch() + MAX_FUTURE_SKEW_SECS + 3600;
+
+        store
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                far_future,
+                ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+
+        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        assert!(
+            endpoints[0].observed_at < far_future,
+            "expected the timestamp to be clamped, got {}",
+            endpoints[0].observed_at
+        );
+        assert!(endpoints[0].observed_at <= now_epoch() + MAX_FUTURE_SKEW_SECS);
     }
 
     /// The dual-VPN case the schema exists for: the API and the client behind

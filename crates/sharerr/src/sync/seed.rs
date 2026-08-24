@@ -21,6 +21,22 @@ use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, torrent_file_path};
 
+/// What [`Seeder::refresh_announce`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceRefresh {
+    /// The cached `.torrent` already announced to the current endpoint; the
+    /// client was not touched.
+    Current,
+    /// The client's tracker list and the cached file were both brought up to
+    /// date.
+    Updated,
+    /// There is no cached `.torrent` to compare against, so nothing was
+    /// checked or changed — the client may well still announce with an old
+    /// token, and recording it as confirmed would show "Valid" for a torrent
+    /// nobody has looked at.
+    NoCachedTorrent,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedOutcome {
     /// A torrent already covering this file was found; nothing was added.
@@ -127,18 +143,25 @@ impl Seeder {
     /// places they live: the cached `.torrent` the feed serves, and the tracker
     /// list inside the torrent client.
     ///
-    /// Returns whether anything was stale. The client is updated **before** the
-    /// file is rewritten: the file's announce is what the next pass compares
-    /// against, so if the client update fails the comparison stays stale and the
-    /// whole step is retried — the opposite order would record success it did not
-    /// achieve.
-    pub async fn refresh_announce(&self, info_hash: &str, announce: &AnnounceSet) -> Result<bool> {
+    /// The client is updated **before** the file is rewritten: the file's
+    /// announce is what the next pass compares against, so if the client
+    /// update fails the comparison stays stale and the whole step is retried
+    /// — the opposite order would record success it did not achieve.
+    pub async fn refresh_announce(
+        &self,
+        info_hash: &str,
+        announce: &AnnounceSet,
+    ) -> Result<AnnounceRefresh> {
         let path = torrent_file_path(&self.torrent_dir, info_hash);
         let data = match tokio::fs::read(&path).await {
             Ok(data) => data,
             // Nothing cached means nothing to compare or serve; the torrent in
-            // the client still works, so this is not worth failing the item over.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            // the client still works, so this is not worth failing the item
+            // over — but nothing here has confirmed what it announces to
+            // either, which the caller must not mistake for "current".
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AnnounceRefresh::NoCachedTorrent);
+            }
             Err(err) => {
                 return Err(err).with_context(|| format!("reading {}", path.display()));
             }
@@ -147,7 +170,7 @@ impl Seeder {
         let current = sharerr_torrent::read_announce(&data)
             .with_context(|| format!("parsing {}", path.display()))?;
         if current.as_deref() == Some(announce.primary.as_str()) {
-            return Ok(false);
+            return Ok(AnnounceRefresh::Current);
         }
 
         self.qbit
@@ -167,7 +190,7 @@ impl Seeder {
             to = %announce.primary,
             "announce URLs refreshed"
         );
-        Ok(true)
+        Ok(AnnounceRefresh::Updated)
     }
 
     /// Build the `.torrent` and keep a copy on disk.
@@ -416,11 +439,11 @@ mod tests {
         let seeder = seeder(Arc::new(StubClient::default()), dir.path().to_path_buf());
         let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
 
-        let changed = seeder
+        let outcome = seeder
             .refresh_announce("deadbeef", &announce)
             .await
             .unwrap();
-        assert!(!changed);
+        assert_eq!(outcome, AnnounceRefresh::NoCachedTorrent);
     }
 
     #[tokio::test]
@@ -449,11 +472,11 @@ mod tests {
         let seeder = seeder(client.clone(), torrent_dir.clone());
         let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
 
-        let changed = seeder
+        let outcome = seeder
             .refresh_announce(&built.info_hash, &new_announce)
             .await
             .unwrap();
-        assert!(changed);
+        assert_eq!(outcome, AnnounceRefresh::Updated);
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
 
         let rewritten = std::fs::read(torrent_file_path(&torrent_dir, &built.info_hash)).unwrap();
@@ -461,11 +484,11 @@ mod tests {
         assert_eq!(current.as_deref(), Some("http://new.example/announce"));
 
         // Running it again against the now-current file must be a no-op.
-        let changed_again = seeder
+        let outcome_again = seeder
             .refresh_announce(&built.info_hash, &new_announce)
             .await
             .unwrap();
-        assert!(!changed_again);
+        assert_eq!(outcome_again, AnnounceRefresh::Current);
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
     }
 

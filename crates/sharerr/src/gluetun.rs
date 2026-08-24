@@ -397,10 +397,18 @@ async fn poll_once(
     };
 
     // A fallback for a forwarded-port lookup that fails on its own — see
-    // `resolve_base` — read from what is currently advertised rather than
+    // `resolve_base` — read from the last *dynamic* observation rather than
     // cached separately, so `/gluetun/down` forgetting the dynamic history
     // (a known-dead port, not a flaky lookup) also clears this fallback.
-    let fallback_port = endpoint.current().and_then(|base| base.port());
+    // Deliberately `last_observed`, not `current`: the latter falls back to
+    // the static `advertised_host` port, and pairing the live VPN exit IP
+    // with a port that was never forwarded there advertises an address
+    // reachable nowhere — the first poll after start, or right after a
+    // `/gluetun/down`, would otherwise rewrite every announce URL to it.
+    let fallback_port = endpoint
+        .last_observed()
+        .map(|observed| observed.base)
+        .and_then(|base| base.port());
 
     let resolved = match http {
         Ok(http) => resolve_once(http.clone(), control, Some(api_key), fallback_port).await,

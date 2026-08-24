@@ -247,7 +247,7 @@ pub struct FeedItem<'a> {
 
 /// Query-string escaping via form_urlencoded: magnet consumers parse the tail as
 /// a query string, and `+` for space is the convention there.
-fn encode_component(value: &str) -> String {
+pub(crate) fn encode_component(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
@@ -387,10 +387,23 @@ pub struct SearchQuery {
     pub t: String,
     pub q: Option<String>,
     pub season: Option<u32>,
+    /// Daily shows send `ep=MM/DD` rather than a number. That form has no
+    /// season/episode to match against here, so it is read as "no episode
+    /// filter" instead of failing the whole request with a bare 400 — which
+    /// Prowlarr counts as an indexer failure and backs off from, hiding every
+    /// other release too.
+    #[serde(default, deserialize_with = "lenient_u32")]
     pub ep: Option<u32>,
     pub tvdbid: Option<i64>,
     pub tmdbid: Option<i64>,
     pub imdbid: Option<String>,
+}
+
+/// `Some` for a plain non-negative integer, `None` for anything else — see
+/// [`SearchQuery::ep`].
+fn lenient_u32<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<u32>, D::Error> {
+    let raw: Option<String> = serde::Deserialize::deserialize(de)?;
+    Ok(raw.and_then(|s| s.trim().parse().ok()))
 }
 
 impl SearchQuery {

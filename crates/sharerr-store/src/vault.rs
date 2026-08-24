@@ -233,17 +233,56 @@ impl Vault {
     /// Store a value, replacing any existing one, and persist immediately.
     pub fn put(&mut self, key: &str, value: &SecretString) -> Result<()> {
         let record = self.seal(key, value.expose_secret().as_bytes())?;
+        let _guard = write_lock();
+        self.reload()?;
         self.records.insert(key.to_owned(), record);
         self.persist()
     }
 
     /// Remove a value. Returns whether it was present.
     pub fn remove(&mut self, key: &str) -> Result<bool> {
+        let _guard = write_lock();
+        self.reload()?;
         let existed = self.records.remove(key).is_some();
         if existed {
             self.persist()?;
         }
         Ok(existed)
+    }
+
+    /// Re-read the records from disk before a mutation.
+    ///
+    /// Every caller opens its own `Vault` — the settings page, the gossip
+    /// identity loader, the decoy-seed minter, the CLI — so a `put` that wrote
+    /// back the records *this* handle read at open time would drop whatever
+    /// another handle stored since. Held under [`write_lock`], this makes each
+    /// mutation a fresh read-modify-write of the file rather than of a
+    /// snapshot. Only the ciphertext is reloaded — no key derivation — so it
+    /// costs one file read.
+    fn reload(&mut self) -> Result<()> {
+        let raw = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            // Never written, or deleted out from under us: what this handle
+            // holds is the whole truth.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(VaultError::Io {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        };
+        let (salt, records) = parse(&raw)?;
+        if salt != self.salt {
+            // A different salt means a different vault was put at this path
+            // since `open` — its records would not decrypt under this cipher,
+            // and ours would not under whoever replaced it.
+            return Err(VaultError::Corrupt(
+                "the vault file was replaced since it was opened; reopen it",
+            ));
+        }
+        self.records = records;
+        Ok(())
     }
 
     /// Every key stored, sorted. Never the values.
@@ -342,6 +381,22 @@ impl Vault {
         out.zeroize();
         Ok(())
     }
+}
+
+/// Serialises vault mutations within this process. Every writer holds this
+/// across [`Vault::reload`] → mutate → [`Vault::persist`], so two handles
+/// cannot interleave their read-modify-writes or rename each other's
+/// half-written `vault.tmp` into place. Process-wide rather than per-`Vault`
+/// because the handles are independent values that never see each other.
+/// A *separate process* (`sharerr vault set` against a running `serve`) is
+/// not covered — that needs a file lock, which std only grew after this
+/// crate's MSRV.
+fn write_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A poisoned lock only means another writer panicked mid-mutation; the
+    // file itself is always either the old or the new version (tmp + rename).
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(unix)]
