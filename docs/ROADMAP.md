@@ -16,10 +16,10 @@ tracks what is still ahead.
 
 ### What's left
 
-Two feature-sized items — **[request flow](#functionality)** and an
-**[OpenAPI spec](#functionality)** — plus the open items from the 2026-08-21
-code review. All of them, features and findings alike, are ranked together in
-[Open work, by scope](#open-work-by-scope) below.
+One feature-sized item — **[request flow](#functionality)** — plus the open
+items from the 2026-08-21 code review. All of them, features and findings
+alike, are ranked together in [Open work, by scope](#open-work-by-scope)
+below.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
 and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
@@ -31,29 +31,17 @@ what was tried and deliberately left out is [`UNSUPPORTED.md`](UNSUPPORTED.md).
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
 
-**OpenAPI spec.** The machine-facing surface — the Torznab feed (`/api`) and
-the Jackett-compatible routes (`/api/v2.0/...`) in `torznab.rs` and
-`jackett.rs` — has no formal contract today, only the handlers themselves and
-the tier-2 suite's assertions against real Sonarr/Radarr/Lidarr/Jackett-shaped
-clients. A spec would give an operator (or a client author working out why
-their app rejects the feed) one document to check request shapes and response
-schemas against, instead of reading the router. Scoped to that feed/API
-surface, not the server-rendered settings UI, which is not a machine API.
-
 ## Open work, by scope
 
 Everything still ahead, in one list, smallest first — by how much each item
 touches, not how long it would take to get right. The review items come from
 a whole-codebase pass on 2026-08-21 (8 finder angles, every candidate
 independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
-= depends on ordering/config); sixteen batches of fixes landed on 2026-08-24
-(the sixteenth: rTorrent tier-2 coverage — `run_docker_tests.sh --rtorrent`
-now drives a real rTorrent + ruTorrent container through the same suite
-qBittorrent and Transmission use, which caught two real bugs no hand-mocked
-server could: `d.multicall2` needs a leading empty parameter, and an empty
-result comes back as a self-closing `<data/>`) and what is listed here is
-what remains. File references are as of the review commit and may have
-drifted.
+= depends on ordering/config); eighteen batches of fixes landed on 2026-08-24
+(the eighteenth: the OpenAPI document — [`openapi.json`](openapi.json),
+generated from the handlers themselves by `sharerr openapi`, covering every
+machine-facing route) and what is listed here is what remains. File references
+are as of the review commit and may have drifted.
 
 ### Small — one function or one file
 
@@ -64,20 +52,7 @@ drifted.
 
 ### Large — a protocol, a data model, or a release process
 
-2. **A "Reused" pre-existing torrent — CONFIRMED.** `sync/seed.rs`
-    `find_existing` matches _any_ torrent in the client (fed by `list(None)`,
-    not just sharerr's category) and returns `SeedOutcome::Reused` without
-    `set_trackers` or a cached `.torrent`; `set_seeding` then records it as
-    Seeding with the current token fingerprint. When library path ==
-    download path, or an operator cross-seeds: (a) `tracker::torrent_file`
-    404s on every friend download and the local client never announces to
-    sharerr's tracker, so friends join an empty swarm; (b) removing the tag
-    makes `withdraw_untagged` `remove()` a torrent sharerr did not create —
-    against the "preserve existing torrents" rule. _Fix:_ on reuse, insert
-    sharerr's tracker and cache the `.torrent` bytes from the client; and
-    record `created_by_sharerr` per item so untag only removes what sharerr
-    added.
-3. **Lighthouse `report` is unpinned — CONFIRMED.** `key_hash` is SHA-256 of
+2. **Lighthouse `report` is unpinned — CONFIRMED.** `key_hash` is SHA-256 of
     the shared API key, never bound to `record.pubkey`; `verify()` only checks
     the record is self-consistent under whatever pubkey it carries. Anyone who
     learns a key hash (a URL path segment, visible in proxy logs) can displace
@@ -88,10 +63,8 @@ drifted.
     canonicalisation are done. _Fix:_ first-writer pins the pubkey for that
     key hash and later reports must carry the same one, or derive `key_hash`
     from the pubkey as well as the key — either way a wire-format decision.
-4. **Request flow** — a new inbound request queue and approve step, touching
+3. **Request flow** — a new inbound request queue and approve step, touching
     the sync engine and the web UI on both sides of a friendship; see
-    [Functionality](#functionality).
-5. **OpenAPI spec** for the Torznab/Jackett-compatible feed API — see
     [Functionality](#functionality).
 
 ---

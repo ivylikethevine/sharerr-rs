@@ -186,6 +186,58 @@ impl QbitClient {
         Ok(())
     }
 
+    /// Add `urls` to one torrent's tracker list, leaving everything already
+    /// there in place — the additive half of [`Self::set_torrent_trackers`]
+    /// without the removal half.
+    ///
+    /// Filtered against the current list first. qBittorrent ignores a
+    /// duplicate `addTrackers` rather than doubling the entry, so this is not
+    /// load-bearing for correctness, but it keeps the call off the wire
+    /// entirely on the common repeat pass.
+    pub async fn add_torrent_trackers(&self, hash: &str, urls: &[String]) -> Result<()> {
+        let existing = self.torrent_trackers(hash).await?;
+        let additions: Vec<&str> = urls
+            .iter()
+            .map(String::as_str)
+            .filter(|url| !existing.iter().any(|t| t.url == *url))
+            .collect();
+        if additions.is_empty() {
+            return Ok(());
+        }
+        let added = additions.len();
+        self.post_tracker_urls(hash, "torrents/addTrackers", &additions, "\n")
+            .await?;
+        tracing::info!(hash, added, "added trackers, keeping the existing ones");
+        Ok(())
+    }
+
+    /// `GET /api/v2/torrents/export` — the `.torrent` file itself, as
+    /// qBittorrent holds it.
+    ///
+    /// Read as bytes, never as text: this is bencode, and a `String` round
+    /// trip would mangle the binary `pieces` field and with it the infohash.
+    pub async fn export_torrent(&self, hash: &str) -> Result<Vec<u8>> {
+        let build = move |rb: reqwest::RequestBuilder| rb.query(&[("hash", hash)]);
+        let response = self.send(Method::GET, "torrents/export", &build).await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(QbitError::Status {
+                status: status.as_u16(),
+                path: "torrents/export".to_owned(),
+                body: crate::client::clamp_body(&body),
+            });
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|source| QbitError::Unreachable {
+                url: "torrents/export".to_owned(),
+                detail: sharerr_client::error_chain(&source),
+            })?;
+        Ok(bytes.to_vec())
+    }
+
     /// Shared body of the add/remove halves of [`set_torrent_trackers`]: they
     /// differ only in endpoint and how qBittorrent wants the URL list joined.
     /// A no-op when `urls` is empty, so callers don't need to check first.

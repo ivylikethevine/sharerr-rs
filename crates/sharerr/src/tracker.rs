@@ -45,6 +45,7 @@ use sharerr_store::{EndpointKind, Store};
 use sharerr_torrent::announce::{
     self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
 };
+use utoipa_axum::router::OpenApiRouter;
 
 use crate::state::ServeState;
 
@@ -112,9 +113,22 @@ impl TrackerState {
 /// spelling them out keeps the tokenless case from depending on how an optional
 /// extractor behaves when the segment is missing.
 pub fn routes(state: Arc<TrackerState>) -> axum::Router {
-    // Mounted from the same constants `sharerr-torrent` writes into announce
-    // URLs, so the two sides of the crate boundary cannot drift.
-    axum::Router::new()
+    let (router, _) = api_router().with_state(state).split_for_parts();
+    router
+}
+
+/// The same routes without state, for [`crate::openapi`].
+///
+/// Unlike every other surface here these are mounted with `.route` rather than
+/// `routes!`, and keep deriving their paths from the constants
+/// `sharerr-torrent` writes into announce URLs — that is what stops the two
+/// sides of the crate boundary drifting, and it is worth more than the
+/// convenience. The document gets them from the handlers' `#[utoipa::path]`
+/// attributes instead, listed in `crate::openapi`, and
+/// `the_documented_tracker_paths_match_the_constants` holds the literal and
+/// the constant together.
+pub(crate) fn api_router() -> OpenApiRouter<Arc<TrackerState>> {
+    OpenApiRouter::new()
         .route(sharerr_torrent::ANNOUNCE_PATH, axum::routing::get(announce))
         .route(
             &format!("{}/{{token}}", sharerr_torrent::ANNOUNCE_PATH),
@@ -126,10 +140,76 @@ pub fn routes(state: Arc<TrackerState>) -> axum::Router {
             axum::routing::get(scrape_with_token),
         )
         .route("/torrents/{name}", axum::routing::get(torrent_file))
-        .with_state(state)
+}
+
+/// The announce query string, for the OpenAPI document only.
+///
+/// Nothing deserializes into this type. The real handler takes `RawQuery` and
+/// hands the bytes to [`AnnounceRequest::parse`], because `info_hash` and
+/// `peer_id` are **20 raw bytes** percent-encoded, and every string-based
+/// extractor replaces the invalid UTF-8 with U+FFFD — destroying the identity
+/// the whole protocol is keyed on. So this exists to describe that query to a
+/// reader, and `announce_query_matches_the_parser` keeps it honest against the
+/// parser's own field names.
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[allow(
+    dead_code,
+    reason = "documentation shape; the handler parses raw bytes"
+)]
+pub struct AnnounceParams {
+    /// The torrent's info hash: 20 raw bytes, percent-encoded. **Not hex.**
+    #[param(required = true)]
+    info_hash: String,
+    /// The client's own id: 20 raw bytes, percent-encoded.
+    #[param(required = true)]
+    peer_id: String,
+    /// The port the client accepts connections on.
+    #[param(required = true, example = 6881)]
+    port: u16,
+    /// Bytes still to download. `0` means a seeder.
+    #[param(required = true)]
+    left: u64,
+    /// `started`, `stopped`, `completed`, or absent for a periodic re-announce.
+    event: Option<String>,
+    /// `1` for the compact peer list. Anything else returns the dictionary form.
+    compact: Option<u8>,
+    /// How many peers to return.
+    numwant: Option<usize>,
+    /// The client's own address. Honoured **only when it is a private address** —
+    /// otherwise the connection's source address wins, so a peer cannot announce
+    /// somebody else into the swarm.
+    ip: Option<String>,
+}
+
+/// The scrape query string. Documentation-only, for the same reason as
+/// [`AnnounceParams`].
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[allow(
+    dead_code,
+    reason = "documentation shape; the handler parses raw bytes"
+)]
+pub struct ScrapeParams {
+    /// One or more info hashes, 20 raw bytes each, percent-encoded. Repeat the
+    /// parameter for several. Omitted entirely means every torrent this instance
+    /// shares with the caller.
+    info_hash: Option<String>,
 }
 
 /// `GET /announce`.
+#[utoipa::path(
+    get,
+    path = "/announce",
+    tag = "tracker",
+    operation_id = "announce",
+    params(AnnounceParams),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn announce(
     State(state): State<Arc<TrackerState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
@@ -139,6 +219,24 @@ pub async fn announce(
 }
 
 /// `GET /announce/{token}`.
+#[utoipa::path(
+    get,
+    path = "/announce/{token}",
+    tag = "tracker",
+    operation_id = "announceWithToken",
+    params(
+        ("token" = String, Path, description =
+         "The announce token baked into this torrent's announce URL. Identifies which \
+          peer is announcing, so a swarm can be attributed and one friend's access \
+          revoked without disturbing anyone else's."),
+        AnnounceParams,
+    ),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn announce_with_token(
     State(state): State<Arc<TrackerState>>,
     Path(token): Path<String>,
@@ -209,11 +307,38 @@ async fn handle_announce(
 }
 
 /// `GET /scrape` — swarm counts, for clients and for Prowlarr's seeder column.
+#[utoipa::path(
+    get,
+    path = "/scrape",
+    tag = "tracker",
+    operation_id = "scrape",
+    params(ScrapeParams),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn scrape(State(state): State<Arc<TrackerState>>, RawQuery(query): RawQuery) -> Response {
     handle_scrape(&state, None, query).await
 }
 
 /// `GET /scrape/{token}`.
+#[utoipa::path(
+    get,
+    path = "/scrape/{token}",
+    tag = "tracker",
+    operation_id = "scrapeWithToken",
+    params(
+        ("token" = String, Path, description = "As on `/announce/{token}`."),
+        ScrapeParams,
+    ),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn scrape_with_token(
     State(state): State<Arc<TrackerState>>,
     Path(token): Path<String>,
@@ -418,6 +543,29 @@ pub struct TorrentFileQuery {
 /// the announce URLs are rewritten in memory — never on disk — to that peer's
 /// own token before the response goes out, the same attribution the feed's
 /// magnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.
+#[utoipa::path(
+    get,
+    path = "/torrents/{name}",
+    tag = "tracker",
+    operation_id = "torrentFile",
+    params(
+        ("name" = String, Path, description =
+         "`{info_hash}.torrent` — 40 lowercase hex characters and the suffix. Parsed \
+          as a hash rather than used as a path component, so no traversal is possible."),
+        ("token" = Option<String>, Query, description =
+         "The requesting peer's own token, as the feed's download links carry. When it \
+          resolves to an active peer the announce URLs are rewritten to that peer's \
+          token in the response body — never on disk."),
+    ),
+    responses(
+        (status = 200, content_type = "application/x-bittorrent",
+         description = "The `.torrent` file.", body = Vec<u8>),
+        (status = 404, description =
+         "Not a torrent name, not currently shared, or shared but its cached file is \
+          missing from disk. Deliberately one status for all three: a caller without \
+          a valid token learns nothing about what this instance holds.", body = String),
+    ),
+)]
 pub async fn torrent_file(
     State(state): State<Arc<TrackerState>>,
     Path(name): Path<String>,
@@ -760,6 +908,7 @@ mod tests {
                 ids: ExternalIds::default(),
                 info_hash: None,
                 announce_token_fp: None,
+                created_by_sharerr: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -767,7 +916,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None)
+            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
             .await
             .unwrap();
 
@@ -1003,6 +1152,7 @@ mod tests {
                 ids: ExternalIds::default(),
                 info_hash: None,
                 announce_token_fp: None,
+                created_by_sharerr: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -1010,7 +1160,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None)
+            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
             .await
             .unwrap();
 
@@ -1060,6 +1210,7 @@ mod tests {
                 ids: ExternalIds::default(),
                 info_hash: None,
                 announce_token_fp: None,
+                created_by_sharerr: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -1067,7 +1218,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None)
+            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None, true)
             .await
             .unwrap();
 

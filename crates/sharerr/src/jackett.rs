@@ -36,6 +36,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::state::ServeState;
 use crate::torznab::{Caller, SearchQuery, collect};
@@ -48,14 +50,17 @@ use crate::torznab::{Caller, SearchQuery, collect};
 /// they used before baked into their client.
 const INDEXER_ID: &str = "sharerr";
 
-pub fn routes(serve: Arc<ServeState>) -> axum::Router {
-    axum::Router::new()
-        // Search. Three shapes, because whether a client appends `/api` and whether
-        // its base URL ends in a slash both vary.
-        .route(
-            "/api/v2.0/indexers/{indexer}/results/torznab",
-            axum::routing::get(torznab_search),
-        )
+/// Mounted through [`OpenApiRouter`] so a route and its OpenAPI entry are one
+/// declaration — `routes!` takes the path from the handler's own
+/// `#[utoipa::path]`. The two exceptions below use `.route`, which mounts
+/// without documenting, and say why.
+pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
+    OpenApiRouter::new()
+        // Search, and the two alias shapes of the same path: whether a client
+        // appends `/api` and whether its base URL ends in a slash both vary.
+        // Only the canonical one is documented — three entries for one
+        // operation would read as three operations.
+        .routes(routes!(torznab_search))
         .route(
             "/api/v2.0/indexers/{indexer}/results/torznab/",
             axum::routing::get(torznab_search),
@@ -65,18 +70,18 @@ pub fn routes(serve: Arc<ServeState>) -> axum::Router {
             axum::routing::get(torznab_search),
         )
         // Admin, read-only.
-        .route("/api/v2.0/indexers", axum::routing::get(indexers))
-        .route("/api/v2.0/server/config", axum::routing::get(server_config))
-        .route(
-            "/api/v2.0/indexers/{indexer}/results",
-            axum::routing::get(json_results),
-        )
-        // Anything else under the Jackett prefix, so a gap is visible.
+        .routes(routes!(indexers))
+        .routes(routes!(server_config))
+        .routes(routes!(json_results))
+        // Anything else under the Jackett prefix, so a gap is visible. Mounted
+        // by hand because axum spells a catch-all `{*rest}` and OpenAPI spells
+        // the same thing `{rest}`; `routes!` would mount the OpenAPI spelling
+        // and match one path segment instead of all of them. The document
+        // still carries it — see `crate::openapi`.
         .route(
             "/api/v2.0/{*rest}",
             axum::routing::any(unimplemented_endpoint),
         )
-        .with_state(serve)
 }
 
 /// Jackett's Torznab endpoint, which is the same Torznab at a different address.
@@ -88,6 +93,35 @@ pub fn routes(serve: Arc<ServeState>) -> axum::Router {
 ///
 /// Download links need nothing: the enclosure URLs are absolute and already point
 /// at this instance, so a client follows them whichever path it searched through.
+///
+/// Three paths reach this handler — with and without a trailing slash, and with a
+/// trailing `/api` — because whether a client appends `/api` and whether its base
+/// URL ends in a slash both vary. Only the canonical one is documented; the other
+/// two are the same operation and listing them would suggest a difference.
+#[utoipa::path(
+    get,
+    path = "/api/v2.0/indexers/{indexer}/results/torznab",
+    tag = "jackett",
+    operation_id = "jackettTorznab",
+    security(("peerApiKey" = [])),
+    params(
+        ("indexer" = String, Path, description =
+         "Jackett namespaces each tracker it proxies; sharerr *is* the one thing it \\
+          serves, so any id — `sharerr`, `all`, or whatever was pasted from an old \\
+          Jackett config — means the same feed."),
+        crate::torznab::SearchQuery,
+    ),
+    responses(
+        (status = 200, content_type = "application/xml", description =
+         "Identical to `GET /api` — the same Torznab at a different address. Two \
+          more paths reach it: the same path with a trailing slash, and with `/api` \
+          appended.", body = String),
+        (status = 400, content_type = "application/xml",
+         description = "No such Torznab function.", body = String),
+        (status = 401, content_type = "application/xml",
+         description = "No `apikey`, or one that matches no active peer.", body = String),
+    ),
+)]
 async fn torznab_search(
     State(state): State<Arc<ServeState>>,
     caller: Caller,
@@ -108,8 +142,9 @@ async fn torznab_search(
 /// them literally. `#[serde(rename_all)]` would not help — Jackett's own casing is
 /// inconsistent between this DTO and the results one below, and matching it is the
 /// entire point of the module.
-#[derive(Debug, Serialize)]
-struct IndexerEntry {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JackettIndexer)]
+pub(crate) struct IndexerEntry {
     id: &'static str,
     name: &'static str,
     description: String,
@@ -124,8 +159,9 @@ struct IndexerEntry {
     caps: Vec<Capability>,
 }
 
-#[derive(Debug, Serialize)]
-struct Capability {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JackettCapability)]
+pub(crate) struct Capability {
     #[serde(rename = "ID")]
     id: String,
     #[serde(rename = "Name")]
@@ -138,6 +174,24 @@ struct Capability {
 /// configured, so the filter is accepted and changes nothing — no `Query`
 /// extractor means every filter a client sends is accepted and ignored, because
 /// a client that sends one and gets an error learns nothing useful.
+#[utoipa::path(
+    get,
+    path = "/api/v2.0/indexers",
+    tag = "jackett",
+    operation_id = "jackettIndexers",
+    security(("peerApiKey" = [])),
+    params(
+        ("configured" = Option<bool>, Query, description =
+         "Accepted and ignored. sharerr's single indexer is always configured, so \
+          every value of this filter yields the same one-element list."),
+    ),
+    responses(
+        (status = 200, description = "A one-element list: sharerr itself.",
+         body = Vec<IndexerEntry>),
+        (status = 401, content_type = "application/xml",
+         description = "No `apikey`, or one that matches no active peer.", body = String),
+    ),
+)]
 async fn indexers(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
     // The live endpoint, not `config.public_base_url()` — see
     // `ServeState::public_base_url`'s docs: a gluetun-only deployment must
@@ -166,8 +220,9 @@ async fn indexers(State(state): State<Arc<ServeState>>, _caller: Caller) -> Resp
 }
 
 /// Jackett's server config DTO, trimmed to the fields a client reads.
-#[derive(Debug, Serialize)]
-struct ServerConfigDto {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JackettServerConfig)]
+pub(crate) struct ServerConfigDto {
     notices: Vec<String>,
     port: u16,
     external: bool,
@@ -191,6 +246,21 @@ struct ServerConfigDto {
 
 /// `GET /api/v2.0/server/config` — what a client reads to learn who it is talking
 /// to.
+#[utoipa::path(
+    get,
+    path = "/api/v2.0/server/config",
+    tag = "jackett",
+    operation_id = "jackettServerConfig",
+    security(("peerApiKey" = [])),
+    responses(
+        (status = 200, description =
+         "Server identity. `api_key` is **always empty**, unlike Jackett's own: \
+          echoing a key back would turn one friend's credential into every \
+          friend's.", body = ServerConfigDto),
+        (status = 401, content_type = "application/xml",
+         description = "No `apikey`, or one that matches no active peer.", body = String),
+    ),
+)]
 async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
     let config = state.config().await;
 
@@ -213,8 +283,9 @@ async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) ->
 ///
 /// Capitalised field names, unlike the indexer DTO above — that inconsistency is
 /// Jackett's, and clients depend on it.
-#[derive(Debug, Serialize)]
-struct JsonResult {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JackettResult)]
+pub(crate) struct JsonResult {
     #[serde(rename = "Tracker")]
     tracker: &'static str,
     #[serde(rename = "TrackerId")]
@@ -256,16 +327,18 @@ struct JsonResult {
     tmdb: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
-struct JsonResults {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JackettResults)]
+pub(crate) struct JsonResults {
     #[serde(rename = "Results")]
     results: Vec<JsonResult>,
     #[serde(rename = "Indexers")]
     indexers: Vec<QueriedIndexer>,
 }
 
-#[derive(Debug, Serialize)]
-struct QueriedIndexer {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = JackettQueriedIndexer)]
+pub(crate) struct QueriedIndexer {
     #[serde(rename = "ID")]
     id: &'static str,
     #[serde(rename = "Name")]
@@ -284,6 +357,28 @@ struct QueriedIndexer {
 /// runs through the *same* [`collect`] the XML feed uses, so the two cannot report
 /// different libraries — which is the failure this project has already had once,
 /// between `doctor` and the web UI's probes.
+#[utoipa::path(
+    get,
+    path = "/api/v2.0/indexers/{indexer}/results",
+    tag = "jackett",
+    operation_id = "jackettResults",
+    security(("peerApiKey" = [])),
+    params(
+        ("indexer" = String, Path, description =
+         "Jackett namespaces each tracker it proxies; sharerr *is* the one thing it \\
+          serves, so any id — `sharerr`, `all`, or whatever was pasted from an old \\
+          Jackett config — means the same feed."),
+        crate::torznab::SearchQuery,
+    ),
+    responses(
+        (status = 200, description =
+         "The same search the Torznab feed answers, rendered as Jackett's JSON. It \
+          runs through the same code path, so the two surfaces cannot report \
+          different libraries.", body = JsonResults),
+        (status = 401, content_type = "application/xml",
+         description = "No `apikey`, or one that matches no active peer.", body = String),
+    ),
+)]
 async fn json_results(
     State(state): State<Arc<ServeState>>,
     caller: Caller,
@@ -379,6 +474,25 @@ async fn json_results(
 /// Answers 501, not 404: the path exists as a concept and sharerr simply does not
 /// implement it, and a client distinguishing the two behaves better than one
 /// guessing.
+#[utoipa::path(
+    method(get, post, put, delete, patch, head, options, trace),
+    path = "/api/v2.0/{rest}",
+    tag = "jackett",
+    operation_id = "jackettUnimplemented",
+    params(
+        ("rest" = String, Path, description =
+         "Any remaining path under the Jackett prefix. Matched as a wildcard, so it \
+          may contain slashes."),
+    ),
+    responses(
+        (status = 501, description =
+         "sharerr implements only Jackett's read-only endpoints. Answered as 501 \
+          rather than 404 on purpose — the path exists as a concept and sharerr \
+          simply does not implement it, which is a different thing for a client to \
+          handle. Every call here is logged at `warn`, naming the method and path, \
+          because that is the list of what would be worth adding.", body = String),
+    ),
+)]
 async fn unimplemented_endpoint(
     method: axum::http::Method,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
@@ -464,6 +578,7 @@ mod tests {
             },
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,

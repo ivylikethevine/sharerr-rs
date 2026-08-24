@@ -92,6 +92,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # filter runs, so e.g. `Amélie` transliterates to `Amelie` instead of `Am.lie`.
 unicode-normalization = "0.1.25"
 url = "2.5.8"
+# The OpenAPI spec is generated from the handlers themselves rather than
+# hand-written, so a route cannot be documented into existence or quietly
+# forgotten. `utoipa-axum` is what makes the second half of that true: a
+# machine-facing route is mounted *through* the spec, so the router and the
+# document are the same declaration. See `sharerr::openapi`.
+utoipa = { version = "5.5.0", features = ["axum_extras", "url", "preserve_order"] }
+utoipa-axum = "0.2.0"
 wiremock = "0.6.5"
 zeroize = "1.9.0"
 

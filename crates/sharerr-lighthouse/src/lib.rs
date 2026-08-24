@@ -43,11 +43,12 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 // ---------------------------------------------------------------------------
 // Wire protocol
@@ -60,17 +61,25 @@ use tokio::sync::RwLock;
 /// wire format rather than inventing a second one, per the design brief. The
 /// type is duplicated rather than shared because gossip's lives in the
 /// `sharerr` binary crate, which this crate deliberately does not depend on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = LighthouseRecordEndpoint)]
 pub struct RecordEndpoint {
+    /// What is reachable there. `tracker` is the only kind in use.
+    #[schema(example = "tracker")]
     pub kind: String,
+    /// `host:port`, as the peer sees its own reachable address.
+    #[schema(example = "203.0.113.7:41234")]
     pub addr: String,
+    /// Unix seconds at which the reporter last confirmed this address.
     pub observed_at: i64,
 }
 
 /// One peer's self-described endpoints, signed by them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = LighthouseEndpointRecord)]
 pub struct EndpointRecord {
     /// Hex Ed25519 public key — the subject's identity.
+    #[schema(example = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29")]
     pub pubkey: String,
     pub endpoints: Vec<RecordEndpoint>,
     /// Unix seconds. A record never replaces a stored one with a newer
@@ -329,6 +338,28 @@ impl LighthouseState {
 /// caller here is the legitimate reporter's own sharerr, not an anonymous
 /// prober — there is nothing to hide from someone who can already produce a
 /// validly signed record.
+#[utoipa::path(
+    post,
+    path = "/lighthouse/v1/report/{key_hash}",
+    tag = "lighthouse",
+    operation_id = "lighthouseReport",
+    params(
+        ("key_hash" = String, Path,
+         description = "Lowercase hex SHA-256 of the API key this peer issued the \
+                        friend who will look it up. 64 characters."),
+    ),
+    request_body = EndpointRecord,
+    responses(
+        (status = 200, description = "Stored, or ignored as older than what is held. \
+                                      The body is `accepted` or `stale`.",
+         body = String),
+        (status = 400, description = "The key hash was not 64 hex characters, the \
+                                      signature did not verify, or `signed_at` is in \
+                                      the future.", body = String),
+        (status = 503, description = "At capacity and nothing was old enough to evict.",
+         body = String),
+    ),
+)]
 async fn report(
     State(state): State<Arc<LighthouseState>>,
     Path(key_hash): Path<String>,
@@ -360,6 +391,24 @@ async fn report(
 /// JSON shape, real record or decoy. A malformed key hash still gets a
 /// decoy rather than a `400`: a probe that can distinguish "malformed" from
 /// "unknown" learns something it should not.
+#[utoipa::path(
+    get,
+    path = "/lighthouse/v1/lookup/{key_hash}",
+    tag = "lighthouse",
+    operation_id = "lighthouseLookup",
+    params(
+        ("key_hash" = String, Path,
+         description = "Lowercase hex SHA-256 of the API key the peer issued you."),
+    ),
+    responses(
+        (status = 200, description = "A record. **Always 200, always this shape** — \
+             an unknown or malformed key hash gets a fabricated record rather than an \
+             error, so an unauthenticated probe cannot tell that an instance exists. \
+             Verify `signature` against the `pubkey` you expect: a decoy carries \
+             random bytes there and never verifies.",
+         body = EndpointRecord),
+    ),
+)]
 async fn lookup(
     State(state): State<Arc<LighthouseState>>,
     Path(key_hash): Path<String>,
@@ -381,6 +430,13 @@ async fn lookup(
 /// bare `/health`, deliberately: `sharerr serve` already owns that path on
 /// whichever listener it embeds these routes onto, and a second `/health`
 /// registration on the same router panics at merge time.
+#[utoipa::path(
+    get,
+    path = "/lighthouse/v1/health",
+    tag = "lighthouse",
+    operation_id = "lighthouseHealth",
+    responses((status = 200, description = "Alive. No state is consulted.", body = String)),
+)]
 async fn health() -> &'static str {
     "ok"
 }
@@ -389,12 +445,30 @@ async fn health() -> &'static str {
 /// they are served by the standalone binary at the root of its own port or
 /// merged into another axum app — the URL a client builds is the same
 /// either way.
+///
+/// Mounted through [`OpenApiRouter`] rather than a plain `Router`, so a route
+/// and its entry in the OpenAPI document are one declaration: the path comes
+/// from the handler's own `#[utoipa::path]` attribute, and there is no second
+/// place to add a route to, or forget to.
 pub fn routes(state: Arc<LighthouseState>) -> Router {
-    Router::new()
-        .route("/lighthouse/v1/health", get(health))
-        .route("/lighthouse/v1/report/{key_hash}", post(report))
-        .route("/lighthouse/v1/lookup/{key_hash}", get(lookup))
-        .with_state(state)
+    let (router, _) = api_router().with_state(state).split_for_parts();
+    router
+}
+
+/// The same declaration without state, so its OpenAPI half can be read off
+/// without standing a lighthouse up. `sharerr`'s own document merges this in,
+/// because the frontend listener carries the lighthouse in some topologies —
+/// see `sharerr::openapi`.
+fn api_router() -> OpenApiRouter<Arc<LighthouseState>> {
+    OpenApiRouter::new()
+        .routes(routes!(health))
+        .routes(routes!(report))
+        .routes(routes!(lookup))
+}
+
+/// The OpenAPI half alone.
+pub fn api_spec() -> utoipa::openapi::OpenApi {
+    api_router().split_for_parts().1
 }
 
 #[cfg(test)]

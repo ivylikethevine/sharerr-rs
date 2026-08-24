@@ -5,7 +5,10 @@
 //!
 //! 1. **Detect first.** If a torrent already contains this file, reuse its infohash
 //!    instead of creating a second one. Cross-seeding is well supported, but a
-//!    duplicate sharerr keeps re-adding every sync is just noise.
+//!    duplicate sharerr keeps re-adding every sync is just noise. Reusing one
+//!    sharerr did not create means *adopting* it — see [`Seeder::adopt`] for
+//!    the two things that takes, and for why sharerr's tracker goes in
+//!    alongside the torrent's own rather than over them.
 //! 2. **`autoTMM=false`.** Automatic Torrent Management relocates content by
 //!    category the instant a torrent is added. Enforced in the qbit client, with no
 //!    override.
@@ -112,6 +115,7 @@ impl Seeder {
                 info_hash = %existing,
                 "already covered by an existing torrent — reusing it"
             );
+            self.adopt(&existing, announce).await?;
             return Ok(SeedOutcome::Reused {
                 info_hash: existing,
             });
@@ -150,6 +154,105 @@ impl Seeder {
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 
         Ok(SeedOutcome::Added { info_hash })
+    }
+
+    /// Take responsibility for a torrent the client already had, without
+    /// taking it over.
+    ///
+    /// Reusing an existing torrent is the right call — a second torrent of the
+    /// same file is noise — but reusing it and doing nothing else leaves a
+    /// share that only looks like one. Two things are missing, and each breaks
+    /// a different half of a friend's download:
+    ///
+    /// 1. **The client is not announcing to sharerr's tracker.** Whatever
+    ///    trackers the torrent came with are the only ones it has, so the local
+    ///    client never registers in the swarm sharerr introduces friends to,
+    ///    and they arrive to find nobody seeding.
+    /// 2. **Nothing is cached under this infohash.** `tracker::torrent_file`
+    ///    serves downloads out of `torrent_dir` and nowhere else, so the feed
+    ///    advertises a release that 404s.
+    ///
+    /// The tracker goes in **additively**: this torrent is the operator's, and
+    /// `set_trackers` would drop the trackers it came with. Ordering matches
+    /// [`Self::refresh_announce`] — the client is corrected before the cache
+    /// is written, so a failure leaves the next pass with the same work to do
+    /// rather than a cache that claims it is done.
+    ///
+    /// Failure here fails the item. An adopted torrent that friends cannot
+    /// download from is worse than one the items page marks Failed with a
+    /// reason: the feed would carry it either way, and only one of those is
+    /// visible to the operator.
+    async fn adopt(&self, info_hash: &str, announce: &AnnounceSet) -> Result<()> {
+        self.qbit
+            .add_trackers(info_hash, &announce.tiers)
+            .await
+            .with_context(|| {
+                format!(
+                    "adding sharerr's tracker to {info_hash} in {}",
+                    self.qbit.kind()
+                )
+            })?;
+
+        let path = torrent_file_path(&self.torrent_dir, info_hash);
+        let cached = match tokio::fs::read(&path).await {
+            Ok(data) => Some(data),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
+        };
+
+        // A cache hit is the common case and not really an adoption at all:
+        // sharerr built this torrent on an earlier run and is only rediscovering
+        // it, which is also why it must not be exported over.
+        let data = match cached {
+            Some(data) => {
+                let current = sharerr_torrent::read_announce(&data)
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                if current.as_deref() == Some(announce.primary.as_str()) {
+                    return Ok(());
+                }
+                data
+            }
+            None => self
+                .qbit
+                .export(info_hash)
+                .await
+                .with_context(|| format!("exporting {info_hash} from {}", self.qbit.kind()))?
+                .with_context(|| {
+                    format!(
+                        "{} already has a torrent covering this file ({info_hash}) but cannot \
+                         hand back its .torrent, and sharerr has none cached — so there would \
+                         be nothing to serve a friend who asked for it. Remove that torrent, \
+                         or let sharerr add its own",
+                        self.qbit.kind()
+                    )
+                })?,
+        };
+
+        let rewritten = sharerr_torrent::rewrite_announce(&data, announce)
+            .with_context(|| format!("rewriting the announce URLs of {info_hash}"))?;
+
+        // What is about to be filed under `info_hash` must actually *be*
+        // `info_hash`. These bytes came from the client, not from
+        // `LavaTorrentFactory`, so nothing so far has checked that — and a
+        // mismatch would hand every friend a torrent for a different swarm than
+        // the feed pointed them at, which fails in a much more confusing place
+        // than here.
+        let actual = sharerr_torrent::read_info_hash(&rewritten)
+            .with_context(|| format!("reading the info hash of the .torrent for {info_hash}"))?;
+        anyhow::ensure!(
+            actual.eq_ignore_ascii_case(info_hash),
+            "{} handed back a .torrent for {actual}, not {info_hash}",
+            self.qbit.kind()
+        );
+
+        write_cached(&path, &rewritten).await?;
+
+        tracing::info!(
+            info_hash,
+            path = %path.display(),
+            "adopted an existing torrent: sharerr's tracker added and its .torrent cached"
+        );
+        Ok(())
     }
 
     /// Read back the `.torrent` sharerr cached for `known_info_hash`, bringing
@@ -366,6 +469,20 @@ impl Seeder {
     }
 }
 
+/// Write a `.torrent` into the cache, creating `torrent_dir` if this is the
+/// first one. Unlike the best-effort write inside [`Seeder::build`], a failure
+/// here is returned: the caller has no copy of these bytes anywhere else.
+async fn write_cached(path: &Path, data: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    tokio::fs::write(path, data)
+        .await
+        .with_context(|| format!("writing {}", path.display()))
+}
+
 fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -433,7 +550,11 @@ mod tests {
     struct StubClient {
         files_result: Option<Box<FilesFn>>,
         set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
+        add_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
         add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+        /// `.torrent` bytes `export` hands back, or `None` for a client that
+        /// has no such call — the Transmission and rTorrent case.
+        export_result: Option<Vec<u8>>,
     }
 
     impl std::fmt::Debug for StubClient {
@@ -481,6 +602,16 @@ mod tests {
                 .unwrap()
                 .push((hash.to_owned(), urls.to_vec()));
             Ok(())
+        }
+        async fn add_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
+            self.add_trackers_calls
+                .lock()
+                .unwrap()
+                .push((hash.to_owned(), urls.to_vec()));
+            Ok(())
+        }
+        async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
+            Ok(self.export_result.clone())
         }
     }
 
@@ -742,6 +873,172 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, SeedOutcome::Added { .. }));
         assert_eq!(client.add_calls.lock().unwrap().len(), 1);
+    }
+
+    /// Adoption, end to end: a torrent the operator already had covers the
+    /// file, so `seed` reuses it — and must leave behind the two things a
+    /// friend's download needs, which reusing it alone did not.
+    #[tokio::test]
+    async fn seed_adopts_a_pre_existing_torrent_by_adding_its_tracker_and_caching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        // Stand in for the operator's own torrent: built against *their*
+        // tracker, and never seen by sharerr.
+        let theirs = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &AnnounceSet::single(
+                    Url::parse("http://their-tracker.example/announce").unwrap(),
+                ),
+            })
+            .unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client.clone(), torrent_dir.clone());
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+        let existing = [torrent(
+            &theirs.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+
+        let outcome = seeder
+            .seed(&paths, &announce, &existing, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SeedOutcome::Reused {
+                info_hash: theirs.info_hash.clone()
+            }
+        );
+        assert!(
+            client.add_calls.lock().unwrap().is_empty(),
+            "adoption must not add a second torrent for the same file"
+        );
+
+        // Additive, not a replace: their tracker list is theirs.
+        let added = client.add_trackers_calls.lock().unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].0, theirs.info_hash);
+        assert_eq!(added[0].1, announce.tiers);
+        assert!(
+            client.set_trackers_calls.lock().unwrap().is_empty(),
+            "set_trackers would drop the trackers the torrent came with"
+        );
+
+        // And the feed now has something to serve, announcing to sharerr.
+        let cached = std::fs::read(torrent_file_path(&torrent_dir, &theirs.info_hash)).unwrap();
+        assert_eq!(
+            sharerr_torrent::read_announce(&cached).unwrap().as_deref(),
+            Some(announce.primary.as_str())
+        );
+        // Rewriting the announce must not disturb the info dict — a cached
+        // file under a different infohash than the torrent being seeded is
+        // exactly the 404 this is here to prevent.
+        assert_eq!(
+            sharerr_torrent::read_info_hash(&cached).unwrap(),
+            theirs.info_hash
+        );
+    }
+
+    /// The same adoption against a client that cannot export — Transmission
+    /// and rTorrent both return `Ok(None)`. There is no way to serve this
+    /// release, so the item fails with a message naming the choice, rather
+    /// than being published as a download nobody can complete.
+    #[tokio::test]
+    async fn seed_fails_an_adoption_when_the_client_cannot_hand_back_the_torrent() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), dir.path().join("torrents"));
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+        let existing = [torrent("deadbeef", "/downloads", "/downloads/movie.mkv")];
+
+        let err = seeder
+            .seed(&paths, &announce, &existing, None)
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("cannot"), "{text}");
+        assert!(text.contains("deadbeef"), "{text}");
+    }
+
+    /// Rediscovering a torrent sharerr itself added takes the same reuse
+    /// branch, and must not export over its own cache — the bytes on disk are
+    /// the ones the feed has been serving all along.
+    #[tokio::test]
+    async fn adopting_a_torrent_sharerr_already_cached_leaves_the_cached_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let built = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &announce,
+            })
+            .unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        std::fs::create_dir(&torrent_dir).unwrap();
+        let cached_path = torrent_file_path(&torrent_dir, &built.info_hash);
+        std::fs::write(&cached_path, &built.data).unwrap();
+
+        // Exporting would replace the cache with these — so if they turn up on
+        // disk, the cache was not consulted first.
+        let client = Arc::new(StubClient {
+            export_result: Some(b"not a torrent".to_vec()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client.clone(), torrent_dir.clone());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+        let existing = [torrent(
+            &built.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+
+        let outcome = seeder
+            .seed(&paths, &announce, &existing, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            SeedOutcome::Reused {
+                info_hash: built.info_hash.clone()
+            }
+        );
+        assert_eq!(std::fs::read(&cached_path).unwrap(), built.data);
+        // The tracker still goes in: a torrent the client has and sharerr has
+        // cached may still have been added by hand from that same cached file.
+        assert_eq!(client.add_trackers_calls.lock().unwrap().len(), 1);
     }
 
     fn torrent(hash: &str, save_path: &str, content_path: &str) -> TorrentSummary {

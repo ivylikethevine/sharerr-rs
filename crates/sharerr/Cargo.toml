@@ -50,6 +50,8 @@ toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["toml", "env", "test"] }

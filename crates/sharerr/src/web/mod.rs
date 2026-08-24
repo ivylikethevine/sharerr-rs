@@ -371,6 +371,7 @@ mod tests {
             ids: sharerr_core::ExternalIds::default(),
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,

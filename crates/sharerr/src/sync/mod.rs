@@ -637,6 +637,7 @@ impl Syncer {
                 item.file_id,
                 outcome.info_hash(),
                 token_fingerprint(announce).as_deref(),
+                matches!(outcome, SeedOutcome::Added { .. }),
             )
             .await?;
 
@@ -650,6 +651,12 @@ impl Syncer {
     ///
     /// Removes the torrent and marks the row `Unshared`. **The file is never
     /// touched** — sharerr shares media it does not own.
+    ///
+    /// Nor is a torrent sharerr did not add. `Seeder::seed` reuses one that
+    /// already covers the file rather than creating a duplicate, so an item can
+    /// be Seeding under an infohash belonging to the operator's own torrent;
+    /// removing that on withdrawal would stop a swarm sharerr was only ever a
+    /// guest in. `created_by_sharerr` is what tells the two apart.
     async fn withdraw_untagged(
         &self,
         known: &HashMap<(MediaSource, i64), SharedItem>,
@@ -679,15 +686,24 @@ impl Syncer {
                 continue;
             }
 
-            if let Some(hash) = &item.info_hash
-                && let Err(err) = self.seeder.qbit.remove(hash).await
-            {
-                // Worth continuing: marking the row Unshared is still correct, and
-                // the torrent can be cleaned up by hand.
-                // The client's own name, not a hardcoded one: this field is a
-                // `dyn TorrentClient` and may well be Transmission.
-                let client = self.seeder.qbit.kind();
-                tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
+            match (&item.info_hash, item.created_by_sharerr) {
+                (Some(hash), true) => {
+                    if let Err(err) = self.seeder.qbit.remove(hash).await {
+                        // Worth continuing: marking the row Unshared is still correct, and
+                        // the torrent can be cleaned up by hand.
+                        // The client's own name, not a hardcoded one: this field is a
+                        // `dyn TorrentClient` and may well be Transmission.
+                        let client = self.seeder.qbit.kind();
+                        tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
+                    }
+                }
+                (Some(hash), false) => tracing::info!(
+                    %hash,
+                    item = %item.spec,
+                    "the torrent was already in the client before sharerr shared this \
+                     file, so it is left running — only the share is withdrawn"
+                ),
+                (None, _) => {}
             }
 
             match self

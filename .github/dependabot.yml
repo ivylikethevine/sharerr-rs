@@ -63,7 +63,7 @@ updates:
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
 
-  # The Dockerfile's builder stage is pinned to the workspace MSRV (1.88) on
+  # The Dockerfile's builder stage is pinned to the workspace MSRV (1.98) on
   # purpose — that pin is what makes `docker build` the MSRV check. Dependabot
   # would otherwise "helpfully" bump it to the latest Rust and quietly delete the
   # only thing in the project that verifies the declared MSRV.

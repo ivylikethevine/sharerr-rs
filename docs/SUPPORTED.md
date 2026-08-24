@@ -29,11 +29,22 @@ client needs no tracker of its own.
 Adding another is mostly writing one file. What a new client must answer
 honestly: whether it can remove a torrent _without_ deleting the data, how it
 replaces a torrent's tracker list in place (`set_trackers`, for endpoint
-rotation), and how it expresses `AddRequest::upload_limit_kib`/`ratio_limit`
-when either is set — the one deliberate exception to "ratios belong to the
+rotation) and how it _adds_ to one without disturbing the rest
+(`add_trackers`, for a torrent sharerr adopts rather than creates), whether it
+can hand back a `.torrent` it already holds (`export`), and how it expresses
+`AddRequest::upload_limit_kib`/`ratio_limit` when either is set — the one deliberate exception to "ratios belong to the
 client," a seeding goal stated once at add time through whatever native
 mechanism the client offers for it, same as qBittorrent (inline on
 `torrents/add`) and Transmission (a follow-up `torrent-set`) already do.
+Only qBittorrent answers the `export` question — `torrents/export` returns
+the file itself. Transmission and rTorrent can each name a path to it on the
+daemon's own filesystem, which in a container deployment is not a filesystem
+sharerr can read, so both return `Ok(None)` rather than guess. That costs them
+one narrow case: a torrent that already covers a file, that sharerr did not
+create and has no cached copy of, cannot be shared on those two — the feed
+would advertise a release with no `.torrent` behind it, so sharerr fails the
+item with a message naming the choice instead.
+
 `sharerr-rtorrent` answers the tracker-replacement question honestly by *not*
 fully answering it: rTorrent's XML-RPC has never grown a way to remove a
 tracker (open upstream as

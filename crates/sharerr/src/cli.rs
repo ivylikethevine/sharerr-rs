@@ -60,6 +60,22 @@ pub enum Command {
     /// with no setup at all. Not linked from the running app anywhere; it is
     /// a development aid, not a feature an operator would use.
     Preview(PreviewArgs),
+
+    /// Print the OpenAPI 3.1 document for sharerr's machine-facing API.
+    ///
+    /// Generated from the handlers themselves, so it cannot describe a route
+    /// that does not exist or miss one that does — see `src/openapi.rs`. Reads
+    /// no config, opens no vault and no database, so it runs anywhere the
+    /// binary does. `docs/openapi.json` in the repository is this output,
+    /// committed.
+    Openapi(OpenapiArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OpenapiArgs {
+    /// Write to this file instead of stdout.
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

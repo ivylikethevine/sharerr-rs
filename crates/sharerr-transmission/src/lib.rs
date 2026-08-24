@@ -434,6 +434,59 @@ impl TorrentClient for TransmissionClient {
             .await
             .map(|_| ())
     }
+
+    async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
+        if urls.is_empty() {
+            return Ok(());
+        }
+        // Read-modify-write on the same `trackerList` (RPC 17) `set_trackers`
+        // uses, rather than the `trackerAdd` argument it replaced: 4.0
+        // deprecated `trackerAdd` in favour of exactly this field, and
+        // carrying both spellings would mean two code paths for one call.
+        let existing = self
+            .rpc(
+                "torrent-get",
+                json!({ "ids": [hash], "fields": ["trackerList"] }),
+            )
+            .await?
+            .get("torrents")
+            .and_then(Value::as_array)
+            .and_then(|t| t.first())
+            .and_then(|t| t.get("trackerList"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+
+        // The new tiers go first, so the endpoint sharerr knows is live is
+        // tried before whatever the torrent already carried — and the existing
+        // list is appended verbatim, tier boundaries and all, because it is the
+        // operator's and this call must not reorder or drop any of it.
+        let mut tiers: Vec<String> = urls
+            .iter()
+            .map(Url::to_string)
+            .filter(|url| !existing.lines().any(|line| line.trim() == url))
+            .collect();
+        if tiers.is_empty() {
+            return Ok(());
+        }
+        if !existing.trim().is_empty() {
+            tiers.push(existing);
+        }
+        let list = tiers.join("\n\n");
+
+        self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
+        // `torrent-get`'s `torrentFile` field is a *path* on the daemon's own
+        // filesystem, and Transmission has no call that returns the bytes. In
+        // the deployments this targets the daemon is a separate container, so
+        // that path is not one sharerr can open — and guessing when it might
+        // be would make this succeed or fail on layout rather than on the API.
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +714,84 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// The additive form reads the current list back and puts sharerr's tiers
+    /// in front of it, verbatim. Anything that dropped or reordered what was
+    /// already there would be rearranging the operator's own torrent.
+    #[tokio::test]
+    async fn add_trackers_prepends_without_dropping_the_existing_list() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [
+                { "trackerList": "http://theirs.example/announce\n\nhttp://backup.example/announce" }
+            ]})),
+        )
+        .await;
+
+        client(&server)
+            .add_trackers(
+                "aabbcc",
+                &[Url::parse("http://sharerr.example/announce").unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let set = requests
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .find(|b| b["method"] == "torrent-set")
+            .expect("a torrent-set was sent");
+        assert_eq!(
+            set["arguments"]["trackerList"].as_str().unwrap(),
+            "http://sharerr.example/announce\n\nhttp://theirs.example/announce\n\nhttp://backup.example/announce"
+        );
+    }
+
+    /// Already present means nothing to do — and nothing sent, so a repeat
+    /// pass over an adopted item cannot slowly rewrite its tracker list.
+    #[tokio::test]
+    async fn add_trackers_sends_no_torrent_set_when_the_url_is_already_listed() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [
+                { "trackerList": "http://sharerr.example/announce" }
+            ]})),
+        )
+        .await;
+
+        client(&server)
+            .add_trackers(
+                "aabbcc",
+                &[Url::parse("http://sharerr.example/announce").unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let sent_set = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .any(|b| b["method"] == "torrent-set");
+        assert!(!sent_set, "nothing to add means nothing sent");
+    }
+
+    /// Transmission has no call that returns a `.torrent`, and says so as
+    /// `Ok(None)` rather than an error — the caller turns that into a message
+    /// naming the choice the operator has, which an RPC failure could not.
+    #[tokio::test]
+    async fn export_reports_that_transmission_cannot_produce_the_file() {
+        let server = MockServer::start().await;
+        assert_eq!(client(&server).export("aabbcc").await.unwrap(), None);
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "and answers without a round trip"
+        );
     }
 
     /// `torrent-add` itself carries no ratio/speed arguments, so a

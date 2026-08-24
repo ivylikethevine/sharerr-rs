@@ -257,10 +257,10 @@ impl Store {
             r#"
             INSERT INTO shared_items (
                 source, source_id, file_id, spec_json, release_title, arr_path,
-                size, ids_json, info_hash, announce_token_fp, state, last_error,
-                created_at, updated_at
+                size, ids_json, info_hash, announce_token_fp, created_by_sharerr,
+                state, last_error, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
             ON CONFLICT (source, file_id) DO UPDATE SET
                 source_id     = excluded.source_id,
                 spec_json     = excluded.spec_json,
@@ -277,6 +277,11 @@ impl Store {
                 -- Same reasoning as info_hash: a rediscovery must not blank out a
                 -- fingerprint that only `set_seeding`/`set_announce_token_fp` know.
                 announce_token_fp = COALESCE(excluded.announce_token_fp, shared_items.announce_token_fp),
+                -- Deliberately absent from this clause. A rediscovery describes
+                -- a file, not a torrent, so it always arrives with `false` and
+                -- assigning that would strip the claim `set_seeding` recorded —
+                -- and with it the client's licence to remove the torrent on
+                -- withdrawal. Only `set_seeding` writes this column.
                 state         = excluded.state,
                 last_error    = excluded.last_error,
                 updated_at    = excluded.updated_at
@@ -293,6 +298,7 @@ impl Store {
         .bind(&ids_json)
         .bind(item.info_hash.as_deref())
         .bind(item.announce_token_fp.as_deref())
+        .bind(i64::from(item.created_by_sharerr))
         .bind(item.state.as_str())
         .bind(item.last_error.as_deref())
         .bind(now)
@@ -336,19 +342,27 @@ impl Store {
     /// torrent just built, so the items page can show whether it is still the
     /// currently configured one — see [`Self::set_announce_token_fp`] for the
     /// case where the torrent already existed and only this needed confirming.
+    ///
+    /// `created_by_sharerr` says whether this call is recording a torrent
+    /// sharerr added or one it adopted, and is the only thing that writes that
+    /// column — see [`SharedItem::created_by_sharerr`], and the withdrawal path
+    /// that reads it.
     pub async fn set_seeding(
         &self,
         source: MediaSource,
         file_id: i64,
         info_hash: &str,
         announce_token_fp: Option<&str>,
+        created_by_sharerr: bool,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE shared_items SET info_hash = ?1, announce_token_fp = ?2, state = ?3, \
-             last_error = NULL, updated_at = ?4 WHERE source = ?5 AND file_id = ?6",
+            "UPDATE shared_items SET info_hash = ?1, announce_token_fp = ?2, \
+             created_by_sharerr = ?3, state = ?4, last_error = NULL, updated_at = ?5 \
+             WHERE source = ?6 AND file_id = ?7",
         )
         .bind(info_hash)
         .bind(announce_token_fp)
+        .bind(i64::from(created_by_sharerr))
         .bind(ShareState::Seeding.as_str())
         .bind(now_epoch())
         .bind(source.as_str())
@@ -517,7 +531,8 @@ pub struct RunRecord {
 }
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
-     arr_path, size, ids_json, info_hash, announce_token_fp, state, last_error, created_at \
+     arr_path, size, ids_json, info_hash, announce_token_fp, created_by_sharerr, state, \
+     last_error, created_at \
      FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
@@ -555,6 +570,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         ids,
         info_hash: row.try_get("info_hash")?,
         announce_token_fp: row.try_get("announce_token_fp")?,
+        created_by_sharerr: row.try_get::<i64, _>("created_by_sharerr")? != 0,
         state,
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at").ok(),
@@ -620,6 +636,7 @@ mod tests {
             },
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -671,6 +688,7 @@ mod tests {
             },
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -842,7 +860,7 @@ mod tests {
         store.upsert(&episode(1001)).await.unwrap();
 
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
             .await
             .unwrap();
 
@@ -860,7 +878,7 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
             .await
             .unwrap();
 
@@ -883,7 +901,7 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
             .await
             .unwrap();
 

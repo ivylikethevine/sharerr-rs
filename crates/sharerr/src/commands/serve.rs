@@ -22,12 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::Router;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
 use serde::Deserialize;
 use sharerr_core::Config;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::gluetun::GluetunTarget;
 use crate::state::ServeState;
@@ -84,15 +84,10 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // only value either takes is `?target=client` to nudge the second poller
     // instead of the first (the default) — so there is nothing to protect
     // beyond the private-address check both handlers share.
-    let mut app = Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route(
-            "/gluetun/refresh",
-            get(gluetun_refresh).post(gluetun_refresh),
-        )
-        .route("/gluetun/down", get(gluetun_down).post(gluetun_down))
+    let (ops, _) = ops_router()
         .with_state(Arc::clone(&state))
+        .split_for_parts();
+    let mut app = ops
         .merge(crate::tracker::routes(Arc::clone(&tracker)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
@@ -234,6 +229,23 @@ struct GluetunQuery {
 /// neighbour, never the internet side of the tunnel. `target` picks which
 /// poller — the tracker's tunnel (default, unchanged) or the torrent client's
 /// second one, when `[gluetun_client]` is configured.
+#[utoipa::path(
+    method(get, post),
+    path = "/gluetun/refresh",
+    tag = "ops",
+    operation_id = "gluetunRefresh",
+    params(
+        ("target" = Option<String>, Query,
+         description = "Which poller to nudge: omitted for the tracker's tunnel, \
+                        `client` for the torrent client's second one."),
+    ),
+    responses(
+        (status = 200, description = "The poller was nudged. This only makes sharerr \
+            ask gluetun sooner — a caller can never supply the answer.", body = String),
+        (status = 403, description = "Refused: the caller is not on a private address. \
+            The legitimate caller is gluetun's own up-command.", body = String),
+    ),
+)]
 async fn gluetun_refresh(
     State(state): State<Arc<ServeState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
@@ -257,6 +269,24 @@ async fn gluetun_refresh(
 /// poller the same way `/gluetun/refresh` does, means the very next resolve
 /// either finds a fresh port or degrades cleanly to the static endpoint rather
 /// than keep advertising one that no longer works.
+#[utoipa::path(
+    method(get, post),
+    path = "/gluetun/down",
+    tag = "ops",
+    operation_id = "gluetunDown",
+    params(
+        ("target" = Option<String>, Query,
+         description = "Which tunnel went down: omitted for the tracker's, `client` \
+                        for the torrent client's."),
+    ),
+    responses(
+        (status = 200, description = "The dead port was forgotten and the poller \
+            nudged, so the next resolve finds a fresh port or degrades to the static \
+            endpoint.", body = String),
+        (status = 403, description = "Refused: the caller is not on a private address.",
+         body = String),
+    ),
+)]
 async fn gluetun_down(
     State(state): State<Arc<ServeState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
@@ -324,7 +354,26 @@ async fn background(state: Arc<ServeState>) {
 /// Liveness, not correctness — this answers "should this container be restarted?",
 /// and the answer is no even when the vault is empty, because a restart cannot
 /// populate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional
+/// The operational endpoints, without state, so [`crate::openapi`] reads the
+/// document off the same declaration that mounts them.
+pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
+    OpenApiRouter::new()
+        .routes(routes!(health))
+        .routes(routes!(ready))
+        .routes(routes!(gluetun_refresh))
+        .routes(routes!(gluetun_down))
+}
+
 /// in this handler turns a fixable configuration gap into a restart loop.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "ops",
+    operation_id = "health",
+    responses((status = 200, description = "Alive. Answers `ok` whatever state the \
+        configuration is in — a restart cannot fix a missing credential, so this \
+        never reports one.", body = String)),
+)]
 async fn health() -> &'static str {
     "ok"
 }
@@ -333,6 +382,19 @@ async fn health() -> &'static str {
 /// file it could not load, credentials it could not load, and its own database. The
 /// *arr apps and qBittorrent being down is a `doctor` question, not a reason to pull
 /// this instance out of service.
+#[utoipa::path(
+    get,
+    path = "/ready",
+    tag = "ops",
+    operation_id = "ready",
+    responses(
+        (status = 200, description = "Configuration, credentials and database all \
+            loaded.", body = String),
+        (status = 503, description = "One of those three is not available; the body \
+            names which. The *arr apps and the torrent client being down is not \
+            covered here — that is what `sharerr doctor` is for.", body = String),
+    ),
+)]
 async fn ready(State(state): State<Arc<ServeState>>) -> (StatusCode, String) {
     // Reported ahead of the syncer's reason, which would otherwise relay the same
     // string under the less specific "not configured" heading.

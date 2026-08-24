@@ -110,6 +110,20 @@ impl TorrentClient for QbitClient {
             .await
             .map_err(|e| self.translate(e))
     }
+
+    async fn add_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
+        let urls: Vec<String> = urls.iter().map(url::Url::to_string).collect();
+        self.add_torrent_trackers(hash, &urls)
+            .await
+            .map_err(|e| self.translate(e))
+    }
+
+    async fn export(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        self.export_torrent(hash)
+            .await
+            .map(Some)
+            .map_err(|e| self.translate(e))
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +376,106 @@ mod tests {
             .expect("an addTrackers call was made");
         let body = String::from_utf8(add.body.clone()).unwrap();
         assert!(body.contains("tracker.example"), "{body}");
+    }
+
+    /// The additive form must never reach `removeTrackers`. It is pointed at
+    /// torrents sharerr did not create, whose tracker list is the operator's.
+    #[tokio::test]
+    async fn add_trackers_adds_without_removing_what_is_already_there() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/trackers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "url": "http://theirs.example/announce", "status": 2 },
+                { "url": "** [DHT] **", "status": 0 },
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/torrents/addTrackers"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
+        let client = mocked_client(&server).await;
+        client.add_trackers("abc123", &urls).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let add = requests
+            .iter()
+            .find(|r| r.url.path() == "/api/v2/torrents/addTrackers")
+            .expect("an addTrackers call was made");
+        assert!(
+            String::from_utf8(add.body.clone())
+                .unwrap()
+                .contains("sharerr.example")
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path() == "/api/v2/torrents/removeTrackers"),
+            "add_trackers must not remove anything"
+        );
+    }
+
+    /// A URL the torrent already carries costs no request at all — this runs
+    /// again every time an adopted item is re-seeded.
+    #[tokio::test]
+    async fn add_trackers_is_silent_when_the_url_is_already_present() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/trackers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "url": "http://sharerr.example/announce", "status": 2 },
+            ])))
+            .mount(&server)
+            .await;
+
+        let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
+        let client = mocked_client(&server).await;
+        client.add_trackers("abc123", &urls).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path() == "/api/v2/torrents/addTrackers"),
+            "nothing to add means nothing sent"
+        );
+    }
+
+    /// `torrents/export` is bencode. Read as bytes and returned untouched — a
+    /// `String` round trip would mangle the binary `pieces` field, and with it
+    /// the infohash of every torrent sharerr adopts.
+    #[tokio::test]
+    async fn export_returns_the_torrent_bytes_verbatim() {
+        // Not valid UTF-8, deliberately: 0x80..0x9f is what a `pieces` field
+        // looks like and what a lossy decode would replace.
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+            .mount(&server)
+            .await;
+
+        let client = mocked_client(&server).await;
+        assert_eq!(client.export("abc123").await.unwrap(), Some(bytes));
+    }
+
+    /// An unknown hash is a real error, not `Ok(None)` — `None` is reserved for
+    /// a client that has no export call at all, which is a different fix.
+    #[tokio::test]
+    async fn export_of_an_unknown_torrent_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/export"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = mocked_client(&server).await;
+        assert!(client.export("abc123").await.is_err());
     }
 }

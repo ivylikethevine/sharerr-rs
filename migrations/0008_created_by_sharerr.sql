@@ -1,0 +1,21 @@
+-- Whether sharerr is the one that added this item's torrent to the client.
+--
+-- `Seeder::seed` reuses any torrent already covering a file rather than adding
+-- a second one, so a row can end up Seeding under an infohash sharerr never
+-- created -- an operator's own torrent, or a cross-seed. Withdrawing that item
+-- used to `remove()` it from the client all the same, which is the one thing
+-- the "preserve any existing torrents" rule forbids: sharerr tearing down a
+-- torrent it did not put there.
+--
+-- Set by `set_seeding`, which knows which branch of `seed` it is recording.
+-- Never touched by `upsert`: rediscovery rebuilds items with no torrent at all
+-- and must not overwrite what an earlier pass established, the same reasoning
+-- the COALESCE on `info_hash` and `announce_token_fp` already carries.
+--
+-- DEFAULT 1 exists only to backfill rows that predate this column. Before it,
+-- withdrawal removed every torrent unconditionally, so 1 is what those rows
+-- have effectively been all along -- and a reused torrent among them is not
+-- corrected until a pass re-seeds it, because an item the client still has
+-- takes the Unchanged fast path and never reaches `set_seeding`. New rows
+-- always bind the column explicitly and never see this default.
+ALTER TABLE shared_items ADD COLUMN created_by_sharerr INTEGER NOT NULL DEFAULT 1;

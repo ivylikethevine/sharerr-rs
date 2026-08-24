@@ -414,6 +414,23 @@ impl TorrentClient for RtorrentClient {
         );
         Ok(())
     }
+
+    async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
+        // Already exactly what `set_trackers` does here — rTorrent can only
+        // insert (see the module docs), so the replacing and adding forms
+        // collapse into one call. The distinction still matters to the
+        // caller, which is why the trait keeps them apart: on qBittorrent and
+        // Transmission they are genuinely different operations.
+        self.set_trackers(hash, urls).await
+    }
+
+    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
+        // `d.loaded_file` names the `.torrent` inside rTorrent's session
+        // directory, which is a path on the daemon's filesystem rather than
+        // bytes on the wire — the same limitation the Transmission client has,
+        // and unreadable for the same reason.
+        Ok(None)
+    }
 }
 
 /// Quote a value for use as a `d.*.set=` command argument, the way rTorrent's
@@ -1000,6 +1017,44 @@ mod tests {
             !body.contains("<methodName>load.raw_start</methodName>"),
             "{body}"
         );
+    }
+
+    /// On rTorrent the replacing and adding forms are the same call, because
+    /// insert is the only one there is — so pointing `add_trackers` at a
+    /// torrent sharerr did not create is safe here for free.
+    #[tokio::test]
+    async fn add_trackers_inserts_the_same_way_set_trackers_does() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .add_trackers(
+                "aabbcc",
+                &[Url::parse("http://sharerr.example/announce").unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = String::from_utf8(requests[0].body.clone()).unwrap();
+        assert!(
+            body.contains("<methodName>d.tracker.insert</methodName>"),
+            "{body}"
+        );
+    }
+
+    /// `d.loaded_file` names a path on the daemon's filesystem, not bytes on
+    /// the wire, so there is nothing to return — reported as `Ok(None)` rather
+    /// than an error, and without a round trip.
+    #[tokio::test]
+    async fn export_reports_that_rtorrent_cannot_produce_the_file() {
+        let server = MockServer::start().await;
+        assert_eq!(client(&server).export("aabbcc").await.unwrap(), None);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     /// rTorrent cannot remove a tracker, so this must insert rather than

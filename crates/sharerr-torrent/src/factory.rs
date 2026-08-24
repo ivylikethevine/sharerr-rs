@@ -158,6 +158,19 @@ pub fn read_announce(data: &[u8]) -> Result<Option<String>> {
     Ok(torrent.announce)
 }
 
+/// The info hash of a `.torrent` held in memory, lowercase hex.
+///
+/// The counterpart to [`torrent_file_path`], which names a cache entry by this
+/// value: bytes that arrived from somewhere other than [`LavaTorrentFactory`]
+/// have to be asked what they actually describe before being filed under a
+/// hash. Caching the wrong file under the right name serves a friend a torrent
+/// for a different swarm than the one they were pointed at.
+pub fn read_info_hash(data: &[u8]) -> Result<String> {
+    let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
+        .map_err(|source| TorrentError::Reparse { source })?;
+    Ok(torrent.info_hash())
+}
+
 /// Rewrite a stored `.torrent`'s announce URL and tiers, leaving everything else
 /// — the info dictionary above all — untouched.
 ///

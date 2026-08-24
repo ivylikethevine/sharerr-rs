@@ -52,7 +52,8 @@ const MAX_RECORDS: usize = 64;
 // ---------------------------------------------------------------------------
 
 /// One address inside a record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GossipRecordEndpoint)]
 pub struct RecordEndpoint {
     /// One of [`EndpointKind`]'s names. Unknown kinds are skipped on ingest, so
     /// a newer sharerr can add kinds without breaking older friends.
@@ -62,7 +63,8 @@ pub struct RecordEndpoint {
 }
 
 /// One peer's self-described endpoints, signed by them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GossipEndpointRecord)]
 pub struct EndpointRecord {
     /// Hex Ed25519 public key — the subject's identity.
     pub pubkey: String,
@@ -75,7 +77,8 @@ pub struct EndpointRecord {
 }
 
 /// The wire shape of both gossip endpoints' bodies.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GossipRecordBatch)]
 pub struct RecordBatch {
     pub records: Vec<EndpointRecord>,
 }
@@ -248,7 +251,8 @@ pub(crate) async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
 // ---------------------------------------------------------------------------
 
 /// What one batch of records amounted to, for logging and the POST response.
-#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = GossipIngestSummary)]
 pub struct IngestSummary {
     pub accepted: usize,
     /// Signature or shape failures — records nobody should have sent.
@@ -393,6 +397,29 @@ pub struct PullQuery {
 }
 
 /// `GET /api/gossip/endpoints?peers=pk1,pk2` — the pull side.
+#[utoipa::path(
+    get,
+    path = "/api/gossip/endpoints",
+    tag = "gossip",
+    operation_id = "gossipPull",
+    security(("peerApiKey" = [])),
+    params(
+        ("peers" = Option<String>, Query, description =
+         "Comma-separated hex pubkeys the caller already knows, so the answer can \
+          skip them."),
+    ),
+    responses(
+        (status = 200, description =
+         "Signed endpoint records: this instance's own first, then any it holds for \
+          peers it shares with. Each is signed by the peer it describes, so nothing \
+          here has to be trusted on the relayer's word.", body = RecordBatch),
+        (status = 401, content_type = "application/xml", description =
+         "No `apikey`, or one that matches no active peer. Answered as Torznab's own \
+          XML error, the same as the feed — this rides the feed's authentication.",
+         body = String),
+        (status = 503, description = "The database is not open yet.", body = String),
+    ),
+)]
 pub async fn pull(
     State(state): State<Arc<ServeState>>,
     // Unused beyond authenticating the caller — the extractor is what rejects an
@@ -440,6 +467,23 @@ pub async fn pull(
 
 /// `POST /api/gossip/endpoints` — the push side, for a friend whose address
 /// changed and who can therefore no longer be pulled from.
+#[utoipa::path(
+    post,
+    path = "/api/gossip/endpoints",
+    tag = "gossip",
+    operation_id = "gossipPush",
+    security(("peerApiKey" = [])),
+    request_body = RecordBatch,
+    responses(
+        (status = 200, description =
+         "What the batch amounted to. Records about peers this instance does not \
+          share with are counted `unknown` and dropped by design, not rejected — a \
+          friend relaying their whole view is normal.", body = IngestSummary),
+        (status = 401, content_type = "application/xml",
+         description = "No `apikey`, or one that matches no active peer.", body = String),
+        (status = 503, description = "The database is not open yet.", body = String),
+    ),
+)]
 pub async fn push(
     State(state): State<Arc<ServeState>>,
     caller: Caller,

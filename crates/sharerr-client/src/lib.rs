@@ -386,6 +386,33 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// before a VPN reconnect keeps announcing to the dead address until it is
     /// removed and re-added.
     async fn set_trackers(&self, hash: &str, urls: &[Url]) -> Result<()>;
+
+    /// Add `urls` to an existing torrent's tracker list **without removing
+    /// anything already on it**, one tier each, ahead of what is there.
+    ///
+    /// The additive counterpart to [`Self::set_trackers`], and the only one of
+    /// the two that may be pointed at a torrent sharerr did not create. A
+    /// pre-existing torrent that already covers a file gets reused rather than
+    /// duplicated, and it needs sharerr's tracker in its list to announce
+    /// there — but its own trackers are the operator's, and replacing them
+    /// would be sharerr rearranging something it does not own.
+    ///
+    /// Adding a URL the torrent already has must be a no-op, not a duplicate
+    /// entry: this runs again on every pass that re-seeds the item.
+    async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()>;
+
+    /// The `.torrent` bytes for a torrent the client already holds.
+    ///
+    /// `Ok(None)` — not an error — from a client whose API cannot produce
+    /// them. Only qBittorrent has a call that returns the file itself;
+    /// Transmission and rTorrent can each name a path to it on the daemon's
+    /// own filesystem, which is not necessarily a filesystem sharerr can read.
+    ///
+    /// sharerr needs these for a torrent it is adopting rather than creating:
+    /// the feed serves downloads out of its own `.torrent` cache, so a torrent
+    /// with nothing cached under its infohash is a release every friend gets a
+    /// 404 for.
+    async fn export(&self, hash: &str) -> Result<Option<Vec<u8>>>;
 }
 
 #[cfg(test)]

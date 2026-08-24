@@ -51,9 +51,9 @@ design is built around.
 
 See also: [the configuration reference](docs/CONFIGURATION.md), [supported
 services](docs/SUPPORTED.md), [what's deliberately not
-supported](docs/UNSUPPORTED.md), [the roadmap](docs/ROADMAP.md), [the
-original design brief](docs/DESIGN.md), and [the security
-policy](docs/SECURITY.md).
+supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
+roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
+[the security policy](docs/SECURITY.md).
 
 ## What works today
 

@@ -25,7 +25,7 @@ pub use announce::{
 pub use error::{Result, TorrentError};
 pub use factory::{
     BuiltTorrent, LavaTorrentFactory, TorrentRequest, piece_length_for, read_announce,
-    rewrite_announce, torrent_file_path,
+    read_info_hash, rewrite_announce, torrent_file_path,
 };
 pub use title::{ParsedTitle, parse, resolve, synthesize};
 pub use tracker::{
