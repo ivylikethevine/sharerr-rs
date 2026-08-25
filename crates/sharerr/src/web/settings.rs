@@ -1376,6 +1376,7 @@ pub(super) fn arr_section(
             .unwrap_or_default(),
         key_set: is_set(key),
         placeholder: url_placeholder(kind),
+        docs_url: super::docs::for_source(kind).unwrap_or_default(),
         url_path,
         primary,
     })

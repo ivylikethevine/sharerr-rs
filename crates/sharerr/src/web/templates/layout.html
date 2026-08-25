@@ -21,8 +21,12 @@
     <a href="/peers" title="Keys, scopes, and where each friend is"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 7.5a2 2 0 100-4 2 2 0 000 4zM2 13a4 4 0 018 0M10.5 3.6a2 2 0 010 3.8M11.5 9.2a3.5 3.5 0 012.5 3.8"/></svg>Friends</a>
     <a href="/settings" title="Sources, client, tracker, and everything else this instance is told"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h8M12 4.5h2M2 11.5h2M6 11.5h8M10 2.5a2 2 0 100 4 2 2 0 000-4zM4 9.5a2 2 0 100 4 2 2 0 000-4z"/></svg>Settings</a>
     <a href="/debug" title="Advertised addresses and an outside-reachability script"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 2.5a3 3 0 00-2.8 4.1L2.5 11.8l1.7 1.7 5.2-5.2A3 3 0 0013.5 5l-1.8 1.8-1.5-1.5z"/></svg>Debug</a>
+    {# Styled as a nav item rather than a text link: it sits in the same row as
+       six pills, and an underlined link among them read as the one thing on the
+       bar that had gone wrong. It stays a POST — signing out is a state change,
+       and a GET link would let any page trigger it with an image tag. #}
     <form method="post" action="/logout" class="inline">
-      <button type="submit" class="link">Sign out</button>
+      <button type="submit"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 2.5H3.5a1 1 0 00-1 1v9a1 1 0 001 1h3M10.5 5.5L13 8l-2.5 2.5M12.5 8h-7"/></svg>Sign out</button>
     </form>
   </nav>
   {% endif %}
@@ -32,7 +36,21 @@
 {% block content %}{% endblock %}
 </main>
 
-<footer class="foot">sharerr v{{ crate::web::templates::version() }}</footer>
+<footer class="foot">
+  {# The links an operator wants when a page has not told them enough. Present
+     signed out too: the sign-in and claim-instance pages are exactly where
+     somebody meeting sharerr for the first time lands. #}
+  <nav aria-label="Documentation">
+    <a href="{{ crate::web::docs::README }}" target="_blank" rel="noopener noreferrer">Overview</a>
+    <a href="{{ crate::web::docs::CONFIGURATION }}" target="_blank" rel="noopener noreferrer">Configuration</a>
+    <a href="{{ crate::web::docs::SUPPORTED }}" target="_blank" rel="noopener noreferrer">Supported services</a>
+    <a href="{{ crate::web::docs::API }}" target="_blank" rel="noopener noreferrer">API</a>
+    <a href="{{ crate::web::docs::SECURITY }}" target="_blank" rel="noopener noreferrer">Security</a>
+    <a href="{{ crate::web::docs::ROADMAP }}" target="_blank" rel="noopener noreferrer">Roadmap</a>
+    <a href="{{ crate::web::docs::REPO }}" target="_blank" rel="noopener noreferrer">Source</a>
+  </nav>
+  <span class="foot-version">sharerr v{{ crate::web::templates::version() }}</span>
+</footer>
 
 {% if signed_in %}
 <script>

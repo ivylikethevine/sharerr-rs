@@ -17,6 +17,7 @@ pub mod auth;
 pub mod config_io;
 pub mod debug;
 pub mod diagnostics;
+pub mod docs;
 pub mod items;
 pub mod peers;
 pub mod probe;

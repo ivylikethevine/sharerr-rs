@@ -330,13 +330,21 @@ built from `Dockerfile.lighthouse`) is meant to be self-hosted by anyone on
 neutral ground:
 
 ```bash
-docker build -f Dockerfile.lighthouse -t sharerr-lighthouse .
-docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
+docker run -d --name sharerr-lighthouse -p 7878:7878 \
+  -v lighthouse-data:/data ghcr.io/ivylikethevine/sharerr-lighthouse:latest
 ```
 
 `/data` holds nothing but the decoy secret — losing it just reshuffles
-fabricated answers after a restart, not a credential. There is no published
-image for it yet; building locally is the only way to run it today.
+fabricated answers after a restart, not a credential.
+
+It is published to GHCR as its own package, on its own `v*` tag series and
+behind its own approval — a sharerr release is not silently also a lighthouse
+release. To build it yourself instead:
+
+```bash
+docker build -f Dockerfile.lighthouse -t sharerr-lighthouse .
+docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
+```
 
 For a single operator who would rather not run a second container, it can
 also run as extra routes on one of sharerr's own listeners — under

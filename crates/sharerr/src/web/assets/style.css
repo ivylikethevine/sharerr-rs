@@ -1038,3 +1038,265 @@ p.error, div.error {
 @media (max-width: 32rem) {
   .bar nav a svg { display: none; }
 }
+
+/* ---- Documentation links ---------------------------------------------
+   Every page carries links out to the reference for whatever it configures —
+   this project's own docs for a setting, the upstream project's for a service
+   sharerr talks to. They are chrome, not content: quiet by default, and never
+   competing with the accent-coloured links inside the prose they sit under.
+
+   The URLs themselves are constants in `web::docs`, checked by a test there
+   against the real headings in `docs/`, so a link here cannot silently rot.
+
+   `.doclinks` is the row under a heading; `.doclink` also works on its own
+   inside a sentence, where it picks up the surrounding font size via `em`. */
+.doclinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  align-items: center;
+}
+
+.doclink {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 550;
+  text-decoration: none;
+  transition: border-color var(--ease), color var(--ease), background var(--ease);
+}
+.doclink:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* The book glyph, and the arrow that says the link leaves the app. Both are
+   drawn in `currentColor`, so hover and focus need no extra rule. The arrow is
+   a mask rather than markup: it belongs to every doclink, and no template
+   should have to remember it. */
+.doclink svg {
+  width: 0.95em;
+  height: 0.95em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.doclink::after {
+  content: "";
+  width: 0.7em;
+  height: 0.7em;
+  flex: none;
+  opacity: 0.75;
+  background: currentColor;
+  -webkit-mask: var(--out-glyph) center / contain no-repeat;
+  mask: var(--out-glyph) center / contain no-repeat;
+  --out-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M6 2h8v8h-2V5.4L4.7 12.7 3.3 11.3 10.6 4H6z'/%3E%3C/svg%3E");
+}
+
+/* Inside a paragraph the pill treatment is wrong — it breaks the line's
+   rhythm — so a doclink in prose reads as an ordinary link that happens to
+   carry the two glyphs. */
+p .doclink, li .doclink, dd .doclink, .hint .doclink {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: inherit;
+  font-weight: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+p .doclink:hover, li .doclink:hover, dd .doclink:hover, .hint .doclink:hover {
+  color: var(--accent-hover);
+  background: none;
+}
+/* `inline` above drops the flex layout the glyphs relied on, so they go back
+   to being inline boxes nudged onto the text baseline. */
+p .doclink svg, li .doclink svg, dd .doclink svg, .hint .doclink svg {
+  display: inline-block;
+  vertical-align: -0.12em;
+  margin-right: 0.2em;
+}
+p .doclink::after, li .doclink::after, dd .doclink::after, .hint .doclink::after {
+  display: inline-block;
+  vertical-align: -0.02em;
+  margin-left: 0.15em;
+}
+
+/* A row of doclinks introduces the section under a heading, so it wants the
+   same air the quicknav strip gets rather than the flow default. */
+.doclinks + * { margin-top: var(--sp-5); }
+
+/* ---- Section icons ---------------------------------------------------
+   A 16×16 stroke glyph before a section heading, in the heading's own colour.
+   Settings is twelve sections long and every one of them is a panel of fields;
+   the glyph is what lets an operator scrolling past recognise where they are
+   without reading. Muted rather than accent: it labels the heading, it is not
+   a control. */
+.sec-icon {
+  width: 1.05em;
+  height: 1.05em;
+  flex: none;
+  align-self: center;
+  vertical-align: -0.15em;
+  margin-right: 0.45em;
+  color: var(--faint);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+/* `h2:has(> .section-chip)` makes the heading a flex row, where the glyph is a
+   flex item and its `margin-right` would double up with the row's gap. */
+h2:has(> .section-chip) > .sec-icon,
+h3:has(> .section-chip) > .sec-icon { margin-right: calc(var(--sp-3) * -1 + 0.45em); }
+
+/* ---- Numeric legibility ----------------------------------------------
+   Sizes, counts and durations sit in columns that are read by comparison, so
+   the digits have to line up. `tabular-nums` is a font feature rather than a
+   layout change: nothing moves, the 1s just stop being narrow. */
+table, .stat dd, .facts dd, .filter-count { font-variant-numeric: tabular-nums; }
+
+/* A hash, a URL or an absolute path in a fact row has no space to break at,
+   and `.facts` is a grid whose value column is `1fr` — so without this the
+   longest value pushes the grid past the viewport and takes the page's
+   horizontal scrollbar with it. Deliberately *not* extended to `td code`:
+   a table's own escape hatch is `.table-scroll`, and letting a cell break
+   mid-string instead lets the auto layout shrink that column to nothing. */
+.facts dd code { overflow-wrap: anywhere; }
+
+/* 14px muted text inherits the body's 1.55 and reads loose at that size —
+   hints are the app's explanatory voice and there are a lot of them. */
+.hint { line-height: 1.5; }
+
+/* Body prose gets the same measure cap `p.hint` already had. A settings panel
+   is 46rem of column and an unconstrained paragraph runs the whole of it. */
+main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
+
+/* ---- Empty states ----------------------------------------------------
+   "No completed sync yet" as a bare grey line reads as a page that failed to
+   load. Centred in its own dashed box it reads as a state, which is what it
+   is — and leaves room to say what would fill it. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-8) var(--sp-4);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--muted);
+  text-align: center;
+}
+.empty svg {
+  width: 1.75rem;
+  height: 1.75rem;
+  color: var(--faint);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.empty p { margin: 0; max-width: 44ch; font-size: var(--text-sm); }
+.empty strong { color: var(--ink); font-size: var(--text-base); font-weight: 650; }
+
+/* ---- The footer ------------------------------------------------------
+   Was a right-aligned version string. It is the one piece of chrome on every
+   page, which makes it the right place for the links an operator wants when
+   they are stuck — and the version still has to be there, because it is the
+   first thing a bug report needs. */
+.foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-4);
+  text-align: left;
+  border-top: 1px solid var(--line);
+  padding-top: var(--sp-4);
+  margin-top: var(--sp-8);
+}
+.foot nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+}
+.foot a {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 550;
+}
+.foot a:hover { color: var(--accent); text-decoration: underline; }
+.foot .foot-version { color: var(--faint); }
+
+@media (max-width: 32rem) {
+  .foot { justify-content: flex-start; }
+}
+
+/* Sign out is a `<form>` + `<button>` (it has to be a POST), sitting in a row
+   of anchor pills. These two rules make it read as the seventh nav item rather
+   than as a button that wandered onto the bar. */
+.bar nav form.inline { display: flex; }
+.bar nav button {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  font-weight: 550;
+  font-size: var(--text-md);
+  text-decoration: none;
+}
+.bar nav button:hover { color: var(--ink); background: var(--accent-wash); }
+.bar nav button svg {
+  width: 1rem;
+  height: 1rem;
+  margin-right: 0.35rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+@media (max-width: 32rem) {
+  .bar nav button svg { display: none; }
+}
+
+/* The column a row is identified by. Without a floor the auto layout hands it
+   whatever is left after eight other columns have taken what they need, and a
+   two-word name with a "(revoked …)" note after it breaks to one word per
+   line — unreadable in exactly the cell that says which friend this is. */
+td.peer-name { min-width: 9rem; }
+
+/* The glance strip's glyphs. Sized against the label rather than the number:
+   they belong to the caption, and at the number's size they competed with it. */
+.stat dt svg {
+  width: 0.95em;
+  height: 0.95em;
+  vertical-align: -0.12em;
+  margin-right: 0.4em;
+  color: var(--faint);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

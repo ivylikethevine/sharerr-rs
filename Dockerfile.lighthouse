@@ -1,5 +1,5 @@
 # sharerr-lighthouse — the standalone rendezvous service, its own image, its
-# own port. See docs/roadmap.md's "The lighthouse" for what it is and why it
+# own port. See docs/ROADMAP.md's "The lighthouse" for what it is and why it
 # is deliberately not built into the main sharerr image: it is meant to be
 # self-hosted by anyone, on neutral ground away from any particular library.
 #
@@ -12,7 +12,7 @@
 
 # Pinned to the workspace's declared rust-version — see the main Dockerfile's
 # comment on why both pins have to move together.
-FROM --platform=$BUILDPLATFORM rust:1.88-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS builder
 
 # Supplied by BuildKit. Names the architecture of the *runtime* image, not of
 # this stage.

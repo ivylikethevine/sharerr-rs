@@ -927,7 +927,9 @@ mod tests {
     #[test]
     fn an_announce_for_a_shared_torrent_is_admitted_and_answered() {
         with_open_vault(|state| async move {
-            use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+            use sharerr_core::model::{
+                ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem,
+            };
 
             let store = state.store().await.unwrap();
 
@@ -1217,7 +1219,9 @@ mod tests {
     #[test]
     fn scrape_for_a_shared_torrent_reports_it() {
         with_open_vault(|state| async move {
-            use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+            use sharerr_core::model::{
+                ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem,
+            };
 
             let store = state.store().await.unwrap();
 

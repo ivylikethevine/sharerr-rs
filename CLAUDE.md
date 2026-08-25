@@ -134,5 +134,13 @@ architectures — that build is load-bearing as the MSRV check — but ships not
 so no branch tag (`:main` included) ever exists on GHCR; only `latest`, the semver
 tags, and a `sha-*` tag do.
 
+**Two images ship, from two workflows.** `docker.yml` builds `Dockerfile` into
+`ghcr.io/<repo>`; `docker-lighthouse.yml` builds `Dockerfile.lighthouse` into
+`ghcr.io/<owner>/sharerr-lighthouse`. They are separate so a break in one cannot
+hold the other's release, and so each is approved on its own. Both Dockerfiles
+pin the toolchain to `rust-version`, and **both pins have to move together** —
+the lighthouse one silently sat three minors behind for a while, which meant that
+image had no working MSRV check at all.
+
 The roadmap is `docs/ROADMAP.md`; the original design brief and the two premises
 the implementation disproved are in `docs/DESIGN.md`.
