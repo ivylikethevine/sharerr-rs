@@ -60,7 +60,7 @@ services:
   # The far end of the tunnel. Not a service sharerr knows or cares about; it
   # exists so gluetun has something real to connect to.
   vpn:
-    image: lscr.io/linuxserver/wireguard:1.0.20250521@sha256:f33891344345b1f78705e723b633e3a3f94d08ae75ca1a5f48c5a449c35bf460
+    image: lscr.io/linuxserver/wireguard:1.0.20260223@sha256:3abfd4b82212106e357989750b9c0c9859aa511f5305a9a55c18c8de7198b655
     container_name: sharerr-vpn-test-wg
     networks:
       vpn:
