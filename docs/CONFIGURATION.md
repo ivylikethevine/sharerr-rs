@@ -235,8 +235,21 @@ separate one — see `docker/deploy/dual-vpn/`.
 | `gluetun_client.control_url` | url  | unset   |                                                                                                             |
 | `gluetun_client.poll_secs`   | int  | `60`    |                                                                                                             |
 
-Vault secrets: `gluetun.api_key`, `gluetun_client.api_key` — required since
-gluetun v3.40 made `apikey` the default control-server auth.
+Vault secrets: `gluetun.api_key`, `gluetun_client.api_key`. **Not optional.**
+gluetun has made every control-server route private since v3.39.1, and sharerr
+skips the poll entirely rather than send a request that can only come back
+`401` — so a `control_url` with no matching key in the vault is inert, and
+looks identical to one that is working. `sharerr doctor` names the missing key;
+Diagnostics shows the poller's last success, which stays empty.
+
+On gluetun's side the key comes from `HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE`
+(one key, every route) or from a role in `/gluetun/auth/config.toml`. A
+per-route role needs three entries, not two: sharerr requests
+`GET /v1/openvpn/portforwarded`, gluetun answers with a 301 to
+`/v1/portforward`, and the redirect is authorised separately —
+`docker/deploy/gluetun-auth.example.toml` has the worked example.
+
+`docker/deploy/` wires all of this up for four deployment shapes.
 
 ## `[sync]`
 

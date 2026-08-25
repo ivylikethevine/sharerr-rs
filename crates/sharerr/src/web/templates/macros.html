@@ -1,0 +1,26 @@
+{#- Shared markup that more than one page needs. Imported, not extended:
+    `{% import "macros.html" as ui %}` at the top of a template, then
+    `{% call ui::doc(...) %}`.
+
+    Every URL these take comes from `crate::web::docs`, which is checked by a
+    test against the real headings in `docs/` — a template should never carry a
+    documentation URL of its own. -#}
+
+{#- A link out to documentation. Opens in a new tab, because an operator
+    half-way through filling in a form should not lose it to a reference
+    lookup, and `rel="noopener"` because the target is a third-party site on
+    plenty of these. The book glyph and the "leaves the app" arrow are the
+    `.doclink` class's own; nothing here has to draw them. -#}
+{%- macro doc(url, text) -%}
+<a class="doclink" href="{{ url }}" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 4.2C6.9 3.2 5.4 2.7 3.5 2.7c-.4 0-.8 0-1 .1v9c.2 0 .6-.1 1-.1 1.9 0 3.4.5 4.5 1.5 1.1-1 2.6-1.5 4.5-1.5.4 0 .8 0 1 .1v-9c-.2-.1-.6-.1-1-.1-1.9 0-3.4.5-4.5 1.5z"/><path d="M8 4.2v9.1"/></svg>{{ text }}<span class="visually-hidden"> (opens in a new tab)</span></a>
+{%- endmacro %}
+
+{#- An empty state: what the operator is looking at, and what would fill it.
+    A bare grey sentence in a panel reads as a page that failed to load. -#}
+{%- macro empty(headline, detail) -%}
+<div class="empty">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 014.5 6h4l2 2.5h9a1.5 1.5 0 011.5 1.5v7.5a1.5 1.5 0 01-1.5 1.5h-15A1.5 1.5 0 013 17.5z"/></svg>
+  <strong>{{ headline }}</strong>
+  <p>{{ detail }}</p>
+</div>
+{%- endmacro %}

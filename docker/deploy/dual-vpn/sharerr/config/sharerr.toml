@@ -28,18 +28,63 @@ tag = "sharerr"
 skip_checking = true
 
 [tracker]
-# What friends resolve *this* instance as. With [gluetun] below enabled, the
+# What friends resolve *this* instance as. With [gluetun] below working, the
 # live exit address and forwarded port from this stack's own tunnel win over
 # this pair — keep a DNS name here anyway; it rides along as an extra
 # announce-list tier. This is unrelated to qBittorrent's own address: that one
-# is forwarded by ../../media/'s gluetun and sharerr does not track it.
+# is forwarded by ../../media/'s gluetun and is tracked by [gluetun_client].
 advertised_host = "CHANGE-ME.example.com"
 port = 8477
 
+# ---------------------------------------------------------------------------
+# Two tunnels, two pollers, two vault keys
+#
+# This deployment is the reason sharerr has two of these sections. They watch
+# different tunnels, for different reasons, and neither substitutes for the
+# other:
+#
+#   [gluetun]         this stack's tunnel — the address friends announce to and
+#                     fetch the feed from. Drives the announce URL in every
+#                     .torrent sharerr writes.
+#   [gluetun_client]  ../../media/'s tunnel — qBittorrent's own exit. Nothing
+#                     rewrites a torrent from it; sharerr's gossip self-record
+#                     reads it, so friends see where the swarm traffic comes
+#                     from.
+#
+# Both need a credential. gluetun has required one on every control-server route
+# since v3.39.1, and sharerr skips the poll rather than send a request that can
+# only come back 401 — so a section with a `control_url` and no key in the vault
+# is inert, and looks exactly like a section that is working. The keys are
+# distinct because the two gluetuns are:
+#
+#   printf %s "$GLUETUN_API_KEY" | \
+#     docker compose exec -T sharerr sharerr vault set gluetun.api_key
+#   printf %s "<../../media/.env's GLUETUN_API_KEY>" | \
+#     docker compose exec -T sharerr sharerr vault set gluetun_client.api_key
+#
+# `sharerr doctor` names whichever one is missing. Diagnostics shows each
+# poller's last success separately.
+# ---------------------------------------------------------------------------
+
 [gluetun]
-# This stack's own gluetun, not the media stack's. Polls this tunnel's exit
-# and forwarded port only — the tracker/feed address, never qBittorrent's.
+# This stack's own gluetun, on localhost because sharerr shares its network
+# namespace. Polls this tunnel's exit and forwarded port only — the tracker/feed
+# address, never qBittorrent's. Vault key: `gluetun.api_key`.
 control_url = "http://localhost:8000"
+poll_secs = 60
+
+[gluetun_client]
+# ../../media/'s gluetun, by container name over sharerr-shared — the same way
+# qBittorrent's WebUI is reached above, and for the same reason: it is a
+# namespace away, not on this loopback. That stack's control server listens on
+# `:8000` rather than 127.0.0.1 precisely so this poll can arrive.
+#
+# Vault key: `gluetun_client.api_key`, holding ../../media/.env's value.
+#
+# Comment `control_url` out to turn this poller off; the section is disabled by
+# default in a fresh config and is enabled here because this layout is the one
+# it exists for.
+control_url = "http://media-gluetun:8000"
 poll_secs = 60
 
 [sync]

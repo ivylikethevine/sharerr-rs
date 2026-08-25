@@ -1,8 +1,14 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Friends — sharerr{% endblock %}
 
 {% block content %}
 <h1>Friends</h1>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SUPPORTED_INDEXERS, "Setting up a friend's indexer") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::PROWLARR_INDEXERS, "Prowlarr indexers") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::SECURITY_SCOPE, "What a friend's key can reach") %}{% endcall %}
+</div>
 
 <p class="hint">
   Each friend gets their own key. That is what makes it possible to see who is
@@ -17,7 +23,7 @@
 {% if let Some(new) = revealed %}
 <div class="ok" role="status">
   <p><strong>{{ new.label }}'s key</strong></p>
-  <p class="error">
+  <p class="warn">
     Copy it now — this is the only time it is shown. sharerr stores only a hash of
     it and cannot show it again. If it is lost, delete this friend and add them
     back.
@@ -87,7 +93,7 @@
     <tbody>
       {% for peer in peers %}
       <tr{% if peer.revoked %} class="revoked"{% endif %}>
-        <td>
+        <td class="peer-name">
           {{ peer.label }}
           {% if peer.revoked %}
           <span class="error">(revoked{% if !peer.revoked_when.is_empty() %} {{ peer.revoked_when }}{% endif %})</span>

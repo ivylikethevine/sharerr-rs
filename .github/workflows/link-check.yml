@@ -1,4 +1,5 @@
-# Checks every external URL in the repo's markdown for dead links.
+# Checks every external URL in the repo's markdown — and in the web UI's
+# documentation-link table, `web::docs` — for dead links.
 #
 # A rotted URL in the docs is worth seeing and has never shipped a bug, so
 # this reports and never blocks — same reasoning as hadolint and markdownlint
@@ -47,7 +48,7 @@ jobs:
           set -uo pipefail
           ~/.cargo/bin/lychee --accept 200,204,206,429 \
             --format markdown --output "$RUNNER_TEMP/lychee.md" \
-            '**/*.md'
+            '**/*.md' crates/sharerr/src/web/docs.rs
           status=$?
           echo "found=$([ "$status" -ne 0 ] && echo 1 || echo 0)" >>"$GITHUB_OUTPUT"
           exit "$status"
@@ -62,6 +63,6 @@ jobs:
             echo
             cat "$RUNNER_TEMP/lychee.md"
             echo
-            echo "Advisory only: this job never blocks a merge. Run \`lychee '**/*.md'\`"
-            echo "locally to reproduce."
+            echo "Advisory only: this job never blocks a merge. Reproduce with"
+            echo "\`lychee '**/*.md' crates/sharerr/src/web/docs.rs\`."
           } >>"$GITHUB_STEP_SUMMARY"

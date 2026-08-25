@@ -4,6 +4,11 @@ A disposable Sonarr + Radarr + Lidarr + qBittorrent + Prowlarr stack for exercis
 sharerr against the real services. **Entirely optional** — the default `cargo test`
 suite is hermetic and needs none of this.
 
+> **Not for deploying.** The stacks in this directory build the image from
+> source, seed synthetic fixtures, publish on throwaway ports and are torn down
+> with `-v`. To actually run sharerr, use [`deploy/`](deploy/), which has four
+> layouts and a chooser for picking between them.
+
 Everything in `tests/fixtures/media` is synthetic: invented titles, seeded
 pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhere.
 

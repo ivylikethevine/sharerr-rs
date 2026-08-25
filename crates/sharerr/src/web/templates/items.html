@@ -1,8 +1,15 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Items — sharerr{% endblock %}
 
 {% block content %}
 <h1>Items</h1>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SUPPORTED_SOURCES, "Where items come from") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_PATH_MAP, "Why a path resolves the way it does") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::SUPPORTED_INDEXERS, "What consumes this feed") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::TORZNAB_SPEC, "The Torznab feed format") %}{% endcall %}
+</div>
 
 <p class="hint">
   Every file sharerr has discovered, in whatever state it is in — not just what
@@ -68,7 +75,7 @@
 
 <div class="panel">
   {% if items.is_empty() %}
-  <p class="hint">Nothing matches. Widen the filters above, or run a sync.</p>
+  {% call ui::empty("Nothing matches", "Widen the filters above, or wait for a sync — items appear here once a source has tagged content sharerr can read.") %}{% endcall %}
   {% else %}
   <div class="table-scroll">
   <table>

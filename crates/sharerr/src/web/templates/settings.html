@@ -1,4 +1,5 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}sharerr settings{% endblock %}
 
 {% macro lock_attr(key) %}{% if locks.contains_key(*key) %}disabled{% endif %}{% endmacro %}
@@ -19,6 +20,9 @@
 {%- macro chip(state, text) %}<span class="section-chip section-chip--{{ state }}">{{ text }}</span>{% endmacro %}
 
 {% macro arr_section(arr) %}
+<div class="doclinks">
+  {% call ui::doc(arr.docs_url, "{} documentation"|format(arr.title)) %}{% endcall %}
+</div>
 <form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
   <label for="{{ arr.source }}_url">URL</label>
   <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
@@ -44,6 +48,10 @@
    inline while the other two sit behind a fold — see the "Torrent client"
    section below. #}
 {% macro qbittorrent_section() %}
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_QBITTORRENT, "qBittorrent settings") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::QBITTORRENT_API, "qBittorrent WebUI API") %}{% endcall %}
+</div>
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>
   <input id="qbit_url" name="url" value="{{ qbit_url }}" required
@@ -93,6 +101,10 @@
 {% endmacro %}
 
 {% macro transmission_section() %}
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_TRANSMISSION, "Transmission settings") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::TRANSMISSION_RPC, "Transmission RPC spec") %}{% endcall %}
+</div>
 <form method="post" action="/settings/transmission" class="panel">
   <label for="transmission_url">URL</label>
   <input id="transmission_url" name="url" value="{{ transmission_url }}" required
@@ -128,6 +140,10 @@
 {% endmacro %}
 
 {% macro rtorrent_section() %}
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_RTORRENT, "rTorrent settings") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::RTORRENT_RPC, "rTorrent command reference") %}{% endcall %}
+</div>
 <form method="post" action="/settings/rtorrent" class="panel">
   <label for="rtorrent_url">RPC URL</label>
   <input id="rtorrent_url" name="url" value="{{ rtorrent_url }}" required
@@ -243,7 +259,10 @@
 </p>
 {% endif %}
 
-<h2 id="general">General</h2>
+<h2 id="general"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M7.6 2.5H13V8l-5.4 5.4a1 1 0 01-1.4 0l-4-4a1 1 0 010-1.4zM10.4 5.6h.01"/></svg>General</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_TOP_LEVEL, "Top-level settings") %}{% endcall %}
+</div>
 <form method="post" action="/settings/general" class="panel">
   <label for="tag">Tag to watch</label>
   <input id="tag" name="tag" value="{{ tag }}" required
@@ -253,10 +272,15 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="library-sources">Library sources
+<h2 id="library-sources"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.8 4.5a1 1 0 011-1h3l1.5 2h6a1 1 0 011 1v6a1 1 0 01-1 1h-10.5a1 1 0 01-1-1z"/></svg>Library sources
   {%- if library_sources_configured == 0 %}{% call chip("warn", "none configured") %}{% endcall %}
   {%- else if library_sources_configured == 1 %}{% call chip("set", "1 source") %}{% endcall %}
   {%- else %}{% call chip("set", "{} sources"|format(library_sources_configured)) %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SUPPORTED_SOURCES, "Which sources work") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_ARR, "*arr configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::ARR_API_KEY, "Where to find an API key") %}{% endcall %}
+</div>
 <p class="hint">
   Where sharerr finds media to share: *arr apps, plain directories, or both —
   configure whichever you use and leave the rest blank. Without at least one of
@@ -286,7 +310,10 @@
   {% endfor %}
 </details>
 
-<h3 id="library-directories">Library directories</h3>
+<h3 id="library-directories"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 13.5v-9a1 1 0 011-1h3l1.5 2h5a1 1 0 011 1M2.5 13.5l1.9-5.2a1 1 0 01.94-.65h9.16l-1.9 5.2a1 1 0 01-.94.65z"/></svg>Library directories</h3>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_LIBRARY, "Library directory reference") %}{% endcall %}
+</div>
 <form method="post" action="/settings/libraries" class="panel">
   <p class="hint">
     Plain folders shared without any *arr app — everything in each one is shared,
@@ -324,7 +351,7 @@
   <span id="test-library"></span>
 </form>
 
-<h2 id="torrent-client">Torrent client
+<h2 id="torrent-client"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v7.5M5 6.5L8 9.5l3-3M2.5 11v1.5a1 1 0 001 1h9a1 1 0 001-1V11"/></svg>Torrent client
   {%- if torrent_backend == "qbittorrent" %}
     {%- if qbit_api_key_set %}{% call chip("set", "qBittorrent · key set") %}{% endcall %}
     {%- else %}{% call chip("warn", "qBittorrent · no API key") %}{% endcall %}{% endif %}
@@ -335,6 +362,11 @@
     {%- if rtorrent_password_set %}{% call chip("set", "rTorrent · password set") %}{% endcall %}
     {%- else %}{% call chip("unset", "rTorrent · no password") %}{% endcall %}{% endif %}
   {%- endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SUPPORTED_CLIENTS, "Which clients work") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_TORRENT_CLIENT, "Client configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::UNSUPPORTED, "What is deliberately not supported") %}{% endcall %}
+</div>
 <form method="post" action="/settings/torrent-backend" class="panel">
   <label for="torrent_backend">Which client actually seeds</label>
   <select id="torrent_backend" name="backend"
@@ -388,11 +420,15 @@
   {% endif %}
 </details>
 
-<h2 id="tracker">Tracker
+<h2 id="tracker"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3M4.8 4.8a4.5 4.5 0 000 6.4M11.2 4.8a4.5 4.5 0 010 6.4M2.6 2.6a7.6 7.6 0 000 10.8M13.4 2.6a7.6 7.6 0 010 10.8"/></svg>Tracker
   {%- if tracker_advertised_host.is_empty() && tracker_advertised_url.is_empty() && !(gluetun_enabled && !gluetun_control_url.is_empty()) %}{% call chip("warn", "no advertised address") %}{% endcall %}
   {%- else if tracker_token_previous_set %}{% call chip("warn", "token rotation in progress") %}{% endcall %}
   {%- else if tracker_token_set %}{% call chip("set", "address set · token set") %}{% endcall %}
   {%- else %}{% call chip("unset", "address set · no token") %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_TRACKER, "Tracker configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::BITTORRENT_SPEC, "The tracker protocol") %}{% endcall %}
+</div>
 <form method="post" action="/settings/tracker" class="panel">
   <p class="hint">
     sharerr serves announces itself, from this instance, whichever torrent client
@@ -487,10 +523,13 @@
 </form>
 {% endif %}
 
-<h2 id="path-mappings">Path mappings
+<h2 id="path-mappings"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5.5h9M8.5 3L11 5.5 8.5 8M14 10.5H5M7.5 8L5 10.5 7.5 13"/></svg>Path mappings
   {%- if path_map_count == 0 %}{% call chip("unset", "none — paths agree") %}{% endcall %}
   {%- else if path_map_count == 1 %}{% call chip("set", "1 rule") %}{% endcall %}
   {%- else %}{% call chip("set", "{} rules"|format(path_map_count)) %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_PATH_MAP, "Path mapping reference") %}{% endcall %}
+</div>
 <form method="post" action="/settings/paths" class="panel">
   <p class="hint">
     How the *arr apps, sharerr, and qBittorrent each see the same library. Leave
@@ -532,9 +571,12 @@
   can simply not use.
 </p>
 
-<h2 id="seeding">Seeding limits
+<h2 id="seeding"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.5V4M4.8 7.2L8 4l3.2 3.2M3 14h10"/></svg>Seeding limits
   {%- if seeding_upload_limit_kib.is_empty() && seeding_ratio_limit.is_empty() %}{% call chip("unset", "no caps") %}{% endcall %}
   {%- else %}{% call chip("set", "limits set") %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_SEEDING, "Seeding limits reference") %}{% endcall %}
+</div>
 <form method="post" action="/settings/seeding" class="panel">
   <p class="hint">
     Applied once, when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent —
@@ -559,11 +601,16 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="gluetun">Gluetun
+<h2 id="gluetun"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8l5 1.7v4.2c0 3-2.1 5.3-5 6.5-2.9-1.2-5-3.5-5-6.5V3.5z"/></svg>Gluetun
   {%- if gluetun_control_url.is_empty() %}{% call chip("unset", "off") %}{% endcall %}
   {%- else if !gluetun_enabled %}{% call chip("unset", "paused") %}{% endcall %}
   {%- else if gluetun_last_error.is_some() %}{% call chip("warn", "polling · last poll failed") %}{% endcall %}
   {%- else %}{% call chip("set", "polling") %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_GLUETUN, "Gluetun configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::GLUETUN_CONTROL_SERVER, "gluetun control server") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::GLUETUN_PORT_FORWARDING, "VPN port forwarding") %}{% endcall %}
+</div>
 <form method="post" action="/settings/gluetun" class="panel">
   <p class="hint">
     Behind a VPN with a forwarded port, the address friends reach you on changes
@@ -598,10 +645,14 @@
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
   {% endif %}
   <p class="hint">
-    Required since gluetun v3.40, which made <code>apikey</code> the default
-    control server auth — an unkeyed request now gets a bare <code>401</code>.
-    Find or set it in gluetun's own config under <code>CONTROL_SERVER_AUTH</code>
-    (or the roles section of its auth config file).
+    Required since gluetun v3.39.1 made every control server route private — an
+    unkeyed request now gets a bare <code>401</code>, so sharerr skips the poll
+    rather than send one. Set it on gluetun's side with
+    <code>HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE</code>, or in a role in its
+    <code>/gluetun/auth/config.toml</code>. A per-route role needs all three of
+    <code>GET /v1/publicip/ip</code>, <code>/v1/openvpn/portforwarded</code> and
+    <code>/v1/portforward</code> &mdash; gluetun redirects the second to the
+    third, and the redirect is authorised separately.
   </p>
 
   <label for="gluetun_poll_secs">Poll interval (seconds)</label>
@@ -703,16 +754,20 @@
   </form>
 </details>
 
-<h2 id="lighthouse">Lighthouse
+<h2 id="lighthouse"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4a1.6 1.6 0 100 3.2 1.6 1.6 0 000-3.2M6.4 6.4L4.3 13.6h7.4L9.6 6.4"/></svg>Lighthouse
   {%- if lighthouse_enabled && lighthouse_url_count > 0 %}{% call chip("set", "running · {} used"|format(lighthouse_url_count)) %}{% endcall %}
   {%- else if lighthouse_enabled %}{% call chip("set", "running") %}{% endcall %}
   {%- else if lighthouse_url_count == 1 %}{% call chip("set", "1 lighthouse used") %}{% endcall %}
   {%- else if lighthouse_url_count > 1 %}{% call chip("set", "{} lighthouses used"|format(lighthouse_url_count)) %}{% endcall %}
   {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_LIGHTHOUSE, "Lighthouse configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "What a lighthouse is for") %}{% endcall %}
+</div>
 <form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
-    gossip alone has no path back — see <a href="https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md#the-lighthouse">the roadmap's "The lighthouse"</a>.
+    gossip alone has no path back — see {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "the roadmap's \"The lighthouse\"") %}{% endcall %}.
   </p>
 
   <label class="hint">
@@ -755,9 +810,12 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="periodic-sync">Periodic sync
+<h2 id="periodic-sync"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 01-9.7 3.6M2.5 8a5.5 5.5 0 019.7-3.6M12.2 1.9v2.5H9.7M3.8 14.1v-2.5h2.5"/></svg>Periodic sync
   {%- if sync_enabled %}{% call chip("set", "every {} s"|format(sync_interval_secs)) %}{% endcall %}
   {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_SYNC, "Sync configuration") %}{% endcall %}
+</div>
 <form method="post" action="/settings/sync" class="panel">
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if sync_enabled %}checked{% endif %}
@@ -780,9 +838,12 @@
    <details> so the quick-nav anchor lands here; the script at the bottom
    opens it when it is the target. #}
 <details class="fold" id="checks">
-  <summary>Automatic checks
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5a1 1 0 011-1h7a1 1 0 011 1v9a1 1 0 01-1 1h-7a1 1 0 01-1-1zM5.9 8l1.5 1.5 3-3"/></svg>Automatic checks
     {%- if checks_reachability %}{% call chip("set", "reachability on") %}{% endcall %}
     {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_CHECKS, "Checks configuration") %}{% endcall %}
+</div>
 <form method="post" action="/settings/checks" class="panel">
   <label class="hint">
     <input type="checkbox" name="reachability" value="1" {% if checks_reachability %}checked{% endif %}
@@ -804,9 +865,12 @@
 </details>
 
 <details class="fold" id="notifications">
-  <summary>Notifications
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2a4 4 0 00-4 4c0 3-1.5 4.6-1.5 4.6h11S12 9 12 6a4 4 0 00-4-4M6.6 13a1.6 1.6 0 002.8 0"/></svg>Notifications
     {%- if notifications_webhook_set %}{% call chip("set", "webhook set · {}"|format(notifications_kind)) %}{% endcall %}
     {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_NOTIFICATIONS, "Notifications configuration") %}{% endcall %}
+</div>
 <form method="post" action="/settings/notifications" class="panel">
   <p class="hint">
     A webhook fired when a sync fails outright, or when a friend has not been
@@ -849,7 +913,10 @@
 </details>
 
 <details class="fold" id="your-account">
-  <summary>Your account</summary>
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 8a2.75 2.75 0 100-5.5A2.75 2.75 0 008 8M3 13.6a5 5 0 0110 0"/></svg>Your account</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SECURITY_SCOPE, "What sharerr treats as a security boundary") %}{% endcall %}
+</div>
 <form method="post" action="/settings/account/password" class="panel">
   <p class="hint">
     Changing this signs out every other session, here and elsewhere.
@@ -870,7 +937,12 @@
 </details>
 
 <details class="fold" id="fixed-at-startup">
-  <summary>Fixed at startup</summary>
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 7V5a3.5 3.5 0 017 0v2M3.5 7h9a1 1 0 011 1v5a1 1 0 01-1 1h-9a1 1 0 01-1-1V8a1 1 0 011-1z"/></svg>Fixed at startup</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_LAYERING, "How configuration is layered") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_ENV, "Environment variable overrides") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_VAULT, "Vault secrets") %}{% endcall %}
+</div>
 <div class="panel">
   <p class="hint">
     These need a restart to change, so they are not editable here — a wrong bind

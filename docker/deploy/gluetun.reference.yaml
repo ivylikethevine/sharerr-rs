@@ -1,0 +1,362 @@
+# The gluetun service every tunnelled sharerr stack extends.
+#
+# Not a stack. Nothing here comes up on its own — `vpn/`, `dual-vpn/media/` and
+# `dual-vpn/sharerr/` each pull this service in and add the handful of things
+# that genuinely differ between them:
+#
+#   services:
+#     gluetun:
+#       extends:
+#         file: ../gluetun.reference.yaml
+#         service: gluetun
+#       container_name: sharerr-gluetun
+#       ports: ["127.0.0.1:8477:8477"]
+#       environment:
+#         FIREWALL_VPN_INPUT_PORTS: "6881,8477"
+#
+# ## What may and may not live here
+#
+# `environment:` is a YAML mapping, so a stack that sets the same key wins and
+# this file supplies the rest. Everything else merges by *appending*, which is
+# why there is no `ports:` below — a port list here could only ever be added to,
+# never replaced, and every stack publishes something different. `networks:` and
+# `container_name:` are absent for the same reason.
+#
+# Compose does not import the resources an extended service references, so each
+# stack declares the `gluetun-config` volume in its own top-level `volumes:`.
+#
+# Interpolation resolves against the *calling* project's `.env`, so the tunnel
+# credentials below read from whichever stack pulled this file in.
+#
+# ## Reading the variable list
+#
+# Every environment variable gluetun v3.41.3 accepts is present. The ones the
+# stacks actually depend on are live; the rest are commented out with their real
+# default, so enabling one is uncommenting a line rather than a trip to the wiki.
+#
+# Defaults are from `internal/configuration/settings/*.go` at tag v3.41.3, not
+# from the wiki — the wiki documents `main`, which is ahead. Variables you will
+# find documented there and *not* here (`SOCKS5_*`, `AMNEZIAWG_*`,
+# `WIREGUARD_GSO`, `STORAGE_SERVERS_*`, `VPN_UP_COMMAND`, `VPN_DOWN_COMMAND`,
+# `VPN_PORT_FORWARDING_PORTS_COUNT`, `UPDATER_PREFER_DIRECT_DOWNLOAD`) do not
+# exist in v3.41.3 and are silently ignored if you set them.
+
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3.41.3
+
+    # NET_ADMIN to manage the tunnel interface and the killswitch's iptables
+    # rules; /dev/net/tun is the interface itself. Neither is optional.
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    # Server lists, the auth config, and the forwarded-port status file.
+    volumes:
+      - gluetun-config:/gluetun
+
+    restart: unless-stopped
+
+    # gluetun ships its own check. Naming it here is what lets the containers
+    # riding in this namespace `depends_on: {condition: service_healthy}` and so
+    # wait for a *working tunnel* rather than a started container — the
+    # difference between qBittorrent announcing from the tunnel and announcing
+    # from your home address for the first thirty seconds after `up`.
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+    environment:
+      # ==================================================================
+      # Provider and VPN type
+      # ==================================================================
+      #
+      # `custom` means "a WireGuard endpoint I control" and needs the
+      # WIREGUARD_ENDPOINT_* pair below. For a commercial provider put its name
+      # here (`mullvad`, `protonvpn`, `privado`, `windscribe`, …) and leave the
+      # endpoint pair unset — gluetun ships the server lists. The full list of
+      # names is in the gluetun wiki under Providers.
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
+
+      # `openvpn` or `wireguard`. gluetun's default is openvpn; every stack here
+      # wants wireguard, so it is set rather than defaulted.
+      VPN_TYPE: ${VPN_TYPE:-wireguard}
+
+      # Renames the tunnel interface. Only worth touching if something else in
+      # the namespace already owns the name.
+      # VPN_INTERFACE: tun0
+
+      # ==================================================================
+      # Server selection  (commercial providers only — ignored for `custom`)
+      # ==================================================================
+      #
+      # PORT_FORWARD_ONLY is the one that matters most here: with a provider
+      # that grants forwarded ports, it is the difference between landing on a
+      # server that can give you one and landing on a server that cannot. A
+      # sharerr instance on a non-forwarding server looks completely healthy and
+      # is reachable by nobody.
+      # PORT_FORWARD_ONLY: "on"          # off
+      # SERVER_COUNTRIES: Switzerland,Sweden
+      # SERVER_CITIES: Zurich
+      # SERVER_REGIONS: Europe
+      # SERVER_HOSTNAMES: ch-zrh-wg-001.example.net
+      # SERVER_NAMES: ch-zrh-001
+      # SERVER_CATEGORIES: legacy
+      # SERVER_NUMBER: "1"
+      # ISP: Init7
+      # OWNED_ONLY: "no"                 # no    (Mullvad, NordVPN)
+      # FREE_ONLY: "no"                  # no    (ProtonVPN, VPN Unlimited)
+      # PREMIUM_ONLY: "no"               # no    (VPNSecure)
+      # STREAM_ONLY: "no"                # no    (ProtonVPN)
+      # TOR_ONLY: "no"                   # no    (ProtonVPN)
+      # SECURE_CORE_ONLY: "no"           # no    (ProtonVPN)
+      # MULTIHOP_ONLY: "no"              # no    (Surfshark)
+
+      # ==================================================================
+      # WireGuard
+      # ==================================================================
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set this in .env}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set this in .env}
+
+      # Endpoint pair: required for VPN_SERVICE_PROVIDER=custom, supplied by
+      # gluetun's server list otherwise. Blank is the correct value for a
+      # commercial provider — leave these unset in that .env.
+      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:-}
+      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:-}
+      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-51820}
+
+      # WIREGUARD_PRESHARED_KEY: ""
+      # WIREGUARD_ALLOWED_IPS: "0.0.0.0/0,::/0"
+      # WIREGUARD_IMPLEMENTATION: auto   # auto | kernelspace | userspace
+      # WIREGUARD_MTU: "1320"            # 1320 — lower it if large transfers stall
+      # WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL: "0"   # e.g. 25s behind a NAT
+      # WIREGUARD_INTERFACE: wg0
+
+      # ==================================================================
+      # OpenVPN  (only when VPN_TYPE=openvpn)
+      # ==================================================================
+      # OPENVPN_USER: ""
+      # OPENVPN_PASSWORD: ""
+      # OPENVPN_PROTOCOL: udp            # udp | tcp
+      # OPENVPN_VERSION: "2.6"           # 2.5 | 2.6
+      # OPENVPN_ENDPOINT_IP: ""
+      # OPENVPN_ENDPOINT_PORT: ""
+      # OPENVPN_VERBOSITY: "1"           # 0..6
+      # OPENVPN_FLAGS: ""
+      # OPENVPN_ROOT: "no"               # no
+      # OPENVPN_PROCESS_USER: root       # root
+      # OPENVPN_CIPHERS: ""
+      # OPENVPN_AUTH: ""
+      # OPENVPN_MSSFIX: "0"              # 0 = use defaults
+      # OPENVPN_CERT: ""                 # base64 body only, no PEM header
+      # OPENVPN_KEY: ""
+      # OPENVPN_ENCRYPTED_KEY: ""
+      # OPENVPN_KEY_PASSPHRASE: ""
+      # OPENVPN_CUSTOM_CONFIG: ""        # path, for VPN_SERVICE_PROVIDER=custom
+      # OPENVPN_INTERFACE: tun0
+      # PRIVATE_INTERNET_ACCESS_OPENVPN_ENCRYPTION_PRESET: strong   # PIA only
+
+      # ==================================================================
+      # Firewall / killswitch
+      # ==================================================================
+      #
+      # The two INPUT lists are per-stack and deliberately absent here — see
+      # each stack's own `environment:`. What they mean:
+      #
+      #   FIREWALL_VPN_INPUT_PORTS  reachable from the internet through the
+      #                             tunnel; needs a forwarded port to be real
+      #   FIREWALL_INPUT_PORTS      reachable on the default interface, which is
+      #                             how docker's published ports arrive
+      #
+      # Outbound: your LAN and docker's own ranges, so published ports can answer
+      # and so sharerr can reach *arr apps running outside this stack. Must NOT
+      # overlap WIREGUARD_ADDRESSES — an overlap breaks port forwarding in a way
+      # that reads as a flaky provider.
+      FIREWALL_OUTBOUND_SUBNETS: ${LAN_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8}
+
+      # FIREWALL_DEBUG: "off"            # off — logs every iptables rule
+      #
+      # There is a FIREWALL_ENABLED_DISABLING_IT_SHOOTS_YOU_IN_YOUR_FOOT. It is
+      # named that on purpose. Turning the killswitch off means traffic keeps
+      # flowing out of your real address whenever the tunnel drops, which is the
+      # single thing this whole layout exists to prevent. It is listed here so
+      # nobody meets it for the first time in a forum post.
+
+      # ==================================================================
+      # DNS
+      # ==================================================================
+      #
+      # 127.0.0.11 is docker's embedded resolver. Pointing at it rather than
+      # gluetun's own DoT server is what keeps container names resolvable from
+      # inside the namespace — without it, `http://sonarr:8989` fails for an
+      # *arr app running outside this stack. The trade is that DNS then leaves
+      # over docker's resolver rather than encrypted through the tunnel; if you
+      # have no external containers to reach, drop this line and take the DoT
+      # server instead.
+      DNS_ADDRESS: ${DNS_ADDRESS:-127.0.0.11}
+
+      # DNS_KEEP_NAMESERVER: "off"       # off — keep the container's resolv.conf
+      # DNS_UPSTREAM_RESOLVER_TYPE: dot  # dot | doh | plain
+      # DNS_UPSTREAM_RESOLVERS: cloudflare
+      # DNS_UPSTREAM_IPV6: "off"         # off
+      # DNS_PLAINTEXT_ADDRESS: ""        # ip:port, plaintext UDP; discouraged
+      # DNS_CACHING: "on"                # on
+      # DNS_UPDATE_PERIOD: 24h           # 24h; 0 disables block-list refresh
+      #
+      # Block lists. BLOCK_SURVEILLANCE defaults to ON in v3.41.3 (the wiki says
+      # otherwise). If an *arr app, an indexer or a friend's instance sits on a
+      # hostname one of these lists happens to carry, this is where that
+      # resolves to nowhere — DNS_UNBLOCK_HOSTNAMES is the escape hatch.
+      # BLOCK_MALICIOUS: "on"            # on
+      # BLOCK_SURVEILLANCE: "on"         # on
+      # BLOCK_ADS: "off"                 # off
+      # DNS_UNBLOCK_HOSTNAMES: friend.example.com
+      # DNS_BLOCK_IPS: ""
+      # DNS_BLOCK_IP_PREFIXES: ""
+      # DNS_REBINDING_PROTECTION_EXEMPT_HOSTNAMES: ""
+
+      # ==================================================================
+      # Port forwarding
+      # ==================================================================
+      #
+      # Off by default because only some providers offer it. The stacks that
+      # want it turn it on in their own `environment:`, together with the
+      # up/down commands that nudge sharerr to re-poll the moment a reconnect
+      # hands over a new port — see `vpn/compose.yaml`.
+      #
+      # Supported providers: private internet access, perfect privacy,
+      # privatevpn, protonvpn. Everyone else gets no forwarded port, and a
+      # WireGuard endpoint you own does not need one — you control its firewall.
+      # VPN_PORT_FORWARDING: "off"       # off
+      # VPN_PORT_FORWARDING_PROVIDER: "" # defaults to the active provider
+      # VPN_PORT_FORWARDING_STATUS_FILE: /tmp/gluetun/forwarded_port
+      # VPN_PORT_FORWARDING_LISTENING_PORT: "0"   # redirect inbound to this port
+      # VPN_PORT_FORWARDING_USERNAME: ""
+      # VPN_PORT_FORWARDING_PASSWORD: ""
+      # VPN_PORT_FORWARDING_UP_COMMAND: ""        # {{PORT}} and {{VPN_INTERFACE}} expand
+      # VPN_PORT_FORWARDING_DOWN_COMMAND: ""
+
+      # ==================================================================
+      # Control server  —  where sharerr learns its own address
+      # ==================================================================
+      #
+      # sharerr polls /v1/publicip/ip and /v1/openvpn/portforwarded here and
+      # keeps every torrent's announce URL in step with the answers. Every route
+      # has been private by default since gluetun v3.39.1, so this needs a
+      # credential or sharerr's poller gets a 401 and gives up.
+      #
+      # HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE covers every route not named in an
+      # auth file, which is the whole surface when there is no auth file. Each
+      # stack sets it, because the key belongs in that stack's .env.
+      #
+      # HTTP_CONTROL_SERVER_ADDRESS is per-stack too: `127.0.0.1:8000` when
+      # sharerr shares this namespace (nothing else can reach it, and it needs
+      # no firewall entry), `:8000` when sharerr is a container away.
+      #
+      # HTTP_CONTROL_SERVER_LOG: "on"    # on
+      # HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH: /gluetun/auth/config.toml
+      #
+      # The auth file path already defaults to /gluetun/auth/config.toml, so
+      # bind-mounting ../gluetun-auth.example.toml there is enough to switch
+      # from one key for everything to per-route roles. Read that file first —
+      # supplying one *removes* gluetun's permissive built-in role for every
+      # route at once.
+
+      # ==================================================================
+      # Health checker
+      # ==================================================================
+      #
+      # This is what the compose healthcheck above reports on, and what decides
+      # whether a wedged tunnel gets restarted under you.
+      # HEALTH_SERVER_ADDRESS: 127.0.0.1:9999
+      # HEALTH_TARGET_ADDRESSES: cloudflare.com:443,github.com:443
+      # HEALTH_ICMP_TARGET_IPS: 1.1.1.1,8.8.8.8
+      # HEALTH_SMALL_CHECK_TYPE: icmp    # icmp | tcp
+      # HEALTH_RESTART_VPN: "on"         # on
+
+      # ==================================================================
+      # Public IP
+      # ==================================================================
+      #
+      # Leave PUBLICIP_ENABLED alone. `/v1/publicip/ip` is the one call sharerr
+      # cannot do without: a failed forwarded-port lookup falls back to the last
+      # known port, but no exit address means no announce URL to rewrite, and
+      # every torrent keeps advertising wherever it was pointed last. Turning
+      # this off does not fail loudly — it just freezes sharerr's idea of where
+      # it lives.
+      # PUBLICIP_ENABLED: "yes"          # yes
+      # PUBLICIP_API: ipinfo,cloudflare,ifconfigco,ip2location
+      # PUBLICIP_API_TOKEN: ""
+      # PUBLICIP_FILE: /tmp/gluetun/ip
+
+      # ==================================================================
+      # Built-in proxies  (nothing in these stacks uses them)
+      # ==================================================================
+      #
+      # Both let a program *outside* the namespace send traffic through this
+      # tunnel. sharerr and qBittorrent are inside it already, so they need
+      # neither. Publish the listening port on the stack if you enable one.
+      # HTTPPROXY: "off"                 # off
+      # HTTPPROXY_LISTENING_ADDRESS: ":8888"
+      # HTTPPROXY_USER: ""
+      # HTTPPROXY_PASSWORD: ""
+      # HTTPPROXY_LOG: "off"             # off
+      # HTTPPROXY_STEALTH: "off"         # off
+      #
+      # SHADOWSOCKS: "off"               # off
+      # SHADOWSOCKS_LISTENING_ADDRESS: ":8388"
+      # SHADOWSOCKS_PASSWORD: ""
+      # SHADOWSOCKS_CIPHER: chacha20-ietf-poly1305
+      # SHADOWSOCKS_LOG: "off"           # off
+
+      # ==================================================================
+      # Server-list storage and updater
+      # ==================================================================
+      # STORAGE_FILEPATH: /gluetun/servers.json
+      #
+      # UPDATER_PERIOD: "0"              # 0 = never; e.g. 480h to refresh
+      # UPDATER_MIN_RATIO: "0.8"         # 0.8
+      # UPDATER_VPN_SERVICE_PROVIDERS: ""    # defaults to the active provider
+      # UPDATER_PROTONVPN_EMAIL: ""
+      # UPDATER_PROTONVPN_USERNAME: ""
+      # UPDATER_PROTONVPN_PASSWORD: ""
+
+      # ==================================================================
+      # Process and logging
+      # ==================================================================
+      #
+      # PUID/PGID own the files gluetun writes under /gluetun. They do not
+      # affect the containers riding in this namespace — those keep their own.
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+
+      # LOG_LEVEL: info                  # debug | info | warn | error
+      # VERSION_INFORMATION: "on"        # on — logs when a newer gluetun exists
+
+      # ==================================================================
+      # Deprecated aliases — do not use
+      # ==================================================================
+      #
+      # Still accepted in v3.41.3, gone in v4. Each has a replacement above:
+      #
+      #   DOT, DOT_CACHING, DOT_IPV6, DOT_PROVIDERS,        -> DNS_*
+      #   DOT_PRIVATE_ADDRESS, DOT_VERBOSITY,
+      #   DOT_VERBOSITY_DETAILS, DOT_VALIDATION_LOGLEVEL
+      #   PROXY_*, TINYPROXY_*, HTTPPROXY_PORT              -> HTTPPROXY_*
+      #   SHADOWSOCKS_PORT, SHADOWSOCKS_METHOD              -> SHADOWSOCKS_*
+      #   VPNSP                                             -> VPN_SERVICE_PROVIDER
+      #   PORT_FORWARDING, PORT_FORWARDING_STATUS_FILE      -> VPN_PORT_FORWARDING*
+      #   PRIVATE_INTERNET_ACCESS_VPN_PORT_FORWARDING*      -> VPN_PORT_FORWARDING*
+      #   EXTRA_SUBNETS                                     -> FIREWALL_OUTBOUND_SUBNETS
+      #   HEALTH_ADDRESS_TO_PING, HEALTH_TARGET_ADDRESS,    -> HEALTH_*S (plural)
+      #   HEALTH_ICMP_TARGET_IP
+      #   HEALTH_VPN_DURATION_INITIAL/ADDITION              -> removed, no replacement
+      #   OPENVPN_PORT, OPENVPN_TARGET_IP, PORT, PROTOCOL   -> OPENVPN_ENDPOINT_*
+      #   USER, PASSWORD, ENCRYPTION, PIA_ENCRYPTION        -> OPENVPN_*
+      #   UID, GID                                          -> PUID, PGID
+      #   BLOCK_NSA, UNBLOCK                                -> BLOCK_*, DNS_UNBLOCK_HOSTNAMES
+      #   PUBLICIP_PERIOD                                   -> PUBLICIP_ENABLED

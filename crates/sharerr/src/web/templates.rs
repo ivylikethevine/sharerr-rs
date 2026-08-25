@@ -470,6 +470,10 @@ pub struct ArrSection {
     pub key_set: bool,
     /// Example URL with the app's documented default port.
     pub placeholder: &'static str,
+    /// The app's own upstream documentation, for the section's reference link.
+    /// Empty only for a source with no upstream project, which the *arr loop
+    /// never renders.
+    pub docs_url: &'static str,
     /// The config path of the URL field, for the template's shared lock macros —
     /// a precomputed "is it locked" flag here would hide these fields from the
     /// test that proves every lock key in the template is a real config path.

@@ -1,8 +1,14 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Topology — sharerr{% endblock %}
 
 {% block content %}
 <h1>Topology</h1>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SUPPORTED, "What each box can be") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_TORRENT_CLIENT, "Torrent client configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::BITTORRENT_SPEC, "The tracker protocol") %}{% endcall %}
+</div>
 
 <p class="hint">
   How this instance connects to everything around it: sources on the left,
@@ -187,7 +193,7 @@
 <h2>Active swarms</h2>
 <div class="panel">
   {% if swarms.is_empty() %}
-  <p class="hint">No torrent has a live peer right now.</p>
+  {% call ui::empty("No live peers right now", "A swarm appears here the moment a friend's client announces to this instance's tracker. An idle share is normal — nobody is downloading it at the moment.") %}{% endcall %}
   {% else %}
   <p class="hint">
     Who is actually connected right now, per torrent — the diagram above only

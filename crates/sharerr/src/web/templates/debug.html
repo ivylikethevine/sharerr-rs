@@ -1,8 +1,14 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Debug — sharerr{% endblock %}
 
 {% block content %}
 <h1>Debug</h1>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_TRACKER, "Tracker and advertised addresses") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::GLUETUN_PORT_FORWARDING, "VPN port forwarding") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_ENV, "Environment variable overrides") %}{% endcall %}
+</div>
 
 <p class="hint">
   What this instance believes its own addresses are, and a script to check

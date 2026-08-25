@@ -1,11 +1,15 @@
 # sharerr and qBittorrent sharing one VPN exit, via gluetun.
 #
-#   cd docker/deploy && cp .env.example .env && $EDITOR .env sharerr.toml
+#   cd docker/deploy/vpn && cp .env.example .env && $EDITOR .env config/sharerr.toml
 #   docker compose up -d
+#
+# Then the step that is easy to miss — the gluetun API key has to reach sharerr's
+# vault, or sharerr never asks gluetun anything. See "Two halves of one key".
 #
 # Want qBittorrent and sharerr on two separate tunnels instead — two
 # subscriptions, two exits, each rotating its address independently? See
-# `../dual-vpn/` for that layout as two compose projects.
+# `../dual-vpn/`. No tunnel at all? `../direct/`. Adding sharerr to a stack you
+# already run? `../sidecar/`.
 #
 # ## The topology
 #
@@ -43,8 +47,32 @@
 #
 # 8477 appears in both lists on purpose. It is one listener with two audiences:
 # your browser arrives over the published docker port, a friend's indexer arrives
-# through the tunnel. See "one port, three services" below before deciding you are
-# comfortable with that.
+# through the tunnel.
+#
+# gluetun's control server is the fifth port and is deliberately not in either
+# list: `HTTP_CONTROL_SERVER_ADDRESS` binds it to 127.0.0.1, where sharerr can
+# reach it because it shares this namespace and nothing else can reach it at all.
+#
+# ## Two halves of one key
+#
+# gluetun has made every control-server route private by default since v3.39.1,
+# and sharerr will not send a request it knows can only come back 401 — with no
+# key configured it skips the poll entirely and logs one warning. So the key has
+# to be set in both places or the `[gluetun]` section in config/sharerr.toml does
+# nothing at all:
+#
+#   1. `GLUETUN_API_KEY` in .env, which lands in gluetun via
+#      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE below.
+#   2. The same value in sharerr's vault, once the stack is up:
+#
+#        printf %s "$GLUETUN_API_KEY" | \
+#          docker compose exec -T sharerr sharerr vault set gluetun.api_key
+#
+#      or paste it into Settings -> gluetun in the web UI.
+#
+# Half of it configured looks exactly like all of it configured until you notice
+# the announce URLs never changed. Diagnostics shows the poller's last success;
+# `docker compose exec sharerr sharerr doctor` names the missing key outright.
 #
 # ## Read this before assuming the three inbound ports work
 #
@@ -73,27 +101,17 @@ services:
   # ------------------------------------------------------------------ gluetun
   #
   # The namespace owner. Everything else in this file is a passenger.
+  #
+  # The image pin, the tunnel credentials, the capabilities, the healthcheck and
+  # gluetun's full variable surface live in ../gluetun.reference.yaml. What stays
+  # here is what is specific to *this* stack: which ports it publishes, what the
+  # firewall lets in, and where the control server listens.
   gluetun:
-    image: qmcgaw/gluetun:v3.40.0
+    extends:
+      file: ../gluetun.reference.yaml
+      service: gluetun
     container_name: gluetun
-    cap_add: [NET_ADMIN]
-    devices:
-      - /dev/net/tun:/dev/net/tun
     environment:
-      # --- the tunnel -----------------------------------------------------
-      #
-      # As written: a WireGuard endpoint you control. For a commercial provider
-      # set VPN_SERVICE_PROVIDER to its name and drop the WIREGUARD_ENDPOINT_*
-      # pair — gluetun supplies the server list itself. See
-      # https://github.com/qdm12/gluetun-wiki
-      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
-      VPN_TYPE: wireguard
-      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set this in .env}
-      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:?set this in .env}
-      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:?set this in .env}
-      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-51820}
-      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set this in .env}
-
       # --- what may come in ------------------------------------------------
       #
       # Through the tunnel: the two things friends connect to, plus the peer
@@ -105,34 +123,27 @@ services:
       # dead from the host.
       FIREWALL_INPUT_PORTS: "8080,8477"
 
-      # --- what may go out -------------------------------------------------
+      # --- the control server ----------------------------------------------
       #
-      # Your LAN and docker's own subnets, so the published ports can answer and
-      # so sharerr can reach any *arr apps you run outside this stack. Must NOT
-      # overlap WIREGUARD_ADDRESSES — an overlap breaks port forwarding in ways
-      # that look like a flaky provider.
-      FIREWALL_OUTBOUND_SUBNETS: ${LAN_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8}
-
-      # Docker's embedded resolver, so container names outside this stack still
-      # resolve from inside the tunnel's namespace.
-      DNS_ADDRESS: 127.0.0.11
+      # Loopback-only. sharerr is in this namespace so `localhost:8000` reaches
+      # it; nothing outside the namespace can, which is why 8000 appears in
+      # neither firewall list above and is not published below.
+      HTTP_CONTROL_SERVER_ADDRESS: "127.0.0.1:8000"
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"apikey","apikey":"${GLUETUN_API_KEY:?set this in .env — see "Two halves of one key"}"}'
 
       # --- provider port forwarding (optional) ------------------------------
       #
       # Uncomment for a provider that supports it. You get one port, chosen by
       # them, on an exit address that also rotates. sharerr's `[gluetun]` config
-      # section (see config/sharerr.toml) polls the control server on :8000 for
-      # both values and keeps every torrent's announce URL in step; the
-      # up-command below makes a reconnect picked up in seconds instead of at
-      # the next poll, and the down-command means a port going away is dropped
-      # immediately rather than kept as a stale fallback until the next poll
-      # finds out on its own. sharerr is in this same namespace, so `localhost`
-      # is correct — and neither endpoint takes a value, they only *nudge*
-      # sharerr to re-ask gluetun, so there is no port to template into either.
-      # Also set gluetun.api_key in sharerr's Settings (or `CONTROL_SERVER_AUTH`
-      # here) — gluetun's control server has required one since v3.40, and
-      # sharerr skips its poll entirely rather than send a request that would
-      # only come back 401.
+      # section polls the control server for both values and keeps every
+      # torrent's announce URL in step; the up-command makes a reconnect picked
+      # up in seconds instead of at the next poll, and the down-command means a
+      # port going away is dropped immediately rather than kept as a stale
+      # fallback until the next poll finds out on its own.
+      #
+      # Neither endpoint takes a value — they only *nudge* sharerr to re-ask
+      # gluetun, so there is no port to template in. `localhost` is correct
+      # because sharerr is in this same namespace.
       #
       # VPN_PORT_FORWARDING: "on"
       # VPN_PORT_FORWARDING_PROVIDER: ${VPN_SERVICE_PROVIDER}
@@ -141,24 +152,11 @@ services:
       #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/refresh'
       # VPN_PORT_FORWARDING_DOWN_COMMAND: >-
       #   /bin/sh -c 'wget -qO- http://localhost:8477/gluetun/down'
-
-      TZ: ${TZ:-Etc/UTC}
     ports:
       # Both WebUIs. They live here because neither container that serves them
       # has a network of its own — the detail that surprises people.
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8477:8477"
-    volumes:
-      - gluetun-config:/gluetun
-    restart: unless-stopped
-    healthcheck:
-      # gluetun ships its own check; naming it here is what lets the two
-      # passengers wait for a *working tunnel* rather than a started container.
-      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
 
   # -------------------------------------------------------------- qbittorrent
   #
@@ -204,11 +202,17 @@ services:
       # The one thing that cannot come from the UI, because it encrypts the vault
       # the UI writes into. Generate with `openssl rand -base64 32` and keep it:
       # losing it means losing every stored credential.
+      #
+      # Nothing else belongs here. Every other setting is a `SHARERR_*` variable
+      # that would *pin* its field — figment layers env over the file, so the
+      # Settings page renders anything set here disabled, and a save is silently
+      # discarded. Configure in config/sharerr.toml or the UI instead.
       SHARERR_MASTER_KEY: ${SHARERR_MASTER_KEY:?set this in .env}
       RUST_LOG: ${RUST_LOG:-sharerr=info,warn}
       TZ: ${TZ:-Etc/UTC}
     volumes:
-      # sharerr.toml, rewritten in place by the UI when you save.
+      # sharerr.toml, rewritten in place by the UI when you save — so this has
+      # to be writable by uid 1000, which is what the image runs as.
       - ./config:/config
       # The vault, the database, and the generated .torrent files.
       - sharerr-data:/data
@@ -220,6 +224,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  # gluetun-config is referenced by the extended service in
+  # ../gluetun.reference.yaml. Compose does not import the resources an extended
+  # service names, so it has to be declared here.
   gluetun-config:
   qbittorrent-config:
   sharerr-data:

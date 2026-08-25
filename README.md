@@ -267,9 +267,11 @@ and, so a port going away is dropped immediately instead of lingering as a stale
 fallback until the next poll, `VPN_PORT_FORWARDING_DOWN_COMMAND` to
 `wget -qO- http://localhost:8477/gluetun/down` — both pushes only nudge sharerr to
 re-ask the control server, so nothing pushed is trusted. gluetun's own control
-server has required an API key (`gluetun.api_key` in Settings, or
-`CONTROL_SERVER_AUTH` on gluetun's side) since v3.40; without one, sharerr skips
-the poll rather than send a request that can only come back `401`. The exit
+server has required a credential on every route since v3.39.1
+(`gluetun.api_key` in Settings, matching gluetun's own
+`HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE` or its `/gluetun/auth/config.toml`);
+without one, sharerr skips the poll rather than send a request that can only
+come back `401`. The exit
 address and the forwarded port are also resolved independently — since the
 routes in gluetun's own auth config can grant one without the other, a port
 lookup that fails falls back to the last known port rather than blocking an exit
@@ -328,13 +330,21 @@ built from `Dockerfile.lighthouse`) is meant to be self-hosted by anyone on
 neutral ground:
 
 ```bash
-docker build -f Dockerfile.lighthouse -t sharerr-lighthouse .
-docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
+docker run -d --name sharerr-lighthouse -p 7878:7878 \
+  -v lighthouse-data:/data ghcr.io/ivylikethevine/sharerr-lighthouse:latest
 ```
 
 `/data` holds nothing but the decoy secret — losing it just reshuffles
-fabricated answers after a restart, not a credential. There is no published
-image for it yet; building locally is the only way to run it today.
+fabricated answers after a restart, not a credential.
+
+It is published to GHCR as its own package, on its own `v*` tag series and
+behind its own approval — a sharerr release is not silently also a lighthouse
+release. To build it yourself instead:
+
+```bash
+docker build -f Dockerfile.lighthouse -t sharerr-lighthouse .
+docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
+```
 
 For a single operator who would rather not run a second container, it can
 also run as extra routes on one of sharerr's own listeners — under

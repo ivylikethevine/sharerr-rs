@@ -1,0 +1,103 @@
+# sharerr joined to a stack you already run.
+#
+# Every URL below is a guess at what your services are called. Replace them with
+# the service names from *your* compose file — `docker network inspect
+# <your-network>` lists everything attached to it.
+#
+# Secrets are deliberately absent. The qBittorrent API key (or password), the
+# *arr API keys, and the Torznab key live in the encrypted vault, not here — set
+# them in the web UI under Settings, or pipe them in:
+#
+#   docker compose exec -T sharerr \
+#     sh -c 'printf %s "$KEY" | sharerr vault set sonarr.api_key'
+#
+# The web UI rewrites this file in place, comments and all, when you save.
+
+data_dir = "/data"
+
+# Content carrying this tag in Sonarr/Radarr is what gets shared. Add the tag to
+# the series and movies you want to seed; nothing without it is touched.
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[qbittorrent]
+# The service name from your stack, on the network this container joined. If
+# your qBittorrent runs inside a VPN container's namespace it has no name of its
+# own — see the last section of compose.yaml, which is about exactly that.
+#
+# 5.2 or newer authenticates with an API key (Options -> Web UI -> API key),
+# which is stateless and does not expire. Older versions use
+# `qbittorrent.username` plus a password in the vault.
+url = "http://qbittorrent:8080"
+category = "sharerr"
+tag = "sharerr"
+# `true` (the default) is faster on a large library, since sharerr never moves,
+# renames, or re-links media — but it will happily seed mismatched data if a path
+# mapping is wrong. Set this `false` for the first run: with checking on,
+# qBittorrent verifies the mapping instead of trusting it, and refuses rather
+# than seeding the wrong bytes.
+skip_checking = true
+
+# Running Transmission or rTorrent instead? Set
+#   torrent_backend = "transmission"   (or "rtorrent")
+# at the top level and configure the matching section. See docs/CONFIGURATION.md.
+
+[tracker]
+# What *friends* resolve this instance as — not the container's address and not
+# the docker host's, unless that is genuinely what your router forwards 8477 to.
+# Everything else can be wrong and produce a loud failure; this one produces
+# torrents that look perfect and that nobody can announce to.
+advertised_host = "CHANGE-ME.example.com"
+port = 8477
+
+# With a TLS reverse proxy in front, set this instead of the two fields above. It
+# wins over them and carries the scheme, so announce URLs match the address
+# friends can actually reach.
+#
+# advertised_url = "https://sharerr.example.com"
+
+# A second listener carrying only the tracker routes and .torrent downloads, not
+# the web UI. Forward *this* port instead of 8477 and the login page stays off
+# the internet. It adds a door rather than moving one. Publish it in compose.yaml
+# too if you enable it.
+#
+# bind = "0.0.0.0:8478"
+
+# If the client you are pointing at sits behind gluetun and you want sharerr to
+# follow its exit address and forwarded port, add a [gluetun_client] section
+# here with that gluetun's control_url — and put its API key in the vault as
+# `gluetun_client.api_key`, or the poll is skipped. ../dual-vpn/ is worked
+# through in full.
+
+[sync]
+enabled = true
+interval_secs = 900
+
+# The three views of one library, which is the whole reason path mapping exists.
+# `arr` is the path Sonarr/Radarr report, `sharerr` is where this container reads
+# it (under /media), `qbit` is what the torrent client is told.
+#
+# These almost certainly need changing — they are the one part of this file that
+# depends on how *your* stack mounts things. Check them with
+# `docker compose exec sharerr sharerr doctor`, which resolves each mapping
+# against the files that are actually there; `sharerr doctor --suggest-paths`
+# proposes mappings by searching /media.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"
+
+# Your *arr apps, by service name. Delete the ones you do not run; add the API
+# keys in the UI. Lidarr, Readarr and Whisparr have their own sections too.
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"

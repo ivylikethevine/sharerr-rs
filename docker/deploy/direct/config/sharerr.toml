@@ -1,0 +1,85 @@
+# sharerr on a plain docker bridge, no VPN.
+#
+# Secrets are deliberately absent. The qBittorrent API key (or password), the
+# *arr API keys, and the Torznab key live in the encrypted vault, not here — set
+# them in the web UI under Settings, or pipe them in:
+#
+#   docker compose exec -T sharerr \
+#     sh -c 'printf %s "$KEY" | sharerr vault set qbittorrent.api_key'
+#
+# The web UI rewrites this file in place, comments and all, when you save.
+
+data_dir = "/data"
+
+# Content carrying this tag in Sonarr/Radarr is what gets shared.
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[qbittorrent]
+# By **service name**, because these containers are on an ordinary bridge and
+# each has its own network. The gluetun stacks next door say `localhost` instead,
+# for the opposite reason — they share one namespace and there is no name to
+# resolve. Copying that line into this file is the most common way to get a
+# qBittorrent that is configured and unreachable.
+url = "http://qbittorrent:8080"
+category = "sharerr"
+tag = "sharerr"
+# `true` (the default) is faster on a large library, since sharerr never moves,
+# renames, or re-links media — but it will happily seed mismatched data if a path
+# mapping is wrong. Set this `false` while still proving the mappings are right,
+# so qBittorrent verifies rather than trusting them.
+skip_checking = true
+
+[tracker]
+# What *friends* resolve this instance as. With no tunnel in front, this is your
+# own address: a dynamic-DNS name, a static IP, whatever your router forwards
+# 8477 to. Everything else can be wrong and produce a loud failure; this one
+# produces torrents that look perfect and that nobody can announce to.
+#
+# There is no [gluetun] section in this deployment — nothing is rotating your
+# exit address, so this value is the whole answer rather than a fallback.
+advertised_host = "CHANGE-ME.example.com"
+
+# The port friends announce to.
+port = 8477
+
+# If you put a TLS reverse proxy in front — and read the header of compose.yaml
+# for why you should before forwarding 8477 — set this instead of the two fields
+# above. It wins over them and carries the scheme, so announce URLs match the
+# address friends can actually reach.
+#
+# advertised_url = "https://sharerr.example.com"
+
+# A second listener carrying only the tracker routes and .torrent downloads, not
+# the web UI. Forward *this* port instead of 8477 and the login page stays on
+# loopback. It adds a door rather than moving one, so `[server] bind` above still
+# applies. Publish it in compose.yaml too if you enable it.
+#
+# bind = "0.0.0.0:8478"
+
+[sync]
+enabled = true
+interval_secs = 900
+
+# The three views of one library, which is the whole reason path mapping exists.
+# Sonarr reports /tv, sharerr reads /media/tv, qBittorrent is told /downloads/tv.
+# Add a [[path_map]] per root, and check them with `sharerr doctor` — a wrong
+# mapping is the most common reason nothing is shared.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"
+
+# By service name, same as qBittorrent above. Add the API keys in the UI.
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"

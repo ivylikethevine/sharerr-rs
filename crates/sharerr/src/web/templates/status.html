@@ -1,13 +1,20 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}sharerr status{% endblock %}
 
 {% block content %}
 <h1>Status</h1>
 
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::README, "What sharerr does") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIGURATION, "Configuration reference") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::SUPPORTED, "Supported services") %}{% endcall %}
+</div>
+
 {% if let Some(glance) = glance %}
 <dl class="stat-grid">
   <div class="stat">
-    <dt title="Items with a torrent the client is seeding right now">Shared</dt>
+    <dt title="Items with a torrent the client is seeding right now"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.5V4M4.8 7.2L8 4l3.2 3.2M3 14h10"/></svg>Shared</dt>
     <dd>
       <strong>{{ glance.items_shared }}</strong> item(s) seeding
       {% if !glance.shared_size.is_empty() %}
@@ -16,7 +23,7 @@
     </dd>
   </div>
   <div class="stat">
-    <dt title="The most recent finished reconciliation pass">Last sync</dt>
+    <dt title="The most recent finished reconciliation pass"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 01-9.7 3.6M2.5 8a5.5 5.5 0 019.7-3.6M12.2 1.9v2.5H9.7M3.8 14.1v-2.5h2.5"/></svg>Last sync</dt>
     <dd>
       {% if let Some(when) = glance.last_sync %}
       {{ when }}{% if !glance.last_sync_note.is_empty() %} —
@@ -32,7 +39,7 @@
     </dd>
   </div>
   <div class="stat">
-    <dt title="Friends whose key was used within the last hour, over all active friends">Friends</dt>
+    <dt title="Friends whose key was used within the last hour, over all active friends"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 7.5a2 2 0 100-4 2 2 0 000 4M2 13a4 4 0 018 0M10.5 3.6a2 2 0 010 3.8M11.5 9.2a3.5 3.5 0 012.5 3.8"/></svg>Friends</dt>
     <dd>
       {% if glance.friends_total == 0 %}
       none yet — add one on the <a href="/peers">Friends</a> page
@@ -42,7 +49,7 @@
     </dd>
   </div>
   <div class="stat">
-    <dt title="Live peers across this instance's tracker right now — first-hand, this process is the tracker">Swarms</dt>
+    <dt title="Live peers across this instance's tracker right now — first-hand, this process is the tracker"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3M4.8 4.8a4.5 4.5 0 000 6.4M11.2 4.8a4.5 4.5 0 010 6.4M2.6 2.6a7.6 7.6 0 000 10.8M13.4 2.6a7.6 7.6 0 010 10.8"/></svg>Swarms</dt>
     <dd>
       {% if glance.swarm_peers == 0 %}
       no peers announcing right now
@@ -110,7 +117,7 @@
 <h2>Recent syncs</h2>
 <div class="panel">
   {% if diag.runs.is_empty() %}
-  <p class="hint">No completed sync yet.</p>
+  {% call ui::empty("No sync has finished yet", "The first pass runs shortly after startup, and again on every interval. Anything that stopped it appears here.") %}{% endcall %}
   {% else %}
   <div class="table-scroll">
   <table>
@@ -142,6 +149,11 @@
 </div>
 
 <h2>Networking</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_GLUETUN, "Gluetun configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::GLUETUN_CONTROL_SERVER, "gluetun control server") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::GLUETUN_PORT_FORWARDING, "VPN port forwarding") %}{% endcall %}
+</div>
 <div class="panel">
   {% for row in diag.gluetun %}
   <h3>{{ row.label }}</h3>
@@ -193,6 +205,10 @@
    for friends gossip cannot reach, and most instances never set one up. #}
 {% if let Some(lighthouse) = diag.lighthouse %}
 <h2>Lighthouse</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_LIGHTHOUSE, "Lighthouse configuration") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "What a lighthouse is for") %}{% endcall %}
+</div>
 <div class="panel">
   <p class="hint">
     The fallback for finding a friend whose address changed while nobody was
@@ -276,6 +292,10 @@
 {% endif %}
 
 <h2>Services</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::SUPPORTED_SOURCES, "Which sources work") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_ARR, "*arr configuration") %}{% endcall %}
+</div>
 <div class="panel">
   {% if diag.services.len() < 2 %}
   <p class="hint">Neither Sonarr nor Radarr is configured, so there is nothing to scan.</p>
@@ -296,6 +316,9 @@
 </div>
 
 <h2>Path mapping</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_PATH_MAP, "Path mapping reference") %}{% endcall %}
+</div>
 <div class="panel">
   <p class="hint">
     The settings page's <em>Test connection</em> buttons answer "can I reach it".
