@@ -45,7 +45,7 @@ services:
   sonarr:
     # Pinned rather than :latest — the pre-seeding workaround in README.md couples
     # to Sonarr's database schema, so a silent major bump would be a bad surprise.
-    image: lscr.io/linuxserver/sonarr:4.0.15@sha256:fbe67c25693dc5f3de220c5691f374576ae265df782c16918cc071b630490bd7
+    image: lscr.io/linuxserver/sonarr:4.0.18@sha256:916844aff737c06c12066be9146cc604c104cec66eb8e07e545cb3719a4b771a
     container_name: sharerr-test-sonarr
     environment:
       PUID: *puid
