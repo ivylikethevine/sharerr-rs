@@ -187,13 +187,7 @@ async fn gather(state: &WebState) -> TopologyPage {
     // One vault open for the whole page, same reasoning as `diagnostics::gather`:
     // opening it derives the key with Argon2, and paying that once per
     // configured service turned this into the slowest page in the UI.
-    let vault = state.serve.open_vault().await;
-    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
-        match &vault {
-            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
-            Err(reason) => Err(reason.clone()),
-        }
-    };
+    let secret = super::diagnostics::secret_reader(&state.serve).await;
 
     // Shared with `web::diagnostics::gather` — see `checks::snapshot`'s docs
     // for why the arr probes, library scan, and path check live there instead
@@ -246,12 +240,33 @@ async fn gather(state: &WebState) -> TopologyPage {
         format!("{} resolve", paths.checked)
     };
 
-    let (instance_lines, instance_status) = instance_lines(&config, state).await;
-    let (client_label, client_lines, client_status, client_check) =
-        client_node(&config, state, &secret).await;
+    // The store is read once for the whole page: the client check needs every
+    // seeding item and the swarm table needs a title per live info hash, and
+    // both come out of the same `all_items` rather than a query per swarm.
+    let items = stored_items(state).await;
+    let titles: HashMap<&str, &str> = items
+        .iter()
+        .filter_map(|item| {
+            item.info_hash
+                .as_deref()
+                .map(|hash| (hash, item.spec.title()))
+        })
+        .collect();
 
-    let friends = friend_nodes(state).await;
-    let swarms = swarm_rows(state).await;
+    // Four independent probes — the live client, the two reachability dials,
+    // the friends list, the swarm snapshot — run together rather than one
+    // after another.
+    let (
+        (instance_lines, instance_status),
+        (client_label, client_lines, client_status, client_check),
+        friends,
+        swarms,
+    ) = tokio::join!(
+        instance_lines(&config, state),
+        client_node(&config, state, &secret, &items),
+        friend_nodes(state),
+        swarm_rows(state, &titles),
+    );
 
     let (nodes, edges, width, height) = layout(
         &sources,
@@ -354,18 +369,21 @@ fn client_check_failed(reason: String) -> ClientCheck {
     }
 }
 
+/// Every item the store holds, or nothing when the store is unavailable —
+/// the rest of the page still has a useful answer without it.
+async fn stored_items(state: &WebState) -> Vec<SharedItem> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    store.all_items().await.unwrap_or_default()
+}
+
 /// What the store says should be seeding, as `(info hash, title)` pairs.
 ///
 /// An item with no info hash has no torrent yet, so there is nothing for the
 /// client to be holding — it is not a disagreement, and counting it as one
 /// would make every pending item look like a fault.
-async fn expected_seeding(state: &WebState) -> Vec<(String, String)> {
-    let Ok(store) = state.serve.store().await else {
-        return Vec::new();
-    };
-    let Ok(items) = store.all_items().await else {
-        return Vec::new();
-    };
+fn expected_seeding(items: &[SharedItem]) -> Vec<(String, String)> {
     items
         .iter()
         .filter(|item| item.state == sharerr_core::ShareState::Seeding)
@@ -383,17 +401,16 @@ async fn expected_seeding(state: &WebState) -> Vec<(String, String)> {
 /// not be resolved back to a title (withdrawn mid-swarm, the rare case) is
 /// still listed, named by its hash, rather than silently dropped — the
 /// peers connected to it are just as real either way.
-async fn swarm_rows(state: &WebState) -> Vec<SwarmRow> {
-    let Ok(store) = state.serve.store().await else {
-        return Vec::new();
-    };
-
+///
+/// `titles` is info hash to title for every stored item that has one, built
+/// once by [`gather`] from the same read the client check uses.
+async fn swarm_rows(state: &WebState, titles: &HashMap<&str, &str>) -> Vec<SwarmRow> {
     let mut rows = Vec::new();
     for swarm in state.serve.swarms().snapshots().await {
         let hex_hash = hex::encode(swarm.info_hash);
-        let title = match store.item_by_info_hash(&hex_hash).await {
-            Ok(Some(item)) => item.spec.title().to_owned(),
-            _ => format!("torrent {}", &hex_hash[..8]),
+        let title = match titles.get(hex_hash.as_str()) {
+            Some(title) => (*title).to_owned(),
+            None => format!("torrent {}", &hex_hash[..8]),
         };
 
         let more = swarm.peers.len().saturating_sub(MAX_SWARM_PEERS);
@@ -428,7 +445,7 @@ async fn swarm_rows(state: &WebState) -> Vec<SwarmRow> {
 /// has something to say, and a row that is simply absent says nothing.
 async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, NodeStatus) {
     let swarm = state.serve.swarms().stats().await;
-    let gluetun_error = gluetun_error_suffix(state, GluetunTarget::Tracker).await;
+    let gluetun_error = super::settings::gluetun_last_error(&state.serve, GluetunTarget::Tracker).await;
 
     let mut lines = Vec::new();
     let status = match state.serve.endpoint().current() {
@@ -467,8 +484,13 @@ async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, No
         let tracker = state.serve.endpoint().current();
         let feed = url::Url::parse(&config.public_base_url()).ok();
 
-        for (tag, base) in [("tracker", tracker.as_ref()), ("feed", feed.as_ref())] {
-            let outcome = checks::check_reachable(base).await;
+        // Two dials, each bounded by its own timeout — made together so a
+        // silent drop on one does not delay the other.
+        let targets = [("tracker", tracker.as_ref()), ("feed", feed.as_ref())];
+        let outcomes =
+            futures::future::join_all(targets.iter().map(|(_, base)| checks::check_reachable(*base)))
+                .await;
+        for ((tag, _), outcome) in targets.iter().zip(outcomes) {
             let text = match &outcome {
                 checks::ReachOutcome::Reachable => "reachable".to_owned(),
                 checks::ReachOutcome::NotConfigured => "no address to check".to_owned(),
@@ -479,24 +501,11 @@ async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, No
             if !outcome.is_reachable() && status == NodeStatus::Ok {
                 status = NodeStatus::Warn;
             }
-            lines.push(line(tag, text));
+            lines.push(line(*tag, text));
         }
     }
 
     (lines, status)
-}
-
-/// The most recent gluetun error for `target`, or `None` when that poller is
-/// healthy right now — cleared the moment a poll succeeds, same as the
-/// Settings page shows, so this never flags a poller that has since
-/// recovered.
-async fn gluetun_error_suffix(state: &WebState, target: GluetunTarget) -> Option<String> {
-    state
-        .serve
-        .gluetun_status(target)
-        .snapshot()
-        .await
-        .last_error
 }
 
 /// The configured torrent client, live-checked the same way Settings' "Test
@@ -506,6 +515,7 @@ async fn client_node(
     config: &Config,
     state: &WebState,
     secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
+    items: &[SharedItem],
 ) -> (String, Vec<NodeLine>, NodeStatus, Option<ClientCheck>) {
     let backend = config.torrent_backend;
     let client = config.torrent_client_for(backend);
@@ -539,7 +549,7 @@ async fn client_node(
             // would report it as absent. The hashes are the join key, so the
             // category adds nothing but a way to be wrong.
             let reconciled = match connected.list(None).await {
-                Ok(listed) => reconcile(&expected_seeding(state).await, &listed),
+                Ok(listed) => reconcile(&expected_seeding(items), &listed),
                 Err(err) => client_check_failed(sharerr_client::error_chain(&err)),
             };
             lines.push(line(
@@ -596,7 +606,9 @@ async fn client_node(
         }
     };
 
-    if let Some(reason) = gluetun_error_suffix(state, GluetunTarget::Client).await {
+    if let Some(reason) =
+        super::settings::gluetun_last_error(&state.serve, GluetunTarget::Client).await
+    {
         lines.push(line("gluetun", reason));
     }
 
@@ -911,9 +923,10 @@ pub(crate) fn layout(
     let source_hs: Vec<i32> = sources.iter().map(|s| node_height(s.lines.len())).collect();
     let sharerr_h = node_height(instance_lines.len());
     let client_h = node_height(client_lines.len());
-    let friend_hs: Vec<i32> = friends
+    let friend_lines: Vec<Vec<NodeLine>> = friends.iter().map(FriendNode::lines).collect();
+    let friend_hs: Vec<i32> = friend_lines
         .iter()
-        .map(|f| node_height(f.lines().len()))
+        .map(|lines| node_height(lines.len()))
         .collect();
 
     let sources_h = stack_height(&source_hs);
@@ -999,7 +1012,7 @@ pub(crate) fn layout(
     }
 
     let mut y = MARGIN + center_offset(friends_h, content_h);
-    for (friend, h) in friends.iter().zip(&friend_hs) {
+    for ((friend, lines), h) in friends.iter().zip(friend_lines).zip(&friend_hs) {
         let status = if friend.channels().iter().any(|c| c.addr.is_some()) {
             NodeStatus::Ok
         } else {
@@ -1012,7 +1025,7 @@ pub(crate) fn layout(
             h: *h,
             icon: NodeIcon::Friend,
             label: friend.label.clone(),
-            lines: placed(&friend.lines(), y),
+            lines: place(lines, y),
             status,
             accent: friend.accent,
             lane: Lane::Friend,
@@ -1058,12 +1071,17 @@ pub(crate) fn layout(
 /// Stamp each detail row with its baseline, now that the node's own position
 /// is known — see [`NodeLine::y`].
 fn placed(lines: &[NodeLine], node_y: i32) -> Vec<NodeLine> {
+    place(lines.to_vec(), node_y)
+}
+
+/// [`placed`] for rows already owned — no second copy of each line.
+fn place(lines: Vec<NodeLine>, node_y: i32) -> Vec<NodeLine> {
     lines
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, l)| NodeLine {
             y: node_y + NODE_HEAD_H + i as i32 * NODE_LINE_H + 14,
-            ..l.clone()
+            ..l
         })
         .collect()
 }
@@ -1616,13 +1634,7 @@ mod tests {
     async fn expected_seeding_lists_only_seeding_items_that_have_a_torrent() {
         use sharerr_core::{MediaSpec, ShareState, SharedItem};
 
-        let (dir, serve) = crate::state::fixtures::unconfigured();
-        serve
-            .replace_config(Config {
-                data_dir: dir.path().to_path_buf(),
-                ..Config::default()
-            })
-            .await;
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve
             .store()
             .await
@@ -1671,7 +1683,7 @@ mod tests {
             .unwrap();
 
         let state = web_state(serve);
-        let expected = expected_seeding(&state).await;
+        let expected = expected_seeding(&stored_items(&state).await);
 
         assert_eq!(expected.len(), 1, "{expected:?}");
         assert_eq!(expected[0].0, "aabb");
@@ -1682,7 +1694,7 @@ mod tests {
     /// install reconciles as healthy rather than as "everything is missing".
     ///
     /// Only the empty-library path: `fixtures::unconfigured` still opens a
-    /// working store, so the `Err` arm of `expected_seeding` -- which also
+    /// working store, so the `Err` arm of `stored_items` -- which also
     /// yields an empty list -- is not reachable from tier 1. See CLAUDE.md on
     /// what these fixtures do and do not stand up.
     #[tokio::test]
@@ -1690,7 +1702,7 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let state = web_state(serve);
 
-        assert!(expected_seeding(&state).await.is_empty());
+        assert!(expected_seeding(&stored_items(&state).await).is_empty());
     }
 
     #[tokio::test]

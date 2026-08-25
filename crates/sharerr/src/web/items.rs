@@ -114,10 +114,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // re-lowercasing the title on every comparison the sort makes.
     match sort {
         "title" => items.sort_by_cached_key(|item| item.spec.title().to_lowercase()),
-        "source" => items.sort_by_cached_key(|item| item.source.as_str().to_owned()),
-        "size" => items.sort_by_cached_key(|item| item.size),
-        "state" => items.sort_by_cached_key(|item| item.state.as_str().to_owned()),
-        _ => items.sort_by_cached_key(|item| item.created_at.unwrap_or(0)),
+        "source" => items.sort_by_key(|item| item.source.as_str()),
+        "size" => items.sort_by_key(|item| item.size),
+        "state" => items.sort_by_key(|item| item.state.as_str()),
+        _ => items.sort_by_key(|item| item.created_at.unwrap_or(0)),
     }
     if desc {
         items.reverse();

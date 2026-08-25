@@ -18,7 +18,6 @@
 
 use axum::extract::{Path, State};
 use axum::response::{Html, IntoResponse, Response};
-use secrecy::SecretString;
 use sharerr_core::config::{TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use std::fmt::Write as _;
@@ -37,12 +36,8 @@ use crate::checks::{
 pub async fn test(State(state): State<WebState>, Path(service): Path<String>) -> Response {
     let config = state.serve.config().await;
 
-    let outcome = if service == "qbittorrent" {
-        qbit_badge(&state, &config).await
-    } else if service == "transmission" {
-        transmission_badge(&state, &config).await
-    } else if service == "rtorrent" {
-        rtorrent_badge(&state, &config).await
+    let outcome = if let Some(backend) = TorrentBackend::parse(&service) {
+        torrent_client_badge(&state, &config, backend).await
     } else if service == "library" {
         library_badge(&config).await
     } else if let Some(kind) = MediaSource::parse(&service) {
@@ -146,8 +141,11 @@ async fn library_badge(config: &Config) -> Outcome {
     // stall the single worker thread this may be running on.
     let outcomes = match tokio::task::spawn_blocking(move || {
         libraries
-            .iter()
-            .map(|library| (library.clone(), check_library(library)))
+            .into_iter()
+            .map(|library| {
+                let outcome = check_library(&library);
+                (library, outcome)
+            })
             .collect::<Vec<_>>()
     })
     .await
@@ -195,26 +193,11 @@ async fn library_badge(config: &Config) -> Outcome {
     Outcome::Good(message)
 }
 
-/// Test qBittorrent specifically, regardless of whether it is the backend
-/// currently selected — the button sits under the qBittorrent heading and
-/// must report on the credentials just saved there, not on whichever client
-/// happens to be selected.
-async fn qbit_badge(state: &WebState, config: &Config) -> Outcome {
-    torrent_client_badge(state, config, TorrentBackend::Qbittorrent).await
-}
-
-/// Test Transmission specifically, regardless of whether it is the backend
-/// currently selected to seed — so an operator filling in its fields can
-/// confirm they work *before* switching `torrent_backend` over to it.
-async fn transmission_badge(state: &WebState, config: &Config) -> Outcome {
-    torrent_client_badge(state, config, TorrentBackend::Transmission).await
-}
-
-/// Test rTorrent specifically — same reasoning as [`transmission_badge`].
-async fn rtorrent_badge(state: &WebState, config: &Config) -> Outcome {
-    torrent_client_badge(state, config, TorrentBackend::Rtorrent).await
-}
-
+/// Test one torrent client specifically, regardless of whether it is the
+/// backend currently selected to seed — the button sits under that client's
+/// heading and must report on the credentials just saved there, so an
+/// operator filling in its fields can confirm they work *before* switching
+/// `torrent_backend` over to it.
 async fn torrent_client_badge(
     state: &WebState,
     config: &Config,
@@ -227,13 +210,7 @@ async fn torrent_client_badge(
 
     // Opened once — going through `state.secret` for each key would open (and
     // Argon2-derive) the vault twice for one badge.
-    let vault = state.serve.open_vault().await;
-    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
-        match &vault {
-            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
-            Err(reason) => Err(reason.clone()),
-        }
-    };
+    let secret = super::diagnostics::secret_reader(&state.serve).await;
     let credential = resolve_torrent_credential(&client, &secret);
 
     let outcome = check_qbit(backend, client.url, client.username, credential).await;
@@ -318,7 +295,10 @@ mod tests {
     #[tokio::test]
     async fn library_badge_counts_a_real_directory() {
         let dir = tempfile::tempdir().unwrap();
-        sharerr_testkit::library::tv_library(dir.path()).unwrap();
+        // Only counted, never read: tiny stand-ins rather than a full
+        // testkit library's worth of bytes.
+        std::fs::write(dir.path().join("Lanternwick.Hollow.S02E01.mkv"), [0u8; 16]).unwrap();
+        std::fs::write(dir.path().join("Lanternwick.Hollow.S02E02.mkv"), [0u8; 16]).unwrap();
         let config = Config {
             library: vec![sharerr_core::config::LibraryConfig {
                 path: dir.path().to_path_buf(),

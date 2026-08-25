@@ -292,18 +292,39 @@ async fn build(
             Ok(peers) => {
                 // One extra query per friend; the list is people, not rows —
                 // but run concurrently rather than one round trip at a time.
-                // The seeding count per scope rides along in the same fan-out:
-                // it is the concrete answer to what "Can see: TV only" means.
-                let endpoints = futures::future::join_all(peers.iter().map(|peer| async {
-                    let endpoints = store.peer_endpoints(peer.id).await.unwrap_or_default();
-                    let sharing = store
-                        .seeding_items(peer.scope)
-                        .await
-                        .ok()
-                        .map(|items| items.len());
-                    (endpoints, sharing)
-                }))
-                .await;
+                // The seeding count per scope rides alongside, once per
+                // distinct scope rather than once per friend: it is the
+                // concrete answer to what "Can see: TV only" means.
+                let mut scopes: Vec<PeerScope> = Vec::new();
+                for peer in &peers {
+                    if !scopes.contains(&peer.scope) {
+                        scopes.push(peer.scope);
+                    }
+                }
+                let (endpoints, counts) = tokio::join!(
+                    futures::future::join_all(peers.iter().map(|peer| async {
+                        store.peer_endpoints(peer.id).await.unwrap_or_default()
+                    })),
+                    futures::future::join_all(scopes.iter().map(|scope| async {
+                        let sharing = store
+                            .seeding_items(*scope)
+                            .await
+                            .ok()
+                            .map(|items| items.len());
+                        (*scope, sharing)
+                    })),
+                );
+                let endpoints = peers
+                    .iter()
+                    .zip(endpoints)
+                    .map(|(peer, endpoints)| {
+                        let sharing = counts
+                            .iter()
+                            .find(|(scope, _)| *scope == peer.scope)
+                            .and_then(|(_, sharing)| *sharing);
+                        (endpoints, sharing)
+                    })
+                    .collect::<Vec<_>>();
                 (peers, endpoints, None)
             }
             Err(err) => (

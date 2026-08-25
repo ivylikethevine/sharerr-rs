@@ -45,22 +45,38 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     // One vault open for the whole page. Opening it derives the key with Argon2 —
     // ~16ms of solid CPU, more on ARM — so paying that once per configured
     // service turned this into the most expensive page in the UI.
-    let vault = state.serve.open_vault().await;
-    let api_key = |key: &'static str| -> Result<Option<SecretString>, String> {
-        match &vault {
-            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
-            Err(reason) => Err(reason.clone()),
-        }
-    };
+    let api_key = secret_reader(&state.serve).await;
 
     // Shared with `web::topology::gather` — see `checks::snapshot`'s docs for
     // why the arr probes, library scan, and path check live there instead of
-    // being duplicated per page.
+    // being duplicated per page. The run history and the two poller rows do
+    // not depend on it, so they are gathered alongside rather than after.
+    let (snapshot, runs, gluetun) = tokio::join!(
+        checks::snapshot(&config, &api_key),
+        recent_run_rows(state),
+        futures::future::join_all(
+            [GluetunTarget::Tracker, GluetunTarget::Client]
+                .into_iter()
+                .map(|target| async move {
+                    let label = match target {
+                        GluetunTarget::Tracker => "Tracker/feed",
+                        GluetunTarget::Client => "Torrent client",
+                    };
+                    endpoint_status(
+                        label,
+                        target.config(&config),
+                        &state.serve.endpoint_for(target),
+                        state.serve.gluetun_status(target),
+                    )
+                    .await
+                }),
+        ),
+    );
     let checks::Snapshot {
         sources,
         libraries,
         paths,
-    } = checks::snapshot(&config, &api_key).await;
+    } = snapshot;
 
     let mut services: Vec<ServiceLine> = sources
         .iter()
@@ -91,24 +107,6 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     let scanned = paths.checked > 0;
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
 
-    let runs = recent_run_rows(state).await;
-    let gluetun = vec![
-        endpoint_status(
-            "Tracker/feed",
-            &config.gluetun,
-            &state.serve.endpoint(),
-            state.serve.gluetun_status(GluetunTarget::Tracker),
-        )
-        .await,
-        endpoint_status(
-            "Torrent client",
-            &config.gluetun_client,
-            &state.serve.client_endpoint(),
-            state.serve.gluetun_status(GluetunTarget::Client),
-        )
-        .await,
-    ];
-
     DiagnosticsData {
         services,
         scanned,
@@ -133,6 +131,22 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         gluetun,
         runs,
         lighthouse: lighthouse_view(state, &config).await,
+    }
+}
+
+/// The vault opened once, wrapped as the `secret` reader `checks` takes.
+///
+/// Opening the vault derives the key with Argon2 — ~16ms of solid CPU, more
+/// on ARM — so a page or badge that needs several secrets opens it once and
+/// reads through this rather than going through `WebState::secret` per key.
+/// A vault that would not open answers every read with the same reason.
+pub(super) async fn secret_reader(
+    state: &crate::state::ServeState,
+) -> impl Fn(&'static str) -> Result<Option<SecretString>, String> {
+    let vault = state.open_vault().await;
+    move |key: &'static str| match &vault {
+        Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
+        Err(reason) => Err(reason.clone()),
     }
 }
 
@@ -231,9 +245,7 @@ async fn endpoint_status(
         enabled: gluetun_config.enabled,
         configured: gluetun_config.control_url.is_some(),
         current: endpoint.current().map(|base| base.to_string()),
-        last_observed: endpoint
-            .last_observed()
-            .map(|observed| format!("{} ({})", observed.base, ago(observed.observed_at))),
+        last_observed: super::settings::gluetun_last_observed(endpoint),
         last_poll: snapshot.last_poll_at.map(ago),
         last_success: snapshot.last_success_at.map(ago),
         last_error: snapshot.last_error,
@@ -487,12 +499,7 @@ mod tests {
     /// even when more rows exist.
     #[tokio::test]
     async fn gather_renders_run_history_and_caps_it_at_recent_runs() {
-        let (dir, serve) = crate::state::fixtures::unconfigured();
-        let config = Config {
-            data_dir: dir.path().to_path_buf(),
-            ..Config::default()
-        };
-        serve.replace_config(config).await;
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve
             .store()
             .await
@@ -584,13 +591,9 @@ mod tests {
 
     // -------------------------------------------------------- describe (arr)
 
-    fn base_config() -> Config {
-        Config::default()
-    }
-
     #[test]
     fn describe_covers_every_arr_outcome() {
-        let config = base_config();
+        let config = Config::default();
 
         let cases: Vec<(ArrOutcome, bool)> = vec![
             (ArrOutcome::NotConfigured, false),
@@ -641,7 +644,7 @@ mod tests {
     /// the same to an operator.
     #[test]
     fn describe_distinguishes_tag_missing_from_tag_unused() {
-        let config = base_config();
+        let config = Config::default();
 
         let missing = describe(
             MediaSource::Radarr,
@@ -693,7 +696,7 @@ mod tests {
     fn an_unconfigured_service_reports_no_address() {
         let line = describe(
             MediaSource::Radarr,
-            &base_config(),
+            &Config::default(),
             &ArrOutcome::NotConfigured,
         );
 
@@ -716,7 +719,7 @@ mod tests {
 
     #[test]
     fn describe_names_a_healthy_service_with_its_file_count() {
-        let mut config = base_config();
+        let mut config = Config::default();
         config.tag = "sharerr".to_owned();
         let outcome = ArrOutcome::Ready {
             version: "4.0.15".to_owned(),

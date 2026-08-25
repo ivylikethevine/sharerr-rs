@@ -23,7 +23,11 @@ pub async fn page(State(state): State<WebState>) -> Response {
         .client_endpoint()
         .current()
         .map(|b| b.to_string());
-    let feed_base = config.public_base_url();
+    // The live endpoint, not `config.public_base_url()` — see
+    // `ServeState::public_base_url`'s docs: this page is about the address
+    // friends actually reach, and on a gluetun-only deployment that is the
+    // resolved one.
+    let feed_base = state.serve.public_base_url().await;
 
     let script = script_for(tracker_base.as_deref(), &feed_base);
 
