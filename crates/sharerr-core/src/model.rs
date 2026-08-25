@@ -369,6 +369,12 @@ pub struct Discovered {
     /// The original scene release name, when the file was imported from one. This
     /// is the best possible release title — it is already known to parse.
     pub scene_name: Option<String>,
+    /// The path the file had when it was imported, before any renaming the source
+    /// applied — Radarr's `originalFilePath`. A second chance at a real release
+    /// name for a library that has since been renamed; unlike [`Self::scene_name`]
+    /// it is not known to parse, so it is only used if it does. `None` for every
+    /// other source: Sonarr, Lidarr and Readarr do not report it.
+    pub original_path: Option<PathBuf>,
 }
 
 impl Discovered {
@@ -588,6 +594,7 @@ mod tests {
             size: 1024,
             ids: ExternalIds::default(),
             scene_name: Some("Copper.Vale.2001.mkv".to_owned()),
+            original_path: None,
         }
     }
 

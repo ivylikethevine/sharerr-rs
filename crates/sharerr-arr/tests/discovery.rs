@@ -568,6 +568,84 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
     assert_eq!(movie.size, 8_589_934_592);
 }
 
+/// `originalFilePath` is Radarr-only — Sonarr's `EpisodeFileResource` has no
+/// counterpart — and it is the second-choice release title when the library has
+/// been renamed since import. It reaches [`Discovered::original_path`] as a path
+/// so the resolver can take its basename; an absent or empty one stays `None`.
+#[tokio::test]
+async fn radarr_carries_the_pre_rename_path_when_it_reports_one() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/movie",
+        json!([
+            {
+                "id": 31,
+                "title": "The Gilded Ferry",
+                "year": 2019,
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": {
+                    "id": 900,
+                    "path": "/movies/The Gilded Ferry (2019)/movie.mkv",
+                    "size": 10,
+                    "originalFilePath": "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv",
+                },
+            },
+            {
+                "id": 32,
+                "title": "Paper Lantern Sky",
+                "year": 2021,
+                "tags": [TAG_ID],
+                "hasFile": true,
+                // Radarr sends `""` rather than omitting it for a file it never
+                // renamed; that is not a path, so it must not become one.
+                "movieFile": {
+                    "id": 901,
+                    "path": "/movies/paper.lantern.sky.2021.mkv",
+                    "size": 10,
+                    "originalFilePath": "",
+                },
+            },
+            {
+                "id": 33,
+                "title": "Harrowmere",
+                "year": 2024,
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": { "id": 902, "path": "/movies/harrowmere.mkv", "size": 10 },
+            },
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Radarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    let by_file = |id: i64| {
+        found
+            .iter()
+            .find(|d| d.file_id == id)
+            .expect("every tagged movie has a file")
+    };
+
+    assert_eq!(
+        by_file(900).original_path.as_deref(),
+        Some(std::path::Path::new(
+            "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv"
+        ))
+    );
+    assert_eq!(
+        by_file(901).original_path,
+        None,
+        "an empty string is not a path"
+    );
+    assert_eq!(by_file(902).original_path, None, "the field may be absent");
+}
+
 #[tokio::test]
 async fn radarr_falls_back_to_the_moviefile_endpoint() {
     let server = MockServer::start().await;

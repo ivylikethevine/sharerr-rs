@@ -985,6 +985,7 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
         size: 1024,
         ids: sharerr_core::ExternalIds::default(),
         scene_name: None,
+        original_path: None,
     };
 
     let result = h

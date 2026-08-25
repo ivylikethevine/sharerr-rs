@@ -90,6 +90,9 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 size: file.size,
                 ids: ids.clone(),
                 scene_name: non_empty(file.scene_name),
+                // Sonarr's `EpisodeFileResource` has no `originalFilePath`; only
+                // Radarr records where the file was before the import rename.
+                original_path: None,
             });
         }
     }

@@ -204,6 +204,7 @@ mod tests {
             size,
             ids: ExternalIds::default(),
             scene_name: None,
+            original_path: None,
         }
     }
 
