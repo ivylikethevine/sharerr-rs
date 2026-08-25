@@ -23,7 +23,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::now_epoch;
-use sharerr_store::{Peer, PeerScope};
+use sharerr_store::{Peer, PeerScope, SeedingSummary};
 
 use super::WebState;
 use super::settings::title_case;
@@ -301,19 +301,15 @@ async fn build(
                         scopes.push(peer.scope);
                     }
                 }
-                let (endpoints, counts) = tokio::join!(
-                    futures::future::join_all(peers.iter().map(|peer| async {
-                        store.peer_endpoints(peer.id).await.unwrap_or_default()
-                    })),
-                    futures::future::join_all(scopes.iter().map(|scope| async {
-                        let sharing = store
-                            .seeding_items(*scope)
-                            .await
-                            .ok()
-                            .map(|items| items.len());
-                        (*scope, sharing)
-                    })),
-                );
+                let (endpoints, counts) =
+                    tokio::join!(
+                        futures::future::join_all(peers.iter().map(|peer| async {
+                            store.peer_endpoints(peer.id).await.unwrap_or_default()
+                        })),
+                        futures::future::join_all(scopes.iter().map(|scope| async {
+                            (*scope, store.seeding_summary(*scope).await.ok())
+                        })),
+                    );
                 let endpoints = peers
                     .iter()
                     .zip(endpoints)
@@ -368,10 +364,14 @@ fn row(
     peer: &Peer,
     endpoints: &[sharerr_store::PeerEndpoint],
     gossip_key_set: bool,
-    sharing: Option<usize>,
+    sharing: Option<SeedingSummary>,
 ) -> PeerRow {
     PeerRow {
-        sharing,
+        sharing: sharing.map(|summary| summary.count.unsigned_abs() as usize),
+        sharing_size: sharing
+            .filter(|summary| summary.size > 0)
+            .map(|summary| super::items::human_size(summary.size.unsigned_abs()))
+            .unwrap_or_default(),
         id: peer.id,
         label: peer.label.clone(),
         scope: peer.scope.as_str(),

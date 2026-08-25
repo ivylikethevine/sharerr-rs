@@ -78,6 +78,7 @@ fn status_page() -> StatusPage {
         signed_in: true,
         glance: Some(Glance {
             items_shared: 128,
+            shared_size: "412.6 GiB".to_owned(),
             last_sync: Some("4 minutes ago".to_owned()),
             last_sync_note: "2 added, 1 failed".to_owned(),
             last_sync_failed: false,
@@ -101,6 +102,12 @@ fn status_page() -> StatusPage {
 
         diag: DiagnosticsData {
             services: vec![
+                service_line(
+                    "Torrent client",
+                    "Transmission v4.0.6 — reachable",
+                    true,
+                    "http://transmission.example:9091/",
+                ),
                 service_line(
                     "Sonarr",
                     "reachable, tag present",
@@ -129,6 +136,7 @@ fn status_page() -> StatusPage {
                 "/movies/Harborlight (2019)/Harborlight.mkv".to_owned(),
             ],
             more_missing: 0,
+            missing_total: 2,
             invalid: vec![],
             sample: Some(SampleRow {
                 arr: "/data/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
@@ -464,6 +472,7 @@ fn settings_page() -> SettingsPage {
             },
         ],
         secondary_arr_configured: true,
+        library_sources_configured: 4,
 
         torrent_backend: "transmission",
         // qBittorrent's key is set below while Transmission is selected, so
@@ -501,6 +510,7 @@ fn settings_page() -> SettingsPage {
         lighthouse_enabled: true,
         lighthouse_mount: "tracker",
         lighthouse_urls: "https://lighthouse.example:9443".to_owned(),
+        lighthouse_url_count: 1,
 
         gluetun_control_url: "http://gluetun.example:8000".to_owned(),
         gluetun_enabled: true,
@@ -546,7 +556,9 @@ fn settings_page() -> SettingsPage {
                 sharerr: "/media/movies".to_owned(),
                 qbit: "/downloads/movies".to_owned(),
             },
+            PathRow::default(),
         ],
+        path_map_count: 2,
 
         min_password_len: 12,
 
@@ -585,6 +597,7 @@ fn peers_page() -> PeersPage {
                 last_seen_absolute: "2024-05-06 11:10:52 UTC".to_owned(),
                 revoked: false,
                 sharing: Some(41),
+                sharing_size: "412.6 GiB".to_owned(),
                 revoked_when: String::new(),
                 pubkey_short: Some("a1b2c3d4…e5f6".to_owned()),
                 gossip_url: "https://sams-sharerr.example:8477".to_owned(),
@@ -615,6 +628,7 @@ fn peers_page() -> PeersPage {
                 last_seen_absolute: String::new(),
                 revoked: false,
                 sharing: Some(128),
+                sharing_size: "298.1 GiB".to_owned(),
                 revoked_when: String::new(),
                 pubkey_short: None,
                 gossip_url: String::new(),
@@ -632,6 +646,7 @@ fn peers_page() -> PeersPage {
                 last_seen_absolute: "2023-12-19 07:55:38 UTC".to_owned(),
                 revoked: true,
                 sharing: None,
+                sharing_size: String::new(),
                 revoked_when: "5 months ago".to_owned(),
                 pubkey_short: Some("9f8e7d6c…1a2b".to_owned()),
                 gossip_url: String::new(),
@@ -681,6 +696,10 @@ fn items_page() -> ItemsPage {
                 visible_to: "Sam, Alex".to_owned(),
                 since: "3 months ago".to_owned(),
                 info_hash: Some("ab".repeat(20)),
+                info_hash_short: Some("abababababab".to_owned()),
+                peers: "2↑ 1↓".to_owned(),
+                peers_hint: "2 seeding · 1 downloading".to_owned(),
+                source_hint: "Sonarr series 42, file 1337".to_owned(),
                 announce_url: Some("http://seed.example.com:51413/announce/9f2a7c4e".to_owned()),
                 token_fp: Some("9f2a7c4e".to_owned()),
                 token_status: TokenStatus::Valid,
@@ -701,6 +720,10 @@ fn items_page() -> ItemsPage {
                 visible_to: "Sam".to_owned(),
                 since: "1 month ago".to_owned(),
                 info_hash: Some("cd".repeat(20)),
+                info_hash_short: Some("cdcdcdcdcdcd".to_owned()),
+                peers: "1↑ 0↓".to_owned(),
+                peers_hint: "1 seeding · 0 downloading".to_owned(),
+                source_hint: "Radarr movie 7, file 91".to_owned(),
                 announce_url: Some("http://seed.example.com:51413/announce/OLDTOKEN12".to_owned()),
                 token_fp: Some("OLDTOKEN12".to_owned()),
                 token_status: TokenStatus::Stale,
@@ -723,6 +746,10 @@ fn items_page() -> ItemsPage {
                 visible_to: String::new(),
                 since: "2 minutes ago".to_owned(),
                 info_hash: None,
+                info_hash_short: None,
+                peers: String::new(),
+                peers_hint: String::new(),
+                source_hint: "Sonarr series 42, file 2051".to_owned(),
                 announce_url: None,
                 token_fp: None,
                 token_status: TokenStatus::None,
@@ -743,6 +770,10 @@ fn items_page() -> ItemsPage {
                 visible_to: String::new(),
                 since: "40 minutes ago".to_owned(),
                 info_hash: None,
+                info_hash_short: None,
+                peers: String::new(),
+                peers_hint: String::new(),
+                source_hint: "Lidarr artist 5, file 610".to_owned(),
                 announce_url: None,
                 token_fp: None,
                 token_status: TokenStatus::None,
@@ -765,6 +796,10 @@ fn items_page() -> ItemsPage {
                 visible_to: "no friend's scope covers it".to_owned(),
                 since: "6 days ago".to_owned(),
                 info_hash: Some("ef".repeat(20)),
+                info_hash_short: Some("efefefefefef".to_owned()),
+                peers: "".to_owned(),
+                peers_hint: "".to_owned(),
+                source_hint: "Readarr author 3, file 12".to_owned(),
                 announce_url: Some("http://seed.example.com:51413/announce/9f2a7c4e".to_owned()),
                 token_fp: Some("9f2a7c4e".to_owned()),
                 token_status: TokenStatus::Valid,
@@ -776,6 +811,8 @@ fn items_page() -> ItemsPage {
         ],
         total: 132,
         shown: 5,
+        seeding_size: "412.6 GiB".to_owned(),
+        shown_size: "12.0 GiB".to_owned(),
         source_options: vec![
             FilterOption {
                 value: "",
@@ -816,8 +853,16 @@ fn items_page() -> ItemsPage {
                 label: "Failed".to_owned(),
             },
         ],
+        kind_options: crate::web::items::KINDS
+            .iter()
+            .map(|k| FilterOption {
+                value: k,
+                label: format!("{}{}", k[..1].to_uppercase(), &k[1..]),
+            })
+            .collect(),
         source_filter: String::new(),
         state_filter: String::new(),
+        kind_filter: String::new(),
         q: String::new(),
         // Built from the real column list rather than a hand-written subset:
         // the table's header count has to match its body's cell count, and a

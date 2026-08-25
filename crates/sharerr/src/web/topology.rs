@@ -675,7 +675,7 @@ fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> 
     };
 
     SourceNode {
-        label: truncate(&label),
+        label,
         icon: NodeIcon::Arr,
         lines,
         status,
@@ -720,7 +720,7 @@ fn library_node(path: &Path, outcome: &DirOutcome) -> SourceNode {
     };
 
     SourceNode {
-        label: truncate(&label),
+        label,
         icon: NodeIcon::Library,
         lines,
         status,
@@ -759,7 +759,7 @@ async fn friend_nodes(state: &WebState) -> Vec<FriendNode> {
 
 fn friend_node(label: &str, endpoints: &[PeerEndpoint], accent: &'static str) -> FriendNode {
     FriendNode {
-        label: truncate(label),
+        label: label.to_owned(),
         accent,
         indexer: channel(endpoints, EndpointKind::Api),
         client: channel(endpoints, EndpointKind::Client),
@@ -953,7 +953,8 @@ pub(crate) fn layout(
             w: COL_W,
             h: *h,
             icon: source.icon,
-            label: source.label.clone(),
+            label: truncate(&source.label),
+            full_label: source.label.clone(),
             lines: placed(&source.lines, y),
             status: source.status,
             accent: source.accent,
@@ -972,6 +973,7 @@ pub(crate) fn layout(
         h: sharerr_h,
         icon: NodeIcon::Instance,
         label: "sharerr".to_owned(),
+        full_label: "sharerr".to_owned(),
         lines: placed(instance_lines, sharerr_y),
         status: instance_status,
         accent: ACCENT_INSTANCE,
@@ -983,7 +985,8 @@ pub(crate) fn layout(
         w: COL_W,
         h: client_h,
         icon: NodeIcon::Client,
-        label: client_label.to_owned(),
+        label: truncate(client_label),
+        full_label: client_label.to_owned(),
         lines: placed(client_lines, client_y),
         status: client_status,
         accent: ACCENT_CLIENT,
@@ -1029,7 +1032,8 @@ pub(crate) fn layout(
             w: COL_W,
             h: *h,
             icon: NodeIcon::Friend,
-            label: friend.label.clone(),
+            label: truncate(&friend.label),
+            full_label: friend.label.clone(),
             lines: place(lines, y),
             status,
             accent: friend.accent,

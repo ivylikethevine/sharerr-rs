@@ -44,7 +44,7 @@
 
       {% for node in nodes %}
       <g class="topo-node topo-node--{{ node.status.css_class() }}" data-lane="{{ node.lane.as_str() }}">
-        <title>{{ node.label }}{% for l in node.lines %} — {% if !l.tag.is_empty() %}{{ l.tag }}: {% endif %}{{ l.text }}{% endfor %}</title>
+        <title>{{ node.full_label }}{% for l in node.lines %} — {% if !l.tag.is_empty() %}{{ l.tag }}: {% endif %}{{ l.text }}{% endfor %}</title>
         <rect class="topo-node-box" x="{{ node.x }}" y="{{ node.y }}" width="{{ node.w }}" height="{{ node.h }}" rx="10"></rect>
         <rect class="topo-node-accent" x="{{ node.x }}" y="{{ node.y }}" width="5" height="{{ node.h }}" rx="2.5" fill="{{ node.accent }}"></rect>
         <path class="topo-icon" d="{{ node.icon.path() }}" stroke="{{ node.accent }}"

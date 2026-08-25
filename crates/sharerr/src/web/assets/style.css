@@ -326,6 +326,10 @@ details.fold > summary:hover { color: var(--accent); }
 .lede { color: var(--muted); font-size: var(--text-lg); max-width: 42rem; }
 .hint { color: var(--muted); }
 .hint { font-size: var(--text-sm); }
+/* A paragraph of hint text on a wide screen otherwise runs the full panel —
+   150+ characters a line at 1440px, which is past what reads comfortably.
+   Paragraphs only: a `label.hint` holds a checkbox row, a `span.hint` a cell. */
+p.hint { max-width: 70ch; }
 
 /* `em` rather than a spacing token on purpose: a `<code>` pill has to shrink
    with the text around it, so the same rule works inside a `<th>` and inside a
@@ -823,6 +827,74 @@ td.title .hint:not(:has(code)) { overflow-wrap: anywhere; }
 }
 .quicknav a:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-wash); }
 
+/* The Settings page's strip stays put under the top bar while its sections
+   scroll past. `--bar-h` is the measured height of `.bar` (set by a script on
+   that page; this is the fallback for one unwrapped row). Below `.bar`'s
+   z-index so the bar still paints over it, above the panels. The pills wrap
+   into two rows in the content column; on a narrow screen they scroll
+   sideways in one row instead, rather than stacking into a block that would
+   eat half the viewport. */
+:root { --bar-h: 3.5rem; }
+.quicknav--sticky {
+  position: sticky;
+  top: var(--bar-h);
+  z-index: 9;
+  /* Negative inline margins let the strip's background run to the page
+     edge; the padding puts the pills back where they were. */
+  margin-inline: calc(-1 * var(--sp-5));
+  padding: var(--sp-2) var(--sp-5);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+.quicknav--sticky a { white-space: nowrap; }
+@media (max-width: 40rem) {
+  .quicknav--sticky {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .quicknav--sticky::-webkit-scrollbar { display: none; }
+}
+
+/* The Debug page's script: wrapped rather than scrolled, so no line is ever
+   hidden off the right edge — the block is there to be read, and copying
+   takes the text, not the layout. */
+pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A section heading that is an anchor target lands under both sticky bars
+   rather than behind them. `--quicknav-h` is measured by the same script as
+   `--bar-h` — the strip wraps to two rows in the content column, so its
+   height is not a constant either. */
+:root { --quicknav-h: 3rem; }
+main :is(h2, h3, details.fold)[id] {
+  scroll-margin-top: calc(var(--bar-h) + var(--quicknav-h) + var(--sp-3));
+}
+
+/* A section's state, summarised on its heading: `--set` is healthy, `--unset`
+   a feature not in use (neutral, not a fault), `--warn` something to look at.
+   Right-aligned, so the headings alone read as a status column. */
+h2:has(> .section-chip), h3:has(> .section-chip) {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.section-chip {
+  margin-left: auto;
+  display: inline-block;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.4;
+  padding: var(--sp-05) var(--sp-2);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.section-chip--set   { background: var(--ok-bg);   color: var(--ok-ink); }
+.section-chip--unset { background: transparent;    color: var(--muted); border: 1px solid var(--line-strong); }
+.section-chip--warn  { background: var(--warn-bg); color: var(--warn-ink); }
+
 /* A pill strip introduces what follows it, so it wants more air below than the
    flow default — expressed on the *next* block, so only one side of the gap
    ever carries a margin and neighbours can never disagree. */
@@ -904,6 +976,9 @@ td.actions > * + * { margin-left: var(--sp-3); }
 
 @media (max-width: 32rem) {
   main { padding: var(--sp-6) var(--sp-4) 4rem; }
+  /* Keeps the strip's edge-to-edge background in step with main's narrower
+     padding, or it overhangs the page by the difference. */
+  .quicknav--sticky { margin-inline: calc(-1 * var(--sp-4)); padding-inline: var(--sp-4); }
   .bar { padding: var(--sp-3) var(--sp-4); }
   h1 { font-size: var(--text-xl); }
 }

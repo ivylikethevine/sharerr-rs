@@ -15,6 +15,8 @@ use serde::Deserialize;
 use sharerr_core::{MediaSource, ShareState, SharedItem};
 use sharerr_store::{Peer, PeerScope};
 
+use std::collections::HashMap;
+
 use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
@@ -27,6 +29,8 @@ pub struct ItemsQuery {
     #[serde(default)]
     state: String,
     #[serde(default)]
+    kind: String,
+    #[serde(default)]
     q: String,
     #[serde(default)]
     sort: String,
@@ -34,7 +38,6 @@ pub struct ItemsQuery {
     dir: String,
 }
 
-/// Sortable columns, in the order the header row offers them.
 /// The tooltip for each sortable header — kept beside the column list so a
 /// column added there gets its sentence here, and the template stays free of
 /// per-column branches.
@@ -53,6 +56,7 @@ pub(crate) fn column_hint(field: &str) -> &'static str {
     }
 }
 
+/// Sortable columns, in the order the header row offers them.
 pub(crate) const SORT_COLUMNS: &[(&str, &str)] = &[
     ("since", "Since"),
     ("title", "Title"),
@@ -60,6 +64,10 @@ pub(crate) const SORT_COLUMNS: &[(&str, &str)] = &[
     ("size", "Size"),
     ("state", "State"),
 ];
+
+/// Every kind a `MediaSpec` can be, in the order the filter offers them —
+/// the same tags `MediaSpec::kind_tag` returns.
+pub(crate) const KINDS: &[&str] = &["episode", "movie", "track", "book"];
 
 pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>) -> Response {
     let store = match state.store_or_503().await {
@@ -87,6 +95,13 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
             })
         })
         .collect();
+    // Also over the whole library: "how much am I actually seeding" is the
+    // second half of the same question the tally answers.
+    let seeding_bytes: u64 = items
+        .iter()
+        .filter(|item| item.state == ShareState::Seeding)
+        .map(|item| item.size)
+        .sum();
 
     let needle = query.q.trim().to_lowercase();
     if !needle.is_empty() {
@@ -101,6 +116,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     if !query.state.is_empty() {
         items.retain(|item| item.state.as_str() == query.state);
     }
+    if !query.kind.is_empty() {
+        items.retain(|item| item.spec.kind_tag() == query.kind);
+    }
+    let shown_bytes: u64 = items.iter().map(|item| item.size).sum();
 
     // Default view is newest first, matching the order the sync log reports
     // things in. An explicit sort overrides it; the header links below always
@@ -139,6 +158,25 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         .tracker_token()
         .await
         .map(|token| crate::sync::fingerprint(&token));
+    // The tracker's own view of who is in each swarm right now — first-hand,
+    // in memory, and only present for torrents with at least one live peer,
+    // so a miss below means "nobody", not "unknown".
+    let swarms: HashMap<String, SwarmCount> = state
+        .serve
+        .swarms()
+        .snapshots()
+        .await
+        .into_iter()
+        .map(|swarm| {
+            (
+                hex::encode(swarm.info_hash),
+                SwarmCount {
+                    complete: swarm.complete,
+                    incomplete: swarm.incomplete,
+                },
+            )
+        })
+        .collect();
 
     let sort_links = SORT_COLUMNS
         .iter()
@@ -160,9 +198,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                 label,
                 hint: column_hint(field),
                 href: format!(
-                    "?source={}&state={}&q={}&sort={field}&dir={next_dir}",
+                    "?source={}&state={}&kind={}&q={}&sort={field}&dir={next_dir}",
                     urlencode(&query.source),
                     urlencode(&query.state),
+                    urlencode(&query.kind),
                     urlencode(&query.q),
                 ),
                 active,
@@ -181,14 +220,22 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         total,
         shown: items.len(),
         state_counts,
+        seeding_size: human_size(seeding_bytes),
+        shown_size: human_size(shown_bytes),
         items: items
             .iter()
             .map(|item| {
+                let swarm = item
+                    .info_hash
+                    .as_deref()
+                    .and_then(|hash| swarms.get(&hash.to_lowercase()))
+                    .copied();
                 row(
                     item,
                     &active,
                     announce_url.as_deref(),
                     current_token_fp.as_deref(),
+                    swarm,
                 )
             })
             .collect(),
@@ -206,8 +253,16 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                 label: title_case(s.as_str()),
             })
             .collect(),
+        kind_options: KINDS
+            .iter()
+            .map(|k| FilterOption {
+                value: k,
+                label: title_case(k),
+            })
+            .collect(),
         source_filter: query.source,
         state_filter: query.state,
+        kind_filter: query.kind,
         q: query.q,
         sort_links,
     })
@@ -272,12 +327,44 @@ fn visible_to(item: &SharedItem, peers: &[Peer]) -> String {
     }
 }
 
+/// Live seeder/leecher counts for one swarm, as the tracker sees them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SwarmCount {
+    pub complete: usize,
+    pub incomplete: usize,
+}
+
+/// `"2↑ 1↓"` for the column and `"2 seeding · 1 downloading"` for its
+/// tooltip. Empty when nobody is in the swarm — the template renders the dash
+/// itself, so the cell reads the same as every other "nothing here" on the page.
+fn peers_cell(swarm: Option<SwarmCount>) -> (String, String) {
+    match swarm {
+        Some(SwarmCount {
+            complete,
+            incomplete,
+        }) => (
+            format!("{complete}↑ {incomplete}↓"),
+            format!("{complete} seeding · {incomplete} downloading"),
+        ),
+        None => (String::new(), String::new()),
+    }
+}
+
+/// The first 12 hex characters, or the whole thing if somehow shorter: enough
+/// to tell two torrents apart at a glance, narrow enough not to squeeze the
+/// title column. The full hash stays on hover and behind the copy button.
+fn short_hash(hash: &str) -> String {
+    hash.get(..12).unwrap_or(hash).to_owned()
+}
+
 fn row(
     item: &SharedItem,
     peers: &[Peer],
     announce_url: Option<&str>,
     current_token_fp: Option<&str>,
+    swarm: Option<SwarmCount>,
 ) -> ItemRow {
+    let (peers_live, peers_hint) = peers_cell(swarm);
     ItemRow {
         title: item.spec.title().to_owned(),
         release_title: item.release_title.clone(),
@@ -290,6 +377,23 @@ fn row(
         visible_to: visible_to(item, peers),
         since: item.created_at.map(ago).unwrap_or_default(),
         info_hash: item.info_hash.clone(),
+        info_hash_short: item.info_hash.as_deref().map(short_hash),
+        peers: peers_live,
+        peers_hint,
+        // The *arr's own identifiers — the join key an operator greps its
+        // logs for when a row here and an entry there disagree.
+        source_hint: format!(
+            "{} {} {}, file {}",
+            title_case(item.source.as_str()),
+            match item.spec {
+                sharerr_core::MediaSpec::Episode { .. } => "series",
+                sharerr_core::MediaSpec::Movie { .. } => "movie",
+                sharerr_core::MediaSpec::Track { .. } => "artist",
+                sharerr_core::MediaSpec::Book { .. } => "author",
+            },
+            item.source_id,
+            item.file_id
+        ),
         // A torrent with no info hash has not been built yet, so there is
         // nothing meaningful to announce either — `None` regardless of
         // whether the tracker itself is configured.
@@ -541,6 +645,45 @@ mod tests {
     }
 
     #[test]
+    fn a_swarm_renders_compactly_with_the_long_form_on_hover() {
+        let (cell, hint) = peers_cell(Some(SwarmCount {
+            complete: 2,
+            incomplete: 1,
+        }));
+        assert_eq!(cell, "2↑ 1↓");
+        assert_eq!(hint, "2 seeding · 1 downloading");
+        assert_eq!(peers_cell(None), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn a_short_hash_is_twelve_characters_and_never_panics_on_less() {
+        assert_eq!(short_hash(&"ab".repeat(20)), "abababababab");
+        assert_eq!(short_hash("abc"), "abc");
+    }
+
+    /// `source_id`/`file_id` are what an operator greps *arr logs for, so
+    /// they ride along on the source cell's tooltip.
+    #[test]
+    fn a_row_names_the_arr_identifiers_in_the_source_hint() {
+        let it = SharedItem {
+            source_id: 42,
+            file_id: 1337,
+            ..item(
+                MediaSource::Sonarr,
+                MediaSpec::Episode {
+                    series_title: "X".to_owned(),
+                    season: 1,
+                    episode: 1,
+                },
+                ShareState::Seeding,
+            )
+        };
+        let row = row(&it, &[], None, None, None);
+        assert_eq!(row.source_hint, "Sonarr series 42, file 1337");
+        assert_eq!(row.info_hash_short, None);
+    }
+
+    #[test]
     fn only_pending_and_unshared_get_a_hint() {
         assert!(state_hint(ShareState::Pending).is_some());
         assert!(state_hint(ShareState::Unshared).is_some());
@@ -587,7 +730,7 @@ mod tests {
         source_item.release_title = "Harborlight.2019.2160p-SYNTH".to_owned();
         source_item.arr_path = "/data/movies/Harborlight (2019)/Harborlight.mkv".into();
 
-        let row = row(&source_item, &[], None, None);
+        let row = row(&source_item, &[], None, None, None);
 
         assert_eq!(row.release_title, "Harborlight.2019.2160p-SYNTH");
         assert_eq!(
@@ -609,13 +752,13 @@ mod tests {
         };
 
         let mine = item(MediaSource::Radarr, spec.clone(), ShareState::Seeding);
-        assert!(row(&mine, &[], None, None).created_by_sharerr);
+        assert!(row(&mine, &[], None, None, None).created_by_sharerr);
 
         let reused = SharedItem {
             created_by_sharerr: false,
             ..item(MediaSource::Radarr, spec, ShareState::Seeding)
         };
-        assert!(!row(&reused, &[], None, None).created_by_sharerr);
+        assert!(!row(&reused, &[], None, None, None).created_by_sharerr);
     }
 
     #[tokio::test]
@@ -782,6 +925,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filtering_by_kind_narrows_the_list() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&SharedItem {
+                spec: MediaSpec::Episode {
+                    series_title: "Lanternwick Hollow".to_owned(),
+                    season: 1,
+                    episode: 1,
+                },
+                ..named(MediaSource::Sonarr, "unused", 1)
+            })
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Harborlight", 2))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    kind: "movie".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("Harborlight"), "{html}");
+        assert!(!html.contains("Lanternwick Hollow"), "{html}");
+        // The sort links carry the kind along so re-sorting keeps the filter.
+        assert!(html.contains("kind=movie&#38;q="), "{html}");
+    }
+
+    /// The seeding total describes the library, the shown total the view.
+    #[tokio::test]
+    async fn the_summary_totals_the_seeding_size_and_the_shown_size() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        // Two seeding items at 1.5 GiB each, one failed one that must not count.
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+            .await
+            .unwrap();
+        store
+            .upsert(&named(MediaSource::Radarr, "Harborlight", 2))
+            .await
+            .unwrap();
+        store
+            .upsert(&SharedItem {
+                state: ShareState::Failed,
+                ..named(MediaSource::Radarr, "Broken", 3)
+            })
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            page(
+                State(state),
+                Query(ItemsQuery {
+                    source: "sonarr".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("3.0 GiB seeding"), "{html}");
+        assert!(html.contains("1 of 3"), "{html}");
+        assert!(html.contains("1.5 GiB shown"), "{html}");
+    }
+
+    /// A live swarm shows up against its row, matched on the stored hex hash.
+    #[tokio::test]
+    async fn a_live_swarm_is_counted_on_its_row() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let hash = "ab".repeat(20);
+        store
+            .upsert(&SharedItem {
+                info_hash: Some(hash.clone()),
+                ..named(MediaSource::Radarr, "Harborlight", 1)
+            })
+            .await
+            .unwrap();
+        store
+            .upsert(&SharedItem {
+                info_hash: Some("cd".repeat(20)),
+                ..named(MediaSource::Radarr, "Lonely", 2)
+            })
+            .await
+            .unwrap();
+        let raw = sharerr_torrent::announce::info_hash_from_hex(&hash).unwrap();
+        // `left=0` marks a seeder, which is what a friend who finished looks like.
+        let request = sharerr_torrent::AnnounceRequest {
+            info_hash: raw,
+            peer_id: [1; 20],
+            port: 6881,
+            left: 0,
+            event: sharerr_torrent::Event::None,
+            compact: true,
+            numwant: 50,
+            declared_ip: None,
+        };
+        serve
+            .swarms()
+            .announce(&request, "203.0.113.1:6881".parse().unwrap())
+            .await;
+        let state = web_state(serve);
+
+        let html = body_of(page(State(state), Query(ItemsQuery::default())).await).await;
+        assert!(html.contains("1↑ 0↓"), "{html}");
+        assert!(html.contains("1 seeding · 0 downloading"), "{html}");
+        // The first twelve characters are visible; the whole hash is on hover.
+        assert!(html.contains(">abababababab<"), "{html}");
+        assert!(html.contains(&format!("title=\"{hash}\"")), "{html}");
+    }
+
+    #[tokio::test]
     async fn sorting_by_title_ascending_orders_the_rows() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
@@ -813,15 +1081,15 @@ mod tests {
         assert!(apple_at < zebra_at, "{html}");
     }
 
-    /// The header row is `sort_links` plus four fixed columns, and the body
-    /// row is nine cells — so a `sort_links` of any other length silently
+    /// The header row is `sort_links` plus five fixed columns, and the body
+    /// row is ten cells — so a `sort_links` of any other length silently
     /// renders every header against the wrong column. `commands::preview`
     /// shipped exactly that bug by hand-writing three of the five, which is
     /// why this asserts on the constant rather than on one page render.
     #[test]
     fn the_sortable_columns_plus_the_fixed_ones_match_the_body_row() {
-        const FIXED_HEADERS: usize = 4; // Visible to, Info hash, Announce URL, Token
-        const BODY_CELLS: usize = 9;
+        const FIXED_HEADERS: usize = 5; // Peers, Visible to, Info hash, Announce URL, Token
+        const BODY_CELLS: usize = 10;
 
         assert_eq!(
             SORT_COLUMNS.len() + FIXED_HEADERS,

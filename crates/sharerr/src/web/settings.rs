@@ -1417,6 +1417,8 @@ async fn build_page(
     let secondary_arr_configured = arrs
         .iter()
         .any(|arr| !arr.primary && (!arr.url.is_empty() || arr.key_set));
+    let library_sources_configured =
+        arrs.iter().filter(|arr| !arr.url.is_empty()).count() + config.library.len();
 
     // The one state where what is on disk and what the page renders disagree, so
     // the operator has to be told which of the two a save keeps — and where the
@@ -1449,6 +1451,7 @@ async fn build_page(
 
         arrs,
         secondary_arr_configured,
+        library_sources_configured,
 
         torrent_backend: config.torrent_backend.as_str(),
         unselected_client_configured: unselected_client_configured(&config, &is_set),
@@ -1504,6 +1507,7 @@ async fn build_page(
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n"),
+        lighthouse_url_count: config.lighthouse.urls.len(),
         gluetun_control_url: url_or_empty(config.gluetun.control_url.as_ref()),
         gluetun_enabled: config.gluetun.enabled,
         gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
@@ -1542,6 +1546,7 @@ async fn build_page(
             .collect(),
 
         path_map: path_rows(&config),
+        path_map_count: config.path_map.len(),
 
         min_password_len: super::auth::MIN_PASSWORD_LEN,
         data_dir: config.data_dir.display().to_string(),

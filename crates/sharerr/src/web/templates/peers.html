@@ -78,7 +78,9 @@
   <table>
     <thead>
       <tr>
-        <th title="The name you gave them — nobody else sees it">Name</th><th title="Which sources their feed admits; content outside it is never listed or offered">Can see</th><th title="How many seeding items their scope admits right now">Sharing</th><th title="When their key was generated">Added</th><th title="When their key was last used against the feed">Last seen</th>
+        <th title="The name you gave them — nobody else sees it">Name</th><th title="Which sources their feed admits; content outside it is never listed or offered">Can see</th><th title="How many seeding items their scope admits right now, and their combined size">Sharing</th><th title="When their key was generated">Added</th><th title="When their key was last used against the feed">Last seen</th>
+        <th title="Whether their own sharerr has introduced itself to yours — friends who run sharerr exchange signed address records (gossip), so a moved address is found without anyone retyping it">Runs sharerr</th>
+        <th title="The most recent address this friend was seen at, and how">Last address</th>
         <th><span class="visually-hidden">Actions</span></th>
       </tr>
     </thead>
@@ -105,9 +107,23 @@
           </form>
           {% endif %}
         </td>
-        <td class="nowrap">{% if let Some(n) = peer.sharing %}{{ n }} item(s){% else %}<span class="hint">—</span>{% endif %}</td>
+        <td class="nowrap">{% if let Some(n) = peer.sharing %}{{ n }} item(s){% if !peer.sharing_size.is_empty() %} <span class="hint">· {{ peer.sharing_size }}</span>{% endif %}{% else %}<span class="hint">—</span>{% endif %}</td>
         <td class="nowrap" title="{{ peer.created_absolute }}">{{ peer.created }}</td>
         <td class="nowrap"{% if !peer.last_seen_absolute.is_empty() %} title="{{ peer.last_seen_absolute }}"{% endif %}>{{ peer.last_seen }}</td>
+        <td class="nowrap">
+          {% if let Some(pubkey) = peer.pubkey_short %}
+          <span class="ok" title="Their sharerr has introduced itself; this is a short form of its identity key">✓ <code>{{ pubkey }}</code></span>
+          {% else %}
+          <span class="hint" title="Their sharerr has not spoken to yours — they may only pull the feed from Prowlarr, or their instance is not set up yet">—</span>
+          {% endif %}
+        </td>
+        <td class="nowrap">
+          {% if let Some(latest) = peer.endpoints.first() %}
+          <code>{{ latest.addr }}</code> <span class="hint">{{ latest.kind }}, {{ latest.seen }}</span>
+          {% else %}
+          <span class="hint">—</span>
+          {% endif %}
+        </td>
         <td class="actions">
           {% if !peer.revoked %}
           <a href="/peers/{{ peer.id }}/feed" target="_blank" rel="noopener">View feed XML</a>
@@ -157,14 +173,6 @@
 <div class="panel">
   <h3>{{ peer.label }}</h3>
   <dl class="facts">
-    <dt>Identity</dt>
-    <dd>
-      {% if let Some(pubkey) = peer.pubkey_short %}
-      <code>{{ pubkey }}</code>
-      {% else %}
-      <span class="hint">not yet introduced — their sharerr has not spoken to yours</span>
-      {% endif %}
-    </dd>
     <dt>Seen at</dt>
     <dd>
       {% if peer.endpoints.is_empty() %}

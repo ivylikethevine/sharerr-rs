@@ -13,6 +13,10 @@
 {%- else %}<span class="field-status field-status--unset">not set</span>
 {%- endif %}
 {%- endmacro %}
+{#- A small right-aligned summary of a section's state, on its heading, so the
+    page can be skimmed from the headings alone. `set` is healthy, `unset` is
+    neutral (a feature simply not in use), `warn` is something to look at. #}
+{%- macro chip(state, text) %}<span class="section-chip section-chip--{{ state }}">{{ text }}</span>{% endmacro %}
 
 {% macro arr_section(arr) %}
 <form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
@@ -178,7 +182,7 @@
 {# Ordered required-first: everything above the "Optional" divider has to be
    right before sharerr shares anything at all, and everything below it has a
    working default or is a feature an instance can simply not use. #}
-<ul class="quicknav">
+<ul class="quicknav quicknav--sticky" aria-label="Settings sections">
   <li><a href="#general">General</a></li>
   <li><a href="#library-sources">Library sources</a></li>
   <li><a href="#torrent-client">Torrent client</a></li>
@@ -249,7 +253,10 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="library-sources">Library sources</h2>
+<h2 id="library-sources">Library sources
+  {%- if library_sources_configured == 0 %}{% call chip("warn", "none configured") %}{% endcall %}
+  {%- else if library_sources_configured == 1 %}{% call chip("set", "1 source") %}{% endcall %}
+  {%- else %}{% call chip("set", "{} sources"|format(library_sources_configured)) %}{% endcall %}{% endif %}</h2>
 <p class="hint">
   Where sharerr finds media to share: *arr apps, plain directories, or both —
   configure whichever you use and leave the rest blank. Without at least one of
@@ -258,7 +265,10 @@
 
 {% for arr in arrs %}
 {% if arr.primary %}
-<h3>{{ arr.title }}</h3>
+<h3>{{ arr.title }}
+  {%- if !arr.url.is_empty() && arr.key_set %}{% call chip("set", "configured · key set") %}{% endcall %}
+  {%- else if !arr.url.is_empty() %}{% call chip("warn", "URL set · no API key") %}{% endcall %}
+  {%- else %}{% call chip("unset", "not configured") %}{% endcall %}{% endif %}</h3>
 {% call arr_section(arr) %}{% endcall %}
 {% endif %}
 {% endfor %}
@@ -314,7 +324,17 @@
   <span id="test-library"></span>
 </form>
 
-<h2 id="torrent-client">Torrent client</h2>
+<h2 id="torrent-client">Torrent client
+  {%- if torrent_backend == "qbittorrent" %}
+    {%- if qbit_api_key_set %}{% call chip("set", "qBittorrent · key set") %}{% endcall %}
+    {%- else %}{% call chip("warn", "qBittorrent · no API key") %}{% endcall %}{% endif %}
+  {%- else if torrent_backend == "transmission" %}
+    {%- if transmission_password_set %}{% call chip("set", "Transmission · password set") %}{% endcall %}
+    {%- else %}{% call chip("warn", "Transmission · no password") %}{% endcall %}{% endif %}
+  {%- else %}
+    {%- if rtorrent_password_set %}{% call chip("set", "rTorrent · password set") %}{% endcall %}
+    {%- else %}{% call chip("unset", "rTorrent · no password") %}{% endcall %}{% endif %}
+  {%- endif %}</h2>
 <form method="post" action="/settings/torrent-backend" class="panel">
   <label for="torrent_backend">Which client actually seeds</label>
   <select id="torrent_backend" name="backend"
@@ -368,7 +388,11 @@
   {% endif %}
 </details>
 
-<h2 id="tracker">Tracker</h2>
+<h2 id="tracker">Tracker
+  {%- if tracker_advertised_host.is_empty() && tracker_advertised_url.is_empty() && !(gluetun_enabled && !gluetun_control_url.is_empty()) %}{% call chip("warn", "no advertised address") %}{% endcall %}
+  {%- else if tracker_token_previous_set %}{% call chip("warn", "token rotation in progress") %}{% endcall %}
+  {%- else if tracker_token_set %}{% call chip("set", "address set · token set") %}{% endcall %}
+  {%- else %}{% call chip("unset", "address set · no token") %}{% endcall %}{% endif %}</h2>
 <form method="post" action="/settings/tracker" class="panel">
   <p class="hint">
     sharerr serves announces itself, from this instance, whichever torrent client
@@ -463,7 +487,10 @@
 </form>
 {% endif %}
 
-<h2 id="path-mappings">Path mappings</h2>
+<h2 id="path-mappings">Path mappings
+  {%- if path_map_count == 0 %}{% call chip("unset", "none — paths agree") %}{% endcall %}
+  {%- else if path_map_count == 1 %}{% call chip("set", "1 rule") %}{% endcall %}
+  {%- else %}{% call chip("set", "{} rules"|format(path_map_count)) %}{% endcall %}{% endif %}</h2>
 <form method="post" action="/settings/paths" class="panel">
   <p class="hint">
     How the *arr apps, sharerr, and qBittorrent each see the same library. Leave
@@ -505,7 +532,9 @@
   can simply not use.
 </p>
 
-<h2 id="seeding">Seeding limits</h2>
+<h2 id="seeding">Seeding limits
+  {%- if seeding_upload_limit_kib.is_empty() && seeding_ratio_limit.is_empty() %}{% call chip("unset", "no caps") %}{% endcall %}
+  {%- else %}{% call chip("set", "limits set") %}{% endcall %}{% endif %}</h2>
 <form method="post" action="/settings/seeding" class="panel">
   <p class="hint">
     Applied once, when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent —
@@ -530,7 +559,11 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="gluetun">Gluetun</h2>
+<h2 id="gluetun">Gluetun
+  {%- if gluetun_control_url.is_empty() %}{% call chip("unset", "off") %}{% endcall %}
+  {%- else if !gluetun_enabled %}{% call chip("unset", "paused") %}{% endcall %}
+  {%- else if gluetun_last_error.is_some() %}{% call chip("warn", "polling · last poll failed") %}{% endcall %}
+  {%- else %}{% call chip("set", "polling") %}{% endcall %}{% endif %}</h2>
 <form method="post" action="/settings/gluetun" class="panel">
   <p class="hint">
     Behind a VPN with a forwarded port, the address friends reach you on changes
@@ -670,7 +703,12 @@
   </form>
 </details>
 
-<h2 id="lighthouse">Lighthouse</h2>
+<h2 id="lighthouse">Lighthouse
+  {%- if lighthouse_enabled && lighthouse_url_count > 0 %}{% call chip("set", "running · {} used"|format(lighthouse_url_count)) %}{% endcall %}
+  {%- else if lighthouse_enabled %}{% call chip("set", "running") %}{% endcall %}
+  {%- else if lighthouse_url_count == 1 %}{% call chip("set", "1 lighthouse used") %}{% endcall %}
+  {%- else if lighthouse_url_count > 1 %}{% call chip("set", "{} lighthouses used"|format(lighthouse_url_count)) %}{% endcall %}
+  {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</h2>
 <form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
@@ -717,7 +755,9 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="periodic-sync">Periodic sync</h2>
+<h2 id="periodic-sync">Periodic sync
+  {%- if sync_enabled %}{% call chip("set", "every {} s"|format(sync_interval_secs)) %}{% endcall %}
+  {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</h2>
 <form method="post" action="/settings/sync" class="panel">
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if sync_enabled %}checked{% endif %}
@@ -735,7 +775,14 @@
   <button type="submit">Save</button>
 </form>
 
-<h2 id="checks">Automatic checks</h2>
+{# The rest are rarely revisited once set, so they fold — the chip on each
+   summary says what is in effect without opening it. The id sits on the
+   <details> so the quick-nav anchor lands here; the script at the bottom
+   opens it when it is the target. #}
+<details class="fold" id="checks">
+  <summary>Automatic checks
+    {%- if checks_reachability %}{% call chip("set", "reachability on") %}{% endcall %}
+    {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</summary>
 <form method="post" action="/settings/checks" class="panel">
   <label class="hint">
     <input type="checkbox" name="reachability" value="1" {% if checks_reachability %}checked{% endif %}
@@ -754,8 +801,12 @@
   </p>
   <button type="submit">Save</button>
 </form>
+</details>
 
-<h2 id="notifications">Notifications</h2>
+<details class="fold" id="notifications">
+  <summary>Notifications
+    {%- if notifications_webhook_set %}{% call chip("set", "webhook set · {}"|format(notifications_kind)) %}{% endcall %}
+    {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</summary>
 <form method="post" action="/settings/notifications" class="panel">
   <p class="hint">
     A webhook fired when a sync fails outright, or when a friend has not been
@@ -795,8 +846,10 @@
 
   <button type="submit">Save</button>
 </form>
+</details>
 
-<h2 id="your-account">Your account</h2>
+<details class="fold" id="your-account">
+  <summary>Your account</summary>
 <form method="post" action="/settings/account/password" class="panel">
   <p class="hint">
     Changing this signs out every other session, here and elsewhere.
@@ -814,8 +867,10 @@
 
   <button type="submit">Change password</button>
 </form>
+</details>
 
-<h2>Fixed at startup</h2>
+<details class="fold" id="fixed-at-startup">
+  <summary>Fixed at startup</summary>
 <div class="panel">
   <p class="hint">
     These need a restart to change, so they are not editable here — a wrong bind
@@ -827,4 +882,42 @@
     <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>
   </dl>
 </div>
+</details>
+
+<script>
+// The section strip sticks just under the top bar, whose height depends on
+// whether its nav wrapped — measured rather than guessed, and re-measured
+// on resize. The strip's own height feeds the anchor offset the same way,
+// since it wraps too. Both have static fallbacks in the stylesheet for the
+// moment before this runs.
+(function () {
+  var bar = document.querySelector(".bar");
+  var strip = document.querySelector(".quicknav--sticky");
+  if (!bar || !strip) return;
+  var set = function () {
+    var root = document.documentElement.style;
+    root.setProperty("--bar-h", bar.offsetHeight + "px");
+    root.setProperty("--quicknav-h", strip.offsetHeight + "px");
+  };
+  set();
+  window.addEventListener("resize", set);
+})();
+
+// A folded section that is the anchor target opens itself, so a quick-nav
+// link to it lands on the form rather than on a closed summary.
+(function () {
+  var reveal = function () {
+    if (!location.hash) return;
+    var target = document.getElementById(location.hash.slice(1));
+    if (!target) return;
+    var fold = target.closest("details");
+    if (fold && !fold.open) {
+      fold.open = true;
+      target.scrollIntoView();
+    }
+  };
+  reveal();
+  window.addEventListener("hashchange", reveal);
+})();
+</script>
 {% endblock %}

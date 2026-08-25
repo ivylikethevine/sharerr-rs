@@ -8,7 +8,12 @@
 <dl class="stat-grid">
   <div class="stat">
     <dt title="Items with a torrent the client is seeding right now">Shared</dt>
-    <dd><strong>{{ glance.items_shared }}</strong> item(s) seeding</dd>
+    <dd>
+      <strong>{{ glance.items_shared }}</strong> item(s) seeding
+      {% if !glance.shared_size.is_empty() %}
+      <br><span class="hint" title="Combined size of every seeding item">{{ glance.shared_size }} on disk</span>
+      {% endif %}
+    </dd>
   </div>
   <div class="stat">
     <dt title="The most recent finished reconciliation pass">Last sync</dt>
@@ -272,9 +277,9 @@
 
 <h2>Services</h2>
 <div class="panel">
-  {% if diag.services.is_empty() %}
+  {% if diag.services.len() < 2 %}
   <p class="hint">Neither Sonarr nor Radarr is configured, so there is nothing to scan.</p>
-  {% else %}
+  {% endif %}
   <dl class="facts">
     {% for service in diag.services %}
     <dt>{{ service.name }}</dt>
@@ -288,7 +293,6 @@
     </dd>
     {% endfor %}
   </dl>
-  {% endif %}
 </div>
 
 <h2>Path mapping</h2>
@@ -320,7 +324,7 @@
   <p class="ok">All {{ diag.checked }} tagged file(s) are readable by sharerr.</p>
   {% else %}
   <p class="error">
-    {{ diag.missing.len() }} of {{ diag.checked }} tagged file(s) do not exist at the path
+    {{ diag.missing_total }} of {{ diag.checked }} tagged file(s) do not exist at the path
     sharerr resolved them to. sharerr cannot build a torrent for a file it cannot
     open, so these are not being shared.
   </p>
@@ -330,7 +334,7 @@
     {% endfor %}
   </ul>
   {% if diag.more_missing > 0 %}
-  <p class="hint">… and {{ diag.more_missing }} more.</p>
+  <p class="hint">… and {{ diag.more_missing }} more — the first {{ diag.missing.len() }} are listed.</p>
   {% endif %}
   <p class="hint">
     Fix the path mappings under <a href="/settings">Settings</a> so the *arr view

@@ -164,6 +164,10 @@ pub struct LighthouseRow {
 pub struct Glance {
     /// Items currently seeding.
     pub items_shared: i64,
+    /// Their combined size, pre-rendered ("412 GiB") — what "128 items"
+    /// amounts to on disk, which is the number a friend's quota actually
+    /// feels. Empty when nothing is seeding.
+    pub shared_size: String,
     /// Rendered relative time of the last finished sync, or `None` for never.
     pub last_sync: Option<String>,
     /// What that sync amounted to — "3 added, 1 failed" — or empty when it was
@@ -308,6 +312,9 @@ pub struct SettingsPage {
     /// secondary sections live in starts open in that case, because hiding a
     /// configured service behind a fold reads as it having vanished.
     pub secondary_arr_configured: bool,
+    /// How many library sources are set up at all — *arr apps with a URL plus
+    /// `[[library]]` directories — for the chip beside the section heading.
+    pub library_sources_configured: usize,
 
     /// `"qbittorrent"`, `"transmission"`, or `"rtorrent"` — which client
     /// `torrent_backend` currently selects to actually seed. Only this one's
@@ -375,6 +382,9 @@ pub struct SettingsPage {
     /// Lighthouse(s) this instance reports to and queries, one URL per line —
     /// see [`sharerr_core::config::LighthouseConfig::urls`].
     pub lighthouse_urls: String,
+    /// How many lines `lighthouse_urls` holds, for the section chip — a
+    /// template cannot count them itself.
+    pub lighthouse_url_count: usize,
 
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,
@@ -420,7 +430,11 @@ pub struct SettingsPage {
     /// One row per `[[library]]` directory, plus a spare blank row.
     pub libraries: Vec<LibraryRow>,
 
+    /// One row per configured mapping, plus a spare blank row.
     pub path_map: Vec<PathRow>,
+    /// The number of real rows in `path_map` (the spare excluded), for the
+    /// section chip.
+    pub path_map_count: usize,
 
     /// Stated on the change-password form so the rule is visible before the
     /// submission that would otherwise reject it. Comes from the constant the
@@ -504,9 +518,12 @@ pub struct DiagnosticsData {
     pub rules: usize,
     pub checked: usize,
     pub unmapped: usize,
-    /// Capped for display; `more_missing` carries the remainder.
+    /// Capped for display; `more_missing` carries the remainder and
+    /// `missing_total` the sum — the count sentence must name the total,
+    /// not the length of the capped list.
     pub missing: Vec<String>,
     pub more_missing: usize,
+    pub missing_total: usize,
     pub invalid: Vec<String>,
     pub sample: Option<SampleRow>,
     /// Files that resolved to something sharerr can actually open.
@@ -587,6 +604,9 @@ pub struct PeerRow {
     /// `None` when the store could not say. What "Can see: TV only"
     /// actually amounts to in files.
     pub sharing: Option<usize>,
+    /// The combined size of those items, pre-rendered ("41 GiB"). Empty
+    /// when `sharing` is `None` or nothing is admitted.
+    pub sharing_size: String,
     /// When the key was revoked, rendered relative — stored all along and never
     /// shown, so "(revoked)" gave no clue whether it happened today or a year
     /// ago. Empty for a friend who is not revoked.
@@ -692,6 +712,18 @@ pub struct ItemRow {
     pub since: String,
     /// The full 40-character hash, or `None` before a torrent exists.
     pub info_hash: Option<String>,
+    /// The first twelve characters of `info_hash`, for the cell itself; the
+    /// full value rides on the tooltip and the copy button.
+    pub info_hash_short: Option<String>,
+    /// `"2↑ 1↓"`: who the tracker currently sees in this torrent's swarm.
+    /// Empty when nobody is announcing, which the template shows as a dash.
+    pub peers: String,
+    /// The long form of `peers` — `"2 seeding · 1 downloading"` — for hover.
+    pub peers_hint: String,
+    /// `"Sonarr series 42, file 1337"`: the *arr's own identifiers, shown on
+    /// hover over the source cell because they are what an operator greps
+    /// the *arr's logs for.
+    pub source_hint: String,
     /// Where this torrent currently announces — the same URL a freshly built
     /// torrent would carry, computed live rather than stored, since it tracks
     /// whatever the endpoint currently resolves to. `None` before a torrent
@@ -903,7 +935,10 @@ pub struct Node {
     /// The glyph drawn beside the label, naming what *kind* of thing this is
     /// without spending a word on it.
     pub icon: NodeIcon,
+    /// Fitted to the box width — see `topology::truncate`.
     pub label: String,
+    /// The untruncated name, for the box's tooltip.
+    pub full_label: String,
     /// Detail rows under the label, each with its own short tag naming what
     /// the value is ("url", "indexer", "client") — an unlabelled address is
     /// the thing this page was hardest to read without.
@@ -1162,10 +1197,16 @@ pub struct ItemsPage {
     /// is applied. "128 of 132 seeding" is the question the page exists to
     /// answer, and it was previously only derivable by filtering four times.
     pub state_counts: Vec<StateCount>,
+    /// Bytes across every `Seeding` item in the library, before filters, and
+    /// across the rows currently shown — both via `web::items::human_size`.
+    pub seeding_size: String,
+    pub shown_size: String,
     pub source_options: Vec<FilterOption>,
     pub state_options: Vec<FilterOption>,
+    pub kind_options: Vec<FilterOption>,
     pub source_filter: String,
     pub state_filter: String,
+    pub kind_filter: String,
     pub q: String,
     pub sort_links: Vec<SortLink>,
 }

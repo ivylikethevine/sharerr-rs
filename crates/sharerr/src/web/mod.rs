@@ -240,7 +240,18 @@ async fn glance(
 ) -> Option<crate::web::templates::Glance> {
     let store = state.serve.store().await.ok()?;
 
-    let items_shared = store.count_seeding().await.unwrap_or(0);
+    // One aggregate for both the count and the size — `PeerScope::All`
+    // admits every source, so this is the whole seeding set.
+    let seeding = store
+        .seeding_summary(sharerr_store::PeerScope::All)
+        .await
+        .unwrap_or_default();
+    let items_shared = seeding.count;
+    let shared_size = if seeding.size > 0 {
+        items::human_size(seeding.size.unsigned_abs())
+    } else {
+        String::new()
+    };
 
     // The most recent *finished* run. An in-flight run has no outcome yet, and
     // "last sync: just now" while it still churns would overpromise.
@@ -294,6 +305,7 @@ async fn glance(
 
     Some(crate::web::templates::Glance {
         items_shared,
+        shared_size,
         last_sync,
         last_sync_note,
         last_sync_failed,

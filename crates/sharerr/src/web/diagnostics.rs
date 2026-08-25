@@ -22,7 +22,7 @@ use super::peers::ago;
 use super::templates::{
     DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunRow, SampleRow, ServiceLine,
 };
-use crate::checks::{self, ArrOutcome, DirOutcome};
+use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
 
 /// How many problem paths to name before summarising the rest.
@@ -54,8 +54,9 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     let config = &config;
     let tracker_endpoint = state.serve.endpoint_for(GluetunTarget::Tracker);
     let client_endpoint = state.serve.endpoint_for(GluetunTarget::Client);
-    let (snapshot, runs, tracker, client) = tokio::join!(
+    let (snapshot, torrent_client, runs, tracker, client) = tokio::join!(
         checks::snapshot(config, &api_key),
+        torrent_client_line(config, &api_key),
         recent_run_rows(state),
         endpoint_status(
             display_label(GluetunTarget::Tracker),
@@ -77,10 +78,14 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         paths,
     } = snapshot;
 
-    let mut services: Vec<ServiceLine> = sources
-        .iter()
-        .map(|(kind, outcome)| describe(*kind, config, outcome))
-        .collect();
+    // The client leads: it is the one service every install has, and the
+    // one whose absence stops everything else from mattering.
+    let mut services = vec![torrent_client];
+    services.extend(
+        sources
+            .iter()
+            .map(|(kind, outcome)| describe(*kind, config, outcome)),
+    );
     match &libraries {
         checks::LibraryScan::Scanned(scanned) => {
             services.extend(
@@ -119,6 +124,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
             .map(|path| path.display().to_string())
             .collect(),
         more_missing,
+        missing_total: paths.missing.len(),
         invalid: paths.invalid.iter().take(MAX_LISTED).cloned().collect(),
         readable: paths.readable(),
         healthy: !paths.is_failure(),
@@ -236,6 +242,45 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
             }
         })
         .collect()
+}
+
+/// The torrent client's line in the services list: sign in and read its
+/// version, the same probe `doctor` and the topology page run. Reachable
+/// *arr apps mean nothing if the client that seeds is not.
+async fn torrent_client_line(
+    config: &Config,
+    secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
+) -> ServiceLine {
+    let backend = config.torrent_backend;
+    let client = config.torrent_client_for(backend);
+    let credential = checks::resolve_torrent_credential(&client, secret);
+    let outcome = checks::check_qbit(backend, client.url, client.username, credential).await;
+
+    let (message, ok) = match outcome {
+        QbitOutcome::Ready { version, kind, .. } => {
+            (format!("{kind} v{version} — reachable"), true)
+        }
+        QbitOutcome::NoCredential => (
+            "no credential stored — save one under Settings".to_owned(),
+            false,
+        ),
+        QbitOutcome::CredentialUnreadable(reason) => {
+            (format!("credential unreadable: {reason}"), false)
+        }
+        QbitOutcome::BadUrl(reason) => (format!("misconfigured: {reason}"), false),
+        QbitOutcome::Unreachable(reason) => (format!("could not reach it: {reason}"), false),
+        QbitOutcome::AuthRejected => (
+            "reachable, but it rejected the credential".to_owned(),
+            false,
+        ),
+        QbitOutcome::Failed(reason) => (format!("failed: {reason}"), false),
+    };
+    ServiceLine {
+        name: "Torrent client".to_owned(),
+        message,
+        ok,
+        url: client.url.to_string(),
+    }
 }
 
 /// One gluetun poller's row, pre-rendered for the template.
@@ -378,7 +423,11 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert!(data.services.is_empty(), "{:?}", data.services);
+        // Only the torrent client line, which every install has — and with
+        // no vault it reports the missing credential rather than probing.
+        assert_eq!(data.services.len(), 1, "{:?}", data.services);
+        assert_eq!(data.services[0].name, "Torrent client");
+        assert!(!data.services[0].ok);
         assert!(!data.scanned);
         assert_eq!(data.rules, 0);
         assert_eq!(data.checked, 0);
@@ -420,9 +469,9 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert_eq!(data.services.len(), 1);
-        assert!(!data.services[0].ok, "{:?}", data.services[0]);
-        assert_eq!(data.services[0].name, "Sonarr");
+        assert_eq!(data.services.len(), 2);
+        assert!(!data.services[1].ok, "{:?}", data.services[1]);
+        assert_eq!(data.services[1].name, "Sonarr");
         // Nothing was discovered, so path checking has nothing to say either.
         assert!(!data.scanned);
         assert!(data.healthy);
@@ -451,9 +500,9 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert_eq!(data.services.len(), 1);
-        assert!(data.services[0].ok, "{:?}", data.services[0]);
-        assert!(data.services[0].name.contains("library"));
+        assert_eq!(data.services.len(), 2);
+        assert!(data.services[1].ok, "{:?}", data.services[1]);
+        assert!(data.services[1].name.contains("library"));
         assert!(data.scanned);
         assert_eq!(data.checked, library.files.len());
         assert_eq!(data.readable, library.files.len());
@@ -483,9 +532,9 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert_eq!(data.services.len(), 1);
-        assert!(!data.services[0].ok, "{:?}", data.services[0]);
-        assert!(data.services[0].message.contains("does not exist"));
+        assert_eq!(data.services.len(), 2);
+        assert!(!data.services[1].ok, "{:?}", data.services[1]);
+        assert!(data.services[1].message.contains("does not exist"));
         // Nothing was discovered, so the scan flag stays false even though a
         // library is configured.
         assert!(!data.scanned);
