@@ -163,7 +163,10 @@ impl std::fmt::Debug for Vault {
             .field("path", &self.path)
             .field("keys", &self.records.keys().collect::<Vec<_>>())
             .field("cipher", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 

@@ -21,6 +21,7 @@ use axum::response::{Html, IntoResponse, Response};
 use secrecy::SecretString;
 use sharerr_core::config::{TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
+use std::fmt::Write as _;
 
 use super::WebState;
 use crate::checks::{
@@ -186,9 +187,10 @@ async fn library_badge(config: &Config) -> Outcome {
 
     let mut message = format!("{folders} folder(s), {files} media file(s) found.");
     if skipped > 0 {
-        message.push_str(&format!(
+        let _ = write!(
+            message,
             " {skipped} file(s) skipped — their names could not be classified."
-        ));
+        );
     }
     Outcome::Good(message)
 }

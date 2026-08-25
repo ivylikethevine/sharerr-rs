@@ -479,12 +479,12 @@ async fn tagged_harness() -> Harness {
         {
             "id": 11,
             "title": "Lanternwick Hollow",
-            "tvdbId": 918273,
+            "tvdbId": 918_273,
             "tvMazeId": 4242,
             "imdbId": "tt7654321",
             "tags": [library::TAG_ID],
         },
-        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112233, "tags": [1] },
+        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112_233, "tags": [1] },
     ]);
     harness(series, SeedingConfig::default()).await
 }
@@ -496,12 +496,12 @@ async fn tagged_harness_with_seeding(seeding: SeedingConfig) -> Harness {
         {
             "id": 11,
             "title": "Lanternwick Hollow",
-            "tvdbId": 918273,
+            "tvdbId": 918_273,
             "tvMazeId": 4242,
             "imdbId": "tt7654321",
             "tags": [library::TAG_ID],
         },
-        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112233, "tags": [1] },
+        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112_233, "tags": [1] },
     ]);
     harness(series, seeding).await
 }
@@ -510,7 +510,7 @@ async fn tagged_harness_with_seeding(seeding: SeedingConfig) -> Harness {
 async fn untagged_harness() -> Harness {
     harness(
         json!([
-            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918273, "tags": [1] },
+            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918_273, "tags": [1] },
         ]),
         SeedingConfig::default(),
     )

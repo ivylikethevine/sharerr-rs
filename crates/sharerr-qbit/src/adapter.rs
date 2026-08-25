@@ -144,7 +144,7 @@ mod tests {
         QbitClient::with_api_key(&base, SecretString::from(API_KEY)).unwrap()
     }
 
-    async fn mocked_client(server: &MockServer) -> QbitClient {
+    fn mocked_client(server: &MockServer) -> QbitClient {
         make_client(&server.uri())
     }
 
@@ -176,7 +176,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let version = TorrentClient::version(&client).await.unwrap();
         assert_eq!(version, "v4.6.0");
     }
@@ -189,7 +189,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let err = TorrentClient::version(&client).await.unwrap_err();
         assert!(
             matches!(
@@ -228,7 +228,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let err = TorrentClient::version(&client).await.unwrap_err();
         assert!(
             matches!(
@@ -261,7 +261,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let list = client.list(None).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].hash, "abc123");
@@ -283,7 +283,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let files = client.files("abc123").await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "movie.mkv");
@@ -301,7 +301,7 @@ mod tests {
 
         let data = b"d8:announce0:e";
         let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -319,7 +319,7 @@ mod tests {
 
         let data = b"not really a torrent";
         let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let err = client.add(&request).await.unwrap_err();
         assert!(
             matches!(
@@ -342,7 +342,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.remove("abc123").await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -366,7 +366,7 @@ mod tests {
             .await;
 
         let urls = [Url::parse("http://tracker.example/announce").unwrap()];
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.set_trackers("abc123", &urls).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -398,7 +398,7 @@ mod tests {
             .await;
 
         let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.add_trackers("abc123", &urls).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -433,7 +433,7 @@ mod tests {
             .await;
 
         let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.add_trackers("abc123", &urls).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -460,7 +460,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         assert_eq!(client.export("abc123").await.unwrap(), Some(bytes));
     }
 
@@ -475,7 +475,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         assert!(client.export("abc123").await.is_err());
     }
 }

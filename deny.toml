@@ -32,6 +32,25 @@ ignore = [
     #
     # Revisit when the factory grows a second implementation.
     "RUSTSEC-2025-0058",
+
+    # `paste` is unmaintained (the author archived the repository). It reaches
+    # this workspace only as a proc-macro:
+    #
+    #   paste <- utoipa-axum <- sharerr, sharerr-lighthouse
+    #
+    # Two things bound the exposure. It is a *proc-macro*, so it runs at compile
+    # time on this machine and contributes no code to the shipped binary — the
+    # container carries nothing of it. And unmaintained is not a vulnerability:
+    # the advisory itself records "No safe upgrade is available".
+    #
+    # There is also no upgrade to take. `utoipa-axum 0.2.0` is the newest
+    # release, and dropping it would mean giving up generating the OpenAPI spec
+    # from the handlers themselves — the property that stops a route being
+    # documented into existence or quietly forgotten (see `sharerr::openapi`).
+    #
+    # Revisit when utoipa-axum publishes a release that drops `paste`, which the
+    # weekly `cargo deny` run will keep asking about until it does.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

@@ -287,7 +287,7 @@ fn apply_one(doc: &mut DocumentMut, edit: Edit) {
                 Setting::Float(f) => table[segment] = value(f),
                 Setting::Bool(b) => table[segment] = value(b),
                 Setting::StrList(list) => {
-                    table[segment] = value(list.into_iter().collect::<toml_edit::Array>())
+                    table[segment] = value(list.into_iter().collect::<toml_edit::Array>());
                 }
                 Setting::Unset => {
                     table.remove(segment);

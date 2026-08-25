@@ -109,7 +109,10 @@ impl std::fmt::Debug for RtorrentClient {
             .field("endpoint", &self.endpoint.as_str())
             .field("username", &self.username)
             .field("password", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 
@@ -773,6 +776,8 @@ fn expect_end(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(),
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::fmt::Write as _;
+
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -858,9 +863,9 @@ mod tests {
                 // Booleans (complete/is_active, the last two slots) come back
                 // as rTorrent's own i8, not a <boolean> tag.
                 if i >= 5 {
-                    inner.push_str(&format!("<value><i8>{cell}</i8></value>"));
+                    let _ = write!(inner, "<value><i8>{cell}</i8></value>");
                 } else {
-                    inner.push_str(&format!("<value><string>{cell}</string></value>"));
+                    let _ = write!(inner, "<value><string>{cell}</string></value>");
                 }
             }
             inner.push_str("</data></array></value>");

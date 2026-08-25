@@ -66,7 +66,10 @@ impl std::fmt::Debug for TransmissionClient {
             .field("endpoint", &self.endpoint.as_str())
             .field("username", &self.username)
             .field("password", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 

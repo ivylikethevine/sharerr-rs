@@ -593,6 +593,8 @@ pub fn info_hash_from_hex(raw: &str) -> Option<InfoHash> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// Percent-encode raw bytes the way a client would — the inverse of
@@ -606,7 +608,9 @@ mod tests {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                     out.push(*byte as char);
                 }
-                _ => out.push_str(&format!("%{byte:02x}")),
+                _ => {
+                    let _ = write!(out, "%{byte:02x}");
+                }
             }
         }
         out

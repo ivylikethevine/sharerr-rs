@@ -81,7 +81,7 @@ async fn files_maps_torrent_files_into_file_entries() {
     Mock::given(method("GET"))
         .and(path("/api/v2/torrents/files"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2147483648_u64, "progress": 1.0 }
+            { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2_147_483_648_u64, "progress": 1.0 }
         ])))
         .mount(&server)
         .await;

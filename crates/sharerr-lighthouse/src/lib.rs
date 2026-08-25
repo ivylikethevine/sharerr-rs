@@ -160,8 +160,7 @@ pub fn hash_key(raw_key: &str) -> String {
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) as i64
+        .map_or(0, |d| d.as_secs()) as i64
 }
 
 // ---------------------------------------------------------------------------

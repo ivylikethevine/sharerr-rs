@@ -256,7 +256,7 @@ async fn mount_sonarr_library(server: &MockServer) {
             {
                 "id": 11,
                 "title": "Lanternwick Hollow",
-                "tvdbId": 918273,
+                "tvdbId": 918_273,
                 "tvMazeId": 4242,
                 "imdbId": "tt7654321",
                 "tags": [TAG_ID],
@@ -265,7 +265,7 @@ async fn mount_sonarr_library(server: &MockServer) {
                 // Untagged: must not appear in the results at all.
                 "id": 12,
                 "title": "Copper Vale Station",
-                "tvdbId": 112233,
+                "tvdbId": 112_233,
                 "tags": [1],
             },
         ]),
@@ -279,14 +279,14 @@ async fn mount_sonarr_library(server: &MockServer) {
             {
                 "id": 501,
                 "path": "/tv/Lanternwick Hollow/Season 02/lanternwick.s02e01.mkv",
-                "size": 2147483648_u64,
+                "size": 2_147_483_648_u64,
                 "sceneName": "Lanternwick.Hollow.S02E01.1080p.WEB-DL.DD5.1.H.264-FAKEGRP",
             },
             {
                 // A double-length premiere: one file, two episodes.
                 "id": 502,
                 "path": "/tv/Lanternwick Hollow/Season 02/lanternwick.s02e02e03.mkv",
-                "size": 4294967296_u64,
+                "size": 4_294_967_296_u64,
             },
             {
                 // Orphaned by a failed import — no episode points at it.
@@ -352,8 +352,8 @@ async fn sonarr_pairs_each_series_with_its_own_files_when_responses_race() {
         &server,
         "/api/v3/series",
         json!([
-            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918273, "tags": [TAG_ID] },
-            { "id": 21, "title": "Harrowmere", "tvdbId": 445566, "tags": [TAG_ID] },
+            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918_273, "tags": [TAG_ID] },
+            { "id": 21, "title": "Harrowmere", "tvdbId": 445_566, "tags": [TAG_ID] },
         ]),
     )
     .await;
@@ -436,7 +436,7 @@ async fn sonarr_carries_metadata_ids_and_the_unmapped_path() {
             episode: 1,
         }
     );
-    assert_eq!(first.ids.tvdb, Some(918273));
+    assert_eq!(first.ids.tvdb, Some(918_273));
     assert_eq!(first.ids.tvmaze, Some(4242));
     assert_eq!(first.ids.imdb.as_deref(), Some("tt7654321"));
     assert_eq!(first.ids.tmdb, None);
@@ -510,14 +510,14 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
                 "id": 31,
                 "title": "The Gilded Ferry",
                 "year": 2019,
-                "tmdbId": 555444,
+                "tmdbId": 555_444,
                 "imdbId": "tt1234567",
                 "tags": [TAG_ID],
                 "hasFile": true,
                 "movieFile": {
                     "id": 900,
                     "path": "/movies/The Gilded Ferry (2019)/gilded.ferry.2019.mkv",
-                    "size": 8589934592_u64,
+                    "size": 8_589_934_592_u64,
                     "sceneName": "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP",
                 },
             },
@@ -556,7 +556,7 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
             year: Some(2019)
         }
     );
-    assert_eq!(movie.ids.tmdb, Some(555444));
+    assert_eq!(movie.ids.tmdb, Some(555_444));
     assert_eq!(movie.ids.imdb.as_deref(), Some("tt1234567"));
     assert_eq!(movie.ids.tvdb, None);
     assert_eq!(movie.size, 8_589_934_592);
@@ -574,7 +574,7 @@ async fn radarr_falls_back_to_the_moviefile_endpoint() {
             "id": 31,
             "title": "The Gilded Ferry",
             "year": 2019,
-            "tmdbId": 555444,
+            "tmdbId": 555_444,
             "tags": [TAG_ID],
             "hasFile": true,
         }]),
@@ -587,7 +587,7 @@ async fn radarr_falls_back_to_the_moviefile_endpoint() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
             "id": 900,
             "path": "/movies/The Gilded Ferry (2019)/gilded.ferry.2019.mkv",
-            "size": 8589934592_u64,
+            "size": 8_589_934_592_u64,
         }])))
         .expect(1)
         .mount(&server)

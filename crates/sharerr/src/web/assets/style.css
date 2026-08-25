@@ -10,7 +10,11 @@
   --panel-2: #fbfbfd;
   --ink: #1b1c1f;
   --muted: #5d616b;
-  --faint: #8b8f99;
+  /* Darkened from #8b8f99 to clear WCAG AA (4.5:1) as *text*: it labels the
+     tag/value rows inside a topology node, where it sat at 3.0-3.2:1 against
+     the box fills. Also the input hover border, which only needs 3:1 as a UI
+     component and is simply a little firmer now. */
+  --faint: #676a71;
   --line: #e1e4ea;
   --line-strong: #cbd0d9;
   --accent: #2f6f4f;
@@ -81,7 +85,9 @@
     --panel-2: #202226;
     --ink: #e8e9ec;
     --muted: #a0a4ae;
-    --faint: #71757f;
+    /* Lightened for the same reason as its light-mode counterpart -- 3.5:1
+       against a node box fill, against the 4.5:1 that text needs. */
+    --faint: #858a96;
     --line: #303339;
     --line-strong: #43474f;
     --accent: #4c9a72;
@@ -152,6 +158,22 @@ main {
   top: 0;
 }
 
+/* Present to a screen reader, absent on screen. For a column of controls whose
+   header would be redundant to look at but leaves those cells unnamed without
+   it — clipping rather than `display: none`, which would take the text out of
+   the accessibility tree along with the layout. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .bar {
   position: sticky;
   top: 0;
@@ -210,8 +232,13 @@ main {
 
 .bar nav a:hover { color: var(--ink); background: var(--accent-wash); }
 
+/* `--accent-hover`, not `--accent`: this is the one place accent-coloured text
+   sits on an accent-tinted pill, and in dark mode that pairing composited to
+   4.3:1 — just under the 4.5:1 AA needs. The hover variant is the same hue a
+   step further from its background, so it clears AA in both themes without
+   introducing a colour the palette did not already have. */
 .bar nav a[aria-current="page"] {
-  color: var(--accent);
+  color: var(--accent-hover);
   background: var(--accent-wash);
 }
 

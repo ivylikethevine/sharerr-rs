@@ -243,6 +243,128 @@ mod tests {
         }
     }
 
+    /// Build a real `.torrent` over a temp file, so the round-trip functions
+    /// are exercised against bytes `lava_torrent` actually produced rather
+    /// than a hand-written fixture that could drift from its encoder.
+    fn built(dir: &tempfile::TempDir, announce: &crate::AnnounceSet) -> BuiltTorrent {
+        let path = dir.path().join("Lanternwick Hollow S01E01.mkv");
+        // Deterministic bytes: the info hash has to be stable across machines.
+        std::fs::write(&path, vec![7u8; 512 * 1024]).unwrap();
+
+        LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &path,
+                announce,
+            })
+            .unwrap()
+    }
+
+    fn announce_set(primary: &str, tiers: &[&str]) -> crate::AnnounceSet {
+        crate::AnnounceSet {
+            primary: primary.parse().unwrap(),
+            tiers: tiers.iter().map(|t| t.parse().unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_built_torrent_reports_the_announce_url_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let torrent = built(&dir, &set);
+
+        assert_eq!(
+            read_announce(&torrent.data).unwrap().as_deref(),
+            Some("http://seed.example:51413/announce/tok")
+        );
+    }
+
+    /// Bytes filed under the wrong hash serve a friend a torrent for a
+    /// different swarm than the one they were pointed at, so the cache name
+    /// has to come from the bytes rather than from the caller.
+    #[test]
+    fn the_info_hash_read_back_matches_the_one_the_builder_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let torrent = built(&dir, &set);
+
+        assert_eq!(read_info_hash(&torrent.data).unwrap(), torrent.info_hash);
+    }
+
+    /// The property the whole rotation story rests on. The announce fields sit
+    /// outside the info dictionary, so moving them must leave the torrent's
+    /// identity alone -- otherwise every client already seeding it would lose
+    /// the swarm the moment a gluetun port changed.
+    #[test]
+    fn rewriting_the_announce_url_leaves_the_info_hash_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = built(
+            &dir,
+            &announce_set("http://old.example:51413/announce/a", &[]),
+        );
+
+        let moved = announce_set("http://new.example:6881/announce/b", &[]);
+        let after = rewrite_announce(&before.data, &moved).unwrap();
+
+        assert_eq!(
+            read_info_hash(&after).unwrap(),
+            before.info_hash,
+            "the rewrite changed the torrent's identity"
+        );
+        assert_eq!(
+            read_announce(&after).unwrap().as_deref(),
+            Some("http://new.example:6881/announce/b"),
+            "the rewrite did not move the announce URL"
+        );
+    }
+
+    /// A single-entry announce-list would add bytes and change nothing --
+    /// clients ignore `announce` the moment a list is present.
+    #[test]
+    fn a_rewrite_with_fallback_tiers_emits_a_tier_list_and_one_without_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = built(
+            &dir,
+            &announce_set("http://old.example:51413/announce/a", &[]),
+        );
+
+        let single = announce_set(
+            "http://new.example:6881/announce/b",
+            &["http://new.example:6881/announce/b"],
+        );
+        let rewritten = rewrite_announce(&before.data, &single).unwrap();
+        let parsed = lava_torrent::torrent::v1::Torrent::read_from_bytes(&rewritten).unwrap();
+        assert!(
+            parsed.announce_list.is_none(),
+            "one tier should emit no list"
+        );
+
+        let two = announce_set(
+            "http://new.example:6881/announce/b",
+            &[
+                "http://new.example:6881/announce/b",
+                "http://old.example:51413/announce/a",
+            ],
+        );
+        let rewritten = rewrite_announce(&before.data, &two).unwrap();
+        let parsed = lava_torrent::torrent::v1::Torrent::read_from_bytes(&rewritten).unwrap();
+        assert_eq!(parsed.announce_list.unwrap().len(), 2);
+    }
+
+    /// These run over whatever a friend or an operator handed us, so malformed
+    /// input has to come back as an error rather than a panic.
+    #[test]
+    fn reading_bytes_that_are_not_a_torrent_is_an_error() {
+        assert!(read_info_hash(b"not a torrent at all").is_err());
+        assert!(read_announce(b"not a torrent at all").is_err());
+        assert!(
+            rewrite_announce(
+                b"not a torrent at all",
+                &announce_set("http://x.example/announce", &[])
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn torrent_files_are_named_by_info_hash() {
         let path = torrent_file_path(Path::new("/data/torrents"), "abc123");

@@ -1276,7 +1276,7 @@ fn validate_advertised_host(host: &str) -> anyhow::Result<()> {
              `advertised_url` for a full URL"
         );
     }
-    if host.chars().any(|c| c.is_whitespace()) {
+    if host.chars().any(char::is_whitespace) {
         anyhow::bail!("{host:?} contains whitespace");
     }
     if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {

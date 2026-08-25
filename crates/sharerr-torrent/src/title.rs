@@ -289,7 +289,7 @@ fn loose_eq(a: &str, b: &str) -> bool {
     let key = |s: &str| -> String {
         let ascii: String = transliterate(s)
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
+            .filter(char::is_ascii_alphanumeric)
             .map(|c| c.to_ascii_lowercase())
             .collect();
         if ascii.is_empty() {

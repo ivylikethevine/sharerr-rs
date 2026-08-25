@@ -10,6 +10,5 @@
 pub fn closed_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .unwrap_or(1)
+        .map_or(1, |addr| addr.port())
 }

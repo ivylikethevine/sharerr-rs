@@ -650,6 +650,10 @@ mod tests {
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 
+    /// Shaped to `check_arr`'s `api_key` parameter, which is itself a
+    /// `Result` because resolving a secret from the vault can fail. Unwrapping
+    /// it here would mean re-wrapping at every call site below.
+    #[allow(clippy::unnecessary_wraps, reason = "matches check_arr's parameter")]
     fn key() -> Result<Option<SecretString>, String> {
         Ok(Some(SecretString::from(API_KEY)))
     }

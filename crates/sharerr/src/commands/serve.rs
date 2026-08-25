@@ -509,7 +509,7 @@ mod tests {
             tokio::spawn(async move {
                 state
                     .endpoint_refresh_requested(GluetunTarget::Tracker)
-                    .await
+                    .await;
             })
         };
         let client_waiter = {
@@ -517,7 +517,7 @@ mod tests {
             tokio::spawn(async move {
                 state
                     .endpoint_refresh_requested(GluetunTarget::Client)
-                    .await
+                    .await;
             })
         };
         tokio::task::yield_now().await;

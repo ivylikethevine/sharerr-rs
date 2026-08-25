@@ -70,7 +70,10 @@ impl std::fmt::Debug for QbitClient {
         f.debug_struct("QbitClient")
             .field("base", &self.base.as_str())
             .field("api_key", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 
@@ -131,6 +134,13 @@ impl QbitClient {
     /// Nothing to establish: the key is stateless and `auth/login` rejects it
     /// outright, so this always succeeds and leaves proving the key to the first
     /// real call. [`Self::version`] is that call for every caller in this tree.
+    ///
+    /// `async` with nothing to await is deliberate: `TorrentClient::login`
+    /// delegates straight to this, and a backend that *does* have a session to
+    /// establish (Transmission's 409 handshake) needs the await point. Dropping
+    /// it here would make the two implementations differ in shape for no
+    /// reason a caller could act on.
+    #[allow(clippy::unused_async, reason = "matches the trait method it backs")]
     pub async fn login(&self) -> Result<()> {
         Ok(())
     }

@@ -1,5 +1,6 @@
 //! `sharerr vault` — manage the encrypted credential store.
 
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Read};
 
 use anyhow::{Context, Result, bail};
@@ -57,7 +58,7 @@ fn format_listing(path: &std::path::Path, keys: &[&str]) -> String {
     let mut out = format!("{}:\n", path.display());
     for key in keys {
         // Values are never printed, by design.
-        out.push_str(&format!("  {key}\n"));
+        let _ = writeln!(out, "  {key}");
     }
     out
 }

@@ -30,7 +30,11 @@ jobs:
       # (redirect handling, retry behaviour), same reasoning as Trivy in
       # image-scan.yml.
       - name: Install lychee
-        run: cargo install lychee --locked
+        # Version-pinned for the same reason the actions above are SHA-pinned:
+        # `--locked` alone still floats to the newest release, and a link
+        # checker that changes its own rules mid-week fails a PR that changed
+        # no links.
+        run: cargo install lychee --version 0.24.2 --locked
 
       # 200/204/206 are ordinary success; 429 is a server saying "you are
       # checking too fast", not "the link is dead" — treating it as a failure

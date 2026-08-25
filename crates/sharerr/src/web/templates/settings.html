@@ -292,9 +292,12 @@
     <tbody>
       {% for row in libraries %}
       <tr>
-        <td><input name="path" value="{{ row.path }}" placeholder="/media/extras"></td>
         <td>
-          <select name="kind">
+          <input name="path" value="{{ row.path }}" placeholder="/media/extras"
+                 aria-label="Library directory {{ loop.index }}, as sharerr sees it">
+        </td>
+        <td>
+          <select name="kind" aria-label="Kind of library directory {{ loop.index }}">
             <option value="tv" {% if row.kind == "tv" %}selected{% endif %}>TV</option>
             <option value="movie" {% if row.kind == "movie" %}selected{% endif %}>Movies</option>
             <option value="music" {% if row.kind == "music" %}selected{% endif %}>Music</option>
@@ -475,9 +478,18 @@
     <tbody>
       {% for row in path_map %}
       <tr>
-        <td><input name="arr" value="{{ row.arr }}" placeholder="/tv"></td>
-        <td><input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"></td>
-        <td><input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"></td>
+        <td>
+          <input name="arr" value="{{ row.arr }}" placeholder="/tv"
+                 aria-label="Path mapping {{ loop.index }}, as Sonarr and Radarr report it">
+        </td>
+        <td>
+          <input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"
+                 aria-label="Path mapping {{ loop.index }}, as sharerr sees it">
+        </td>
+        <td>
+          <input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"
+                 aria-label="Path mapping {{ loop.index }}, as the torrent client sees it">
+        </td>
       </tr>
       {% endfor %}
     </tbody>

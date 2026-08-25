@@ -641,10 +641,10 @@ fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> 
 }
 
 fn library_node(path: &Path, outcome: &DirOutcome) -> SourceNode {
-    let label = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
+    let label = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
 
     let mut lines = vec![line("path", path.display().to_string())];
     let status = match outcome {
@@ -667,8 +667,11 @@ fn library_node(path: &Path, outcome: &DirOutcome) -> SourceNode {
             lines.push(line("", "Not a directory"));
             NodeStatus::Error
         }
-        DirOutcome::Unreadable(_) => {
+        DirOutcome::Unreadable(reason) => {
             lines.push(line("", "Unreadable"));
+            // The scan error is already in hand -- a permission problem and a
+            // vanished mount both read as "Unreadable" without it.
+            lines.push(line("why", reason.clone()));
             NodeStatus::Error
         }
     };
@@ -1358,6 +1361,106 @@ mod tests {
 
     // -------------------------------------------------------------- nodes
 
+    /// A box sizes itself to its rows, which is what lets the three lanes be
+    /// stacked from real heights rather than one fixed row pitch.
+    #[test]
+    fn node_height_grows_one_row_at_a_time() {
+        let none = node_height(0);
+        let one = node_height(1);
+
+        assert_eq!(one - none, NODE_LINE_H);
+        assert_eq!(node_height(4) - node_height(3), NODE_LINE_H);
+        // Even an empty box has to fit its title and bottom padding.
+        assert_eq!(none, NODE_HEAD_H + NODE_PAD_BOTTOM);
+    }
+
+    /// The diagram is tight on space, so its relative times are abbreviated
+    /// rather than spelled out the way the rest of the UI does.
+    #[test]
+    fn compact_ago_abbreviates_every_bucket() {
+        let now = sharerr_core::endpoint::now_epoch();
+
+        assert_eq!(compact_ago(now), "now");
+        assert_eq!(compact_ago(now - 120), "2m");
+        assert_eq!(compact_ago(now - 7_200), "2h");
+        assert_eq!(compact_ago(now - 172_800), "2d");
+    }
+
+    #[test]
+    fn a_readable_library_reports_its_counts_and_is_ok() {
+        let node = library_node(
+            Path::new("/media/tv"),
+            &DirOutcome::Ready {
+                items: Vec::new(),
+                skipped: 2,
+            },
+        );
+
+        assert_eq!(node.status, NodeStatus::Ok);
+        assert_eq!(node.label, "tv", "the box is named by the leaf directory");
+        let text: Vec<&str> = node.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(text.iter().any(|t| t.contains("/media/tv")));
+        assert!(text.iter().any(|t| t.contains("2 unclassified")));
+    }
+
+    /// A clean scan must not render an empty "skipped" row -- zero skipped is
+    /// the normal case and a row saying so is noise in a box this small.
+    #[test]
+    fn a_library_with_nothing_skipped_omits_the_skipped_row() {
+        let node = library_node(
+            Path::new("/media/tv"),
+            &DirOutcome::Ready {
+                items: Vec::new(),
+                skipped: 0,
+            },
+        );
+
+        assert!(!node.lines.iter().any(|l| l.tag == "skipped"));
+    }
+
+    /// Empty is not a fault -- there is simply nothing to share yet -- while
+    /// the other three are. Collapsing them would make a missing mount look
+    /// like an empty directory.
+    #[test]
+    fn library_outcomes_map_to_distinct_statuses() {
+        let at = Path::new("/media/tv");
+
+        assert_eq!(
+            library_node(at, &DirOutcome::Empty).status,
+            NodeStatus::Unknown
+        );
+        assert_eq!(
+            library_node(at, &DirOutcome::Missing).status,
+            NodeStatus::Error
+        );
+        assert_eq!(
+            library_node(at, &DirOutcome::NotADirectory).status,
+            NodeStatus::Error
+        );
+        assert_eq!(
+            library_node(at, &DirOutcome::Unreadable("permission denied".to_owned())).status,
+            NodeStatus::Error
+        );
+    }
+
+    /// "Unreadable" alone cannot distinguish a permission problem from a
+    /// vanished mount, and the scan already knows which it was.
+    #[test]
+    fn an_unreadable_library_says_why() {
+        let node = library_node(
+            Path::new("/media/tv"),
+            &DirOutcome::Unreadable("permission denied".to_owned()),
+        );
+
+        assert!(
+            node.lines
+                .iter()
+                .any(|l| l.text.contains("permission denied")),
+            "{:?}",
+            node.lines
+        );
+    }
+
     #[test]
     fn truncate_leaves_short_labels_alone() {
         assert_eq!(truncate("Sam"), "Sam");
@@ -1469,6 +1572,90 @@ mod tests {
     /// A fresh instance — no sources, no vault, no friends — must still
     /// render a page rather than panicking, mirroring
     /// `diagnostics::gather_on_an_unconfigured_instance_degrades_gracefully`.
+    /// The client check compares against what the *store* believes is seeding,
+    /// so this is the half that decides which torrents a disagreement is even
+    /// measured over.
+    #[tokio::test]
+    async fn expected_seeding_lists_only_seeding_items_that_have_a_torrent() {
+        use sharerr_core::{MediaSpec, ShareState, SharedItem};
+
+        let (dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .replace_config(Config {
+                data_dir: dir.path().to_path_buf(),
+                ..Config::default()
+            })
+            .await;
+        let store = serve
+            .store()
+            .await
+            .expect("store opens with an empty vault");
+
+        let base = |file_id: i64, title: &str| SharedItem {
+            id: None,
+            source: MediaSource::Radarr,
+            source_id: 1,
+            file_id,
+            spec: MediaSpec::Movie {
+                title: title.to_owned(),
+                year: None,
+            },
+            release_title: format!("{title}.2019-SYNTH"),
+            arr_path: "/data/x.mkv".into(),
+            size: 1,
+            ids: sharerr_core::ExternalIds::default(),
+            info_hash: None,
+            announce_token_fp: None,
+            created_by_sharerr: true,
+            state: ShareState::Seeding,
+            last_error: None,
+            created_at: None,
+        };
+
+        // Seeding with a torrent: the only shape the client can be asked about.
+        store
+            .upsert(&SharedItem {
+                info_hash: Some("aabb".to_owned()),
+                ..base(1, "Counted")
+            })
+            .await
+            .unwrap();
+        // Seeding but no torrent yet -- nothing exists for the client to hold,
+        // so counting it would report every pending item as a disagreement.
+        store.upsert(&base(2, "No torrent yet")).await.unwrap();
+        // Has a torrent but is not seeding: the client is not expected to.
+        store
+            .upsert(&SharedItem {
+                info_hash: Some("ccdd".to_owned()),
+                state: ShareState::Unshared,
+                ..base(3, "Withdrawn")
+            })
+            .await
+            .unwrap();
+
+        let state = web_state(serve);
+        let expected = expected_seeding(&state).await;
+
+        assert_eq!(expected.len(), 1, "{expected:?}");
+        assert_eq!(expected[0].0, "aabb");
+        assert_eq!(expected[0].1, "Counted");
+    }
+
+    /// An instance sharing nothing expects nothing of the client, so a clean
+    /// install reconciles as healthy rather than as "everything is missing".
+    ///
+    /// Only the empty-library path: `fixtures::unconfigured` still opens a
+    /// working store, so the `Err` arm of `expected_seeding` -- which also
+    /// yields an empty list -- is not reachable from tier 1. See CLAUDE.md on
+    /// what these fixtures do and do not stand up.
+    #[tokio::test]
+    async fn expected_seeding_is_empty_for_a_library_with_nothing_in_it() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        assert!(expected_seeding(&state).await.is_empty());
+    }
+
     #[tokio::test]
     async fn gather_on_an_unconfigured_instance_degrades_gracefully() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();

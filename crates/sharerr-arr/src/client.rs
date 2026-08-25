@@ -50,7 +50,10 @@ impl std::fmt::Debug for ArrClient {
             .field("kind", &self.kind)
             .field("base", &self.base.as_str())
             .field("api_key", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 
