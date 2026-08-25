@@ -13,9 +13,12 @@ deliberately left out, see [`UNSUPPORTED.md`](UNSUPPORTED.md).
 ## Library sources (where tagged content comes from)
 
 **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
-tag-driven discovery, and the **plain tagged directory** (`[[library]]`). Both
-shapes sit behind the `LibrarySource` seam, which is where a future source
-would plug in — none is currently planned.
+tag-driven discovery (Whisparr reuses Sonarr's walk), and the **plain
+directory** (`[[library]]`). Both shapes sit behind the `LibrarySource` seam
+in `crates/sharerr/src/sync/mod.rs` — `kind()` plus `discover()`, which
+returns a scan that also says whether it was _complete_: a partial walk still
+shares what it found, but nothing is withdrawn on its behalf. That is where a
+future source would plug in — none is currently planned.
 
 ## Torrent clients (what actually seeds)
 
@@ -32,10 +35,31 @@ replaces a torrent's tracker list in place (`set_trackers`, for endpoint
 rotation) and how it _adds_ to one without disturbing the rest
 (`add_trackers`, for a torrent sharerr adopts rather than creates), whether it
 can hand back a `.torrent` it already holds (`export`), and how it expresses
-`AddRequest::upload_limit_kib`/`ratio_limit` when either is set — the one deliberate exception to "ratios belong to the
-client," a seeding goal stated once at add time through whatever native
-mechanism the client offers for it, same as qBittorrent (inline on
-`torrents/add`) and Transmission (a follow-up `torrent-set`) already do.
+`AddRequest::upload_limit_kib`/`ratio_limit` when either is set — the one
+deliberate exception to "ratios belong to the client," a seeding goal stated
+once at add time through whatever native mechanism the client offers for it,
+as qBittorrent (inline on `torrents/add`) and Transmission (a follow-up
+`torrent-set`) do. rTorrent applies the upload cap but has no per-torrent
+ratio limit — its ratio enforcement is an `.rtorrent.rc` schedule keyed to a
+view — so it logs a warning and drops `ratio_limit`; the seeding form does
+not know which backend is selected, so nothing warns there.
+
+Two more things the three answer differently. Only qBittorrent can skip the
+hash check on add (`qbittorrent.skip_checking`); Transmission and rTorrent
+always verify, and sharerr passes `skip_checking = false` to both. And only
+qBittorrent has a real category plus tags: Transmission merges both into its
+flat `labels` list and filters by category client-side, and rTorrent has one
+free-text `d.custom1` slot, which takes the category and drops the tags. The
+config collapses both to a single `label` for those two.
+
+Credentials differ too. qBittorrent takes only a WebUI API key (5.2+, sent as
+a bearer token; there is no username/password path). Transmission takes HTTP
+Basic plus the 409 session-id handshake, and needs 4.0+ (RPC 17) for the
+`trackerList` calls behind `set_trackers`/`add_trackers`. rTorrent's XML-RPC
+has no credential of its own, so its username/password are HTTP Basic aimed
+at whatever reverse proxy fronts the RPC endpoint, and `rtorrent.url` is that
+exact endpoint, not a base.
+
 Only qBittorrent answers the `export` question — `torrents/export` returns
 the file itself. Transmission and rTorrent can each name a path to it on the
 daemon's own filesystem, which in a container deployment is not a filesystem
@@ -54,8 +78,8 @@ whatever is already on the torrent, not replace it — see the crate's module
 docs for the full reasoning.
 
 `run_docker_tests.sh --rtorrent` drives a real rTorrent + ruTorrent container
-(`crazymax/rtorrent-rutorrent`) through the same tier-2 suite the plain and
-Transmission stacks use — confirming the requests and responses a real
+(`crazymax/rtorrent-rutorrent`) through the same tier-2 suite the plain,
+`--transmission` and `--vpn` stacks use — confirming the requests and responses a real
 rTorrent actually sends, not just the ones the crate's hand-mocked unit
 tests expect. It already caught two bugs neither a hand-mocked server nor a
 human reading rTorrent's docs had: `d.multicall2` rejects every call
@@ -65,5 +89,12 @@ result with a self-closing `<data/>` rather than `<data></data>`.
 ## Indexers (what consumes the feed)
 
 **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
-**Sonarr/Radarr/Lidarr direct**, each confirmed against a real instance in the
-tier-2 suite. No further indexer work is currently planned.
+**Sonarr/Radarr/Lidarr direct**. The tier-2 script (`run_docker_tests.sh`)
+adds sharerr as an indexer to a real Sonarr, and to a real Lidarr on the plain
+stack, and drives its own Jackett-shaped routes and Torznab caps by hand;
+Prowlarr is an opt-in container in that compose file for the manual exercise
+in the README, and Radarr-direct is exercised only by hand. The feed also
+advertises `book-search` and category 7000, so nothing _stops_ a Readarr
+pointed at it — it is just untested; see
+[`UNSUPPORTED.md`](UNSUPPORTED.md#readarr-as-a-direct-indexer). No further
+indexer work is currently planned.

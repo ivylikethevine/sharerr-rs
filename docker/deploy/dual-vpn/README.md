@@ -20,8 +20,12 @@ Both gluetun containers additionally join one shared bridge network,
 `sharerr-shared`, created once before either stack starts:
 
 ```bash
-docker network create sharerr-shared
+docker network create --subnet 172.31.90.0/24 sharerr-shared
 ```
+
+The subnet is not decorative: both gluetuns list `172.31.90.0/24` in
+`FIREWALL_OUTBOUND_SUBNETS`, so a network Docker numbered on its own would be
+one the killswitch refuses to route.
 
 qBittorrent and sharerr each use `network_mode: service:gluetun`, which shares
 their *entire* network stack with the gluetun container they belong to —
@@ -40,18 +44,27 @@ splits qBittorrent and sharerr onto different hosts.
 ## Bring it up
 
 ```bash
-docker network create sharerr-shared
+docker network create --subnet 172.31.90.0/24 sharerr-shared
 
 cd media && cp .env.example .env && $EDITOR .env
 docker compose up -d
 cd ..
 
-cd sharerr && cp .env.example .env && $EDITOR .env sharerr.toml
+cd sharerr && cp .env.example .env && $EDITOR .env config/sharerr.toml
 docker compose up -d
 ```
 
 Each `.env` configures its own VPN credentials — they are unrelated tunnels
-and there is no reason they would share a provider, let alone an exit.
+and there is no reason they would share a provider, let alone an exit. Both
+share one `MEDIA_PATH`: sharerr has to see the very files qBittorrent seeds,
+just mounted at `/media` instead of `/downloads`. `sharerr/.env` also carries
+`SHARERR_MASTER_KEY`; the credentials themselves (qBittorrent's API key, the
+*arr keys) go into the vault through Settings or `sharerr vault set`, never
+into `config/sharerr.toml`.
+
+sharerr is published on `127.0.0.1:8477` by its gluetun, and its `/health`
+healthcheck is what keeps the container up — an unpopulated vault answers 503
+on `/ready` by design and must not restart the container out from under you.
 
 ## What this changes about addresses
 
@@ -62,12 +75,17 @@ port, and `sharerr/.env`'s is where friends reach the tracker and feed over
 HTTP. Either tunnel can reconnect and get handed a new exit or a new forwarded
 port without the other noticing, and the two exits are never the same address.
 
-sharerr tracks its own two addresses independently via a second, separate
-poller: `[gluetun]` for the tracker/feed address, and `[gluetun_client]` for
-the torrent client's own address. Point `[gluetun].control_url` at
-`sharerr`'s own gluetun (`http://sharerr-gluetun:8000` from inside this
-stack, or `localhost:8000` since sharerr shares its namespace) — that keeps
-the tracker/feed address correct. Point `[gluetun_client].control_url` at
-`media-gluetun:8000` — reachable over `sharerr-shared`, the same as
-qBittorrent's WebUI — so sharerr also resolves qBittorrent's own forwarded
-port and exit, independently and on its own schedule.
+sharerr can track the two addresses independently, with two separate pollers:
+`[gluetun]` for the tracker/feed address, and `[gluetun_client]` for the torrent
+client's own. The shipped `sharerr/config/sharerr.toml` enables only the first,
+pointed at `http://localhost:8000` — sharerr shares its gluetun's namespace, so
+that is this stack's own control server — which keeps the tracker/feed address
+correct. To have sharerr also follow qBittorrent's exit and forwarded port, add
+a `[gluetun_client]` section with `control_url = "http://media-gluetun:8000"`,
+reachable over `sharerr-shared` the same way the WebUI is; it is off
+(`control_url` unset) by default.
+
+gluetun `v3.40` gates its control server routes behind an auth config, so each
+poller has a matching vault key — `gluetun.api_key` and
+`gluetun_client.api_key` — that Settings manages; sharerr names the missing one
+in its error when the control server answers 401.

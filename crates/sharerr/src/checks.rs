@@ -16,9 +16,10 @@
 //!
 //! # What is deliberately not here
 //!
-//! Path-mapping resolution. It needs a library to walk and a `PathResolver`, and
-//! only `doctor` currently does it — folding it in would mean this module growing a
-//! second shape for one caller.
+//! The checks only `doctor` runs — the vault's key inventory, the database, the
+//! tracker endpoint, the gluetun control server — stay in
+//! [`crate::commands::doctor`]; the web UI has no equivalent to keep in
+//! agreement with.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,4 +1,5 @@
-//! The guided first-run — see `docs/ROADMAP.md`'s "Setup wizard".
+//! The guided first-run: welcome, services, paths, tracker, done — one
+//! step at a time, on top of the same handlers the full Settings page uses.
 //!
 //! Not a separate configuration path: every step here submits to the very
 //! same `/settings/*` handlers [`super::settings`] exposes, with `?next=`

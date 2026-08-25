@@ -622,8 +622,8 @@ fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
 }
 
 /// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
-/// hands a torrent to the client — see `docs/ROADMAP.md`'s "Ratio and
-/// bandwidth control" and [`sharerr_core::config::SeedingConfig`].
+/// hands a torrent to the client — see [`sharerr_core::config::SeedingConfig`]
+/// and `docs/CONFIGURATION.md`'s `[seeding]` section.
 pub async fn save_seeding(
     State(state): State<WebState>,
     Form(form): Form<SeedingForm>,
@@ -886,10 +886,10 @@ pub async fn save_paths(
 
 /// Open the config file, let `edit` mutate it, then validate, write, and reload.
 ///
-/// Every settings handler goes through here — or through the two halves,
-/// [`prepare_config`] then [`commit_config`], when it also has a secret to
-/// store — so that no path can skip the validate-before-write step or forget
-/// to invalidate the syncer.
+/// Every settings handler goes through here — or through
+/// [`write_config_and_secret`] when it also has a secret to store — so that no
+/// path can skip the validate-before-write step or forget to invalidate the
+/// syncer.
 async fn write_config<F>(state: &WebState, section: &str, next: Option<String>, edit: F) -> Response
 where
     F: FnOnce(&mut ConfigFile) -> anyhow::Result<()>,
@@ -948,8 +948,8 @@ struct PendingConfig<'a> {
 /// The first half of [`write_config`]: open, edit, and **validate** the
 /// document, without writing it.
 ///
-/// A handler that also stores a secret calls this first and the vault second:
-/// the form's plain fields are checked before anything irreversible happens,
+/// [`write_config_and_secret`] calls this first and the vault second: the
+/// form's plain fields are checked before anything irreversible happens,
 /// so a rejected save leaves the vault as it was. The other order — vault
 /// first, validate second — committed the credential, invalidated the syncer,
 /// and in `save_tracker`'s case consumed the one-slot rotation grace period,

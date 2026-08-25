@@ -39,7 +39,9 @@ impl MediaSource {
     /// Not cosmetic: Sonarr, Radarr and Whisparr are on `v3` while Lidarr and
     /// Readarr are on `v1`. Hardcoding one prefix is why the client could only ever
     /// have talked to the first two, and getting it wrong presents as a 404 that
-    /// looks like a wrong URL rather than a wrong version.
+    /// looks like a wrong URL rather than a wrong version. The arr client matches
+    /// on the source itself rather than this string when building its prefix;
+    /// this is the one place the split is stated for everything else.
     pub fn api_version(self) -> &'static str {
         match self {
             Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",

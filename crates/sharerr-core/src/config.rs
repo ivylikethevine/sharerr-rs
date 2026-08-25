@@ -716,7 +716,7 @@ impl Default for RtorrentConfig {
 /// The tracker itself is always sharerr's own, served by this process — one
 /// backend, not two independently built announce URLs to keep in sync on every
 /// dynamic-endpoint change. A config that still names a `backend` is rejected
-/// with the fix — see [`removed_tracker_backend`].
+/// with the fix — see `removed_tracker_backend`.
 pub struct TrackerConfig {
     /// **Removed.** Present only so a `sharerr.toml` still setting it fails to
     /// load with an error naming this exact change, rather than a generic
@@ -779,7 +779,7 @@ impl LighthouseMount {
     }
 }
 
-/// Running the lighthouse rendezvous service ([`sharerr_lighthouse`] in the
+/// Running the lighthouse rendezvous service (`sharerr_lighthouse` in the
 /// workspace) as extra routes on one of sharerr's own listeners, instead of
 /// its own separate image and port.
 ///

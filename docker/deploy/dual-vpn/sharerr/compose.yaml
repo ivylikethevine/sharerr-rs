@@ -66,7 +66,7 @@ services:
       start_period: 30s
 
   sharerr:
-    image: ghcr.io/ivyduggan/sharerr-rs:main
+    image: ghcr.io/ivylikethevine/sharerr-rs:latest
     container_name: sharerr
     # No `networks:` here either — reaching media-gluetun and sonarr/radarr on
     # sharerr-shared comes for free by sharing gluetun's network namespace.

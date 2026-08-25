@@ -7,7 +7,7 @@
 //! Everything else — scheduling, ratios, RSS, categories as an organising system —
 //! belongs to the client and is none of sharerr's business.
 //!
-//! So the surface here is deliberately six operations wide. That narrowness is what
+//! So the surface here is deliberately narrow — ten operations. That narrowness is what
 //! makes a second client tractable at all: qBittorrent, Transmission, Deluge and
 //! rTorrent disagree about almost everything *except* "add this torrent, with the
 //! data already at this path". Announces always go to sharerr's own tracker, so a

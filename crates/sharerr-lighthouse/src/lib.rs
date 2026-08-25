@@ -37,8 +37,8 @@
 //!
 //! # What the report side does *not* hide
 //!
-//! The privacy property above is a property of [`lookup`], and only of
-//! [`lookup`]. Reporting answers honestly: `accepted`, `stale`, or a refusal
+//! The privacy property above is a property of `lookup`, and only of
+//! `lookup`. Reporting answers honestly: `accepted`, `stale`, or a refusal
 //! naming its reason. That means someone who guesses a key hash and posts a
 //! record of their own can learn whether that key hash is in use, which a
 //! lookup would never tell them.

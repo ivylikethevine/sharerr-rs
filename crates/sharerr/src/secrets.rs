@@ -29,7 +29,7 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
 }
 
 /// `N` raw bytes from the same entropy source, for key material that is not a
-/// pasteable secret — the gossip signing seed.
+/// pasteable secret — the gossip signing key and the lighthouse decoy seed.
 pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     let mut raw = [0u8; N];
     getrandom::fill(&mut raw).map_err(|err| format!("could not generate key material: {err}"))?;

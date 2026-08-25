@@ -104,7 +104,7 @@ impl PathResolver {
     /// otherwise translate the path into one that exists nowhere. The only
     /// translation that can apply is sharerr→qbit, taken from the most specific
     /// rule whose `sharerr` prefix matches — the same most-specific-wins choice
-    /// [`Self::resolve`] makes on the arr side, via the same [`most_specific_match`].
+    /// [`Self::resolve`] makes on the arr side, via the same `most_specific_match`.
     /// A more specific rule that leaves `qbit` unset still wins the match and
     /// still means "no translation" rather than falling through to a less
     /// specific rule that happens to define one: two sources of the same file

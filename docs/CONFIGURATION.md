@@ -22,6 +22,7 @@ default, and what sets it.
 - [`[lighthouse]`](#lighthouse)
 - [`[gluetun]` and `[gluetun_client]`](#gluetun-and-gluetun_client)
 - [`[sync]`](#sync)
+- [`[checks]`](#checks)
 - [`[notifications]`](#notifications)
 - [Vault secrets](#vault-secrets)
 - [Environment variable overrides](#environment-variable-overrides)
@@ -32,12 +33,20 @@ Three layers, applied in order, each overriding the last:
 
 1. **Compiled defaults** — what every field below is when `sharerr.toml`
    does not mention it.
-2. **`sharerr.toml`** — read from `/config/sharerr.toml` by default. This is
-   the file the web UI rewrites in place (comments and all) when you save a
-   settings form.
+2. **`sharerr.toml`** — read from `/config/sharerr.toml` by default
+   (`--config <path>`, or `SHARERR_CONFIG`, points elsewhere). This is the
+   file the web UI rewrites in place (comments and all) when you save a
+   settings form. A missing file is not an error; a deployment can be
+   configured entirely through the environment.
 3. **`SHARERR_*` environment variables** — the top layer, and the only one a
    restart is needed to change. See
    [Environment variable overrides](#environment-variable-overrides).
+
+Unknown keys are rejected, not ignored — a typo like `taag = "x"` is a
+startup error naming the key, at every layer. If the file fails to load,
+`serve` still starts on a fallback config that salvages `data_dir` and
+`server.bind` from the broken file (and the environment) so the web UI is
+reachable to fix it, and says so on every page.
 
 **Secrets are never in `sharerr.toml`.** Every API key, password, and token
 lives in the encrypted vault instead, keyed by the constants listed in
@@ -162,13 +171,18 @@ selected — never re-applied or enforced afterward. See the README's
 | `tracker.advertised_host` | string      | unset (required*)    | Hostname/IP friends reach the tracker on.                                                 |
 | `tracker.port`            | int         | `server.bind`'s port | Override when a published docker port differs from the internal one.                      |
 | `tracker.advertised_url`  | url         | unset                | Full base URL (scheme, path prefix, bracketed IPv6) — wins over `advertised_host`/`port`. |
-| `tracker.bind`            | socket addr | unset                | A second listener carrying only the tracker, for a one-forwarded-port topology.           |
+| `tracker.bind`            | socket addr | unset                | A second listener carrying only the tracker and `.torrent` downloads, for a one-forwarded-port topology. File/env only — the settings page has no field for it. |
 
 \* Required unless `advertised_url` is set, or [`[gluetun]`](#gluetun-and-gluetun_client)
 resolves an endpoint dynamically.
 
 Vault secret: `tracker.token` — an announce token embedded in every torrent
-built after it is set. See the README's
+built after it is set. It becomes one unencoded segment of every announce
+URL, so `vault set` and the settings page both refuse anything outside
+letters, digits, `-`, `_`, `.` and `~`. Rotating it from the settings page
+(retyping or "Generate") keeps the old value as `tracker.token_previous`, and
+the tracker keeps accepting that one, unattributed, until you finalise the
+rotation or clear the token — clearing removes both. See the README's
 ["The tracker"](../README.md#the-tracker).
 
 ## `[[path_map]]`
@@ -231,6 +245,15 @@ gluetun v3.40 made `apikey` the default control-server auth.
 | `sync.enabled`       | bool | `true`  | Run the reconciliation loop on a timer while `serve` runs. |
 | `sync.interval_secs` | int  | `900`   | Floor of 60s.                                              |
 
+## `[checks]`
+
+| TOML key              | Type | Default | Notes                                                                                                                                                                                                                       |
+| --------------------- | ---- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checks.reachability` | bool | `false` | Dial this instance's own advertised tracker and feed addresses and report whether they accept a TCP connection. Opt-in because many NAT setups refuse hairpinning, which would show a scary failure on a healthy instance. |
+
+See the README's
+["Checking that you are actually reachable"](../README.md#checking-that-you-are-actually-reachable).
+
 ## `[notifications]`
 
 A webhook fired on sync failure or a peer going quiet — see the README's
@@ -270,12 +293,14 @@ sharerr vault remove <key>
 | `gluetun_client.api_key`    | Torrent-client-facing gluetun control server API key         |
 | `notifications.webhook_url` | Where a sync-failure/peer-quiet notification is POSTed       |
 
-Two more secrets exist but are never operator-set — generated on first use
-and not listed by `sharerr vault list`'s writable-fields view:
-`identity.signing_key` (this instance's gossip signing key) and
-`lighthouse.decoy_seed` (the embedded lighthouse's decoy-answer seed). A
-per-peer gossip key (`peer.gossip.<id>`) is managed from the Friends page
-instead of Settings.
+Those twelve are the keys `sharerr vault set` accepts. `sharerr vault list`
+shows every key the vault holds, which includes a few sharerr manages
+itself and `vault set` refuses: `tracker.token_previous` (the rotated-out
+announce token, see [`[tracker]`](#tracker)), `identity.signing_key` (this
+instance's gossip signing key, generated on first use),
+`lighthouse.decoy_seed` (the embedded lighthouse's decoy-answer seed, same),
+and one `peer.gossip.<id>` per friend, managed from the Friends page instead
+of Settings.
 
 ## Environment variable overrides
 
@@ -294,4 +319,7 @@ variable, rather than accepting a save that would be silently discarded.
 `SHARERR_MASTER_KEY` (and `SHARERR_MASTER_KEY_FILE`, pointing at a Docker
 secret) is the one setting that has no `sharerr.toml` equivalent at all,
 since it is what encrypts the vault the file's own secrets would otherwise
-need to unlock.
+need to unlock. It, `SHARERR_CONFIG`, and the tier-2 test suite's
+`SHARERR_E2E_*` variables are the only `SHARERR_*` names that are not config
+fields; any other unrecognised `SHARERR_*` variable is a startup error, same
+as an unknown key in the file.

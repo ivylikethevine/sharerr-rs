@@ -11,8 +11,8 @@
 //!
 //! So the document comes from the handlers. Each one carries a
 //! `#[utoipa::path]` attribute next to its own doc comment, and every route is
-//! mounted through [`OpenApiRouter`], which takes the path *from that
-//! attribute* — a route cannot be added without an entry, and an entry cannot
+//! mounted through [`OpenApiRouter`](utoipa_axum::router::OpenApiRouter), which
+//! takes the path *from that attribute* — a route cannot be added without an entry, and an entry cannot
 //! name a path nothing serves. [`document`] then assembles those routers with
 //! no state at all, which is what lets `sharerr openapi` run on a machine with
 //! no config and no database.
@@ -32,7 +32,7 @@
 //!
 //! # The exceptions
 //!
-//! Three routes are mounted by hand rather than through `routes!`, each for a
+//! A handful of routes are mounted by hand rather than through `routes!`, each for a
 //! reason recorded where it is mounted, and so are listed in [`ApiDoc`]'s own
 //! `paths(...)` instead:
 //!

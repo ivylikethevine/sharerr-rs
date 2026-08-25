@@ -89,9 +89,10 @@ impl Seeder {
     /// Ensure the file at `paths` is being seeded, building a torrent only if
     /// nothing already covers it.
     ///
-    /// `torrents` is the client's full list, fetched once per reconciliation pass
-    /// by the caller — refetching it here per item would cost a first sync of a
-    /// large library one full-library round trip per file. A snapshot is
+    /// `torrents` is the client's full list, fetched and indexed once per
+    /// reconciliation pass by the caller — refetching it here per item would
+    /// cost a first sync of a large library one full-library round trip per
+    /// file. A snapshot is
     /// sound: torrents this pass adds are single-file and each discovered item is
     /// a distinct file, so a later item can never be covered by an earlier add.
     ///

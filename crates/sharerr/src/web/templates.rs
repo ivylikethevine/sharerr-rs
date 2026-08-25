@@ -884,7 +884,7 @@ pub struct SwarmRow {
     pub more: usize,
 }
 
-/// One peer's address, full and redacted — see [`Node::sublabel_masked`]'s
+/// One peer's address, full and redacted — see [`NodeLine::masked`]'s
 /// doc comment for what the redaction is and why.
 #[derive(Debug, Clone)]
 pub struct AddressCell {

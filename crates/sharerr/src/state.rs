@@ -85,7 +85,7 @@ pub struct ServeState {
     tracker_token: RwLock<Option<Option<String>>>,
     /// The tracker token a rotation just replaced, cached the same way and
     /// for the same reason as `tracker_token` — see
-    /// [`crate::web::settings::rotate_tracker_token`].
+    /// `crate::web::settings::rotate_tracker_token`.
     tracker_token_previous: RwLock<Option<Option<String>>>,
     /// This instance's gossip signing identity, cached for the same reason as
     /// `tracker_token` — loading it means opening the vault, and the pull side of

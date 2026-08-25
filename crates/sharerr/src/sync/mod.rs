@@ -166,7 +166,7 @@ pub struct Syncer {
     sources: Vec<Box<dyn LibrarySource>>,
     tracker: Arc<dyn TrackerProvider>,
     /// Owns the torrent client too — the syncer reads it through
-    /// [`Seeder::client`], so there is exactly one handle to keep consistent.
+    /// [`Seeder::qbit`], so there is exactly one handle to keep consistent.
     seeder: Seeder,
     resolver: PathResolver,
 }

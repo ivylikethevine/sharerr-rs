@@ -111,7 +111,8 @@ pub struct ConfigFile {
     path: PathBuf,
     doc: DocumentMut,
     /// Set when the file on disk did not parse and `doc` is a blank replacement.
-    /// [`Self::save`] moves the original aside rather than overwriting it.
+    /// [`Self::write_validated`] moves the original aside rather than
+    /// overwriting it.
     recovered: bool,
 }
 
@@ -146,9 +147,9 @@ impl ConfigFile {
     /// anyway, the honest move is to write out what the running process actually
     /// has and let the operator carry on.
     ///
-    /// [`Self::save`] renames the original to `sharerr.toml.invalid` first, so the
-    /// only copy of what they hand-wrote — including the one stray character that
-    /// probably caused this — survives for them to consult.
+    /// [`Self::write_validated`] renames the original to `sharerr.toml.invalid`
+    /// first, so the only copy of what they hand-wrote — including the one stray
+    /// character that probably caused this — survives for them to consult.
     pub fn replacing(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -157,12 +158,13 @@ impl ConfigFile {
         }
     }
 
-    /// Where [`Self::save`] will move the current file, when it is replacing one.
+    /// Where [`Self::write_validated`] will move the current file, when it is
+    /// replacing one.
     pub fn backup_path(&self) -> Option<PathBuf> {
         (self.recovered && self.path.exists()).then(|| invalid_path(&self.path))
     }
 
-    /// Apply edits in order. Nothing is written until [`Self::save`].
+    /// Apply edits in order. Nothing is written until [`Self::write_validated`].
     pub fn apply(&mut self, edits: impl IntoIterator<Item = Edit>) {
         for edit in edits {
             apply_one(&mut self.doc, edit);
@@ -235,7 +237,7 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// The write half of [`Self::save`], for a caller that has already
+    /// The write half of `save`, for a caller that has already
     /// serialised and validated the document (the settings page does so
     /// *before* touching the vault) and must not pay for — or drift from —
     /// a second pass. `text` must be this document's own `to_toml()` output.

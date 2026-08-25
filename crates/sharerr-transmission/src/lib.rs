@@ -15,7 +15,7 @@
 //!
 //! A client that treats the 409 as a failure appears to work against a freshly
 //! restarted daemon and then breaks hours later, which is a miserable thing to
-//! debug. [`TransmissionClient::rpc`] handles it centrally and retries once.
+//! debug. `TransmissionClient::rpc` handles it centrally and retries once.
 //!
 //! # Why not a category
 //!
