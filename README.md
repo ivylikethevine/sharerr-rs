@@ -66,6 +66,7 @@ roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Builtin BitTorrent tracker, served by sharerr itself                             | ✅ |
 | Torznab feed for Prowlarr, with magnet links                                     | ✅ |
 | Jackett compatibility: URLs, indexer list, JSON results                          | ✅ |
+| Media metadata in the feeds: resolution, codecs, channels, runtime               | ✅ |
 | Web UI: first-run wizard, settings, connection tests                             | ✅ |
 | Items page: every discovered file, its torrent and announce-token status         | ✅ |
 | Path-mapping diagnostics in the browser                                          | ✅ |
@@ -667,6 +668,7 @@ bytes. No real content is involved anywhere.
 | `sharerr-rtorrent`     | rTorrent XML-RPC client                                   |
 | `sharerr-store`        | Encrypted vault + SQLite store                            |
 | `sharerr-torrent`      | Torrent construction and tracker resolution               |
+| `sharerr-probe`        | Reads what a media file is, where no *arr can say         |
 | `sharerr-lighthouse`   | The lighthouse rendezvous service — its own binary too    |
 | `sharerr-testkit`      | Synthetic fixtures. Never in a release build              |
 

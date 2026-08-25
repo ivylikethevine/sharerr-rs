@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Result, TorrentError};
 use lava_torrent::torrent::v1::TorrentBuilder;
+use sharerr_core::MediaMeta;
 
 /// What to build a torrent over.
 ///
@@ -19,6 +20,10 @@ pub struct TorrentRequest<'a> {
     /// Where peers announce: the current endpoint first, then the recently held
     /// ones as fallback tiers.
     pub announce: &'a crate::AnnounceSet,
+    /// What the file is, when known — written into the torrent's `comment` field
+    /// for whoever opens the `.torrent` by hand. `None` writes no comment at all
+    /// rather than an empty one.
+    pub media: Option<&'a sharerr_core::MediaMeta>,
 }
 
 /// A finished torrent, in memory.
@@ -84,6 +89,18 @@ impl LavaTorrentFactory {
         // one-entry list would only add bytes and change nothing.
         if let Some(tiers) = request.announce.tier_list() {
             builder = builder.set_announce_list(tiers);
+        }
+        // `add_extra_field`, never `add_extra_info_field`. The latter writes into
+        // the info dictionary, which would make the info hash a function of the
+        // metadata as well as of the file — two torrents over one unchanged file
+        // would stop matching, and the "reuse the torrent that already covers
+        // this file" path that keeps sharerr from re-adding media would break.
+        // `comment` belongs outside it by BEP 3 anyway.
+        if let Some(comment) = request.media.and_then(describe) {
+            builder = builder.add_extra_field(
+                "comment".to_owned(),
+                lava_torrent::bencode::BencodeElem::String(comment),
+            );
         }
         let torrent = builder.build().map_err(|source| TorrentError::Build {
             path: path.to_path_buf(),
@@ -191,6 +208,28 @@ pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Ve
         .map_err(|source| TorrentError::Reencode { source })
 }
 
+/// One human-readable line describing the file, for the torrent's `comment`.
+///
+/// Space-separated rather than dotted: this is read by a person opening the
+/// `.torrent`, not parsed by an *arr, and the release title is already carrying
+/// the parseable form. `None` when nothing is known, so no comment is written at
+/// all — an empty comment field is worse than none.
+fn describe(media: &MediaMeta) -> Option<String> {
+    let parts: Vec<&str> = [
+        media.resolution.as_deref(),
+        media.video_codec.as_deref(),
+        media.dynamic_range.as_deref(),
+        media.audio_codec.as_deref(),
+        media.audio_channels.as_deref(),
+        media.runtime.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -255,6 +294,7 @@ mod tests {
             .create(&TorrentRequest {
                 path: &path,
                 announce,
+                media: None,
             })
             .unwrap()
     }
@@ -264,6 +304,77 @@ mod tests {
             primary: primary.parse().unwrap(),
             tiers: tiers.iter().map(|t| t.parse().unwrap()).collect(),
         }
+    }
+
+    /// The invariant the whole comment feature is subordinate to.
+    ///
+    /// The info hash identifies the *file*. `Seeder::seed` reuses an existing
+    /// torrent when one already covers a path, `set_seeding` records the hash as
+    /// the item's identity, and withdrawal finds the torrent by it. Were the
+    /// comment written inside the info dictionary, every one of those would start
+    /// missing as soon as a file's metadata was learned — a re-probe would
+    /// silently mint a second identity for media already being seeded.
+    #[test]
+    fn a_comment_does_not_move_the_info_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Lanternwick Hollow S01E01.mkv");
+        std::fs::write(&path, vec![7u8; 512 * 1024]).unwrap();
+        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+
+        let bare = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &path,
+                announce: &set,
+                media: None,
+            })
+            .unwrap();
+        let described = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &path,
+                announce: &set,
+                media: Some(&MediaMeta {
+                    resolution: Some("1920x1080".to_owned()),
+                    video_codec: Some("HEVC".to_owned()),
+                    audio_codec: Some("EAC3".to_owned()),
+                    audio_channels: Some("5.1".to_owned()),
+                    ..MediaMeta::default()
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(
+            bare.info_hash, described.info_hash,
+            "the comment must live outside the info dictionary"
+        );
+        // ...and it must actually be there, or the assertion above passes for
+        // the wrong reason.
+        assert!(described.data.len() > bare.data.len());
+        assert!(
+            String::from_utf8_lossy(&described.data).contains("1920x1080 HEVC EAC3 5.1"),
+            "the comment is written verbatim"
+        );
+    }
+
+    /// Nothing known means no `comment` key at all — an empty one is a field a
+    /// client will render as blank rather than omit.
+    #[test]
+    fn nothing_known_writes_no_comment_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let torrent = built(&dir, &set);
+
+        assert!(!String::from_utf8_lossy(&torrent.data).contains("comment"));
+        assert_eq!(describe(&MediaMeta::default()), None);
+    }
+
+    #[test]
+    fn a_comment_lists_only_what_is_known() {
+        let partial = MediaMeta {
+            resolution: Some("1280x720".to_owned()),
+            runtime: Some("0:42:11".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(describe(&partial).as_deref(), Some("1280x720 0:42:11"));
     }
 
     #[test]

@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use sharerr_core::MediaSpec;
+use sharerr_core::{MediaMeta, MediaSpec};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
@@ -103,6 +103,7 @@ pub fn resolve(
     spec: &MediaSpec,
     scene_name: Option<&str>,
     original_path: Option<&Path>,
+    media: Option<&MediaMeta>,
     path: &Path,
 ) -> String {
     if let Some(scene) = scene_name {
@@ -120,16 +121,35 @@ pub fn resolve(
         }
     }
 
-    synthesize(spec)
+    synthesize(spec, media)
 }
 
 /// Build a scene-style name from metadata alone.
 ///
-/// The quality tokens are a deliberate fiction: sharerr does not inspect the media
-/// to find out what it actually is. They are present because a title with no
-/// quality at all parses to "unknown quality" on the far end, which many profiles
-/// reject outright.
-pub fn synthesize(spec: &MediaSpec) -> String {
+/// A title with no quality at all parses to "unknown quality" on the far end,
+/// which many profiles reject outright — so this always emits *some* quality
+/// tokens. Which ones depends on how much is known about the file:
+///
+/// - With [`MediaMeta`], the resolution and video codec are the file's real
+///   ones, and only the source token stays invented (see below).
+/// - Without it, the tokens are the flat guess this function has always
+///   produced. `1080p.WEB-DL.x264` is not a claim about the file so much as the
+///   most common shape of one, chosen because it is the least likely to be
+///   filtered out.
+///
+/// **The source token is a fiction either way.** `WEB-DL` versus `BluRay` versus
+/// `HDTV` describes where a release came from, and no amount of reading the file
+/// reveals that — the container of a BluRay remux and a web download are
+/// identical. It stays `WEB-DL` because that is the least restrictive assumption
+/// a downstream quality profile can be handed.
+pub fn synthesize(spec: &MediaSpec, media: Option<&MediaMeta>) -> String {
+    // Real values where they are known, the historical guess where they are not.
+    let resolution = media
+        .and_then(MediaMeta::scene_resolution)
+        .unwrap_or("1080p");
+    let codec = media
+        .and_then(MediaMeta::scene_video_codec)
+        .unwrap_or("x264");
     match spec {
         MediaSpec::Episode {
             series_title,
@@ -137,13 +157,16 @@ pub fn synthesize(spec: &MediaSpec) -> String {
             episode,
         } => {
             format!(
-                "{}.S{season:02}E{episode:02}.WEB-DL.x264-{GROUP}",
+                "{}.S{season:02}E{episode:02}.{resolution}.WEB-DL.{codec}-{GROUP}",
                 dotted(series_title)
             )
         }
         MediaSpec::Movie { title, year } => match year {
-            Some(year) => format!("{}.{year}.WEB-DL.x264-{GROUP}", dotted(title)),
-            None => format!("{}.WEB-DL.x264-{GROUP}", dotted(title)),
+            Some(year) => format!(
+                "{}.{year}.{resolution}.WEB-DL.{codec}-{GROUP}",
+                dotted(title)
+            ),
+            None => format!("{}.{resolution}.WEB-DL.{codec}-{GROUP}", dotted(title)),
         },
         // Music convention is `Artist-Album-FORMAT-GROUP`, hyphen-separated rather
         // than dotted, and with an audio format instead of a video codec. A music
@@ -451,7 +474,7 @@ mod tests {
                 season,
                 episode: ep,
             };
-            let title = synthesize(&spec);
+            let title = synthesize(&spec, None);
             assert!(
                 parse(&title).describes(&spec),
                 "{title:?} did not round-trip back to {spec:?}"
@@ -473,7 +496,7 @@ mod tests {
                 title: name.to_owned(),
                 year,
             };
-            let title = synthesize(&spec);
+            let title = synthesize(&spec, None);
             if year.is_some() {
                 assert!(
                     parse(&title).describes(&spec),
@@ -489,8 +512,8 @@ mod tests {
 
     #[test]
     fn synthesized_titles_are_dot_separated_and_tagged() {
-        let title = synthesize(&episode());
-        assert_eq!(title, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
+        let title = synthesize(&episode(), None);
+        assert_eq!(title, "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-SHARERR");
         assert!(!title.contains(' '), "scene names carry no spaces: {title}");
     }
 
@@ -503,8 +526,8 @@ mod tests {
             title: "Amélie".to_owned(),
             year: Some(2001),
         };
-        let title = synthesize(&spec);
-        assert_eq!(title, "Amelie.2001.WEB-DL.x264-SHARERR");
+        let title = synthesize(&spec, None);
+        assert_eq!(title, "Amelie.2001.1080p.WEB-DL.x264-SHARERR");
     }
 
     /// A script with no ASCII-transliterable form at all (CJK, here) used to
@@ -512,11 +535,14 @@ mod tests {
     /// untransliterable title, and a collision risk for `describes`.
     #[test]
     fn a_title_with_no_ascii_form_gets_a_stable_placeholder_not_the_literal_unknown() {
-        let title = synthesize(&MediaSpec::Movie {
-            title: "千と千尋の神隠し".to_owned(),
-            year: Some(2001),
-        });
-        assert_ne!(title, "Unknown.2001.WEB-DL.x264-SHARERR");
+        let title = synthesize(
+            &MediaSpec::Movie {
+                title: "千と千尋の神隠し".to_owned(),
+                year: Some(2001),
+            },
+            None,
+        );
+        assert_ne!(title, "Unknown.2001.1080p.WEB-DL.x264-SHARERR");
         assert!(
             title.starts_with("Unknown."),
             "still recognisable as a placeholder: {title}"
@@ -527,14 +553,20 @@ mod tests {
     /// placeholder and therefore be treated as describing the same content.
     #[test]
     fn two_different_untransliterable_titles_get_different_placeholders() {
-        let a = synthesize(&MediaSpec::Movie {
-            title: "千と千尋の神隠し".to_owned(),
-            year: Some(2001),
-        });
-        let b = synthesize(&MediaSpec::Movie {
-            title: "となりのトトロ".to_owned(),
-            year: Some(1988),
-        });
+        let a = synthesize(
+            &MediaSpec::Movie {
+                title: "千と千尋の神隠し".to_owned(),
+                year: Some(2001),
+            },
+            None,
+        );
+        let b = synthesize(
+            &MediaSpec::Movie {
+                title: "となりのトトロ".to_owned(),
+                year: Some(1988),
+            },
+            None,
+        );
         assert_ne!(a, b);
         assert!(
             !parse(&a).describes(&MediaSpec::Movie {
@@ -546,6 +578,72 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------ synthesis + media
+
+    fn full_meta() -> MediaMeta {
+        MediaMeta {
+            resolution: Some("3840x2160".to_owned()),
+            video_codec: Some("HEVC".to_owned()),
+            ..MediaMeta::default()
+        }
+    }
+
+    #[test]
+    fn known_metadata_replaces_the_guessed_quality_tokens() {
+        let title = synthesize(&episode(), Some(&full_meta()));
+        assert_eq!(title, "Lanternwick.Hollow.S02E01.2160p.WEB-DL.x265-SHARERR");
+
+        let movie = synthesize(&movie(), Some(&full_meta()));
+        assert_eq!(movie, "The.Gilded.Ferry.2019.2160p.WEB-DL.x265-SHARERR");
+    }
+
+    /// Metadata that describes the file but not in terms a release title uses —
+    /// an off-ladder resolution, an unrecognised codec — falls back per token
+    /// rather than all-or-nothing.
+    #[test]
+    fn unusable_metadata_falls_back_token_by_token() {
+        let odd = MediaMeta {
+            resolution: Some("1024x768".to_owned()),
+            video_codec: Some("HEVC".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(
+            synthesize(&episode(), Some(&odd)),
+            "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x265-SHARERR",
+            "the codec is usable even though the resolution is not"
+        );
+    }
+
+    /// Music and books have no resolution or video codec, so metadata must not
+    /// leak into their naming conventions.
+    #[test]
+    fn audio_and_book_titles_ignore_video_metadata() {
+        let track = synthesize(
+            &MediaSpec::Track {
+                artist: "Copper Vale".to_owned(),
+                album: "Harrowmere".to_owned(),
+                track: Some(3),
+            },
+            Some(&full_meta()),
+        );
+        assert_eq!(track, "Copper.Vale-Harrowmere-03-FLAC-SHARERR");
+    }
+
+    /// The metadata reaches `synthesize` only through the fallback path — a real
+    /// scene name still outranks everything, metadata included.
+    #[test]
+    fn metadata_does_not_displace_a_real_name() {
+        let scene = "Lanternwick.Hollow.S02E01.720p.HDTV.x264-REALGRP";
+        let resolved = resolve(
+            &episode(),
+            Some(scene),
+            None,
+            Some(&full_meta()),
+            &PathBuf::from("/tv/whatever.mkv"),
+        );
+        assert_eq!(resolved, scene, "a published name is not ours to improve");
+    }
+
     // ---------------------------------------------------------- resolution
 
     #[test]
@@ -554,6 +652,7 @@ mod tests {
         let resolved = resolve(
             &episode(),
             Some(scene),
+            None,
             None,
             &PathBuf::from("/tv/Lanternwick Hollow/Season 02/whatever.mkv"),
         );
@@ -564,13 +663,14 @@ mod tests {
     fn a_scene_name_keeps_its_extension_off() {
         let resolved = resolve(
             &episode(),
-            Some("Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-FAKEGRP.mkv"),
+            Some("Lanternwick.Hollow.S02E01.1080p.1080p.WEB-DL.x264-FAKEGRP.mkv"),
+            None,
             None,
             &PathBuf::from("/tv/x.mkv"),
         );
         assert_eq!(
             resolved,
-            "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-FAKEGRP"
+            "Lanternwick.Hollow.S02E01.1080p.1080p.WEB-DL.x264-FAKEGRP"
         );
     }
 
@@ -578,6 +678,7 @@ mod tests {
     fn a_parseable_basename_is_used_when_there_is_no_scene_name() {
         let resolved = resolve(
             &episode(),
+            None,
             None,
             None,
             &PathBuf::from(
@@ -593,9 +694,13 @@ mod tests {
             &episode(),
             None,
             None,
+            None,
             &PathBuf::from("/tv/Lanternwick Hollow/Season 02/01.mkv"),
         );
-        assert_eq!(resolved, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
+        assert_eq!(
+            resolved,
+            "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-SHARERR"
+        );
     }
 
     /// The subtle one: a basename that parses, but to the *wrong* episode. Using it
@@ -606,9 +711,13 @@ mod tests {
             &episode(),
             None,
             None,
+            None,
             &PathBuf::from("/tv/Copper Vale/Copper.Vale.S05E09.WEB-DL.mkv"),
         );
-        assert_eq!(resolved, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
+        assert_eq!(
+            resolved,
+            "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-SHARERR"
+        );
     }
 
     #[test]
@@ -617,9 +726,13 @@ mod tests {
             &episode(),
             Some("   "),
             None,
+            None,
             &PathBuf::from("/tv/Lanternwick/01.mkv"),
         );
-        assert_eq!(resolved, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
+        assert_eq!(
+            resolved,
+            "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-SHARERR"
+        );
     }
 
     /// The case the fallback exists for: Radarr renamed the file on import, so the
@@ -633,6 +746,7 @@ mod tests {
             Some(&PathBuf::from(
                 "/downloads/The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv",
             )),
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
         );
         assert_eq!(resolved, "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP");
@@ -647,6 +761,7 @@ mod tests {
             &movie(),
             None,
             Some(&PathBuf::from("/downloads/rrqx7z1p/file1.mkv")),
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/The Gilded Ferry (2019).mkv"),
         );
         assert_eq!(resolved, "The Gilded Ferry (2019)");
@@ -661,9 +776,10 @@ mod tests {
             Some(&PathBuf::from(
                 "/downloads/Copper.Vale.2011.1080p.WEB-DL.mkv",
             )),
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
         );
-        assert_eq!(resolved, "The.Gilded.Ferry.2019.WEB-DL.x264-SHARERR");
+        assert_eq!(resolved, "The.Gilded.Ferry.2019.1080p.WEB-DL.x264-SHARERR");
     }
 
     #[test]
@@ -674,6 +790,7 @@ mod tests {
             Some(&PathBuf::from(
                 "/downloads/The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv",
             )),
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
         );
         assert_eq!(resolved, "The.Gilded.Ferry.2019.2160p.UHD.BluRay-SCENEGRP");
@@ -685,6 +802,7 @@ mod tests {
             &movie(),
             None,
             None,
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/The Gilded Ferry (2019).mkv"),
         );
         assert_eq!(parseable, "The Gilded Ferry (2019)");
@@ -693,8 +811,12 @@ mod tests {
             &movie(),
             None,
             None,
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
         );
-        assert_eq!(unparseable, "The.Gilded.Ferry.2019.WEB-DL.x264-SHARERR");
+        assert_eq!(
+            unparseable,
+            "The.Gilded.Ferry.2019.1080p.WEB-DL.x264-SHARERR"
+        );
     }
 }

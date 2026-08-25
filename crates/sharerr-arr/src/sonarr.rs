@@ -16,7 +16,7 @@ use sharerr_core::{ExternalIds, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
-use crate::models::{Episode, EpisodeFile, Series, non_empty, non_zero};
+use crate::models::{Episode, EpisodeFile, MediaInfo, Series, non_empty, non_zero};
 use crate::{Discovered, Tagged, fetch_tagged};
 
 impl Tagged for Series {
@@ -90,6 +90,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 size: file.size,
                 ids: ids.clone(),
                 scene_name: non_empty(file.scene_name),
+                media: file.media_info.and_then(MediaInfo::into_meta),
                 // Sonarr's `EpisodeFileResource` has no `originalFilePath`; only
                 // Radarr records where the file was before the import rename.
                 original_path: None,

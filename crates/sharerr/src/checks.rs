@@ -896,6 +896,7 @@ mod tests {
             arr_path: file,
             size: 2,
             ids: ExternalIds::default(),
+            media: None,
             scene_name: None,
             original_path: None,
         };
@@ -949,6 +950,7 @@ mod tests {
             arr_path: "/tv/Gilded.Ferry.2019.mkv".into(),
             size: 2,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             original_path: None,
             scene_name: None,
         };
@@ -977,6 +979,7 @@ mod tests {
             size: 2,
             original_path: None,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             scene_name: None,
         };
         let ready = DirOutcome::Ready {
@@ -1033,6 +1036,7 @@ mod tests {
             original_path: None,
             size: 2,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             scene_name: None,
         };
 
@@ -1060,6 +1064,7 @@ mod tests {
             arr_path: "relative/Gilded.Ferry.2019.mkv".into(),
             size: 2,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             scene_name: None,
         };
 

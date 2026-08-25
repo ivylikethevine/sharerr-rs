@@ -10,7 +10,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 
 use sharerr_core::endpoint::now_epoch;
-use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+use sharerr_core::model::{ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareState, SharedItem};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -242,15 +242,18 @@ impl Store {
         let now = now_epoch();
         let spec_json = encode_json(&item.spec)?;
         let ids_json = encode_json(&item.ids)?;
+        // `None` stays SQL NULL rather than the string "null": the COALESCE below
+        // distinguishes the two, and a JSON "null" would satisfy it forever.
+        let media_json = item.media.as_ref().map(encode_json).transpose()?;
 
         let row = sqlx::query(
             r#"
             INSERT INTO shared_items (
                 source, source_id, file_id, spec_json, release_title, arr_path,
                 size, ids_json, info_hash, announce_token_fp, created_by_sharerr,
-                state, last_error, created_at, updated_at
+                state, last_error, created_at, updated_at, media_json
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)
             ON CONFLICT (source, file_id) DO UPDATE SET
                 source_id     = excluded.source_id,
                 spec_json     = excluded.spec_json,
@@ -272,6 +275,13 @@ impl Store {
                 -- assigning that would strip the claim `set_seeding` recorded —
                 -- and with it the client's licence to remove the torrent on
                 -- withdrawal. Only `set_seeding` writes this column.
+                -- COALESCE for the same reason as info_hash, one step removed: a
+                -- rediscovery whose *arr has not analysed the file yet, or whose
+                -- probe failed this pass, arrives with NULL. Assigning it would
+                -- throw away metadata an earlier pass established, and the feed
+                -- would silently lose attributes it had been publishing. A source
+                -- that later reports better metadata still overwrites.
+                media_json    = COALESCE(excluded.media_json, shared_items.media_json),
                 state         = excluded.state,
                 last_error    = excluded.last_error,
                 updated_at    = excluded.updated_at
@@ -292,6 +302,7 @@ impl Store {
         .bind(item.state.as_str())
         .bind(item.last_error.as_deref())
         .bind(now)
+        .bind(media_json.as_deref())
         .fetch_one(&self.pool)
         .await?;
 
@@ -594,7 +605,7 @@ pub struct RunRecord {
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
      arr_path, size, ids_json, info_hash, announce_token_fp, created_by_sharerr, state, \
-     last_error, created_at \
+     last_error, created_at, media_json \
      FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
@@ -617,6 +628,13 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         .map_err(|e| malformed(format!("spec_json: {e}")))?;
     let ids: ExternalIds = serde_json::from_str(row.try_get::<&str, _>("ids_json")?)
         .map_err(|e| malformed(format!("ids_json: {e}")))?;
+    // Nullable, unlike the two above: rows predating the column have none, and so
+    // does anything neither the *arr apps nor a probe could describe.
+    let media: Option<MediaMeta> = row
+        .try_get::<Option<&str>, _>("media_json")?
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| malformed(format!("media_json: {e}")))?;
 
     let size: i64 = row.try_get("size")?;
 
@@ -636,6 +654,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         state,
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at").ok(),
+        media,
     })
 }
 
@@ -696,6 +715,7 @@ mod tests {
                 imdb: Some("tt7654321".to_owned()),
                 ..ExternalIds::default()
             },
+            media: None,
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
@@ -703,6 +723,93 @@ mod tests {
             last_error: None,
             created_at: None,
         }
+    }
+
+    fn sample_media() -> MediaMeta {
+        MediaMeta {
+            resolution: Some("1920x1080".to_owned()),
+            video_codec: Some("x265".to_owned()),
+            audio_channels: Some("5.1".to_owned()),
+            ..MediaMeta::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn media_metadata_survives_an_insert_and_a_read_back() {
+        let store = Store::open_in_memory().await.unwrap();
+        let item = SharedItem {
+            media: Some(sample_media()),
+            ..episode(1)
+        };
+        store.upsert(&item).await.unwrap();
+
+        let back = store.all_items().await.unwrap();
+        assert_eq!(back[0].media, Some(sample_media()));
+    }
+
+    /// A row from before the column existed, and one whose source could say
+    /// nothing, are both "unknown" — and must load rather than fail the read.
+    #[tokio::test]
+    async fn an_item_with_no_metadata_round_trips_as_none() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1)).await.unwrap();
+
+        let back = store.all_items().await.unwrap();
+        assert_eq!(back[0].media, None);
+    }
+
+    /// The COALESCE in `upsert`. A rediscovery arrives with whatever the source
+    /// says *this pass* — and an *arr that has not re-analysed the file, or a
+    /// probe that failed, says nothing. Assigning that would silently strip
+    /// attributes the feed had been publishing.
+    #[tokio::test]
+    async fn a_rediscovery_with_no_metadata_does_not_erase_what_is_known() {
+        let store = Store::open_in_memory().await.unwrap();
+        store
+            .upsert(&SharedItem {
+                media: Some(sample_media()),
+                ..episode(1)
+            })
+            .await
+            .unwrap();
+
+        // The same file, rediscovered by a pass that learned nothing about it.
+        store.upsert(&episode(1)).await.unwrap();
+
+        let back = store.all_items().await.unwrap();
+        assert_eq!(
+            back[0].media,
+            Some(sample_media()),
+            "a silent pass must not unpublish what an earlier one established"
+        );
+    }
+
+    /// The other half of that clause: a source that *does* report metadata still
+    /// overwrites, or a first bad reading would be permanent.
+    #[tokio::test]
+    async fn a_rediscovery_with_better_metadata_replaces_the_old() {
+        let store = Store::open_in_memory().await.unwrap();
+        store
+            .upsert(&SharedItem {
+                media: Some(MediaMeta {
+                    resolution: Some("1280x720".to_owned()),
+                    ..MediaMeta::default()
+                }),
+                ..episode(1)
+            })
+            .await
+            .unwrap();
+
+        store
+            .upsert(&SharedItem {
+                media: Some(sample_media()),
+                ..episode(1)
+            })
+            .await
+            .unwrap();
+
+        let back = store.all_items().await.unwrap();
+        assert_eq!(back[0].media, Some(sample_media()));
     }
 
     /// Every source must survive an insert and a read-back.
@@ -748,6 +855,7 @@ mod tests {
                 tmdb: Some(555_444),
                 ..ExternalIds::default()
             },
+            media: None,
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,

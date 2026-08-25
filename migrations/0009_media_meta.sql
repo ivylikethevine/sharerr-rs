@@ -1,0 +1,16 @@
+-- What each shared file actually is: resolution, codecs, channels, runtime.
+--
+-- Two things want this and neither can get it at render time. The Torznab feed
+-- publishes it as attributes, which is what lets a friend's Sonarr filter on
+-- quality instead of parsing it back out of the title; and `title::synthesize`
+-- folds the resolution and codec into the release name it invents for a file
+-- that had no real one, replacing tokens that used to be a flat guess.
+--
+-- JSON rather than columns for the same reason `ids_json` is: the shape follows
+-- what the *arr apps report, the fields are sparse, and nothing queries an
+-- individual value -- rows are read whole and rendered whole.
+--
+-- NULL for a row discovered before this column existed, and for one whose source
+-- reported nothing and whose file could not be probed. Both are "unknown", and
+-- the feed omits the attributes entirely rather than publishing empty ones.
+ALTER TABLE shared_items ADD COLUMN media_json TEXT;

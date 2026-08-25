@@ -232,6 +232,10 @@ fn walk(
                 ids: ExternalIds::default(),
                 scene_name: None,
                 original_path: None,
+                // A directory has no *arr behind it to have analysed anything.
+                // The sync pass probes the file, which is the one path that also
+                // covers an *arr file the *arr itself never analysed.
+                media: None,
             }),
             None => {
                 outcome.skipped += 1;

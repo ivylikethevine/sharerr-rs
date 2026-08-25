@@ -130,6 +130,9 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 scene_name: non_empty(file.scene_name.clone()),
                 // Lidarr and Readarr report no pre-rename path.
                 original_path: None,
+                // Not yet read from Readarr's `mediaInfo`; the sync pass probes the
+                // file instead. See docs/ROADMAP.md.
+                media: None,
             });
         }
     }

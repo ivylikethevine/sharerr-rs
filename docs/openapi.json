@@ -1813,6 +1813,54 @@
               "null"
             ],
             "format": "int64"
+          },
+          "Resolution": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "VideoCodec": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "AudioCodec": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "AudioChannels": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "Languages": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "Subs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "Runtime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "Hdr": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

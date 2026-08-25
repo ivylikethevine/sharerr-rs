@@ -794,6 +794,7 @@ mod tests {
             arr_path: std::path::PathBuf::from("/tv/Gilded Ferry/ep.mkv"),
             size: 2,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             scene_name: None,
             original_path: None,
         }

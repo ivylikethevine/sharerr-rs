@@ -949,6 +949,7 @@ mod tests {
                     arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
                     size: 1,
                     ids: ExternalIds::default(),
+                    media: None,
                     info_hash: None,
                     announce_token_fp: None,
                     created_by_sharerr: true,
@@ -1089,6 +1090,7 @@ mod tests {
             .create(&sharerr_torrent::TorrentRequest {
                 path: &media,
                 announce: &announce,
+                media: None,
             })
             .unwrap()
     }
@@ -1241,6 +1243,7 @@ mod tests {
                     arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
                     size: 1,
                     ids: ExternalIds::default(),
+                    media: None,
                     info_hash: None,
                     announce_token_fp: None,
                     created_by_sharerr: true,
@@ -1300,6 +1303,7 @@ mod tests {
                 arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
                 size: 1,
                 ids: ExternalIds::default(),
+                media: None,
                 info_hash: None,
                 announce_token_fp: None,
                 created_by_sharerr: true,

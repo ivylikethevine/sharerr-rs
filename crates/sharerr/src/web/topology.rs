@@ -1654,6 +1654,7 @@ mod tests {
             arr_path: "/data/x.mkv".into(),
             size: 1,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,

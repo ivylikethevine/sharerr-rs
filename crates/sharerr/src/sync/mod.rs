@@ -573,6 +573,41 @@ impl Syncer {
             return Ok(Step::Unchanged);
         }
 
+        // Fill in what the source could not say about the file, by reading the
+        // file. Sonarr and Radarr report `mediaInfo` and never reach this; a
+        // `[[library]]` directory has no application to report anything, and an
+        // *arr file whose analysis has not run looks identical from here.
+        //
+        // Ahead of the release title on purpose: `title::synthesize` folds the
+        // resolution and codec into the name it invents, so the metadata has to
+        // exist before the title is computed.
+        //
+        // The resolution here is opportunistic and its failure is *not* handled —
+        // an unresolvable path simply yields no metadata. The authoritative
+        // attempt, the one whose error fails the item, is still below, after the
+        // row has been recorded.
+        let mut item = std::borrow::Cow::Borrowed(item);
+        if item.media.is_none()
+            && let Ok(paths) = self.resolver.resolve_for(item.source, &item.arr_path)
+        {
+            // `probe` reads the file, which is blocking work on a runtime whose
+            // other tasks are HTTP requests to Sonarr and qBittorrent. Off-thread
+            // rather than stalling the executor for the length of a disk read.
+            let probed = tokio::task::spawn_blocking(move || sharerr_probe::probe(&paths.sharerr))
+                .await
+                .unwrap_or_else(|err| {
+                    // The probe backends parse untrusted container headers; a
+                    // panic in one is a bug in a dependency, not a reason to fail
+                    // an item that is otherwise perfectly shareable.
+                    tracing::warn!(error = %err, "media probe panicked — continuing without it");
+                    None
+                });
+            if probed.is_some() {
+                item.to_mut().media = probed;
+            }
+        }
+        let item = item.as_ref();
+
         // Path mapping only ever substitutes the prefix (`PathResolver::resolve`
         // joins the mapped root to `rest`, the part after `strip_prefix`), so the
         // file's basename is identical under `item.arr_path` and under
@@ -582,6 +617,7 @@ impl Syncer {
             &item.spec,
             item.scene_name.as_deref(),
             item.original_path.as_deref(),
+            item.media.as_ref(),
             &item.arr_path,
         );
 
@@ -643,6 +679,7 @@ impl Syncer {
                 announce,
                 torrents,
                 known.and_then(|k| k.info_hash.as_deref()),
+                item.media.as_ref(),
             )
             .await?;
         self.store

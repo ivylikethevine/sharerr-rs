@@ -16,10 +16,12 @@ tracks what is still ahead.
 
 ### What's left
 
-One feature-sized item — **[request flow](#functionality)**. The 2026-08-21
-code review is otherwise closed out: what is left of it is a single entry kept
-only so its documented behaviour reads as a decision rather than an oversight.
-Both are in [Open work, by scope](#open-work-by-scope) below.
+One feature-sized item — **[request flow](#functionality)** — and a cluster of
+follow-ups to media metadata, which landed for Sonarr and Radarr and stops
+short of Lidarr and Readarr. The 2026-08-21 code review is otherwise closed
+out: what is left of it is a single entry kept only so its documented
+behaviour reads as a decision rather than an oversight. All are in
+[Open work, by scope](#open-work-by-scope) below.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
 and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
@@ -51,9 +53,41 @@ are as of the review commit and may have drifted.
    Stale while the tracker admits it. The doc comment frames that as
    intended; listed so the decision is a decision.
 
+2. **Lidarr `mediaInfo` → `MediaMeta`** — Lidarr's `TrackFileResource` reports
+   the same `mediaInfo` object Sonarr and Radarr do, and `lidarr.rs` passes
+   `media: None` today with a comment pointing here. Wiring it is the same
+   shape as the Sonarr/Radarr path in `models.rs` — one wire struct reused, one
+   `into_meta` call — and it is the *cheap* half of the audio story: Lidarr has
+   already analysed the file, so nothing needs to read it.
+
+3. **Readarr `mediaInfo`** — the same one-line wiring as Lidarr, if Readarr's
+   `BookFileResource` turns out to report the object at all. Verify before
+   writing the struct: an ebook has no streams to analyse, so this may be an
+   entry that closes as "there is nothing to read".
+
+### Medium — a subsystem, or one shape repeated across several files
+
+4. **Audio metadata fields worth carrying** — `MediaMeta` is shaped around what
+   a video release advertises (resolution, video codec, dynamic range). Music
+   releases are matched on different things: sample rate, bit depth, and
+   lossless-vs-lossy are what a friend's Lidarr quality profile actually
+   filters on, and none has a field today. Adding them means widening
+   `MediaMeta`, the `media_json` payload, both feed renderers, and the
+   `-FLAC-` token `title::synthesize` currently hard-codes for every track
+   regardless of what the file is. Worth doing **after** item 2, since Lidarr's
+   `mediaInfo` is where the values would come from.
+
+5. **An audio backend for `sharerr-probe`** — the probe covers MKV/WebM and
+   ISO-BMFF; a bare `flac`, `mp3` or `opus` in a `[[library]]` directory gets
+   nothing. `symphonia` is the obvious backend and clears the MSRV floor. This
+   is deliberately behind items 2 and 4: for anything Lidarr manages the
+   `mediaInfo` path is free and better, so this only ever serves
+   directory-sourced music — and it is worth knowing whether item 4's fields
+   are the right ones before building a second producer for them.
+
 ### Large — a protocol, a data model, or a release process
 
-2. **Request flow** — a new inbound request queue and approve step, touching
+6. **Request flow** — a new inbound request queue and approve step, touching
     the sync engine and the web UI on both sides of a friendship; see
     [Functionality](#functionality).
 

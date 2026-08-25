@@ -509,6 +509,7 @@ mod tests {
             arr_path: "/x".into(),
             size: 1_610_612_736, // 1.5 GiB
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,

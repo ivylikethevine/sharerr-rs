@@ -367,6 +367,35 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
             );
         }
 
+        // What the file actually is. Optional attributes throughout: an absent one
+        // is a fact not known, and publishing it empty would have a friend's
+        // quality profile match on `""` rather than skip the comparison.
+        //
+        // `video`, `audio`, `resolution` and `subs` are the names Jackett
+        // established and every Torznab consumer reads; `audiochannels` and `hdr`
+        // are not in that set, and are emitted anyway because an unknown attribute
+        // costs a consumer nothing to ignore and the information is real.
+        if let Some(media) = item.media.as_ref() {
+            for (name, value) in [
+                ("resolution", media.resolution.as_deref()),
+                ("video", media.video_codec.as_deref()),
+                ("audio", media.audio_codec.as_deref()),
+                ("audiochannels", media.audio_channels.as_deref()),
+                ("language", media.audio_languages.as_deref()),
+                ("subs", media.subtitles.as_deref()),
+                ("runtime", media.runtime.as_deref()),
+                ("hdr", media.dynamic_range.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    let _ = writeln!(
+                        out,
+                        "      <torznab:attr name=\"{name}\" value=\"{}\"/>",
+                        escape(value)
+                    );
+                }
+            }
+        }
+
         if let MediaSpec::Episode {
             season, episode, ..
         } = item.spec
@@ -958,6 +987,90 @@ mod tests {
     use sharerr_core::model::{MediaSource, ShareState};
     use std::path::PathBuf;
 
+    /// Every field populated, to prove each one reaches the feed under the name
+    /// a Torznab consumer expects.
+    fn full_media() -> sharerr_core::MediaMeta {
+        sharerr_core::MediaMeta {
+            resolution: Some("1920x1080".to_owned()),
+            video_codec: Some("HEVC".to_owned()),
+            dynamic_range: Some("HDR10".to_owned()),
+            audio_codec: Some("EAC3".to_owned()),
+            audio_channels: Some("5.1".to_owned()),
+            audio_languages: Some("English/Japanese".to_owned()),
+            subtitles: Some("English".to_owned()),
+            runtime: Some("0:42:11".to_owned()),
+        }
+    }
+
+    #[test]
+    fn media_attributes_reach_the_feed_under_their_torznab_names() {
+        let mut item = episode("Lanternwick.Hollow.S02E01", 2, 1);
+        item.media = Some(full_media());
+        let xml = render(&item);
+
+        for (name, value) in [
+            ("resolution", "1920x1080"),
+            ("video", "HEVC"),
+            ("audio", "EAC3"),
+            ("audiochannels", "5.1"),
+            ("language", "English/Japanese"),
+            ("subs", "English"),
+            ("runtime", "0:42:11"),
+            ("hdr", "HDR10"),
+        ] {
+            let expected = format!(r#"<torznab:attr name="{name}" value="{value}"/>"#);
+            assert!(xml.contains(&expected), "missing {name}: {xml}");
+        }
+    }
+
+    /// An unknown field is omitted, never published empty: a friend's quality
+    /// profile comparing against `""` is worse than one that skips the
+    /// comparison because the attribute is absent.
+    #[test]
+    fn unknown_media_fields_are_omitted_rather_than_empty() {
+        let mut item = episode("Lanternwick.Hollow.S02E01", 2, 1);
+        item.media = Some(sharerr_core::MediaMeta {
+            resolution: Some("1280x720".to_owned()),
+            ..sharerr_core::MediaMeta::default()
+        });
+        let xml = render(&item);
+
+        assert!(xml.contains(r#"<torznab:attr name="resolution" value="1280x720"/>"#));
+        for absent in ["video", "audio", "audiochannels", "subs", "runtime", "hdr"] {
+            assert!(
+                !xml.contains(&format!(r#"name="{absent}""#)),
+                "{absent} must not appear at all: {xml}"
+            );
+        }
+    }
+
+    /// An item with no metadata renders exactly as it did before the feature —
+    /// the attributes are additive, and a consumer that was working must not see
+    /// the feed change shape.
+    #[test]
+    fn an_item_without_media_gains_no_attributes() {
+        let item = episode("Lanternwick.Hollow.S02E01", 2, 1);
+        let xml = render(&item);
+        for absent in ["resolution", "video", "audio", "subs", "runtime", "hdr"] {
+            assert!(!xml.contains(&format!(r#"name="{absent}""#)), "{absent}");
+        }
+    }
+
+    /// Metadata is a string from an *arr API or a container header, neither of
+    /// which sharerr controls, and it lands in XML.
+    #[test]
+    fn media_values_are_escaped() {
+        let mut item = episode("Lanternwick.Hollow.S02E01", 2, 1);
+        item.media = Some(sharerr_core::MediaMeta {
+            video_codec: Some("a<b>&\"c\"".to_owned()),
+            ..sharerr_core::MediaMeta::default()
+        });
+        let xml = render(&item);
+
+        assert!(!xml.contains("a<b>"), "raw markup reached the feed: {xml}");
+        assert!(xml.contains("a&lt;b&gt;"), "{xml}");
+    }
+
     fn episode(title: &str, season: u32, ep: u32) -> SharedItem {
         SharedItem {
             id: Some(1),
@@ -979,6 +1092,7 @@ mod tests {
                 imdb: Some("tt7654321".to_owned()),
                 ..ExternalIds::default()
             },
+            media: None,
             info_hash: Some("ab".repeat(20)),
             announce_token_fp: None,
             created_by_sharerr: true,
@@ -1002,6 +1116,7 @@ mod tests {
                 imdb: Some("tt1112223".to_owned()),
                 ..ExternalIds::default()
             },
+            media: None,
             ..episode(title, 1, 1)
         }
     }

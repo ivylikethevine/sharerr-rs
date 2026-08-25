@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
+use sharerr_core::MediaMeta;
 use sharerr_core::paths::ResolvedPaths;
 use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, torrent_file_path};
 
@@ -109,6 +110,7 @@ impl Seeder {
         announce: &AnnounceSet,
         torrents: &KnownTorrents,
         known_info_hash: Option<&str>,
+        media: Option<&MediaMeta>,
     ) -> Result<SeedOutcome> {
         if let Some(existing) = self.find_existing(torrents, &paths.qbit).await? {
             tracing::info!(
@@ -125,7 +127,7 @@ impl Seeder {
         let (info_hash, data) = match self.reuse_cached(known_info_hash, announce).await {
             Some(reused) => reused,
             None => {
-                let built = self.build(paths, announce).await?;
+                let built = self.build(paths, announce, media).await?;
                 (built.info_hash, built.data)
             }
         };
@@ -405,10 +407,13 @@ impl Seeder {
         &self,
         paths: &ResolvedPaths,
         announce: &AnnounceSet,
+        media: Option<&MediaMeta>,
     ) -> Result<sharerr_torrent::BuiltTorrent> {
         let path = paths.sharerr.clone();
         let announce = announce.clone();
         let torrent_dir = self.torrent_dir.clone();
+        // Owned: the closure below outlives this frame on a blocking thread.
+        let media = media.cloned();
 
         // Hashing a media file is gigabytes of CPU work, and the cache write can
         // block for tens of milliseconds on the network mounts these deployments
@@ -418,6 +423,7 @@ impl Seeder {
             let built = LavaTorrentFactory.create(&TorrentRequest {
                 path: &path,
                 announce: &announce,
+                media: media.as_ref(),
             })?;
 
             // Best-effort: the torrent is already in memory and about to be
@@ -730,6 +736,7 @@ mod tests {
             .create(&TorrentRequest {
                 path: &media,
                 announce: &old_announce,
+                media: None,
             })
             .unwrap();
 
@@ -783,6 +790,7 @@ mod tests {
             .create(&TorrentRequest {
                 path: &media,
                 announce: &announce,
+                media: None,
             })
             .unwrap();
 
@@ -810,6 +818,7 @@ mod tests {
                 &announce,
                 &KnownTorrents::default(),
                 Some(&built.info_hash),
+                None,
             )
             .await
             .unwrap();
@@ -842,6 +851,7 @@ mod tests {
             .create(&TorrentRequest {
                 path: &media,
                 announce: &old_announce,
+                media: None,
             })
             .unwrap();
 
@@ -870,6 +880,7 @@ mod tests {
                 &new_announce,
                 &KnownTorrents::default(),
                 Some(&built.info_hash),
+                None,
             )
             .await
             .unwrap();
@@ -923,6 +934,7 @@ mod tests {
                 &announce,
                 &KnownTorrents::default(),
                 Some("stale-hash-nothing-cached"),
+                None,
             )
             .await
             .unwrap();
@@ -947,6 +959,7 @@ mod tests {
                 announce: &AnnounceSet::single(
                     Url::parse("http://their-tracker.example/announce").unwrap(),
                 ),
+                media: None,
             })
             .unwrap();
 
@@ -970,7 +983,13 @@ mod tests {
         )];
 
         let outcome = seeder
-            .seed(&paths, &announce, &KnownTorrents::index(&existing), None)
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1031,7 +1050,13 @@ mod tests {
         let existing = [summary("deadbeef", "/downloads", "/downloads/movie.mkv")];
 
         let err = seeder
-            .seed(&paths, &announce, &KnownTorrents::index(&existing), None)
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         let text = format!("{err:#}");
@@ -1053,6 +1078,7 @@ mod tests {
             .create(&TorrentRequest {
                 path: &media,
                 announce: &announce,
+                media: None,
             })
             .unwrap();
 
@@ -1081,7 +1107,13 @@ mod tests {
         )];
 
         let outcome = seeder
-            .seed(&paths, &announce, &KnownTorrents::index(&existing), None)
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(

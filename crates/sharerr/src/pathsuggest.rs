@@ -203,6 +203,7 @@ mod tests {
             arr_path: PathBuf::from(arr_path),
             size,
             ids: ExternalIds::default(),
+            media: None,
             scene_name: None,
             original_path: None,
         }

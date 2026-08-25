@@ -408,6 +408,7 @@ mod tests {
             arr_path: std::path::PathBuf::from("/tv/x.mkv"),
             size: 1024,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
