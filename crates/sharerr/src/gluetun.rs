@@ -163,13 +163,15 @@ pub enum GluetunError {
     )]
     NoForwardedPort,
 
-    /// gluetun's control server has required an API key by default since
-    /// v3.40; a request sent without one comes back `401` with a terse
+    /// gluetun's control server has required a credential on every route since
+    /// v3.39.1; a request sent without one comes back `401` with a terse
     /// `Unauthorized` body, not a JSON error object.
     #[error(
         "gluetun's control server at {url} rejected the request as unauthorized — set \
          gluetun.api_key in Settings to the control server's API key \
-         (CONTROL_SERVER_AUTH's apikey, from gluetun's config/auth file)"
+         (the apikey in gluetun's HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE, or in a \
+         role covering GET /v1/publicip/ip, /v1/openvpn/portforwarded and \
+         /v1/portforward in its auth config file)"
     )]
     Unauthorized { url: String },
 }

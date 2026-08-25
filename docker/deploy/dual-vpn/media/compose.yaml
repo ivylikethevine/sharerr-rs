@@ -1,6 +1,6 @@
 # The library stack: gluetun, qBittorrent, Sonarr, Radarr.
 #
-#   docker network create sharerr-shared   # once, before either stack
+#   docker network create --subnet 172.31.90.0/24 sharerr-shared   # once, before either stack
 #   cp .env.example .env && $EDITOR .env
 #   docker compose up -d
 #
@@ -21,46 +21,83 @@ networks:
     external: true
 
 services:
+  # ------------------------------------------------------------------ gluetun
+  #
+  # The image pin, the tunnel credentials, the capabilities, the healthcheck and
+  # gluetun's full variable surface live in ../../gluetun.reference.yaml. What
+  # stays here is what is specific to *this* tunnel.
   gluetun:
-    image: qmcgaw/gluetun:v3.40.0
+    extends:
+      file: ../../gluetun.reference.yaml
+      service: gluetun
     container_name: media-gluetun
-    cap_add: [NET_ADMIN]
-    devices:
-      - /dev/net/tun:/dev/net/tun
     networks: [default, sharerr-shared]
     environment:
-      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:-custom}
-      VPN_TYPE: wireguard
-      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY:?set this in .env}
-      WIREGUARD_PUBLIC_KEY: ${WIREGUARD_PUBLIC_KEY:?set this in .env}
-      WIREGUARD_ENDPOINT_IP: ${WIREGUARD_ENDPOINT_IP:?set this in .env}
-      WIREGUARD_ENDPOINT_PORT: ${WIREGUARD_ENDPOINT_PORT:-51820}
-      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES:?set this in .env}
-
       # Only qBittorrent's listener needs to be reachable from the internet
       # through this tunnel — the tracker/feed live in the other stack now.
       FIREWALL_VPN_INPUT_PORTS: "6881"
-      # The WebUI, for the host-published port below, and for sharerr calling
-      # in over sharerr-shared — both arrive on the non-tunnel interface.
-      FIREWALL_INPUT_PORTS: "8080"
+      # On the non-tunnel interface: the WebUI, for the host-published port
+      # below and for sharerr calling in over sharerr-shared; and the control
+      # server, which sharerr polls from the other stack. Both arrive here
+      # rather than through the tunnel.
+      FIREWALL_INPUT_PORTS: "8080,8000"
       # LAN/docker ranges plus sharerr-shared's own subnet, so a killswitch
-      # that is otherwise correctly paranoid does not also block the one
-      # cross-stack call this deployment needs.
+      # that is otherwise correctly paranoid does not also block the two
+      # cross-stack calls this deployment needs.
       FIREWALL_OUTBOUND_SUBNETS: >-
         ${LAN_SUBNETS:-192.168.0.0/16,172.16.0.0/12,10.0.0.0/8},172.31.90.0/24
-      DNS_ADDRESS: 127.0.0.11
-      TZ: ${TZ:-Etc/UTC}
+
+      # --- the control server ----------------------------------------------
+      #
+      # `:8000`, not loopback — unlike the other stacks, the thing that polls
+      # this control server is in a different network namespace and arrives over
+      # sharerr-shared. That is also why 8000 is in FIREWALL_INPUT_PORTS above.
+      #
+      # sharerr reads it as `[gluetun_client]` — this tunnel's exit address and
+      # forwarded port belong to the torrent client, not to the tracker. The key
+      # below therefore goes in the vault as `gluetun_client.api_key`, and it is
+      # a *different* key from the one ../sharerr/ uses for its own gluetun:
+      #
+      #   printf %s "$GLUETUN_API_KEY" | docker compose exec -T sharerr \
+      #     sharerr vault set gluetun_client.api_key
+      #
+      # (run from ../sharerr/, where the sharerr container lives)
+      #
+      # This control server is reachable by anything else on sharerr-shared, so
+      # if that network carries containers you do not fully trust, swap the
+      # blanket role below for the per-route one in
+      # ../../gluetun-auth.example.toml.
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+      HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE: '{"auth":"apikey","apikey":"${GLUETUN_API_KEY:?set this in .env}"}'
+
+      # --- provider port forwarding (optional) ------------------------------
+      #
+      # Uncomment for a provider that supports it — private internet access,
+      # perfect privacy, privatevpn or protonvpn. gluetun rejects
+      # VPN_PORT_FORWARDING for anything else, `custom` included, so this stays
+      # off while VPN_SERVICE_PROVIDER is the default.
+      #
+      # The port this tunnel is granted is qBittorrent's BitTorrent listener.
+      # sharerr still wants to know about it — its gossip self-record carries the
+      # client's address — so the up/down commands reach *across* to the other
+      # stack's sharerr and nudge the `client` poller specifically. Two details
+      # make that work: `?target=client` picks the second poller rather than the
+      # tracker one, and the hostname is ../sharerr/'s gluetun container, because
+      # sharerr rides in its namespace and has no name of its own.
+      #
+      # sharerr rejects these from non-private source addresses; 172.31.90.0/24
+      # qualifies. Neither endpoint takes a value — they only ask sharerr to
+      # re-poll, so there is no port to template in.
+      #
+      # VPN_PORT_FORWARDING: "on"
+      # VPN_PORT_FORWARDING_PROVIDER: ${VPN_SERVICE_PROVIDER}
+      # VPN_PORT_FORWARDING_STATUS_FILE: /gluetun/forwarded_port
+      # VPN_PORT_FORWARDING_UP_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- "http://sharerr-gluetun:8477/gluetun/refresh?target=client"'
+      # VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+      #   /bin/sh -c 'wget -qO- "http://sharerr-gluetun:8477/gluetun/down?target=client"'
     ports:
       - "127.0.0.1:8080:8080"
-    volumes:
-      - gluetun-config:/gluetun
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:5.2.3
@@ -113,6 +150,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  # gluetun-config is referenced by the extended service in
+  # ../../gluetun.reference.yaml. Compose does not import the resources an
+  # extended service names, so it has to be declared here.
   gluetun-config:
   qbittorrent-config:
   sonarr-config:

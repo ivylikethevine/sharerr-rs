@@ -1,0 +1,171 @@
+# sharerr with no VPN: everything on one docker bridge, ports forwarded on your
+# router.
+#
+#   cd docker/deploy/direct && cp .env.example .env && $EDITOR .env config/sharerr.toml
+#   docker compose up -d
+#
+# This is the simplest layout and the one to start from if you are not sure. It
+# is the right answer when the exit address is already yours — a box with a
+# static IP or a dynamic-DNS name, a VPS, a seedbox — because then there is no
+# tunnel to keep sharerr's advertised address in step with, and
+# `tracker.advertised_host` is simply true.
+#
+# It is the wrong answer if you were planning to seed from a home connection you
+# would rather not have in a swarm's peer list. That is `../vpn/`.
+#
+# ## The shape
+#
+# One ordinary bridge network, so every container resolves every other by
+# **service name** — `http://qbittorrent:8080`, `http://sonarr:8989`. This is the
+# opposite of the gluetun layouts next door, where everything is `localhost`
+# because the containers share one namespace. Config copied from one to the other
+# will not work; that is the single most common mistake between these two files.
+#
+# ## The ports, and which ones the internet needs
+#
+# Published to loopback only. Reach them over SSH forwarding or a reverse proxy;
+# they have no business on the LAN, let alone the internet:
+#
+#   8080  qBittorrent WebUI
+#   8989  Sonarr
+#   7878  Radarr
+#
+# Published on every interface, because someone outside has to reach them:
+#
+#   6881  qBittorrent's BitTorrent listener — inbound peers
+#   8477  sharerr — friends' announces, and the Torznab feed their Prowlarr polls
+#
+# Both need forwarding on your router to the docker host. A closed 6881 stalls
+# transfers in a way that looks like a slow swarm; a closed 8477 means friends
+# can see your feed entries and never download from you, with no error anywhere.
+#
+# ## 8477 carries the web UI too
+#
+# There is one listener. The tracker, the Torznab feed, the gossip endpoints and
+# the web UI are all on 8477, so opening it to the internet opens the login page
+# to the internet. sharerr serves no TLS and does not mark its session cookie
+# secure, which means a password crossing that connection crosses it in the
+# clear.
+#
+# Do one of these before forwarding 8477:
+#
+#   * Put a TLS-terminating reverse proxy in front (Caddy, nginx, Traefik) and
+#     forward 443 to it instead of 8477 to the host. Set
+#     `tracker.advertised_url` in config/sharerr.toml to the https:// address so
+#     announce URLs match what friends can actually reach.
+#   * Or bind a second listener with `tracker.bind` and forward only *that*
+#     port. It carries the tracker routes and .torrent downloads and not the UI —
+#     it adds a door rather than moving one, so keep 8477 on loopback.
+#
+# Forwarding 8477 as-is works, and is a login page on the open internet.
+
+name: sharerr-direct
+
+services:
+  # -------------------------------------------------------------- qbittorrent
+  #
+  # 5.2 or newer, so sharerr can authenticate with an API key instead of a
+  # password — stateless, no session to expire. Generate one under
+  # Options -> Web UI -> API key once the stack is up, then put it in sharerr's
+  # vault via Settings, or:
+  #
+  #   printf %s "$KEY" | docker compose exec -T sharerr sharerr vault set qbittorrent.api_key
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
+    container_name: qbittorrent
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: "6881"
+    volumes:
+      - qbittorrent-config:/config
+      # Read-only on purpose. sharerr never moves, renames, or re-links media,
+      # and qBittorrent only ever needs to *read* these files to seed them — so
+      # nothing in this stack has a reason to write here.
+      - ${MEDIA_PATH:?set this in .env}:/downloads:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+      # Peers. Forward this on the router.
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------- sonarr
+  #
+  # Sonarr and Radarr are here so the file is a complete working example. If you
+  # already run them, delete both services, drop their `[sonarr]`/`[radarr]`
+  # sections' URLs to wherever they actually live, and see ../sidecar/ — which is
+  # this stack with everything but sharerr removed.
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.15
+    container_name: sonarr
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - sonarr-config:/config
+      - ${MEDIA_PATH}/tv:/tv
+    ports:
+      - "127.0.0.1:8989:8989"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------- radarr
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.14.0
+    container_name: radarr
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - radarr-config:/config
+      - ${MEDIA_PATH}/movies:/movies
+    ports:
+      - "127.0.0.1:7878:7878"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ sharerr
+  sharerr:
+    image: ghcr.io/ivylikethevine/sharerr-rs:latest
+    container_name: sharerr
+    depends_on:
+      - qbittorrent
+      - sonarr
+      - radarr
+    environment:
+      # The one thing that cannot come from the UI, because it encrypts the vault
+      # the UI writes into. Generate with `openssl rand -base64 32` and keep it:
+      # losing it means losing every stored credential.
+      #
+      # Nothing else belongs here. Every other setting is a `SHARERR_*` variable
+      # that would *pin* its field — figment layers env over the file, so the
+      # Settings page renders anything set here disabled, and a save is silently
+      # discarded. Configure in config/sharerr.toml or the UI instead.
+      SHARERR_MASTER_KEY: ${SHARERR_MASTER_KEY:?set this in .env}
+      RUST_LOG: ${RUST_LOG:-sharerr=info,warn}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # sharerr.toml, rewritten in place by the UI when you save — so this has to
+      # be writable by uid 1000, which is what the image runs as.
+      - ./config:/config
+      # The vault, the database, and the generated .torrent files.
+      - sharerr-data:/data
+      # The same media, at sharerr's own path. It differs from qBittorrent's
+      # /downloads deliberately: the path mappings in sharerr.toml are what
+      # translate between the two, and identical mounts would hide a mapping bug
+      # here that then bites on a real deployment.
+      - ${MEDIA_PATH}:/media:ro
+    ports:
+      # Read "8477 carries the web UI too" at the top of this file before
+      # forwarding this on your router.
+      - "8477:8477"
+    restart: unless-stopped
+
+volumes:
+  qbittorrent-config:
+  sonarr-config:
+  radarr-config:
+  sharerr-data:

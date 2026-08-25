@@ -598,10 +598,14 @@
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
   {% endif %}
   <p class="hint">
-    Required since gluetun v3.40, which made <code>apikey</code> the default
-    control server auth — an unkeyed request now gets a bare <code>401</code>.
-    Find or set it in gluetun's own config under <code>CONTROL_SERVER_AUTH</code>
-    (or the roles section of its auth config file).
+    Required since gluetun v3.39.1 made every control server route private — an
+    unkeyed request now gets a bare <code>401</code>, so sharerr skips the poll
+    rather than send one. Set it on gluetun's side with
+    <code>HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE</code>, or in a role in its
+    <code>/gluetun/auth/config.toml</code>. A per-route role needs all three of
+    <code>GET /v1/publicip/ip</code>, <code>/v1/openvpn/portforwarded</code> and
+    <code>/v1/portforward</code> &mdash; gluetun redirects the second to the
+    third, and the redirect is authorised separately.
   </p>
 
   <label for="gluetun_poll_secs">Poll interval (seconds)</label>

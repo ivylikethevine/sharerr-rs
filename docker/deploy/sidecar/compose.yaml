@@ -1,0 +1,127 @@
+# sharerr alone, joined to a stack you already run.
+#
+#   cd docker/deploy/sidecar && cp .env.example .env && $EDITOR .env config/sharerr.toml
+#   docker compose up -d
+#
+# The other three layouts in this directory bring up qBittorrent and the *arr
+# apps themselves. This one assumes you already have them, running under some
+# other compose project, and adds exactly one container.
+#
+# ## Step one: find the network your stack is on
+#
+#   docker network ls
+#   docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' qbittorrent
+#
+# Compose names a project's default network `<project>_default`, so a stack
+# brought up from a `media/` directory is usually on `media_default`. Put that
+# name in `.env` as EXTERNAL_NETWORK. It is declared `external: true` below,
+# which means this file joins it and never owns it — `docker compose down` here
+# will not take your stack's network with it.
+#
+# If your services are spread across more than one network, add the others to
+# the `networks:` list on the sharerr service and to the top-level block; a
+# container can join several.
+#
+# ## Step two: names, not localhost
+#
+# On a shared bridge every container resolves every other by **service name** —
+# `http://qbittorrent:8080`, `http://sonarr:8989`. Use the name the *other*
+# compose project gave the service, which is not always its container name.
+#
+# The exception is the last section of this file: if your torrent client runs
+# inside a VPN container's network namespace, joining that namespace is a
+# different topology with different rules. Read it before assuming names work.
+#
+# ## What this stack still needs from you
+#
+# sharerr reads your library directly — it hashes the files to build torrents, so
+# a mount is not optional and a network share is a bad idea for the first pass.
+# MEDIA_PATH must point at the same bytes your torrent client seeds, and the
+# `[[path_map]]` entries in config/sharerr.toml translate between what Sonarr
+# reports, what sharerr reads, and what the client is told. Get those wrong and
+# nothing is shared; `docker compose exec sharerr sharerr doctor` checks them.
+
+name: sharerr-sidecar
+
+networks:
+  # Your existing stack's network. Not created here — `external: true` means
+  # compose expects to find it and errors if it cannot, rather than quietly
+  # making a second network of the same shape that reaches nothing.
+  existing:
+    external: true
+    name: ${EXTERNAL_NETWORK:?set this in .env — see "Step one" at the top of this file}
+
+services:
+  sharerr:
+    image: ghcr.io/ivylikethevine/sharerr-rs:latest
+    container_name: sharerr
+    networks: [existing]
+    environment:
+      # The one thing that cannot come from the UI, because it encrypts the vault
+      # the UI writes into. Generate with `openssl rand -base64 32` and keep it:
+      # losing it means losing every stored credential.
+      #
+      # Nothing else belongs here. Every other setting is a `SHARERR_*` variable
+      # that would *pin* its field — figment layers env over the file, so the
+      # Settings page renders anything set here disabled, and a save is silently
+      # discarded. Configure in config/sharerr.toml or the UI instead.
+      SHARERR_MASTER_KEY: ${SHARERR_MASTER_KEY:?set this in .env}
+      RUST_LOG: ${RUST_LOG:-sharerr=info,warn}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # sharerr.toml, rewritten in place by the UI when you save — so this has to
+      # be writable by uid 1000, which is what the image runs as.
+      - ./config:/config
+      # The vault, the database, and the generated .torrent files.
+      - sharerr-data:/data
+      # Your library, read-only. sharerr never moves, renames, or re-links media;
+      # it only reads. /media is sharerr's own view — it does not have to match
+      # the path your torrent client uses, and the path mappings in
+      # config/sharerr.toml exist precisely to translate between them.
+      - ${MEDIA_PATH:?set this in .env}:/media:ro
+    ports:
+      # One listener carries the web UI, the tracker, the Torznab feed and the
+      # gossip endpoints. Friends need to reach it, so it has to be forwarded on
+      # your router — and that puts the login page on the internet, over a
+      # connection sharerr does not encrypt and a session cookie it cannot mark
+      # secure.
+      #
+      # Put a TLS reverse proxy in front and set `tracker.advertised_url` to the
+      # https:// address, or bind a second tracker-only listener with
+      # `tracker.bind` and forward that instead. Both are set up in
+      # config/sharerr.toml.
+      - "8477:8477"
+    restart: unless-stopped
+
+  # ------------------------------------------------- if your client is behind a VPN
+  #
+  # Some stacks run qBittorrent inside a VPN container's network namespace
+  # (`network_mode: "service:gluetun"` in their compose file). Then qBittorrent
+  # has no network of its own and no name to resolve, and the sharerr service
+  # above cannot reach it however many networks it joins.
+  #
+  # Two ways round it, and they are not equivalent:
+  #
+  #   * **Join the namespace.** Replace `networks: [existing]` above with
+  #
+  #        network_mode: "container:gluetun"
+  #
+  #     using their gluetun's *container* name. sharerr then reaches qBittorrent
+  #     on `http://localhost:8080`, and announces from the same public address as
+  #     the swarm traffic, which is what you want — a friend sees one host rather
+  #     than two. Consequences: drop the `ports:` block (publishing belongs to
+  #     their gluetun, and you will have to add 8477 to it and to its
+  #     FIREWALL_INPUT_PORTS/FIREWALL_VPN_INPUT_PORTS), and their gluetun must
+  #     already be up or this container will not start. At that point you are
+  #     rebuilding ../vpn/ by hand and may prefer to run it directly.
+  #
+  #   * **Reach it through their VPN container's published port.** If their
+  #     gluetun publishes qBittorrent's WebUI, point sharerr at the gluetun
+  #     service *by name* — `http://gluetun:8080` — because the port belongs to
+  #     gluetun now. sharerr stays outside the tunnel, which means it announces
+  #     your real address while qBittorrent announces the tunnel's. That is a
+  #     legitimate choice, and it is `../dual-vpn/` without the second tunnel;
+  #     just be sure it is deliberate.
+
+volumes:
+  sharerr-data:

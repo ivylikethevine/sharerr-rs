@@ -668,7 +668,10 @@ async fn attributed_bytes(state: &TrackerState, bytes: Vec<u8>, supplied: &str) 
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // `result_large_err` for the same reason `state.rs`'s tests allow it: the
+    // Jail closures below return `Result<_, figment::Error>`, and that error is
+    // figment's to size, not ours.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
 
@@ -832,6 +835,39 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    /// Drive `body` against a state whose vault genuinely opens.
+    ///
+    /// [`authenticate`] fails closed on a vault it cannot read, so the
+    /// `unconfigured()` fixture — which has no master key — refuses *every*
+    /// announce and scrape with `invalid announce token` before the handler
+    /// under test is reached. Any test asserting what happens after admission
+    /// needs a real `SHARERR_MASTER_KEY`, and the vault it opens is empty, so
+    /// no token is configured and admission is the "none required" path.
+    ///
+    /// `Jail` scopes the variable to this closure and serializes against every
+    /// other Jail-based test in the binary; a bare `std::env::set_var` would do
+    /// neither and race the parallel runner. `Jail` is not async, hence the
+    /// plain `#[test]` callers and the runtime built here.
+    fn with_open_vault<F, Fut>(body: F)
+    where
+        F: FnOnce(Arc<crate::state::ServeState>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "tracker-tests-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let state = Arc::new(crate::state::ServeState::new(config, path, None));
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(body(state));
+            Ok(())
+        });
+    }
+
     async fn get(state: &Arc<crate::state::ServeState>, uri: &str) -> (StatusCode, String) {
         let state = Arc::new(TrackerState::new(Arc::clone(state)));
         let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
@@ -880,61 +916,60 @@ mod tests {
     /// End to end, through the real router, for a torrent this instance
     /// actually shares: the announce is admitted and answered rather than
     /// refused. No prior test in this module exercises the success path —
-    /// every existing one is a rejection. This fixture has no configured
-    /// vault (see `state::fixtures::unconfigured`), so `tracker.token` is
-    /// unset here and the request is necessarily on the "no token
-    /// configured" path already covered by `authenticate_token`'s own unit
-    /// tests — those, together with `a_successful_attribution_records_the_
-    /// clients_address`, are what prove the peer-hash branch itself works;
-    /// setting up a real vault-backed token for a full router-level version
-    /// of that would mean mutating the process's `SHARERR_MASTER_KEY`,
-    /// which nothing else in this test suite does, for good reason under a
-    /// parallel test runner.
-    #[tokio::test]
-    async fn an_announce_for_a_shared_torrent_is_admitted_and_answered() {
-        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+    /// every existing one is a rejection.
+    ///
+    /// Needs [`with_open_vault`], not `unconfigured()`: admission fails closed
+    /// on a vault it cannot read, so without a master key this never gets past
+    /// [`authenticate`] to the behaviour it means to check. The vault it opens
+    /// is empty, so no token is configured and this is the "none required"
+    /// path — the peer-hash branch is proven by `authenticate_token`'s own unit
+    /// tests and by `a_successful_attribution_records_the_clients_address`.
+    #[test]
+    fn an_announce_for_a_shared_torrent_is_admitted_and_answered() {
+        with_open_vault(|state| async move {
+            use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
 
-        let (_dir, state) = unconfigured();
-        let store = state.store().await.unwrap();
+            let store = state.store().await.unwrap();
 
-        let hash_hex = "00".repeat(20);
-        store
-            .upsert(&SharedItem {
-                id: None,
-                source: MediaSource::Sonarr,
-                source_id: 1,
-                file_id: 1,
-                spec: MediaSpec::Episode {
-                    series_title: "Lanternwick Hollow".to_owned(),
-                    season: 1,
-                    episode: 1,
-                },
-                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                size: 1,
-                ids: ExternalIds::default(),
-                info_hash: None,
-                announce_token_fp: None,
-                created_by_sharerr: true,
-                state: ShareState::Pending,
-                last_error: None,
-                created_at: None,
-            })
-            .await
-            .unwrap();
-        store
-            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
-            .await
-            .unwrap();
+            let hash_hex = "00".repeat(20);
+            store
+                .upsert(&SharedItem {
+                    id: None,
+                    source: MediaSource::Sonarr,
+                    source_id: 1,
+                    file_id: 1,
+                    spec: MediaSpec::Episode {
+                        series_title: "Lanternwick Hollow".to_owned(),
+                        season: 1,
+                        episode: 1,
+                    },
+                    release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+                    arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+                    size: 1,
+                    ids: ExternalIds::default(),
+                    info_hash: None,
+                    announce_token_fp: None,
+                    created_by_sharerr: true,
+                    state: ShareState::Pending,
+                    last_error: None,
+                    created_at: None,
+                })
+                .await
+                .unwrap();
+            store
+                .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
+                .await
+                .unwrap();
 
-        let hash_query = "%00".repeat(20);
-        let (status, body) = get(
-            &state,
-            &format!("/announce?info_hash={hash_query}&peer_id={hash_query}&port=6881"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(!body.contains("failure reason"), "body was: {body}");
+            let hash_query = "%00".repeat(20);
+            let (status, body) = get(
+                &state,
+                &format!("/announce?info_hash={hash_query}&peer_id={hash_query}&port=6881"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "body was: {body}");
+        });
     }
 
     /// Every route the tracker claims to serve must actually be wired up. A handler
@@ -954,6 +989,50 @@ mod tests {
             let (status, _) = get(&state, &uri).await;
             assert_ne!(status, StatusCode::NOT_FOUND, "{uri} is not routed");
         }
+    }
+
+    /// The other half of [`with_open_vault`]'s reason for existing: a vault that
+    /// cannot be opened refuses announces rather than admitting them.
+    ///
+    /// [`authenticate`] deliberately fails closed here, because
+    /// `tracker_token()`'s `None` cannot distinguish "no token configured" from
+    /// "could not read the vault", and admitting on the latter would silently
+    /// switch enforcement off after a transient error — a master-key file briefly
+    /// unreadable during a mount or a rotation.
+    ///
+    /// The master key is set to the empty string rather than left alone: empty
+    /// counts as unset (see `sharerr_store::vault::master_key_from`), so this
+    /// pins "no master key" deterministically instead of inheriting whatever a
+    /// concurrently-running Jail test happens to have set. Five tests in this
+    /// module used to depend on that accident in the opposite direction — they
+    /// asserted post-admission behaviour and passed only while some other test
+    /// held a master key in the environment.
+    #[test]
+    fn an_announce_is_refused_when_the_vault_cannot_be_opened() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let state = Arc::new(crate::state::ServeState::new(config, path, None));
+
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let hash = "%00".repeat(20);
+                let (status, body) = get(
+                    &state,
+                    &format!("/announce?info_hash={hash}&peer_id={hash}&port=6881"),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "trackers report refusals in-band");
+                assert!(
+                    body.contains("invalid announce token"),
+                    "an unreadable vault must refuse, not admit: {body}"
+                );
+            });
+            Ok(())
+        });
     }
 
     /// A `.torrent` sharerr did not make must not be served, whoever asks — the
@@ -1093,88 +1172,90 @@ mod tests {
     /// A scrape naming no `info_hash` at all is refused with a specific
     /// reason rather than treated as "tell me about everything" — this
     /// tracker never enumerates its whole library.
-    #[tokio::test]
-    async fn scrape_with_no_info_hash_is_refused() {
-        let (_dir, state) = unconfigured();
-
-        let (status, body) = get(&state, "/scrape").await;
-        assert_eq!(status, StatusCode::OK, "trackers report refusals in-band");
-        assert!(
-            body.contains("this tracker only scrapes specific torrents"),
-            "{body}"
-        );
+    #[test]
+    fn scrape_with_no_info_hash_is_refused() {
+        with_open_vault(|state| async move {
+            let (status, body) = get(&state, "/scrape").await;
+            assert_eq!(status, StatusCode::OK, "trackers report refusals in-band");
+            assert!(
+                body.contains("this tracker only scrapes specific torrents"),
+                "{body}"
+            );
+        });
     }
 
     /// An `info_hash` of the wrong length cannot be a real info hash — refused
     /// by shape before any store lookup happens.
-    #[tokio::test]
-    async fn scrape_with_a_short_info_hash_is_refused() {
-        let (_dir, state) = unconfigured();
-
-        let (status, body) = get(&state, "/scrape?info_hash=%00").await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            body.contains("info_hash must be exactly 20 bytes"),
-            "{body}"
-        );
+    #[test]
+    fn scrape_with_a_short_info_hash_is_refused() {
+        with_open_vault(|state| async move {
+            let (status, body) = get(&state, "/scrape?info_hash=%00").await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body.contains("info_hash must be exactly 20 bytes"),
+                "{body}"
+            );
+        });
     }
 
     /// A well-formed hash for a torrent this instance does not share gets an
     /// empty scrape answer, not a failure — a client scraping something we
     /// withdrew should learn "no peers", not "something went wrong".
-    #[tokio::test]
-    async fn scrape_for_an_unshared_torrent_is_not_a_failure() {
-        let (_dir, state) = unconfigured();
-        let hash = "%00".repeat(20);
+    #[test]
+    fn scrape_for_an_unshared_torrent_is_not_a_failure() {
+        with_open_vault(|state| async move {
+            let hash = "%00".repeat(20);
 
-        let (status, body) = get(&state, &format!("/scrape?info_hash={hash}")).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(!body.contains("failure reason"), "{body}");
+            let (status, body) = get(&state, &format!("/scrape?info_hash={hash}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "{body}");
+        });
     }
 
     /// The success path: a torrent this instance actually shares gets real
     /// scrape counts back rather than the empty-files fallback above.
-    #[tokio::test]
-    async fn scrape_for_a_shared_torrent_reports_it() {
-        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+    #[test]
+    fn scrape_for_a_shared_torrent_reports_it() {
+        with_open_vault(|state| async move {
+            use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
 
-        let (_dir, state) = unconfigured();
-        let store = state.store().await.unwrap();
+            let store = state.store().await.unwrap();
 
-        let hash_hex = "00".repeat(20);
-        store
-            .upsert(&SharedItem {
-                id: None,
-                source: MediaSource::Sonarr,
-                source_id: 1,
-                file_id: 1,
-                spec: MediaSpec::Episode {
-                    series_title: "Lanternwick Hollow".to_owned(),
-                    season: 1,
-                    episode: 1,
-                },
-                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                size: 1,
-                ids: ExternalIds::default(),
-                info_hash: None,
-                announce_token_fp: None,
-                created_by_sharerr: true,
-                state: ShareState::Pending,
-                last_error: None,
-                created_at: None,
-            })
-            .await
-            .unwrap();
-        store
-            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
-            .await
-            .unwrap();
+            let hash_hex = "00".repeat(20);
+            store
+                .upsert(&SharedItem {
+                    id: None,
+                    source: MediaSource::Sonarr,
+                    source_id: 1,
+                    file_id: 1,
+                    spec: MediaSpec::Episode {
+                        series_title: "Lanternwick Hollow".to_owned(),
+                        season: 1,
+                        episode: 1,
+                    },
+                    release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+                    arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+                    size: 1,
+                    ids: ExternalIds::default(),
+                    info_hash: None,
+                    announce_token_fp: None,
+                    created_by_sharerr: true,
+                    state: ShareState::Pending,
+                    last_error: None,
+                    created_at: None,
+                })
+                .await
+                .unwrap();
+            store
+                .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
+                .await
+                .unwrap();
 
-        let hash_query = "%00".repeat(20);
-        let (status, body) = get(&state, &format!("/scrape?info_hash={hash_query}")).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(!body.contains("failure reason"), "{body}");
+            let hash_query = "%00".repeat(20);
+            let (status, body) = get(&state, &format!("/scrape?info_hash={hash_query}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "{body}");
+        });
     }
 
     // -------------------------------------------------------- torrent_file

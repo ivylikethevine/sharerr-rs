@@ -1,0 +1,86 @@
+# gluetun control-server roles, for deployments that want the API key sharerr
+# uses to reach exactly the three routes it calls and nothing else.
+#
+# The stacks in this directory do not use this file. They set
+# HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE instead — one key, every route, one line
+# in compose and no bind mount. That is the right default: the control server
+# listens on 127.0.0.1 inside a namespace whose only other residents are sharerr
+# and qBittorrent, so the blast radius of "this key can also read /v1/vpn/
+# settings" is a container that could read the settings file anyway.
+#
+# Use this file when that is not true for you — a control server reachable
+# across a shared network (`dual-vpn/media/`), or a host where something else
+# also holds the key.
+#
+#   1. cp gluetun-auth.example.toml gluetun-auth.toml
+#   2. Put a generated key in it:  docker run --rm qmcgaw/gluetun:v3.41.3 genkey
+#   3. Mount it into the gluetun service, read-only:
+#
+#        volumes:
+#          - ./gluetun-auth.toml:/gluetun/auth/config.toml:ro
+#
+#      /gluetun/auth/config.toml is already the default path
+#      (HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH), so no env var is needed.
+#   4. Drop HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE from that stack, or keep it as
+#      the catch-all for whatever routes you did not name here.
+#   5. Put the same key in sharerr's vault:
+#
+#        printf %s "$KEY" | docker compose exec -T sharerr sharerr vault set gluetun.api_key
+#
+# ## Read this before you mount it
+#
+# Supplying an auth file *replaces* gluetun's built-in permissive role for every
+# route at once — not just the ones named below. Any route you leave out, and
+# that no default role covers, answers 401 to everybody. That is the point, but
+# it is also how a monitoring dashboard you forgot about stops working.
+
+# ---------------------------------------------------------------- sharerr
+#
+# Three routes for what looks like two calls, and the third is the one people
+# leave out.
+#
+# sharerr asks for /v1/openvpn/portforwarded. Since v3.41 gluetun answers that
+# with a 301 to /v1/portforward, and sharerr's HTTP client follows the redirect
+# — same origin, so it keeps the X-Api-Key header. The auth middleware then runs
+# again against the *new* path. A role that names only the route sharerr
+# requested authorises the redirect and rejects its destination, which surfaces
+# as a forwarded-port lookup that fails while the public-IP lookup beside it
+# succeeds. sharerr survives that (it falls back to the last known port) which
+# is exactly why it can go unnoticed.
+[[roles]]
+name = "sharerr"
+routes = [
+  "GET /v1/publicip/ip",
+  "GET /v1/openvpn/portforwarded",
+  "GET /v1/portforward",
+]
+auth = "apikey"
+# docker run --rm qmcgaw/gluetun:v3.41.3 genkey
+apikey = "CHANGE-ME"
+
+# ---------------------------------------------------------------- optional
+#
+# A second role for whatever else you point at this control server. Basic auth
+# rather than a key only because it is easier to paste into a dashboard.
+#
+# [[roles]]
+# name = "monitoring"
+# routes = ["GET /v1/vpn/status", "GET /v1/publicip/ip"]
+# auth = "basic"
+# username = "CHANGE-ME"
+# password = "CHANGE-ME"
+
+# ## Every route gluetun v3.41.3 serves
+#
+#   GET  /v1/version
+#   GET  /v1/vpn/status          PUT /v1/vpn/status
+#   GET  /v1/vpn/settings
+#   GET  /v1/openvpn/status      PUT /v1/openvpn/status
+#   GET  /v1/openvpn/settings
+#   GET  /v1/openvpn/portforwarded          (301 -> /v1/portforward)
+#   GET  /v1/portforward         PUT /v1/portforward
+#   GET  /v1/dns/status          PUT /v1/dns/status
+#   GET  /v1/updater/status      PUT /v1/updater/status
+#   GET  /v1/publicip/ip
+#
+# `auth = "none"` is accepted and is how you deliberately leave a route open.

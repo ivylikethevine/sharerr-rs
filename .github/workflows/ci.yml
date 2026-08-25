@@ -226,6 +226,39 @@ jobs:
       # Schema-validates the compose file without needing the images or a daemon.
       - run: docker compose -f docker/compose.test.yml config -q
 
+      # The same check for the deployment recipes, which are what people
+      # actually run. Three of them `extends` docker/deploy/gluetun.reference.yaml,
+      # so this also catches a fragment edit that breaks its consumers — the
+      # failure mode that made a shared fragment worth the indirection.
+      #
+      # The placeholders exist because every stack guards its required inputs
+      # with `${VAR:?}`, which `config` evaluates. Values are shaped like the
+      # real thing and are not secrets; the point is to reach the schema check,
+      # not to describe a deployment.
+      - name: Validate the deployment compose files
+        run: |
+          set -euo pipefail
+          env_file="$(mktemp)"
+          cat > "$env_file" <<'PLACEHOLDERS'
+          WIREGUARD_PRIVATE_KEY=placeholder
+          WIREGUARD_ADDRESSES=10.13.13.2/32
+          GLUETUN_API_KEY=placeholder
+          SHARERR_MASTER_KEY=placeholder
+          MEDIA_PATH=/srv/media
+          EXTERNAL_NETWORK=media_default
+          PLACEHOLDERS
+          for f in \
+            docker/deploy/direct/compose.yaml \
+            docker/deploy/vpn/compose.yaml \
+            docker/deploy/sidecar/compose.yaml \
+            docker/deploy/dual-vpn/media/compose.yaml \
+            docker/deploy/dual-vpn/sharerr/compose.yaml
+          do
+            echo "::group::$f"
+            docker compose -f "$f" --env-file "$env_file" config -q
+            echo "::endgroup::"
+          done
+
   # GitHub Actions security audit: expression injection, untrusted checkouts
   # feeding privileged jobs, cache/artifact poisoning — the class of bug that
   # SHA-pinning actions and reading crafted input through env: (see runner.yml)

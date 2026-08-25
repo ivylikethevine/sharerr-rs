@@ -52,6 +52,18 @@ port = 8477
 # /v1/openvpn/portforwarded as the source of truth for its own address, and a
 # changed answer triggers a re-announce and a rewrite of every .torrent —
 # instead of every torrent announcing to yesterday's port until someone notices.
+#
+# This URL alone is not enough. gluetun requires a credential on every
+# control-server route, and sharerr skips the poll rather than send a request
+# that can only come back 401 — so `gluetun.api_key` must be in the vault too,
+# holding the same value as GLUETUN_API_KEY in .env:
+#
+#   printf %s "$GLUETUN_API_KEY" | \
+#     docker compose exec -T sharerr sharerr vault set gluetun.api_key
+#
+# Without it this section is inert and `advertised_host` above stays in force.
+# `sharerr doctor` names the missing key; Diagnostics shows the poller's last
+# success, which stays empty.
 control_url = "http://localhost:8000"
 poll_secs = 60
 
