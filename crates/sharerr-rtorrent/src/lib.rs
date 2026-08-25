@@ -109,7 +109,10 @@ impl std::fmt::Debug for RtorrentClient {
             .field("endpoint", &self.endpoint.as_str())
             .field("username", &self.username)
             .field("password", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 
@@ -264,7 +267,7 @@ impl TorrentClient for RtorrentClient {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let [hash, name, directory, base_path, custom1, complete, active] =
-                take7("d.multicall2", row)?;
+                take("d.multicall2", row)?;
 
             let tag = as_str(&custom1).to_owned();
             if let Some(wanted) = category
@@ -305,7 +308,7 @@ impl TorrentClient for RtorrentClient {
 
         rows.into_iter()
             .map(|row| {
-                let [path, size] = take2("f.multicall", row)?;
+                let [path, size] = take("f.multicall", row)?;
                 Ok(TorrentFileEntry {
                     name: as_str(&path).to_owned(),
                     size: as_u64(&size),
@@ -414,6 +417,23 @@ impl TorrentClient for RtorrentClient {
         );
         Ok(())
     }
+
+    async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
+        // Already exactly what `set_trackers` does here — rTorrent can only
+        // insert (see the module docs), so the replacing and adding forms
+        // collapse into one call. The distinction still matters to the
+        // caller, which is why the trait keeps them apart: on qBittorrent and
+        // Transmission they are genuinely different operations.
+        self.set_trackers(hash, urls).await
+    }
+
+    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
+        // `d.loaded_file` names the `.torrent` inside rTorrent's session
+        // directory, which is a path on the daemon's filesystem rather than
+        // bytes on the wire — the same limitation the Transmission client has,
+        // and unreadable for the same reason.
+        Ok(None)
+    }
 }
 
 /// Quote a value for use as a `d.*.set=` command argument, the way rTorrent's
@@ -432,27 +452,14 @@ fn quote_command_arg(value: &str) -> String {
     out
 }
 
-fn take2(method: &str, mut row: Vec<XmlValue>) -> Result<[XmlValue; 2]> {
-    if row.len() != 2 {
-        return Err(ClientError::Malformed {
-            kind: KIND,
-            detail: format!(
-                "{method} returned a row of {} values, expected 2",
-                row.len()
-            ),
-        });
-    }
-    let b = row.pop().unwrap_or(XmlValue::Str(String::new()));
-    let a = row.pop().unwrap_or(XmlValue::Str(String::new()));
-    Ok([a, b])
-}
-
-fn take7(method: &str, row: Vec<XmlValue>) -> Result<[XmlValue; 7]> {
+/// One multicall row as exactly `N` values, or a [`ClientError::Malformed`]
+/// naming the call that returned the wrong shape.
+fn take<const N: usize>(method: &str, row: Vec<XmlValue>) -> Result<[XmlValue; N]> {
     row.try_into()
         .map_err(|row: Vec<XmlValue>| ClientError::Malformed {
             kind: KIND,
             detail: format!(
-                "{method} returned a row of {} values, expected 7",
+                "{method} returned a row of {} values, expected {N}",
                 row.len()
             ),
         })
@@ -756,6 +763,8 @@ fn expect_end(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(),
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::fmt::Write as _;
+
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -841,9 +850,9 @@ mod tests {
                 // Booleans (complete/is_active, the last two slots) come back
                 // as rTorrent's own i8, not a <boolean> tag.
                 if i >= 5 {
-                    inner.push_str(&format!("<value><i8>{cell}</i8></value>"));
+                    let _ = write!(inner, "<value><i8>{cell}</i8></value>");
                 } else {
-                    inner.push_str(&format!("<value><string>{cell}</string></value>"));
+                    let _ = write!(inner, "<value><string>{cell}</string></value>");
                 }
             }
             inner.push_str("</data></array></value>");
@@ -1000,6 +1009,44 @@ mod tests {
             !body.contains("<methodName>load.raw_start</methodName>"),
             "{body}"
         );
+    }
+
+    /// On rTorrent the replacing and adding forms are the same call, because
+    /// insert is the only one there is — so pointing `add_trackers` at a
+    /// torrent sharerr did not create is safe here for free.
+    #[tokio::test]
+    async fn add_trackers_inserts_the_same_way_set_trackers_does() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>")))
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .add_trackers(
+                "aabbcc",
+                &[Url::parse("http://sharerr.example/announce").unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body = String::from_utf8(requests[0].body.clone()).unwrap();
+        assert!(
+            body.contains("<methodName>d.tracker.insert</methodName>"),
+            "{body}"
+        );
+    }
+
+    /// `d.loaded_file` names a path on the daemon's filesystem, not bytes on
+    /// the wire, so there is nothing to return — reported as `Ok(None)` rather
+    /// than an error, and without a round trip.
+    #[tokio::test]
+    async fn export_reports_that_rtorrent_cannot_produce_the_file() {
+        let server = MockServer::start().await;
+        assert_eq!(client(&server).export("aabbcc").await.unwrap(), None);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     /// rTorrent cannot remove a tracker, so this must insert rather than
@@ -1241,13 +1288,14 @@ mod tests {
 
     #[test]
     fn take2_rejects_a_row_of_the_wrong_length() {
-        let err = take2("f.multicall", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
+        let err = take::<2>("f.multicall", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
         assert!(err.to_string().contains("expected 2"), "{err}");
     }
 
     #[test]
     fn take7_rejects_a_row_of_the_wrong_length() {
-        let err = take7("d.multicall2", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
+        let err =
+            take::<7>("d.multicall2", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
         assert!(err.to_string().contains("expected 7"), "{err}");
     }
 

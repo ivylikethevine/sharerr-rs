@@ -7,6 +7,7 @@
 //! that does not short-circuit — hold everywhere rather than per call site.
 
 use anyhow::Context;
+use secrecy::{ExposeSecret, SecretString};
 use sharerr_core::Config;
 use sharerr_store::{Vault, master_key_from_env};
 
@@ -28,11 +29,38 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
 }
 
 /// `N` raw bytes from the same entropy source, for key material that is not a
-/// pasteable secret — the gossip signing seed.
+/// pasteable secret — the gossip signing key and the lighthouse decoy seed.
 pub fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
     let mut raw = [0u8; N];
     getrandom::fill(&mut raw).map_err(|err| format!("could not generate key material: {err}"))?;
     Ok(raw)
+}
+
+/// Load a 32-byte seed stored hex-encoded under `key`, minting and storing
+/// one on first use. `what` names it in errors ("identity key", "lighthouse
+/// decoy seed"). The returned flag is `true` when this call minted it, so the
+/// caller can log the event with whatever it derives from the seed.
+///
+/// One function for the gossip signing key and the lighthouse decoy seed:
+/// both are 32 bytes of key material that must persist across restarts, and
+/// the load-or-mint dance is the same for each.
+pub fn load_or_create_seed(
+    vault: &mut Vault,
+    key: &'static str,
+    what: &str,
+) -> Result<([u8; 32], bool), String> {
+    if let Ok(Some(stored)) = vault.get(key) {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(stored.expose_secret(), &mut bytes)
+            .map_err(|_| format!("the stored {what} is not 32 hex bytes"))?;
+        return Ok((bytes, false));
+    }
+
+    let seed = random_bytes::<32>().map_err(|err| format!("generating a {what}: {err}"))?;
+    vault
+        .put(key, &SecretString::from(hex::encode(seed)))
+        .map_err(|err| format!("storing the {what}: {err}"))?;
+    Ok((seed, true))
 }
 
 /// Compare two secrets without short-circuiting on the first difference.

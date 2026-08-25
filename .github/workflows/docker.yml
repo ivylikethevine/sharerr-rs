@@ -5,7 +5,7 @@
 # publishing should be something you choose to do, not a side effect of merging.
 #
 # This also doubles as the MSRV check for the whole project. The Dockerfile's
-# builder stage is pinned to the workspace's declared rust-version (1.88) while a
+# builder stage is pinned to the workspace's declared rust-version (1.98) while a
 # developer's local toolchain is invariably newer, so a build here is the only
 # thing that reliably catches code reaching past the MSRV. That is why pull
 # requests build the image even though they never publish it.
@@ -121,7 +121,7 @@ jobs:
           platforms: arm64
 
       # Required for --platform builds and for the type=gha cache backend.
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # Only when something is actually going to be pushed. A PR from a fork gets a
       # read-only GITHUB_TOKEN, so logging in would fail for exactly the
@@ -223,7 +223,7 @@ jobs:
       # `imagetools create` needs the buildx CLI but builds nothing and needs no
       # emulation — it is a registry-side copy of an existing manifest list onto
       # new tags, which is what makes this job a retag rather than a rebuild.
-      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Promote the approved image to its real tags
         env:

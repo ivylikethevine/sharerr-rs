@@ -42,7 +42,11 @@ jobs:
           # sharing a key with ci.yml's `test` job would thrash both caches.
           key: coverage
 
-      - run: cargo install cargo-llvm-cov --locked
+      # Pinned like every action above it: `--locked` only honours the tool's
+      # own lockfile, so without `--version` this still installs whatever
+      # published most recently and a coverage run can change under a commit
+      # that touched no code.
+      - run: cargo install cargo-llvm-cov --version 0.9.0 --locked
 
       # Collects profile data once; `report` below reads it twice (HTML, then
       # a plain-text summary) without re-running the suite either time.

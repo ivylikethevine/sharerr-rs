@@ -30,7 +30,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
@@ -52,7 +52,8 @@ const MAX_RECORDS: usize = 64;
 // ---------------------------------------------------------------------------
 
 /// One address inside a record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GossipRecordEndpoint)]
 pub struct RecordEndpoint {
     /// One of [`EndpointKind`]'s names. Unknown kinds are skipped on ingest, so
     /// a newer sharerr can add kinds without breaking older friends.
@@ -62,7 +63,8 @@ pub struct RecordEndpoint {
 }
 
 /// One peer's self-described endpoints, signed by them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GossipEndpointRecord)]
 pub struct EndpointRecord {
     /// Hex Ed25519 public key — the subject's identity.
     pub pubkey: String,
@@ -75,7 +77,8 @@ pub struct EndpointRecord {
 }
 
 /// The wire shape of both gossip endpoints' bodies.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(as = GossipRecordBatch)]
 pub struct RecordBatch {
     pub records: Vec<EndpointRecord>,
 }
@@ -149,25 +152,15 @@ impl std::fmt::Debug for Identity {
 impl Identity {
     /// Load the signing key from the vault, minting one on first use.
     pub fn load_or_create(vault: &mut sharerr_store::Vault) -> Result<Self, String> {
-        if let Ok(Some(stored)) = vault.get(secret_keys::IDENTITY_SIGNING_KEY) {
-            let mut bytes = [0u8; 32];
-            hex::decode_to_slice(stored.expose_secret(), &mut bytes)
-                .map_err(|_| "the stored identity key is not 32 hex bytes".to_owned())?;
-            return Ok(Self {
-                signing: SigningKey::from_bytes(&bytes),
-            });
-        }
-
-        let seed = crate::secrets::random_bytes::<32>()
-            .map_err(|err| format!("generating an identity key: {err}"))?;
+        let (seed, minted) = crate::secrets::load_or_create_seed(
+            vault,
+            secret_keys::IDENTITY_SIGNING_KEY,
+            "identity key",
+        )?;
         let signing = SigningKey::from_bytes(&seed);
-        vault
-            .put(
-                secret_keys::IDENTITY_SIGNING_KEY,
-                &SecretString::from(hex::encode(seed)),
-            )
-            .map_err(|err| format!("storing the identity key: {err}"))?;
-        tracing::info!(pubkey = %hex::encode(signing.verifying_key().to_bytes()), "minted a gossip identity");
+        if minted {
+            tracing::info!(pubkey = %hex::encode(signing.verifying_key().to_bytes()), "minted a gossip identity");
+        }
         Ok(Self { signing })
     }
 
@@ -248,7 +241,8 @@ pub(crate) async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
 // ---------------------------------------------------------------------------
 
 /// What one batch of records amounted to, for logging and the POST response.
-#[derive(Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[schema(as = GossipIngestSummary)]
 pub struct IngestSummary {
     pub accepted: usize,
     /// Signature or shape failures — records nobody should have sent.
@@ -280,6 +274,12 @@ pub async fn ingest(
     };
 
     let now = now_epoch();
+    // Identity is the pubkey, nothing else — indexed once rather than scanned
+    // per record.
+    let by_pubkey: std::collections::HashMap<&str, &sharerr_store::Peer> = peers
+        .iter()
+        .filter_map(|p| p.pubkey.as_deref().map(|pubkey| (pubkey, p)))
+        .collect();
 
     for record in records.into_iter().take(MAX_RECORDS) {
         if let Err(reason) = verify(&record) {
@@ -299,11 +299,8 @@ pub async fn ingest(
             continue;
         }
 
-        // Who is this record about? Identity is the pubkey, nothing else.
-        let subject_id = match peers
-            .iter()
-            .find(|p| p.pubkey.as_deref() == Some(record.pubkey.as_str()))
-        {
+        // Who is this record about?
+        let subject_id = match by_pubkey.get(record.pubkey.as_str()) {
             Some(subject) if !subject.is_revoked() => subject.id,
             Some(_) => {
                 summary.unknown += 1;
@@ -337,13 +334,19 @@ pub async fn ingest(
             }
         };
 
-        // Freshness: never let an older record rewind a newer one.
+        // Freshness: never let an older record rewind a newer one. Only the
+        // timestamp is read out of the stored record — the endpoints and the
+        // signature would be deserialised and dropped.
+        #[derive(Deserialize)]
+        struct SignedAt {
+            signed_at: i64,
+        }
         let stored_signed_at = store
             .peer_gossip_record(subject_id)
             .await
             .ok()
             .flatten()
-            .and_then(|raw| serde_json::from_str::<EndpointRecord>(&raw).ok())
+            .and_then(|raw| serde_json::from_str::<SignedAt>(&raw).ok())
             .map(|stored| stored.signed_at);
         if stored_signed_at.is_some_and(|stored| stored >= record.signed_at) {
             summary.stale += 1;
@@ -393,6 +396,29 @@ pub struct PullQuery {
 }
 
 /// `GET /api/gossip/endpoints?peers=pk1,pk2` — the pull side.
+#[utoipa::path(
+    get,
+    path = "/api/gossip/endpoints",
+    tag = "gossip",
+    operation_id = "gossipPull",
+    security(("peerApiKey" = [])),
+    params(
+        ("peers" = Option<String>, Query, description =
+         "Comma-separated hex pubkeys the caller already knows, so the answer can \
+          skip them."),
+    ),
+    responses(
+        (status = 200, description =
+         "Signed endpoint records: this instance's own first, then any it holds for \
+          peers it shares with. Each is signed by the peer it describes, so nothing \
+          here has to be trusted on the relayer's word.", body = RecordBatch),
+        (status = 401, content_type = "application/xml", description =
+         "No `apikey`, or one that matches no active peer. Answered as Torznab's own \
+          XML error, the same as the feed — this rides the feed's authentication.",
+         body = String),
+        (status = 503, description = "The database is not open yet.", body = String),
+    ),
+)]
 pub async fn pull(
     State(state): State<Arc<ServeState>>,
     // Unused beyond authenticating the caller — the extractor is what rejects an
@@ -440,6 +466,23 @@ pub async fn pull(
 
 /// `POST /api/gossip/endpoints` — the push side, for a friend whose address
 /// changed and who can therefore no longer be pulled from.
+#[utoipa::path(
+    post,
+    path = "/api/gossip/endpoints",
+    tag = "gossip",
+    operation_id = "gossipPush",
+    security(("peerApiKey" = [])),
+    request_body = RecordBatch,
+    responses(
+        (status = 200, description =
+         "What the batch amounted to. Records about peers this instance does not \
+          share with are counted `unknown` and dropped by design, not rejected — a \
+          friend relaying their whole view is normal.", body = IngestSummary),
+        (status = 401, content_type = "application/xml",
+         description = "No `apikey`, or one that matches no active peer.", body = String),
+        (status = 503, description = "The database is not open yet.", body = String),
+    ),
+)]
 pub async fn push(
     State(state): State<Arc<ServeState>>,
     caller: Caller,
@@ -468,9 +511,7 @@ pub async fn exchange_loop(state: Arc<ServeState>) {
     // live connection pool for nothing. A build failure is kept rather than
     // retried every interval; nothing here can fix a broken TLS backend by
     // trying again in fifteen minutes.
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
+    let http = sharerr_client::http_client_with_timeout(Duration::from_secs(15))
         .map_err(|e| e.to_string());
 
     loop {
@@ -600,6 +641,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
+    use secrecy::SecretString;
     use sharerr_store::PeerScope;
 
     fn identity(seed: u8) -> Identity {

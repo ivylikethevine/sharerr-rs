@@ -9,14 +9,13 @@
 //! maintained; this walk is deliberately conservative about which fields it needs,
 //! so a fork that drifts slightly still works.
 
-use futures::stream::{self, StreamExt, TryStreamExt};
 use serde::Deserialize;
 use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
 use crate::models::non_empty;
-use crate::{DISCOVERY_CONCURRENCY, Discovered};
+use crate::{Discovered, Tagged, fetch_tagged};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +25,12 @@ struct Author {
     author_name: String,
     #[serde(default)]
     tags: Vec<i64>,
+}
+
+impl Tagged for Author {
+    fn tags(&self) -> &[i64] {
+        &self.tags
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,47 +70,27 @@ struct BookFile {
     scene_name: Option<String>,
 }
 
-/// What one tagged author needs fetching for it. Fetched by id and zipped back
-/// onto the author list by the caller — see `sonarr::SeriesPayload` for why.
+/// What one tagged author needs fetching for it.
 type AuthorPayload = (Vec<Book>, Vec<BookFile>);
 
-async fn fetch_author(client: &ArrClient, author_id: i64) -> Result<AuthorPayload> {
-    let author_id = author_id.to_string();
-
+async fn fetch_author(client: &ArrClient, author: &Author) -> Result<AuthorPayload> {
     // Independent lookups, so they run concurrently — per tagged author this
     // halves the round trips paid in sequence.
-    let by_author = [("authorId", author_id)];
+    let by_author = [("authorId", author.id)];
     let (books, files) = tokio::try_join!(
-        client.get::<Vec<Book>>("book", &by_author),
-        client.get::<Vec<BookFile>>("bookfile", &by_author),
+        client.get::<Vec<Book>, _>("book", &by_author),
+        client.get::<Vec<BookFile>, _>("bookfile", &by_author),
     )?;
     Ok((books, files))
 }
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let authors: Vec<Author> = client.get("author", &[]).await?;
-    let tagged: Vec<&Author> = authors
-        .iter()
-        .filter(|a| a.tags.contains(&tag_id))
-        .collect();
-
-    tracing::debug!(
-        total = authors.len(),
-        tagged = tagged.len(),
-        "readarr authors scanned for the sharerr tag"
-    );
-
-    // Concurrent across authors as well as within one — see
-    // `DISCOVERY_CONCURRENCY`.
-    let ids: Vec<i64> = tagged.iter().map(|a| a.id).collect();
-    let fetched: Vec<AuthorPayload> = stream::iter(ids)
-        .map(|id| fetch_author(client, id))
-        .buffered(DISCOVERY_CONCURRENCY)
-        .try_collect()
-        .await?;
+    let authors: Vec<Author> = client.get("author", &()).await?;
+    // Concurrent across authors as well as within one — see `fetch_tagged`.
+    let fetched = fetch_tagged(client, &authors, tag_id, "readarr authors", fetch_author).await?;
 
     let mut discovered = Vec::new();
-    for (author, (books, files)) in tagged.into_iter().zip(fetched) {
+    for (author, (books, files)) in fetched {
         if files.is_empty() {
             tracing::debug!(author = %author.author_name, "tagged but has no files on disk");
             continue;

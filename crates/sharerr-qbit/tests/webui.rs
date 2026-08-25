@@ -10,15 +10,13 @@
 use secrecy::SecretString;
 use serde_json::json;
 use sharerr_qbit::{AddRequest, QbitClient, QbitError};
+use sharerr_testkit::mock::{QBIT_API_KEY as API_KEY, base_url, mount_ok, multipart_field};
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-const API_KEY: &str = "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86";
-
 fn client(server: &MockServer) -> QbitClient {
-    let base = Url::parse(&server.uri()).expect("wiremock uri is a valid url");
-    QbitClient::with_api_key(&base, SecretString::from(API_KEY)).expect("client builds")
+    QbitClient::with_api_key(&base_url(server), SecretString::from(API_KEY)).expect("client builds")
 }
 
 async fn requests_to(server: &MockServer, suffix: &str) -> Vec<Request> {
@@ -257,7 +255,7 @@ async fn torrent_files_decodes() {
         .and(path("/api/v2/torrents/files"))
         .and(query_param("hash", "aabbcc"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2147483648_u64, "progress": 1.0 }
+            { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2_147_483_648_u64, "progress": 1.0 }
         ])))
         .mount(&server)
         .await;
@@ -301,16 +299,7 @@ async fn add_torrent_always_disables_automatic_torrent_management() {
     let sent = requests_to(&server, "/torrents/add").await;
     let body = body_text(&sent[0]);
 
-    let field = |name: &str| {
-        body.split(&format!("name=\"{name}\"")).nth(1).map(|rest| {
-            rest.trim_start()
-                .lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or_default()
-                .trim()
-                .to_owned()
-        })
-    };
+    let field = |name: &str| multipart_field(&body, name);
 
     assert_eq!(
         field("autoTMM").as_deref(),
@@ -340,11 +329,7 @@ async fn add_torrent_always_disables_automatic_torrent_management() {
 #[tokio::test]
 async fn a_configured_seeding_goal_rides_the_add_request_and_is_omitted_when_unset() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/add"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .mount(&server)
-        .await;
+    mount_ok(&server, "/api/v2/torrents/add").await;
 
     client(&server)
         .add_torrent(
@@ -364,11 +349,7 @@ async fn a_configured_seeding_goal_rides_the_add_request_and_is_omitted_when_uns
     assert!(body.contains("2.5"), "body was:\n{body}");
 
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/add"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .mount(&server)
-        .await;
+    mount_ok(&server, "/api/v2/torrents/add").await;
 
     client(&server)
         .add_torrent(&AddRequest::new(
@@ -391,11 +372,7 @@ async fn a_configured_seeding_goal_rides_the_add_request_and_is_omitted_when_uns
 #[tokio::test]
 async fn skip_checking_is_opt_in() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/add"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .mount(&server)
-        .await;
+    mount_ok(&server, "/api/v2/torrents/add").await;
 
     client(&server)
         .add_torrent(
@@ -536,8 +513,8 @@ async fn set_torrent_trackers_adds_then_removes_and_skips_pseudo_entries() {
         .set_torrent_trackers(
             "aabbcc",
             &[
-                "http://new.example:41234/announce".to_owned(),
-                "http://kept.example:8477/announce".to_owned(),
+                Url::parse("http://new.example:41234/announce").expect("literal url"),
+                Url::parse("http://kept.example:8477/announce").expect("literal url"),
             ],
         )
         .await
@@ -574,7 +551,7 @@ async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
     client(&server)
         .set_torrent_trackers(
             "aabbcc",
-            &["http://current.example:8477/announce".to_owned()],
+            &[Url::parse("http://current.example:8477/announce").expect("literal url")],
         )
         .await
         .unwrap();

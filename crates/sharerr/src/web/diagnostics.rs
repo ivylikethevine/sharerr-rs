@@ -19,8 +19,10 @@ use sharerr_core::{Config, MediaSource};
 
 use super::WebState;
 use super::peers::ago;
-use super::templates::{DiagnosticsData, EndpointStatus, RunRow, SampleRow, ServiceLine};
-use crate::checks::{self, ArrOutcome, DirOutcome};
+use super::templates::{
+    DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunRow, SampleRow, ServiceLine,
+};
+use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
 
 /// How many problem paths to name before summarising the rest.
@@ -43,27 +45,47 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     // One vault open for the whole page. Opening it derives the key with Argon2 —
     // ~16ms of solid CPU, more on ARM — so paying that once per configured
     // service turned this into the most expensive page in the UI.
-    let vault = state.serve.open_vault().await;
-    let api_key = |key: &'static str| -> Result<Option<SecretString>, String> {
-        match &vault {
-            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
-            Err(reason) => Err(reason.clone()),
-        }
-    };
+    let api_key = secret_reader(state.serve.open_vault().await);
 
     // Shared with `web::topology::gather` — see `checks::snapshot`'s docs for
     // why the arr probes, library scan, and path check live there instead of
-    // being duplicated per page.
+    // being duplicated per page. The run history and the two poller rows do
+    // not depend on it, so they are gathered alongside rather than after.
+    let config = &config;
+    let tracker_endpoint = state.serve.endpoint_for(GluetunTarget::Tracker);
+    let client_endpoint = state.serve.endpoint_for(GluetunTarget::Client);
+    let (snapshot, torrent_client, runs, tracker, client) = tokio::join!(
+        checks::snapshot(config, &api_key),
+        torrent_client_line(config, &api_key),
+        recent_run_rows(state),
+        endpoint_status(
+            display_label(GluetunTarget::Tracker),
+            GluetunTarget::Tracker.config(config),
+            &tracker_endpoint,
+            state.serve.gluetun_status(GluetunTarget::Tracker),
+        ),
+        endpoint_status(
+            display_label(GluetunTarget::Client),
+            GluetunTarget::Client.config(config),
+            &client_endpoint,
+            state.serve.gluetun_status(GluetunTarget::Client),
+        ),
+    );
+    let gluetun = vec![tracker, client];
     let checks::Snapshot {
         sources,
         libraries,
         paths,
-    } = checks::snapshot(&config, &api_key).await;
+    } = snapshot;
 
-    let mut services: Vec<ServiceLine> = sources
-        .iter()
-        .map(|(kind, outcome)| describe(*kind, &config, outcome))
-        .collect();
+    // The client leads: it is the one service every install has, and the
+    // one whose absence stops everything else from mattering.
+    let mut services = vec![torrent_client];
+    services.extend(
+        sources
+            .iter()
+            .map(|(kind, outcome)| describe(*kind, config, outcome)),
+    );
     match &libraries {
         checks::LibraryScan::Scanned(scanned) => {
             services.extend(
@@ -79,6 +101,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
                 name: "library".to_owned(),
                 message: format!("the scan did not complete: {err}"),
                 ok: false,
+                url: String::new(),
             });
         }
     }
@@ -87,24 +110,6 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     // exactly when either phase found something.
     let scanned = paths.checked > 0;
     let more_missing = paths.missing.len().saturating_sub(MAX_LISTED);
-
-    let runs = recent_run_rows(state).await;
-    let gluetun = vec![
-        endpoint_status(
-            "Tracker/feed",
-            &config.gluetun,
-            &state.serve.endpoint(),
-            state.serve.gluetun_status(GluetunTarget::Tracker),
-        )
-        .await,
-        endpoint_status(
-            "Torrent client",
-            &config.gluetun_client,
-            &state.serve.client_endpoint(),
-            state.serve.gluetun_status(GluetunTarget::Client),
-        )
-        .await,
-    ];
 
     DiagnosticsData {
         services,
@@ -119,6 +124,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
             .map(|path| path.display().to_string())
             .collect(),
         more_missing,
+        missing_total: paths.missing.len(),
         invalid: paths.invalid.iter().take(MAX_LISTED).cloned().collect(),
         readable: paths.readable(),
         healthy: !paths.is_failure(),
@@ -129,7 +135,76 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         }),
         gluetun,
         runs,
+        lighthouse: lighthouse_view(state, config).await,
     }
+}
+
+/// The row heading for one gluetun poller, as the status page words it.
+fn display_label(target: GluetunTarget) -> &'static str {
+    match target {
+        GluetunTarget::Tracker => "Tracker/feed",
+        GluetunTarget::Client => "Torrent client",
+    }
+}
+
+/// A vault open (or its failure), wrapped as the `secret` reader `checks` takes.
+///
+/// Opening the vault derives the key with Argon2 — ~16ms of solid CPU, more
+/// on ARM — so a page or badge that needs several secrets opens it once and
+/// reads through this rather than going through `WebState::secret` per key.
+/// A vault that would not open answers every read with the same reason.
+pub(super) fn secret_reader(
+    vault: Result<sharerr_store::Vault, String>,
+) -> impl Fn(&'static str) -> Result<Option<SecretString>, String> {
+    move |key: &'static str| match &vault {
+        Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
+        Err(reason) => Err(reason.clone()),
+    }
+}
+
+/// What the lighthouse poller is doing, or `None` when none is configured.
+///
+/// Reads the running poller's own record rather than probing anything: a
+/// lighthouse is contacted on a 15-minute timer, and dialling one from a page
+/// load would report on a request the poller never made.
+async fn lighthouse_view(
+    state: &WebState,
+    config: &sharerr_core::config::Config,
+) -> Option<LighthouseView> {
+    let configured = config.lighthouse.urls.len();
+    if configured == 0 {
+        return None;
+    }
+
+    let snapshot = state.serve.lighthouse_status().snapshot().await;
+    let rows: Vec<LighthouseRow> = snapshot
+        .lighthouses
+        .iter()
+        .map(|report| LighthouseRow {
+            url: report.url.clone(),
+            last_success: report.last_success_at.map(ago),
+            last_error: report.last_error.clone(),
+        })
+        .collect();
+
+    // Healthy means every configured lighthouse has accepted a report and none
+    // is currently failing. A URL the poller has not reached yet has no row at
+    // all, so a short row list is itself a failure to report — which is why
+    // this compares against `configured` rather than against `rows.len()`.
+    let accepting = rows
+        .iter()
+        .filter(|row| row.last_success.is_some() && row.last_error.is_none())
+        .count();
+
+    Some(LighthouseView {
+        configured,
+        last_pass: snapshot.last_pass_at.map(ago),
+        healthy: accepting == configured,
+        rows,
+        last_recovery: snapshot.last_recovery_at.map(ago),
+        last_recovery_peer: snapshot.last_recovery_peer.clone(),
+        lookups_attempted: snapshot.lookups_attempted,
+    })
 }
 
 /// The last few sync runs, newest first — "is the last one healthy" is the
@@ -149,6 +224,10 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
             let Some(finished_at) = run.finished_at else {
                 return RunRow {
                     when: ago(run.started_at),
+                    when_absolute: super::peers::absolute(run.started_at),
+                    // Nothing to measure to yet, and "0s" would read as a run
+                    // that finished instantly rather than one still going.
+                    took: String::new(),
                     summary: "still running".to_owned(),
                     failed: false,
                 };
@@ -156,11 +235,52 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
             let (summary, failed) = run.summary.describe(true);
             RunRow {
                 when: ago(finished_at),
+                when_absolute: super::peers::absolute(finished_at),
+                took: super::peers::took(run.started_at, finished_at),
                 summary,
                 failed,
             }
         })
         .collect()
+}
+
+/// The torrent client's line in the services list: sign in and read its
+/// version, the same probe `doctor` and the topology page run. Reachable
+/// *arr apps mean nothing if the client that seeds is not.
+async fn torrent_client_line(
+    config: &Config,
+    secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
+) -> ServiceLine {
+    let backend = config.torrent_backend;
+    let client = config.torrent_client_for(backend);
+    let credential = checks::resolve_torrent_credential(&client, secret);
+    let outcome = checks::check_qbit(backend, client.url, client.username, credential).await;
+
+    let (message, ok) = match outcome {
+        QbitOutcome::Ready { version, kind, .. } => {
+            (format!("{kind} v{version} — reachable"), true)
+        }
+        QbitOutcome::NoCredential => (
+            "no credential stored — save one under Settings".to_owned(),
+            false,
+        ),
+        QbitOutcome::CredentialUnreadable(reason) => {
+            (format!("credential unreadable: {reason}"), false)
+        }
+        QbitOutcome::BadUrl(reason) => (format!("misconfigured: {reason}"), false),
+        QbitOutcome::Unreachable(reason) => (format!("could not reach it: {reason}"), false),
+        QbitOutcome::AuthRejected => (
+            "reachable, but it rejected the credential".to_owned(),
+            false,
+        ),
+        QbitOutcome::Failed(reason) => (format!("failed: {reason}"), false),
+    };
+    ServiceLine {
+        name: "Torrent client".to_owned(),
+        message,
+        ok,
+        url: client.url.to_string(),
+    }
 }
 
 /// One gluetun poller's row, pre-rendered for the template.
@@ -176,9 +296,7 @@ async fn endpoint_status(
         enabled: gluetun_config.enabled,
         configured: gluetun_config.control_url.is_some(),
         current: endpoint.current().map(|base| base.to_string()),
-        last_observed: endpoint
-            .last_observed()
-            .map(|observed| format!("{} ({})", observed.base, ago(observed.observed_at))),
+        last_observed: super::settings::gluetun_last_observed(endpoint),
         last_poll: snapshot.last_poll_at.map(ago),
         last_success: snapshot.last_success_at.map(ago),
         last_error: snapshot.last_error,
@@ -192,25 +310,32 @@ async fn endpoint_status(
 /// away from what `doctor` reports.
 fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> ServiceLine {
     let (ok, message) = match outcome {
-        ArrOutcome::Ready { version, items, .. } => (
+        ArrOutcome::Ready {
+            version,
+            items,
+            app_name,
+            ..
+        } => (
             true,
+            // The app's own name, so a Sonarr URL that actually answers as
+            // Radarr is visible here rather than only in `doctor`.
             format!(
-                "{} file(s) tagged {:?} (v{version})",
+                "{} file(s) tagged {:?} ({app_name} v{version})",
                 items.len(),
                 config.tag
             ),
         ),
-        ArrOutcome::TagUnused { .. } => (
+        ArrOutcome::TagUnused { version } => (
             true,
             format!(
-                "connected, but nothing carries the {:?} tag yet",
+                "connected, but nothing carries the {:?} tag yet (v{version})",
                 config.tag
             ),
         ),
-        ArrOutcome::TagMissing { .. } => (
+        ArrOutcome::TagMissing { version } => (
             false,
             format!(
-                "no tag named {:?} exists there — create it first",
+                "no tag named {:?} exists there — create it first (v{version})",
                 config.tag
             ),
         ),
@@ -226,6 +351,13 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
         name: super::settings::title_case(kind.as_str()),
         message,
         ok,
+        // Already in hand from the config this function was passed. A line
+        // reading "could not reach it: connection refused" is far more
+        // actionable next to the address that was actually dialled.
+        url: config
+            .service(kind)
+            .map(|service| service.url.to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -260,6 +392,8 @@ fn describe_library(
         name: format!("library {}", library.path.display()),
         message,
         ok,
+        // The path is the identity here, and it is already in `name`.
+        url: String::new(),
     }
 }
 
@@ -274,17 +408,8 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::web::auth::Sessions;
 
-    /// Same helper `web/settings.rs` and `web/probe.rs` build: a `WebState`
-    /// wired to a `ServeState` fixture rather than a real signed-in router,
-    /// which nothing else in this module's test needs.
-    fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     // ---------------------------------------------------------------- gather
 
@@ -298,7 +423,11 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert!(data.services.is_empty(), "{:?}", data.services);
+        // Only the torrent client line, which every install has — and with
+        // no vault it reports the missing credential rather than probing.
+        assert_eq!(data.services.len(), 1, "{:?}", data.services);
+        assert_eq!(data.services[0].name, "Torrent client");
+        assert!(!data.services[0].ok);
         assert!(!data.scanned);
         assert_eq!(data.rules, 0);
         assert_eq!(data.checked, 0);
@@ -340,9 +469,9 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert_eq!(data.services.len(), 1);
-        assert!(!data.services[0].ok, "{:?}", data.services[0]);
-        assert_eq!(data.services[0].name, "Sonarr");
+        assert_eq!(data.services.len(), 2);
+        assert!(!data.services[1].ok, "{:?}", data.services[1]);
+        assert_eq!(data.services[1].name, "Sonarr");
         // Nothing was discovered, so path checking has nothing to say either.
         assert!(!data.scanned);
         assert!(data.healthy);
@@ -371,9 +500,9 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert_eq!(data.services.len(), 1);
-        assert!(data.services[0].ok, "{:?}", data.services[0]);
-        assert!(data.services[0].name.contains("library"));
+        assert_eq!(data.services.len(), 2);
+        assert!(data.services[1].ok, "{:?}", data.services[1]);
+        assert!(data.services[1].name.contains("library"));
         assert!(data.scanned);
         assert_eq!(data.checked, library.files.len());
         assert_eq!(data.readable, library.files.len());
@@ -403,9 +532,9 @@ mod tests {
 
         let data = gather(&state).await;
 
-        assert_eq!(data.services.len(), 1);
-        assert!(!data.services[0].ok, "{:?}", data.services[0]);
-        assert!(data.services[0].message.contains("does not exist"));
+        assert_eq!(data.services.len(), 2);
+        assert!(!data.services[1].ok, "{:?}", data.services[1]);
+        assert!(data.services[1].message.contains("does not exist"));
         // Nothing was discovered, so the scan flag stays false even though a
         // library is configured.
         assert!(!data.scanned);
@@ -416,12 +545,7 @@ mod tests {
     /// even when more rows exist.
     #[tokio::test]
     async fn gather_renders_run_history_and_caps_it_at_recent_runs() {
-        let (dir, serve) = crate::state::fixtures::unconfigured();
-        let config = Config {
-            data_dir: dir.path().to_path_buf(),
-            ..Config::default()
-        };
-        serve.replace_config(config).await;
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve
             .store()
             .await
@@ -513,13 +637,9 @@ mod tests {
 
     // -------------------------------------------------------- describe (arr)
 
-    fn base_config() -> Config {
-        Config::default()
-    }
-
     #[test]
     fn describe_covers_every_arr_outcome() {
-        let config = base_config();
+        let config = Config::default();
 
         let cases: Vec<(ArrOutcome, bool)> = vec![
             (ArrOutcome::NotConfigured, false),
@@ -570,7 +690,7 @@ mod tests {
     /// the same to an operator.
     #[test]
     fn describe_distinguishes_tag_missing_from_tag_unused() {
-        let config = base_config();
+        let config = Config::default();
 
         let missing = describe(
             MediaSource::Radarr,
@@ -590,12 +710,65 @@ mod tests {
         assert_ne!(missing.message, unused.message);
         assert!(missing.message.contains("no tag named"));
         assert!(unused.message.contains("nothing carries"));
+        // Both outcomes carry the version they were told, and both used to
+        // discard it — leaving the page unable to say which *arr it reached.
+        assert!(missing.message.contains("1.0"), "{}", missing.message);
+        assert!(unused.message.contains("1.0"), "{}", unused.message);
+    }
+
+    /// "could not reach it" is only actionable next to the address that was
+    /// actually dialled — the cause is usually a typo visible in the URL.
+    #[test]
+    fn describe_carries_the_address_it_was_talking_to() {
+        let config = Config {
+            radarr: Some(ServiceConfig {
+                url: Url::parse("http://radarr.example:7878").unwrap(),
+            }),
+            ..Config::default()
+        };
+
+        let line = describe(
+            MediaSource::Radarr,
+            &config,
+            &ArrOutcome::Unreachable("connection refused".to_owned()),
+        );
+
+        assert!(line.url.contains("radarr.example:7878"), "{}", line.url);
+    }
+
+    /// A service with no section at all has no address to name, and must not
+    /// invent one — the line still has to render.
+    #[test]
+    fn an_unconfigured_service_reports_no_address() {
+        let line = describe(
+            MediaSource::Radarr,
+            &Config::default(),
+            &ArrOutcome::NotConfigured,
+        );
+
+        assert!(line.url.is_empty());
+        assert!(!line.message.is_empty());
+    }
+
+    /// A library line is identified by its path, which is already the name —
+    /// a URL there would be a second, emptier identity.
+    #[test]
+    fn a_library_line_has_no_address() {
+        let library = LibraryConfig {
+            path: std::path::PathBuf::from("/media/tv"),
+            kind: LibraryKind::Tv,
+        };
+        let line = describe_library(&library, &DirOutcome::Empty);
+
+        assert!(line.url.is_empty());
     }
 
     #[test]
     fn describe_names_a_healthy_service_with_its_file_count() {
-        let mut config = base_config();
-        config.tag = "sharerr".to_owned();
+        let config = Config {
+            tag: "sharerr".to_owned(),
+            ..Config::default()
+        };
         let outcome = ArrOutcome::Ready {
             version: "4.0.15".to_owned(),
             app_name: "Sonarr".to_owned(),

@@ -148,9 +148,18 @@
     <tbody>
       {% for row in path_map %}
       <tr>
-        <td><input name="arr" value="{{ row.arr }}" placeholder="/tv"></td>
-        <td><input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"></td>
-        <td><input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"></td>
+        <td>
+          <input name="arr" value="{{ row.arr }}" placeholder="/tv"
+                 aria-label="Path mapping {{ loop.index }}, as Sonarr and Radarr report it">
+        </td>
+        <td>
+          <input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"
+                 aria-label="Path mapping {{ loop.index }}, as sharerr sees it">
+        </td>
+        <td>
+          <input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"
+                 aria-label="Path mapping {{ loop.index }}, as the torrent client sees it">
+        </td>
       </tr>
       {% endfor %}
     </tbody>

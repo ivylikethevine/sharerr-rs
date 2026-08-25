@@ -15,7 +15,7 @@
 //!
 //! A client that treats the 409 as a failure appears to work against a freshly
 //! restarted daemon and then breaks hours later, which is a miserable thing to
-//! debug. [`TransmissionClient::rpc`] handles it centrally and retries once.
+//! debug. `TransmissionClient::rpc` handles it centrally and retries once.
 //!
 //! # Why not a category
 //!
@@ -23,7 +23,7 @@
 //! sharerr's category and tags both land there. That means a category filter is
 //! applied by this crate rather than by the server — see [`TransmissionClient::list`].
 
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -34,7 +34,6 @@ use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
     http_client, is_auth_rejection, normalise_base,
 };
-use tokio::sync::RwLock;
 use url::Url;
 
 const KIND: ClientKind = ClientKind::Transmission;
@@ -52,11 +51,11 @@ const SESSION_HEADER: &str = "X-Transmission-Session-Id";
 pub struct TransmissionClient {
     http: reqwest::Client,
     endpoint: Url,
-    base: Url,
     username: String,
     password: SecretString,
-    /// Learned from a 409 and replayed on every later request.
-    session: Arc<RwLock<Option<String>>>,
+    /// Learned from a 409 and replayed on every later request. A plain mutex:
+    /// it is only ever held for a clone or a store, never across an await.
+    session: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for TransmissionClient {
@@ -66,7 +65,10 @@ impl std::fmt::Debug for TransmissionClient {
             .field("endpoint", &self.endpoint.as_str())
             .field("username", &self.username)
             .field("password", &"<redacted>")
-            .finish()
+            // `finish_non_exhaustive` rather than `finish`: the omission is
+            // deliberate, and rendering `..` says so to whoever reads the log
+            // instead of implying this is the whole struct.
+            .finish_non_exhaustive()
     }
 }
 
@@ -86,11 +88,20 @@ impl TransmissionClient {
         Ok(Self {
             http,
             endpoint,
-            base,
             username: username.to_owned(),
             password,
-            session: Arc::new(RwLock::new(None)),
+            session: Mutex::new(None),
         })
+    }
+
+    /// The session lock. A poisoned mutex only means another task panicked
+    /// mid-store of a `String`; the value is still a valid (if stale) token,
+    /// and a stale token is exactly what the 409 handshake already recovers
+    /// from.
+    fn session(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Issue one RPC call, paying the session handshake if the server asks.
@@ -102,7 +113,7 @@ impl TransmissionClient {
         let body = json!({ "method": method, "arguments": arguments });
 
         for attempt in 0..2 {
-            let session = self.session.read().await.clone();
+            let session = self.session().clone();
             let mut request = self
                 .http
                 .post(self.endpoint.clone())
@@ -115,7 +126,7 @@ impl TransmissionClient {
             let response = request
                 .send()
                 .await
-                .map_err(|e| sharerr_client::unreachable(KIND, self.base.as_str(), &e))?;
+                .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
             let status = response.status();
 
             if status == reqwest::StatusCode::CONFLICT && attempt == 0 {
@@ -128,7 +139,7 @@ impl TransmissionClient {
                 match token {
                     Some(token) => {
                         tracing::debug!("picked up a Transmission session id");
-                        *self.session.write().await = Some(token);
+                        *self.session() = Some(token);
                         continue;
                     }
                     None => {
@@ -220,6 +231,21 @@ struct FilesTorrent {
 struct ListedFile {
     name: String,
     length: u64,
+}
+
+/// The slice of a `torrent-get` reply that [`TorrentClient::add_trackers`]
+/// reads back before rewriting the list.
+#[derive(Debug, Deserialize)]
+struct TrackerListResponse {
+    #[serde(default)]
+    torrents: Vec<TrackerListTorrent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackerListTorrent {
+    #[serde(default)]
+    tracker_list: String,
 }
 
 /// Decode one RPC response body, naming the call on failure.
@@ -433,6 +459,59 @@ impl TorrentClient for TransmissionClient {
         self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
             .await
             .map(|_| ())
+    }
+
+    async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
+        if urls.is_empty() {
+            return Ok(());
+        }
+        // Read-modify-write on the same `trackerList` (RPC 17) `set_trackers`
+        // uses, rather than the `trackerAdd` argument it replaced: 4.0
+        // deprecated `trackerAdd` in favour of exactly this field, and
+        // carrying both spellings would mean two code paths for one call.
+        let arguments = self
+            .rpc(
+                "torrent-get",
+                json!({ "ids": [hash], "fields": ["trackerList"] }),
+            )
+            .await?;
+        let response: TrackerListResponse = decode("torrent-get", arguments)?;
+        let existing = response
+            .torrents
+            .into_iter()
+            .next()
+            .map(|t| t.tracker_list)
+            .unwrap_or_default();
+
+        // The new tiers go first, so the endpoint sharerr knows is live is
+        // tried before whatever the torrent already carried — and the existing
+        // list is appended verbatim, tier boundaries and all, because it is the
+        // operator's and this call must not reorder or drop any of it.
+        let mut tiers: Vec<String> = urls
+            .iter()
+            .map(Url::to_string)
+            .filter(|url| !existing.lines().any(|line| line.trim() == url))
+            .collect();
+        if tiers.is_empty() {
+            return Ok(());
+        }
+        if !existing.trim().is_empty() {
+            tiers.push(existing);
+        }
+        let list = tiers.join("\n\n");
+
+        self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
+        // `torrent-get`'s `torrentFile` field is a *path* on the daemon's own
+        // filesystem, and Transmission has no call that returns the bytes. In
+        // the deployments this targets the daemon is a separate container, so
+        // that path is not one sharerr can open — and guessing when it might
+        // be would make this succeed or fail on layout rather than on the API.
+        Ok(None)
     }
 }
 
@@ -661,6 +740,84 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// The additive form reads the current list back and puts sharerr's tiers
+    /// in front of it, verbatim. Anything that dropped or reordered what was
+    /// already there would be rearranging the operator's own torrent.
+    #[tokio::test]
+    async fn add_trackers_prepends_without_dropping_the_existing_list() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [
+                { "trackerList": "http://theirs.example/announce\n\nhttp://backup.example/announce" }
+            ]})),
+        )
+        .await;
+
+        client(&server)
+            .add_trackers(
+                "aabbcc",
+                &[Url::parse("http://sharerr.example/announce").unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let set = requests
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .find(|b| b["method"] == "torrent-set")
+            .expect("a torrent-set was sent");
+        assert_eq!(
+            set["arguments"]["trackerList"].as_str().unwrap(),
+            "http://sharerr.example/announce\n\nhttp://theirs.example/announce\n\nhttp://backup.example/announce"
+        );
+    }
+
+    /// Already present means nothing to do — and nothing sent, so a repeat
+    /// pass over an adopted item cannot slowly rewrite its tracker list.
+    #[tokio::test]
+    async fn add_trackers_sends_no_torrent_set_when_the_url_is_already_listed() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [
+                { "trackerList": "http://sharerr.example/announce" }
+            ]})),
+        )
+        .await;
+
+        client(&server)
+            .add_trackers(
+                "aabbcc",
+                &[Url::parse("http://sharerr.example/announce").unwrap()],
+            )
+            .await
+            .unwrap();
+
+        let sent_set = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .any(|b| b["method"] == "torrent-set");
+        assert!(!sent_set, "nothing to add means nothing sent");
+    }
+
+    /// Transmission has no call that returns a `.torrent`, and says so as
+    /// `Ok(None)` rather than an error — the caller turns that into a message
+    /// naming the choice the operator has, which an RPC failure could not.
+    #[tokio::test]
+    async fn export_reports_that_transmission_cannot_produce_the_file() {
+        let server = MockServer::start().await;
+        assert_eq!(client(&server).export("aabbcc").await.unwrap(), None);
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "and answers without a round trip"
+        );
     }
 
     /// `torrent-add` itself carries no ratio/speed arguments, so a

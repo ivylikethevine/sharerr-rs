@@ -166,7 +166,7 @@ pub struct Syncer {
     sources: Vec<Box<dyn LibrarySource>>,
     tracker: Arc<dyn TrackerProvider>,
     /// Owns the torrent client too — the syncer reads it through
-    /// [`Seeder::client`], so there is exactly one handle to keep consistent.
+    /// [`Seeder::qbit`], so there is exactly one handle to keep consistent.
     seeder: Seeder,
     resolver: PathResolver,
 }
@@ -397,6 +397,10 @@ impl Syncer {
 
         let torrents =
             torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
+        // Hashes are compared lowercase. Both sides are folded once here —
+        // the stored side while `known` is built below — rather than per item
+        // in `share`. Every writer already produces lowercase hex, so folding
+        // the stored hash in place changes nothing that is looked up by it.
         let live: HashSet<String> = torrents
             .iter()
             .map(|t| t.hash.to_ascii_lowercase())
@@ -404,8 +408,16 @@ impl Syncer {
 
         let known: HashMap<(MediaSource, i64), SharedItem> = known_items?
             .into_iter()
-            .map(|item| (item.key(), item))
+            .map(|mut item| {
+                if let Some(hash) = &mut item.info_hash {
+                    hash.make_ascii_lowercase();
+                }
+                (item.key(), item)
+            })
             .collect();
+
+        // Indexed once per pass — see `seed::KnownTorrents`.
+        let torrents = seed::KnownTorrents::index(&torrents);
 
         for item in discovered {
             match self
@@ -509,7 +521,7 @@ impl Syncer {
         item: &Discovered,
         announce: &AnnounceSet,
         live: &HashSet<String>,
-        torrents: &[sharerr_client::TorrentSummary],
+        torrents: &seed::KnownTorrents,
         known: Option<&SharedItem>,
         dry_run: bool,
     ) -> Result<Step> {
@@ -522,7 +534,7 @@ impl Syncer {
         if let Some(known) = known
             && known.state == ShareState::Seeding
             && let Some(hash) = &known.info_hash
-            && live.contains(&hash.to_ascii_lowercase())
+            && live.contains(hash)
         {
             if !dry_run {
                 match self.seeder.refresh_announce(hash, announce).await {
@@ -605,10 +617,11 @@ impl Syncer {
 
         // `try_exists` rather than a blocking `exists()`: this runs per item on
         // the async loop, against a mount that may be remote.
+        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
+            return Err(missing());
+        }
+
         if dry_run {
-            if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
-                return Err(missing());
-            }
             tracing::info!(
                 item = %item.spec,
                 release = %release_title,
@@ -616,10 +629,6 @@ impl Syncer {
                 "would share"
             );
             return Ok(Step::Added);
-        }
-
-        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
-            return Err(missing());
         }
 
         let outcome = self
@@ -637,6 +646,7 @@ impl Syncer {
                 item.file_id,
                 outcome.info_hash(),
                 token_fingerprint(announce).as_deref(),
+                matches!(outcome, SeedOutcome::Added { .. }),
             )
             .await?;
 
@@ -650,6 +660,12 @@ impl Syncer {
     ///
     /// Removes the torrent and marks the row `Unshared`. **The file is never
     /// touched** — sharerr shares media it does not own.
+    ///
+    /// Nor is a torrent sharerr did not add. `Seeder::seed` reuses one that
+    /// already covers the file rather than creating a duplicate, so an item can
+    /// be Seeding under an infohash belonging to the operator's own torrent;
+    /// removing that on withdrawal would stop a swarm sharerr was only ever a
+    /// guest in. `created_by_sharerr` is what tells the two apart.
     async fn withdraw_untagged(
         &self,
         known: &HashMap<(MediaSource, i64), SharedItem>,
@@ -679,15 +695,24 @@ impl Syncer {
                 continue;
             }
 
-            if let Some(hash) = &item.info_hash
-                && let Err(err) = self.seeder.qbit.remove(hash).await
-            {
-                // Worth continuing: marking the row Unshared is still correct, and
-                // the torrent can be cleaned up by hand.
-                // The client's own name, not a hardcoded one: this field is a
-                // `dyn TorrentClient` and may well be Transmission.
-                let client = self.seeder.qbit.kind();
-                tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
+            match (&item.info_hash, item.created_by_sharerr) {
+                (Some(hash), true) => {
+                    if let Err(err) = self.seeder.qbit.remove(hash).await {
+                        // Worth continuing: marking the row Unshared is still correct, and
+                        // the torrent can be cleaned up by hand.
+                        // The client's own name, not a hardcoded one: this field is a
+                        // `dyn TorrentClient` and may well be Transmission.
+                        let client = self.seeder.qbit.kind();
+                        tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
+                    }
+                }
+                (Some(hash), false) => tracing::info!(
+                    %hash,
+                    item = %item.spec,
+                    "the torrent was already in the client before sharerr shared this \
+                     file, so it is left running — only the share is withdrawn"
+                ),
+                (None, _) => {}
             }
 
             match self

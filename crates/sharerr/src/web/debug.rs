@@ -23,7 +23,11 @@ pub async fn page(State(state): State<WebState>) -> Response {
         .client_endpoint()
         .current()
         .map(|b| b.to_string());
-    let feed_base = config.public_base_url();
+    // The live endpoint, not `config.public_base_url()` — see
+    // `ServeState::public_base_url`'s docs: this page is about the address
+    // friends actually reach, and on a gluetun-only deployment that is the
+    // resolved one.
+    let feed_base = state.serve.public_base_url().await;
 
     let script = script_for(tracker_base.as_deref(), &feed_base);
 
@@ -96,17 +100,9 @@ echo "A FAIL means the address, the port forward, or the firewall is wrong."
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::sync::Arc;
-
     use super::*;
-    use crate::web::auth::Sessions;
 
-    fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     #[test]
     fn the_script_embeds_the_resolved_addresses() {

@@ -146,7 +146,7 @@ async fn verify_password(password: &SecretString, stored: Option<String>) -> Res
         blocking_verify(&password, &stored)
     })
     .await
-    .map_err(|_| StoreError::PasswordHash("verification task panicked".to_owned()))?
+    .map_err(|_| StoreError::PasswordHash("verification task panicked".to_owned()))
 }
 
 /// The plaintext has to be owned to cross into a blocking task; `Zeroizing` is
@@ -167,17 +167,19 @@ fn blocking_hash(password: &str) -> Result<String> {
         .map_err(|e| StoreError::PasswordHash(e.to_string()))
 }
 
-fn blocking_verify(password: &str, stored: &str) -> Result<bool> {
-    // A hash this build cannot parse is a rejected login, not an error: the only
-    // ways to get one are a hand-edited database or a downgrade, and neither
-    // should hand out a session.
+/// Plain `bool`, not `Result`: verification has no failure mode distinct from
+/// "no". A hash this build cannot parse is a rejected login, not an error --
+/// the only ways to get one are a hand-edited database or a downgrade, and
+/// neither should hand out a session. A `Result` here would invite a caller to
+/// treat an unparsable hash as something to retry or surface.
+fn blocking_verify(password: &str, stored: &str) -> bool {
     let Ok(parsed) = PasswordHash::new(stored) else {
-        return Ok(false);
+        return false;
     };
 
-    Ok(Argon2::default()
+    Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
+        .is_ok()
 }
 
 #[cfg(test)]

@@ -12,16 +12,15 @@
 //!   searches for, so it is what gets named; the track number is carried when there
 //!   is one and omitted when the file is the album.
 //!
-//! Lidarr is also on API `v1` rather than `v3` — see [`MediaSource::api_version`].
+//! Lidarr is also on API `v1` rather than `v3`.
 
-use futures::stream::{self, StreamExt, TryStreamExt};
 use serde::Deserialize;
 use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
 use crate::models::non_empty;
-use crate::{DISCOVERY_CONCURRENCY, Discovered};
+use crate::{Discovered, Tagged, fetch_tagged};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +32,12 @@ struct Artist {
     tags: Vec<i64>,
     #[serde(default)]
     foreign_artist_id: Option<String>,
+}
+
+impl Tagged for Artist {
+    fn tags(&self) -> &[i64] {
+        &self.tags
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,50 +74,30 @@ struct Track {
     absolute_track_number: Option<u32>,
 }
 
-/// What one tagged artist needs fetching for it. Fetched by id and zipped back
-/// onto the artist list by the caller — see `sonarr::SeriesPayload` for why.
+/// What one tagged artist needs fetching for it.
 type ArtistPayload = (Vec<Album>, Vec<TrackFile>, Vec<Track>);
 
-async fn fetch_artist(client: &ArrClient, artist_id: i64) -> Result<ArtistPayload> {
-    let artist_id = artist_id.to_string();
-
+async fn fetch_artist(client: &ArrClient, artist: &Artist) -> Result<ArtistPayload> {
     // Independent lookups, so they run concurrently — per tagged artist this
     // costs one round trip's latency instead of three. The track list carries
     // numbers so a single-track file can be named precisely; a file no track
     // points at is still shareable — it is simply the whole album.
-    let by_artist = [("artistId", artist_id)];
+    let by_artist = [("artistId", artist.id)];
     let (albums, files, tracks) = tokio::try_join!(
-        client.get::<Vec<Album>>("album", &by_artist),
-        client.get::<Vec<TrackFile>>("trackfile", &by_artist),
-        client.get::<Vec<Track>>("track", &by_artist),
+        client.get::<Vec<Album>, _>("album", &by_artist),
+        client.get::<Vec<TrackFile>, _>("trackfile", &by_artist),
+        client.get::<Vec<Track>, _>("track", &by_artist),
     )?;
     Ok((albums, files, tracks))
 }
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let artists: Vec<Artist> = client.get("artist", &[]).await?;
-    let tagged: Vec<&Artist> = artists
-        .iter()
-        .filter(|a| a.tags.contains(&tag_id))
-        .collect();
-
-    tracing::debug!(
-        total = artists.len(),
-        tagged = tagged.len(),
-        "lidarr artists scanned for the sharerr tag"
-    );
-
-    // Concurrent across artists as well as within one — see
-    // `DISCOVERY_CONCURRENCY`.
-    let ids: Vec<i64> = tagged.iter().map(|a| a.id).collect();
-    let fetched: Vec<ArtistPayload> = stream::iter(ids)
-        .map(|id| fetch_artist(client, id))
-        .buffered(DISCOVERY_CONCURRENCY)
-        .try_collect()
-        .await?;
+    let artists: Vec<Artist> = client.get("artist", &()).await?;
+    // Concurrent across artists as well as within one — see `fetch_tagged`.
+    let fetched = fetch_tagged(client, &artists, tag_id, "lidarr artists", fetch_artist).await?;
 
     let mut discovered = Vec::new();
-    for (artist, (albums, files, tracks)) in tagged.into_iter().zip(fetched) {
+    for (artist, (albums, files, tracks)) in fetched {
         if files.is_empty() {
             tracing::debug!(artist = %artist.artist_name, "tagged but has no files on disk");
             continue;

@@ -574,12 +574,7 @@ mod tests {
     // A `WebState` over `state::fixtures::unconfigured()`, same as web/settings.rs's
     // handler tests — a real sqlite-backed `Store` (no vault involved), so account
     // creation, login, and password change all exercise the genuine store queries.
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(Sessions::default()),
-        }
-    }
+    use crate::web::web_state;
 
     async fn body_text(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)

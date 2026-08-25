@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lava_torrent::torrent::v1::Torrent;
 use sharerr_testkit::{deterministic_bytes, write_media_file};
@@ -26,6 +26,15 @@ fn build(path: &Path) -> sharerr_torrent::BuiltTorrent {
         .unwrap()
 }
 
+/// A synthetic media file of `size` bytes at `name` inside a fresh tempdir.
+/// The tempdir rides along so the file outlives the call.
+fn fixture(name: &str, size: usize, seed: u64) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    write_media_file(&path, size, seed).unwrap();
+    (dir, path)
+}
+
 fn tiered(urls: &[&str]) -> AnnounceSet {
     let tiers: Vec<Url> = urls.iter().map(|u| Url::parse(u).unwrap()).collect();
     AnnounceSet {
@@ -36,11 +45,11 @@ fn tiered(urls: &[&str]) -> AnnounceSet {
 
 #[test]
 fn builds_a_torrent_over_a_file_where_it_already_is() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir
-        .path()
-        .join("tv/Lanternwick Hollow/lanternwick.s02e01.mkv");
-    write_media_file(&path, 768 * 1024, 1).unwrap();
+    let (_dir, path) = fixture(
+        "tv/Lanternwick Hollow/lanternwick.s02e01.mkv",
+        768 * 1024,
+        1,
+    );
 
     let before = std::fs::metadata(&path).unwrap();
     let built = build(&path);
@@ -67,9 +76,7 @@ fn builds_a_torrent_over_a_file_where_it_already_is() {
 /// looks for inside the save path.
 #[test]
 fn the_torrent_is_named_after_the_file_not_the_release() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lanternwick.s02e01.mkv");
-    write_media_file(&path, 4096, 1).unwrap();
+    let (_dir, path) = fixture("lanternwick.s02e01.mkv", 4096, 1);
 
     let built = build(&path);
 
@@ -85,9 +92,7 @@ fn the_torrent_is_named_after_the_file_not_the_release() {
 /// the only thing preventing that, so it gets its own assertion.
 #[test]
 fn torrents_are_private() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("file.mkv");
-    write_media_file(&path, 4096, 1).unwrap();
+    let (_dir, path) = fixture("file.mkv", 4096, 1);
 
     let decoded = Torrent::read_from_bytes(&build(&path).data).unwrap();
     assert!(decoded.is_private(), "the private flag was not set");
@@ -95,9 +100,7 @@ fn torrents_are_private() {
 
 #[test]
 fn the_announce_url_is_embedded() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("file.mkv");
-    write_media_file(&path, 4096, 1).unwrap();
+    let (_dir, path) = fixture("file.mkv", 4096, 1);
 
     let decoded = Torrent::read_from_bytes(&build(&path).data).unwrap();
     assert_eq!(
@@ -110,16 +113,12 @@ fn the_announce_url_is_embedded() {
 /// torrent, and what makes the fixtures usable as regression anchors.
 #[test]
 fn identical_content_produces_an_identical_info_hash() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
+    let (_first, a) = fixture("file.mkv", 768 * 1024, 99);
+    let (_second, b) = fixture("file.mkv", 768 * 1024, 99);
 
-    let a = first.path().join("file.mkv");
-    let b = second.path().join("file.mkv");
-    write_media_file(&a, 768 * 1024, 99).unwrap();
-    write_media_file(&b, 768 * 1024, 99).unwrap();
-
-    assert_eq!(build(&a).info_hash, build(&b).info_hash);
-    assert_eq!(build(&a).data, build(&b).data);
+    let (built_a, built_b) = (build(&a), build(&b));
+    assert_eq!(built_a.info_hash, built_b.info_hash);
+    assert_eq!(built_a.data, built_b.data);
 }
 
 #[test]
@@ -147,10 +146,8 @@ fn a_different_filename_changes_the_info_hash() {
 
 #[test]
 fn the_piece_count_matches_the_file_size() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("file.mkv");
     // Deliberately not a whole number of pieces: the tail piece is short.
-    write_media_file(&path, 700 * 1024, 1).unwrap();
+    let (_dir, path) = fixture("file.mkv", 700 * 1024, 1);
 
     let built = build(&path);
     let decoded = Torrent::read_from_bytes(&built.data).unwrap();
@@ -212,9 +209,7 @@ fn piece_length_scales_with_file_size() {
 /// through recently held addresses after a VPN reconnect.
 #[test]
 fn multiple_endpoints_become_ordered_announce_tiers() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("file.mkv");
-    write_media_file(&path, 4096, 1).unwrap();
+    let (_dir, path) = fixture("file.mkv", 4096, 1);
 
     let announce = tiered(&[
         "http://203.0.113.9:41234/announce",
@@ -246,9 +241,7 @@ fn multiple_endpoints_become_ordered_announce_tiers() {
 /// identity in every client already seeding it.
 #[test]
 fn rewriting_the_announce_keeps_the_info_hash() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("file.mkv");
-    write_media_file(&path, 768 * 1024, 7).unwrap();
+    let (_dir, path) = fixture("file.mkv", 768 * 1024, 7);
 
     let built = build(&path);
     assert_eq!(

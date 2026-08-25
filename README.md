@@ -28,6 +28,7 @@ design is built around.
 ## Table of contents
 
 - [What works today](#what-works-today)
+- [Screenshots](#screenshots)
 - [Quickstart](#quickstart)
 - [Sharing with a friend](#sharing-with-a-friend)
   - [The tracker](#the-tracker)
@@ -51,9 +52,9 @@ design is built around.
 
 See also: [the configuration reference](docs/CONFIGURATION.md), [supported
 services](docs/SUPPORTED.md), [what's deliberately not
-supported](docs/UNSUPPORTED.md), [the roadmap](docs/ROADMAP.md), [the
-original design brief](docs/DESIGN.md), and [the security
-policy](docs/SECURITY.md).
+supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
+roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
+[the security policy](docs/SECURITY.md).
 
 ## What works today
 
@@ -65,7 +66,8 @@ policy](docs/SECURITY.md).
 | Builtin BitTorrent tracker, served by sharerr itself                             | ✅ |
 | Torznab feed for Prowlarr, with magnet links                                     | ✅ |
 | Jackett compatibility: URLs, indexer list, JSON results                          | ✅ |
-| Web UI: setup, settings, connection tests                                        | ✅ |
+| Web UI: first-run wizard, settings, connection tests                             | ✅ |
+| Items page: every discovered file, its torrent and announce-token status         | ✅ |
 | Path-mapping diagnostics in the browser                                          | ✅ |
 | Friend/peer management: per-friend keys, revoke, last-seen                       | ✅ |
 | Per-friend scoping: this friend sees TV, that one films                          | ✅ |
@@ -79,12 +81,24 @@ policy](docs/SECURITY.md).
 | Topology diagram: sources, this instance, and friends in one picture             | ✅ |
 | Live per-torrent swarm view: who is connected to each torrent right now          | ✅ |
 | Reachability script for checking from outside your network (`/debug`)            | ✅ |
+| Webhook notifications (generic, Discord, Apprise): sync failed, friend gone quiet | ✅ |
+| OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)              | ✅ |
 
 Full detail on which *arr apps, torrent clients, and indexers are supported —
 and the trait/seam each plugs into — is [`docs/SUPPORTED.md`](docs/SUPPORTED.md).
 For things tried and deliberately left out (a media-server library source,
 Readarr as a direct indexer, and more), see
 [`docs/UNSUPPORTED.md`](docs/UNSUPPORTED.md).
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Status](docs/screenshots/status.webp) | ![Items](docs/screenshots/items.webp) |
+| ![Topology](docs/screenshots/topology.webp) | ![Topology, networking only](docs/screenshots/topology-networking.webp) |
+| ![Friends](docs/screenshots/peers.webp) | ![Debug](docs/screenshots/debug.webp) |
+
+![Settings](docs/screenshots/settings.webp)
 
 ## Quickstart
 
@@ -95,18 +109,21 @@ docker run -d --name sharerr \
   -v sharerr-config:/config \
   -v sharerr-data:/data \
   -v /path/to/library:/media:ro \
-  ghcr.io/ivyduggan/sharerr-rs:main
+  ghcr.io/ivylikethevine/sharerr-rs:latest
 ```
 
-> The `:latest` tag is only published from a version tag, and there are none yet.
-> Until the first release, `:main` is the image to use.
+> Images are only published from a `v*` tag, and there are none yet — no `:latest`
+> and no branch tag exists on GHCR. Until the first release, build the image
+> yourself (`docker build -t sharerr-rs .` at the repository root) and use that
+> name in place of the `ghcr.io/…` reference.
 
 Then open `http://localhost:8477/`. The first visit asks you to create an account —
 whoever gets there first claims the instance, so do it now rather than leaving it
-reachable and unclaimed. After that, **Settings** takes the Sonarr and Radarr URLs
-and API keys, the qBittorrent URL and API key, the path mappings, and the
-tracker's advertised host. Each service has a _Test connection_ button, and
-saving takes effect within a second or two — no restart.
+reachable and unclaimed. A short **wizard** then walks through the Sonarr and
+Radarr URLs and API keys, the qBittorrent URL and API key, the path mappings,
+and the tracker's advertised host — or skip it and use **Settings**, which holds
+the same fields and everything else. Each service has a _Test connection_
+button, and saving takes effect within a second or two — no restart.
 
 `SHARERR_MASTER_KEY` is the one thing that cannot come from the UI, because it is
 what encrypts the vault the UI writes into. Set it (or `SHARERR_MASTER_KEY_FILE`,
@@ -144,10 +161,10 @@ books. That applies to the feed itself, not just the display — content outside
 friend's scope is never listed and never offered, and they cannot search their
 way around it.
 
-> A single shared `torznab.api_key` still works, for setups made before per-friend
-> keys existed. While one is set, revoking a friend does **not** cut them off,
-> because the shared key still opens the feed; the Friends page says so. Clear it
-> under Settings → Indexer once everyone has their own.
+> There is no shared feed key any more. The old `torznab.api_key`, which let one
+> key open the feed for everybody and so made revoking a single friend
+> meaningless, has been removed — a `sharerr.toml` still carrying a `[torznab]`
+> section fails to load; delete it and issue each friend their own key.
 
 If your friend has a client set up for **Jackett** rather than Prowlarr, it works
 unmodified. sharerr answers Jackett's URL shape
@@ -207,7 +224,8 @@ running.
 Sharing a library with no cap on what it costs you is a real deterrent to
 running this, so Settings → Seeding limits takes an upload-speed cap (KiB/s)
 and a seed-ratio goal, applied once per torrent at the moment sharerr hands
-it to qBittorrent or Transmission:
+it to qBittorrent, Transmission or rTorrent (with one rTorrent caveat,
+[below](#using-rtorrent--rutorrent-instead-of-qbittorrent)):
 
 ```toml
 [seeding]
@@ -264,6 +282,15 @@ full base URL (scheme, path prefix, bracketed IPv6) for reverse-proxied
 instances, and `tracker.bind` opens a second listener carrying only the tracker
 — for the topology where exactly one forwarded port exists and it has to be the
 tracker's, while the web UI stays on the LAN side.
+
+If the torrent client sits behind a *different* gluetun than sharerr does —
+the tracker on one tunnel, the seeding on another — a second, independent
+poller, `[gluetun_client]` (Settings → Gluetun, under "torrent client's own
+tunnel"), watches that tunnel's control server with the same fields and its
+own `gluetun_client.api_key`. It is what lets the Topology page say which
+tunnel a port is actually on. `docker/deploy/dual-vpn/` is that layout. Both
+pollers also take `enabled = false` to pause polling without losing a saved
+`control_url`.
 
 ### The lighthouse
 
@@ -376,6 +403,13 @@ Set it up per friend on the Friends page: their sharerr's URL, and the key they
 issued you (from _their_ Friends page). Leave both empty and your instance still
 answers their pulls and accepts their pushes; it just never initiates.
 
+A friend who stops showing up can also be reported rather than noticed: with a
+webhook URL stored as `notifications.webhook_url` (Settings → Notifications),
+sharerr POSTs there when a sync fails and when a friend has not been seen for
+`notifications.peer_quiet_secs` (a week by default; `0` turns only the
+peer-quiet check off). `notifications.kind` picks the payload shape — `generic`
+JSON, a `discord` webhook, or an `apprise` API server's `/notify`.
+
 ## Topology
 
 The **Topology** page is one diagram of how this instance connects to
@@ -393,15 +427,27 @@ to a friend means their address was seen directly; dashed means gossip relayed
 it; dotted means a lighthouse answered it; no line at all means that friend's
 sharerr has not been heard from yet. Every friend gets their own colour, shared
 between their box and the lines reaching it, so which lines belong to whom is
-readable at a glance. Under the diagram, **Active swarms** lists who is
-connected to each torrent right now, from the tracker's own bookkeeping.
+readable at a glance. Each friend's box carries three rows — the address their
+feed requests arrive from, their torrent client, and their own sharerr's
+announce endpoint — and each line lands on the row it describes. A legend
+under the diagram spells out the icons, the border colours (health), and the
+line styles. Under that, **Torrent client** asks the client what it is
+actually doing — the one place a torrent paused or removed behind sharerr's
+back shows up, listed as "not in the client" or "in the client, not seeding"
+— and **Active swarms** lists who is connected to each torrent right now, from
+the tracker's own bookkeeping.
+
+**Networking only** hides the sources lane — the *arr apps and library
+directories feed sharerr files but are not part of the network — and reframes
+the diagram on this instance, its client, and friends. The choice is
+remembered per browser, and `/topology?view=networking` links straight to it.
 
 Addresses are redacted by default: an IPv4 keeps its first two octets and hides
 the last two (`203.0.113.9` shows as `203.0.•••.•`), and a port keeps only its
 leading half. The first half is what you recognise as your own network; the
 second half is what identifies one machine on it — so the page stays readable
 to you and stays safe to screenshot. A checkbox at the top reveals the real
-values.
+values; that choice is remembered per browser too.
 
 ### Checking that you are actually reachable
 
@@ -550,10 +596,12 @@ scripted deployment or a secrets manager wants:
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `sharerr sync`               | One reconciliation pass, then exit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
+| `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (`--search-root`, default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
 | `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `sharerr vault list`         | Lists which secret keys are currently set, without their values.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `sharerr openapi`            | Prints the OpenAPI 3.1 document for the machine-facing API, generated from the handlers themselves (`--output` writes it to a file; `docs/openapi.json` is this output, committed). Reads no config, opens no vault. See [docs/API.md](docs/API.md).                                                                                                                                                                                                                                                                       |
+| `sharerr preview`            | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout in a real browser with no instance behind it. Reads nothing; a development aid, not something an operator needs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -600,9 +648,9 @@ bytes. No real content is involved anywhere.
 
 | Crate                  |                                                           |
 | ---------------------- | --------------------------------------------------------- |
-| `sharerr`              | The binary: CLI, web UI, Torznab, tracker, reconciliation |
+| `sharerr`              | The binary: CLI, web UI, Torznab/Jackett, tracker, reconciliation, directory libraries, gossip, lighthouse client, notifications |
 | `sharerr-core`         | Domain types, layered config, path mapping. No I/O        |
-| `sharerr-arr`          | Sonarr/Radarr clients and tagged-content discovery        |
+| `sharerr-arr`          | Sonarr/Radarr/Lidarr/Readarr/Whisparr clients and tagged-content discovery |
 | `sharerr-client`       | The narrow trait a torrent client backend implements      |
 | `sharerr-qbit`         | qBittorrent WebUI client                                  |
 | `sharerr-transmission` | Transmission RPC client                                   |

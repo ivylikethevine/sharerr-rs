@@ -24,7 +24,8 @@ mod tests {
 
 Never weaken the workspace lint to make a test compile. A non-test `expect()` that
 genuinely cannot fail takes a targeted `#[allow]` **plus a comment saying why** —
-`Config::default`'s `Url::parse` on a literal is the one example in the tree.
+`QbitConfig::default`'s `Url::parse` on a literal (and its Transmission and
+rTorrent twins) are the only examples in the tree.
 
 **`cargo test` does not build `target/debug/sharerr`.** It builds the test harness.
 Any CLI smoke test needs an explicit `cargo build` first; running a stale binary has
@@ -63,16 +64,24 @@ with. Mocks cannot prove that.
 All fixtures are synthetic — invented titles, seeded pseudo-random bytes, so
 torrent info hashes are stable across machines. No real content, ever.
 
+Fixtures worth knowing by name: `state::fixtures::{unconfigured, unloadable}`
+(a fresh container, with or without a loadable `sharerr.toml`; keep the returned
+`TempDir` alive), `web::web_state(serve)` for a `WebState` around one of those,
+and `sharerr_testkit::mock::{base_url, mount_json, mount_ok, mount_text,
+multipart_field, QBIT_API_KEY, ARR_API_KEY}` for wiremock-backed service clients.
+
 **No tier-1 fixture opens a real vault.** `state::fixtures::unconfigured()` has no
 master key, so `ServeState::open_vault`/`tracker_token`/`gossip_identity` all
 resolve to "unavailable" there — fine for testing the not-yet-configured path, a
 real gap for anything that only behaves differently once a vault-backed secret
-*is* set (e.g. a magnet's announce token once `tracker.token` exists). Standing
-one up would mean setting `SHARERR_MASTER_KEY` on the real process env, which
-nothing in this suite does because a parallel test runner does not scope env
-vars per test. Prefer testing the store-backed logic directly (pass `Store` and
-the resolved secret as plain parameters, the way `tracker::authenticate_token`
-does) over reaching for a live vault.
+*is* set. Prefer testing the store-backed logic directly (pass `Store` and the
+resolved secret as plain parameters, the way `tracker::authenticate_token` does).
+When a test genuinely needs the vault open, the one sanctioned way is
+`figment::Jail::expect_with` with `jail.set_env("SHARERR_MASTER_KEY", ..)` — see
+`state.rs`'s `vault_backed_accessors_succeed_and_cache_once_the_vault_opens` —
+because `Jail` scopes the variable and serialises against every other Jail test
+in the binary. A bare `std::env::set_var` does neither and races the parallel
+runner.
 
 ## Traps
 
@@ -91,12 +100,20 @@ seeds mismatched data instead of qBittorrent refusing it.
 the constants in `sharerr_core::config::secret_keys`. Adding a secret means adding
 it to `secret_keys::ALL` (or `commands/vault.rs`'s `vault set`/`vault list` silently
 reject it) *and* wiring the constant into the relevant handler in `web/settings.rs`
-(which does not consult `ALL` at all — each settings section names its secret
-explicitly), or the web UI silently will not manage it.
+(which does not consult `ALL` at all — each save handler passes its own secret key
+to the shared `write_config_and_secret` helper; Transmission and rTorrent share
+one, `save_rpc_client`), or the web UI silently will not manage it.
 
 **The config file is rewritten in place by the web UI**, comments and all, via
 `toml_edit`. A settings path is a hand-typed string in more than one place; check
 `web/settings.rs` and `web/templates/settings.html` agree.
+
+**`config_io::env_overrides()` is memoised in a `OnceLock`.** The process env
+cannot change after start, so it is scanned once. A test that sets a `SHARERR_*`
+variable (even inside a `Jail`) and then renders the settings or wizard page will
+see whatever the *first* caller in the binary saw, not its own variable. Test the
+lock detection through `collect_overrides(vars)` with an explicit iterator, as
+`config_io`'s tests do.
 
 **Every `web/settings.rs` form field must be `#[serde(default)]`**, even ones the
 handler goes on to treat as required. An `<input>` can render `disabled` — no
@@ -113,7 +130,9 @@ added later inherits the tolerance instead of needing to remember it.
 ## Repository
 
 Publishing to GHCR happens on a `v*` tag only. A push to `main` builds both
-architectures — that build is load-bearing as the MSRV check — but ships nothing.
+architectures — that build is load-bearing as the MSRV check — but ships nothing,
+so no branch tag (`:main` included) ever exists on GHCR; only `latest`, the semver
+tags, and a `sha-*` tag do.
 
 The roadmap is `docs/ROADMAP.md`; the original design brief and the two premises
 the implementation disproved are in `docs/DESIGN.md`.

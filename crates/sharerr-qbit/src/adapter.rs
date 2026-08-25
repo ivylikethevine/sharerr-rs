@@ -105,9 +105,21 @@ impl TorrentClient for QbitClient {
     }
 
     async fn set_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
-        let urls: Vec<String> = urls.iter().map(url::Url::to_string).collect();
-        self.set_torrent_trackers(hash, &urls)
+        self.set_torrent_trackers(hash, urls)
             .await
+            .map_err(|e| self.translate(e))
+    }
+
+    async fn add_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
+        self.add_torrent_trackers(hash, urls)
+            .await
+            .map_err(|e| self.translate(e))
+    }
+
+    async fn export(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        self.export_torrent(hash)
+            .await
+            .map(Some)
             .map_err(|e| self.translate(e))
     }
 }
@@ -130,7 +142,7 @@ mod tests {
         QbitClient::with_api_key(&base, SecretString::from(API_KEY)).unwrap()
     }
 
-    async fn mocked_client(server: &MockServer) -> QbitClient {
+    fn mocked_client(server: &MockServer) -> QbitClient {
         make_client(&server.uri())
     }
 
@@ -162,7 +174,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let version = TorrentClient::version(&client).await.unwrap();
         assert_eq!(version, "v4.6.0");
     }
@@ -175,7 +187,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let err = TorrentClient::version(&client).await.unwrap_err();
         assert!(
             matches!(
@@ -214,7 +226,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let err = TorrentClient::version(&client).await.unwrap_err();
         assert!(
             matches!(
@@ -247,7 +259,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let list = client.list(None).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].hash, "abc123");
@@ -269,7 +281,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let files = client.files("abc123").await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "movie.mkv");
@@ -287,7 +299,7 @@ mod tests {
 
         let data = b"d8:announce0:e";
         let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -305,7 +317,7 @@ mod tests {
 
         let data = b"not really a torrent";
         let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         let err = client.add(&request).await.unwrap_err();
         assert!(
             matches!(
@@ -328,7 +340,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.remove("abc123").await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -352,7 +364,7 @@ mod tests {
             .await;
 
         let urls = [Url::parse("http://tracker.example/announce").unwrap()];
-        let client = mocked_client(&server).await;
+        let client = mocked_client(&server);
         client.set_trackers("abc123", &urls).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
@@ -362,5 +374,106 @@ mod tests {
             .expect("an addTrackers call was made");
         let body = String::from_utf8(add.body.clone()).unwrap();
         assert!(body.contains("tracker.example"), "{body}");
+    }
+
+    /// The additive form must never reach `removeTrackers`. It is pointed at
+    /// torrents sharerr did not create, whose tracker list is the operator's.
+    #[tokio::test]
+    async fn add_trackers_adds_without_removing_what_is_already_there() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/trackers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "url": "http://theirs.example/announce", "status": 2 },
+                { "url": "** [DHT] **", "status": 0 },
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v2/torrents/addTrackers"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
+        let client = mocked_client(&server);
+        client.add_trackers("abc123", &urls).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let add = requests
+            .iter()
+            .find(|r| r.url.path() == "/api/v2/torrents/addTrackers")
+            .expect("an addTrackers call was made");
+        assert!(
+            String::from_utf8(add.body.clone())
+                .unwrap()
+                .contains("sharerr.example")
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path() == "/api/v2/torrents/removeTrackers"),
+            "add_trackers must not remove anything"
+        );
+    }
+
+    /// A URL the torrent already carries costs no request at all — this runs
+    /// again every time an adopted item is re-seeded.
+    #[tokio::test]
+    async fn add_trackers_is_silent_when_the_url_is_already_present() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/trackers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "url": "http://sharerr.example/announce", "status": 2 },
+            ])))
+            .mount(&server)
+            .await;
+
+        let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
+        let client = mocked_client(&server);
+        client.add_trackers("abc123", &urls).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path() == "/api/v2/torrents/addTrackers"),
+            "nothing to add means nothing sent"
+        );
+    }
+
+    /// `torrents/export` is bencode. Read as bytes and returned untouched — a
+    /// `String` round trip would mangle the binary `pieces` field, and with it
+    /// the infohash of every torrent sharerr adopts.
+    #[tokio::test]
+    async fn export_returns_the_torrent_bytes_verbatim() {
+        // Not valid UTF-8, deliberately: 0x80..0x9f is what a `pieces` field
+        // looks like and what a lossy decode would replace.
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+            .mount(&server)
+            .await;
+
+        let client = mocked_client(&server);
+        assert_eq!(client.export("abc123").await.unwrap(), Some(bytes));
+    }
+
+    /// An unknown hash is a real error, not `Ok(None)` — `None` is reserved for
+    /// a client that has no export call at all, which is a different fix.
+    #[tokio::test]
+    async fn export_of_an_unknown_torrent_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/export"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = mocked_client(&server);
+        assert!(client.export("abc123").await.is_err());
     }
 }

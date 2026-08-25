@@ -104,15 +104,17 @@ impl GluetunTarget {
 
 /// What a gluetun poller last saw and last failed with, so the Diagnostics
 /// page can show when gluetun last actually told sharerr something.
+///
+/// One lock around the whole snapshot rather than one per field — the same
+/// shape as [`crate::lighthouse_client::LighthouseStatus`] — so a reader can
+/// never see a poll's `last_poll_at` beside the previous poll's error.
 #[derive(Debug, Default)]
 pub struct GluetunStatus {
-    last_poll_at: tokio::sync::RwLock<Option<i64>>,
-    last_success_at: tokio::sync::RwLock<Option<i64>>,
-    last_error: tokio::sync::RwLock<Option<String>>,
+    inner: tokio::sync::RwLock<GluetunSnapshot>,
 }
 
 /// A read-only snapshot of a [`GluetunStatus`], for rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GluetunSnapshot {
     pub last_poll_at: Option<i64>,
     pub last_success_at: Option<i64>,
@@ -122,22 +124,20 @@ pub struct GluetunSnapshot {
 impl GluetunStatus {
     async fn record_ok(&self) {
         let now = now_epoch();
-        *self.last_poll_at.write().await = Some(now);
-        *self.last_success_at.write().await = Some(now);
-        *self.last_error.write().await = None;
+        let mut inner = self.inner.write().await;
+        inner.last_poll_at = Some(now);
+        inner.last_success_at = Some(now);
+        inner.last_error = None;
     }
 
     async fn record_err(&self, message: String) {
-        *self.last_poll_at.write().await = Some(now_epoch());
-        *self.last_error.write().await = Some(message);
+        let mut inner = self.inner.write().await;
+        inner.last_poll_at = Some(now_epoch());
+        inner.last_error = Some(message);
     }
 
     pub async fn snapshot(&self) -> GluetunSnapshot {
-        GluetunSnapshot {
-            last_poll_at: *self.last_poll_at.read().await,
-            last_success_at: *self.last_success_at.read().await,
-            last_error: self.last_error.read().await.clone(),
-        }
+        self.inner.read().await.clone()
     }
 }
 
@@ -203,12 +203,10 @@ impl GluetunClient {
     /// repeatedly — the poller, once per interval, forever — can build one and
     /// keep it, rather than discarding a connection pool on every tick.
     pub fn http_client() -> Result<reqwest::Client> {
-        reqwest::Client::builder()
-            // The control server is on loopback in the intended topology; a
-            // longer wait means something is wrong, not slow.
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| GluetunError::Malformed(format!("building the HTTP client: {e}")))
+        // The control server is on loopback in the intended topology; a
+        // longer wait means something is wrong, not slow.
+        sharerr_client::http_client_with_timeout(Duration::from_secs(10))
+            .map_err(|e| GluetunError::Malformed(e.to_string()))
     }
 
     pub fn new(base: &Url, api_key: Option<SecretString>) -> Result<Self> {
@@ -306,10 +304,9 @@ impl GluetunClient {
             (Err(err), None) => return Err(err),
         };
 
-        let raw = match ip {
-            IpAddr::V4(v4) => format!("http://{v4}:{port}"),
-            IpAddr::V6(v6) => format!("http://[{v6}]:{port}"),
-        };
+        // `SocketAddr`'s `Display` brackets an IPv6 literal the way a URL
+        // authority needs it.
+        let raw = format!("http://{}", std::net::SocketAddr::new(ip, port));
         Url::parse(&raw).map_err(|e| GluetunError::Malformed(format!("{raw}: {e}")))
     }
 }
@@ -410,8 +407,17 @@ async fn poll_once(
         .map(|observed| observed.base)
         .and_then(|base| base.port());
 
+    // The key comes from `ServeState::gluetun_api_key`, which caches it. A
+    // vault that will not open (no master key, none of the settings ever saved
+    // one) means no key at all, and the guard above skips the request rather
+    // than sending one whose only possible answer is the `401` that
+    // `GluetunError::Unauthorized` exists to explain.
     let resolved = match http {
-        Ok(http) => resolve_once(http.clone(), control, Some(api_key), fallback_port).await,
+        Ok(http) => {
+            GluetunClient::with_http(http.clone(), control, Some(api_key))
+                .resolve_base(fallback_port)
+                .await
+        }
         Err(err) => Err(GluetunError::Malformed(err.clone())),
     };
 
@@ -456,24 +462,6 @@ async fn record_error(
         *last_error = Some(rendered);
     }
     changed
-}
-
-/// One resolve against `control`, reusing the caller's HTTP client.
-///
-/// The key comes from [`ServeState::gluetun_api_key`], which caches it. A vault
-/// that will not open (no master key, none of the settings ever saved one) means
-/// no key at all, and the poller skips the request rather than sending one whose
-/// only possible answer is the `401` that [`GluetunError::Unauthorized`] exists
-/// to explain.
-async fn resolve_once(
-    http: reqwest::Client,
-    control: &Url,
-    api_key: Option<SecretString>,
-    fallback_port: Option<u16>,
-) -> Result<Url> {
-    GluetunClient::with_http(http, control, api_key)
-        .resolve_base(fallback_port)
-        .await
 }
 
 #[cfg(test)]
@@ -790,23 +778,6 @@ mod tests {
         assert!(record_error(&status, &mut last_error, "boom".to_owned()).await);
         assert!(!record_error(&status, &mut last_error, "boom".to_owned()).await);
         assert!(record_error(&status, &mut last_error, "different boom".to_owned()).await);
-    }
-
-    /// `resolve_once` is a thin, stateless passthrough to `GluetunClient` — it
-    /// needs no `ServeState`, only the HTTP client and address `poll_once`
-    /// already has in hand.
-    #[tokio::test]
-    async fn resolve_once_resolves_against_the_given_control_server() {
-        let server = server_with(
-            serde_json::json!({ "public_ip": "203.0.113.9" }),
-            serde_json::json!({ "port": 41234 }),
-        )
-        .await;
-
-        let http = GluetunClient::http_client().unwrap();
-        let control: Url = server.uri().parse().unwrap();
-        let resolved = resolve_once(http, &control, None, None).await.unwrap();
-        assert_eq!(resolved.as_str(), "http://203.0.113.9:41234/");
     }
 
     /// An inactive poller — the default, with no `control_url` configured —

@@ -119,34 +119,44 @@ pub struct StatusPage {
     pub config_path: String,
 
     // ------------------------------------------------------ diagnostics
-    /// Live connectivity + tag/path checks, one line per *arr app and per
-    /// `[[library]]` directory — only for what is actually configured. Shared
-    /// with `doctor` via `crate::checks`, so the two cannot disagree about
-    /// what they found.
-    pub services: Vec<ServiceLine>,
-    /// Whether any tagged file was found at all. Distinguishes "everything
-    /// resolves" from "there was nothing to resolve", which look identical if you
-    /// only count failures.
-    pub scanned: bool,
-    pub rules: usize,
-    pub checked: usize,
-    pub unmapped: usize,
-    /// Capped for display; `more_missing` carries the remainder.
-    pub missing: Vec<String>,
-    pub more_missing: usize,
-    pub invalid: Vec<String>,
-    pub sample: Option<SampleRow>,
-    /// Files that resolved to something sharerr can actually open.
-    pub readable: usize,
-    /// Whether anything here stops a file being shared. Drives the one-line verdict
-    /// at the top, so the answer is visible without reading the whole page.
+    /// The deeper checks, gathered by `diagnostics::gather` — the template
+    /// reads them as `diag.x`.
+    pub diag: DiagnosticsData,
+}
+
+/// What the lighthouse poller is doing, pre-rendered.
+///
+/// `None` on [`StatusPage`] when no lighthouse is configured — the section is
+/// then omitted entirely rather than shown empty, since lighthouse is an
+/// opt-in fallback and most instances never set one up.
+#[derive(Debug)]
+pub struct LighthouseView {
+    /// Configured lighthouse URLs, whether or not one has been contacted yet.
+    pub configured: usize,
+    /// Rendered relative time of the last completed pass, or `None` before the
+    /// first — a real state, given the 15-minute interval.
+    pub last_pass: Option<String>,
+    pub rows: Vec<LighthouseRow>,
+    /// When a lookup last recovered a friend's address, and whose. The only
+    /// evidence a lighthouse has ever actually helped.
+    pub last_recovery: Option<String>,
+    pub last_recovery_peer: Option<String>,
+    /// Friends quiet enough to be worth looking up in the last pass. Zero is
+    /// the healthy case, so the template says so rather than showing a bare 0.
+    pub lookups_attempted: usize,
+    /// Whether every configured lighthouse has accepted a report. Drives the
+    /// section's one-line verdict.
     pub healthy: bool,
-    /// One row per gluetun poller (tracker, then client) — what each is
-    /// pointed at, what it last saw, and what it last failed with.
-    pub gluetun: Vec<EndpointStatus>,
-    /// The last few sync runs, newest first — the glance above only shows the
-    /// single latest one.
-    pub runs: Vec<RunRow>,
+}
+
+/// One lighthouse's report state, pre-rendered.
+#[derive(Debug)]
+pub struct LighthouseRow {
+    pub url: String,
+    /// Rendered relative time of the last accepted report, or `None` if none
+    /// has ever been accepted.
+    pub last_success: Option<String>,
+    pub last_error: Option<String>,
 }
 
 /// The numbers an operator actually came to check, in one strip.
@@ -154,6 +164,10 @@ pub struct StatusPage {
 pub struct Glance {
     /// Items currently seeding.
     pub items_shared: i64,
+    /// Their combined size, pre-rendered ("412 GiB") — what "128 items"
+    /// amounts to on disk, which is the number a friend's quota actually
+    /// feels. Empty when nothing is seeding.
+    pub shared_size: String,
     /// Rendered relative time of the last finished sync, or `None` for never.
     pub last_sync: Option<String>,
     /// What that sync amounted to — "3 added, 1 failed" — or empty when it was
@@ -170,6 +184,15 @@ pub struct Glance {
     /// the tracker.
     pub swarm_peers: usize,
     pub swarm_seeders: usize,
+    /// How many distinct torrents have a live swarm. Computed alongside the
+    /// two counts above and previously discarded — without it, twenty peers on
+    /// one torrent and one peer on each of twenty read identically.
+    pub swarm_torrents: usize,
+    /// When the next periodic sync is due, rendered relative ("in ~4 min",
+    /// "due now") — derived from the last finished run plus the configured
+    /// interval, since the sync loop stores no deadline of its own. Empty when
+    /// periodic sync is off or nothing has run yet.
+    pub next_sync: String,
 }
 
 /// One row of the path-mapping table.
@@ -182,6 +205,20 @@ pub struct PathRow {
     pub arr: String,
     pub sharerr: String,
     pub qbit: String,
+}
+
+impl From<&sharerr_core::config::PathMapping> for PathRow {
+    fn from(m: &sharerr_core::config::PathMapping) -> Self {
+        Self {
+            arr: m.arr.display().to_string(),
+            sharerr: m.sharerr.display().to_string(),
+            qbit: m
+                .qbit
+                .as_ref()
+                .map(|q| q.display().to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// One row of the `[[library]]` table — form state, same as [`PathRow`].
@@ -275,6 +312,9 @@ pub struct SettingsPage {
     /// secondary sections live in starts open in that case, because hiding a
     /// configured service behind a fold reads as it having vanished.
     pub secondary_arr_configured: bool,
+    /// How many library sources are set up at all — *arr apps with a URL plus
+    /// `[[library]]` directories — for the chip beside the section heading.
+    pub library_sources_configured: usize,
 
     /// `"qbittorrent"`, `"transmission"`, or `"rtorrent"` — which client
     /// `torrent_backend` currently selects to actually seed. Only this one's
@@ -342,6 +382,9 @@ pub struct SettingsPage {
     /// Lighthouse(s) this instance reports to and queries, one URL per line —
     /// see [`sharerr_core::config::LighthouseConfig::urls`].
     pub lighthouse_urls: String,
+    /// How many lines `lighthouse_urls` holds, for the section chip — a
+    /// template cannot count them itself.
+    pub lighthouse_url_count: usize,
 
     /// gluetun's control server URL, or empty when endpoint resolution is off.
     pub gluetun_control_url: String,
@@ -387,7 +430,11 @@ pub struct SettingsPage {
     /// One row per `[[library]]` directory, plus a spare blank row.
     pub libraries: Vec<LibraryRow>,
 
+    /// One row per configured mapping, plus a spare blank row.
     pub path_map: Vec<PathRow>,
+    /// The number of real rows in `path_map` (the spare excluded), for the
+    /// section chip.
+    pub path_map_count: usize,
 
     /// Stated on the change-password form so the rule is visible before the
     /// submission that would otherwise reject it. Comes from the constant the
@@ -401,12 +448,15 @@ pub struct SettingsPage {
     pub config_path: String,
 }
 
-/// One `<option>` in a peer-scope selector.
+/// One `<option>` in a `<select>`: the wire value and the text shown for it.
 #[derive(Debug)]
-pub struct ScopeOption {
+pub struct SelectOption {
     pub value: &'static str,
     pub label: String,
 }
+
+/// One `<option>` in a peer-scope selector.
+pub type ScopeOption = SelectOption;
 
 /// One *arr app's section on the settings page.
 #[derive(Debug)]
@@ -436,6 +486,11 @@ pub struct ServiceLine {
     pub name: String,
     pub message: String,
     pub ok: bool,
+    /// Where sharerr reached for it, so a line saying "could not reach it" also
+    /// says *what* it could not reach — the misconfiguration is usually visible
+    /// in the URL itself. Empty for a line describing a local directory, whose
+    /// path is already in `name`.
+    pub url: String,
 }
 
 /// One file traced through all three views of the library.
@@ -451,25 +506,52 @@ pub struct SampleRow {
 /// instead of an eleven-tuple.
 #[derive(Debug)]
 pub struct DiagnosticsData {
+    /// Live connectivity + tag/path checks, one line per *arr app and per
+    /// `[[library]]` directory — only for what is actually configured. Shared
+    /// with `doctor` via `crate::checks`, so the two cannot disagree about
+    /// what they found.
     pub services: Vec<ServiceLine>,
+    /// Whether any tagged file was found at all. Distinguishes "everything
+    /// resolves" from "there was nothing to resolve", which look identical if you
+    /// only count failures.
     pub scanned: bool,
     pub rules: usize,
     pub checked: usize,
     pub unmapped: usize,
+    /// Capped for display; `more_missing` carries the remainder and
+    /// `missing_total` the sum — the count sentence must name the total,
+    /// not the length of the capped list.
     pub missing: Vec<String>,
     pub more_missing: usize,
+    pub missing_total: usize,
     pub invalid: Vec<String>,
     pub sample: Option<SampleRow>,
+    /// Files that resolved to something sharerr can actually open.
     pub readable: usize,
+    /// Whether anything here stops a file being shared. Drives the one-line verdict
+    /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
+    /// One row per gluetun poller (tracker, then client) — what each is
+    /// pointed at, what it last saw, and what it last failed with.
     pub gluetun: Vec<EndpointStatus>,
+    /// The last few sync runs, newest first — the glance above only shows the
+    /// single latest one.
     pub runs: Vec<RunRow>,
+    /// What the lighthouse poller is doing, or `None` when none is configured
+    /// — the section is omitted entirely in that case.
+    pub lighthouse: Option<LighthouseView>,
 }
 
 /// One past sync run, pre-rendered for display.
 #[derive(Debug)]
 pub struct RunRow {
     pub when: String,
+    /// The absolute instant behind `when`, for a `title=` tooltip — see
+    /// `peers::absolute`. Empty for a run still in flight.
+    pub when_absolute: String,
+    /// How long the run took, pre-rendered. Empty while it is still running,
+    /// which is also the only case where there is no end to measure to.
+    pub took: String,
     /// Either the run's own error, or a summary of what it did.
     pub summary: String,
     pub failed: bool,
@@ -510,10 +592,25 @@ pub struct PeerRow {
     /// How to say it to a person — "everything", "TV only", "films only".
     pub scope_label: &'static str,
     pub created: String,
+    /// The absolute instant behind `created`, for a `title=` tooltip.
+    pub created_absolute: String,
     /// Rendered relative time, or "never" — the answer to "is my friend actually
     /// set up?", which nothing could report before peers existed.
     pub last_seen: String,
+    /// The absolute instant behind `last_seen`, empty when it is "never".
+    pub last_seen_absolute: String,
     pub revoked: bool,
+    /// How many seeding items this friend's scope admits right now, or
+    /// `None` when the store could not say. What "Can see: TV only"
+    /// actually amounts to in files.
+    pub sharing: Option<usize>,
+    /// The combined size of those items, pre-rendered ("41 GiB"). Empty
+    /// when `sharing` is `None` or nothing is admitted.
+    pub sharing_size: String,
+    /// When the key was revoked, rendered relative — stored all along and never
+    /// shown, so "(revoked)" gave no clue whether it happened today or a year
+    /// ago. Empty for a friend who is not revoked.
+    pub revoked_when: String,
     /// A truncated render of their gossip identity, or `None` until their
     /// sharerr has introduced itself.
     pub pubkey_short: Option<String>,
@@ -564,11 +661,7 @@ pub struct RevealedPeer {
 }
 
 /// One `<option>` in the items page's source/state filters.
-#[derive(Debug)]
-pub struct FilterOption {
-    pub value: &'static str,
-    pub label: String,
-}
+pub type FilterOption = SelectOption;
 
 /// One column header on the items page, pre-rendered as a link that toggles
 /// direction on the next click — the template has no scripting to do this
@@ -576,6 +669,8 @@ pub struct FilterOption {
 #[derive(Debug)]
 pub struct SortLink {
     pub label: &'static str,
+    /// One sentence for the header's tooltip, saying what the column means.
+    pub hint: &'static str,
     pub href: String,
     /// Whether this is the column the list is currently sorted by.
     pub active: bool,
@@ -589,6 +684,15 @@ pub struct SortLink {
 #[derive(Debug)]
 pub struct ItemRow {
     pub title: String,
+    /// The scene-style name the feed advertises. `items::page` already filters
+    /// on it, so leaving it unrendered meant matching against a string the
+    /// operator could not see. Distinct from `title` by design — see
+    /// `sharerr-torrent` on why conflating the two stalls seeding at 0%.
+    pub release_title: String,
+    /// The path exactly as the *arr app reported it, before any mapping. The
+    /// first thing to check when an item will not share, and previously
+    /// visible only as the single `sample` row on the status page.
+    pub arr_path: String,
     /// `episode` / `movie` / `track` / `book`, for the small kind badge.
     pub kind: &'static str,
     pub source_label: String,
@@ -608,6 +712,18 @@ pub struct ItemRow {
     pub since: String,
     /// The full 40-character hash, or `None` before a torrent exists.
     pub info_hash: Option<String>,
+    /// The first twelve characters of `info_hash`, for the cell itself; the
+    /// full value rides on the tooltip and the copy button.
+    pub info_hash_short: Option<String>,
+    /// `"2↑ 1↓"`: who the tracker currently sees in this torrent's swarm.
+    /// Empty when nobody is announcing, which the template shows as a dash.
+    pub peers: String,
+    /// The long form of `peers` — `"2 seeding · 1 downloading"` — for hover.
+    pub peers_hint: String,
+    /// `"Sonarr series 42, file 1337"`: the *arr's own identifiers, shown on
+    /// hover over the source cell because they are what an operator greps
+    /// the *arr's logs for.
+    pub source_hint: String,
     /// Where this torrent currently announces — the same URL a freshly built
     /// torrent would carry, computed live rather than stored, since it tracks
     /// whatever the endpoint currently resolves to. `None` before a torrent
@@ -619,7 +735,20 @@ pub struct ItemRow {
     /// [`TokenStatus::None`] before a torrent exists.
     pub token_fp: Option<String>,
     pub token_status: TokenStatus,
+    /// The metadata IDs carried in the feed — "tvdb 12345 · imdb tt0111161" —
+    /// which are what a friend's *arr matches the release on. Empty when
+    /// the item has none, which is itself the reason a friend's app
+    /// would ignore it.
+    pub ids: String,
     pub last_error: Option<String>,
+    /// Whether sharerr added this torrent itself, rather than reusing one that
+    /// already covered the file. Changes what withdrawing the item does, so it
+    /// is worth seeing before withdrawing anything — see
+    /// `SharedItem::created_by_sharerr`. Meaningless before a torrent exists,
+    /// which `info_hash: None` already says.
+    pub created_by_sharerr: bool,
+    /// The absolute instant behind `since`, for a `title=` tooltip.
+    pub since_absolute: String,
 }
 
 /// Whether an item's confirmed announce-token fingerprint still matches the
@@ -691,6 +820,11 @@ pub struct DebugPage {
 #[derive(Debug, Template)]
 #[template(path = "topology.html")]
 pub struct TopologyPage {
+    /// Whether the torrent client is seeding what the store says it is.
+    /// `None` when the client could not be reached at all — the diagram's own
+    /// client node already says so, and repeating it as a table of zeros
+    /// would read as "nothing is seeding".
+    pub client_check: Option<ClientCheck>,
     pub signed_in: bool,
     pub width: i32,
     pub height: i32,
@@ -702,6 +836,71 @@ pub struct TopologyPage {
     /// with a live peer are listed; an idle share has nothing to show here.
     pub swarms: Vec<SwarmRow>,
 }
+
+/// The running binary's version, for the page footer — so a bug report or a
+/// "which build has that fix" question can be answered from any page.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+impl TopologyPage {
+    /// The legend's "what each box is" row, in lane order. Built from
+    /// [`NodeIcon`] itself so the legend can never show a glyph the diagram
+    /// does not draw, or the other way round.
+    pub fn legend(&self) -> &'static [LegendEntry] {
+        LEGEND
+    }
+}
+
+/// One swatch in the topology legend: the glyph, the color it is drawn in
+/// on the diagram, and what it stands for.
+#[derive(Debug, Clone, Copy)]
+pub struct LegendEntry {
+    pub icon: NodeIcon,
+    pub lane: Lane,
+    /// The same `var(--...)` reference the matching node's accent bar uses.
+    pub accent: &'static str,
+    pub name: &'static str,
+    pub meaning: &'static str,
+}
+
+const LEGEND: &[LegendEntry] = &[
+    LegendEntry {
+        icon: NodeIcon::Arr,
+        lane: Lane::Source,
+        accent: "var(--topo-arr)",
+        name: "*arr app",
+        meaning: "Sonarr, Radarr, Lidarr or Readarr — a source sharerr reads tagged files from",
+    },
+    LegendEntry {
+        icon: NodeIcon::Library,
+        lane: Lane::Source,
+        accent: "var(--topo-library)",
+        name: "Library",
+        meaning: "A plain [[library]] directory sharerr scans",
+    },
+    LegendEntry {
+        icon: NodeIcon::Instance,
+        lane: Lane::Instance,
+        accent: "var(--accent)",
+        name: "sharerr",
+        meaning: "This instance: the tracker friends announce to and the feed they pull",
+    },
+    LegendEntry {
+        icon: NodeIcon::Client,
+        lane: Lane::Client,
+        accent: "var(--topo-client)",
+        name: "Torrent client",
+        meaning: "The client that actually seeds — qBittorrent, Transmission or rTorrent",
+    },
+    LegendEntry {
+        icon: NodeIcon::Friend,
+        lane: Lane::Friend,
+        accent: "var(--topo-peer-1)",
+        name: "Friend",
+        meaning: "One friend. Each gets a color of their own, shared by their box and both lines reaching it",
+    },
+];
 
 /// One torrent's live swarm, for the "Active swarms" table below the
 /// diagram.
@@ -717,7 +916,7 @@ pub struct SwarmRow {
     pub more: usize,
 }
 
-/// One peer's address, full and redacted — see [`Node::sublabel_masked`]'s
+/// One peer's address, full and redacted — see [`NodeLine::masked`]'s
 /// doc comment for what the redaction is and why.
 #[derive(Debug, Clone)]
 pub struct AddressCell {
@@ -736,7 +935,10 @@ pub struct Node {
     /// The glyph drawn beside the label, naming what *kind* of thing this is
     /// without spending a word on it.
     pub icon: NodeIcon,
+    /// Fitted to the box width — see `topology::truncate`.
     pub label: String,
+    /// The untruncated name, for the box's tooltip.
+    pub full_label: String,
     /// Detail rows under the label, each with its own short tag naming what
     /// the value is ("url", "indexer", "client") — an unlabelled address is
     /// the thing this page was hardest to read without.
@@ -748,6 +950,36 @@ pub struct Node {
     /// as one connected thing at a glance. A CSS `var(--...)` reference,
     /// applied to the box's left accent bar and its icon.
     pub accent: &'static str,
+    /// Which column of the diagram this box stands in — what the "networking
+    /// only" toggle keys on to hide the sources lane, and what the legend's
+    /// swatches name.
+    pub lane: Lane,
+}
+
+/// The three swimlanes of the diagram, plus the client's own slot in the
+/// middle one. Rendered as a `data-lane` attribute so the page's script can
+/// hide a whole lane without knowing anything about coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// An *arr app or `[[library]]` directory — where media comes from.
+    Source,
+    /// This instance.
+    Instance,
+    /// This instance's torrent client.
+    Client,
+    /// A friend.
+    Friend,
+}
+
+impl Lane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Instance => "instance",
+            Self::Client => "client",
+            Self::Friend => "friend",
+        }
+    }
 }
 
 /// One detail row inside a [`Node`].
@@ -840,6 +1072,30 @@ pub struct Edge {
     /// category color, a friend's two edges match that friend's unique
     /// color, and the sharerr-to-client edge is left neutral.
     pub accent: &'static str,
+    /// What the line stands for — rendered as `data-kind` so the "networking
+    /// only" toggle can drop the source edges along with their boxes.
+    pub kind: EdgeKind,
+}
+
+/// What an [`Edge`] connects, independent of how it was learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// A source feeding this instance — a media relationship, not a network one.
+    Source,
+    /// This instance to its torrent client, labelled with the path-mapping result.
+    Client,
+    /// This instance to a friend's indexer or torrent client.
+    Friend,
+}
+
+impl EdgeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Client => "client",
+            Self::Friend => "friend",
+        }
+    }
 }
 
 /// How an edge was learned, or whatever else distinguishes one connection
@@ -857,6 +1113,18 @@ pub enum EdgeStyle {
 }
 
 impl EdgeStyle {
+    /// A sentence for the line's hover tooltip: the diagram encodes this as
+    /// a dash pattern, and a pattern is exactly the kind of thing a reader
+    /// forgets between visits.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Solid => "Observed directly: this instance and theirs have spoken",
+            Self::Dashed => "Learned through gossip: another friend relayed their address",
+            Self::Dotted => "Learned from a lighthouse: the fallback when nobody has seen them",
+            Self::None => "",
+        }
+    }
+
     /// The SVG `stroke-dasharray` value, or `None` when [`Self::None`] means
     /// the edge should not be drawn at all.
     pub fn dasharray(self) -> Option<&'static str> {
@@ -867,6 +1135,50 @@ impl EdgeStyle {
             Self::None => None,
         }
     }
+}
+
+/// Whether the torrent client is actually seeding what sharerr's store says
+/// it is.
+///
+/// Every other check on these pages asks the store or a *arr app what it
+/// believes. This one asks the client what it is *doing*, which is the only
+/// way to notice a torrent removed from the client behind sharerr's back —
+/// the store still says `Seeding` and nothing else contradicts it.
+#[derive(Debug)]
+pub struct ClientCheck {
+    /// Torrents the store says are seeding, i.e. what should be there.
+    pub expected: usize,
+    /// Of those, the ones the client holds *and* reports as seeding.
+    pub confirmed: usize,
+    /// Expected torrents the client does not have at all. The serious case:
+    /// sharerr believes these are shared and nothing is serving them.
+    pub absent: Vec<ClientMismatch>,
+    pub more_absent: usize,
+    /// Expected torrents the client holds but is not seeding — paused,
+    /// errored, or still checking. Recoverable inside the client itself.
+    pub idle: Vec<ClientMismatch>,
+    pub more_idle: usize,
+    /// Set when the listing itself failed, in which case every count above is
+    /// zero and means nothing — distinct from "asked, and found nothing wrong".
+    pub error: Option<String>,
+    /// Whether the client agrees with the store. Drives the one-line verdict.
+    pub healthy: bool,
+}
+
+/// One torrent the client and the store disagree about.
+#[derive(Debug)]
+pub struct ClientMismatch {
+    pub title: String,
+    /// Shown truncated, but carried in full so it can be copied — it is the
+    /// join key for looking the torrent up in the client's own UI.
+    pub hash: String,
+}
+
+/// One state's share of the library, for the tally above the items table.
+#[derive(Debug)]
+pub struct StateCount {
+    pub label: String,
+    pub count: usize,
 }
 
 /// Every file sharerr has discovered, sortable and filterable — the page
@@ -881,10 +1193,20 @@ pub struct ItemsPage {
     /// query.
     pub total: usize,
     pub shown: usize,
+    /// How the whole library breaks down by state, counted before any filter
+    /// is applied. "128 of 132 seeding" is the question the page exists to
+    /// answer, and it was previously only derivable by filtering four times.
+    pub state_counts: Vec<StateCount>,
+    /// Bytes across every `Seeding` item in the library, before filters, and
+    /// across the rows currently shown — both via `web::items::human_size`.
+    pub seeding_size: String,
+    pub shown_size: String,
     pub source_options: Vec<FilterOption>,
     pub state_options: Vec<FilterOption>,
+    pub kind_options: Vec<FilterOption>,
     pub source_filter: String,
     pub state_filter: String,
+    pub kind_filter: String,
     pub q: String,
     pub sort_links: Vec<SortLink>,
 }

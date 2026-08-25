@@ -10,15 +10,13 @@ use secrecy::SecretString;
 use serde_json::json;
 use sharerr_client::{AddRequest, ClientError, ClientKind, TorrentClient};
 use sharerr_qbit::QbitClient;
+use sharerr_testkit::mock::{QBIT_API_KEY as API_KEY, base_url, mount_ok};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const API_KEY: &str = "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86";
-
 fn client(server: &MockServer) -> QbitClient {
-    let base = Url::parse(&server.uri()).expect("wiremock uri is a valid url");
-    QbitClient::with_api_key(&base, SecretString::from(API_KEY)).expect("client builds")
+    QbitClient::with_api_key(&base_url(server), SecretString::from(API_KEY)).expect("client builds")
 }
 
 #[test]
@@ -81,7 +79,7 @@ async fn files_maps_torrent_files_into_file_entries() {
     Mock::given(method("GET"))
         .and(path("/api/v2/torrents/files"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2147483648_u64, "progress": 1.0 }
+            { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2_147_483_648_u64, "progress": 1.0 }
         ])))
         .mount(&server)
         .await;
@@ -97,16 +95,8 @@ async fn files_maps_torrent_files_into_file_entries() {
 #[tokio::test]
 async fn add_remove_and_set_trackers_succeed_through_the_trait() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/add"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/delete"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Ok."))
-        .mount(&server)
-        .await;
+    mount_ok(&server, "/api/v2/torrents/add").await;
+    mount_ok(&server, "/api/v2/torrents/delete").await;
     Mock::given(method("GET"))
         .and(path("/api/v2/torrents/trackers"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))

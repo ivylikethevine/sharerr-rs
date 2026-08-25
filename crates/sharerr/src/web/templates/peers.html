@@ -16,19 +16,30 @@
 
 {% if let Some(new) = revealed %}
 <div class="ok" role="status">
-  <h2>{{ new.label }}'s key</h2>
+  <p><strong>{{ new.label }}'s key</strong></p>
   <p class="error">
     Copy it now — this is the only time it is shown. sharerr stores only a hash of
     it and cannot show it again. If it is lost, delete this friend and add them
     back.
   </p>
-  <p><code>{{ new.key }}</code></p>
+  <p>
+    <code>{{ new.key }}</code>
+    <button type="button" class="link micro" data-copy-text="{{ new.key }}"
+            aria-label="Copy the key">copy</button>
+    <span class="hint" data-copy-note></span>
+  </p>
   <p class="hint">
     In their Prowlarr: add a <em>Generic Torznab</em> indexer with this URL and
     this key.
   </p>
   <dl class="facts">
-    <dt>Feed URL</dt><dd><code>{{ feed_url }}</code></dd>
+    <dt>Feed URL</dt>
+    <dd>
+      <code>{{ feed_url }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ feed_url }}"
+              aria-label="Copy the feed URL">copy</button>
+      <span class="hint" data-copy-note></span>
+    </dd>
   </dl>
 </div>
 {% endif %}
@@ -54,6 +65,7 @@
   <button type="submit">Generate a key</button>
 </form>
 
+<section class="wide">
 <h2>Sharing with {{ peers.len() }} friend(s)</h2>
 <div class="panel">
   {% if peers.is_empty() %}
@@ -65,12 +77,22 @@
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Name</th><th>Can see</th><th>Added</th><th>Last seen</th><th></th></tr>
+      <tr>
+        <th title="The name you gave them — nobody else sees it">Name</th><th title="Which sources their feed admits; content outside it is never listed or offered">Can see</th><th title="How many seeding items their scope admits right now, and their combined size">Sharing</th><th title="When their key was generated">Added</th><th title="When their key was last used against the feed">Last seen</th>
+        <th title="Whether their own sharerr has introduced itself to yours — friends who run sharerr exchange signed address records (gossip), so a moved address is found without anyone retyping it">Runs sharerr</th>
+        <th title="The most recent address this friend was seen at, and how">Last address</th>
+        <th><span class="visually-hidden">Actions</span></th>
+      </tr>
     </thead>
     <tbody>
       {% for peer in peers %}
       <tr{% if peer.revoked %} class="revoked"{% endif %}>
-        <td>{{ peer.label }}{% if peer.revoked %} <span class="error">(revoked)</span>{% endif %}</td>
+        <td>
+          {{ peer.label }}
+          {% if peer.revoked %}
+          <span class="error">(revoked{% if !peer.revoked_when.is_empty() %} {{ peer.revoked_when }}{% endif %})</span>
+          {% endif %}
+        </td>
         <td>
           {% if peer.revoked %}
           {{ peer.scope_label }}
@@ -85,8 +107,23 @@
           </form>
           {% endif %}
         </td>
-        <td class="nowrap">{{ peer.created }}</td>
-        <td class="nowrap">{{ peer.last_seen }}</td>
+        <td class="nowrap">{% if let Some(n) = peer.sharing %}{{ n }} item(s){% if !peer.sharing_size.is_empty() %} <span class="hint">· {{ peer.sharing_size }}</span>{% endif %}{% else %}<span class="hint">—</span>{% endif %}</td>
+        <td class="nowrap" title="{{ peer.created_absolute }}">{{ peer.created }}</td>
+        <td class="nowrap"{% if !peer.last_seen_absolute.is_empty() %} title="{{ peer.last_seen_absolute }}"{% endif %}>{{ peer.last_seen }}</td>
+        <td class="nowrap">
+          {% if let Some(pubkey) = peer.pubkey_short %}
+          <span class="ok" title="Their sharerr has introduced itself; this is a short form of its identity key">✓ <code>{{ pubkey }}</code></span>
+          {% else %}
+          <span class="hint" title="Their sharerr has not spoken to yours — they may only pull the feed from Prowlarr, or their instance is not set up yet">—</span>
+          {% endif %}
+        </td>
+        <td class="nowrap">
+          {% if let Some(latest) = peer.endpoints.first() %}
+          <code>{{ latest.addr }}</code> <span class="hint">{{ latest.kind }}, {{ latest.seen }}</span>
+          {% else %}
+          <span class="hint">—</span>
+          {% endif %}
+        </td>
         <td class="actions">
           {% if !peer.revoked %}
           <a href="/peers/{{ peer.id }}/feed" target="_blank" rel="noopener">View feed XML</a>
@@ -109,6 +146,7 @@
   </p>
   {% endif %}
 </div>
+</section>
 
 {% if !peers.is_empty() %}
 <h2>Where friends are</h2>
@@ -135,14 +173,6 @@
 <div class="panel">
   <h3>{{ peer.label }}</h3>
   <dl class="facts">
-    <dt>Identity</dt>
-    <dd>
-      {% if let Some(pubkey) = peer.pubkey_short %}
-      <code>{{ pubkey }}</code>
-      {% else %}
-      <span class="hint">not yet introduced — their sharerr has not spoken to yours</span>
-      {% endif %}
-    </dd>
     <dt>Seen at</dt>
     <dd>
       {% if peer.endpoints.is_empty() %}

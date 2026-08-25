@@ -84,6 +84,7 @@ PAGES=(
     "peers:/peers"
     "items:/items"
     "topology:/topology"
+    "topology-networking:/topology?view=networking"
     "debug:/debug"
 )
 

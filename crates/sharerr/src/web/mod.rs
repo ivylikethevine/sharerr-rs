@@ -186,7 +186,8 @@ async fn status_page(State(state): State<WebState>) -> Response {
     // half — it probes every *arr over HTTP and stats every discovered file,
     // while `glance` is two store queries. Run in series the cheap one sat
     // behind the slow one on the page an operator lands on.
-    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state));
+    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
+    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state, sync_every));
 
     render(&StatusPage {
         signed_in: true,
@@ -203,21 +204,29 @@ async fn status_page(State(state): State<WebState>) -> Response {
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
         config_path: state.serve.config_path().display().to_string(),
-
-        services: diag.services,
-        scanned: diag.scanned,
-        rules: diag.rules,
-        checked: diag.checked,
-        unmapped: diag.unmapped,
-        missing: diag.missing,
-        more_missing: diag.more_missing,
-        invalid: diag.invalid,
-        sample: diag.sample,
-        readable: diag.readable,
-        healthy: diag.healthy,
-        gluetun: diag.gluetun,
-        runs: diag.runs,
+        diag,
     })
+}
+
+/// A `WebState` over a bare `ServeState`, for handler-level tests across the
+/// web modules — one definition rather than a copy per test module.
+#[cfg(test)]
+pub(crate) fn web_state(serve: Arc<ServeState>) -> WebState {
+    WebState {
+        serve,
+        sessions: Arc::new(Sessions::default()),
+    }
+}
+
+/// The `Location` header of a redirect, or `""` — shared by the tests that
+/// assert where a save or a sign-in lands.
+#[cfg(test)]
+pub(crate) fn location(response: &Response) -> &str {
+    response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
 }
 
 /// The one-glance numbers, gathered from the store and the live swarms.
@@ -225,10 +234,24 @@ async fn status_page(State(state): State<WebState>) -> Response {
 /// `None` when the database is unavailable — the page's existing banners
 /// already name that problem, and a strip of zeros next to them would claim
 /// "nothing shared" when the truth is "cannot tell".
-async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
+async fn glance(
+    state: &WebState,
+    sync_every: Option<u64>,
+) -> Option<crate::web::templates::Glance> {
     let store = state.serve.store().await.ok()?;
 
-    let items_shared = store.count_seeding().await.unwrap_or(0);
+    // One aggregate for both the count and the size — `PeerScope::All`
+    // admits every source, so this is the whole seeding set.
+    let seeding = store
+        .seeding_summary(sharerr_store::PeerScope::All)
+        .await
+        .unwrap_or_default();
+    let items_shared = seeding.count;
+    let shared_size = if seeding.size > 0 {
+        items::human_size(seeding.size.unsigned_abs())
+    } else {
+        String::new()
+    };
 
     // The most recent *finished* run. An in-flight run has no outcome yet, and
     // "last sync: just now" while it still churns would overpromise.
@@ -251,6 +274,26 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
     };
 
     let now = now_epoch();
+    // The loop sleeps `interval` after each pass finishes, so the deadline is
+    // the last finish plus the interval — an estimate, and worded as one.
+    let next_sync = match (
+        sync_every,
+        last_run.as_ref().and_then(|run| run.finished_at),
+    ) {
+        (Some(every), Some(finished)) => {
+            let due_in = finished + every as i64 - now;
+            if due_in <= 0 {
+                "due now".to_owned()
+            } else if due_in < 90 {
+                "in under 2 min".to_owned()
+            } else if due_in < 3600 {
+                format!("in ~{} min", due_in / 60)
+            } else {
+                format!("in ~{} h", due_in / 3600)
+            }
+        }
+        _ => String::new(),
+    };
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
     let friends_recent = active
@@ -262,6 +305,7 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
 
     Some(crate::web::templates::Glance {
         items_shared,
+        shared_size,
         last_sync,
         last_sync_note,
         last_sync_failed,
@@ -269,6 +313,8 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
         friends_total: active.len(),
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
+        swarm_torrents: swarm.swarms,
+        next_sync,
     })
 }
 
@@ -338,14 +384,6 @@ mod tests {
         Request::builder().method("POST").uri(path)
     }
 
-    fn location(response: &axum::response::Response) -> &str {
-        response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-    }
-
     /// The one-glance numbers, checked against a store with known contents.
     #[tokio::test]
     async fn the_glance_counts_items_friends_and_runs() {
@@ -371,6 +409,7 @@ mod tests {
             ids: sharerr_core::ExternalIds::default(),
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -422,11 +461,8 @@ mod tests {
             .await
             .unwrap();
 
-        let state = WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        };
-        let glance = glance(&state).await.expect("the store is available");
+        let state = web_state(serve);
+        let glance = glance(&state, None).await.expect("the store is available");
 
         assert_eq!(glance.items_shared, 1);
         assert_eq!((glance.friends_recent, glance.friends_total), (1, 2));
@@ -452,10 +488,7 @@ mod tests {
             };
             let path = dir.join("sharerr.toml");
             let serve = Arc::new(ServeState::new(config, path, None));
-            let state = WebState {
-                serve,
-                sessions: Arc::new(Sessions::default()),
-            };
+            let state = web_state(serve);
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let result = runtime.block_on(state.secret("nonexistent-key"));
@@ -471,10 +504,7 @@ mod tests {
     #[tokio::test]
     async fn the_status_page_renders_for_a_fresh_unconfigured_instance() {
         let (_dir, serve) = unconfigured();
-        let state = WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        };
+        let state = web_state(serve);
 
         let response = status_page(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -483,10 +513,7 @@ mod tests {
     #[tokio::test]
     async fn the_topology_page_renders_for_a_fresh_unconfigured_instance() {
         let (_dir, serve) = unconfigured();
-        let state = WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        };
+        let state = web_state(serve);
 
         let response = topology::page(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);

@@ -7,11 +7,16 @@
 {% if let Some(glance) = glance %}
 <dl class="stat-grid">
   <div class="stat">
-    <dt>Shared</dt>
-    <dd><strong>{{ glance.items_shared }}</strong> item(s) seeding</dd>
+    <dt title="Items with a torrent the client is seeding right now">Shared</dt>
+    <dd>
+      <strong>{{ glance.items_shared }}</strong> item(s) seeding
+      {% if !glance.shared_size.is_empty() %}
+      <br><span class="hint" title="Combined size of every seeding item">{{ glance.shared_size }} on disk</span>
+      {% endif %}
+    </dd>
   </div>
   <div class="stat">
-    <dt>Last sync</dt>
+    <dt title="The most recent finished reconciliation pass">Last sync</dt>
     <dd>
       {% if let Some(when) = glance.last_sync %}
       {{ when }}{% if !glance.last_sync_note.is_empty() %} —
@@ -21,10 +26,13 @@
       {% else %}
       never
       {% endif %}
+      {% if !glance.next_sync.is_empty() %}
+      <br><span class="hint" title="Estimated from the last finished sync plus the configured interval">next {{ glance.next_sync }}</span>
+      {% endif %}
     </dd>
   </div>
   <div class="stat">
-    <dt>Friends</dt>
+    <dt title="Friends whose key was used within the last hour, over all active friends">Friends</dt>
     <dd>
       {% if glance.friends_total == 0 %}
       none yet — add one on the <a href="/peers">Friends</a> page
@@ -34,12 +42,13 @@
     </dd>
   </div>
   <div class="stat">
-    <dt>Swarms</dt>
+    <dt title="Live peers across this instance's tracker right now — first-hand, this process is the tracker">Swarms</dt>
     <dd>
       {% if glance.swarm_peers == 0 %}
       no peers announcing right now
       {% else %}
       <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
+      <br><span class="hint">across {{ glance.swarm_torrents }} torrent(s)</span>
       {% endif %}
     </dd>
   </div>
@@ -77,39 +86,46 @@
 </p>
 {% endif %}
 
-{% if scanned %}
-{% if healthy %}
+{% if diag.scanned %}
+{% if diag.healthy %}
 <p class="ok" role="status">
-  All {{ readable }} tagged file(s) resolve to somewhere sharerr can read.
+  All {{ diag.readable }} tagged file(s) resolve to somewhere sharerr can read.
 </p>
 {% else %}
 <p class="error" role="alert">
-  {{ readable }} of {{ checked }} tagged file(s) resolve. The rest are not being
+  {{ diag.readable }} of {{ diag.checked }} tagged file(s) resolve. The rest are not being
   shared — see Path mapping below.
 </p>
 {% endif %}
 {% endif %}
 
 <dl class="facts">
-  <dt>Tag watched</dt><dd><code>{{ tag }}</code></dd>
-  <dt>{{ client_name }}</dt><dd><code>{{ client_url }}</code></dd>
-  <dt>Periodic sync</dt>
+  <dt title="Only *arr content carrying this tag is shared">Tag watched</dt><dd><code>{{ tag }}</code></dd>
+  <dt title="The torrent client sharerr hands torrents to">{{ client_name }}</dt><dd><code>{{ client_url }}</code></dd>
+  <dt title="How often sharerr re-reads the sources and reconciles the client">Periodic sync</dt>
   <dd>{% if sync_enabled %}every {{ sync_interval_secs }}s{% else %}disabled{% endif %}</dd>
-  <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>
+  <dt title="The file the Settings page rewrites in place">Config file</dt><dd><code>{{ config_path }}</code></dd>
 </dl>
 
 <h2>Recent syncs</h2>
 <div class="panel">
-  {% if runs.is_empty() %}
+  {% if diag.runs.is_empty() %}
   <p class="hint">No completed sync yet.</p>
   {% else %}
   <div class="table-scroll">
   <table>
-    <thead><tr><th>When</th><th>Result</th></tr></thead>
+    <thead><tr><th title="When the pass finished">When</th><th title="Wall-clock duration of the pass">Took</th><th title="What changed, or why the pass failed">Result</th></tr></thead>
     <tbody>
-      {% for run in runs %}
+      {% for run in diag.runs %}
       <tr>
-        <td>{{ run.when }}</td>
+        <td class="nowrap"{% if !run.when_absolute.is_empty() %} title="{{ run.when_absolute }}"{% endif %}>{{ run.when }}</td>
+        <td class="nowrap">
+          {% if run.took.is_empty() %}
+          <span class="hint">—</span>
+          {% else %}
+          {{ run.took }}
+          {% endif %}
+        </td>
         <td>
           {% if run.failed %}
           <span class="error">{{ run.summary }}</span>
@@ -127,7 +143,7 @@
 
 <h2>Networking</h2>
 <div class="panel">
-  {% for row in gluetun %}
+  {% for row in diag.gluetun %}
   <h3>{{ row.label }}</h3>
   <dl class="facts">
     <dt>Poller</dt>
@@ -173,18 +189,110 @@
   </p>
 </div>
 
+{# Omitted entirely when no lighthouse is configured: it is an opt-in fallback
+   for friends gossip cannot reach, and most instances never set one up. #}
+{% if let Some(lighthouse) = diag.lighthouse %}
+<h2>Lighthouse</h2>
+<div class="panel">
+  <p class="hint">
+    The fallback for finding a friend whose address changed while nobody was
+    watching. This instance publishes its own endpoint to each lighthouse under
+    the hash of the key it issued that friend — if a lighthouse is refusing
+    those reports, friends who have gone quiet cannot find their way back.
+  </p>
+
+  {% if lighthouse.healthy %}
+  <p class="ok">
+    All {{ lighthouse.configured }} lighthouse(s) are accepting this instance's
+    endpoint reports.
+  </p>
+  {% else %}
+  <p class="warn">
+    Not every configured lighthouse is accepting reports — see below. Gossip is
+    unaffected; only friends who have already gone quiet are.
+  </p>
+  {% endif %}
+
+  <dl class="facts">
+    <dt>Last pass</dt>
+    <dd>
+      {% if let Some(when) = lighthouse.last_pass %}
+      {{ when }}
+      {% else %}
+      <span class="hint">not yet — the first runs within 15 minutes of startup</span>
+      {% endif %}
+    </dd>
+    <dt>Friends looked up</dt>
+    <dd>
+      {% if lighthouse.lookups_attempted == 0 %}
+      <span class="hint">none were quiet enough to need it</span>
+      {% else %}
+      {{ lighthouse.lookups_attempted }} in the last pass
+      {% endif %}
+    </dd>
+    <dt>Last recovery</dt>
+    <dd>
+      {% if let Some(when) = lighthouse.last_recovery %}
+      {% if let Some(who) = lighthouse.last_recovery_peer %}{{ who }}, {% endif %}{{ when }}
+      {% else %}
+      <span class="hint">never — no friend has been found this way yet</span>
+      {% endif %}
+    </dd>
+  </dl>
+
+  {% if lighthouse.rows.is_empty() %}
+  <p class="hint">
+    No lighthouse has been contacted yet, so there is nothing to report on.
+  </p>
+  {% else %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th title="A rendezvous service this instance publishes its endpoint to">Lighthouse</th><th title="When it last accepted this instance's report">Last accepted</th><th title="The most recent report it turned down, and why">Last refusal</th></tr></thead>
+    <tbody>
+      {% for row in lighthouse.rows %}
+      <tr>
+        <td><code>{{ row.url }}</code></td>
+        <td class="nowrap">
+          {% if let Some(when) = row.last_success %}
+          <span class="ok">{{ when }}</span>
+          {% else %}
+          <span class="hint">never</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if let Some(reason) = row.last_error %}
+          <span class="error">{{ reason }}</span>
+          {% else %}
+          <span class="hint">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <h2>Services</h2>
 <div class="panel">
-  {% if services.is_empty() %}
+  {% if diag.services.len() < 2 %}
   <p class="hint">Neither Sonarr nor Radarr is configured, so there is nothing to scan.</p>
-  {% else %}
+  {% endif %}
   <dl class="facts">
-    {% for service in services %}
+    {% for service in diag.services %}
     <dt>{{ service.name }}</dt>
-    <dd class="{% if service.ok %}ok{% else %}error{% endif %}">{{ service.message }}</dd>
+    <dd>
+      <span class="{% if service.ok %}ok{% else %}error{% endif %}">{{ service.message }}</span>
+      {# "could not reach it" is far more actionable next to the address that
+         was actually dialled — a typo in the URL is the usual cause. #}
+      {% if !service.url.is_empty() %}
+      <br><code>{{ service.url }}</code>
+      {% endif %}
+    </dd>
     {% endfor %}
   </dl>
-  {% endif %}
 </div>
 
 <h2>Path mapping</h2>
@@ -196,37 +304,37 @@
     nothing is the most common reason sharerr appears to do nothing at all.
   </p>
 
-  {% if !scanned %}
+  {% if !diag.scanned %}
   <p class="hint">
     No tagged files were found, so there are no paths to resolve. Tag something in
     Sonarr or Radarr and reload.
   </p>
   {% else %}
 
-  {% if rules == 0 %}
+  {% if diag.rules == 0 %}
   <p class="hint">
     No <code>[[path_map]]</code> rules are configured, so all three views are
     assumed identical.
   </p>
   {% else %}
-  <p class="hint">{{ rules }} mapping rule(s) configured.</p>
+  <p class="hint">{{ diag.rules }} mapping rule(s) configured.</p>
   {% endif %}
 
-  {% if missing.is_empty() && invalid.is_empty() %}
-  <p class="ok">All {{ checked }} tagged file(s) are readable by sharerr.</p>
+  {% if diag.missing.is_empty() && diag.invalid.is_empty() %}
+  <p class="ok">All {{ diag.checked }} tagged file(s) are readable by sharerr.</p>
   {% else %}
   <p class="error">
-    {{ missing.len() }} of {{ checked }} tagged file(s) do not exist at the path
+    {{ diag.missing_total }} of {{ diag.checked }} tagged file(s) do not exist at the path
     sharerr resolved them to. sharerr cannot build a torrent for a file it cannot
     open, so these are not being shared.
   </p>
   <ul class="paths">
-    {% for path in missing %}
+    {% for path in diag.missing %}
     <li><code>{{ path }}</code></li>
     {% endfor %}
   </ul>
-  {% if more_missing > 0 %}
-  <p class="hint">… and {{ more_missing }} more.</p>
+  {% if diag.more_missing > 0 %}
+  <p class="hint">… and {{ diag.more_missing }} more — the first {{ diag.missing.len() }} are listed.</p>
   {% endif %}
   <p class="hint">
     Fix the path mappings under <a href="/settings">Settings</a> so the *arr view
@@ -234,25 +342,25 @@
   </p>
   {% endif %}
 
-  {% if !invalid.is_empty() %}
-  <p class="error">{{ invalid.len() }} path(s) could not be resolved at all:</p>
+  {% if !diag.invalid.is_empty() %}
+  <p class="error">{{ diag.invalid.len() }} path(s) could not be resolved at all:</p>
   <ul class="paths">
-    {% for reason in invalid %}
+    {% for reason in diag.invalid %}
     <li>{{ reason }}</li>
     {% endfor %}
   </ul>
   {% endif %}
 
-  {% if unmapped > 0 && rules > 0 %}
+  {% if diag.unmapped > 0 && diag.rules > 0 %}
   <p class="error">
-    {{ unmapped }} of {{ checked }} file(s) matched no mapping rule and passed
+    {{ diag.unmapped }} of {{ diag.checked }} file(s) matched no mapping rule and passed
     through unchanged.
   </p>
   {% endif %}
 
-  {% if let Some(sample) = sample %}
+  {% if let Some(sample) = diag.sample %}
   <h3>Example resolution</h3>
-  <p class="hint">One of the {{ checked }} file(s), traced through all three views.</p>
+  <p class="hint">One of the {{ diag.checked }} file(s), traced through all three views.</p>
   <dl class="facts">
     <dt>*arr view</dt><dd><code>{{ sample.arr }}</code></dd>
     <dt>sharerr view</dt><dd><code>{{ sample.sharerr }}</code></dd>

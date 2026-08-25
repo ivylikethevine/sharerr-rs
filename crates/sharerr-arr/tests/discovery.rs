@@ -12,21 +12,24 @@ use serde_json::json;
 use sharerr_arr::{ArrClient, ArrError};
 use sharerr_core::{MediaSource, MediaSpec};
 use sharerr_testkit::library::TAG_ID;
-use sharerr_testkit::mock::mount_json;
+use sharerr_testkit::mock::{ARR_API_KEY as API_KEY, base_url, mount_json};
 use url::Url;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const API_KEY: &str = "0123456789abcdef0123456789abcdef";
-
 fn client(kind: MediaSource, server: &MockServer) -> ArrClient {
-    let base = Url::parse(&server.uri()).expect("wiremock uri is a valid url");
-    ArrClient::new(kind, &base, SecretString::from(API_KEY)).expect("client builds")
+    ArrClient::new(kind, &base_url(server), SecretString::from(API_KEY)).expect("client builds")
 }
 
-/// Mounts `GET /api/v3/tag` with the testkit's `sharerr` tag plus its decoy.
-async fn mount_tags(server: &MockServer) {
-    mount_json(server, "/api/v3/tag", sharerr_testkit::library::tag_json()).await;
+/// Mounts `GET {prefix}/tag` — `/api/v3` for Sonarr/Radarr, `/api/v1` for
+/// Lidarr/Readarr — with the testkit's `sharerr` tag plus its decoy.
+async fn mount_tags(server: &MockServer, prefix: &str) {
+    mount_json(
+        server,
+        &format!("{prefix}/tag"),
+        sharerr_testkit::library::tag_json(),
+    )
+    .await;
 }
 
 // --------------------------------------------------------------- tag resolution
@@ -34,7 +37,7 @@ async fn mount_tags(server: &MockServer) {
 #[tokio::test]
 async fn tag_is_resolved_case_insensitively() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
 
     let client = client(MediaSource::Sonarr, &server);
     // Sonarr lowercases labels on save, so an operator who typed "Sharerr" in the
@@ -47,7 +50,7 @@ async fn tag_is_resolved_case_insensitively() {
 #[tokio::test]
 async fn a_missing_tag_is_a_named_error_listing_what_does_exist() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
 
     let err = client(MediaSource::Sonarr, &server)
         .tag_id("shrerr")
@@ -151,8 +154,11 @@ async fn a_rejected_key_is_distinguishable_from_an_unreachable_host() {
 
 #[tokio::test]
 async fn an_unreachable_host_is_distinguishable_from_a_rejected_key() {
-    // Port 1 is privileged and unbound; connecting is refused immediately.
-    let base = Url::parse("http://127.0.0.1:1").unwrap();
+    let base = Url::parse(&format!(
+        "http://127.0.0.1:{}",
+        sharerr_testkit::net::closed_port()
+    ))
+    .unwrap();
     let client = ArrClient::new(MediaSource::Radarr, &base, SecretString::from(API_KEY)).unwrap();
 
     let err = client.tag_id("sharerr").await.unwrap_err();
@@ -248,7 +254,7 @@ async fn system_status_probes_liveness() {
 // --------------------------------------------------------------- sonarr
 
 async fn mount_sonarr_library(server: &MockServer) {
-    mount_tags(server).await;
+    mount_tags(server, "/api/v3").await;
     mount_json(
         server,
         "/api/v3/series",
@@ -256,7 +262,7 @@ async fn mount_sonarr_library(server: &MockServer) {
             {
                 "id": 11,
                 "title": "Lanternwick Hollow",
-                "tvdbId": 918273,
+                "tvdbId": 918_273,
                 "tvMazeId": 4242,
                 "imdbId": "tt7654321",
                 "tags": [TAG_ID],
@@ -265,7 +271,7 @@ async fn mount_sonarr_library(server: &MockServer) {
                 // Untagged: must not appear in the results at all.
                 "id": 12,
                 "title": "Copper Vale Station",
-                "tvdbId": 112233,
+                "tvdbId": 112_233,
                 "tags": [1],
             },
         ]),
@@ -279,14 +285,14 @@ async fn mount_sonarr_library(server: &MockServer) {
             {
                 "id": 501,
                 "path": "/tv/Lanternwick Hollow/Season 02/lanternwick.s02e01.mkv",
-                "size": 2147483648_u64,
+                "size": 2_147_483_648_u64,
                 "sceneName": "Lanternwick.Hollow.S02E01.1080p.WEB-DL.DD5.1.H.264-FAKEGRP",
             },
             {
                 // A double-length premiere: one file, two episodes.
                 "id": 502,
                 "path": "/tv/Lanternwick Hollow/Season 02/lanternwick.s02e02e03.mkv",
-                "size": 4294967296_u64,
+                "size": 4_294_967_296_u64,
             },
             {
                 // Orphaned by a failed import — no episode points at it.
@@ -347,13 +353,13 @@ async fn sonarr_discovers_only_tagged_series() {
 #[tokio::test]
 async fn sonarr_pairs_each_series_with_its_own_files_when_responses_race() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
     mount_json(
         &server,
         "/api/v3/series",
         json!([
-            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918273, "tags": [TAG_ID] },
-            { "id": 21, "title": "Harrowmere", "tvdbId": 445566, "tags": [TAG_ID] },
+            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918_273, "tags": [TAG_ID] },
+            { "id": 21, "title": "Harrowmere", "tvdbId": 445_566, "tags": [TAG_ID] },
         ]),
     )
     .await;
@@ -436,7 +442,7 @@ async fn sonarr_carries_metadata_ids_and_the_unmapped_path() {
             episode: 1,
         }
     );
-    assert_eq!(first.ids.tvdb, Some(918273));
+    assert_eq!(first.ids.tvdb, Some(918_273));
     assert_eq!(first.ids.tvmaze, Some(4242));
     assert_eq!(first.ids.imdb.as_deref(), Some("tt7654321"));
     assert_eq!(first.ids.tmdb, None);
@@ -480,7 +486,7 @@ async fn a_multi_episode_file_is_named_by_its_lowest_episode() {
 #[tokio::test]
 async fn a_tag_that_nothing_carries_yields_an_empty_result_not_an_error() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
     mount_json(
         &server,
         "/api/v3/series",
@@ -501,7 +507,7 @@ async fn a_tag_that_nothing_carries_yields_an_empty_result_not_an_error() {
 #[tokio::test]
 async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
     mount_json(
         &server,
         "/api/v3/movie",
@@ -510,14 +516,14 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
                 "id": 31,
                 "title": "The Gilded Ferry",
                 "year": 2019,
-                "tmdbId": 555444,
+                "tmdbId": 555_444,
                 "imdbId": "tt1234567",
                 "tags": [TAG_ID],
                 "hasFile": true,
                 "movieFile": {
                     "id": 900,
                     "path": "/movies/The Gilded Ferry (2019)/gilded.ferry.2019.mkv",
-                    "size": 8589934592_u64,
+                    "size": 8_589_934_592_u64,
                     "sceneName": "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP",
                 },
             },
@@ -556,7 +562,7 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
             year: Some(2019)
         }
     );
-    assert_eq!(movie.ids.tmdb, Some(555444));
+    assert_eq!(movie.ids.tmdb, Some(555_444));
     assert_eq!(movie.ids.imdb.as_deref(), Some("tt1234567"));
     assert_eq!(movie.ids.tvdb, None);
     assert_eq!(movie.size, 8_589_934_592);
@@ -565,7 +571,7 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
 #[tokio::test]
 async fn radarr_falls_back_to_the_moviefile_endpoint() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
     mount_json(
         &server,
         "/api/v3/movie",
@@ -574,7 +580,7 @@ async fn radarr_falls_back_to_the_moviefile_endpoint() {
             "id": 31,
             "title": "The Gilded Ferry",
             "year": 2019,
-            "tmdbId": 555444,
+            "tmdbId": 555_444,
             "tags": [TAG_ID],
             "hasFile": true,
         }]),
@@ -587,7 +593,7 @@ async fn radarr_falls_back_to_the_moviefile_endpoint() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
             "id": 900,
             "path": "/movies/The Gilded Ferry (2019)/gilded.ferry.2019.mkv",
-            "size": 8589934592_u64,
+            "size": 8_589_934_592_u64,
         }])))
         .expect(1)
         .mount(&server)
@@ -604,7 +610,7 @@ async fn radarr_falls_back_to_the_moviefile_endpoint() {
 #[tokio::test]
 async fn radarr_placeholder_values_become_none() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
     mount_json(
         &server,
         "/api/v3/movie",
@@ -670,25 +676,14 @@ async fn discovered_items_promote_to_storable_items() {
 #[tokio::test]
 async fn lidarr_is_reached_on_api_v1() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/tag"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "id": TAG_ID, "label": "sharerr" }
-        ])))
-        .mount(&server)
-        .await;
+    mount_tags(&server, "/api/v1").await;
 
     let client = client(MediaSource::Lidarr, &server);
     assert_eq!(client.tag_id("sharerr").await.unwrap(), TAG_ID);
 }
 
 async fn mount_lidarr(server: &MockServer) {
-    mount_json(
-        server,
-        "/api/v1/tag",
-        json!([{ "id": TAG_ID, "label": "sharerr" }]),
-    )
-    .await;
+    mount_tags(server, "/api/v1").await;
     mount_json(
         server,
         "/api/v1/artist",
@@ -791,12 +786,7 @@ async fn a_lidarr_file_holding_a_whole_album_carries_no_track_number() {
 #[tokio::test]
 async fn readarr_discovers_a_tagged_authors_books() {
     let server = MockServer::start().await;
-    mount_json(
-        &server,
-        "/api/v1/tag",
-        json!([{ "id": TAG_ID, "label": "sharerr" }]),
-    )
-    .await;
+    mount_tags(&server, "/api/v1").await;
     mount_json(
         &server,
         "/api/v1/author",
@@ -849,7 +839,7 @@ async fn readarr_discovers_a_tagged_authors_books() {
 #[tokio::test]
 async fn whisparr_walks_like_sonarr() {
     let server = MockServer::start().await;
-    mount_tags(&server).await;
+    mount_tags(&server, "/api/v3").await;
     mount_json(
         &server,
         "/api/v3/series",

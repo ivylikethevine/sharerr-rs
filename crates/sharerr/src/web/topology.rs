@@ -11,18 +11,19 @@
 //! this port actually on" is answerable at a glance. See the README's
 //! "Topology" section.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use axum::extract::State;
 use axum::response::Response;
 use secrecy::SecretString;
-use sharerr_core::{Config, MediaSource};
+use sharerr_core::{Config, MediaSource, SharedItem};
 use sharerr_store::{EndpointKind, ObservedVia, PeerEndpoint};
 
 use super::WebState;
 use super::templates::{
-    AddressCell, Edge, EdgeStyle, Node, NodeIcon, NodeLine, NodeStatus, SwarmRow, TopologyPage,
-    render,
+    AddressCell, ClientCheck, ClientMismatch, Edge, EdgeKind, EdgeStyle, Lane, Node, NodeIcon,
+    NodeLine, NodeStatus, SwarmRow, TopologyPage, render,
 };
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
@@ -130,6 +131,11 @@ pub(crate) struct FriendNode {
     pub(crate) accent: &'static str,
     pub(crate) indexer: Channel,
     pub(crate) client: Channel,
+    /// Their own sharerr's announce/feed endpoint, as their gossip reports
+    /// it — the address *their* friends announce to. Stored and listed on
+    /// the Friends page all along, and previously the one channel the
+    /// diagram left out.
+    pub(crate) tracker: Channel,
 }
 
 /// One address channel on a [`FriendNode`]: `addr` is `None` when nothing
@@ -162,7 +168,17 @@ impl Channel {
 
 impl FriendNode {
     fn lines(&self) -> Vec<NodeLine> {
-        vec![self.indexer.row("indexer"), self.client.row("client")]
+        vec![
+            self.indexer.row("indexer"),
+            self.client.row("client"),
+            self.tracker.row("tracker"),
+        ]
+    }
+
+    /// The channels in row order — the index is the detail row each one's
+    /// edge lands on, so this is the one place that order is decided.
+    fn channels(&self) -> [&Channel; 3] {
+        [&self.indexer, &self.client, &self.tracker]
     }
 }
 
@@ -172,13 +188,7 @@ async fn gather(state: &WebState) -> TopologyPage {
     // One vault open for the whole page, same reasoning as `diagnostics::gather`:
     // opening it derives the key with Argon2, and paying that once per
     // configured service turned this into the slowest page in the UI.
-    let vault = state.serve.open_vault().await;
-    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
-        match &vault {
-            Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
-            Err(reason) => Err(reason.clone()),
-        }
-    };
+    let secret = super::diagnostics::secret_reader(state.serve.open_vault().await);
 
     // Shared with `web::diagnostics::gather` — see `checks::snapshot`'s docs
     // for why the arr probes, library scan, and path check live there instead
@@ -231,11 +241,33 @@ async fn gather(state: &WebState) -> TopologyPage {
         format!("{} resolve", paths.checked)
     };
 
-    let (instance_lines, instance_status) = instance_lines(&config, state).await;
-    let (client_label, client_lines, client_status) = client_node(&config, state, &secret).await;
+    // The store is read once for the whole page: the client check needs every
+    // seeding item and the swarm table needs a title per live info hash, and
+    // both come out of the same `all_items` rather than a query per swarm.
+    let items = stored_items(state).await;
+    let titles: HashMap<&str, &str> = items
+        .iter()
+        .filter_map(|item| {
+            item.info_hash
+                .as_deref()
+                .map(|hash| (hash, item.spec.title()))
+        })
+        .collect();
 
-    let friends = friend_nodes(state).await;
-    let swarms = swarm_rows(state).await;
+    // Four independent probes — the live client, the two reachability dials,
+    // the friends list, the swarm snapshot — run together rather than one
+    // after another.
+    let (
+        (instance_lines, instance_status),
+        (client_label, client_lines, client_status, client_check),
+        friends,
+        swarms,
+    ) = tokio::join!(
+        instance_lines(&config, state),
+        client_node(&config, state, &secret, &items),
+        friend_nodes(state),
+        swarm_rows(state, &titles),
+    );
 
     let (nodes, edges, width, height) = layout(
         &sources,
@@ -255,7 +287,113 @@ async fn gather(state: &WebState) -> TopologyPage {
         nodes,
         edges,
         swarms,
+        client_check,
     }
+}
+
+/// How many mismatched torrents to name before summarising the rest. A
+/// library whose client was wiped has *every* torrent absent, and a page
+/// listing ten thousand of them buries the one line that explains it.
+const MAX_MISMATCHES: usize = 20;
+
+/// Compare what the store believes is seeding against what the client is
+/// actually doing with it.
+///
+/// Pure, and takes plain `(hash, title)` pairs rather than a `SharedItem` or a
+/// live client, so the interesting half — which side of a disagreement a
+/// torrent falls on — is testable without either. See `CLAUDE.md` on
+/// preferring store-backed logic as plain parameters.
+///
+/// Hashes are compared lowercased: `TorrentSummary::hash` documents itself as
+/// lowercase hex, but a hash that came from a `.torrent` sharerr did not build
+/// has no such guarantee, and a case mismatch here would report every torrent
+/// as absent.
+pub(crate) fn reconcile(
+    expected: &[(String, String)],
+    listed: &[sharerr_client::TorrentSummary],
+) -> ClientCheck {
+    use std::collections::HashMap;
+
+    let present: HashMap<String, bool> = listed
+        .iter()
+        .map(|t| (t.hash.to_lowercase(), t.is_seeding))
+        .collect();
+
+    let mut absent = Vec::new();
+    let mut idle = Vec::new();
+    let mut confirmed = 0usize;
+
+    for (hash, title) in expected {
+        match present.get(&hash.to_lowercase()) {
+            Some(true) => confirmed += 1,
+            Some(false) => idle.push(ClientMismatch {
+                title: title.clone(),
+                hash: hash.clone(),
+            }),
+            None => absent.push(ClientMismatch {
+                title: title.clone(),
+                hash: hash.clone(),
+            }),
+        }
+    }
+
+    let more_absent = absent.len().saturating_sub(MAX_MISMATCHES);
+    let more_idle = idle.len().saturating_sub(MAX_MISMATCHES);
+    absent.truncate(MAX_MISMATCHES);
+    idle.truncate(MAX_MISMATCHES);
+
+    ClientCheck {
+        expected: expected.len(),
+        confirmed,
+        healthy: more_absent == 0 && more_idle == 0 && absent.is_empty() && idle.is_empty(),
+        absent,
+        more_absent,
+        idle,
+        more_idle,
+        error: None,
+    }
+}
+
+/// The `ClientCheck` for a client that answered the version probe but not the
+/// listing. Distinct from an unreachable client, which produces no check at
+/// all — here sharerr *can* talk to it and still cannot say what it holds.
+fn client_check_failed(reason: String) -> ClientCheck {
+    ClientCheck {
+        expected: 0,
+        confirmed: 0,
+        absent: Vec::new(),
+        more_absent: 0,
+        idle: Vec::new(),
+        more_idle: 0,
+        error: Some(reason),
+        healthy: false,
+    }
+}
+
+/// Every item the store holds, or nothing when the store is unavailable —
+/// the rest of the page still has a useful answer without it.
+async fn stored_items(state: &WebState) -> Vec<SharedItem> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    store.all_items().await.unwrap_or_default()
+}
+
+/// What the store says should be seeding, as `(info hash, title)` pairs.
+///
+/// An item with no info hash has no torrent yet, so there is nothing for the
+/// client to be holding — it is not a disagreement, and counting it as one
+/// would make every pending item look like a fault.
+fn expected_seeding(items: &[SharedItem]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .filter(|item| item.state == sharerr_core::ShareState::Seeding)
+        .filter_map(|item| {
+            item.info_hash
+                .as_ref()
+                .map(|hash| (hash.clone(), item.spec.title().to_owned()))
+        })
+        .collect()
 }
 
 /// Every torrent with a live peer right now, each with its connected
@@ -264,17 +402,16 @@ async fn gather(state: &WebState) -> TopologyPage {
 /// not be resolved back to a title (withdrawn mid-swarm, the rare case) is
 /// still listed, named by its hash, rather than silently dropped — the
 /// peers connected to it are just as real either way.
-async fn swarm_rows(state: &WebState) -> Vec<SwarmRow> {
-    let Ok(store) = state.serve.store().await else {
-        return Vec::new();
-    };
-
+///
+/// `titles` is info hash to title for every stored item that has one, built
+/// once by [`gather`] from the same read the client check uses.
+async fn swarm_rows(state: &WebState, titles: &HashMap<&str, &str>) -> Vec<SwarmRow> {
     let mut rows = Vec::new();
     for swarm in state.serve.swarms().snapshots().await {
         let hex_hash = hex::encode(swarm.info_hash);
-        let title = match store.item_by_info_hash(&hex_hash).await {
-            Ok(Some(item)) => item.spec.title().to_owned(),
-            _ => format!("torrent {}", &hex_hash[..8]),
+        let title = match titles.get(hex_hash.as_str()) {
+            Some(title) => (*title).to_owned(),
+            None => format!("torrent {}", &hex_hash[..8]),
         };
 
         let more = swarm.peers.len().saturating_sub(MAX_SWARM_PEERS);
@@ -309,7 +446,8 @@ async fn swarm_rows(state: &WebState) -> Vec<SwarmRow> {
 /// has something to say, and a row that is simply absent says nothing.
 async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, NodeStatus) {
     let swarm = state.serve.swarms().stats().await;
-    let gluetun_error = gluetun_error_suffix(state, GluetunTarget::Tracker).await;
+    let gluetun_error =
+        super::settings::gluetun_last_error(&state.serve, GluetunTarget::Tracker).await;
 
     let mut lines = Vec::new();
     let status = match state.serve.endpoint().current() {
@@ -348,8 +486,16 @@ async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, No
         let tracker = state.serve.endpoint().current();
         let feed = url::Url::parse(&config.public_base_url()).ok();
 
-        for (tag, base) in [("tracker", tracker.as_ref()), ("feed", feed.as_ref())] {
-            let outcome = checks::check_reachable(base).await;
+        // Two dials, each bounded by its own timeout — made together so a
+        // silent drop on one does not delay the other.
+        let targets = [("tracker", tracker.as_ref()), ("feed", feed.as_ref())];
+        let outcomes = futures::future::join_all(
+            targets
+                .iter()
+                .map(|(_, base)| checks::check_reachable(*base)),
+        )
+        .await;
+        for ((tag, _), outcome) in targets.iter().zip(outcomes) {
             let text = match &outcome {
                 checks::ReachOutcome::Reachable => "reachable".to_owned(),
                 checks::ReachOutcome::NotConfigured => "no address to check".to_owned(),
@@ -367,19 +513,6 @@ async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, No
     (lines, status)
 }
 
-/// The most recent gluetun error for `target`, or `None` when that poller is
-/// healthy right now — cleared the moment a poll succeeds, same as the
-/// Settings page shows, so this never flags a poller that has since
-/// recovered.
-async fn gluetun_error_suffix(state: &WebState, target: GluetunTarget) -> Option<String> {
-    state
-        .serve
-        .gluetun_status(target)
-        .snapshot()
-        .await
-        .last_error
-}
-
 /// The configured torrent client, live-checked the same way Settings' "Test
 /// connection" button does — see `crate::web::probe::torrent_client_badge`,
 /// whose credential resolution this mirrors.
@@ -387,7 +520,8 @@ async fn client_node(
     config: &Config,
     state: &WebState,
     secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
-) -> (String, Vec<NodeLine>, NodeStatus) {
+    items: &[SharedItem],
+) -> (String, Vec<NodeLine>, NodeStatus, Option<ClientCheck>) {
     let backend = config.torrent_backend;
     let client = config.torrent_client_for(backend);
 
@@ -397,42 +531,93 @@ async fn client_node(
     let label = backend.display_name().to_owned();
 
     let mut lines = vec![address_line("url", client.url.to_string())];
+    // The address the client is *advertised* on — what friends' clients
+    // actually dial, and the thing this page is about. Only present on the
+    // split-VPN deployment, where it differs from the URL sharerr uses.
+    if let Some(public) = state.serve.client_endpoint().current() {
+        lines.push(address_line("public", public.to_string()));
+    }
+    // `Ready` carries the authenticated client precisely so a caller with more
+    // to ask does not build a second one — see `QbitOutcome::Ready`. This page
+    // has more to ask: every other check reports what sharerr *believes*, and
+    // only the client can say what it is actually doing.
+    let mut check = None;
     let status = match outcome {
-        QbitOutcome::Ready { version, kind, .. } => {
+        QbitOutcome::Ready {
+            version,
+            kind,
+            client: connected,
+        } => {
             lines.push(line("version", format!("{kind} v{version}")));
-            NodeStatus::Ok
+            // `None` rather than sharerr's own category: a torrent moved to a
+            // different category is still seeding the file, and filtering here
+            // would report it as absent. The hashes are the join key, so the
+            // category adds nothing but a way to be wrong.
+            let reconciled = match connected.list(None).await {
+                Ok(listed) => reconcile(&expected_seeding(items), &listed),
+                Err(err) => client_check_failed(sharerr_client::error_chain(&err)),
+            };
+            lines.push(line(
+                "seeding",
+                if let Some(reason) = &reconciled.error {
+                    format!("could not list: {reason}")
+                } else {
+                    format!("{} of {}", reconciled.confirmed, reconciled.expected)
+                },
+            ));
+            let degraded = !reconciled.healthy;
+            check = Some(reconciled);
+            // A client that is reachable but not seeding what sharerr thinks
+            // is not "Ok" — that is exactly the state this check exists to
+            // stop looking healthy.
+            if degraded {
+                NodeStatus::Warn
+            } else {
+                NodeStatus::Ok
+            }
         }
         QbitOutcome::NoCredential => {
             lines.push(line("", "No credential stored"));
             NodeStatus::Error
         }
-        QbitOutcome::CredentialUnreadable(_) => {
+        // Each of these carries the reason it failed. Collapsing it to the bare
+        // category left the diagram saying "Unreachable" where the answer —
+        // wrong port, refused connection, expired certificate — was already in
+        // hand. `line` truncates to the node's width, and the node's <title>
+        // repeats every line for the full text on hover.
+        QbitOutcome::CredentialUnreadable(reason) => {
             lines.push(line("", "Vault unreadable"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
-        QbitOutcome::BadUrl(_) => {
+        QbitOutcome::BadUrl(reason) => {
             lines.push(line("", "Misconfigured"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
-        QbitOutcome::Unreachable(_) => {
+        QbitOutcome::Unreachable(reason) => {
             lines.push(line("", "Unreachable"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
         QbitOutcome::AuthRejected => {
             lines.push(line("", "Credential rejected"));
             NodeStatus::Error
         }
-        QbitOutcome::Failed(_) => {
+        QbitOutcome::Failed(reason) => {
             lines.push(line("", "Failed"));
+            lines.push(line("why", reason));
             NodeStatus::Error
         }
     };
 
-    if let Some(reason) = gluetun_error_suffix(state, GluetunTarget::Client).await {
+    if let Some(reason) =
+        super::settings::gluetun_last_error(&state.serve, GluetunTarget::Client).await
+    {
         lines.push(line("gluetun", reason));
     }
 
-    (label, lines, status)
+    (label, lines, status, check)
 }
 
 fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> SourceNode {
@@ -444,8 +629,13 @@ fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> 
     }
 
     let status = match outcome {
-        ArrOutcome::Ready { version, items, .. } => {
-            lines.push(line("version", format!("v{version}")));
+        ArrOutcome::Ready {
+            version,
+            items,
+            app_name,
+            ..
+        } => {
+            lines.push(line("version", format!("{app_name} v{version}")));
             lines.push(line("tagged", format!("{} file(s)", items.len())));
             NodeStatus::Ok
         }
@@ -485,7 +675,7 @@ fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> 
     };
 
     SourceNode {
-        label: truncate(&label),
+        label,
         icon: NodeIcon::Arr,
         lines,
         status,
@@ -494,10 +684,10 @@ fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> 
 }
 
 fn library_node(path: &Path, outcome: &DirOutcome) -> SourceNode {
-    let label = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
+    let label = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
 
     let mut lines = vec![line("path", path.display().to_string())];
     let status = match outcome {
@@ -520,14 +710,17 @@ fn library_node(path: &Path, outcome: &DirOutcome) -> SourceNode {
             lines.push(line("", "Not a directory"));
             NodeStatus::Error
         }
-        DirOutcome::Unreadable(_) => {
+        DirOutcome::Unreadable(reason) => {
             lines.push(line("", "Unreadable"));
+            // The scan error is already in hand -- a permission problem and a
+            // vanished mount both read as "Unreadable" without it.
+            lines.push(line("why", reason.clone()));
             NodeStatus::Error
         }
     };
 
     SourceNode {
-        label: truncate(&label),
+        label,
         icon: NodeIcon::Library,
         lines,
         status,
@@ -566,10 +759,11 @@ async fn friend_nodes(state: &WebState) -> Vec<FriendNode> {
 
 fn friend_node(label: &str, endpoints: &[PeerEndpoint], accent: &'static str) -> FriendNode {
     FriendNode {
-        label: truncate(label),
+        label: label.to_owned(),
         accent,
         indexer: channel(endpoints, EndpointKind::Api),
         client: channel(endpoints, EndpointKind::Client),
+        tracker: channel(endpoints, EndpointKind::Tracker),
     }
 }
 
@@ -734,9 +928,10 @@ pub(crate) fn layout(
     let source_hs: Vec<i32> = sources.iter().map(|s| node_height(s.lines.len())).collect();
     let sharerr_h = node_height(instance_lines.len());
     let client_h = node_height(client_lines.len());
-    let friend_hs: Vec<i32> = friends
+    let friend_lines: Vec<Vec<NodeLine>> = friends.iter().map(FriendNode::lines).collect();
+    let friend_hs: Vec<i32> = friend_lines
         .iter()
-        .map(|f| node_height(f.lines().len()))
+        .map(|lines| node_height(lines.len()))
         .collect();
 
     let sources_h = stack_height(&source_hs);
@@ -758,10 +953,12 @@ pub(crate) fn layout(
             w: COL_W,
             h: *h,
             icon: source.icon,
-            label: source.label.clone(),
+            label: truncate(&source.label),
+            full_label: source.label.clone(),
             lines: placed(&source.lines, y),
             status: source.status,
             accent: source.accent,
+            lane: Lane::Source,
         });
         source_mid_ys.push((y + h / 2, source.accent));
         y += h + ROW_GAP;
@@ -776,9 +973,11 @@ pub(crate) fn layout(
         h: sharerr_h,
         icon: NodeIcon::Instance,
         label: "sharerr".to_owned(),
+        full_label: "sharerr".to_owned(),
         lines: placed(instance_lines, sharerr_y),
         status: instance_status,
         accent: ACCENT_INSTANCE,
+        lane: Lane::Instance,
     });
     nodes.push(Node {
         x: instance_x,
@@ -786,10 +985,12 @@ pub(crate) fn layout(
         w: COL_W,
         h: client_h,
         icon: NodeIcon::Client,
-        label: client_label.to_owned(),
+        label: truncate(client_label),
+        full_label: client_label.to_owned(),
         lines: placed(client_lines, client_y),
         status: client_status,
         accent: ACCENT_CLIENT,
+        lane: Lane::Client,
     });
     edges.push(Edge {
         x1: instance_x + COL_W / 2,
@@ -799,6 +1000,7 @@ pub(crate) fn layout(
         label: path_edge_label.to_owned(),
         style: EdgeStyle::Solid,
         accent: ACCENT_NEUTRAL,
+        kind: EdgeKind::Client,
     });
 
     let sharerr_left = instance_x;
@@ -813,12 +1015,13 @@ pub(crate) fn layout(
             label: String::new(),
             style: EdgeStyle::Solid,
             accent,
+            kind: EdgeKind::Source,
         });
     }
 
     let mut y = MARGIN + center_offset(friends_h, content_h);
-    for (friend, h) in friends.iter().zip(&friend_hs) {
-        let status = if friend.indexer.addr.is_some() || friend.client.addr.is_some() {
+    for ((friend, lines), h) in friends.iter().zip(friend_lines).zip(&friend_hs) {
+        let status = if friend.channels().iter().any(|c| c.addr.is_some()) {
             NodeStatus::Ok
         } else {
             NodeStatus::Unknown
@@ -829,10 +1032,12 @@ pub(crate) fn layout(
             w: COL_W,
             h: *h,
             icon: NodeIcon::Friend,
-            label: friend.label.clone(),
-            lines: placed(&friend.lines(), y),
+            label: truncate(&friend.label),
+            full_label: friend.label.clone(),
+            lines: place(lines, y),
             status,
             accent: friend.accent,
+            lane: Lane::Friend,
         });
 
         // Each channel's edge lands on its own row, so which line a given
@@ -844,26 +1049,27 @@ pub(crate) fn layout(
         // landed on top of each other and rendered as unreadable doubled text.
         // Identical labels are drawn once.
         let row_y = |index: i32| y + NODE_HEAD_H + index * NODE_LINE_H - NODE_LINE_H / 3;
-        let duplicate_label = friend.indexer.style != EdgeStyle::None
-            && friend.client.style != EdgeStyle::None
-            && friend.indexer.edge_label == friend.client.edge_label;
-        for (channel, index) in [(&friend.indexer, 0), (&friend.client, 1)] {
-            if channel.style != EdgeStyle::None {
-                let label = if duplicate_label && index == 1 {
-                    String::new()
-                } else {
-                    channel.edge_label.clone()
-                };
-                edges.push(Edge {
-                    x1: sharerr_right,
-                    y1: sharerr_mid_y,
-                    x2: friends_x,
-                    y2: row_y(index),
-                    label,
-                    style: channel.style,
-                    accent: friend.accent,
-                });
+        let mut drawn_labels: Vec<&str> = Vec::new();
+        for (index, channel) in friend.channels().into_iter().enumerate() {
+            if channel.style == EdgeStyle::None {
+                continue;
             }
+            let label = if drawn_labels.contains(&channel.edge_label.as_str()) {
+                String::new()
+            } else {
+                drawn_labels.push(&channel.edge_label);
+                channel.edge_label.clone()
+            };
+            edges.push(Edge {
+                x1: sharerr_right,
+                y1: sharerr_mid_y,
+                x2: friends_x,
+                y2: row_y(index as i32),
+                label,
+                style: channel.style,
+                accent: friend.accent,
+                kind: EdgeKind::Friend,
+            });
         }
         y += h + ROW_GAP;
     }
@@ -874,12 +1080,17 @@ pub(crate) fn layout(
 /// Stamp each detail row with its baseline, now that the node's own position
 /// is known — see [`NodeLine::y`].
 fn placed(lines: &[NodeLine], node_y: i32) -> Vec<NodeLine> {
+    place(lines.to_vec(), node_y)
+}
+
+/// [`placed`] for rows already owned — no second copy of each line.
+fn place(lines: Vec<NodeLine>, node_y: i32) -> Vec<NodeLine> {
     lines
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, l)| NodeLine {
             y: node_y + NODE_HEAD_H + i as i32 * NODE_LINE_H + 14,
-            ..l.clone()
+            ..l
         })
         .collect()
 }
@@ -904,19 +1115,113 @@ fn center_offset(lane_h: i32, content_h: i32) -> i32 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::sync::Arc;
-
     use sharerr_core::Config;
 
     use super::*;
-    use crate::web::auth::Sessions;
 
-    fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
+    fn summary(hash: &str, seeding: bool) -> sharerr_client::TorrentSummary {
+        sharerr_client::TorrentSummary {
+            hash: hash.to_owned(),
+            name: "whatever".to_owned(),
+            save_path: "/downloads".to_owned(),
+            content_path: "/downloads/whatever".to_owned(),
+            category: String::new(),
+            tags: Vec::new(),
+            is_seeding: seeding,
         }
     }
+
+    fn expect(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(h, t)| ((*h).to_owned(), (*t).to_owned()))
+            .collect()
+    }
+
+    /// The whole point of asking the client: the store still says `Seeding`
+    /// for a torrent somebody removed there, and nothing else contradicts it.
+    #[test]
+    fn a_torrent_missing_from_the_client_is_reported_absent() {
+        let check = reconcile(
+            &expect(&[("aabb", "Kept"), ("ccdd", "Removed")]),
+            &[summary("aabb", true)],
+        );
+
+        assert_eq!(check.expected, 2);
+        assert_eq!(check.confirmed, 1);
+        assert_eq!(check.absent.len(), 1);
+        assert_eq!(check.absent[0].title, "Removed");
+        assert!(check.idle.is_empty());
+        assert!(!check.healthy);
+    }
+
+    /// Held but paused is a different problem from not held at all, and has a
+    /// different fix — so the two must not be collapsed into one count.
+    #[test]
+    fn a_paused_torrent_is_idle_rather_than_absent() {
+        let check = reconcile(&expect(&[("aabb", "Paused")]), &[summary("aabb", false)]);
+
+        assert_eq!(check.confirmed, 0);
+        assert!(check.absent.is_empty());
+        assert_eq!(check.idle.len(), 1);
+        assert_eq!(check.idle[0].title, "Paused");
+        assert!(!check.healthy);
+    }
+
+    #[test]
+    fn everything_seeding_is_healthy() {
+        let check = reconcile(
+            &expect(&[("aabb", "One"), ("ccdd", "Two")]),
+            &[summary("aabb", true), summary("ccdd", true)],
+        );
+
+        assert_eq!(check.confirmed, 2);
+        assert!(check.healthy);
+        assert!(check.error.is_none());
+    }
+
+    /// `TorrentSummary::hash` documents itself as lowercase, but a hash from a
+    /// torrent sharerr did not build carries no such guarantee — and comparing
+    /// case-sensitively would report every one of them as absent.
+    #[test]
+    fn hashes_compare_without_regard_to_case() {
+        let check = reconcile(
+            &expect(&[("AABBCCDD", "Shouty")]),
+            &[summary("aabbccdd", true)],
+        );
+
+        assert_eq!(check.confirmed, 1);
+        assert!(check.healthy);
+    }
+
+    /// A wiped client would otherwise render ten thousand rows and bury the
+    /// one line that explains it.
+    #[test]
+    fn a_long_list_of_mismatches_is_capped_and_counted() {
+        let pairs: Vec<(String, String)> = (0..MAX_MISMATCHES + 5)
+            .map(|i| (format!("{i:040x}"), format!("Item {i}")))
+            .collect();
+
+        let check = reconcile(&pairs, &[]);
+
+        assert_eq!(check.absent.len(), MAX_MISMATCHES);
+        assert_eq!(check.more_absent, 5);
+        assert!(!check.healthy);
+    }
+
+    /// A client that answered the version probe but not the listing is not the
+    /// same as a healthy one — the counts are meaningless, and saying "0 of 0
+    /// seeding" would be a lie rather than an absence of information.
+    #[test]
+    fn a_failed_listing_is_not_healthy() {
+        let check = client_check_failed("connection reset".to_owned());
+
+        assert!(!check.healthy);
+        assert_eq!(check.error.as_deref(), Some("connection reset"));
+        assert_eq!(check.expected, 0);
+    }
+
+    use super::super::web_state;
 
     fn node(label: &str, status: NodeStatus) -> SourceNode {
         SourceNode {
@@ -932,6 +1237,7 @@ mod tests {
         FriendNode {
             label: label.to_owned(),
             accent: peer_color(0),
+            tracker: Channel::unseen(),
             indexer: Channel::unseen(),
             client: Channel::unseen(),
         }
@@ -1012,6 +1318,7 @@ mod tests {
         let friends = vec![FriendNode {
             label: "Sam".to_owned(),
             accent: peer_color(0),
+            tracker: Channel::unseen(),
             indexer: Channel {
                 addr: Some("203.0.113.5:1".to_owned()),
                 style: EdgeStyle::Solid,
@@ -1047,6 +1354,7 @@ mod tests {
         let friends = vec![FriendNode {
             label: "Sam".to_owned(),
             accent: peer_color(0),
+            tracker: Channel::unseen(),
             indexer: same(),
             client: same(),
         }];
@@ -1108,6 +1416,106 @@ mod tests {
     }
 
     // -------------------------------------------------------------- nodes
+
+    /// A box sizes itself to its rows, which is what lets the three lanes be
+    /// stacked from real heights rather than one fixed row pitch.
+    #[test]
+    fn node_height_grows_one_row_at_a_time() {
+        let none = node_height(0);
+        let one = node_height(1);
+
+        assert_eq!(one - none, NODE_LINE_H);
+        assert_eq!(node_height(4) - node_height(3), NODE_LINE_H);
+        // Even an empty box has to fit its title and bottom padding.
+        assert_eq!(none, NODE_HEAD_H + NODE_PAD_BOTTOM);
+    }
+
+    /// The diagram is tight on space, so its relative times are abbreviated
+    /// rather than spelled out the way the rest of the UI does.
+    #[test]
+    fn compact_ago_abbreviates_every_bucket() {
+        let now = sharerr_core::endpoint::now_epoch();
+
+        assert_eq!(compact_ago(now), "now");
+        assert_eq!(compact_ago(now - 120), "2m");
+        assert_eq!(compact_ago(now - 7_200), "2h");
+        assert_eq!(compact_ago(now - 172_800), "2d");
+    }
+
+    #[test]
+    fn a_readable_library_reports_its_counts_and_is_ok() {
+        let node = library_node(
+            Path::new("/media/tv"),
+            &DirOutcome::Ready {
+                items: Vec::new(),
+                skipped: 2,
+            },
+        );
+
+        assert_eq!(node.status, NodeStatus::Ok);
+        assert_eq!(node.label, "tv", "the box is named by the leaf directory");
+        let text: Vec<&str> = node.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(text.iter().any(|t| t.contains("/media/tv")));
+        assert!(text.iter().any(|t| t.contains("2 unclassified")));
+    }
+
+    /// A clean scan must not render an empty "skipped" row -- zero skipped is
+    /// the normal case and a row saying so is noise in a box this small.
+    #[test]
+    fn a_library_with_nothing_skipped_omits_the_skipped_row() {
+        let node = library_node(
+            Path::new("/media/tv"),
+            &DirOutcome::Ready {
+                items: Vec::new(),
+                skipped: 0,
+            },
+        );
+
+        assert!(!node.lines.iter().any(|l| l.tag == "skipped"));
+    }
+
+    /// Empty is not a fault -- there is simply nothing to share yet -- while
+    /// the other three are. Collapsing them would make a missing mount look
+    /// like an empty directory.
+    #[test]
+    fn library_outcomes_map_to_distinct_statuses() {
+        let at = Path::new("/media/tv");
+
+        assert_eq!(
+            library_node(at, &DirOutcome::Empty).status,
+            NodeStatus::Unknown
+        );
+        assert_eq!(
+            library_node(at, &DirOutcome::Missing).status,
+            NodeStatus::Error
+        );
+        assert_eq!(
+            library_node(at, &DirOutcome::NotADirectory).status,
+            NodeStatus::Error
+        );
+        assert_eq!(
+            library_node(at, &DirOutcome::Unreadable("permission denied".to_owned())).status,
+            NodeStatus::Error
+        );
+    }
+
+    /// "Unreadable" alone cannot distinguish a permission problem from a
+    /// vanished mount, and the scan already knows which it was.
+    #[test]
+    fn an_unreadable_library_says_why() {
+        let node = library_node(
+            Path::new("/media/tv"),
+            &DirOutcome::Unreadable("permission denied".to_owned()),
+        );
+
+        assert!(
+            node.lines
+                .iter()
+                .any(|l| l.text.contains("permission denied")),
+            "{:?}",
+            node.lines
+        );
+    }
 
     #[test]
     fn truncate_leaves_short_labels_alone() {
@@ -1220,6 +1628,84 @@ mod tests {
     /// A fresh instance — no sources, no vault, no friends — must still
     /// render a page rather than panicking, mirroring
     /// `diagnostics::gather_on_an_unconfigured_instance_degrades_gracefully`.
+    /// The client check compares against what the *store* believes is seeding,
+    /// so this is the half that decides which torrents a disagreement is even
+    /// measured over.
+    #[tokio::test]
+    async fn expected_seeding_lists_only_seeding_items_that_have_a_torrent() {
+        use sharerr_core::{MediaSpec, ShareState, SharedItem};
+
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve
+            .store()
+            .await
+            .expect("store opens with an empty vault");
+
+        let base = |file_id: i64, title: &str| SharedItem {
+            id: None,
+            source: MediaSource::Radarr,
+            source_id: 1,
+            file_id,
+            spec: MediaSpec::Movie {
+                title: title.to_owned(),
+                year: None,
+            },
+            release_title: format!("{title}.2019-SYNTH"),
+            arr_path: "/data/x.mkv".into(),
+            size: 1,
+            ids: sharerr_core::ExternalIds::default(),
+            info_hash: None,
+            announce_token_fp: None,
+            created_by_sharerr: true,
+            state: ShareState::Seeding,
+            last_error: None,
+            created_at: None,
+        };
+
+        // Seeding with a torrent: the only shape the client can be asked about.
+        store
+            .upsert(&SharedItem {
+                info_hash: Some("aabb".to_owned()),
+                ..base(1, "Counted")
+            })
+            .await
+            .unwrap();
+        // Seeding but no torrent yet -- nothing exists for the client to hold,
+        // so counting it would report every pending item as a disagreement.
+        store.upsert(&base(2, "No torrent yet")).await.unwrap();
+        // Has a torrent but is not seeding: the client is not expected to.
+        store
+            .upsert(&SharedItem {
+                info_hash: Some("ccdd".to_owned()),
+                state: ShareState::Unshared,
+                ..base(3, "Withdrawn")
+            })
+            .await
+            .unwrap();
+
+        let state = web_state(serve);
+        let expected = expected_seeding(&stored_items(&state).await);
+
+        assert_eq!(expected.len(), 1, "{expected:?}");
+        assert_eq!(expected[0].0, "aabb");
+        assert_eq!(expected[0].1, "Counted");
+    }
+
+    /// An instance sharing nothing expects nothing of the client, so a clean
+    /// install reconciles as healthy rather than as "everything is missing".
+    ///
+    /// Only the empty-library path: `fixtures::unconfigured` still opens a
+    /// working store, so the `Err` arm of `stored_items` -- which also
+    /// yields an empty list -- is not reachable from tier 1. See CLAUDE.md on
+    /// what these fixtures do and do not stand up.
+    #[tokio::test]
+    async fn expected_seeding_is_empty_for_a_library_with_nothing_in_it() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        assert!(expected_seeding(&stored_items(&state).await).is_empty());
+    }
+
     #[tokio::test]
     async fn gather_on_an_unconfigured_instance_degrades_gracefully() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();

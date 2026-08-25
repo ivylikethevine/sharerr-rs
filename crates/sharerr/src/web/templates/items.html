@@ -16,6 +16,7 @@
 {# Laid out as a row rather than the stacked label/input every other form on
    this app uses: three short controls stacked filled most of a screen before
    the table an operator came here to read even started. #}
+<section class="wide">
 <form method="get" action="/items" class="panel filter-bar">
   <div class="field">
     <label for="q">Search</label>
@@ -42,11 +43,30 @@
     </select>
   </div>
 
+  <div class="field">
+    <label for="kind">Kind</label>
+    <select id="kind" name="kind">
+      <option value=""{% if kind_filter.is_empty() %} selected{% endif %}>Any</option>
+      {% for option in kind_options %}
+      <option value="{{ option.value }}"{% if kind_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
   <button type="submit">Filter</button>
-  <span class="filter-count">Showing {{ shown }} of {{ total }} item(s).</span>
+  <span class="filter-count">
+    Showing {{ shown }} of {{ total }} item(s){% if shown > 0 %}, {{ shown_size }} shown{% endif %}.
+    {# Counted before any filter runs, so this describes the library rather
+       than the current view — "128 of 132 seeding" is the question the page
+       exists to answer, and it took four filtered loads to get at before.
+       The seeding size is the other half of that question. #}
+    {% if !state_counts.is_empty() %}
+    <br>{% for state in state_counts %}{{ state.count }} {{ state.label }} &middot; {% endfor %}<span title="Total size of every seeding item, before filters">{{ seeding_size }} seeding</span>
+    {% endif %}
+  </span>
 </form>
 
-<div class="panel wide">
+<div class="panel">
   {% if items.is_empty() %}
   <p class="hint">Nothing matches. Widen the filters above, or run a sync.</p>
   {% else %}
@@ -55,36 +75,63 @@
     <thead>
       <tr>
         {% for link in sort_links %}
-        <th><a href="{{ link.href }}">{{ link.label }}{% if link.active %}
+        <th title="{{ link.hint }}"><a href="{{ link.href }}">{{ link.label }}{% if link.active %}
           {% if link.dir == "desc" %} &#9660;{% else %} &#9650;{% endif %}
         {% endif %}</a></th>
         {% endfor %}
-        <th>Visible to</th>
-        <th>Info hash</th>
-        <th>Announce URL</th>
-        <th>Token</th>
+        <th title="Peers announcing to this instance's tracker right now: ↑ have the whole file, ↓ are still downloading. A dash means nobody is in the swarm at the moment">Peers</th>
+        <th title="Friends whose scope admits this item — what they see in their feed">Visible to</th>
+        <th title="The torrent's identity, and the join key for finding it in the client">Info hash</th>
+        <th title="The tracker URL baked into this item's torrent — this instance">Announce URL</th>
+        <th title="Fingerprint of the announce token the torrent carries; red means the tracker no longer accepts it">Token</th>
       </tr>
     </thead>
     <tbody>
       {% for item in items %}
       <tr>
-        <td class="nowrap">{{ item.since }}</td>
-        <td>
+        <td class="nowrap"{% if !item.since_absolute.is_empty() %} title="{{ item.since_absolute }}"{% endif %}>{{ item.since }}</td>
+        <td class="title">
           {{ item.title }}
           <span class="hint">({{ item.kind }})</span>
+          {# Two different strings by design — conflating them stalls seeding at
+             0%, see `sharerr-torrent`. The release title is also what the
+             search box above matches on, so hiding it meant filtering against
+             something the operator could not read. #}
+          <br><span class="hint"><code>{{ item.release_title }}</code></span>
+          <br><span class="hint">{{ item.arr_path }}</span>
+          {% if !item.ids.is_empty() %}
+          <br><span class="hint ids" title="Metadata IDs carried in the feed — what a friend's *arr matches the release on">{{ item.ids }}</span>
+          {% endif %}
           {% if let Some(reason) = item.last_error %}
           <br><span class="error">{{ reason }}</span>
           {% endif %}
         </td>
-        <td>{{ item.source_label }}</td>
+        <td title="{{ item.source_hint }}">{{ item.source_label }}</td>
         <td class="nowrap">{{ item.size }}</td>
-        <td>
+        <td class="state">
           {{ item.state_label }}
           {% if let Some(hint) = item.state_hint %}
           <br><span class="hint">{{ hint }}</span>
           {% endif %}
+          {# Only meaningful once a torrent exists. Withdrawing an item sharerr
+             did not create leaves the torrent alone, so this changes what the
+             operator should expect — see `SharedItem::created_by_sharerr`. #}
+          {% if item.info_hash.is_some() %}
+          <br><span class="hint">
+            {% if item.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}
+          </span>
+          {% endif %}
         </td>
-        <td>
+        {# The tracker's own live count — first-hand, unlike anything the
+           client reports. Empty means nobody is announcing right now. #}
+        <td class="nowrap"{% if !item.peers_hint.is_empty() %} title="{{ item.peers_hint }}"{% endif %}>
+          {% if item.peers.is_empty() %}
+          <span class="hint">—</span>
+          {% else %}
+          {{ item.peers }}
+          {% endif %}
+        </td>
+        <td class="visible">
           {% if item.visible_to.is_empty() %}
           <span class="hint">—</span>
           {% else %}
@@ -95,17 +142,23 @@
            anything else in the row, and left at full width they squeezed the
            title and state columns down to one word per line. Shown short with
            the whole value on hover and selectable in full via the title
-           attribute. #}
-        <td>
+           attribute. The copy link sits under the value rather than beside
+           it: every row is already three lines tall, and side by side the two
+           cells together pushed the table past the panel's edge. #}
+        <td class="nowrap">
           {% if let Some(hash) = item.info_hash %}
-          <code class="truncate" title="{{ hash }}">{{ hash }}</code>
+          <code title="{{ hash }}">{% if let Some(short) = item.info_hash_short %}{{ short }}{% endif %}</code>
+          <br><button type="button" class="link micro" data-copy-text="{{ hash }}"
+                  aria-label="Copy the full info hash for {{ item.title }}">copy</button>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
         </td>
-        <td>
+        <td class="nowrap">
           {% if let Some(url) = item.announce_url %}
           <code class="truncate" title="{{ url }}">{{ url }}</code>
+          <br><button type="button" class="link micro" data-copy-text="{{ url }}"
+                  aria-label="Copy the full announce URL for {{ item.title }}">copy</button>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
@@ -124,4 +177,5 @@
   </div>
   {% endif %}
 </div>
+</section>
 {% endblock %}

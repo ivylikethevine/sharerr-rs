@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="sharerr — share what you already have with friends, over the tools you already run.">
 <title>{% block title %}sharerr{% endblock %}</title>
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/style.css">
@@ -14,12 +15,12 @@
   <a class="brand" href="/">sharerr</a>
   {% if signed_in %}
   <nav>
-    <a href="/">Status</a>
-    <a href="/items">Items</a>
-    <a href="/topology">Topology</a>
-    <a href="/peers">Friends</a>
-    <a href="/settings">Settings</a>
-    <a href="/debug">Debug</a>
+    <a href="/" title="Health at a glance"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8.5h3l2-5 3 9 2-4h3"/></svg>Status</a>
+    <a href="/items" title="Every file sharerr has discovered"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h1M6 4h7.5M2.5 8h1M6 8h7.5M2.5 12h1M6 12h7.5"/></svg>Items</a>
+    <a href="/topology" title="How this instance connects to sources, its client, and friends"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 12.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM12.5 12.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM8 5a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM7.2 4.8l-3 4.6M8.8 4.8l3 4.6"/></svg>Topology</a>
+    <a href="/peers" title="Keys, scopes, and where each friend is"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 7.5a2 2 0 100-4 2 2 0 000 4zM2 13a4 4 0 018 0M10.5 3.6a2 2 0 010 3.8M11.5 9.2a3.5 3.5 0 012.5 3.8"/></svg>Friends</a>
+    <a href="/settings" title="Sources, client, tracker, and everything else this instance is told"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5h8M12 4.5h2M2 11.5h2M6 11.5h8M10 2.5a2 2 0 100 4 2 2 0 000-4zM4 9.5a2 2 0 100 4 2 2 0 000-4z"/></svg>Settings</a>
+    <a href="/debug" title="Advertised addresses and an outside-reachability script"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 2.5a3 3 0 00-2.8 4.1L2.5 11.8l1.7 1.7 5.2-5.2A3 3 0 0013.5 5l-1.8 1.8-1.5-1.5z"/></svg>Debug</a>
     <form method="post" action="/logout" class="inline">
       <button type="submit" class="link">Sign out</button>
     </form>
@@ -31,8 +32,54 @@
 {% block content %}{% endblock %}
 </main>
 
+<footer class="foot">sharerr v{{ crate::web::templates::version() }}</footer>
+
 {% if signed_in %}
 <script>
+// Copy-to-clipboard for any `[data-copy]` (copies the text of the element the
+// selector names) or `[data-copy-text]` (copies the attribute itself).
+// Delegated from the document so it covers rows rendered on any page without
+// each template shipping its own handler.
+(function () {
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest("[data-copy], [data-copy-text]");
+    if (!button) return;
+
+    var text = button.hasAttribute("data-copy-text")
+      ? button.getAttribute("data-copy-text")
+      : (document.querySelector(button.getAttribute("data-copy")) || {}).textContent;
+    if (text == null) return;
+
+    var note = button.parentNode.querySelector("[data-copy-note]");
+    var say = function (message) {
+      if (!note) return;
+      note.textContent = message;
+      // Cleared again so a stale "Copied." does not sit next to a value the
+      // operator has since changed their mind about.
+      window.setTimeout(function () { note.textContent = ""; }, 2000);
+    };
+
+    // `navigator.clipboard` needs a secure context, which a plain-HTTP LAN
+    // instance is not — so fall back to selecting the value for a manual copy
+    // rather than silently doing nothing.
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () { say(" Copied."); });
+      return;
+    }
+
+    var source = button.hasAttribute("data-copy")
+      ? document.querySelector(button.getAttribute("data-copy"))
+      : button.previousElementSibling;
+    if (!source) { say(" Copy manually: " + text); return; }
+    var range = document.createRange();
+    range.selectNodeContents(source);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    say(" Selected — press Ctrl+C.");
+  });
+})();
+
 (function () {
   var path = location.pathname;
   var links = document.querySelectorAll(".bar nav a[href]");

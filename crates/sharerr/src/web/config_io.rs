@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
 use sharerr_core::Config;
 use sharerr_core::config::{LibraryConfig, LibraryKind, PathMapping};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
@@ -110,7 +111,8 @@ pub struct ConfigFile {
     path: PathBuf,
     doc: DocumentMut,
     /// Set when the file on disk did not parse and `doc` is a blank replacement.
-    /// [`Self::save`] moves the original aside rather than overwriting it.
+    /// [`Self::write_validated`] moves the original aside rather than
+    /// overwriting it.
     recovered: bool,
 }
 
@@ -145,9 +147,9 @@ impl ConfigFile {
     /// anyway, the honest move is to write out what the running process actually
     /// has and let the operator carry on.
     ///
-    /// [`Self::save`] renames the original to `sharerr.toml.invalid` first, so the
-    /// only copy of what they hand-wrote — including the one stray character that
-    /// probably caused this — survives for them to consult.
+    /// [`Self::write_validated`] renames the original to `sharerr.toml.invalid`
+    /// first, so the only copy of what they hand-wrote — including the one stray
+    /// character that probably caused this — survives for them to consult.
     pub fn replacing(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -156,12 +158,13 @@ impl ConfigFile {
         }
     }
 
-    /// Where [`Self::save`] will move the current file, when it is replacing one.
+    /// Where [`Self::write_validated`] will move the current file, when it is
+    /// replacing one.
     pub fn backup_path(&self) -> Option<PathBuf> {
         (self.recovered && self.path.exists()).then(|| invalid_path(&self.path))
     }
 
-    /// Apply edits in order. Nothing is written until [`Self::save`].
+    /// Apply edits in order. Nothing is written until [`Self::write_validated`].
     pub fn apply(&mut self, edits: impl IntoIterator<Item = Edit>) {
         for edit in edits {
             apply_one(&mut self.doc, edit);
@@ -222,10 +225,23 @@ impl ConfigFile {
     ///
     /// Returns the `Config` the new file produces, so the caller can swap it into
     /// the running server without re-reading from disk and racing itself.
+    ///
+    /// Test-only: the settings page validates in `prepare_config` (before the
+    /// vault is touched) and writes through [`Self::write_validated`], so
+    /// nothing in the binary needs the single-step form any more.
+    #[cfg(test)]
     pub fn save(&self) -> Result<Config> {
         let text = self.to_toml();
         let config = crate::settings::validate(&text)?;
+        self.write_validated(&text)?;
+        Ok(config)
+    }
 
+    /// The write half of `save`, for a caller that has already
+    /// serialised and validated the document (the settings page does so
+    /// *before* touching the vault) and must not pay for — or drift from —
+    /// a second pass. `text` must be this document's own `to_toml()` output.
+    pub fn write_validated(&self, text: &str) -> Result<()> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -251,11 +267,11 @@ impl ConfigFile {
         // A truncated sharerr.toml is not merely lost settings — with
         // `deny_unknown_fields` it is a container that will not start.
         let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &text).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("replacing {}", self.path.display()))?;
 
-        Ok(config)
+        Ok(())
     }
 }
 
@@ -287,7 +303,7 @@ fn apply_one(doc: &mut DocumentMut, edit: Edit) {
                 Setting::Float(f) => table[segment] = value(f),
                 Setting::Bool(b) => table[segment] = value(b),
                 Setting::StrList(list) => {
-                    table[segment] = value(list.into_iter().collect::<toml_edit::Array>())
+                    table[segment] = value(list.into_iter().collect::<toml_edit::Array>());
                 }
                 Setting::Unset => {
                     table.remove(segment);
@@ -331,8 +347,14 @@ fn header() -> Table {
 /// silently discarded on reload if the matching variable is set. The UI renders
 /// those fields locked and names the variable, rather than accepting a save that
 /// goes nowhere.
+///
+/// Scanned once and memoised: the process environment cannot change after
+/// start, and this is otherwise re-read on every settings and wizard render.
 pub fn env_overrides() -> BTreeMap<String, String> {
-    collect_overrides(std::env::vars())
+    static OVERRIDES: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    OVERRIDES
+        .get_or_init(|| collect_overrides(std::env::vars()))
+        .clone()
 }
 
 /// The env-scanning logic, split out so it is testable without mutating the

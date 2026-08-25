@@ -1,0 +1,1993 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "sharerr",
+    "description": "The machine-facing HTTP API of a sharerr instance: the indexer feed a friend's Sonarr or Radarr queries, the BitTorrent tracker their client announces to, the gossip exchange that keeps addresses current, the lighthouse rendezvous, and the operational endpoints an orchestrator polls.\n\nThe server-rendered web UI is deliberately absent — see the `sharerr::openapi` module docs.\n\n**Authentication.** Every feed and gossip endpoint takes a peer's own API key as an `apikey` query parameter. Each friend holds a different one, so a single friend can be cut off without disturbing the others, and every request records who made it. There is no unauthenticated read path: a missing key is refused exactly the way a wrong one is, because saying \"this instance has no key configured\" would confirm the port belongs to sharerr.\n\n**Base URL.** None is listed. A sharerr instance is reached at whatever address its operator advertises — often behind a VPN with a rotating forwarded port, which is the whole reason the gossip and lighthouse endpoints exist.",
+    "license": {
+      "name": "AGPL-3.0-or-later"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/announce": {
+      "get": {
+        "tags": [
+          "tracker"
+        ],
+        "summary": "`GET /announce`.",
+        "operationId": "announce",
+        "parameters": [
+          {
+            "name": "info_hash",
+            "in": "query",
+            "description": "The torrent's info hash: 20 raw bytes, percent-encoded. **Not hex.**",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "peer_id",
+            "in": "query",
+            "description": "The client's own id: 20 raw bytes, percent-encoded.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "port",
+            "in": "query",
+            "description": "The port the client accepts connections on.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "example": 6881
+          },
+          {
+            "name": "left",
+            "in": "query",
+            "description": "Bytes still to download. `0` means a seeder.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "description": "`started`, `stopped`, `completed`, or absent for a periodic re-announce.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "compact",
+            "in": "query",
+            "description": "`1` for the compact peer list. Anything else returns the dictionary form.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "numwant",
+            "in": "query",
+            "description": "How many peers to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "ip",
+            "in": "query",
+            "description": "The client's own address. Honoured **only when it is a private address** —\notherwise the connection's source address wins, so a peer cannot announce\nsomebody else into the swarm.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol reports refusal as a bencoded `failure reason` key, not as an HTTP status, so a client that only checks the status code will read an error as a swarm.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/announce/{token}": {
+      "get": {
+        "tags": [
+          "tracker"
+        ],
+        "summary": "`GET /announce/{token}`.",
+        "operationId": "announceWithToken",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "The announce token baked into this torrent's announce URL. Identifies which peer is announcing, so a swarm can be attributed and one friend's access revoked without disturbing anyone else's.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "info_hash",
+            "in": "query",
+            "description": "The torrent's info hash: 20 raw bytes, percent-encoded. **Not hex.**",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "peer_id",
+            "in": "query",
+            "description": "The client's own id: 20 raw bytes, percent-encoded.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "port",
+            "in": "query",
+            "description": "The port the client accepts connections on.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "example": 6881
+          },
+          {
+            "name": "left",
+            "in": "query",
+            "description": "Bytes still to download. `0` means a seeder.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "description": "`started`, `stopped`, `completed`, or absent for a periodic re-announce.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "compact",
+            "in": "query",
+            "description": "`1` for the compact peer list. Anything else returns the dictionary form.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "numwant",
+            "in": "query",
+            "description": "How many peers to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "ip",
+            "in": "query",
+            "description": "The client's own address. Honoured **only when it is a private address** —\notherwise the connection's source address wins, so a peer cannot announce\nsomebody else into the swarm.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol reports refusal as a bencoded `failure reason` key, not as an HTTP status, so a client that only checks the status code will read an error as a swarm.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api": {
+      "get": {
+        "tags": [
+          "torznab"
+        ],
+        "summary": "`GET /api?t=...`",
+        "operationId": "torznab",
+        "parameters": [
+          {
+            "name": "t",
+            "in": "query",
+            "description": "The Torznab function. `caps` for the capabilities document, or one of the\nsearch functions: `search`, `tvsearch`, `movie`, `music`, `book`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "tvsearch"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Free-text needle, matched against the release title.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "season",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "ep",
+            "in": "query",
+            "description": "Daily shows send `ep=MM/DD` rather than a number. That form has no\nseason/episode to match against here, so it is read as \"no episode\nfilter\" instead of failing the whole request with a bare 400 — which\nProwlarr counts as an indexer failure and backs off from, hiding every\nother release too.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "tvdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "tmdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "imdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A Torznab document: the capabilities XML for `t=caps`, otherwise an RSS feed of matching releases. Each item carries a `.torrent` link and a magnet whose announce tiers are attributed to the calling peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No such Torznab function — a Torznab `<error code=\"202\">`.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer. `t=caps` requires it too, deliberately: one fewer endpoint that says anything to an unauthenticated caller.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is not open yet.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/gossip/endpoints": {
+      "get": {
+        "tags": [
+          "gossip"
+        ],
+        "summary": "`GET /api/gossip/endpoints?peers=pk1,pk2` — the pull side.",
+        "operationId": "gossipPull",
+        "parameters": [
+          {
+            "name": "peers",
+            "in": "query",
+            "description": "Comma-separated hex pubkeys the caller already knows, so the answer can skip them.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed endpoint records: this instance's own first, then any it holds for peers it shares with. Each is signed by the peer it describes, so nothing here has to be trusted on the relayer's word.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GossipRecordBatch"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer. Answered as Torznab's own XML error, the same as the feed — this rides the feed's authentication.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is not open yet.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "gossip"
+        ],
+        "summary": "`POST /api/gossip/endpoints` — the push side, for a friend whose address\nchanged and who can therefore no longer be pulled from.",
+        "operationId": "gossipPush",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GossipRecordBatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the batch amounted to. Records about peers this instance does not share with are counted `unknown` and dropped by design, not rejected — a friend relaying their whole view is normal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GossipIngestSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is not open yet.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v2.0/indexers": {
+      "get": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "`GET /api/v2.0/indexers` — the list of indexers, which for sharerr is one.",
+        "description": "Jackett supports `?configured=true`. sharerr's single indexer is always\nconfigured, so the filter is accepted and changes nothing — no `Query`\nextractor means every filter a client sends is accepted and ignored, because\na client that sends one and gets an error learns nothing useful.",
+        "operationId": "jackettIndexers",
+        "parameters": [
+          {
+            "name": "configured",
+            "in": "query",
+            "description": "Accepted and ignored. sharerr's single indexer is always configured, so every value of this filter yields the same one-element list.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A one-element list: sharerr itself.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JackettIndexer"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v2.0/indexers/{indexer}/results": {
+      "get": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "`GET /api/v2.0/indexers/{id}/results` — the same search, rendered as JSON.",
+        "description": "Jackett's own clients (and its web dashboard) use this rather than Torznab. It\nruns through the *same* [`collect`] the XML feed uses, so the two cannot report\ndifferent libraries — which is the failure this project has already had once,\nbetween `doctor` and the web UI's probes.",
+        "operationId": "jackettResults",
+        "parameters": [
+          {
+            "name": "indexer",
+            "in": "path",
+            "description": "Jackett namespaces each tracker it proxies; sharerr *is* the one thing it \\\n          serves, so any id — `sharerr`, `all`, or whatever was pasted from an old \\\n          Jackett config — means the same feed.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "t",
+            "in": "query",
+            "description": "The Torznab function. `caps` for the capabilities document, or one of the\nsearch functions: `search`, `tvsearch`, `movie`, `music`, `book`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "tvsearch"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Free-text needle, matched against the release title.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "season",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "ep",
+            "in": "query",
+            "description": "Daily shows send `ep=MM/DD` rather than a number. That form has no\nseason/episode to match against here, so it is read as \"no episode\nfilter\" instead of failing the whole request with a bare 400 — which\nProwlarr counts as an indexer failure and backs off from, hiding every\nother release too.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "tvdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "tmdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "imdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The same search the Torznab feed answers, rendered as Jackett's JSON. It runs through the same code path, so the two surfaces cannot report different libraries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JackettResults"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v2.0/indexers/{indexer}/results/torznab": {
+      "get": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Jackett's Torznab endpoint, which is the same Torznab at a different address.",
+        "description": "The indexer id is accepted and ignored. Jackett namespaces each tracker it\nproxies; sharerr *is* the one thing it serves, so every id — including `all` —\nmeans the same feed. Rejecting unfamiliar ids would only break someone pasting\nthe id from their old Jackett config.\n\nDownload links need nothing: the enclosure URLs are absolute and already point\nat this instance, so a client follows them whichever path it searched through.\n\nThree paths reach this handler — with and without a trailing slash, and with a\ntrailing `/api` — because whether a client appends `/api` and whether its base\nURL ends in a slash both vary. Only the canonical one is documented; the other\ntwo are the same operation and listing them would suggest a difference.",
+        "operationId": "jackettTorznab",
+        "parameters": [
+          {
+            "name": "indexer",
+            "in": "path",
+            "description": "Jackett namespaces each tracker it proxies; sharerr *is* the one thing it \\\n          serves, so any id — `sharerr`, `all`, or whatever was pasted from an old \\\n          Jackett config — means the same feed.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "t",
+            "in": "query",
+            "description": "The Torznab function. `caps` for the capabilities document, or one of the\nsearch functions: `search`, `tvsearch`, `movie`, `music`, `book`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "tvsearch"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Free-text needle, matched against the release title.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "season",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "ep",
+            "in": "query",
+            "description": "Daily shows send `ep=MM/DD` rather than a number. That form has no\nseason/episode to match against here, so it is read as \"no episode\nfilter\" instead of failing the whole request with a bare 400 — which\nProwlarr counts as an indexer failure and backs off from, hiding every\nother release too.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "tvdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "tmdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "imdbid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identical to `GET /api` — the same Torznab at a different address. Two more paths reach it: the same path with a trailing slash, and with `/api` appended.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No such Torznab function.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v2.0/server/config": {
+      "get": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "`GET /api/v2.0/server/config` — what a client reads to learn who it is talking\nto.",
+        "operationId": "jackettServerConfig",
+        "responses": {
+          "200": {
+            "description": "Server identity. `api_key` is **always empty**, unlike Jackett's own: echoing a key back would turn one friend's credential into every friend's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JackettServerConfig"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v2.0/{rest}": {
+      "get": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "trace": {
+        "tags": [
+          "jackett"
+        ],
+        "summary": "Anything under `/api/v2.0/` that is not implemented.",
+        "description": "Logged at `warn` rather than returning a bare 404, because the whole strategy\nfor this surface is to implement what clients actually call. A 404 tells the\noperator nothing; this tells them exactly which method and path to ask for.\n\nAnswers 501, not 404: the path exists as a concept and sharerr simply does not\nimplement it, and a client distinguishing the two behaves better than one\nguessing.",
+        "operationId": "jackettUnimplemented",
+        "parameters": [
+          {
+            "name": "rest",
+            "in": "path",
+            "description": "Any remaining path under the Jackett prefix. Matched as a wildcard, so it may contain slashes.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "sharerr implements only Jackett's read-only endpoints. Answered as 501 rather than 404 on purpose — the path exists as a concept and sharerr simply does not implement it, which is a different thing for a client to handle. Every call here is logged at `warn`, naming the method and path, because that is the list of what would be worth adding.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gluetun/down": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`GET|POST /gluetun/down[?target=client]` — for\n`VPN_PORT_FORWARDING_DOWN_COMMAND`.",
+        "description": "The port gluetun is about to report as gone must not linger as the fallback\na resolve falls back to when the port lookup itself fails (see\n[`crate::gluetun::GluetunClient::resolve_base`]) — that fallback exists for a\nlookup that is merely *flaky*, and this is gluetun saying the port is\nauthoritatively dead. Forgetting the dynamic history first, then nudging the\npoller the same way `/gluetun/refresh` does, means the very next resolve\neither finds a fresh port or degrades cleanly to the static endpoint rather\nthan keep advertising one that no longer works.",
+        "operationId": "gluetunDown",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Which tunnel went down: omitted for the tracker's, `client` for the torrent client's.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The dead port was forgotten and the poller nudged, so the next resolve finds a fresh port or degrades to the static endpoint.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the caller is not on a private address.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`GET|POST /gluetun/down[?target=client]` — for\n`VPN_PORT_FORWARDING_DOWN_COMMAND`.",
+        "description": "The port gluetun is about to report as gone must not linger as the fallback\na resolve falls back to when the port lookup itself fails (see\n[`crate::gluetun::GluetunClient::resolve_base`]) — that fallback exists for a\nlookup that is merely *flaky*, and this is gluetun saying the port is\nauthoritatively dead. Forgetting the dynamic history first, then nudging the\npoller the same way `/gluetun/refresh` does, means the very next resolve\neither finds a fresh port or degrades cleanly to the static endpoint rather\nthan keep advertising one that no longer works.",
+        "operationId": "gluetunDown",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Which tunnel went down: omitted for the tracker's, `client` for the torrent client's.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The dead port was forgotten and the poller nudged, so the next resolve finds a fresh port or degrades to the static endpoint.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the caller is not on a private address.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gluetun/refresh": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`GET|POST /gluetun/refresh[?target=client]` — the push half of endpoint\nresolution.",
+        "description": "Only nudges the poller; the control server stays the source of truth, so a\ncaller can make sharerr ask a question sooner but can never feed it an\nanswer. Refused from non-private addresses: the legitimate caller is\ngluetun's up-command inside the same namespace (loopback) or a container\nneighbour, never the internet side of the tunnel. `target` picks which\npoller — the tracker's tunnel (default, unchanged) or the torrent client's\nsecond one, when `[gluetun_client]` is configured.",
+        "operationId": "gluetunRefresh",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Which poller to nudge: omitted for the tracker's tunnel, `client` for the torrent client's second one.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The poller was nudged. This only makes sharerr ask gluetun sooner — a caller can never supply the answer.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the caller is not on a private address. The legitimate caller is gluetun's own up-command.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`GET|POST /gluetun/refresh[?target=client]` — the push half of endpoint\nresolution.",
+        "description": "Only nudges the poller; the control server stays the source of truth, so a\ncaller can make sharerr ask a question sooner but can never feed it an\nanswer. Refused from non-private addresses: the legitimate caller is\ngluetun's up-command inside the same namespace (loopback) or a container\nneighbour, never the internet side of the tunnel. `target` picks which\npoller — the tracker's tunnel (default, unchanged) or the torrent client's\nsecond one, when `[gluetun_client]` is configured.",
+        "operationId": "gluetunRefresh",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Which poller to nudge: omitted for the tracker's tunnel, `client` for the torrent client's second one.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The poller was nudged. This only makes sharerr ask gluetun sooner — a caller can never supply the answer.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the caller is not on a private address. The legitimate caller is gluetun's own up-command.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "in this handler turns a fixable configuration gap into a restart loop.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Alive. Answers `ok` whatever state the configuration is in — a restart cannot fix a missing credential, so this never reports one.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lighthouse/v1/health": {
+      "get": {
+        "tags": [
+          "lighthouse"
+        ],
+        "summary": "`GET /lighthouse/v1/health` — liveness only, no state consulted. Under the\nsame `/lighthouse/v1/...` prefix as everything else here rather than a\nbare `/health`, deliberately: `sharerr serve` already owns that path on\nwhichever listener it embeds these routes onto, and a second `/health`\nregistration on the same router panics at merge time.",
+        "operationId": "lighthouseHealth",
+        "responses": {
+          "200": {
+            "description": "Alive. No state is consulted.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lighthouse/v1/lookup/{key_hash}": {
+      "get": {
+        "tags": [
+          "lighthouse"
+        ],
+        "summary": "`GET /lighthouse/v1/lookup/{key_hash}` — always `200`, always the same\nJSON shape, real record or decoy. A malformed key hash still gets a\ndecoy rather than a `400`: a probe that can distinguish \"malformed\" from\n\"unknown\" learns something it should not.",
+        "operationId": "lighthouseLookup",
+        "parameters": [
+          {
+            "name": "key_hash",
+            "in": "path",
+            "description": "Lowercase hex SHA-256 of the API key the peer issued you.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A record. **Always 200, always this shape** — an unknown or malformed key hash gets a fabricated record rather than an error, so an unauthenticated probe cannot tell that an instance exists. Verify `signature` against the `pubkey` you expect: a decoy carries random bytes there and never verifies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LighthouseEndpointRecord"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lighthouse/v1/report/{key_hash}": {
+      "post": {
+        "tags": [
+          "lighthouse"
+        ],
+        "summary": "`POST /lighthouse/v1/report/{key_hash}` — a peer publishing its current\nendpoint under the hash of the key it issued the friend who will look it\nup.",
+        "description": "Always answers with the outcome rather than a generic success, since the\ncaller here is the legitimate reporter's own sharerr, not an anonymous\nprober — there is nothing to hide from someone who can already produce a\nvalidly signed record.",
+        "operationId": "lighthouseReport",
+        "parameters": [
+          {
+            "name": "key_hash",
+            "in": "path",
+            "description": "Lowercase hex SHA-256 of the API key this peer issued the friend who will look it up. 64 characters.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LighthouseEndpointRecord"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored, or ignored as older than what is held. The body is `accepted` or `stale`.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The key hash was not 64 hex characters, the signature did not verify, or `signed_at` is in the future.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A record signed by a different keypair already stands under this key hash. The first keypair to claim one keeps it until its record expires.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At capacity and nothing was old enough to evict.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Readiness covers the three things that stop this instance doing work: a config\nfile it could not load, credentials it could not load, and its own database. The\n*arr apps and qBittorrent being down is a `doctor` question, not a reason to pull\nthis instance out of service.",
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "Configuration, credentials and database all loaded.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "One of those three is not available; the body names which. The *arr apps and the torrent client being down is not covered here — that is what `sharerr doctor` is for.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scrape": {
+      "get": {
+        "tags": [
+          "tracker"
+        ],
+        "summary": "`GET /scrape` — swarm counts, for clients and for Prowlarr's seeder column.",
+        "operationId": "scrape",
+        "parameters": [
+          {
+            "name": "info_hash",
+            "in": "query",
+            "description": "One or more info hashes, 20 raw bytes each, percent-encoded. Repeat the\nparameter for several. Omitted entirely means every torrent this instance\nshares with the caller.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol reports refusal as a bencoded `failure reason` key, not as an HTTP status, so a client that only checks the status code will read an error as a swarm.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scrape/{token}": {
+      "get": {
+        "tags": [
+          "tracker"
+        ],
+        "summary": "`GET /scrape/{token}`.",
+        "operationId": "scrapeWithToken",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "As on `/announce/{token}`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "info_hash",
+            "in": "query",
+            "description": "One or more info hashes, 20 raw bytes each, percent-encoded. Repeat the\nparameter for several. Omitted entirely means every torrent this instance\nshares with the caller.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol reports refusal as a bencoded `failure reason` key, not as an HTTP status, so a client that only checks the status code will read an error as a swarm.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/torrents/{name}": {
+      "get": {
+        "tags": [
+          "tracker"
+        ],
+        "summary": "`GET /torrents/{info_hash}.torrent` — the file itself.",
+        "description": "Serves out of `data_dir/torrents`, which is where the factory wrote it. The\nTorznab feed links here, so this is what a friend's Sonarr actually fetches.\n\nThe cached file on disk always carries the shared instance token (or none),\nbecause it is written once by the sync loop and reused for every requester.\nWhen the request carries a `token` that still resolves to an active peer,\nthe announce URLs are rewritten in memory — never on disk — to that peer's\nown token before the response goes out, the same attribution the feed's\nmagnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.",
+        "operationId": "torrentFile",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "`{info_hash}.torrent` — 40 lowercase hex characters and the suffix. Parsed as a hash rather than used as a path component, so no traversal is possible.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "description": "The requesting peer's own token, as the feed's download links carry. When it resolves to an active peer the announce URLs are rewritten to that peer's token in the response body — never on disk.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The `.torrent` file.",
+            "content": {
+              "application/x-bittorrent": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not a torrent name, not currently shared, or shared but its cached file is missing from disk. Deliberately one status for all three: a caller without a valid token learns nothing about what this instance holds.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "GossipEndpointRecord": {
+        "type": "object",
+        "description": "One peer's self-described endpoints, signed by them.",
+        "required": [
+          "pubkey",
+          "endpoints",
+          "signed_at",
+          "signature"
+        ],
+        "properties": {
+          "pubkey": {
+            "type": "string",
+            "description": "Hex Ed25519 public key — the subject's identity."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GossipRecordEndpoint"
+            }
+          },
+          "signed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds. A record never replaces a stored one with a newer\n`signed_at`, which is what stops replays rewinding an address."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Hex Ed25519 signature over [`signable_bytes`]."
+          }
+        }
+      },
+      "GossipIngestSummary": {
+        "type": "object",
+        "description": "What one batch of records amounted to, for logging and the POST response.",
+        "required": [
+          "accepted",
+          "invalid",
+          "unknown",
+          "stale"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "invalid": {
+            "type": "integer",
+            "description": "Signature or shape failures — records nobody should have sent.",
+            "minimum": 0
+          },
+          "unknown": {
+            "type": "integer",
+            "description": "Valid records about peers we do not share with; ignored by design.",
+            "minimum": 0
+          },
+          "stale": {
+            "type": "integer",
+            "description": "Valid records no newer than what is already stored.",
+            "minimum": 0
+          }
+        }
+      },
+      "GossipRecordBatch": {
+        "type": "object",
+        "description": "The wire shape of both gossip endpoints' bodies.",
+        "required": [
+          "records"
+        ],
+        "properties": {
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GossipEndpointRecord"
+            }
+          }
+        }
+      },
+      "GossipRecordEndpoint": {
+        "type": "object",
+        "description": "One address inside a record.",
+        "required": [
+          "kind",
+          "addr",
+          "observed_at"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "One of [`EndpointKind`]'s names. Unknown kinds are skipped on ingest, so\na newer sharerr can add kinds without breaking older friends."
+          },
+          "addr": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "JackettCapability": {
+        "type": "object",
+        "required": [
+          "ID",
+          "Name"
+        ],
+        "properties": {
+          "ID": {
+            "type": "string"
+          },
+          "Name": {
+            "type": "string"
+          }
+        }
+      },
+      "JackettIndexer": {
+        "type": "object",
+        "description": "One entry in Jackett's indexer list.\n\nField names are Jackett's, lowercase and underscored, because clients match on\nthem literally. `#[serde(rename_all)]` would not help — Jackett's own casing is\ninconsistent between this DTO and the results one below, and matching it is the\nentire point of the module.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "type",
+          "configured",
+          "site_link",
+          "language",
+          "last_error",
+          "caps"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "Jackett distinguishes `public`, `private` and `semi-private`. sharerr's feed\nis closed without a key, which is `private` by any reading."
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "site_link": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": "string"
+          },
+          "caps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JackettCapability"
+            }
+          }
+        }
+      },
+      "JackettQueriedIndexer": {
+        "type": "object",
+        "required": [
+          "ID",
+          "Name",
+          "Status",
+          "Results"
+        ],
+        "properties": {
+          "ID": {
+            "type": "string"
+          },
+          "Name": {
+            "type": "string"
+          },
+          "Status": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "Results": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "Error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "JackettResult": {
+        "type": "object",
+        "description": "One release in Jackett's JSON results.\n\nCapitalised field names, unlike the indexer DTO above — that inconsistency is\nJackett's, and clients depend on it.",
+        "required": [
+          "Tracker",
+          "TrackerId",
+          "TrackerType",
+          "Title",
+          "Guid",
+          "Link",
+          "Details",
+          "Category",
+          "CategoryDesc",
+          "Size",
+          "Seeders",
+          "Peers",
+          "InfoHash",
+          "DownloadVolumeFactor",
+          "UploadVolumeFactor"
+        ],
+        "properties": {
+          "Tracker": {
+            "type": "string"
+          },
+          "TrackerId": {
+            "type": "string"
+          },
+          "TrackerType": {
+            "type": "string"
+          },
+          "Title": {
+            "type": "string"
+          },
+          "Guid": {
+            "type": "string"
+          },
+          "Link": {
+            "type": "string"
+          },
+          "Details": {
+            "type": "string"
+          },
+          "Category": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "CategoryDesc": {
+            "type": "string"
+          },
+          "Size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "Seeders": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "Peers": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "InfoHash": {
+            "type": "string"
+          },
+          "MagnetUri": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Jackett serialises the key even when null, and clients read it that way."
+          },
+          "DownloadVolumeFactor": {
+            "type": "number",
+            "format": "float"
+          },
+          "UploadVolumeFactor": {
+            "type": "number",
+            "format": "float"
+          },
+          "Imdb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "TVDBId": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "TMDb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "JackettResults": {
+        "type": "object",
+        "required": [
+          "Results",
+          "Indexers"
+        ],
+        "properties": {
+          "Results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JackettResult"
+            }
+          },
+          "Indexers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JackettQueriedIndexer"
+            }
+          }
+        }
+      },
+      "JackettServerConfig": {
+        "type": "object",
+        "description": "Jackett's server config DTO, trimmed to the fields a client reads.",
+        "required": [
+          "notices",
+          "port",
+          "external",
+          "api_key",
+          "app_version",
+          "blackholedir",
+          "updatedisabled",
+          "prerelease",
+          "logging",
+          "basepathoverride",
+          "omdbkey"
+        ],
+        "properties": {
+          "notices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "external": {
+            "type": "boolean"
+          },
+          "api_key": {
+            "type": "string",
+            "description": "**Always empty.** Jackett returns its own API key here, which is how its\ndashboard bootstraps itself. Echoing a key back would mean this endpoint\nhands out the credential that opens the feed to anyone who already has\n*a* key — turning one friend's key into every friend's. A client that\ngenuinely needs a key has one already, because this endpoint required it."
+          },
+          "app_version": {
+            "type": "string"
+          },
+          "blackholedir": {
+            "type": "string",
+            "description": "sharerr has no blackhole directory, no updater, and no FlareSolverr. These\nare present and empty because their *absence* makes some clients treat the\nresponse as malformed rather than as a server without those features."
+          },
+          "updatedisabled": {
+            "type": "boolean"
+          },
+          "prerelease": {
+            "type": "boolean"
+          },
+          "logging": {
+            "type": "boolean"
+          },
+          "basepathoverride": {
+            "type": "string"
+          },
+          "omdbkey": {
+            "type": "string"
+          }
+        }
+      },
+      "LighthouseEndpointRecord": {
+        "type": "object",
+        "description": "One peer's self-described endpoints, signed by them.",
+        "required": [
+          "pubkey",
+          "endpoints",
+          "signed_at",
+          "signature"
+        ],
+        "properties": {
+          "pubkey": {
+            "type": "string",
+            "description": "Hex Ed25519 public key — the subject's identity.",
+            "example": "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LighthouseRecordEndpoint"
+            }
+          },
+          "signed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds. A record never replaces a stored one with a newer\n`signed_at`, which is what stops a stale report rewinding an address."
+          },
+          "signature": {
+            "type": "string",
+            "description": "Hex Ed25519 signature over the same signable bytes gossip signs."
+          }
+        }
+      },
+      "LighthouseRecordEndpoint": {
+        "type": "object",
+        "description": "One address inside a record.\n\nField-for-field the same shape as gossip's `RecordEndpoint` (see\n`crates/sharerr/src/gossip.rs`) — the lighthouse relays the identical\nwire format rather than inventing a second one, per the design brief. The\ntype is duplicated rather than shared because gossip's lives in the\n`sharerr` binary crate, which this crate deliberately does not depend on.",
+        "required": [
+          "kind",
+          "addr",
+          "observed_at"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "What is reachable there. `tracker` is the only kind in use.",
+            "example": "tracker"
+          },
+          "addr": {
+            "type": "string",
+            "description": "`host:port`, as the peer sees its own reachable address.",
+            "example": "203.0.113.7:41234"
+          },
+          "observed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds at which the reporter last confirmed this address."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "peerApiKey": {
+        "type": "apiKey",
+        "in": "query",
+        "name": "apikey",
+        "description": "The API key this instance issued to one friend. Issued from Settings → Peers, shown once, and stored only as a hash — losing one means issuing a new one, which is the correct behaviour for a bearer credential."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "torznab",
+      "description": "The indexer feed. This is the surface a friend's Sonarr, Radarr, Lidarr or Prowlarr talks to, and the one to check first when a client rejects the feed."
+    },
+    {
+      "name": "jackett",
+      "description": "The same feed at Jackett's URL shapes, plus its two read-only admin endpoints, for clients configured as though sharerr were a Jackett instance. The search runs through the same code as `torznab`, so the two cannot report different libraries."
+    },
+    {
+      "name": "gossip",
+      "description": "How friends tell each other where they have moved to. Records are signed by the peer they describe, so a relayed one needs no trust in the relayer."
+    },
+    {
+      "name": "tracker",
+      "description": "The built-in BitTorrent tracker, and the `.torrent` files the feed links to. It admits announces only for torrents this instance is currently sharing, so it never becomes an open tracker."
+    },
+    {
+      "name": "lighthouse",
+      "description": "Key-hash-to-endpoint rendezvous, for two friends whose addresses both rotated while neither was watching. Answers a lookup with a *fabricated* record rather than an error when the key is unknown, so a probe cannot learn that an instance exists — verify the signature against the pubkey you expect."
+    },
+    {
+      "name": "ops",
+      "description": "Liveness, readiness, and the two hooks gluetun calls when a forwarded port appears or goes away."
+    }
+  ]
+}

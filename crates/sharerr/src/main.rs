@@ -7,6 +7,7 @@ mod jackett;
 mod library;
 mod lighthouse_client;
 mod notify;
+mod openapi;
 mod pathsuggest;
 mod secrets;
 mod settings;
@@ -57,6 +58,8 @@ async fn main() -> Result<()> {
         Command::Vault(VaultCommand::List) => commands::vault::list(&config),
         Command::Vault(VaultCommand::Remove { key }) => commands::vault::remove(&config, &key),
         Command::Preview(args) => commands::preview::run(args.bind).await,
+        // Before the config is even consulted, in spirit: this reads nothing.
+        Command::Openapi(args) => commands::openapi::run(args.output.as_deref()),
     }
 }
 

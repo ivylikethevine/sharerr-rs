@@ -24,8 +24,10 @@ way to answer the same question, not a new one. None is currently planned.
 
 Explicitly out of scope: this project targets small-scale homelab media-file
 sharing, and books are a different, much smaller scale of content than the
-audio/video files everything else here shares. This is only about the
-*indexer* direction — Readarr as a *library source* (tag-driven discovery) is
+audio/video files everything else here shares. Out of scope means untested
+and unsupported, not blocked — the feed advertises book search and the book
+category for Readarr-as-a-source's sake, so a Readarr pointed at it may well
+work. This is only about the *indexer* direction — Readarr as a *library source* (tag-driven discovery) is
 unaffected and fully supported; see [`SUPPORTED.md`](SUPPORTED.md).
 
 ## Transmission-compatible forks, as their own tier-2 target
@@ -33,8 +35,9 @@ unaffected and fully supported; see [`SUPPORTED.md`](SUPPORTED.md).
 Not planned as separate work. `sharerr-transmission` has no version pinning
 or fork detection — it only speaks the documented session-id handshake and
 standard `torrent-*`/`session-get` methods, which is the same protocol
-surface a compatible fork presents. Standing up a real fork for tier-2 was
-investigated and set aside: the one actively-maintained candidate has no
+surface a compatible fork presents. The one de-facto floor is Transmission 4.0
+(RPC 17), for the `trackerList` field the tracker-rotation calls need.
+Standing up a real fork for tier-2 was investigated and set aside: the one actively-maintained candidate has no
 published Docker image and its own maintainers describe its RPC
 compatibility as imperfect.
 
@@ -51,9 +54,10 @@ fuller reasoning.
 ## Publishing to crates.io
 
 Decided against. `cargo install sharerr` as an alternative to the Docker
-image was investigated in the roadmap and found technically feasible —
-the migrations-outside-the-crate and `sharerr-testkit` dev-dependency
-issues both had known fixes — but the project isn't taking on a nine-crate
+image was investigated and found technically feasible — the
+migrations-outside-the-crate and `sharerr-testkit` dev-dependency issues
+both had known fixes — but the project isn't taking on a ten-crate
 dependency-ordered release process for a distribution path this project
-doesn't intend to support. The Docker image remains the only supported way
-to run sharerr.
+doesn't intend to support. Nothing in the manifests enforces this (only
+`sharerr-testkit` carries `publish = false`); it is a decision, not a guard.
+The Docker image remains the only supported way to run sharerr.

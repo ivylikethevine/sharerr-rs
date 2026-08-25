@@ -255,6 +255,7 @@ pub fn system_status_json(app: &str) -> Value {
 }
 
 impl TvLibrary {
+    /// `GET /api/v3/series`: the tagged series plus an untagged decoy.
     pub fn series_json(&self) -> Value {
         json!([
             {
@@ -269,7 +270,7 @@ impl TvLibrary {
                 // Untagged: discovery must never return this.
                 "id": 12,
                 "title": "Copper Vale Station",
-                "tvdbId": 112233,
+                "tvdbId": 112_233,
                 "tags": [1],
             },
         ])

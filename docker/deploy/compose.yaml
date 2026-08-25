@@ -192,7 +192,7 @@ services:
   # In the namespace too, which is the point: it announces from the same public
   # address as the swarm traffic, so a friend sees one host rather than two.
   sharerr:
-    image: ghcr.io/ivyduggan/sharerr-rs:main
+    image: ghcr.io/ivylikethevine/sharerr-rs:latest
     container_name: sharerr
     network_mode: "service:gluetun"
     depends_on:

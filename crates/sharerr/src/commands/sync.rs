@@ -93,4 +93,33 @@ mod tests {
         let text = problems_message(0, 0);
         assert!(text.starts_with("0 item(s) could not be shared and 0 *arr app(s)"));
     }
+
+    /// `sync` is a one-shot CLI run, and an operator invoking it by hand
+    /// usually has no `SHARERR_MASTER_KEY` set. That must degrade to an
+    /// unkeyed gluetun request -- whose 401 explains itself -- rather than
+    /// failing the whole pass before it reaches the *arr apps.
+    #[tokio::test]
+    async fn a_missing_vault_yields_no_gluetun_key_rather_than_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+
+        assert!(gluetun_api_key(&config).await.is_none());
+    }
+
+    /// The bail path's exit code is what a cron wrapper keys off, so the
+    /// message has to name both failure kinds even when only one occurred --
+    /// an *arr app that could not be scanned is a partial pass, not a clean one.
+    #[test]
+    fn problems_message_names_both_kinds_when_only_one_occurred() {
+        let only_items = problems_message(2, 0);
+        assert!(only_items.contains("2 item(s)"));
+        assert!(only_items.contains("0 *arr app(s)"));
+
+        let only_sources = problems_message(0, 3);
+        assert!(only_sources.contains("0 item(s)"));
+        assert!(only_sources.contains("3 *arr app(s)"));
+    }
 }

@@ -2,6 +2,7 @@
 
 use reqwest::Method;
 use reqwest::multipart::{Form, Part};
+use url::Url;
 
 use crate::client::QbitClient;
 use crate::error::{QbitError, Result};
@@ -11,6 +12,17 @@ use crate::models::{Category, TorrentFile, TorrentInfo, TrackerEntry};
 
 /// qBittorrent wants the part typed as a real torrent, not `application/octet-stream`.
 const TORRENT_MIME: &str = "application/x-bittorrent";
+
+/// The URLs in `wanted` that qBittorrent does not already list — the additive
+/// half shared by [`QbitClient::set_torrent_trackers`] and
+/// [`QbitClient::add_torrent_trackers`].
+fn missing_from<'a>(existing: &[TrackerEntry], wanted: &'a [Url]) -> Vec<&'a str> {
+    wanted
+        .iter()
+        .map(Url::as_str)
+        .filter(|url| !existing.iter().any(|t| t.url == *url))
+        .collect()
+}
 
 impl QbitClient {
     /// `GET /api/v2/torrents/info`.
@@ -163,27 +175,64 @@ impl QbitClient {
     /// between — a client that announces during the gap would drop out of the
     /// swarm. The `** [DHT] **`-style pseudo-entries qBittorrent lists are left
     /// alone; they are not URLs and removing them is not possible anyway.
-    pub async fn set_torrent_trackers(&self, hash: &str, urls: &[String]) -> Result<()> {
+    pub async fn set_torrent_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
         let existing = self.torrent_trackers(hash).await?;
 
-        let additions: Vec<&str> = urls
-            .iter()
-            .map(String::as_str)
-            .filter(|url| !existing.iter().any(|t| t.url == *url))
-            .collect();
+        let additions = missing_from(&existing, urls);
         self.post_tracker_urls(hash, "torrents/addTrackers", &additions, "\n")
             .await?;
 
         let stale: Vec<&str> = existing
             .iter()
             .map(|t| t.url.as_str())
-            .filter(|url| !url.starts_with("**") && !urls.iter().any(|u| u == url))
+            .filter(|url| !url.starts_with("**") && !urls.iter().any(|u| u.as_str() == *url))
             .collect();
         self.post_tracker_urls(hash, "torrents/removeTrackers", &stale, "|")
             .await?;
 
         tracing::info!(hash, trackers = urls.len(), "replaced tracker list");
         Ok(())
+    }
+
+    /// Add `urls` to one torrent's tracker list, leaving everything already
+    /// there in place — the additive half of [`Self::set_torrent_trackers`]
+    /// without the removal half.
+    ///
+    /// Filtered against the current list first. qBittorrent ignores a
+    /// duplicate `addTrackers` rather than doubling the entry, so this is not
+    /// load-bearing for correctness, but it keeps the call off the wire
+    /// entirely on the common repeat pass.
+    pub async fn add_torrent_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
+        let existing = self.torrent_trackers(hash).await?;
+        let additions = missing_from(&existing, urls);
+        if additions.is_empty() {
+            return Ok(());
+        }
+        let added = additions.len();
+        self.post_tracker_urls(hash, "torrents/addTrackers", &additions, "\n")
+            .await?;
+        tracing::info!(hash, added, "added trackers, keeping the existing ones");
+        Ok(())
+    }
+
+    /// `GET /api/v2/torrents/export` — the `.torrent` file itself, as
+    /// qBittorrent holds it.
+    ///
+    /// Read as bytes, never as text: this is bencode, and a `String` round
+    /// trip would mangle the binary `pieces` field and with it the infohash.
+    pub async fn export_torrent(&self, hash: &str) -> Result<Vec<u8>> {
+        let build = move |rb: reqwest::RequestBuilder| rb.query(&[("hash", hash)]);
+        let response = self
+            .send_checked(Method::GET, "torrents/export", &build)
+            .await?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|source| QbitError::Unreachable {
+                url: "torrents/export".to_owned(),
+                detail: sharerr_client::error_chain(&source),
+            })?;
+        Ok(bytes.to_vec())
     }
 
     /// Shared body of the add/remove halves of [`set_torrent_trackers`]: they

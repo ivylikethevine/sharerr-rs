@@ -34,6 +34,8 @@ use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
 use secrecy::SecretString;
 
 use sharerr_store::PeerScope;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::state::ServeState;
 
@@ -345,18 +347,24 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
         // The ids are what let the far end match a release to a known series or
         // film rather than parsing the title and hoping.
         for (name, value) in [
-            ("tvdbid", item.ids.tvdb.map(|v| v.to_string())),
-            ("tmdbid", item.ids.tmdb.map(|v| v.to_string())),
-            ("tvmazeid", item.ids.tvmaze.map(|v| v.to_string())),
-            ("imdbid", item.ids.imdb.clone()),
+            ("tvdbid", item.ids.tvdb),
+            ("tmdbid", item.ids.tmdb),
+            ("tvmazeid", item.ids.tvmaze),
         ] {
             if let Some(value) = value {
+                // An integer needs no escaping and no intermediate `String`.
                 let _ = writeln!(
                     out,
-                    "      <torznab:attr name=\"{name}\" value=\"{}\"/>",
-                    escape(&value)
+                    "      <torznab:attr name=\"{name}\" value=\"{value}\"/>"
                 );
             }
+        }
+        if let Some(imdb) = item.ids.imdb.as_deref() {
+            let _ = writeln!(
+                out,
+                "      <torznab:attr name=\"imdbid\" value=\"{}\"/>",
+                escape(imdb)
+            );
         }
 
         if let MediaSpec::Episode {
@@ -381,10 +389,15 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
 // ---------------------------------------------------------------------------
 
 /// The subset of Torznab's query parameters sharerr honours.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct SearchQuery {
+    /// The Torznab function. `caps` for the capabilities document, or one of the
+    /// search functions: `search`, `tvsearch`, `movie`, `music`, `book`.
+    #[param(required = true, example = "tvsearch")]
     #[serde(default)]
     pub t: String,
+    /// Free-text needle, matched against the release title.
     pub q: Option<String>,
     pub season: Option<u32>,
     /// Daily shows send `ep=MM/DD` rather than a number. That form has no
@@ -398,6 +411,10 @@ pub struct SearchQuery {
     pub tmdbid: Option<i64>,
     pub imdbid: Option<String>,
 }
+
+// The `ep` field's own doc comment above becomes its description in the
+// OpenAPI document, which is the point of writing it there: the lenient
+// parse is a thing a client author has to know about.
 
 /// `Some` for a plain non-negative integer, `None` for anything else — see
 /// [`SearchQuery::ep`].
@@ -471,17 +488,33 @@ impl SearchQuery {
         match needle {
             None => true,
             Some(needle) => {
-                item.release_title.to_lowercase().contains(needle)
+                contains_ci(&item.release_title, needle)
                     // Music and books are searched by creator far more than film
                     // and television are, so an artist or author name has to match.
-                    || item
-                        .spec
-                        .creator()
-                        .is_some_and(|c| c.to_lowercase().contains(needle))
-                    || item.spec.title().to_lowercase().contains(needle)
+                    || item.spec.creator().is_some_and(|c| contains_ci(c, needle))
+                    || contains_ci(item.spec.title(), needle)
             }
         }
     }
+}
+
+/// Whether `hay` contains `needle` case-insensitively, where `needle` is
+/// already lowercased (by [`SearchQuery::needle`]).
+///
+/// ASCII text — every release title in practice — is compared in place over
+/// byte windows rather than allocating a lowercased copy per field per item
+/// per search. Anything else falls back to the full Unicode lowercasing, so
+/// the answer is exactly what `hay.to_lowercase().contains(needle)` gives.
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    if !hay.is_ascii() {
+        return hay.to_lowercase().contains(needle);
+    }
+    let needle = needle.as_bytes();
+    needle.is_empty()
+        || hay
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Compare IMDb ids tolerantly, via [`ExternalIds::imdb_bare`] on both sides.
@@ -497,20 +530,46 @@ fn imdb_matches(stored: Option<&str>, wanted: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn routes(serve: Arc<ServeState>) -> axum::Router {
-    axum::Router::new()
-        .route("/api", axum::routing::get(api))
+    let (router, _) = api_router().with_state(serve).split_for_parts();
+    router
+}
+
+/// The same routes without state, so [`crate::openapi`] can read the document
+/// off the very declaration that mounts them — no database, no config, and no
+/// second list to keep in step.
+pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
+    OpenApiRouter::new()
+        .routes(routes!(api))
         // Gossip rides the same per-peer-key authentication as the feed — the
         // whole point of putting it under /api rather than a second surface.
-        .route(
-            "/api/gossip/endpoints",
-            axum::routing::get(crate::gossip::pull).post(crate::gossip::push),
-        )
-        .with_state(Arc::clone(&serve))
+        .routes(routes!(crate::gossip::pull, crate::gossip::push))
         // Jackett's URL shapes, both the Torznab one and the admin surface.
-        .merge(crate::jackett::routes(serve))
+        .merge(crate::jackett::api_router())
 }
 
 /// `GET /api?t=...`
+#[utoipa::path(
+    get,
+    path = "/api",
+    tag = "torznab",
+    operation_id = "torznab",
+    security(("peerApiKey" = [])),
+    params(SearchQuery),
+    responses(
+        (status = 200, content_type = "application/xml", description =
+         "A Torznab document: the capabilities XML for `t=caps`, otherwise an RSS \
+          feed of matching releases. Each item carries a `.torrent` link and a magnet \
+          whose announce tiers are attributed to the calling peer.", body = String),
+        (status = 400, content_type = "application/xml", description =
+         "No such Torznab function — a Torznab `<error code=\"202\">`.", body = String),
+        (status = 401, content_type = "application/xml", description =
+         "No `apikey`, or one that matches no active peer. `t=caps` requires it too, \
+          deliberately: one fewer endpoint that says anything to an unauthenticated \
+          caller.", body = String),
+        (status = 503, content_type = "application/xml",
+         description = "The database is not open yet.", body = String),
+    ),
+)]
 pub async fn api(
     State(state): State<Arc<ServeState>>,
     caller: Caller,
@@ -922,6 +981,7 @@ mod tests {
             },
             info_hash: Some("ab".repeat(20)),
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Seeding,
             last_error: None,
             created_at: None,

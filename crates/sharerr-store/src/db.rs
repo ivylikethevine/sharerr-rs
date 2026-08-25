@@ -165,46 +165,36 @@ impl Store {
     /// their two JSON columns are decoded, which is most of a feed request's work
     /// for a narrowly-scoped friend.
     pub async fn seeding_items(&self, scope: crate::PeerScope) -> Result<Vec<SharedItem>> {
-        // Derived from `PeerScope::allows` over the fixed source list — the SQL
-        // fragment interpolates only the placeholder count, never input.
-        let allowed: Vec<&'static str> = MediaSource::ALL
-            .iter()
-            .copied()
-            .filter(|source| scope.allows(*source))
-            .map(MediaSource::as_str)
-            .collect();
-        let placeholders = vec!["?"; allowed.len()].join(", ");
-
-        // Items from the kind-scoped directory source carry no single app
-        // identity, so a narrow scope admits them by the declared kind in
-        // their spec instead — see `PeerScope::directory_kind`. Under `All`
-        // the source list already includes it and this clause is absent.
-        let kind_placeholders = vec!["?"; MediaSource::KIND_SCOPED.len()].join(", ");
-        let kind_arm = match scope.directory_kind() {
-            Some(_) => format!(
-                " OR (source IN ({kind_placeholders}) AND json_extract(spec_json, '$.kind') = ?)"
-            ),
-            None => String::new(),
-        };
-
+        let filter = ScopeFilter::new(scope);
         let sql = format!(
-            "{SELECT_COLUMNS} WHERE state = ? AND info_hash IS NOT NULL \
-             AND (source IN ({placeholders}){kind_arm}) \
-             ORDER BY created_at DESC, id DESC"
+            "{SELECT_COLUMNS} WHERE {} ORDER BY created_at DESC, id DESC",
+            filter.clause
         );
-        let mut query = sqlx::query(&sql).bind(ShareState::Seeding.as_str());
-        for source in allowed {
-            query = query.bind(source);
+        let mut query = sqlx::query(&sql);
+        for value in filter.binds() {
+            query = query.bind(value);
         }
-        if let Some(kind) = scope.directory_kind() {
-            for source in MediaSource::KIND_SCOPED {
-                query = query.bind(source.as_str());
-            }
-            query = query.bind(kind);
-        }
-
         let rows = query.fetch_all(&self.pool).await?;
         rows.iter().map(row_to_item).collect()
+    }
+
+    /// How many items `scope` may see right now, and their total size in bytes
+    /// — the same rows [`Self::seeding_items`] returns, aggregated in SQL
+    /// rather than decoded. The friends page asks this once per distinct
+    /// scope on every load, and the status page asks it for
+    /// [`crate::PeerScope::All`]; neither needs the rows themselves.
+    pub async fn seeding_summary(&self, scope: crate::PeerScope) -> Result<SeedingSummary> {
+        let filter = ScopeFilter::new(scope);
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM shared_items WHERE {}",
+            filter.clause
+        );
+        let mut query = sqlx::query_as(&sql);
+        for value in filter.binds() {
+            query = query.bind(value);
+        }
+        let (count, size): (i64, i64) = query.fetch_one(&self.pool).await?;
+        Ok(SeedingSummary { count, size })
     }
 
     /// How many items are currently seeding — the "n items shared" number, as a
@@ -257,10 +247,10 @@ impl Store {
             r#"
             INSERT INTO shared_items (
                 source, source_id, file_id, spec_json, release_title, arr_path,
-                size, ids_json, info_hash, announce_token_fp, state, last_error,
-                created_at, updated_at
+                size, ids_json, info_hash, announce_token_fp, created_by_sharerr,
+                state, last_error, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
             ON CONFLICT (source, file_id) DO UPDATE SET
                 source_id     = excluded.source_id,
                 spec_json     = excluded.spec_json,
@@ -271,12 +261,17 @@ impl Store {
                 -- Never clear a known infohash: discovery rebuilds items with
                 -- `info_hash: None`, and a plain assignment would drop the hash
                 -- of a torrent qBittorrent is still seeding, leaving nothing to
-                -- remove if the item is later untagged. Use `set_info_hash` to
-                -- change it, and `set_state(Unshared)` to retire it.
+                -- remove if the item is later untagged. `set_seeding` is what
+                -- records it, and `set_state(Unshared)` retires it.
                 info_hash     = COALESCE(excluded.info_hash, shared_items.info_hash),
                 -- Same reasoning as info_hash: a rediscovery must not blank out a
                 -- fingerprint that only `set_seeding`/`set_announce_token_fp` know.
                 announce_token_fp = COALESCE(excluded.announce_token_fp, shared_items.announce_token_fp),
+                -- Deliberately absent from this clause. A rediscovery describes
+                -- a file, not a torrent, so it always arrives with `false` and
+                -- assigning that would strip the claim `set_seeding` recorded —
+                -- and with it the client's licence to remove the torrent on
+                -- withdrawal. Only `set_seeding` writes this column.
                 state         = excluded.state,
                 last_error    = excluded.last_error,
                 updated_at    = excluded.updated_at
@@ -293,6 +288,7 @@ impl Store {
         .bind(&ids_json)
         .bind(item.info_hash.as_deref())
         .bind(item.announce_token_fp.as_deref())
+        .bind(i64::from(item.created_by_sharerr))
         .bind(item.state.as_str())
         .bind(item.last_error.as_deref())
         .bind(now)
@@ -336,19 +332,27 @@ impl Store {
     /// torrent just built, so the items page can show whether it is still the
     /// currently configured one — see [`Self::set_announce_token_fp`] for the
     /// case where the torrent already existed and only this needed confirming.
+    ///
+    /// `created_by_sharerr` says whether this call is recording a torrent
+    /// sharerr added or one it adopted, and is the only thing that writes that
+    /// column — see [`SharedItem::created_by_sharerr`], and the withdrawal path
+    /// that reads it.
     pub async fn set_seeding(
         &self,
         source: MediaSource,
         file_id: i64,
         info_hash: &str,
         announce_token_fp: Option<&str>,
+        created_by_sharerr: bool,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE shared_items SET info_hash = ?1, announce_token_fp = ?2, state = ?3, \
-             last_error = NULL, updated_at = ?4 WHERE source = ?5 AND file_id = ?6",
+            "UPDATE shared_items SET info_hash = ?1, announce_token_fp = ?2, \
+             created_by_sharerr = ?3, state = ?4, last_error = NULL, updated_at = ?5 \
+             WHERE source = ?6 AND file_id = ?7",
         )
         .bind(info_hash)
         .bind(announce_token_fp)
+        .bind(i64::from(created_by_sharerr))
         .bind(ShareState::Seeding.as_str())
         .bind(now_epoch())
         .bind(source.as_str())
@@ -462,6 +466,78 @@ impl Store {
     }
 }
 
+/// What is seeding within one scope, aggregated — see [`Store::seeding_summary`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SeedingSummary {
+    pub count: i64,
+    /// Sum of the items' `size` in bytes.
+    pub size: i64,
+}
+
+/// The `WHERE` fragment selecting the seeding rows a [`crate::PeerScope`] may
+/// see, and the binder that fills its placeholders in the same order.
+///
+/// One definition for [`Store::seeding_items`] and [`Store::seeding_summary`]:
+/// the feed and the count shown next to a friend's name must agree about
+/// what "TV only" admits, and two hand-written copies of this clause would
+/// not stay agreeing.
+struct ScopeFilter {
+    clause: String,
+    allowed: Vec<&'static str>,
+    directory_kind: Option<&'static str>,
+}
+
+impl ScopeFilter {
+    fn new(scope: crate::PeerScope) -> Self {
+        // Derived from `PeerScope::allows` over the fixed source list — the SQL
+        // fragment interpolates only the placeholder count, never input.
+        let allowed: Vec<&'static str> = MediaSource::ALL
+            .iter()
+            .copied()
+            .filter(|source| scope.allows(*source))
+            .map(MediaSource::as_str)
+            .collect();
+        let placeholders = vec!["?"; allowed.len()].join(", ");
+
+        // Items from the kind-scoped directory source carry no single app
+        // identity, so a narrow scope admits them by the declared kind in
+        // their spec instead — see `PeerScope::directory_kind`. Under `All`
+        // the source list already includes it and this clause is absent.
+        let kind_placeholders = vec!["?"; MediaSource::KIND_SCOPED.len()].join(", ");
+        let directory_kind = scope.directory_kind();
+        let kind_arm = match directory_kind {
+            Some(_) => format!(
+                " OR (source IN ({kind_placeholders}) AND json_extract(spec_json, '$.kind') = ?)"
+            ),
+            None => String::new(),
+        };
+
+        Self {
+            clause: format!(
+                "state = ? AND info_hash IS NOT NULL AND (source IN ({placeholders}){kind_arm})"
+            ),
+            allowed,
+            directory_kind,
+        }
+    }
+
+    /// Every placeholder value in `clause`, in the order it names them. All
+    /// are static strings, so one list serves `query` and `query_as` alike.
+    fn binds(&self) -> Vec<&'static str> {
+        let mut binds = vec![ShareState::Seeding.as_str()];
+        binds.extend(&self.allowed);
+        if let Some(kind) = self.directory_kind {
+            binds.extend(
+                MediaSource::KIND_SCOPED
+                    .iter()
+                    .map(|source| source.as_str()),
+            );
+            binds.push(kind);
+        }
+        binds
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// What one reconciliation pass changed.
 pub struct RunSummary {
@@ -517,7 +593,8 @@ pub struct RunRecord {
 }
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
-     arr_path, size, ids_json, info_hash, announce_token_fp, state, last_error, created_at \
+     arr_path, size, ids_json, info_hash, announce_token_fp, created_by_sharerr, state, \
+     last_error, created_at \
      FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
@@ -555,6 +632,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         ids,
         info_hash: row.try_get("info_hash")?,
         announce_token_fp: row.try_get("announce_token_fp")?,
+        created_by_sharerr: row.try_get::<i64, _>("created_by_sharerr")? != 0,
         state,
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at").ok(),
@@ -620,6 +698,7 @@ mod tests {
             },
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -671,6 +750,7 @@ mod tests {
             },
             info_hash: None,
             announce_token_fp: None,
+            created_by_sharerr: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -842,7 +922,7 @@ mod tests {
         store.upsert(&episode(1001)).await.unwrap();
 
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
             .await
             .unwrap();
 
@@ -860,7 +940,7 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
             .await
             .unwrap();
 
@@ -883,7 +963,7 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"))
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
             .await
             .unwrap();
 
@@ -1036,6 +1116,62 @@ mod tests {
         let feed = store.seeding_items(crate::PeerScope::All).await.unwrap();
         assert_eq!(feed.len(), 1, "only the seeding item belongs in the feed");
         assert_eq!(feed[0].file_id, 2);
+    }
+
+    /// The aggregate must count and size exactly the rows the feed returns:
+    /// same filter, same scope semantics — a pending item and an out-of-scope
+    /// one contribute to neither.
+    #[tokio::test]
+    async fn seeding_summary_aggregates_the_same_rows_the_feed_returns() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        let seeding = |mut item: SharedItem, hash: &str, size: u64| {
+            item.info_hash = Some(hash.repeat(20));
+            item.state = ShareState::Seeding;
+            item.size = size;
+            item
+        };
+        store.upsert(&episode(1)).await.unwrap(); // pending: excluded
+        store
+            .upsert(&seeding(episode(2), "aa", 1_000))
+            .await
+            .unwrap();
+        store
+            .upsert(&seeding(episode(3), "bb", 2_000))
+            .await
+            .unwrap();
+        store.upsert(&seeding(movie(4), "cc", 4_000)).await.unwrap();
+
+        let all = store.seeding_summary(crate::PeerScope::All).await.unwrap();
+        assert_eq!(
+            all,
+            SeedingSummary {
+                count: 3,
+                size: 7_000
+            }
+        );
+
+        let tv = store.seeding_summary(crate::PeerScope::Tv).await.unwrap();
+        let feed = store.seeding_items(crate::PeerScope::Tv).await.unwrap();
+        assert_eq!(tv.count as usize, feed.len());
+        assert_eq!(
+            tv.size.unsigned_abs(),
+            feed.iter().map(|i| i.size).sum::<u64>()
+        );
+        assert_eq!(
+            tv,
+            SeedingSummary {
+                count: 2,
+                size: 3_000
+            }
+        );
+
+        let empty = Store::open_in_memory().await.unwrap();
+        assert_eq!(
+            empty.seeding_summary(crate::PeerScope::All).await.unwrap(),
+            SeedingSummary::default(),
+            "an empty table must sum to zero, not NULL"
+        );
     }
 
     /// Directory items have no app identity, so narrow scopes admit them by

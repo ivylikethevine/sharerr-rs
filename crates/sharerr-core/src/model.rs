@@ -39,7 +39,9 @@ impl MediaSource {
     /// Not cosmetic: Sonarr, Radarr and Whisparr are on `v3` while Lidarr and
     /// Readarr are on `v1`. Hardcoding one prefix is why the client could only ever
     /// have talked to the first two, and getting it wrong presents as a 404 that
-    /// looks like a wrong URL rather than a wrong version.
+    /// looks like a wrong URL rather than a wrong version. The arr client matches
+    /// on the source itself rather than this string when building its prefix;
+    /// this is the one place the split is stated for everything else.
     pub fn api_version(self) -> &'static str {
         match self {
             Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",
@@ -312,6 +314,18 @@ pub struct SharedItem {
     /// token to answer "is this specific torrent still using it" — see
     /// `sharerr_torrent::token_from_announce_url`.
     pub announce_token_fp: Option<String>,
+    /// Whether sharerr added this item's torrent to the client itself.
+    ///
+    /// `false` when `Seeder::seed` found a torrent that already covered the
+    /// file and reused it — an operator's own torrent, or a cross-seed of the
+    /// same media. Withdrawing such an item marks the row `Unshared` but
+    /// leaves the torrent where it was: removing it would tear down something
+    /// sharerr did not put there, which is the "preserve any existing
+    /// torrents" rule the whole seeding path is built around.
+    ///
+    /// `false` on an item with no torrent yet — nothing has been created, so
+    /// there is nothing to claim.
+    pub created_by_sharerr: bool,
     pub state: ShareState,
     pub last_error: Option<String>,
     /// When sharerr first recorded this file, as a Unix timestamp.
@@ -378,6 +392,9 @@ impl Discovered {
             ids: self.ids,
             info_hash: None,
             announce_token_fp: None,
+            // No torrent exists yet; `Store::set_seeding` records which branch
+            // of `Seeder::seed` produced one.
+            created_by_sharerr: false,
             state: ShareState::Pending,
             last_error: None,
             // Assigned by the store on insert; a discovered item has not been

@@ -55,17 +55,26 @@ docker compose -f docker/compose.test.yml start sonarr radarr lidarr
 
 # 4. Collect API keys from each app's config.
 SONARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/sonarr/config.xml)
+RADARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/radarr/config.xml)
 LIDARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/lidarr/config.xml)
 
-# qBittorrent prints a temporary admin password to its log on first start.
+# qBittorrent prints a temporary admin password to its log on first start. That
+# password is only good for logging in to mint the WebUI *API key* sharerr's
+# client actually authenticates with (Options → Web UI → API key in the WebUI at
+# http://127.0.0.1:18080/, or `rotateAPIKey` over the API the way the script
+# does it — see `qbittorrent_api_key` in run_docker_tests.sh).
 docker compose -f docker/compose.test.yml logs qbittorrent | grep -i password
+QBIT_KEY=qbt_...   # the key the WebUI (or rotateAPIKey) handed back
 
 # 5. Load them into sharerr. Either open http://127.0.0.1:18477/ and paste them
-#    into Settings, or pipe them in — the two write to the same vault.
-docker compose -f docker/compose.test.yml exec -T sharerr \
-    sh -c "printf %s '$SONARR_KEY' | sharerr vault set sonarr.api_key"
-docker compose -f docker/compose.test.yml exec -T sharerr \
-    sh -c "printf %s '$LIDARR_KEY' | sharerr vault set lidarr.api_key"
+#    into Settings, or pipe them in — the two write to the same vault. Piped on
+#    stdin rather than interpolated into `sh -c`, so a value containing a quote
+#    cannot break out of the command.
+for pair in "sonarr.api_key=$SONARR_KEY" "radarr.api_key=$RADARR_KEY" \
+            "lidarr.api_key=$LIDARR_KEY" "qbittorrent.api_key=$QBIT_KEY"; do
+    printf %s "${pair#*=}" | docker compose -f docker/compose.test.yml \
+        exec -T sharerr sharerr vault set "${pair%%=*}"
+done
 
 # 6. Check the wiring before trying to sync. The UI's per-service "Test
 #    connection" buttons cover the same ground for the services themselves;
@@ -85,20 +94,24 @@ too — see the root `README.md`.
 
 With the stack up and something tagged and synced:
 
-```bash
-# The Torznab endpoint needs an API key; generate one in the UI (Settings →
-# Indexer) or pipe one in. Piped on stdin rather than interpolated into `sh -c`,
-# so a value containing a quote cannot break out of the command.
-printf %s "a-test-key" | docker compose -f docker/compose.test.yml exec -T sharerr \
-    sharerr vault set torznab.api_key
+The Torznab endpoint authenticates against a *friend's* key, not a shared
+instance secret — there is no vault entry for it. Create the operator account on
+first visit (`/setup`), then add a friend on the Friends page (`/peers`); the key
+is shown exactly once. `run_docker_tests.sh` does both over HTTP, since neither
+has a CLI shortcut and `sharerr-data` is a named volume `seed-arr` cannot reach.
 
+```bash
 # What a friend's Prowlarr would fetch.
-curl -s "http://127.0.0.1:18477/api?t=caps&apikey=a-test-key"
-curl -s "http://127.0.0.1:18477/api?t=tvsearch&apikey=a-test-key"
+curl -s "http://127.0.0.1:18477/api?t=caps&apikey=$FRIEND_KEY"
+curl -s "http://127.0.0.1:18477/api?t=tvsearch&apikey=$FRIEND_KEY"
 ```
 
-`run_docker_tests.sh` sets a key of its own and asserts `t=caps` returns a document,
-so the feed is covered by a normal run — but only that far.
+A normal run covers the feed further than that: it asserts `t=caps` on both the
+native and the Jackett-shaped path (`/api/v2.0/indexers/sharerr/results/torznab/api`),
+that Jackett's `server/config` never echoes a key back, and — after a sync — that a
+real Sonarr (and, on the plain stack, Lidarr) accepts the instance as a Torznab
+indexer. The last one is the check that matters: Sonarr once refused the whole feed
+over a missing `pubDate`, and only a real client caught it.
 
 Prowlarr is in the stack behind an opt-in profile, since nothing automated uses it:
 
@@ -344,7 +357,7 @@ docker compose -f docker/compose.test.yml --profile indexer down -v && rm -rf do
 Both halves are needed. `-v` drops the named volumes, which is what you want
 between runs — the API keys are regenerated on every fresh start, and qBittorrent
 only logs its temporary password when it has no stored one. It does *not* touch
-`docker/state`, where Sonarr and Radarr keep theirs, so that goes separately.
+`docker/state`, where Sonarr, Radarr, and Lidarr keep theirs, so that goes separately.
 `run_docker_tests.sh` does both from a trap.
 
 If `rm -rf docker/state` fails with a permission error, Docker auto-created that

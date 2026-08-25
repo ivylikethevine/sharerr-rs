@@ -43,8 +43,9 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use sharerr_store::{EndpointKind, Store};
 use sharerr_torrent::announce::{
-    self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
+    self, AnnounceError, AnnounceRequest, InfoHash, failure_bencode, scrape_bencode,
 };
+use utoipa_axum::router::OpenApiRouter;
 
 use crate::state::ServeState;
 
@@ -55,10 +56,9 @@ const BENCODE: &str = "text/plain; charset=utf-8";
 /// Everything the tracker handlers need.
 #[derive(Debug)]
 pub struct TrackerState {
+    /// The swarms this router writes are [`ServeState::swarms`]'s — the
+    /// status page reads the same ones.
     pub serve: Arc<ServeState>,
-    /// Borrowed from [`ServeState`], not owned: the status page reads the same
-    /// swarms this router writes.
-    pub swarms: Arc<Swarms>,
 }
 
 /// When the previous (rotated-out) shared tracker token was last actually
@@ -93,10 +93,7 @@ impl LegacyTokenStatus {
 
 impl TrackerState {
     pub fn new(serve: Arc<ServeState>) -> Self {
-        Self {
-            swarms: serve.swarms(),
-            serve,
-        }
+        Self { serve }
     }
 }
 
@@ -112,9 +109,22 @@ impl TrackerState {
 /// spelling them out keeps the tokenless case from depending on how an optional
 /// extractor behaves when the segment is missing.
 pub fn routes(state: Arc<TrackerState>) -> axum::Router {
-    // Mounted from the same constants `sharerr-torrent` writes into announce
-    // URLs, so the two sides of the crate boundary cannot drift.
-    axum::Router::new()
+    let (router, _) = api_router().with_state(state).split_for_parts();
+    router
+}
+
+/// The same routes without state, for [`crate::openapi`].
+///
+/// Unlike every other surface here these are mounted with `.route` rather than
+/// `routes!`, and keep deriving their paths from the constants
+/// `sharerr-torrent` writes into announce URLs — that is what stops the two
+/// sides of the crate boundary drifting, and it is worth more than the
+/// convenience. The document gets them from the handlers' `#[utoipa::path]`
+/// attributes instead, listed in `crate::openapi`, and
+/// `the_documented_tracker_paths_match_the_constants` holds the literal and
+/// the constant together.
+pub(crate) fn api_router() -> OpenApiRouter<Arc<TrackerState>> {
+    OpenApiRouter::new()
         .route(sharerr_torrent::ANNOUNCE_PATH, axum::routing::get(announce))
         .route(
             &format!("{}/{{token}}", sharerr_torrent::ANNOUNCE_PATH),
@@ -126,10 +136,76 @@ pub fn routes(state: Arc<TrackerState>) -> axum::Router {
             axum::routing::get(scrape_with_token),
         )
         .route("/torrents/{name}", axum::routing::get(torrent_file))
-        .with_state(state)
+}
+
+/// The announce query string, for the OpenAPI document only.
+///
+/// Nothing deserializes into this type. The real handler takes `RawQuery` and
+/// hands the bytes to [`AnnounceRequest::parse`], because `info_hash` and
+/// `peer_id` are **20 raw bytes** percent-encoded, and every string-based
+/// extractor replaces the invalid UTF-8 with U+FFFD — destroying the identity
+/// the whole protocol is keyed on. So this exists to describe that query to a
+/// reader, and `announce_query_matches_the_parser` keeps it honest against the
+/// parser's own field names.
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[allow(
+    dead_code,
+    reason = "documentation shape; the handler parses raw bytes"
+)]
+pub struct AnnounceParams {
+    /// The torrent's info hash: 20 raw bytes, percent-encoded. **Not hex.**
+    #[param(required = true)]
+    info_hash: String,
+    /// The client's own id: 20 raw bytes, percent-encoded.
+    #[param(required = true)]
+    peer_id: String,
+    /// The port the client accepts connections on.
+    #[param(required = true, example = 6881)]
+    port: u16,
+    /// Bytes still to download. `0` means a seeder.
+    #[param(required = true)]
+    left: u64,
+    /// `started`, `stopped`, `completed`, or absent for a periodic re-announce.
+    event: Option<String>,
+    /// `1` for the compact peer list. Anything else returns the dictionary form.
+    compact: Option<u8>,
+    /// How many peers to return.
+    numwant: Option<usize>,
+    /// The client's own address. Honoured **only when it is a private address** —
+    /// otherwise the connection's source address wins, so a peer cannot announce
+    /// somebody else into the swarm.
+    ip: Option<String>,
+}
+
+/// The scrape query string. Documentation-only, for the same reason as
+/// [`AnnounceParams`].
+#[derive(utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[allow(
+    dead_code,
+    reason = "documentation shape; the handler parses raw bytes"
+)]
+pub struct ScrapeParams {
+    /// One or more info hashes, 20 raw bytes each, percent-encoded. Repeat the
+    /// parameter for several. Omitted entirely means every torrent this instance
+    /// shares with the caller.
+    info_hash: Option<String>,
 }
 
 /// `GET /announce`.
+#[utoipa::path(
+    get,
+    path = "/announce",
+    tag = "tracker",
+    operation_id = "announce",
+    params(AnnounceParams),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn announce(
     State(state): State<Arc<TrackerState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
@@ -139,6 +215,24 @@ pub async fn announce(
 }
 
 /// `GET /announce/{token}`.
+#[utoipa::path(
+    get,
+    path = "/announce/{token}",
+    tag = "tracker",
+    operation_id = "announceWithToken",
+    params(
+        ("token" = String, Path, description =
+         "The announce token baked into this torrent's announce URL. Identifies which \
+          peer is announcing, so a swarm can be attributed and one friend's access \
+          revoked without disturbing anyone else's."),
+        AnnounceParams,
+    ),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn announce_with_token(
     State(state): State<Arc<TrackerState>>,
     Path(token): Path<String>,
@@ -174,18 +268,24 @@ async fn handle_announce(
     remote: SocketAddr,
     query: &[u8],
 ) -> Result<Vec<u8>, AnnounceError> {
+    // Parsed first: a malformed query needs neither lookup below.
+    let request = AnnounceRequest::parse(query)?;
+
     // Fails closed: an announce this instance cannot check the token for is
     // no more admissible than one for a hash it cannot check either — see
-    // `is_served`'s own identical reasoning just below.
-    let (store, auth) = authenticate(state, token.as_deref()).await?;
-
-    let request = AnnounceRequest::parse(query)?;
-    if !is_served(state, &request.info_hash).await {
+    // `is_served`'s own identical reasoning. The two checks are independent,
+    // so they run together.
+    let (auth, served) = tokio::join!(
+        authenticate(state, token.as_deref()),
+        is_served(state, &request.info_hash)
+    );
+    let (store, auth) = auth?;
+    if !served {
         return Err(AnnounceError::UnknownTorrent);
     }
 
     let addr = request.resolve_addr(remote.ip());
-    let response = state.swarms.announce(&request, addr).await;
+    let response = state.serve.swarms().announce(&request, addr).await;
 
     if let Some(peer_id) = auth.attributed_to {
         crate::torznab::record_sighting(
@@ -209,11 +309,38 @@ async fn handle_announce(
 }
 
 /// `GET /scrape` — swarm counts, for clients and for Prowlarr's seeder column.
+#[utoipa::path(
+    get,
+    path = "/scrape",
+    tag = "tracker",
+    operation_id = "scrape",
+    params(ScrapeParams),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn scrape(State(state): State<Arc<TrackerState>>, RawQuery(query): RawQuery) -> Response {
     handle_scrape(&state, None, query).await
 }
 
 /// `GET /scrape/{token}`.
+#[utoipa::path(
+    get,
+    path = "/scrape/{token}",
+    tag = "tracker",
+    operation_id = "scrapeWithToken",
+    params(
+        ("token" = String, Path, description = "As on `/announce/{token}`."),
+        ScrapeParams,
+    ),
+    responses((status = 200, content_type = "text/plain", body = String, description =
+             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+              reports refusal as a bencoded `failure reason` key, not as an HTTP \
+              status, so a client that only checks the status code will read an \
+              error as a swarm.")),
+)]
 pub async fn scrape_with_token(
     State(state): State<Arc<TrackerState>>,
     Path(token): Path<String>,
@@ -254,7 +381,7 @@ async fn handle_scrape(
         return bencode(scrape_bencode(&[]));
     }
 
-    let (complete, incomplete) = state.swarms.scrape(&info_hash).await;
+    let (complete, incomplete) = state.serve.swarms().scrape(&info_hash).await;
     bencode(scrape_bencode(&[(info_hash, complete, incomplete)]))
 }
 
@@ -418,6 +545,29 @@ pub struct TorrentFileQuery {
 /// the announce URLs are rewritten in memory — never on disk — to that peer's
 /// own token before the response goes out, the same attribution the feed's
 /// magnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.
+#[utoipa::path(
+    get,
+    path = "/torrents/{name}",
+    tag = "tracker",
+    operation_id = "torrentFile",
+    params(
+        ("name" = String, Path, description =
+         "`{info_hash}.torrent` — 40 lowercase hex characters and the suffix. Parsed \
+          as a hash rather than used as a path component, so no traversal is possible."),
+        ("token" = Option<String>, Query, description =
+         "The requesting peer's own token, as the feed's download links carry. When it \
+          resolves to an active peer the announce URLs are rewritten to that peer's \
+          token in the response body — never on disk."),
+    ),
+    responses(
+        (status = 200, content_type = "application/x-bittorrent",
+         description = "The `.torrent` file.", body = Vec<u8>),
+        (status = 404, description =
+         "Not a torrent name, not currently shared, or shared but its cached file is \
+          missing from disk. Deliberately one status for all three: a caller without \
+          a valid token learns nothing about what this instance holds.", body = String),
+    ),
+)]
 pub async fn torrent_file(
     State(state): State<Arc<TrackerState>>,
     Path(name): Path<String>,
@@ -437,8 +587,10 @@ pub async fn torrent_file(
         return (StatusCode::NOT_FOUND, "not shared").into_response();
     }
 
-    let config = state.serve.config().await;
-    let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex::encode(info_hash));
+    let path = sharerr_torrent::torrent_file_path(
+        &state.serve.torrent_dir().await,
+        &hex::encode(info_hash),
+    );
 
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -452,7 +604,7 @@ pub async fn torrent_file(
     };
 
     let bytes = match query.token.as_deref() {
-        Some(supplied) => attributed_bytes(&state, &bytes, supplied).await,
+        Some(supplied) => attributed_bytes(&state, bytes, supplied).await,
         None => bytes,
     };
 
@@ -478,18 +630,21 @@ pub async fn torrent_file(
 /// that fails to parse — falls back to serving `bytes` unchanged: this
 /// parameter only ever narrows attribution, so a caller for whom it cannot be
 /// honoured still gets the same file an unauthenticated download always got.
-async fn attributed_bytes(state: &TrackerState, bytes: &[u8], supplied: &str) -> Vec<u8> {
+///
+/// Takes `bytes` by value so every fallback arm hands the same buffer back
+/// rather than copying it.
+async fn attributed_bytes(state: &TrackerState, bytes: Vec<u8>, supplied: &str) -> Vec<u8> {
     let store = match state.serve.store().await {
         Ok(store) => store,
-        Err(_) => return bytes.to_vec(),
+        Err(_) => return bytes,
     };
 
     let peer = match store.peer_by_key_hash(supplied).await {
         Ok(Some(peer)) => peer,
-        Ok(None) => return bytes.to_vec(),
+        Ok(None) => return bytes,
         Err(err) => {
             tracing::warn!(error = %err, "could not check a peer's download token");
-            return bytes.to_vec();
+            return bytes;
         }
     };
 
@@ -498,15 +653,15 @@ async fn attributed_bytes(state: &TrackerState, bytes: &[u8], supplied: &str) ->
             Ok(announce) => announce,
             Err(err) => {
                 tracing::warn!(error = %err, "could not build a per-peer announce set");
-                return bytes.to_vec();
+                return bytes;
             }
         };
 
-    match sharerr_torrent::rewrite_announce(bytes, &announce) {
+    match sharerr_torrent::rewrite_announce(&bytes, &announce) {
         Ok(rewritten) => rewritten,
         Err(err) => {
             tracing::warn!(error = %err, "could not attribute a .torrent download");
-            bytes.to_vec()
+            bytes
         }
     }
 }
@@ -760,6 +915,7 @@ mod tests {
                 ids: ExternalIds::default(),
                 info_hash: None,
                 announce_token_fp: None,
+                created_by_sharerr: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -767,7 +923,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None)
+            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
             .await
             .unwrap();
 
@@ -874,7 +1030,7 @@ mod tests {
         );
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
-        let rewritten = attributed_bytes(&tracker_state, &built.data, &sam.key_hash).await;
+        let rewritten = attributed_bytes(&tracker_state, built.data.clone(), &sam.key_hash).await;
 
         let announce = sharerr_torrent::read_announce(&rewritten).unwrap().unwrap();
         assert!(
@@ -906,7 +1062,7 @@ mod tests {
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
         for token in ["not-a-real-token", &alex.key_hash] {
-            let result = attributed_bytes(&tracker_state, &built.data, token).await;
+            let result = attributed_bytes(&tracker_state, built.data.clone(), token).await;
             assert_eq!(
                 result, built.data,
                 "token {token:?} should not change the served bytes"
@@ -928,7 +1084,7 @@ mod tests {
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
         let garbage = b"not a bencoded torrent".to_vec();
-        let result = attributed_bytes(&tracker_state, &garbage, &sam.key_hash).await;
+        let result = attributed_bytes(&tracker_state, garbage.clone(), &sam.key_hash).await;
         assert_eq!(result, garbage);
     }
 
@@ -1003,6 +1159,7 @@ mod tests {
                 ids: ExternalIds::default(),
                 info_hash: None,
                 announce_token_fp: None,
+                created_by_sharerr: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -1010,7 +1167,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None)
+            .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
             .await
             .unwrap();
 
@@ -1060,6 +1217,7 @@ mod tests {
                 ids: ExternalIds::default(),
                 info_hash: None,
                 announce_token_fp: None,
+                created_by_sharerr: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -1067,7 +1225,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None)
+            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None, true)
             .await
             .unwrap();
 

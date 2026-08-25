@@ -23,7 +23,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::now_epoch;
-use sharerr_store::{Peer, PeerScope};
+use sharerr_store::{Peer, PeerScope, SeedingSummary};
 
 use super::WebState;
 use super::settings::title_case;
@@ -292,11 +292,35 @@ async fn build(
             Ok(peers) => {
                 // One extra query per friend; the list is people, not rows —
                 // but run concurrently rather than one round trip at a time.
-                let endpoints =
-                    futures::future::join_all(peers.iter().map(|peer| async {
-                        store.peer_endpoints(peer.id).await.unwrap_or_default()
-                    }))
-                    .await;
+                // The seeding count per scope rides alongside, once per
+                // distinct scope rather than once per friend: it is the
+                // concrete answer to what "Can see: TV only" means.
+                let mut scopes: Vec<PeerScope> = Vec::new();
+                for peer in &peers {
+                    if !scopes.contains(&peer.scope) {
+                        scopes.push(peer.scope);
+                    }
+                }
+                let (endpoints, counts) =
+                    tokio::join!(
+                        futures::future::join_all(peers.iter().map(|peer| async {
+                            store.peer_endpoints(peer.id).await.unwrap_or_default()
+                        })),
+                        futures::future::join_all(scopes.iter().map(|scope| async {
+                            (*scope, store.seeding_summary(*scope).await.ok())
+                        })),
+                    );
+                let endpoints = peers
+                    .iter()
+                    .zip(endpoints)
+                    .map(|(peer, endpoints)| {
+                        let sharing = counts
+                            .iter()
+                            .find(|(scope, _)| *scope == peer.scope)
+                            .and_then(|(_, sharing)| *sharing);
+                        (endpoints, sharing)
+                    })
+                    .collect::<Vec<_>>();
                 (peers, endpoints, None)
             }
             Err(err) => (
@@ -322,9 +346,9 @@ async fn build(
         peers: peers
             .iter()
             .zip(&endpoints)
-            .map(|(peer, endpoints)| {
+            .map(|(peer, (endpoints, sharing))| {
                 let key_set = stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id));
-                row(peer, endpoints, key_set)
+                row(peer, endpoints, key_set, *sharing)
             })
             .collect(),
         error: error.or(list_error),
@@ -336,20 +360,33 @@ async fn build(
     }
 }
 
-fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: bool) -> PeerRow {
+fn row(
+    peer: &Peer,
+    endpoints: &[sharerr_store::PeerEndpoint],
+    gossip_key_set: bool,
+    sharing: Option<SeedingSummary>,
+) -> PeerRow {
     PeerRow {
+        sharing: sharing.map(|summary| summary.count.unsigned_abs() as usize),
+        sharing_size: sharing
+            .filter(|summary| summary.size > 0)
+            .map(|summary| super::items::human_size(summary.size.unsigned_abs()))
+            .unwrap_or_default(),
         id: peer.id,
         label: peer.label.clone(),
         scope: peer.scope.as_str(),
         scope_label: peer.scope.label(),
         created: ago(peer.created_at),
+        created_absolute: absolute(peer.created_at),
         last_seen: match peer.last_seen_at {
             Some(at) => ago(at),
             // The answer an operator is actually looking for: the friend has the
             // key but has never used it, so they have not finished setting up.
             None => "never".to_owned(),
         },
+        last_seen_absolute: peer.last_seen_at.map(absolute).unwrap_or_default(),
         revoked: peer.is_revoked(),
+        revoked_when: peer.revoked_at.map(ago).unwrap_or_default(),
         // Truncated: this is a recogniser, not a copy source — the full key
         // travels peer-to-peer inside signed records, never through this page.
         pubkey_short: peer
@@ -408,11 +445,70 @@ pub(crate) fn ago(epoch_secs: i64) -> String {
     }
 }
 
+/// The absolute instant behind a relative string, for a `title=` tooltip.
+///
+/// `ago` answers "recently?", which is nearly always the question — but not
+/// "which of these two happened first" once both of them read "3 day(s) ago".
+/// UTC with no conversion: a container's local zone is usually unset, so an
+/// offset here would be a guess dressed up as a fact. Formatted by hand rather
+/// than through `time`'s `format_description!`, which needs the `macros`
+/// feature the workspace does not enable.
+pub(crate) fn absolute(epoch_secs: i64) -> String {
+    let Ok(at) = time::OffsetDateTime::from_unix_timestamp(epoch_secs) else {
+        // Only reachable for a timestamp outside year ±9999 — a corrupt row
+        // rather than anything an operator did. An empty title just omits the
+        // tooltip, which beats rendering "invalid" next to a real time.
+        return String::new();
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second()
+    )
+}
+
+/// How long something took, given a start and an end.
+///
+/// Sync runs span seconds to minutes, so the units stay coarse: the useful
+/// signal is "this pass is taking much longer than the last one", never the
+/// exact millisecond.
+pub(crate) fn took(started_at: i64, finished_at: i64) -> String {
+    match finished_at.saturating_sub(started_at) {
+        // A clock that moved backwards mid-run. Reporting a negative duration
+        // would read as a bug in sharerr rather than in the host's clock.
+        s if s < 0 => String::new(),
+        0 => "under a second".to_owned(),
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m {}s", s / 60, s % 60),
+        s => format!("{}h {}m", s / 3_600, (s % 3_600) / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn a_run_duration_reads_in_the_coarsest_useful_unit() {
+        assert_eq!(took(100, 100), "under a second");
+        assert_eq!(took(100, 145), "45s");
+        assert_eq!(took(100, 100 + 125), "2m 5s");
+        assert_eq!(took(100, 100 + 7_260), "2h 1m");
+        // A clock that jumped backwards reports nothing rather than "-5s".
+        assert_eq!(took(200, 100), "");
+    }
+
+    #[test]
+    fn an_absolute_timestamp_is_utc_and_needs_no_timezone() {
+        assert_eq!(absolute(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(absolute(1_700_000_000), "2023-11-14 22:13:20 UTC");
+    }
 
     #[test]
     fn relative_times_read_the_way_a_person_would_say_them() {
@@ -447,8 +543,8 @@ mod tests {
             key_hash: "hash".to_owned(),
         };
 
-        assert_eq!(row(&peer, &[], false).last_seen, "never");
-        assert!(!row(&peer, &[], false).revoked);
+        assert_eq!(row(&peer, &[], false, None).last_seen, "never");
+        assert!(!row(&peer, &[], false, None).revoked);
     }
 
     #[test]
@@ -465,7 +561,7 @@ mod tests {
             key_hash: "hash".to_owned(),
         };
 
-        assert!(row(&peer, &[], false).revoked);
+        assert!(row(&peer, &[], false, None).revoked);
     }
 
     // ------------------------------------------------------------- handlers
@@ -476,12 +572,7 @@ mod tests {
     // only ever exercising the "vault would not open" path, never a real
     // open one.
 
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     /// A config whose database path is a directory rather than a file, so
     /// `Store::open` fails deterministically — the hermetic way to reach the

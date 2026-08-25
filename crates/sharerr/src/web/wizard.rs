@@ -1,4 +1,5 @@
-//! The guided first-run — see `docs/ROADMAP.md`'s "Setup wizard".
+//! The guided first-run: welcome, services, paths, tracker, done — one
+//! step at a time, on top of the same handlers the full Settings page uses.
 //!
 //! Not a separate configuration path: every step here submits to the very
 //! same `/settings/*` handlers [`super::settings`] exposes, with `?next=`
@@ -17,11 +18,11 @@ use axum::extract::{Query, State};
 use axum::response::Response;
 use serde::Deserialize;
 use sharerr_core::MediaSource;
-use sharerr_core::config::{config_paths, secret_keys};
+use sharerr_core::config::secret_keys;
 
 use super::WebState;
-use super::settings::{secrets_present, title_case, url_or_empty, url_placeholder};
-use super::templates::{ArrSection, PathRow, WizardPage, WizardStep, render};
+use super::settings::{arr_section, path_rows, secrets_present, url_or_empty};
+use super::templates::{WizardPage, WizardStep, render};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct WizardQuery {
@@ -62,38 +63,10 @@ async fn page(state: &WebState, step: WizardStep, saved: Option<String>) -> Wiza
     // first-run step meant to take a minute.
     let arrs = [MediaSource::Sonarr, MediaSource::Radarr]
         .into_iter()
-        .filter_map(|kind| {
-            let url_path = config_paths::url_for(kind)?;
-            let key = secret_keys::api_key_for(kind)?;
-            Some(ArrSection {
-                source: kind.as_str(),
-                title: title_case(kind.as_str()),
-                url: config
-                    .service(kind)
-                    .map(|s| s.url.to_string())
-                    .unwrap_or_default(),
-                key_set: is_set(key),
-                placeholder: url_placeholder(kind),
-                url_path,
-                primary: true,
-            })
-        })
+        .filter_map(|kind| arr_section(kind, &config, &is_set, true))
         .collect::<Vec<_>>();
 
-    let path_map = config
-        .path_map
-        .iter()
-        .map(|m| PathRow {
-            arr: m.arr.display().to_string(),
-            sharerr: m.sharerr.display().to_string(),
-            qbit: m
-                .qbit
-                .as_ref()
-                .map(|q| q.display().to_string())
-                .unwrap_or_default(),
-        })
-        .chain(std::iter::once(PathRow::default()))
-        .collect();
+    let path_map = path_rows(&config);
 
     WizardPage {
         signed_in: true,
@@ -129,14 +102,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::web::web_state;
     use axum::http::StatusCode;
-
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
-        }
-    }
 
     /// Every step must render — this is the whole guard against a template
     /// referencing a field the Rust side stopped populating.

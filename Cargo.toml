@@ -14,7 +14,7 @@ edition = "2024"
 # MSRV check — a local toolchain is invariably newer and will not catch a breach.
 rust-version = "1.98"
 license = "MIT"
-repository = "https://github.com/ivyduggan/sharerr-rs"
+repository = "https://github.com/ivylikethevine/sharerr-rs"
 
 # One version pin per dependency, for the whole workspace.
 #
@@ -80,7 +80,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
 tokio = "1.53.1"
-toml_edit = "0.22"
+toml_edit = "0.22.27"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
 #-process, so the handler tests exercise the real middleware stack — the auth
 # guard and the cross-origin layer — rather than the handlers in isolation.
@@ -92,6 +92,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # filter runs, so e.g. `Amélie` transliterates to `Amelie` instead of `Am.lie`.
 unicode-normalization = "0.1.25"
 url = "2.5.8"
+# The OpenAPI spec is generated from the handlers themselves rather than
+# hand-written, so a route cannot be documented into existence or quietly
+# forgotten. `utoipa-axum` is what makes the second half of that true: a
+# machine-facing route is mounted *through* the spec, so the router and the
+# document are the same declaration. See `sharerr::openapi`.
+utoipa = { version = "5.5.0", features = ["axum_extras", "url", "preserve_order"] }
+utoipa-axum = "0.2.0"
 wiremock = "0.6.5"
 zeroize = "1.9.0"
 
@@ -115,6 +122,31 @@ missing_debug_implementations = "warn"
 # The vault and qbit clients handle secrets; make accidental panics loud in review.
 unwrap_used = "warn"
 expect_used = "warn"
+
+# Readability. This tree is written to be read — the comments carry the
+# reasoning, and these keep the code around them consistent enough that the
+# comments are the only thing a reader has to slow down for. Each has exactly
+# one right answer, so none of them costs anything to keep green.
+unreadable_literal = "warn"
+semicolon_if_nothing_returned = "warn"
+redundant_closure_for_method_calls = "warn"
+map_unwrap_or = "warn"
+str_to_string = "warn"
+inefficient_to_string = "warn"
+implicit_clone = "warn"
+explicit_iter_loop = "warn"
+format_push_string = "warn"
+
+# Honest signatures. An `async fn` that never awaits and a `-> Result` that
+# never errors both make a caller carry ceremony for a promise the function
+# does not make -- and both hide a real one being added later.
+unused_async = "warn"
+unnecessary_wraps = "warn"
+
+# A hand-written Debug that quietly drops a field makes a debugging session
+# lie to you. Paired with `missing_debug_implementations` above, which only
+# ensures a Debug exists at all.
+missing_fields_in_debug = "warn"
 
 [profile.release]
 lto = "thin"

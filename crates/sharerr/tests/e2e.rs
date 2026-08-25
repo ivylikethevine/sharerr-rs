@@ -76,9 +76,8 @@ fn repo_root() -> PathBuf {
 }
 
 fn media_root() -> PathBuf {
-    std::env::var("SHARERR_E2E_MEDIA") // listed in settings::NON_CONFIG_ENV
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| repo_root().join("tests/fixtures/media"))
+    std::env::var("SHARERR_E2E_MEDIA")
+        .map_or_else(|_| repo_root().join("tests/fixtures/media"), PathBuf::from)
 }
 
 /// Every regular file under `root`, by path relative to it.

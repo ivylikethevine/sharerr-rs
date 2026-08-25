@@ -36,36 +36,8 @@
     Copy this into a shell on a machine that is <em>not</em> on this network.
     It needs only <code>bash</code> and <code>curl</code>.
   </p>
-  <div class="table-scroll">
-    <pre id="debug-script"><code>{{ script }}</code></pre>
-  </div>
-  <button type="button" class="secondary" id="debug-copy">Copy script</button>
-  <span id="debug-copied"></span>
+  <pre id="debug-script" class="wrap"><code>{{ script }}</code></pre>
+  <button type="button" class="secondary" data-copy="#debug-script">Copy script</button>
+  <span data-copy-note></span>
 </div>
-
-<script>
-(function () {
-  var button = document.getElementById("debug-copy");
-  var source = document.getElementById("debug-script");
-  var note = document.getElementById("debug-copied");
-  button.addEventListener("click", function () {
-    var text = source.textContent;
-    // `navigator.clipboard` needs a secure context, which a plain-HTTP LAN
-    // instance is not — so fall back to selecting the block for a manual copy
-    // rather than silently doing nothing.
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(function () {
-        note.textContent = " Copied.";
-      });
-      return;
-    }
-    var range = document.createRange();
-    range.selectNodeContents(source);
-    var sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    note.textContent = " Selected — press Ctrl+C.";
-  });
-})();
-</script>
 {% endblock %}

@@ -197,6 +197,23 @@ impl Peer {
     }
 }
 
+/// A swarm's peers still inside their TTL as of `now`.
+fn live(swarm: &Swarm, now: Instant) -> impl Iterator<Item = (&PeerId, &Peer)> {
+    swarm.iter().filter(move |(_, peer)| peer.is_live(now))
+}
+
+/// `(complete, incomplete)` — seeders and leechers — among a swarm's live
+/// peers as of `now`. The one split every view of a swarm reports.
+fn tally(swarm: &Swarm, now: Instant) -> (usize, usize) {
+    live(swarm, now).fold((0, 0), |(complete, incomplete), (_, peer)| {
+        if peer.left == 0 {
+            (complete + 1, incomplete)
+        } else {
+            (complete, incomplete + 1)
+        }
+    })
+}
+
 /// Every swarm this tracker is serving, keyed by info hash.
 ///
 /// In memory only. A restart loses the peer lists, and every client re-announces
@@ -264,19 +281,15 @@ impl Swarms {
             );
         }
 
-        let (mut complete, mut incomplete) = (0, 0);
-        let mut peers = Vec::new();
-        for (peer_id, peer) in swarm.iter() {
-            if peer.left == 0 {
-                complete += 1;
-            } else {
-                incomplete += 1;
-            }
-            // Never hand a client its own address back; it would connect to itself.
-            if peer_id != &request.peer_id && peers.len() < request.numwant {
-                peers.push(peer.addr);
-            }
-        }
+        // Everything left after the sweep is live, so this counts the whole swarm.
+        let (complete, incomplete) = tally(swarm, now);
+        // Never hand a client its own address back; it would connect to itself.
+        let peers = swarm
+            .iter()
+            .filter(|(peer_id, _)| *peer_id != &request.peer_id)
+            .take(request.numwant)
+            .map(|(_, peer)| peer.addr)
+            .collect();
 
         // An empty swarm must not linger: it would grow the map by one entry per
         // torrent ever announced and never shrink.
@@ -302,17 +315,11 @@ impl Swarms {
 
         let mut stats = SwarmStats::default();
         for swarm in swarms.values() {
-            let live = swarm.values().filter(|peer| peer.is_live(now));
-            let mut any = false;
-            for peer in live {
-                any = true;
-                stats.peers += 1;
-                if peer.left == 0 {
-                    stats.seeders += 1;
-                }
-            }
-            if any {
+            let (seeders, leechers) = tally(swarm, now);
+            if seeders + leechers > 0 {
                 stats.swarms += 1;
+                stats.peers += seeders + leechers;
+                stats.seeders += seeders;
             }
         }
         stats
@@ -328,24 +335,17 @@ impl Swarms {
 
         let mut result = Vec::new();
         for (info_hash, swarm) in swarms.iter() {
-            let mut peers = Vec::new();
-            let (mut complete, mut incomplete) = (0, 0);
-            for peer in swarm.values().filter(|peer| peer.is_live(now)) {
-                peers.push(peer.addr);
-                if peer.left == 0 {
-                    complete += 1;
-                } else {
-                    incomplete += 1;
-                }
+            let peers: Vec<SocketAddr> = live(swarm, now).map(|(_, peer)| peer.addr).collect();
+            if peers.is_empty() {
+                continue;
             }
-            if !peers.is_empty() {
-                result.push(SwarmView {
-                    info_hash: *info_hash,
-                    peers,
-                    complete,
-                    incomplete,
-                });
-            }
+            let (complete, incomplete) = tally(swarm, now);
+            result.push(SwarmView {
+                info_hash: *info_hash,
+                peers,
+                complete,
+                incomplete,
+            });
         }
         result
     }
@@ -357,17 +357,7 @@ impl Swarms {
             return (0, 0);
         };
 
-        let now = Instant::now();
-        swarm.values().filter(|peer| peer.is_live(now)).fold(
-            (0, 0),
-            |(complete, incomplete), peer| {
-                if peer.left == 0 {
-                    (complete + 1, incomplete)
-                } else {
-                    (complete, incomplete + 1)
-                }
-            },
-        )
+        tally(swarm, Instant::now())
     }
 
     /// How many swarms are currently tracked.
@@ -392,28 +382,33 @@ impl AnnounceResponse {
     /// `compact` selects the packed 6-bytes-per-peer form, which is what modern
     /// clients ask for.
     pub fn to_bencode(&self, compact: bool) -> Vec<u8> {
-        let mut out = Vec::with_capacity(128);
+        let mut out = Vec::with_capacity(128 + self.peers.len() * 18);
         out.push(b'd');
 
         // Keys must be in lexicographic order for a well-formed bencoded dict.
         put_int(&mut out, "complete", self.complete as i64);
         put_int(&mut out, "incomplete", self.incomplete as i64);
         put_int(&mut out, "interval", INTERVAL.as_secs() as i64);
-        put_key(&mut out, "min interval");
-        put_raw_int(&mut out, MIN_INTERVAL.as_secs() as i64);
+        put_int(&mut out, "min interval", MIN_INTERVAL.as_secs() as i64);
 
-        let (v4, v6): (Vec<&SocketAddr>, Vec<&SocketAddr>) =
-            self.peers.iter().partition(|a| a.is_ipv4());
+        // `peers` and `peers6` are separate keys, so the two families are
+        // counted up front and each packed straight into `out` behind its own
+        // length prefix — no partitioned copies, no intermediate buffer.
+        let v6_count = self.peers.iter().filter(|a| a.is_ipv6()).count();
+        let v4_count = self.peers.len() - v6_count;
+        let v4 = || self.peers.iter().filter(|a| a.is_ipv4());
+        let v6 = || self.peers.iter().filter(|a| a.is_ipv6());
 
         put_key(&mut out, "peers");
         if compact {
-            put_bytes(&mut out, &pack_compact(&v4));
+            put_len(&mut out, v4_count * 6);
+            v4().for_each(|addr| pack_compact(&mut out, addr));
         } else {
             // The dictionary form has no separate `peers6`: every peer goes
             // in the one list, v6 included, or a `compact=0` client in a v6
             // swarm sees counts but an empty list forever.
             out.push(b'l');
-            for addr in v4.iter().chain(v6.iter()) {
+            for addr in v4().chain(v6()) {
                 out.push(b'd');
                 put_key(&mut out, "ip");
                 put_bytes(&mut out, addr.ip().to_string().as_bytes());
@@ -426,9 +421,10 @@ impl AnnounceResponse {
 
         // Only emitted when there is something to put in it. An empty `peers6` is
         // harmless but some older clients are happier without the key at all.
-        if compact && !v6.is_empty() {
+        if compact && v6_count > 0 {
             put_key(&mut out, "peers6");
-            put_bytes(&mut out, &pack_compact(&v6));
+            put_len(&mut out, v6_count * 18);
+            v6().for_each(|addr| pack_compact(&mut out, addr));
         }
 
         out.push(b'e');
@@ -474,9 +470,14 @@ fn put_key(out: &mut Vec<u8>, key: &str) {
 }
 
 fn put_bytes(out: &mut Vec<u8>, value: &[u8]) {
-    out.extend_from_slice(value.len().to_string().as_bytes());
-    out.push(b':');
+    put_len(out, value.len());
     out.extend_from_slice(value);
+}
+
+/// The `<len>:` prefix of a byte string, for a payload written afterwards.
+fn put_len(out: &mut Vec<u8>, len: usize) {
+    out.extend_from_slice(len.to_string().as_bytes());
+    out.push(b':');
 }
 
 fn put_raw_int(out: &mut Vec<u8>, value: i64) {
@@ -557,20 +558,15 @@ fn percent_decode(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Pack peers in BEP 23/7 compact form: address octets then a big-endian port,
-/// 6 bytes per IPv4 peer and 18 per IPv6. The caller partitions by family —
-/// `peers` and `peers6` are separate keys — and this packs whichever list it is
-/// handed.
-fn pack_compact(addrs: &[&SocketAddr]) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(addrs.len() * 18);
-    for addr in addrs {
-        match addr.ip() {
-            IpAddr::V4(ip) => packed.extend_from_slice(&ip.octets()),
-            IpAddr::V6(ip) => packed.extend_from_slice(&ip.octets()),
-        }
-        packed.extend_from_slice(&addr.port().to_be_bytes());
+/// Append one peer in BEP 23/7 compact form: address octets then a big-endian
+/// port, 6 bytes for IPv4 and 18 for IPv6. The caller keeps the families apart
+/// — `peers` and `peers6` are separate keys — and writes the length prefix.
+fn pack_compact(out: &mut Vec<u8>, addr: &SocketAddr) {
+    match addr.ip() {
+        IpAddr::V4(ip) => out.extend_from_slice(&ip.octets()),
+        IpAddr::V6(ip) => out.extend_from_slice(&ip.octets()),
     }
-    packed
+    out.extend_from_slice(&addr.port().to_be_bytes());
 }
 
 const fn hex_nibble(byte: u8) -> Option<u8> {
@@ -593,6 +589,8 @@ pub fn info_hash_from_hex(raw: &str) -> Option<InfoHash> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// Percent-encode raw bytes the way a client would — the inverse of
@@ -606,7 +604,9 @@ mod tests {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                     out.push(*byte as char);
                 }
-                _ => out.push_str(&format!("%{byte:02x}")),
+                _ => {
+                    let _ = write!(out, "%{byte:02x}");
+                }
             }
         }
         out

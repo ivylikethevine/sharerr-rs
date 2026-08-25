@@ -206,7 +206,7 @@ fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
         created_at: row.try_get("created_at")?,
         last_seen_at: row.try_get("last_seen_at")?,
         revoked_at: row.try_get("revoked_at")?,
-        scope: PeerScope::parse(&row.try_get::<String, _>("scope")?),
+        scope: PeerScope::parse(row.try_get::<&str, _>("scope")?),
         pubkey: row.try_get("pubkey")?,
         gossip_url: row.try_get("gossip_url")?,
         key_hash: row.try_get("key_hash")?,
