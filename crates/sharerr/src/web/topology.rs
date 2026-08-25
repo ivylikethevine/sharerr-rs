@@ -11,12 +11,13 @@
 //! this port actually on" is answerable at a glance. See the README's
 //! "Topology" section.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use axum::extract::State;
 use axum::response::Response;
 use secrecy::SecretString;
-use sharerr_core::{Config, MediaSource};
+use sharerr_core::{Config, MediaSource, SharedItem};
 use sharerr_store::{EndpointKind, ObservedVia, PeerEndpoint};
 
 use super::WebState;
@@ -187,7 +188,7 @@ async fn gather(state: &WebState) -> TopologyPage {
     // One vault open for the whole page, same reasoning as `diagnostics::gather`:
     // opening it derives the key with Argon2, and paying that once per
     // configured service turned this into the slowest page in the UI.
-    let secret = super::diagnostics::secret_reader(&state.serve).await;
+    let secret = super::diagnostics::secret_reader(state.serve.open_vault().await);
 
     // Shared with `web::diagnostics::gather` — see `checks::snapshot`'s docs
     // for why the arr probes, library scan, and path check live there instead
@@ -445,7 +446,8 @@ async fn swarm_rows(state: &WebState, titles: &HashMap<&str, &str>) -> Vec<Swarm
 /// has something to say, and a row that is simply absent says nothing.
 async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, NodeStatus) {
     let swarm = state.serve.swarms().stats().await;
-    let gluetun_error = super::settings::gluetun_last_error(&state.serve, GluetunTarget::Tracker).await;
+    let gluetun_error =
+        super::settings::gluetun_last_error(&state.serve, GluetunTarget::Tracker).await;
 
     let mut lines = Vec::new();
     let status = match state.serve.endpoint().current() {
@@ -487,9 +489,12 @@ async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, No
         // Two dials, each bounded by its own timeout — made together so a
         // silent drop on one does not delay the other.
         let targets = [("tracker", tracker.as_ref()), ("feed", feed.as_ref())];
-        let outcomes =
-            futures::future::join_all(targets.iter().map(|(_, base)| checks::check_reachable(*base)))
-                .await;
+        let outcomes = futures::future::join_all(
+            targets
+                .iter()
+                .map(|(_, base)| checks::check_reachable(*base)),
+        )
+        .await;
         for ((tag, _), outcome) in targets.iter().zip(outcomes) {
             let text = match &outcome {
                 checks::ReachOutcome::Reachable => "reachable".to_owned(),
@@ -501,7 +506,7 @@ async fn instance_lines(config: &Config, state: &WebState) -> (Vec<NodeLine>, No
             if !outcome.is_reachable() && status == NodeStatus::Ok {
                 status = NodeStatus::Warn;
             }
-            lines.push(line(*tag, text));
+            lines.push(line(tag, text));
         }
     }
 
@@ -1106,12 +1111,9 @@ fn center_offset(lane_h: i32, content_h: i32) -> i32 {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::sync::Arc;
-
     use sharerr_core::Config;
 
     use super::*;
-    use crate::web::auth::Sessions;
 
     fn summary(hash: &str, seeding: bool) -> sharerr_client::TorrentSummary {
         sharerr_client::TorrentSummary {
@@ -1215,12 +1217,7 @@ mod tests {
         assert_eq!(check.expected, 0);
     }
 
-    fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     fn node(label: &str, status: NodeStatus) -> SourceNode {
         SourceNode {

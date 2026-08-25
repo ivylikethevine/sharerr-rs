@@ -204,22 +204,29 @@ async fn status_page(State(state): State<WebState>) -> Response {
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
         config_path: state.serve.config_path().display().to_string(),
-
-        services: diag.services,
-        scanned: diag.scanned,
-        rules: diag.rules,
-        checked: diag.checked,
-        unmapped: diag.unmapped,
-        missing: diag.missing,
-        more_missing: diag.more_missing,
-        invalid: diag.invalid,
-        sample: diag.sample,
-        readable: diag.readable,
-        healthy: diag.healthy,
-        gluetun: diag.gluetun,
-        runs: diag.runs,
-        lighthouse: diag.lighthouse,
+        diag,
     })
+}
+
+/// A `WebState` over a bare `ServeState`, for handler-level tests across the
+/// web modules — one definition rather than a copy per test module.
+#[cfg(test)]
+pub(crate) fn web_state(serve: Arc<ServeState>) -> WebState {
+    WebState {
+        serve,
+        sessions: Arc::new(Sessions::default()),
+    }
+}
+
+/// The `Location` header of a redirect, or `""` — shared by the tests that
+/// assert where a save or a sign-in lands.
+#[cfg(test)]
+pub(crate) fn location(response: &Response) -> &str {
+    response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
 }
 
 /// The one-glance numbers, gathered from the store and the live swarms.
@@ -365,14 +372,6 @@ mod tests {
         Request::builder().method("POST").uri(path)
     }
 
-    fn location(response: &axum::response::Response) -> &str {
-        response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-    }
-
     /// The one-glance numbers, checked against a store with known contents.
     #[tokio::test]
     async fn the_glance_counts_items_friends_and_runs() {
@@ -450,10 +449,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state = WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        };
+        let state = web_state(serve);
         let glance = glance(&state, None).await.expect("the store is available");
 
         assert_eq!(glance.items_shared, 1);
@@ -480,10 +476,7 @@ mod tests {
             };
             let path = dir.join("sharerr.toml");
             let serve = Arc::new(ServeState::new(config, path, None));
-            let state = WebState {
-                serve,
-                sessions: Arc::new(Sessions::default()),
-            };
+            let state = web_state(serve);
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let result = runtime.block_on(state.secret("nonexistent-key"));
@@ -499,10 +492,7 @@ mod tests {
     #[tokio::test]
     async fn the_status_page_renders_for_a_fresh_unconfigured_instance() {
         let (_dir, serve) = unconfigured();
-        let state = WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        };
+        let state = web_state(serve);
 
         let response = status_page(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -511,10 +501,7 @@ mod tests {
     #[tokio::test]
     async fn the_topology_page_renders_for_a_fresh_unconfigured_instance() {
         let (_dir, serve) = unconfigured();
-        let state = WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        };
+        let state = web_state(serve);
 
         let response = topology::page(State(state)).await;
         assert_eq!(response.status(), StatusCode::OK);

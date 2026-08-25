@@ -81,15 +81,15 @@ struct Webhook {
 fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
     CLIENT
-        .get_or_init(|| {
-            match sharerr_client::http_client_with_timeout(Duration::from_secs(10)) {
+        .get_or_init(
+            || match sharerr_client::http_client_with_timeout(Duration::from_secs(10)) {
                 Ok(client) => Some(client),
                 Err(err) => {
                     tracing::warn!(error = %err, "could not build the notification HTTP client");
                     None
                 }
-            }
-        })
+            },
+        )
         .as_ref()
 }
 

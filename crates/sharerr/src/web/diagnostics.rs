@@ -45,33 +45,32 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     // One vault open for the whole page. Opening it derives the key with Argon2 —
     // ~16ms of solid CPU, more on ARM — so paying that once per configured
     // service turned this into the most expensive page in the UI.
-    let api_key = secret_reader(&state.serve).await;
+    let api_key = secret_reader(state.serve.open_vault().await);
 
     // Shared with `web::topology::gather` — see `checks::snapshot`'s docs for
     // why the arr probes, library scan, and path check live there instead of
     // being duplicated per page. The run history and the two poller rows do
     // not depend on it, so they are gathered alongside rather than after.
-    let (snapshot, runs, gluetun) = tokio::join!(
-        checks::snapshot(&config, &api_key),
+    let config = &config;
+    let tracker_endpoint = state.serve.endpoint_for(GluetunTarget::Tracker);
+    let client_endpoint = state.serve.endpoint_for(GluetunTarget::Client);
+    let (snapshot, runs, tracker, client) = tokio::join!(
+        checks::snapshot(config, &api_key),
         recent_run_rows(state),
-        futures::future::join_all(
-            [GluetunTarget::Tracker, GluetunTarget::Client]
-                .into_iter()
-                .map(|target| async move {
-                    let label = match target {
-                        GluetunTarget::Tracker => "Tracker/feed",
-                        GluetunTarget::Client => "Torrent client",
-                    };
-                    endpoint_status(
-                        label,
-                        target.config(&config),
-                        &state.serve.endpoint_for(target),
-                        state.serve.gluetun_status(target),
-                    )
-                    .await
-                }),
+        endpoint_status(
+            display_label(GluetunTarget::Tracker),
+            GluetunTarget::Tracker.config(config),
+            &tracker_endpoint,
+            state.serve.gluetun_status(GluetunTarget::Tracker),
+        ),
+        endpoint_status(
+            display_label(GluetunTarget::Client),
+            GluetunTarget::Client.config(config),
+            &client_endpoint,
+            state.serve.gluetun_status(GluetunTarget::Client),
         ),
     );
+    let gluetun = vec![tracker, client];
     let checks::Snapshot {
         sources,
         libraries,
@@ -80,7 +79,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
 
     let mut services: Vec<ServiceLine> = sources
         .iter()
-        .map(|(kind, outcome)| describe(*kind, &config, outcome))
+        .map(|(kind, outcome)| describe(*kind, config, outcome))
         .collect();
     match &libraries {
         checks::LibraryScan::Scanned(scanned) => {
@@ -130,20 +129,27 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         }),
         gluetun,
         runs,
-        lighthouse: lighthouse_view(state, &config).await,
+        lighthouse: lighthouse_view(state, config).await,
     }
 }
 
-/// The vault opened once, wrapped as the `secret` reader `checks` takes.
+/// The row heading for one gluetun poller, as the status page words it.
+fn display_label(target: GluetunTarget) -> &'static str {
+    match target {
+        GluetunTarget::Tracker => "Tracker/feed",
+        GluetunTarget::Client => "Torrent client",
+    }
+}
+
+/// A vault open (or its failure), wrapped as the `secret` reader `checks` takes.
 ///
 /// Opening the vault derives the key with Argon2 — ~16ms of solid CPU, more
 /// on ARM — so a page or badge that needs several secrets opens it once and
 /// reads through this rather than going through `WebState::secret` per key.
 /// A vault that would not open answers every read with the same reason.
-pub(super) async fn secret_reader(
-    state: &crate::state::ServeState,
+pub(super) fn secret_reader(
+    vault: Result<sharerr_store::Vault, String>,
 ) -> impl Fn(&'static str) -> Result<Option<SecretString>, String> {
-    let vault = state.open_vault().await;
     move |key: &'static str| match &vault {
         Ok(vault) => vault.get(key).map_err(|err| err.to_string()),
         Err(reason) => Err(reason.clone()),
@@ -357,17 +363,8 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::web::auth::Sessions;
 
-    /// Same helper `web/settings.rs` and `web/probe.rs` build: a `WebState`
-    /// wired to a `ServeState` fixture rather than a real signed-in router,
-    /// which nothing else in this module's test needs.
-    fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     // ---------------------------------------------------------------- gather
 
@@ -719,8 +716,10 @@ mod tests {
 
     #[test]
     fn describe_names_a_healthy_service_with_its_file_count() {
-        let mut config = Config::default();
-        config.tag = "sharerr".to_owned();
+        let config = Config {
+            tag: "sharerr".to_owned(),
+            ..Config::default()
+        };
         let outcome = ArrOutcome::Ready {
             version: "4.0.15".to_owned(),
             app_name: "Sonarr".to_owned(),

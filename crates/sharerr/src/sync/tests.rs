@@ -19,6 +19,7 @@ use sharerr_core::{Config, MediaSource, ShareState};
 use sharerr_qbit::QbitClient;
 use sharerr_store::Store;
 use sharerr_testkit::library::{self, TvLibrary};
+use sharerr_testkit::mock::{self, QBIT_API_KEY, multipart_field};
 use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, TrackerProvider};
 use url::Url;
 use wiremock::matchers::{method, path as route};
@@ -311,16 +312,6 @@ struct QbitSnapshot {
     trackers_removed: Vec<String>,
 }
 
-/// Pull `name="key"\r\n\r\nvalue` out of a multipart body.
-fn multipart_field(body: &str, key: &str) -> Option<String> {
-    let marker = format!("name=\"{key}\"");
-    let rest = body.split(&marker).nth(1)?;
-    rest.trim_start()
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_owned())
-}
-
 /// Pull a `key=value` out of either a multipart header or a urlencoded body.
 fn form_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     let rest = body.split(key).nth(1)?;
@@ -382,13 +373,15 @@ struct Harness {
     _qbit_server: MockServer,
 }
 
-/// Build a stack with Sonarr serving `series_json` and the library on disk.
-async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
+/// Build a stack with Sonarr serving `series_json` (the library's own tagged
+/// series when `None`) and the library on disk.
+async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness {
     let media = tempfile::tempdir().unwrap();
     let torrents = tempfile::tempdir().unwrap();
     let lib = library::tv_library(media.path()).unwrap();
 
     let sonarr_server = MockServer::start().await;
+    let series_json = series_json.unwrap_or_else(|| lib.series_json());
     for (path, body) in [
         (
             "/api/v3/system/status",
@@ -399,11 +392,7 @@ async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
         ("/api/v3/episodefile", lib.episodefile_json()),
         ("/api/v3/episode", lib.episode_json()),
     ] {
-        Mock::given(method("GET"))
-            .and(route(path))
-            .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .mount(&sonarr_server)
-            .await;
+        mock::mount_json(&sonarr_server, path, body).await;
     }
 
     let qbit_server = MockServer::start().await;
@@ -412,7 +401,7 @@ async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
 
     let sonarr = sharerr_arr::ArrClient::new(
         MediaSource::Sonarr,
-        &Url::parse(&sonarr_server.uri()).unwrap(),
+        &mock::base_url(&sonarr_server),
         SecretString::from("test-key"),
     )
     .unwrap();
@@ -421,8 +410,8 @@ async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
     // concrete client is one implementation of it.
     let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(
         QbitClient::with_api_key(
-            &Url::parse(&qbit_server.uri()).unwrap(),
-            SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            &mock::base_url(&qbit_server),
+            SecretString::from(QBIT_API_KEY),
         )
         .unwrap(),
     );
@@ -431,7 +420,7 @@ async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
     let config = Config {
         tag: "sharerr".to_owned(),
         sonarr: Some(ServiceConfig {
-            url: Url::parse(&sonarr_server.uri()).unwrap(),
+            url: mock::base_url(&sonarr_server),
         }),
         path_map: vec![PathMapping {
             arr: PathBuf::from(library::ARR_TV_PREFIX),
@@ -475,46 +464,36 @@ async fn harness(series_json: Value, seeding: SeedingConfig) -> Harness {
 
 /// The default library: one tagged series with two files.
 async fn tagged_harness() -> Harness {
-    let series = json!([
-        {
-            "id": 11,
-            "title": "Lanternwick Hollow",
-            "tvdbId": 918_273,
-            "tvMazeId": 4242,
-            "imdbId": "tt7654321",
-            "tags": [library::TAG_ID],
-        },
-        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112_233, "tags": [1] },
-    ]);
-    harness(series, SeedingConfig::default()).await
+    harness(None, SeedingConfig::default()).await
 }
 
 /// The default library, with a seeding goal configured — see
 /// `an_add_carries_the_configured_seeding_goal`.
 async fn tagged_harness_with_seeding(seeding: SeedingConfig) -> Harness {
-    let series = json!([
-        {
-            "id": 11,
-            "title": "Lanternwick Hollow",
-            "tvdbId": 918_273,
-            "tvMazeId": 4242,
-            "imdbId": "tt7654321",
-            "tags": [library::TAG_ID],
-        },
-        { "id": 12, "title": "Copper Vale Station", "tvdbId": 112_233, "tags": [1] },
-    ]);
-    harness(series, seeding).await
+    harness(None, seeding).await
 }
 
 /// The same library with the tag removed — what happens after an operator untags.
 async fn untagged_harness() -> Harness {
     harness(
-        json!([
-            { "id": 11, "title": "Lanternwick Hollow", "tvdbId": 918_273, "tags": [1] },
-        ]),
+        Some(json!([
+            { "id": library::SERIES_ID, "title": library::SERIES_TITLE, "tvdbId": library::SERIES_TVDB_ID, "tags": [1] },
+        ])),
         SeedingConfig::default(),
     )
     .await
+}
+
+/// Every stored item keyed the way `withdraw_untagged` wants it.
+async fn known(h: &Harness) -> HashMap<(MediaSource, i64), sharerr_core::SharedItem> {
+    h.syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|i| (i.key(), i))
+        .collect()
 }
 
 fn file_identity(path: &Path) -> (u64, std::time::SystemTime, u64) {
@@ -809,15 +788,7 @@ async fn an_item_that_loses_its_tag_is_unshared_and_its_torrent_removed() {
     // Point the same syncer at a Sonarr that no longer reports the tag by swapping
     // the series response. Simpler: drive `withdraw_untagged` through a run where
     // discovery returns nothing, which is what untagging looks like from here.
-    let known = h
-        .syncer
-        .store()
-        .all_items()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|i| (i.key(), i))
-        .collect();
+    let known = known(&h).await;
     let removed = h
         .syncer
         // Sonarr answered and reported nothing tagged, so its items may be withdrawn.
@@ -881,15 +852,7 @@ async fn withdrawing_an_adopted_torrent_leaves_it_in_the_client() {
 
     // Re-read, so the map carries the flag just written — the withdrawal reads
     // it off these rows.
-    let known: HashMap<_, _> = h
-        .syncer
-        .store()
-        .all_items()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|i| (i.key(), i))
-        .collect();
+    let known = known(&h).await;
     assert!(known.values().all(|i| !i.created_by_sharerr));
 
     let removed = h
@@ -926,15 +889,7 @@ async fn withdraw_untagged_dry_run_counts_without_removing_anything() {
     let h = tagged_harness().await;
     h.syncer.run(false).await.unwrap();
 
-    let known = h
-        .syncer
-        .store()
-        .all_items()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|i| (i.key(), i))
-        .collect();
+    let known = known(&h).await;
     let removed = h
         .syncer
         .withdraw_untagged(
@@ -1034,7 +989,14 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
 
     let result = h
         .syncer
-        .share(&item, &announce, &HashSet::new(), &[], None, false)
+        .share(
+            &item,
+            &announce,
+            &HashSet::new(),
+            &super::seed::KnownTorrents::default(),
+            None,
+            false,
+        )
         .await;
     let Err(err) = result else {
         panic!("an unresolvable path must fail");
@@ -1416,23 +1378,27 @@ async fn a_directory_dry_run_writes_nothing() {
 
 // ------------------------------------------------- multi-app resilience
 
-/// Attach a Radarr that fails every request to an otherwise-healthy harness.
-async fn with_broken_radarr(h: &mut Harness) -> MockServer {
-    let radarr = MockServer::start().await;
+/// An *arr app of the given kind that fails every request.
+async fn broken_arr(source: MediaSource) -> (MockServer, Box<dyn super::LibrarySource>) {
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(route("/api/v3/tag"))
         .respond_with(ResponseTemplate::new(500))
-        .mount(&radarr)
+        .mount(&server)
         .await;
+    let client = sharerr_arr::ArrClient::new(
+        source,
+        &mock::base_url(&server),
+        SecretString::from("test-key"),
+    )
+    .unwrap();
+    (server, Box::new(client))
+}
 
-    h.syncer.sources.push(Box::new(
-        sharerr_arr::ArrClient::new(
-            MediaSource::Radarr,
-            &Url::parse(&radarr.uri()).unwrap(),
-            SecretString::from("test-key"),
-        )
-        .unwrap(),
-    ));
+/// Attach a Radarr that fails every request to an otherwise-healthy harness.
+async fn with_broken_radarr(h: &mut Harness) -> MockServer {
+    let (radarr, client) = broken_arr(MediaSource::Radarr).await;
+    h.syncer.sources.push(client);
     radarr
 }
 
@@ -1526,22 +1492,9 @@ async fn a_pass_with_no_reachable_arr_app_changes_nothing() {
     h.syncer.run(false).await.unwrap();
     let before = h.qbit.snapshot();
 
-    // Break the one healthy app too.
-    let broken = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(route("/api/v3/tag"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&broken)
-        .await;
-    // Replace the only *arr client with a broken one.
-    h.syncer.sources = vec![Box::new(
-        sharerr_arr::ArrClient::new(
-            MediaSource::Sonarr,
-            &Url::parse(&broken.uri()).unwrap(),
-            SecretString::from("test-key"),
-        )
-        .unwrap(),
-    )];
+    // Break the one healthy app too: replace the only *arr client with a broken one.
+    let (_broken, client) = broken_arr(MediaSource::Sonarr).await;
+    h.syncer.sources = vec![client];
 
     let err = h.syncer.run(false).await.unwrap_err();
     assert!(err.to_string().contains("no library source"), "got {err:#}");
@@ -1561,21 +1514,9 @@ async fn a_pass_with_no_reachable_arr_app_changes_nothing() {
 #[tokio::test]
 async fn a_failed_pass_records_its_reason() {
     let mut h = tagged_harness().await;
-    let broken = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(route("/api/v3/tag"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&broken)
-        .await;
     // Replace the only *arr client with a broken one.
-    h.syncer.sources = vec![Box::new(
-        sharerr_arr::ArrClient::new(
-            MediaSource::Sonarr,
-            &Url::parse(&broken.uri()).unwrap(),
-            SecretString::from("test-key"),
-        )
-        .unwrap(),
-    )];
+    let (_broken, client) = broken_arr(MediaSource::Sonarr).await;
+    h.syncer.sources = vec![client];
 
     h.syncer.run(false).await.unwrap_err();
 
@@ -1608,6 +1549,24 @@ async fn a_run_is_recorded_in_history() {
 /// required.
 fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
     sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master")).unwrap()
+}
+
+/// Store the qBittorrent credential `build_client` needs for the default backend.
+fn seed_qbit_key(vault: &mut sharerr_store::Vault) {
+    vault
+        .put(
+            sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
+            &SecretString::from(QBIT_API_KEY),
+        )
+        .unwrap();
+}
+
+/// Open `config`'s vault under `master_key` and seed the qBittorrent credential,
+/// for the `Syncer::build` tests that read the vault from disk.
+fn seed_qbit_key_at(config: &Config, master_key: &str) {
+    let mut vault =
+        sharerr_store::Vault::open(config.vault_path(), &SecretString::from(master_key)).unwrap();
+    seed_qbit_key(&mut vault);
 }
 
 #[test]
@@ -1679,12 +1638,7 @@ fn build_client_fails_naming_the_missing_key_for_the_selected_backend() {
 fn build_client_succeeds_once_the_backends_credential_is_stored() {
     let dir = tempfile::tempdir().unwrap();
     let mut vault = vault_in(&dir);
-    vault
-        .put(
-            sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
-        )
-        .unwrap();
+    seed_qbit_key(&mut vault);
     let config = Config::default();
 
     assert!(super::build_client(&config, &vault).is_ok());
@@ -1754,16 +1708,7 @@ fn build_bails_when_no_library_source_is_configured() {
         // build_client (called before the sources check) needs the qbit
         // credential in the vault, or the bail this test wants would be masked
         // by an earlier, unrelated failure.
-        let mut vault =
-            sharerr_store::Vault::open(config.vault_path(), &SecretString::from("a-master-key"))
-                .unwrap();
-        vault
-            .put(
-                sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
-                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
-            )
-            .unwrap();
-        drop(vault);
+        seed_qbit_key_at(&config, "a-master-key");
 
         let endpoint = Arc::new(sharerr_core::endpoint::AdvertisedEndpoint::new(None));
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -1790,16 +1735,7 @@ fn build_succeeds_with_a_configured_library_and_torrent_client() {
             ..Config::default()
         };
 
-        let mut vault =
-            sharerr_store::Vault::open(config.vault_path(), &SecretString::from("a-master-key"))
-                .unwrap();
-        vault
-            .put(
-                sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
-                &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
-            )
-            .unwrap();
-        drop(vault);
+        seed_qbit_key_at(&config, "a-master-key");
 
         let endpoint = Arc::new(sharerr_core::endpoint::AdvertisedEndpoint::new(None));
         let runtime = tokio::runtime::Runtime::new().unwrap();

@@ -119,37 +119,9 @@ pub struct StatusPage {
     pub config_path: String,
 
     // ------------------------------------------------------ diagnostics
-    /// Live connectivity + tag/path checks, one line per *arr app and per
-    /// `[[library]]` directory — only for what is actually configured. Shared
-    /// with `doctor` via `crate::checks`, so the two cannot disagree about
-    /// what they found.
-    pub services: Vec<ServiceLine>,
-    /// Whether any tagged file was found at all. Distinguishes "everything
-    /// resolves" from "there was nothing to resolve", which look identical if you
-    /// only count failures.
-    pub scanned: bool,
-    pub rules: usize,
-    pub checked: usize,
-    pub unmapped: usize,
-    /// Capped for display; `more_missing` carries the remainder.
-    pub missing: Vec<String>,
-    pub more_missing: usize,
-    pub invalid: Vec<String>,
-    pub sample: Option<SampleRow>,
-    /// Files that resolved to something sharerr can actually open.
-    pub readable: usize,
-    /// Whether anything here stops a file being shared. Drives the one-line verdict
-    /// at the top, so the answer is visible without reading the whole page.
-    pub healthy: bool,
-    /// One row per gluetun poller (tracker, then client) — what each is
-    /// pointed at, what it last saw, and what it last failed with.
-    pub gluetun: Vec<EndpointStatus>,
-    /// The last few sync runs, newest first — the glance above only shows the
-    /// single latest one.
-    pub runs: Vec<RunRow>,
-    /// What the lighthouse poller is doing, or `None` when none is configured
-    /// — the section is omitted entirely in that case.
-    pub lighthouse: Option<LighthouseView>,
+    /// The deeper checks, gathered by `diagnostics::gather` — the template
+    /// reads them as `diag.x`.
+    pub diag: DiagnosticsData,
 }
 
 /// What the lighthouse poller is doing, pre-rendered.
@@ -229,6 +201,20 @@ pub struct PathRow {
     pub arr: String,
     pub sharerr: String,
     pub qbit: String,
+}
+
+impl From<&sharerr_core::config::PathMapping> for PathRow {
+    fn from(m: &sharerr_core::config::PathMapping) -> Self {
+        Self {
+            arr: m.arr.display().to_string(),
+            sharerr: m.sharerr.display().to_string(),
+            qbit: m
+                .qbit
+                .as_ref()
+                .map(|q| q.display().to_string())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// One row of the `[[library]]` table — form state, same as [`PathRow`].
@@ -448,12 +434,15 @@ pub struct SettingsPage {
     pub config_path: String,
 }
 
-/// One `<option>` in a peer-scope selector.
+/// One `<option>` in a `<select>`: the wire value and the text shown for it.
 #[derive(Debug)]
-pub struct ScopeOption {
+pub struct SelectOption {
     pub value: &'static str,
     pub label: String,
 }
+
+/// One `<option>` in a peer-scope selector.
+pub type ScopeOption = SelectOption;
 
 /// One *arr app's section on the settings page.
 #[derive(Debug)]
@@ -503,19 +492,36 @@ pub struct SampleRow {
 /// instead of an eleven-tuple.
 #[derive(Debug)]
 pub struct DiagnosticsData {
+    /// Live connectivity + tag/path checks, one line per *arr app and per
+    /// `[[library]]` directory — only for what is actually configured. Shared
+    /// with `doctor` via `crate::checks`, so the two cannot disagree about
+    /// what they found.
     pub services: Vec<ServiceLine>,
+    /// Whether any tagged file was found at all. Distinguishes "everything
+    /// resolves" from "there was nothing to resolve", which look identical if you
+    /// only count failures.
     pub scanned: bool,
     pub rules: usize,
     pub checked: usize,
     pub unmapped: usize,
+    /// Capped for display; `more_missing` carries the remainder.
     pub missing: Vec<String>,
     pub more_missing: usize,
     pub invalid: Vec<String>,
     pub sample: Option<SampleRow>,
+    /// Files that resolved to something sharerr can actually open.
     pub readable: usize,
+    /// Whether anything here stops a file being shared. Drives the one-line verdict
+    /// at the top, so the answer is visible without reading the whole page.
     pub healthy: bool,
+    /// One row per gluetun poller (tracker, then client) — what each is
+    /// pointed at, what it last saw, and what it last failed with.
     pub gluetun: Vec<EndpointStatus>,
+    /// The last few sync runs, newest first — the glance above only shows the
+    /// single latest one.
     pub runs: Vec<RunRow>,
+    /// What the lighthouse poller is doing, or `None` when none is configured
+    /// — the section is omitted entirely in that case.
     pub lighthouse: Option<LighthouseView>,
 }
 
@@ -635,11 +641,7 @@ pub struct RevealedPeer {
 }
 
 /// One `<option>` in the items page's source/state filters.
-#[derive(Debug)]
-pub struct FilterOption {
-    pub value: &'static str,
-    pub label: String,
-}
+pub type FilterOption = SelectOption;
 
 /// One column header on the items page, pre-rendered as a link that toggles
 /// direction on the next click — the template has no scripting to do this

@@ -36,8 +36,6 @@ mod sonarr;
 /// possibly running on the same small box.
 pub(crate) const DISCOVERY_CONCURRENCY: usize = 8;
 
-use std::future::Future;
-
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 /// An *arr entity at the level the sharerr tag is applied — a series, movie,
@@ -54,7 +52,7 @@ pub(crate) trait Tagged {
 /// it is why the fetch results are collected before any `Discovered` is built:
 /// assembling one is pure CPU, and the output order must not depend on which
 /// response landed first. `what` names the entity in the scan log line.
-pub(crate) async fn fetch_tagged<'a, E, P, F, Fut>(
+pub(crate) async fn fetch_tagged<'a, E, P, F>(
     client: &'a ArrClient,
     entities: &'a [E],
     tag_id: i64,
@@ -63,8 +61,7 @@ pub(crate) async fn fetch_tagged<'a, E, P, F, Fut>(
 ) -> Result<Vec<(&'a E, P)>>
 where
     E: Tagged,
-    F: Fn(&'a ArrClient, &'a E) -> Fut,
-    Fut: Future<Output = Result<P>>,
+    F: AsyncFn(&'a ArrClient, &'a E) -> Result<P>,
 {
     let tagged: Vec<&'a E> = entities
         .iter()
@@ -77,8 +74,11 @@ where
         "{what} scanned for the sharerr tag"
     );
 
-    let fetched: Vec<P> = stream::iter(tagged.iter().copied())
-        .map(|entity| fetch(client, entity))
+    // The futures are built up front rather than inside a stream `map`: a
+    // closure there is inferred higher-ranked over the entity borrow, and the
+    // `async_trait` wrapper in the binary cannot then prove the walk is `Send`.
+    let pending: Vec<_> = tagged.iter().map(|&entity| fetch(client, entity)).collect();
+    let fetched: Vec<P> = stream::iter(pending)
         .buffered(DISCOVERY_CONCURRENCY)
         .try_collect()
         .await?;

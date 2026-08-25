@@ -43,7 +43,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use sharerr_store::{EndpointKind, Store};
 use sharerr_torrent::announce::{
-    self, AnnounceError, AnnounceRequest, InfoHash, Swarms, failure_bencode, scrape_bencode,
+    self, AnnounceError, AnnounceRequest, InfoHash, failure_bencode, scrape_bencode,
 };
 use utoipa_axum::router::OpenApiRouter;
 
@@ -587,8 +587,10 @@ pub async fn torrent_file(
         return (StatusCode::NOT_FOUND, "not shared").into_response();
     }
 
-    let path =
-        sharerr_torrent::torrent_file_path(&state.serve.torrent_dir().await, &hex::encode(info_hash));
+    let path = sharerr_torrent::torrent_file_path(
+        &state.serve.torrent_dir().await,
+        &hex::encode(info_hash),
+    );
 
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -1028,7 +1030,7 @@ mod tests {
         );
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
-        let rewritten = attributed_bytes(&tracker_state, &built.data, &sam.key_hash).await;
+        let rewritten = attributed_bytes(&tracker_state, built.data.clone(), &sam.key_hash).await;
 
         let announce = sharerr_torrent::read_announce(&rewritten).unwrap().unwrap();
         assert!(
@@ -1060,7 +1062,7 @@ mod tests {
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
         for token in ["not-a-real-token", &alex.key_hash] {
-            let result = attributed_bytes(&tracker_state, &built.data, token).await;
+            let result = attributed_bytes(&tracker_state, built.data.clone(), token).await;
             assert_eq!(
                 result, built.data,
                 "token {token:?} should not change the served bytes"
@@ -1082,7 +1084,7 @@ mod tests {
         let tracker_state = TrackerState::new(Arc::clone(&state));
 
         let garbage = b"not a bencoded torrent".to_vec();
-        let result = attributed_bytes(&tracker_state, &garbage, &sam.key_hash).await;
+        let result = attributed_bytes(&tracker_state, garbage.clone(), &sam.key_hash).await;
         assert_eq!(result, garbage);
     }
 

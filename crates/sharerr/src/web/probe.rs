@@ -210,7 +210,7 @@ async fn torrent_client_badge(
 
     // Opened once — going through `state.secret` for each key would open (and
     // Argon2-derive) the vault twice for one badge.
-    let secret = super::diagnostics::secret_reader(&state.serve).await;
+    let secret = super::diagnostics::secret_reader(state.serve.open_vault().await);
     let credential = resolve_torrent_credential(&client, &secret);
 
     let outcome = check_qbit(backend, client.url, client.username, credential).await;
@@ -278,12 +278,7 @@ mod tests {
     // branch (`CredentialUnreadable`/an unreadable-vault `Outcome::Bad`),
     // just never the "credential found and it works" happy path.
 
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     #[tokio::test]
     async fn library_badge_with_nothing_configured_says_so() {

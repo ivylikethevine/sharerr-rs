@@ -188,7 +188,13 @@ fn summarize(failures: usize, warnings: usize) -> Result<()> {
 
 // ------------------------------------------------------------------ vault
 
-fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
+/// Open the vault and report which keys are present. Also hands back the
+/// torrent client's resolved credential, so the client section can use the
+/// one this section already diagnosed instead of resolving it a second time.
+fn check_vault(
+    config: &Config,
+    report: &mut Report,
+) -> (Option<Vault>, Option<checks::TorrentCredential>) {
     let vault = match crate::secrets::open_vault(config) {
         Ok(vault) => vault,
         Err(err) => {
@@ -196,7 +202,7 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
             // vault path for an open failure and correctly does not for a
             // missing master key.
             report.fail(format!("{err:#}"));
-            return None;
+            return (None, None);
         }
     };
 
@@ -209,8 +215,7 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
     // checked as a pair rather than as two independent keys — demanding both would
     // fail an operator who moved to an API key and, correctly, cleared the
     // password they no longer use.
-    let client = config.torrent_client();
-    check_torrent_credential(&vault, client.api_key_key, client.password_key, report);
+    let torrent_credential = check_torrent_credential(&vault, &config.torrent_client(), report);
 
     for key in config
         .configured_sources()
@@ -224,7 +229,7 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
         }
     }
 
-    Some(vault)
+    (Some(vault), torrent_credential)
 }
 
 /// Report on the credential the configured torrent client will authenticate with.
@@ -232,46 +237,51 @@ fn check_vault(config: &Config, report: &mut Report) -> Option<Vault> {
 /// One report line, not two, because the keys are alternatives: whichever is
 /// present is the one that will be used, and only the absence of *both* is a
 /// problem worth failing on.
+///
+/// Which key wins is `checks::resolve_torrent_credential`'s decision, made
+/// once for every caller; this only reports it. The resolved credential is
+/// returned so `check_qbit` can authenticate with it.
 fn check_torrent_credential(
     vault: &Vault,
-    api_key_key: Option<&'static str>,
-    password_key: Option<&'static str>,
+    client: &sharerr_core::config::TorrentClientConfig<'_>,
     report: &mut Report,
-) {
-    let api_key = match api_key_key {
-        Some(key) => match vault.get(key) {
-            Ok(value) => value.map(|_| key),
-            Err(err) => {
-                fail_unreadable(report, key, err);
-                None
+) -> Option<checks::TorrentCredential> {
+    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
+        vault
+            .get(key)
+            .map_err(|err| format!("{key} could not be read: {}", chain(&err)))
+    };
+
+    match checks::resolve_torrent_credential(client, &secret) {
+        Ok(Some(credential)) => {
+            match (&credential, client.api_key_key, client.password_key) {
+                (checks::TorrentCredential::ApiKey(_), Some(key), Some(password_key)) => report.ok(
+                    format!("{key} is set — it takes precedence over {password_key}"),
+                ),
+                (checks::TorrentCredential::ApiKey(_), Some(key), None) => {
+                    report.ok(format!("{key} is set"));
+                }
+                (checks::TorrentCredential::Password(_), _, Some(password_key)) => {
+                    report.ok(format!("{password_key} is set"));
+                }
+                // A credential only ever resolves from a configured key.
+                _ => {}
             }
-        },
-        None => None,
-    };
-
-    if let Some(key) = api_key {
-        match password_key {
-            Some(password_key) => report.ok(format!(
-                "{key} is set — it takes precedence over {password_key}"
-            )),
-            None => report.ok(format!("{key} is set")),
+            Some(credential)
         }
-        return;
-    }
-
-    // No password concept for this backend either — qBittorrent authenticates by
-    // API key alone, so a missing key here is the whole story.
-    let Some(password_key) = password_key else {
-        if let Some(key) = api_key_key {
-            fail_missing(report, key);
+        // Neither is stored. The password is the one to name when the backend
+        // has that concept; qBittorrent authenticates by API key alone, so a
+        // missing key there is the whole story.
+        Ok(None) => {
+            if let Some(key) = client.password_key.or(client.api_key_key) {
+                fail_missing(report, key);
+            }
+            None
         }
-        return;
-    };
-
-    match vault.get(password_key) {
-        Ok(Some(_)) => report.ok(format!("{password_key} is set")),
-        Ok(None) => fail_missing(report, password_key),
-        Err(err) => fail_unreadable(report, password_key, err),
+        Err(reason) => {
+            report.fail(reason);
+            None
+        }
     }
 }
 
@@ -532,45 +542,38 @@ fn check_library(
 /// Which one that is comes from `torrent_backend`. The section names in
 /// `sharerr.toml` differ per client, so the URL, username and vault key are all
 /// resolved together rather than assuming qBittorrent's.
-async fn check_qbit(config: &Config, vault: Option<&Vault>, fix: bool, report: &mut Report) {
+///
+/// `credential` is what the vault section resolved (see
+/// `check_torrent_credential`); when it is `None` that section has already
+/// said why — a missing key, an unreadable one, or a vault that would not
+/// open — so this only records that the check could not run.
+async fn check_qbit(
+    config: &Config,
+    credential: Option<checks::TorrentCredential>,
+    fix: bool,
+    report: &mut Report,
+) {
     let settings = config.torrent_client();
     let (url, label) = (settings.url, settings.category);
 
-    // Read quietly first — via the same `resolve_torrent_credential` every
-    // other caller resolves a torrent-client credential through — and only go
-    // back for the loud, reported read below once it's clear nothing resolved.
-    // Reading loud unconditionally would report a broken password even when an
-    // API key already won, the exact false failure "quiet" used to avoid.
-    let quiet = |key: &'static str| -> Result<Option<SecretString>, String> {
-        Ok(quiet_secret(vault, key))
+    let Some(credential) = credential else {
+        let key = settings
+            .password_key
+            .or(settings.api_key_key)
+            .unwrap_or("the credential");
+        report.fail(format!(
+            "skipped: {key} is unavailable — see the vault section above"
+        ));
+        return;
     };
-    // `quiet` never returns `Err`, so this never falls into the `Err` arm.
-    let credential = checks::resolve_torrent_credential(&settings, &quiet).unwrap_or(None);
 
-    // Cloned out before `credential` is unwrapped below: the category check
+    // Cloned out before `credential` is consumed below: the category check
     // further down needs its own qBittorrent-specific client, since "category"
     // is not a concept the generic `TorrentClient` trait carries — Transmission
     // has none.
     let api_key_for_category = match &credential {
-        Some(checks::TorrentCredential::ApiKey(key)) => Some(key.clone()),
-        _ => None,
-    };
-
-    let credential = match credential {
-        Some(credential) => credential,
-        None => {
-            match settings.password_key {
-                Some(password_key) => {
-                    secret(vault, password_key, report);
-                }
-                None => {
-                    if let Some(key) = settings.api_key_key {
-                        fail_missing(report, key);
-                    }
-                }
-            }
-            return;
-        }
+        checks::TorrentCredential::ApiKey(key) => Some(key.clone()),
+        checks::TorrentCredential::Password(_) => None,
     };
     let noun = credential.noun();
 
@@ -1161,6 +1164,25 @@ mod tests {
 
     // ------------------------------------------------- check_torrent_credential
 
+    /// A torrent-client config with just the vault keys under test — the URL
+    /// and the rest are defaults `check_torrent_credential` never reads.
+    fn client(
+        api_key_key: Option<&'static str>,
+        password_key: Option<&'static str>,
+    ) -> sharerr_core::config::TorrentClientConfig<'static> {
+        static CONFIG: std::sync::LazyLock<Config> = std::sync::LazyLock::new(Config::default);
+        let mut client = CONFIG.torrent_client();
+        client.api_key_key = api_key_key;
+        client.password_key = password_key;
+        client
+    }
+
+    /// Resolve the credential the way `run` does, so a `check_qbit` test gets
+    /// the same input the real command hands it.
+    fn stored_credential(config: &Config, vault: &Vault) -> Option<checks::TorrentCredential> {
+        check_torrent_credential(vault, &config.torrent_client(), &mut Report::default())
+    }
+
     #[test]
     fn an_api_key_takes_precedence_over_a_configured_password() {
         let dir = tempfile::tempdir().unwrap();
@@ -1170,12 +1192,16 @@ mod tests {
             .unwrap();
         let mut report = Report::default();
 
-        check_torrent_credential(
+        let credential = check_torrent_credential(
             &vault,
-            Some("qbittorrent.api_key"),
-            Some("qbittorrent.password"),
+            &client(Some("qbittorrent.api_key"), Some("qbittorrent.password")),
             &mut report,
         );
+
+        assert!(matches!(
+            credential,
+            Some(checks::TorrentCredential::ApiKey(_))
+        ));
 
         assert_eq!(report.failures, 0);
     }
@@ -1189,8 +1215,16 @@ mod tests {
             .unwrap();
         let mut report = Report::default();
 
-        check_torrent_credential(&vault, None, Some("transmission.password"), &mut report);
+        let credential = check_torrent_credential(
+            &vault,
+            &client(None, Some("transmission.password")),
+            &mut report,
+        );
 
+        assert!(matches!(
+            credential,
+            Some(checks::TorrentCredential::Password(_))
+        ));
         assert_eq!(report.failures, 0);
     }
 
@@ -1200,8 +1234,13 @@ mod tests {
         let vault = vault_in(&dir);
         let mut report = Report::default();
 
-        check_torrent_credential(&vault, None, Some("transmission.password"), &mut report);
+        let credential = check_torrent_credential(
+            &vault,
+            &client(None, Some("transmission.password")),
+            &mut report,
+        );
 
+        assert!(credential.is_none());
         assert_eq!(report.failures, 1);
     }
 
@@ -1211,7 +1250,13 @@ mod tests {
         let vault = vault_in(&dir);
         let mut report = Report::default();
 
-        check_torrent_credential(&vault, Some("qbittorrent.api_key"), None, &mut report);
+        let credential = check_torrent_credential(
+            &vault,
+            &client(Some("qbittorrent.api_key"), None),
+            &mut report,
+        );
+
+        assert!(credential.is_none());
 
         assert_eq!(report.failures, 1);
     }
@@ -1546,7 +1591,13 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_qbit(&config, Some(&vault), false, &mut report).await;
+        check_qbit(
+            &config,
+            stored_credential(&config, &vault),
+            false,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 0);
     }
@@ -1593,7 +1644,13 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_qbit(&config, Some(&vault), true, &mut report).await;
+        check_qbit(
+            &config,
+            stored_credential(&config, &vault),
+            true,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 0);
     }
@@ -2191,7 +2248,13 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_qbit(&config, Some(&vault), false, &mut report).await;
+        check_qbit(
+            &config,
+            stored_credential(&config, &vault),
+            false,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 1);
     }
@@ -2217,7 +2280,13 @@ mod tests {
         };
         let mut report = Report::default();
 
-        check_qbit(&config, Some(&vault), false, &mut report).await;
+        check_qbit(
+            &config,
+            stored_credential(&config, &vault),
+            false,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 1);
     }
@@ -2240,9 +2309,15 @@ mod tests {
         };
         let mut report = Report::default();
 
-        // No password stored either: `secret()` reports the miss and
-        // `check_qbit` returns without ever building a client.
-        check_qbit(&config, Some(&vault), false, &mut report).await;
+        // No password stored either: the vault section reported the miss,
+        // and `check_qbit` records the skip without ever building a client.
+        check_qbit(
+            &config,
+            stored_credential(&config, &vault),
+            false,
+            &mut report,
+        )
+        .await;
 
         assert_eq!(report.failures, 1);
     }

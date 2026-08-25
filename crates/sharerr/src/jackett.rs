@@ -395,7 +395,7 @@ async fn json_results(
             // the Torznab path would send.
             return (
                 status,
-                axum::Json(JsonResults {
+                json(JsonResults {
                     results: Vec::new(),
                     indexers: vec![QueriedIndexer {
                         id: INDEXER_ID,

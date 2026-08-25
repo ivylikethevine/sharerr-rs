@@ -81,14 +81,14 @@
 </p>
 {% endif %}
 
-{% if scanned %}
-{% if healthy %}
+{% if diag.scanned %}
+{% if diag.healthy %}
 <p class="ok" role="status">
-  All {{ readable }} tagged file(s) resolve to somewhere sharerr can read.
+  All {{ diag.readable }} tagged file(s) resolve to somewhere sharerr can read.
 </p>
 {% else %}
 <p class="error" role="alert">
-  {{ readable }} of {{ checked }} tagged file(s) resolve. The rest are not being
+  {{ diag.readable }} of {{ diag.checked }} tagged file(s) resolve. The rest are not being
   shared — see Path mapping below.
 </p>
 {% endif %}
@@ -104,14 +104,14 @@
 
 <h2>Recent syncs</h2>
 <div class="panel">
-  {% if runs.is_empty() %}
+  {% if diag.runs.is_empty() %}
   <p class="hint">No completed sync yet.</p>
   {% else %}
   <div class="table-scroll">
   <table>
     <thead><tr><th title="When the pass finished">When</th><th title="Wall-clock duration of the pass">Took</th><th title="What changed, or why the pass failed">Result</th></tr></thead>
     <tbody>
-      {% for run in runs %}
+      {% for run in diag.runs %}
       <tr>
         <td class="nowrap"{% if !run.when_absolute.is_empty() %} title="{{ run.when_absolute }}"{% endif %}>{{ run.when }}</td>
         <td class="nowrap">
@@ -138,7 +138,7 @@
 
 <h2>Networking</h2>
 <div class="panel">
-  {% for row in gluetun %}
+  {% for row in diag.gluetun %}
   <h3>{{ row.label }}</h3>
   <dl class="facts">
     <dt>Poller</dt>
@@ -186,7 +186,7 @@
 
 {# Omitted entirely when no lighthouse is configured: it is an opt-in fallback
    for friends gossip cannot reach, and most instances never set one up. #}
-{% if let Some(lighthouse) = lighthouse %}
+{% if let Some(lighthouse) = diag.lighthouse %}
 <h2>Lighthouse</h2>
 <div class="panel">
   <p class="hint">
@@ -272,11 +272,11 @@
 
 <h2>Services</h2>
 <div class="panel">
-  {% if services.is_empty() %}
+  {% if diag.services.is_empty() %}
   <p class="hint">Neither Sonarr nor Radarr is configured, so there is nothing to scan.</p>
   {% else %}
   <dl class="facts">
-    {% for service in services %}
+    {% for service in diag.services %}
     <dt>{{ service.name }}</dt>
     <dd>
       <span class="{% if service.ok %}ok{% else %}error{% endif %}">{{ service.message }}</span>
@@ -300,37 +300,37 @@
     nothing is the most common reason sharerr appears to do nothing at all.
   </p>
 
-  {% if !scanned %}
+  {% if !diag.scanned %}
   <p class="hint">
     No tagged files were found, so there are no paths to resolve. Tag something in
     Sonarr or Radarr and reload.
   </p>
   {% else %}
 
-  {% if rules == 0 %}
+  {% if diag.rules == 0 %}
   <p class="hint">
     No <code>[[path_map]]</code> rules are configured, so all three views are
     assumed identical.
   </p>
   {% else %}
-  <p class="hint">{{ rules }} mapping rule(s) configured.</p>
+  <p class="hint">{{ diag.rules }} mapping rule(s) configured.</p>
   {% endif %}
 
-  {% if missing.is_empty() && invalid.is_empty() %}
-  <p class="ok">All {{ checked }} tagged file(s) are readable by sharerr.</p>
+  {% if diag.missing.is_empty() && diag.invalid.is_empty() %}
+  <p class="ok">All {{ diag.checked }} tagged file(s) are readable by sharerr.</p>
   {% else %}
   <p class="error">
-    {{ missing.len() }} of {{ checked }} tagged file(s) do not exist at the path
+    {{ diag.missing.len() }} of {{ diag.checked }} tagged file(s) do not exist at the path
     sharerr resolved them to. sharerr cannot build a torrent for a file it cannot
     open, so these are not being shared.
   </p>
   <ul class="paths">
-    {% for path in missing %}
+    {% for path in diag.missing %}
     <li><code>{{ path }}</code></li>
     {% endfor %}
   </ul>
-  {% if more_missing > 0 %}
-  <p class="hint">… and {{ more_missing }} more.</p>
+  {% if diag.more_missing > 0 %}
+  <p class="hint">… and {{ diag.more_missing }} more.</p>
   {% endif %}
   <p class="hint">
     Fix the path mappings under <a href="/settings">Settings</a> so the *arr view
@@ -338,25 +338,25 @@
   </p>
   {% endif %}
 
-  {% if !invalid.is_empty() %}
-  <p class="error">{{ invalid.len() }} path(s) could not be resolved at all:</p>
+  {% if !diag.invalid.is_empty() %}
+  <p class="error">{{ diag.invalid.len() }} path(s) could not be resolved at all:</p>
   <ul class="paths">
-    {% for reason in invalid %}
+    {% for reason in diag.invalid %}
     <li>{{ reason }}</li>
     {% endfor %}
   </ul>
   {% endif %}
 
-  {% if unmapped > 0 && rules > 0 %}
+  {% if diag.unmapped > 0 && diag.rules > 0 %}
   <p class="error">
-    {{ unmapped }} of {{ checked }} file(s) matched no mapping rule and passed
+    {{ diag.unmapped }} of {{ diag.checked }} file(s) matched no mapping rule and passed
     through unchanged.
   </p>
   {% endif %}
 
-  {% if let Some(sample) = sample %}
+  {% if let Some(sample) = diag.sample %}
   <h3>Example resolution</h3>
-  <p class="hint">One of the {{ checked }} file(s), traced through all three views.</p>
+  <p class="hint">One of the {{ diag.checked }} file(s), traced through all three views.</p>
   <dl class="facts">
     <dt>*arr view</dt><dd><code>{{ sample.arr }}</code></dd>
     <dt>sharerr view</dt><dd><code>{{ sample.sharerr }}</code></dd>

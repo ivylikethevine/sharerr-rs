@@ -397,6 +397,10 @@ impl Syncer {
 
         let torrents =
             torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
+        // Hashes are compared lowercase. Both sides are folded once here —
+        // the stored side while `known` is built below — rather than per item
+        // in `share`. Every writer already produces lowercase hex, so folding
+        // the stored hash in place changes nothing that is looked up by it.
         let live: HashSet<String> = torrents
             .iter()
             .map(|t| t.hash.to_ascii_lowercase())
@@ -404,8 +408,16 @@ impl Syncer {
 
         let known: HashMap<(MediaSource, i64), SharedItem> = known_items?
             .into_iter()
-            .map(|item| (item.key(), item))
+            .map(|mut item| {
+                if let Some(hash) = &mut item.info_hash {
+                    hash.make_ascii_lowercase();
+                }
+                (item.key(), item)
+            })
             .collect();
+
+        // Indexed once per pass — see `seed::KnownTorrents`.
+        let torrents = seed::KnownTorrents::index(&torrents);
 
         for item in discovered {
             match self
@@ -509,7 +521,7 @@ impl Syncer {
         item: &Discovered,
         announce: &AnnounceSet,
         live: &HashSet<String>,
-        torrents: &[sharerr_client::TorrentSummary],
+        torrents: &seed::KnownTorrents,
         known: Option<&SharedItem>,
         dry_run: bool,
     ) -> Result<Step> {
@@ -522,7 +534,7 @@ impl Syncer {
         if let Some(known) = known
             && known.state == ShareState::Seeding
             && let Some(hash) = &known.info_hash
-            && live.contains(&hash.to_ascii_lowercase())
+            && live.contains(hash)
         {
             if !dry_run {
                 match self.seeder.refresh_announce(hash, announce).await {
@@ -605,10 +617,11 @@ impl Syncer {
 
         // `try_exists` rather than a blocking `exists()`: this runs per item on
         // the async loop, against a mount that may be remote.
+        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
+            return Err(missing());
+        }
+
         if dry_run {
-            if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
-                return Err(missing());
-            }
             tracing::info!(
                 item = %item.spec,
                 release = %release_title,
@@ -616,10 +629,6 @@ impl Syncer {
                 "would share"
             );
             return Ok(Step::Added);
-        }
-
-        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
-            return Err(missing());
         }
 
         let outcome = self

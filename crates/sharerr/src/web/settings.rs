@@ -96,10 +96,10 @@ pub struct NextQuery {
 /// successful save into a 500), and nothing outside printable ASCII at all —
 /// every path this crate renders into `?next=` is plain ASCII.
 fn sanitize_next(next: Option<String>) -> Option<String> {
+    // `/\` needs no separate check: the backslash already fails the last clause.
     next.filter(|path| {
-        let mut chars = path.chars();
-        chars.next() == Some('/')
-            && !matches!(path.chars().nth(1), Some('/') | Some('\\'))
+        path.starts_with('/')
+            && !path.starts_with("//")
             && path.chars().all(|c| c.is_ascii_graphic() && c != '\\')
     })
 }
@@ -153,19 +153,11 @@ pub struct QbitForm {
     skip_checking: Option<String>,
 }
 
+/// The fields Transmission and rTorrent share: both are an RPC endpoint
+/// behind a username/password, with one label for sharerr's torrents.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct TransmissionForm {
-    url: String,
-    username: String,
-    password: String,
-    clear_password: Option<String>,
-    label: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct RtorrentForm {
+pub struct RpcClientForm {
     url: String,
     username: String,
     password: String,
@@ -316,30 +308,27 @@ pub async fn save_arr(
     };
     let section = source.as_str();
 
-    let pending = match prepare_config(&state, |file| {
-        let url = form.url.trim();
-        if url.is_empty() {
-            // Removing the whole table, not just the URL: each *arr section is
-            // `Option<ServiceConfig>`, and a table with no `url` fails to parse
-            // where an absent table correctly means "not configured".
-            file.apply([Edit::unset(section)]);
-        } else {
-            file.apply([Edit::str(url_path, normalise_url(url)?)]);
-        }
-        Ok(())
-    })
+    write_config_and_secret(
+        &state,
+        section,
+        next.next,
+        |file| {
+            let url = form.url.trim();
+            if url.is_empty() {
+                // Removing the whole table, not just the URL: each *arr section is
+                // `Option<ServiceConfig>`, and a table with no `url` fails to parse
+                // where an absent table correctly means "not configured".
+                file.apply([Edit::unset(section)]);
+            } else {
+                file.apply([Edit::str(url_path, normalise_url(url)?)]);
+            }
+            Ok(())
+        },
+        secret_key,
+        &form.api_key,
+        form.clear_api_key.is_some(),
+    )
     .await
-    {
-        Ok(pending) => pending,
-        Err(message) => return reject(&state, &message).await,
-    };
-
-    if let Err(message) = apply_secret(&state, secret_key, &form.api_key, form.clear_api_key).await
-    {
-        return reject(&state, &message).await;
-    }
-
-    commit_config(&state, section, next.next, pending).await
 }
 
 pub async fn save_qbittorrent(
@@ -360,127 +349,110 @@ pub async fn save_qbittorrent(
         .await;
     }
 
-    let pending = match prepare_config(&state, |file| {
-        let url = form.url.trim();
-        if url.is_empty() {
-            anyhow::bail!("qBittorrent's URL is required — sharerr cannot seed without it");
-        }
-        file.apply([
-            Edit::str(config_paths::QBITTORRENT_URL, normalise_url(url)?),
-            // `str_or_unset` rather than `str`: a blank value here falls back to
-            // the compiled default ("sharerr") instead of writing a literal empty
-            // category/tag — the only way this field arrives blank is an unset
-            // input (no master key yet, or the field is env-locked), never a
-            // deliberate choice, since nothing in the UI offers "blank" as one.
-            Edit::str_or_unset(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
-            Edit::str_or_unset(config_paths::QBITTORRENT_TAG, form.tag.trim()),
-            Edit::bool(
-                config_paths::QBITTORRENT_SKIP_CHECKING,
-                checked(&form.skip_checking),
-            ),
-        ]);
-        Ok(())
-    })
-    .await
-    {
-        Ok(pending) => pending,
-        Err(message) => return reject(&state, &message).await,
-    };
-
-    if let Err(message) = apply_secret(
+    write_config_and_secret(
         &state,
+        "qbittorrent",
+        next.next,
+        |file| {
+            let url = form.url.trim();
+            if url.is_empty() {
+                anyhow::bail!("qBittorrent's URL is required — sharerr cannot seed without it");
+            }
+            file.apply([
+                Edit::str(config_paths::QBITTORRENT_URL, normalise_url(url)?),
+                // `str_or_unset` rather than `str`: a blank value here falls back to
+                // the compiled default ("sharerr") instead of writing a literal empty
+                // category/tag — the only way this field arrives blank is an unset
+                // input (no master key yet, or the field is env-locked), never a
+                // deliberate choice, since nothing in the UI offers "blank" as one.
+                Edit::str_or_unset(config_paths::QBITTORRENT_CATEGORY, form.category.trim()),
+                Edit::str_or_unset(config_paths::QBITTORRENT_TAG, form.tag.trim()),
+                Edit::bool(
+                    config_paths::QBITTORRENT_SKIP_CHECKING,
+                    form.skip_checking.is_some(),
+                ),
+            ]);
+            Ok(())
+        },
         secret_keys::QBITTORRENT_API_KEY,
         &form.api_key,
-        form.clear_api_key,
+        form.clear_api_key.is_some(),
     )
     .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    commit_config(&state, "qbittorrent", next.next, pending).await
 }
 
 pub async fn save_transmission(
     State(state): State<WebState>,
     Query(next): Query<NextQuery>,
-    Form(form): Form<TransmissionForm>,
+    Form(form): Form<RpcClientForm>,
 ) -> Response {
-    let pending = match prepare_config(&state, |file| {
-        let url = form.url.trim();
-        if url.is_empty() {
-            anyhow::bail!("Transmission's URL is required — sharerr cannot seed without it");
-        }
-        file.apply([
-            Edit::str(config_paths::TRANSMISSION_URL, normalise_url(url)?),
-            // `str_or_unset`, not `str`: blank here means the input was never
-            // touched (locked, or no master key yet) and should fall back to
-            // the compiled default, not store a literal empty username/label —
-            // same reasoning as qBittorrent's category and tag above.
-            Edit::str_or_unset(config_paths::TRANSMISSION_USERNAME, form.username.trim()),
-            Edit::str_or_unset(config_paths::TRANSMISSION_LABEL, form.label.trim()),
-        ]);
-        Ok(())
-    })
-    .await
-    {
-        Ok(pending) => pending,
-        Err(message) => return reject(&state, &message).await,
-    };
-
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::TRANSMISSION_PASSWORD,
-        &form.password,
-        form.clear_password,
-    )
-    .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    commit_config(&state, "transmission", next.next, pending).await
+    save_rpc_client(&state, next.next, form, TorrentBackend::Transmission).await
 }
 
 pub async fn save_rtorrent(
     State(state): State<WebState>,
     Query(next): Query<NextQuery>,
-    Form(form): Form<RtorrentForm>,
+    Form(form): Form<RpcClientForm>,
 ) -> Response {
-    let pending = match prepare_config(&state, |file| {
-        let url = form.url.trim();
-        if url.is_empty() {
-            anyhow::bail!(
-                "rTorrent's URL is required — sharerr cannot seed without it. This is the \
-                 exact XML-RPC endpoint your reverse proxy answers on, not a base address."
-            );
+    save_rpc_client(&state, next.next, form, TorrentBackend::Rtorrent).await
+}
+
+/// The save both RPC-style clients share — only the config paths, the vault
+/// key and the wording of the missing-URL error differ between them.
+async fn save_rpc_client(
+    state: &WebState,
+    next: Option<String>,
+    form: RpcClientForm,
+    backend: TorrentBackend,
+) -> Response {
+    let (section, url_path, username_path, label_path, password_key, missing_url) = match backend {
+        TorrentBackend::Transmission => (
+            "transmission",
+            config_paths::TRANSMISSION_URL,
+            config_paths::TRANSMISSION_USERNAME,
+            config_paths::TRANSMISSION_LABEL,
+            secret_keys::TRANSMISSION_PASSWORD,
+            "Transmission's URL is required — sharerr cannot seed without it",
+        ),
+        TorrentBackend::Rtorrent => (
+            "rtorrent",
+            config_paths::RTORRENT_URL,
+            config_paths::RTORRENT_USERNAME,
+            config_paths::RTORRENT_LABEL,
+            secret_keys::RTORRENT_PASSWORD,
+            "rTorrent's URL is required — sharerr cannot seed without it. This is the \
+             exact XML-RPC endpoint your reverse proxy answers on, not a base address.",
+        ),
+        TorrentBackend::Qbittorrent => {
+            return reject(state, "There is no such service to configure.").await;
         }
-        file.apply([
-            Edit::str(config_paths::RTORRENT_URL, normalise_url(url)?),
-            // `str_or_unset`, not `str` — same reasoning as Transmission above.
-            Edit::str_or_unset(config_paths::RTORRENT_USERNAME, form.username.trim()),
-            Edit::str_or_unset(config_paths::RTORRENT_LABEL, form.label.trim()),
-        ]);
-        Ok(())
-    })
-    .await
-    {
-        Ok(pending) => pending,
-        Err(message) => return reject(&state, &message).await,
     };
 
-    if let Err(message) = apply_secret(
-        &state,
-        secret_keys::RTORRENT_PASSWORD,
+    write_config_and_secret(
+        state,
+        section,
+        next,
+        |file| {
+            let url = form.url.trim();
+            if url.is_empty() {
+                anyhow::bail!("{missing_url}");
+            }
+            file.apply([
+                Edit::str(url_path, normalise_url(url)?),
+                // `str_or_unset`, not `str`: blank here means the input was never
+                // touched (locked, or no master key yet) and should fall back to
+                // the compiled default, not store a literal empty username/label —
+                // same reasoning as qBittorrent's category and tag above.
+                Edit::str_or_unset(username_path, form.username.trim()),
+                Edit::str_or_unset(label_path, form.label.trim()),
+            ]);
+            Ok(())
+        },
+        password_key,
         &form.password,
-        form.clear_password,
+        form.clear_password.is_some(),
     )
     .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    commit_config(&state, "rtorrent", next.next, pending).await
 }
 
 pub async fn save_torrent_backend(
@@ -600,7 +572,7 @@ pub async fn save_lighthouse(
 
     write_config(&state, "lighthouse", None, move |file| {
         file.apply([
-            Edit::bool(config_paths::LIGHTHOUSE_ENABLED, checked(&form.enabled)),
+            Edit::bool(config_paths::LIGHTHOUSE_ENABLED, form.enabled.is_some()),
             Edit::str(config_paths::LIGHTHOUSE_MOUNT, mount.as_str()),
             if urls.is_empty() {
                 Edit::unset(config_paths::LIGHTHOUSE_URLS)
@@ -729,44 +701,40 @@ async fn save_gluetun_section(
     poll_secs_path: &'static str,
     api_key_secret: &'static str,
 ) -> Response {
-    let pending = match prepare_config(&state, move |file| {
-        file.apply([Edit::bool(enabled_path, checked(&form.enabled))]);
+    write_config_and_secret(
+        &state,
+        section,
+        None,
+        |file| {
+            file.apply([Edit::bool(enabled_path, form.enabled.is_some())]);
 
-        let url = form.control_url.trim();
-        if url.is_empty() {
-            file.apply([Edit::unset(control_url_path)]);
-        } else {
-            file.apply([Edit::str(control_url_path, normalise_url(url)?)]);
-        }
-
-        let poll = form.poll_secs.trim();
-        if !poll.is_empty() {
-            let secs: u64 = poll.parse().map_err(|_| {
-                anyhow::anyhow!("the poll interval must be a whole number of seconds")
-            })?;
-            if secs < sharerr_core::config::GluetunConfig::MIN_POLL_SECS {
-                anyhow::bail!(
-                    "the poll interval must be at least {} seconds",
-                    sharerr_core::config::GluetunConfig::MIN_POLL_SECS
-                );
+            let url = form.control_url.trim();
+            if url.is_empty() {
+                file.apply([Edit::unset(control_url_path)]);
+            } else {
+                file.apply([Edit::str(control_url_path, normalise_url(url)?)]);
             }
-            file.apply([Edit::int(poll_secs_path, i64::try_from(secs).unwrap_or(60))]);
-        }
-        Ok(())
-    })
+
+            let poll = form.poll_secs.trim();
+            if !poll.is_empty() {
+                let secs: u64 = poll.parse().map_err(|_| {
+                    anyhow::anyhow!("the poll interval must be a whole number of seconds")
+                })?;
+                if secs < sharerr_core::config::GluetunConfig::MIN_POLL_SECS {
+                    anyhow::bail!(
+                        "the poll interval must be at least {} seconds",
+                        sharerr_core::config::GluetunConfig::MIN_POLL_SECS
+                    );
+                }
+                file.apply([Edit::int(poll_secs_path, i64::try_from(secs).unwrap_or(60))]);
+            }
+            Ok(())
+        },
+        api_key_secret,
+        &form.api_key,
+        form.clear_api_key.is_some(),
+    )
     .await
-    {
-        Ok(pending) => pending,
-        Err(message) => return reject(&state, &message).await,
-    };
-
-    if let Err(message) =
-        apply_secret(&state, api_key_secret, &form.api_key, form.clear_api_key).await
-    {
-        return reject(&state, &message).await;
-    }
-
-    commit_config(&state, section, None, pending).await
 }
 
 pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>) -> Response {
@@ -787,7 +755,7 @@ pub async fn save_sync(State(state): State<WebState>, Form(form): Form<SyncForm>
         }
 
         file.apply([
-            Edit::bool(config_paths::SYNC_ENABLED, checked(&form.enabled)),
+            Edit::bool(config_paths::SYNC_ENABLED, form.enabled.is_some()),
             Edit::int(
                 config_paths::SYNC_INTERVAL_SECS,
                 i64::try_from(interval).unwrap_or(900),
@@ -804,7 +772,7 @@ pub async fn save_checks(State(state): State<WebState>, Form(form): Form<ChecksF
     write_config(&state, "checks", None, |file| {
         file.apply([Edit::bool(
             config_paths::CHECKS_REACHABILITY,
-            checked(&form.reachability),
+            form.reachability.is_some(),
         )]);
         Ok(())
     })
@@ -826,39 +794,30 @@ pub async fn save_notifications(
         return reject(&state, "That does not look like a valid webhook URL.").await;
     }
 
-    let pending = match prepare_config(&state, |file| {
-        let Some(kind) = sharerr_core::config::NotifyKind::parse(form.kind.trim()) else {
-            anyhow::bail!("{:?} is not a known notification kind", form.kind);
-        };
-        file.apply([Edit::str(config_paths::NOTIFICATIONS_KIND, kind.as_str())]);
-
-        let secs: u64 = form.peer_quiet_secs.trim().parse().map_err(|_| {
-            anyhow::anyhow!("the peer-quiet threshold must be a whole number of seconds")
-        })?;
-        file.apply([Edit::int(
-            config_paths::NOTIFICATIONS_PEER_QUIET_SECS,
-            i64::try_from(secs).unwrap_or(604_800),
-        )]);
-        Ok(())
-    })
-    .await
-    {
-        Ok(pending) => pending,
-        Err(message) => return reject(&state, &message).await,
-    };
-
-    if let Err(message) = apply_secret(
+    write_config_and_secret(
         &state,
+        "notifications",
+        None,
+        |file| {
+            let Some(kind) = sharerr_core::config::NotifyKind::parse(form.kind.trim()) else {
+                anyhow::bail!("{:?} is not a known notification kind", form.kind);
+            };
+            file.apply([Edit::str(config_paths::NOTIFICATIONS_KIND, kind.as_str())]);
+
+            let secs: u64 = form.peer_quiet_secs.trim().parse().map_err(|_| {
+                anyhow::anyhow!("the peer-quiet threshold must be a whole number of seconds")
+            })?;
+            file.apply([Edit::int(
+                config_paths::NOTIFICATIONS_PEER_QUIET_SECS,
+                i64::try_from(secs).unwrap_or(604_800),
+            )]);
+            Ok(())
+        },
         secret_keys::NOTIFICATIONS_WEBHOOK_URL,
         webhook,
-        form.clear_webhook_url,
+        form.clear_webhook_url.is_some(),
     )
     .await
-    {
-        return reject(&state, &message).await;
-    }
-
-    commit_config(&state, "notifications", None, pending).await
 }
 
 pub async fn save_libraries(
@@ -941,6 +900,36 @@ where
     }
 }
 
+/// [`write_config`] for a section that also stores a vault secret: config
+/// first (open, edit, validate — nothing written), then the secret, then the
+/// commit. The order is the point — see [`prepare_config`] — and every
+/// handler with a secret goes through here so none can get it backwards.
+/// `save_tracker` is the exception: its secret step is a token rotation, not
+/// a plain store-or-clear.
+async fn write_config_and_secret<F>(
+    state: &WebState,
+    section: &str,
+    next: Option<String>,
+    edit: F,
+    key: &'static str,
+    value: &str,
+    clear: bool,
+) -> Response
+where
+    F: FnOnce(&mut ConfigFile) -> anyhow::Result<()>,
+{
+    let pending = match prepare_config(state, edit).await {
+        Ok(pending) => pending,
+        Err(message) => return reject(state, &message).await,
+    };
+
+    if let Err(message) = apply_secret(state, key, value, clear).await {
+        return reject(state, &message).await;
+    }
+
+    commit_config(state, section, next, pending).await
+}
+
 /// An edited, validated `sharerr.toml` that has not been written yet.
 ///
 /// Carries the config-write lock, so between [`prepare_config`] and
@@ -949,6 +938,10 @@ where
 struct PendingConfig<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
     file: ConfigFile,
+    /// The document as it will be written, already validated to `config` —
+    /// so the commit serialises and validates once, not once per half.
+    text: String,
+    config: Config,
     path: std::path::PathBuf,
 }
 
@@ -971,17 +964,25 @@ where
     let mut file = if state.serve.config_error().await.is_some() {
         replacement_for(state, &path).await
     } else {
-        ConfigFile::open(&path).map_err(|err| format!("{err:#}"))?
+        // The file read and parse are blocking; the guard stays on this task.
+        let open_path = path.clone();
+        tokio::task::spawn_blocking(move || ConfigFile::open(open_path))
+            .await
+            .map_err(|err| format!("opening the config file: {err}"))?
+            .map_err(|err| format!("{err:#}"))?
     };
 
     edit(&mut file).map_err(|err| format!("{err:#}"))?;
-    // `save` validates again before writing; this pass is what lets a caller
-    // reject *before* touching the vault.
-    crate::settings::validate(&file.to_toml()).map_err(|err| format!("{err:#}"))?;
+    // Validated here, before anything irreversible, so a caller can reject
+    // *before* touching the vault; `commit_config` writes exactly this text.
+    let text = file.to_toml();
+    let config = crate::settings::validate(&text).map_err(|err| format!("{err:#}"))?;
 
     Ok(PendingConfig {
         _guard: guard,
         file,
+        text,
+        config,
         path,
     })
 }
@@ -994,16 +995,30 @@ async fn commit_config(
     next: Option<String>,
     pending: PendingConfig<'_>,
 ) -> Response {
-    match pending.file.save() {
-        Ok(config) => {
+    let PendingConfig {
+        _guard,
+        file,
+        text,
+        config,
+        path,
+    } = pending;
+    // The write is blocking file IO; `_guard` stays here, on this task, until
+    // the function returns, so the lock is held across the write without
+    // crossing threads.
+    let written = tokio::task::spawn_blocking(move || file.write_validated(&text))
+        .await
+        .map_err(|err| format!("writing the config file: {err}"))
+        .and_then(|result| result.map_err(|err| format!("{err:#}")));
+    match written {
+        Ok(()) => {
             // Swap the new config in *and* drop the cached syncer, so the change is
             // live within one recovery interval instead of at the next restart.
             state.serve.replace_config(config).await;
-            tracing::info!(section, path = %pending.path.display(), "settings saved");
+            tracing::info!(section, path = %path.display(), "settings saved");
             let destination = sanitize_next(next).unwrap_or_else(|| "/settings".to_owned());
             Redirect::to(&format!("{destination}?saved={section}")).into_response()
         }
-        Err(err) => reject(state, &format!("{err:#}")).await,
+        Err(message) => reject(state, &message).await,
     }
 }
 
@@ -1039,22 +1054,24 @@ async fn replacement_for(state: &WebState, path: &std::path::Path) -> ConfigFile
 /// a blank field is the normal state of a form the operator opened to change
 /// something else — treating it as "remove the key" would wipe credentials as a
 /// side effect of editing a URL.
+///
+/// `clear` is the explicit checkbox — an HTML checkbox submits nothing at all
+/// when unticked, so callers pass `field.is_some()`.
 async fn apply_secret(
     state: &WebState,
     key: &'static str,
     value: &str,
-    clear: Option<String>,
+    clear: bool,
 ) -> Result<(), String> {
-    let clearing = clear.is_some();
     let value = value.trim().to_owned();
 
-    if !clearing && value.is_empty() {
+    if !clear && value.is_empty() {
         return Ok(());
     }
 
     let mut vault = state.serve.open_vault().await?;
 
-    if clearing {
+    if clear {
         vault
             .remove(key)
             .map_err(|err| format!("removing {key}: {err}"))?;
@@ -1206,11 +1223,6 @@ pub(super) async fn reject(state: &WebState, message: &str) -> Response {
     (axum::http::StatusCode::BAD_REQUEST, render(&page)).into_response()
 }
 
-/// An HTML checkbox submits nothing at all when unticked, so absence is `false`.
-fn checked(field: &Option<String>) -> bool {
-    field.is_some()
-}
-
 /// Whether a torrent client other than the selected one already holds a
 /// credential — what decides if the fold those live in starts open.
 ///
@@ -1237,7 +1249,9 @@ pub(super) fn url_or_empty(url: Option<&url::Url>) -> String {
 /// What gluetun last actually reported for one endpoint, or `None` when
 /// nothing has been observed yet — the settings page's short version of what
 /// Diagnostics shows in full.
-fn gluetun_last_observed(endpoint: &sharerr_core::endpoint::AdvertisedEndpoint) -> Option<String> {
+pub(super) fn gluetun_last_observed(
+    endpoint: &sharerr_core::endpoint::AdvertisedEndpoint,
+) -> Option<String> {
     let observed = endpoint.last_observed()?;
     Some(format!(
         "{} ({})",
@@ -1249,7 +1263,7 @@ fn gluetun_last_observed(endpoint: &sharerr_core::endpoint::AdvertisedEndpoint) 
 /// The most recent failure `target`'s poller hit, if it has one right now —
 /// cleared the moment a poll succeeds, so this never shows a stale error next
 /// to a working endpoint.
-async fn gluetun_last_error(
+pub(super) async fn gluetun_last_error(
     state: &crate::state::ServeState,
     target: GluetunTarget,
 ) -> Option<String> {
@@ -1343,6 +1357,41 @@ pub(super) fn url_placeholder(source: MediaSource) -> &'static str {
     }
 }
 
+/// One *arr app's section, as both the Settings page and the wizard render
+/// it. `None` for a source with no URL or API key (the directory source).
+pub(super) fn arr_section(
+    kind: MediaSource,
+    config: &Config,
+    is_set: &impl Fn(&str) -> bool,
+    primary: bool,
+) -> Option<ArrSection> {
+    let url_path = config_paths::url_for(kind)?;
+    let key = secret_keys::api_key_for(kind)?;
+    Some(ArrSection {
+        source: kind.as_str(),
+        title: title_case(kind.as_str()),
+        url: config
+            .service(kind)
+            .map(|s| s.url.to_string())
+            .unwrap_or_default(),
+        key_set: is_set(key),
+        placeholder: url_placeholder(kind),
+        url_path,
+        primary,
+    })
+}
+
+/// The path-mapping rows plus a spare blank one, so "add a mapping" needs no
+/// JavaScript — shared with the wizard's paths step.
+pub(super) fn path_rows(config: &Config) -> Vec<PathRow> {
+    config
+        .path_map
+        .iter()
+        .map(PathRow::from)
+        .chain(std::iter::once(PathRow::default()))
+        .collect()
+}
+
 async fn build_page(
     state: &WebState,
     saved: Option<String>,
@@ -1361,20 +1410,8 @@ async fn build_page(
         .iter()
         .copied()
         .filter_map(|kind| {
-            let url_path = config_paths::url_for(kind)?;
-            let key = secret_keys::api_key_for(kind)?;
-            Some(ArrSection {
-                source: kind.as_str(),
-                title: title_case(kind.as_str()),
-                url: config
-                    .service(kind)
-                    .map(|s| s.url.to_string())
-                    .unwrap_or_default(),
-                key_set: is_set(key),
-                placeholder: url_placeholder(kind),
-                url_path,
-                primary: matches!(kind, MediaSource::Sonarr | MediaSource::Radarr),
-            })
+            let primary = matches!(kind, MediaSource::Sonarr | MediaSource::Radarr);
+            arr_section(kind, &config, &is_set, primary)
         })
         .collect::<Vec<_>>();
     let secondary_arr_configured = arrs
@@ -1504,21 +1541,7 @@ async fn build_page(
             .chain(std::iter::once(LibraryRow::default()))
             .collect(),
 
-        // A spare blank row, same reasoning as libraries above.
-        path_map: config
-            .path_map
-            .iter()
-            .map(|m| PathRow {
-                arr: m.arr.display().to_string(),
-                sharerr: m.sharerr.display().to_string(),
-                qbit: m
-                    .qbit
-                    .as_ref()
-                    .map(|q| q.display().to_string())
-                    .unwrap_or_default(),
-            })
-            .chain(std::iter::once(PathRow::default()))
-            .collect(),
+        path_map: path_rows(&config),
 
         min_password_len: super::auth::MIN_PASSWORD_LEN,
         data_dir: config.data_dir.display().to_string(),
@@ -1552,8 +1575,7 @@ mod tests {
         serde_json::from_str::<GeneralForm>("{}").unwrap();
         serde_json::from_str::<ArrForm>(r#"{}"#).unwrap();
         serde_json::from_str::<QbitForm>(r#"{}"#).unwrap();
-        serde_json::from_str::<TransmissionForm>(r#"{}"#).unwrap();
-        serde_json::from_str::<RtorrentForm>(r#"{}"#).unwrap();
+        serde_json::from_str::<RpcClientForm>(r#"{}"#).unwrap();
         serde_json::from_str::<TorrentBackendForm>(r#"{}"#).unwrap();
         serde_json::from_str::<TrackerForm>(r#"{}"#).unwrap();
         serde_json::from_str::<LighthouseForm>(r#"{}"#).unwrap();
@@ -1624,13 +1646,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unticked_checkbox_reads_as_false() {
-        assert!(!checked(&None));
-        // Browsers send "on"; the value is irrelevant, presence is the signal.
-        assert!(checked(&Some("on".to_owned())));
-    }
-
-    #[test]
     fn a_loopback_or_private_advertised_host_is_refused() {
         for host in [
             "127.0.0.1",
@@ -1672,12 +1687,7 @@ mod tests {
     // exercise the path where it will not open.
     // -----------------------------------------------------------------------
 
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
-        }
-    }
+    use crate::web::web_state;
 
     #[tokio::test]
     async fn save_arr_writes_the_normalised_url_to_the_config_file() {
@@ -1754,7 +1764,7 @@ mod tests {
         let response = save_transmission(
             State(state),
             Query(NextQuery::default()),
-            Form(TransmissionForm {
+            Form(RpcClientForm {
                 url: "transmission:9091".to_owned(),
                 username: "sam".to_owned(),
                 password: String::new(),
@@ -1795,7 +1805,7 @@ mod tests {
         let response = save_transmission(
             State(state),
             Query(NextQuery::default()),
-            Form(TransmissionForm {
+            Form(RpcClientForm {
                 url: "transmission:9091".to_owned(),
                 username: "sam".to_owned(),
                 password: "hunter2".to_owned(),
@@ -1821,7 +1831,7 @@ mod tests {
         let response = save_rtorrent(
             State(state),
             Query(NextQuery::default()),
-            Form(RtorrentForm {
+            Form(RpcClientForm {
                 url: "http://seedbox.example/RPC2".to_owned(),
                 username: "sam".to_owned(),
                 password: String::new(),
@@ -1858,7 +1868,7 @@ mod tests {
         save_rtorrent(
             State(state),
             Query(NextQuery::default()),
-            Form(RtorrentForm {
+            Form(RpcClientForm {
                 url: "http://seedbox.example/plugins/httprpc/action.php".to_owned(),
                 username: String::new(),
                 password: String::new(),
@@ -1885,7 +1895,7 @@ mod tests {
         let response = save_rtorrent(
             State(state),
             Query(NextQuery::default()),
-            Form(RtorrentForm {
+            Form(RpcClientForm {
                 url: "http://seedbox.example/RPC2".to_owned(),
                 username: "sam".to_owned(),
                 password: "hunter2".to_owned(),
@@ -2204,7 +2214,7 @@ mod tests {
         let response = save_transmission(
             State(state),
             Query(NextQuery::default()),
-            Form(TransmissionForm::default()),
+            Form(RpcClientForm::default()),
         )
         .await;
 
@@ -2221,7 +2231,7 @@ mod tests {
         let response = save_rtorrent(
             State(state),
             Query(NextQuery::default()),
-            Form(RtorrentForm::default()),
+            Form(RpcClientForm::default()),
         )
         .await;
 

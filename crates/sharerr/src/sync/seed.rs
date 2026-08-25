@@ -106,7 +106,7 @@ impl Seeder {
         &self,
         paths: &ResolvedPaths,
         announce: &AnnounceSet,
-        torrents: &[TorrentSummary],
+        torrents: &KnownTorrents,
         known_info_hash: Option<&str>,
     ) -> Result<SeedOutcome> {
         if let Some(existing) = self.find_existing(torrents, &paths.qbit).await? {
@@ -245,7 +245,13 @@ impl Seeder {
             self.qbit.kind()
         );
 
-        write_cached(&path, &rewritten).await?;
+        // Same writer as `build`'s cache, off the runtime for the same reason;
+        // unlike there, a failure is returned — nothing else holds these bytes.
+        let cached = path.clone();
+        tokio::task::spawn_blocking(move || write_torrent_file(&cached, &rewritten))
+            .await
+            .context("cache write task panicked")?
+            .with_context(|| format!("writing {}", path.display()))?;
 
         tracing::info!(
             info_hash,
@@ -437,13 +443,14 @@ impl Seeder {
     /// extra `torrents/files` call.
     async fn find_existing(
         &self,
-        torrents: &[TorrentSummary],
+        torrents: &KnownTorrents,
         target: &Path,
     ) -> Result<Option<String>> {
         // Normalised once: the target is invariant across the whole scan, and
-        // re-deriving it per candidate torrent was two allocations times the
-        // client's entire list, per item.
+        // the torrents' own paths were normalised once per pass when the list
+        // was indexed — so nothing here allocates per candidate.
         let target = &normalize_path(target);
+        let torrents = &torrents.entries;
 
         if let Some(found) = torrents.iter().find(|t| matches_content_path(t, target)) {
             return Ok(Some(found.hash.clone()));
@@ -460,7 +467,10 @@ impl Seeder {
                 }
             };
 
-            if contains_file(&torrent.save_path, &files, target) {
+            let Some(save_path) = &torrent.save_path else {
+                continue;
+            };
+            if contains_file(save_path, &files, target) {
                 return Ok(Some(torrent.hash.clone()));
             }
         }
@@ -469,20 +479,47 @@ impl Seeder {
     }
 }
 
-/// Write a `.torrent` into the cache, creating `torrent_dir` if this is the
-/// first one. Unlike the best-effort write inside [`Seeder::build`], a failure
-/// here is returned: the caller has no copy of these bytes anywhere else.
-async fn write_cached(path: &Path, data: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    tokio::fs::write(path, data)
-        .await
-        .with_context(|| format!("writing {}", path.display()))
+/// The client's torrent list, indexed once per reconciliation pass for
+/// [`Seeder::seed`]'s cross-seed search.
+///
+/// Every discovered item is matched against every torrent, and normalising a
+/// torrent's paths on each comparison was O(items × torrents) `PathBuf`
+/// builds per pass. Here each path is normalised exactly once; an empty
+/// `save_path` or `content_path` becomes `None`, which matches nothing.
+#[derive(Debug, Default)]
+pub struct KnownTorrents {
+    entries: Vec<KnownTorrent>,
 }
 
+impl KnownTorrents {
+    pub fn index(torrents: &[TorrentSummary]) -> Self {
+        Self {
+            entries: torrents.iter().map(KnownTorrent::from).collect(),
+        }
+    }
+}
+
+/// One torrent as [`KnownTorrents`] holds it: its hash and pre-normalised paths.
+#[derive(Debug)]
+struct KnownTorrent {
+    hash: String,
+    save_path: Option<PathBuf>,
+    content_path: Option<PathBuf>,
+}
+
+impl From<&TorrentSummary> for KnownTorrent {
+    fn from(torrent: &TorrentSummary) -> Self {
+        let normalized = |path: &str| (!path.is_empty()).then(|| normalize(path));
+        Self {
+            hash: torrent.hash.clone(),
+            save_path: normalized(&torrent.save_path),
+            content_path: normalized(&torrent.content_path),
+        }
+    }
+}
+
+/// Write a `.torrent` into the cache, creating `torrent_dir` if this is the
+/// first one. Blocking; callers run it off the runtime.
 fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -492,25 +529,27 @@ fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 /// A single-file torrent points `content_path` straight at the file.
 /// `target` arrives already normalised.
-fn matches_content_path(torrent: &TorrentSummary, target: &Path) -> bool {
-    !torrent.content_path.is_empty() && normalize(&torrent.content_path) == target
+fn matches_content_path(torrent: &KnownTorrent, target: &Path) -> bool {
+    torrent.content_path.as_deref() == Some(target)
 }
 
 /// Whether this torrent's save path could contain `target` at all.
 ///
 /// Compared component-wise, so `/downloads/tv` does not appear to contain
 /// `/downloads/tv-archive/...` the way a string prefix check would.
-fn could_contain(torrent: &TorrentSummary, target: &Path) -> bool {
-    if torrent.save_path.is_empty() {
-        return false;
-    }
-    target.starts_with(normalize(&torrent.save_path))
+fn could_contain(torrent: &KnownTorrent, target: &Path) -> bool {
+    torrent
+        .save_path
+        .as_deref()
+        .is_some_and(|save_path| target.starts_with(save_path))
 }
 
-/// Whether any file in the torrent resolves to `target`.
-fn contains_file(save_path: &str, files: &[TorrentFileEntry], target: &Path) -> bool {
-    let root = normalize(save_path);
-    files.iter().any(|file| root.join(&file.name) == target)
+/// Whether any file in the torrent resolves to `target`. `save_path` arrives
+/// already normalised.
+fn contains_file(save_path: &Path, files: &[TorrentFileEntry], target: &Path) -> bool {
+    files
+        .iter()
+        .any(|file| save_path.join(&file.name) == target)
 }
 
 fn normalize(path: &str) -> PathBuf {
@@ -654,10 +693,10 @@ mod tests {
             ..StubClient::default()
         };
         let seeder = seeder(Arc::new(client), PathBuf::from("/torrents"));
-        let torrents = [
-            torrent("aa", "/downloads/tv", ""),
-            torrent("bb", "/downloads/tv", ""),
-        ];
+        let torrents = KnownTorrents::index(&[
+            summary("aa", "/downloads/tv", ""),
+            summary("bb", "/downloads/tv", ""),
+        ]);
 
         let found = seeder
             .find_existing(&torrents, Path::new("/downloads/tv/target.mkv"))
@@ -765,7 +804,12 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &announce, &[], Some(&built.info_hash))
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::default(),
+                Some(&built.info_hash),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -820,7 +864,12 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &new_announce, &[], Some(&built.info_hash))
+            .seed(
+                &paths,
+                &new_announce,
+                &KnownTorrents::default(),
+                Some(&built.info_hash),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -868,7 +917,12 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &announce, &[], Some("stale-hash-nothing-cached"))
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::default(),
+                Some("stale-hash-nothing-cached"),
+            )
             .await
             .unwrap();
         assert!(matches!(outcome, SeedOutcome::Added { .. }));
@@ -908,14 +962,14 @@ mod tests {
             qbit: PathBuf::from("/downloads/movie.mkv"),
             mapping_applied: false,
         };
-        let existing = [torrent(
+        let existing = [summary(
             &theirs.info_hash,
             "/downloads",
             "/downloads/movie.mkv",
         )];
 
         let outcome = seeder
-            .seed(&paths, &announce, &existing, None)
+            .seed(&paths, &announce, &KnownTorrents::index(&existing), None)
             .await
             .unwrap();
         assert_eq!(
@@ -973,10 +1027,10 @@ mod tests {
             qbit: PathBuf::from("/downloads/movie.mkv"),
             mapping_applied: false,
         };
-        let existing = [torrent("deadbeef", "/downloads", "/downloads/movie.mkv")];
+        let existing = [summary("deadbeef", "/downloads", "/downloads/movie.mkv")];
 
         let err = seeder
-            .seed(&paths, &announce, &existing, None)
+            .seed(&paths, &announce, &KnownTorrents::index(&existing), None)
             .await
             .unwrap_err();
         let text = format!("{err:#}");
@@ -1019,14 +1073,14 @@ mod tests {
             qbit: PathBuf::from("/downloads/movie.mkv"),
             mapping_applied: false,
         };
-        let existing = [torrent(
+        let existing = [summary(
             &built.info_hash,
             "/downloads",
             "/downloads/movie.mkv",
         )];
 
         let outcome = seeder
-            .seed(&paths, &announce, &existing, None)
+            .seed(&paths, &announce, &KnownTorrents::index(&existing), None)
             .await
             .unwrap();
         assert_eq!(
@@ -1041,7 +1095,11 @@ mod tests {
         assert_eq!(client.add_trackers_calls.lock().unwrap().len(), 1);
     }
 
-    fn torrent(hash: &str, save_path: &str, content_path: &str) -> TorrentSummary {
+    fn torrent(hash: &str, save_path: &str, content_path: &str) -> KnownTorrent {
+        KnownTorrent::from(&summary(hash, save_path, content_path))
+    }
+
+    fn summary(hash: &str, save_path: &str, content_path: &str) -> TorrentSummary {
         TorrentSummary {
             hash: hash.to_owned(),
             name: "whatever".to_owned(),
@@ -1122,12 +1180,12 @@ mod tests {
         ];
 
         assert!(contains_file(
-            "/downloads/tv",
+            Path::new("/downloads/tv"),
             &files,
             Path::new("/downloads/tv/Lanternwick Hollow/lanternwick.s02e01.mkv")
         ));
         assert!(!contains_file(
-            "/downloads/tv",
+            Path::new("/downloads/tv"),
             &files,
             Path::new("/downloads/tv/Lanternwick Hollow/lanternwick.s02e09.mkv")
         ));
@@ -1137,7 +1195,7 @@ mod tests {
     fn a_file_under_a_different_save_path_is_not_matched() {
         let files = [file("lanternwick.s02e01.mkv")];
         assert!(!contains_file(
-            "/downloads/other",
+            Path::new("/downloads/other"),
             &files,
             Path::new("/downloads/tv/lanternwick.s02e01.mkv")
         ));

@@ -30,7 +30,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
@@ -511,8 +511,8 @@ pub async fn exchange_loop(state: Arc<ServeState>) {
     // live connection pool for nothing. A build failure is kept rather than
     // retried every interval; nothing here can fix a broken TLS backend by
     // trying again in fifteen minutes.
-    let http =
-        sharerr_client::http_client_with_timeout(Duration::from_secs(15)).map_err(|e| e.to_string());
+    let http = sharerr_client::http_client_with_timeout(Duration::from_secs(15))
+        .map_err(|e| e.to_string());
 
     loop {
         let outcome = match &http {
@@ -641,6 +641,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
+    use secrecy::SecretString;
     use sharerr_store::PeerScope;
 
     fn identity(seed: u8) -> Identity {

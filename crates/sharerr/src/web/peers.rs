@@ -572,12 +572,7 @@ mod tests {
     // only ever exercising the "vault would not open" path, never a real
     // open one.
 
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     /// A config whose database path is a directory rather than a file, so
     /// `Store::open` fails deterministically — the hermetic way to reach the

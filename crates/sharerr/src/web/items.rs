@@ -550,12 +550,7 @@ mod tests {
 
     // -------------------------------------------------------------- page()
 
-    fn web_state(serve: std::sync::Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: std::sync::Arc::new(crate::web::auth::Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     fn named(source: MediaSource, title: &str, file_id: i64) -> SharedItem {
         let spec = MediaSpec::Movie {

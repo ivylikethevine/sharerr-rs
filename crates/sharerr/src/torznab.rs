@@ -353,7 +353,10 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
         ] {
             if let Some(value) = value {
                 // An integer needs no escaping and no intermediate `String`.
-                let _ = writeln!(out, "      <torznab:attr name=\"{name}\" value=\"{value}\"/>");
+                let _ = writeln!(
+                    out,
+                    "      <torznab:attr name=\"{name}\" value=\"{value}\"/>"
+                );
             }
         }
         if let Some(imdb) = item.ids.imdb.as_deref() {

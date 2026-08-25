@@ -21,10 +21,10 @@ use axum::response::Html;
 use axum::routing::get;
 
 use crate::web::templates::{
-    ArrSection, ClientCheck, ClientMismatch, EdgeStyle, EndpointStatus, FilterOption, Glance,
-    ItemRow, ItemsPage, LibraryRow, LighthouseRow, LighthouseView, NodeStatus, PathRow,
-    PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow, ScopeOption,
-    SettingsPage, SortLink, StateCount, StatusPage, TokenStatus, TopologyPage,
+    ArrSection, ClientCheck, ClientMismatch, DiagnosticsData, EdgeStyle, EndpointStatus,
+    FilterOption, Glance, ItemRow, ItemsPage, LibraryRow, LighthouseRow, LighthouseView,
+    NodeStatus, PathRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow,
+    ScopeOption, SettingsPage, SortLink, StateCount, StatusPage, TokenStatus, TopologyPage,
 };
 use crate::web::topology::{Channel, FriendNode, SourceNode, layout};
 
@@ -99,152 +99,133 @@ fn status_page() -> StatusPage {
         sync_interval_secs: 900,
         config_path: "/config/sharerr.toml".to_owned(),
 
-        services: vec![
-            ServiceLineMock::ok(
-                "Sonarr",
-                "reachable, tag present",
-                "http://sonarr.example:8989/",
-            ),
-            ServiceLineMock::ok(
-                "Radarr",
-                "reachable, tag present",
-                "http://radarr.example:7878/",
-            ),
-            ServiceLineMock::bad(
-                "Lidarr",
-                "could not reach it: connection refused",
-                "http://lidarr.example:8686/",
-            ),
-        ]
-        .into_iter()
-        .map(ServiceLineMock::into_line)
-        .collect(),
-        scanned: true,
-        rules: 4,
-        checked: 132,
-        unmapped: 2,
-        missing: vec![
-            "/tv/Lanternwick Hollow/S02E04.mkv".to_owned(),
-            "/movies/Harborlight (2019)/Harborlight.mkv".to_owned(),
-        ],
-        more_missing: 0,
-        invalid: vec![],
-        sample: Some(SampleRow {
-            arr: "/data/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
-            sharerr: "/media/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
-            qbit: "/downloads/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
-        }),
-        readable: 128,
-        healthy: false,
-        gluetun: vec![
-            EndpointStatus {
-                label: "Tracker",
-                enabled: true,
-                configured: true,
-                current: Some("198.51.100.24:51413".to_owned()),
-                last_observed: Some("198.51.100.24:51413, 2 minutes ago".to_owned()),
-                last_poll: Some("2 minutes ago".to_owned()),
-                last_success: Some("2 minutes ago".to_owned()),
-                last_error: None,
-            },
-            EndpointStatus {
-                label: "Torrent client",
-                enabled: true,
-                configured: true,
-                current: None,
-                last_observed: Some("203.0.113.9:51413, 40 minutes ago".to_owned()),
-                last_poll: Some("30 seconds ago".to_owned()),
-                last_success: Some("40 minutes ago".to_owned()),
-                last_error: Some(
-                    "could not reach the gluetun control server: timed out".to_owned(),
+        diag: DiagnosticsData {
+            services: vec![
+                service_line(
+                    "Sonarr",
+                    "reachable, tag present",
+                    true,
+                    "http://sonarr.example:8989/",
                 ),
-            },
-        ],
-        runs: vec![
-            RunRow {
-                when: "4 minutes ago".to_owned(),
-                when_absolute: "2024-05-06 11:18:04 UTC".to_owned(),
-                took: "12s".to_owned(),
-                summary: "2 added, 1 failed".to_owned(),
-                failed: false,
-            },
-            RunRow {
-                when: "19 minutes ago".to_owned(),
-                when_absolute: "2024-05-06 11:03:41 UTC".to_owned(),
-                took: "under a second".to_owned(),
-                summary: "up to date".to_owned(),
-                failed: false,
-            },
-            RunRow {
-                when: "34 minutes ago".to_owned(),
-                when_absolute: "2024-05-06 10:48:22 UTC".to_owned(),
-                took: "2m 5s".to_owned(),
-                summary: "could not reach qBittorrent".to_owned(),
-                failed: true,
-            },
-        ],
-        // One accepting and one refusing, so the preview shows both the row
-        // shape and the warning verdict that a partial failure produces.
-        lighthouse: Some(LighthouseView {
-            configured: 2,
-            last_pass: Some("6 minutes ago".to_owned()),
+                service_line(
+                    "Radarr",
+                    "reachable, tag present",
+                    true,
+                    "http://radarr.example:7878/",
+                ),
+                service_line(
+                    "Lidarr",
+                    "could not reach it: connection refused",
+                    false,
+                    "http://lidarr.example:8686/",
+                ),
+            ],
+            scanned: true,
+            rules: 4,
+            checked: 132,
+            unmapped: 2,
+            missing: vec![
+                "/tv/Lanternwick Hollow/S02E04.mkv".to_owned(),
+                "/movies/Harborlight (2019)/Harborlight.mkv".to_owned(),
+            ],
+            more_missing: 0,
+            invalid: vec![],
+            sample: Some(SampleRow {
+                arr: "/data/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
+                sharerr: "/media/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
+                qbit: "/downloads/tv/Lanternwick Hollow/S01E01.mkv".to_owned(),
+            }),
+            readable: 128,
             healthy: false,
-            rows: vec![
-                LighthouseRow {
-                    url: "https://lighthouse.example".to_owned(),
-                    last_success: Some("6 minutes ago".to_owned()),
+            gluetun: vec![
+                EndpointStatus {
+                    label: "Tracker",
+                    enabled: true,
+                    configured: true,
+                    current: Some("198.51.100.24:51413".to_owned()),
+                    last_observed: Some("198.51.100.24:51413, 2 minutes ago".to_owned()),
+                    last_poll: Some("2 minutes ago".to_owned()),
+                    last_success: Some("2 minutes ago".to_owned()),
                     last_error: None,
                 },
-                LighthouseRow {
-                    url: "https://beacon.example".to_owned(),
-                    last_success: Some("2 days ago".to_owned()),
+                EndpointStatus {
+                    label: "Torrent client",
+                    enabled: true,
+                    configured: true,
+                    current: None,
+                    last_observed: Some("203.0.113.9:51413, 40 minutes ago".to_owned()),
+                    last_poll: Some("30 seconds ago".to_owned()),
+                    last_success: Some("40 minutes ago".to_owned()),
                     last_error: Some(
-                        "answered 403 Forbidden: key hash is pinned to another identity".to_owned(),
+                        "could not reach the gluetun control server: timed out".to_owned(),
                     ),
                 },
             ],
-            last_recovery: Some("3 days ago".to_owned()),
-            last_recovery_peer: Some("Riley".to_owned()),
-            lookups_attempted: 1,
-        }),
+            runs: vec![
+                RunRow {
+                    when: "4 minutes ago".to_owned(),
+                    when_absolute: "2024-05-06 11:18:04 UTC".to_owned(),
+                    took: "12s".to_owned(),
+                    summary: "2 added, 1 failed".to_owned(),
+                    failed: false,
+                },
+                RunRow {
+                    when: "19 minutes ago".to_owned(),
+                    when_absolute: "2024-05-06 11:03:41 UTC".to_owned(),
+                    took: "under a second".to_owned(),
+                    summary: "up to date".to_owned(),
+                    failed: false,
+                },
+                RunRow {
+                    when: "34 minutes ago".to_owned(),
+                    when_absolute: "2024-05-06 10:48:22 UTC".to_owned(),
+                    took: "2m 5s".to_owned(),
+                    summary: "could not reach qBittorrent".to_owned(),
+                    failed: true,
+                },
+            ],
+            // One accepting and one refusing, so the preview shows both the row
+            // shape and the warning verdict that a partial failure produces.
+            lighthouse: Some(LighthouseView {
+                configured: 2,
+                last_pass: Some("6 minutes ago".to_owned()),
+                healthy: false,
+                rows: vec![
+                    LighthouseRow {
+                        url: "https://lighthouse.example".to_owned(),
+                        last_success: Some("6 minutes ago".to_owned()),
+                        last_error: None,
+                    },
+                    LighthouseRow {
+                        url: "https://beacon.example".to_owned(),
+                        last_success: Some("2 days ago".to_owned()),
+                        last_error: Some(
+                            "answered 403 Forbidden: key hash is pinned to another identity"
+                                .to_owned(),
+                        ),
+                    },
+                ],
+                last_recovery: Some("3 days ago".to_owned()),
+                last_recovery_peer: Some("Riley".to_owned()),
+                lookups_attempted: 1,
+            }),
+        },
     }
 }
 
-/// A tiny local stand-in so the `status_page` builder above can express
-/// "ok"/"bad" without repeating `ServiceLine { .. }` three times.
-struct ServiceLineMock {
-    name: &'static str,
-    message: &'static str,
+/// One service row for the `status_page` fixture above, so it does not
+/// repeat `ServiceLine { .. }` with `.to_owned()` on every field three times.
+fn service_line(
+    name: &str,
+    message: &str,
     ok: bool,
-    url: &'static str,
-}
-
-impl ServiceLineMock {
-    fn ok(name: &'static str, message: &'static str, url: &'static str) -> Self {
-        Self {
-            name,
-            message,
-            ok: true,
-            url,
-        }
-    }
-
-    fn bad(name: &'static str, message: &'static str, url: &'static str) -> Self {
-        Self {
-            name,
-            message,
-            ok: false,
-            url,
-        }
-    }
-
-    fn into_line(self) -> crate::web::templates::ServiceLine {
-        crate::web::templates::ServiceLine {
-            name: self.name.to_owned(),
-            message: self.message.to_owned(),
-            ok: self.ok,
-            url: self.url.to_owned(),
-        }
+    url: &str,
+) -> crate::web::templates::ServiceLine {
+    crate::web::templates::ServiceLine {
+        name: name.to_owned(),
+        message: message.to_owned(),
+        ok,
+        url: url.to_owned(),
     }
 }
 

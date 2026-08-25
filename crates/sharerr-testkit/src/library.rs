@@ -255,6 +255,7 @@ pub fn system_status_json(app: &str) -> Value {
 }
 
 impl TvLibrary {
+    /// `GET /api/v3/series`: the tagged series plus an untagged decoy.
     pub fn series_json(&self) -> Value {
         json!([
             {

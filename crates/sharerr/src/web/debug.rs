@@ -100,17 +100,9 @@ echo "A FAIL means the address, the port forward, or the firewall is wrong."
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::sync::Arc;
-
     use super::*;
-    use crate::web::auth::Sessions;
 
-    fn web_state(serve: Arc<crate::state::ServeState>) -> WebState {
-        WebState {
-            serve,
-            sessions: Arc::new(Sessions::default()),
-        }
-    }
+    use super::super::web_state;
 
     #[test]
     fn the_script_embeds_the_resolved_addresses() {

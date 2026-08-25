@@ -338,7 +338,11 @@ pub async fn snapshot(
     let discovered: Vec<(MediaSource, PathBuf)> = sources
         .iter()
         .flat_map(|(_, outcome)| outcome.items())
-        .chain(scanned_items.iter().flat_map(|(_, outcome)| outcome.items()))
+        .chain(
+            scanned_items
+                .iter()
+                .flat_map(|(_, outcome)| outcome.items()),
+        )
         .map(|item| (item.source, item.arr_path.clone()))
         .collect();
 
@@ -357,9 +361,9 @@ pub async fn snapshot(
             )
         })
         .await
-            // A panicked walk renders as an empty report rather than a 500;
-            // the source/library lines still carry the useful half of the page.
-            .unwrap_or_default()
+        // A panicked walk renders as an empty report rather than a 500;
+        // the source/library lines still carry the useful half of the page.
+        .unwrap_or_default()
     };
 
     Snapshot {
