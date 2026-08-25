@@ -53,7 +53,7 @@ services:
   transmission:
     # Pinned like the rest. The RPC is stable, but label handling is not something
     # to discover from a silent minor bump.
-    image: lscr.io/linuxserver/transmission:4.0.5@sha256:c6a95f014f7ec812c9173be5a0afef4656e7c09be1c2d063786f42bdc3ee3d8a
+    image: lscr.io/linuxserver/transmission:4.1.2@sha256:9e876c15ed4f9e7dbd9c7ad1b80664518b0733e3f7485de07f3e8cc8b436f2c0
     container_name: sharerr-tm-test-transmission
     environment:
       PUID: *puid
