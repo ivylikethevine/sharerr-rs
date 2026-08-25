@@ -1,0 +1,129 @@
+name: Advisories
+
+# The notification half of cargo-deny.
+#
+# ci.yml already runs `cargo deny check advisories licenses bans sources` on
+# every push and pull request, and on its own weekly schedule. That job is the
+# gate: it fails the build, which is the right answer when somebody's diff is
+# what pulled in the offending crate.
+#
+# It is the wrong shape for the other case, and the other case is the common
+# one. A RUSTSEC advisory is published against a dependency this repo has not
+# touched in months; the weekly run turns red on a Monday morning; nobody is
+# looking at a scheduled run they did not start. The finding is a standing
+# state of `Cargo.lock`, not an event, and a red run that goes unopened is a
+# notification only in the sense that a tree falling in a forest is.
+#
+# So this workflow asks the same question and answers it differently: one
+# tracking issue, opened when an advisory lands, rewritten with the current
+# report on every later run, closed by the run that finds the tree clean. It is
+# advisory in the literal sense — it never blocks a merge, because ci.yml
+# already does that for anything a diff introduces.
+#
+# Only `advisories` here, not the full `licenses bans sources` set. Those three
+# fail on something the repo itself changed, which is ci.yml's job; advisories
+# is the only one that can start failing with nobody having touched anything.
+
+on:
+  schedule:
+    - cron: "11 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: advisories
+  cancel-in-progress: false
+
+jobs:
+  advisories:
+    name: RUSTSEC advisories against Cargo.lock (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # the one write this job does: upsert (and close) its own tracking issue
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      # A prebuilt binary rather than `cargo install`, which would spend two
+      # minutes compiling a linter on every weekly run. The action is
+      # SHA-pinned like every other, so dependabot owns its version; cargo-deny
+      # itself is resolved to its own latest release, which is what you want
+      # from the thing reading the advisory database.
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        with:
+          tool: cargo-deny
+
+      # cargo-deny exits non-zero on a finding and writes its report to stderr.
+      # Captured rather than left to fail the step: a finding is the case this
+      # workflow exists to report, not a broken job.
+      - id: check
+        name: Check Cargo.lock against the advisory database
+        run: |
+          set -uo pipefail
+          rc=0
+          cargo deny check advisories \
+            >"$RUNNER_TEMP/advisories.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/advisories.txt"
+          echo "found=$rc" >>"$GITHUB_OUTPUT"
+
+      - name: Keep the tracking issue current
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FOUND: ${{ steps.check.outputs.found }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          label=advisories
+          title="A RUSTSEC advisory affects a dependency in Cargo.lock"
+
+          # --force is create-or-update, so a deleted label heals itself rather
+          # than turning every later `issue create` into a hard failure
+          gh label create "$label" --force --color B60205 \
+            --description "cargo-deny reports an advisory against the locked dependency tree" >/dev/null
+
+          # one issue, reused: the finding is a standing state of Cargo.lock,
+          # not an event, so a new issue per weekly run would be pure noise
+          open="$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')"
+
+          if [ "$FOUND" = 0 ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "cargo-deny reports no advisories against the current \`Cargo.lock\`. [Latest run]($RUN_URL)."
+            fi
+            echo "no advisories"
+            exit 0
+          fi
+
+          report="$RUNNER_TEMP/report.md"
+          {
+            echo "\`cargo deny check advisories\` is failing against the current \`Cargo.lock\`."
+            echo
+            echo "The fix is usually a \`cargo update -p <crate>\`, or dependabot's open"
+            echo "bump PR for it. Where no patched version exists yet, the escape hatch is"
+            echo "an \`[advisories] ignore\` entry in \`deny.toml\` **with a comment saying why**."
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/advisories.txt"
+            echo '```'
+            echo
+            echo "Found by [\`advisories\`]($RUN_URL). Closed automatically once the tree is clean."
+          } >"$report"
+          cat "$report" >>"$GITHUB_STEP_SUMMARY"
+
+          # --body-file, not --body: the report is a code block with blank lines,
+          # and a YAML-indented shell string would arrive indented into it
+          if [ -n "$open" ]; then
+            gh issue edit "$open" --title "$title" --body-file "$report"
+            echo "updated #$open"
+          else
+            gh issue create --label "$label" --title "$title" --body-file "$report"
+          fi
+
+          echo "::warning title=cargo-deny::A RUSTSEC advisory affects Cargo.lock - see the issue"

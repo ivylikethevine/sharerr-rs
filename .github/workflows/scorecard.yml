@@ -1,0 +1,79 @@
+name: Scorecard
+
+# OpenSSF Scorecard. A supply-chain score is only useful as a trend, and the
+# checks it grades move when dependabot bumps an action, not when anyone
+# remembers to press a button — hence a schedule rather than dispatch-only.
+#
+# Most of what it grades this repo already does: every `uses:` is SHA-pinned,
+# dependabot covers four ecosystems, workflow permissions are least-privilege
+# and declared per job, and releases are gated behind a manual approval in
+# docker.yml. The checks worth actually watching are Pinned-Dependencies (which
+# also grades the *Dockerfiles*, now digest-pinned) and Dangerous-Workflow.
+#
+# Its SAST check counts CodeQL and does not count zizmor, actionlint, clippy or
+# cargo-deny — a real reason to run codeql.yml, and a bad reason to believe the
+# score.
+#
+# The results are shown in two places, which answer different questions.
+# Privately, the SARIF is uploaded to code scanning, so findings land in the
+# repo's Security tab with file and line rather than inside an artifact nobody
+# downloads. Publicly, publish_results puts the score on the OpenSSF API that a
+# README badge can read.
+#
+# publish_results only takes effect on a scheduled run against the default
+# branch — a workflow_dispatch will not publish, by the action's own design, so
+# the cron above is what keeps a badge current rather than a convenience.
+
+on:
+  schedule:
+    - cron: "41 7 * * 2"
+  workflow_dispatch:
+
+# read-all is the floor; the analysis job takes the three write scopes it needs
+# below. Job-level permissions replace the workflow-level block rather than
+# adding to it, which is why that job spells out its read scopes again.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: supply-chain scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Deliberately no `environment:` gate: this runs on a schedule, and a
+    # schedule cannot pass one — a required reviewer would leave every weekly
+    # run queued for an approval nobody is waiting to give. docker.yml's
+    # publish gate is the one that matters.
+    permissions:
+      contents: read
+      # the two the analysis needs, and the only write scopes in this file:
+      # code scanning takes the SARIF, and publish_results signs the score it
+      # sends to the OpenSSF API with an OIDC token
+      security-events: write
+      id-token: write
+      # Dangerous-Workflow and Token-Permissions read workflow definitions
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # Kept alongside the code-scanning upload rather than replaced by it: the
+      # artifact is the whole report as the tool emitted it, which is what you
+      # want when reading a run by hand. Code scanning keeps only what it can
+      # map to a line.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          if-no-files-found: error
+
+      - name: Upload the findings to code scanning
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          sarif_file: results.sarif

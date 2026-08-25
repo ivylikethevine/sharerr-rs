@@ -15,7 +15,7 @@
 # The two pins drift asymmetrically: raising `rust-version` in Cargo.toml without
 # this line fails loudly here, but raising this line without Cargo.toml fails
 # nowhere — the MSRV check silently starts testing a newer toolchain. Change both.
-FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
 
 # Supplied by BuildKit. Names the architecture of the *runtime* image, not of this
 # stage — which is the whole point of the split.
@@ -88,7 +88,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=registry-$TARGETARCH 
 
 # No --platform override, deliberately: this stage must be pulled for the *target*
 # architecture. That is what makes the arm64 image genuinely arm64.
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 
 RUN apt-get update \
  && apt-get install --yes --no-install-recommends ca-certificates curl \

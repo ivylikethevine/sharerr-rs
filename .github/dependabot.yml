@@ -1,10 +1,31 @@
 # Dependency updates.
 #
-# The workflows pin every action to a commit SHA rather than a tag, which is what
-# makes an update an auditable change instead of something that happens silently
-# under a moving `@v4`. That pinning is only safe with something to move the pins,
-# which is this file: dependabot rewrites the SHA *and* the trailing `# vX.Y.Z`
-# comment together.
+# The workflows pin every action to a commit SHA rather than a tag, and every
+# Dockerfile and compose file now pins its base image by digest as well as by
+# tag. Both of those make an update an auditable change instead of something
+# that happens silently under a moving `@v4` or `:5.2.3`. Pinning is only safe
+# with something to move the pins, which is this file: dependabot rewrites the
+# SHA *and* the trailing `# vX.Y.Z` comment together, and rewrites a digest
+# alongside its tag.
+#
+# What this file cannot cover, and what covers it instead:
+#
+#   * The curl/pip/go-installed tool versions in ci.yml (zizmor, actionlint,
+#     hadolint) have no ecosystem here at all. `tool-versions.yml` watches that
+#     drift and keeps one tracking issue current.
+#   * Whether a base-image bump actually *fixes* anything. Dependabot's docker
+#     ecosystem is version-updates-only — GHSA carries no container ecosystem,
+#     so there are no alerts to drive a security-update mode — and a digest is
+#     just a digest. `image-scan.yml` answers that with trivy by measuring both
+#     the pinned digest and what the tag points at now.
+#
+# Every compose file in the tree is in scope, which took a rename to be true.
+# The docker-compose ecosystem matches files by the regex
+# `(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`, and the gluetun service
+# fragment used to be `gluetun.reference.yaml` — a name with no "compose" in it,
+# which dependabot would never fetch. It is `compose.gluetun.reference.yaml`
+# now. A new file that holds an image pin has to satisfy that regex, or it goes
+# unmanaged in a way nothing here will complain about.
 
 version: 2
 
@@ -63,10 +84,7 @@ updates:
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
 
-  # The Dockerfile's builder stage is pinned to the workspace MSRV (1.98) on
-  # purpose — that pin is what makes `docker build` the MSRV check. Dependabot
-  # would otherwise "helpfully" bump it to the latest Rust and quietly delete the
-  # only thing in the project that verifies the declared MSRV.
+  # Dockerfile and Dockerfile.lighthouse, both at the repo root.
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -75,8 +93,58 @@ updates:
     open-pull-requests-limit: 2
     commit-message:
       prefix: "docker"
-    # Same reasoning as the other two entries above.
+    # Same reasoning as the other entries above.
     cooldown:
       default-days: 7
     ignore:
+      # The builder stage is pinned to the workspace MSRV (1.98) on purpose —
+      # that pin is what makes `docker build` the MSRV check, and a bump to the
+      # latest Rust would quietly delete the only thing in the project that
+      # verifies the declared MSRV.
+      #
+      # Only the three semver update-types are ignored, not the dependency
+      # outright. That is the difference digest-pinning makes: a rebuild of
+      # `rust:1.98-bookworm` still arrives as a digest refresh, so the image
+      # keeps picking up Debian's security fixes while the toolchain stays at
+      # 1.98. Ignoring `rust` wholesale — as this file did before the pins
+      # existed — would freeze the layers too.
       - dependency-name: rust
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+
+  # The compose stacks: the tier-2 test harness under /docker, and the
+  # deployment examples under /docker/deploy. The fetcher reads one directory at
+  # a time and does not recurse, so every directory holding a compose file has
+  # to be named here — the globs below are what keeps that from being a list to
+  # maintain by hand.
+  #
+  # These are pinned by digest for the same reason the Dockerfiles are, but the
+  # stakes differ by directory. /docker is what `run_docker_tests.sh` drives, so
+  # a moving tag there means a tier-2 failure that reproduces on nobody else's
+  # machine. /docker/deploy is copy-pasted by users, so a bump there is a
+  # published recommendation and wants the same review a release does.
+  - package-ecosystem: docker-compose
+    directories:
+      - "/docker"
+      # `/docker/deploy/*` matches the directories *under* deploy, not deploy
+      # itself, and `compose.gluetun.reference.yaml` sits directly in it — the
+      # three tunnelled stacks `extends` that one file for their gluetun pin.
+      - "/docker/deploy"
+      - "/docker/deploy/*"
+      - "/docker/deploy/dual-vpn/*"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker"
+    cooldown:
+      default-days: 7
+    groups:
+      # The *arr images move together on linuxserver's own release cadence and
+      # are upgraded together in practice; one PR per stack beats five.
+      servarr:
+        patterns:
+          - "lscr.io/linuxserver/*"

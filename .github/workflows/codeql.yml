@@ -1,0 +1,78 @@
+name: CodeQL
+
+# CodeQL over the two languages in this repo it can read: Rust and GitHub
+# Actions.
+#
+# Rust analysis went generally available in CodeQL 2.23.3 (Oct 2025) and covers
+# every OWASP Top 10 category except A06 (vulnerable and outdated components),
+# where it defers to dependabot — which is exactly the split this repo already
+# has, with cargo-deny and dependabot owning A06. The queries that earn their
+# keep here are the cryptographic ones: sharerr's vault is argon2 and
+# chacha20poly1305 over secrets that never touch `sharerr.toml`, and
+# `rust/hard-coded-cryptographic-value` looks for precisely the mistake that
+# code must not make — a hard-coded key, IV, nonce or salt.
+#
+# The `actions` half covers eight workflows, where the interesting bugs are
+# expression injection into `run:`, an untrusted checkout feeding a privileged
+# job, and artifact or cache poisoning. That overlaps with zizmor, which already
+# gates every PR in ci.yml, and the overlap is the point rather than an
+# accident: zizmor is a fast opinionated linter that fails the build, CodeQL is
+# a slower dataflow analysis whose findings land in the Security tab with a
+# trace. Where they agree, a finding is cheap to trust; where only one fires, it
+# is worth reading. Neither replaces the other, and zizmor stays the gate.
+#
+# `build-mode: none` for both. Rust is a no-build language for CodeQL since the
+# same 2.23.3 release, which matters here: a build mode would mean compiling the
+# workspace a second time on every push, and this analysis has nothing to say
+# that `cargo clippy` does not already say faster.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # the default-branch baseline code scanning diffs a PR against. Without a
+  # scheduled run the first PR to touch a file has nothing to compare to.
+  schedule:
+    - cron: "17 6 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # the SARIF upload, and the workflow definitions being analysed
+      security-events: write
+      actions: read
+    strategy:
+      # One language failing should not hide the other's findings; they upload
+      # under separate categories and are read separately.
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: "/language:${{ matrix.language }}"

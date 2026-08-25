@@ -142,5 +142,57 @@ pin the toolchain to `rust-version`, and **both pins have to move together** —
 the lighthouse one silently sat three minors behind for a while, which meant that
 image had no working MSRV check at all.
 
+**Every container image is pinned by digest, not just by tag.** Both Dockerfiles
+and all nine compose files under `docker/` carry `name:tag@sha256:...`. The tag
+stays for legibility; the digest is what actually resolves. Adding an image
+means pinning it the same way — `docker buildx imagetools inspect <ref>
+--format '{{.Manifest.Digest}}'` prints the digest to paste.
+
+Two things read those pins back, and neither tolerates a bare tag:
+`.github/scripts/scan_pinned_images.sh` extracts them by regex (a bare tag is
+invisible to it, so an unpinned image is silently unscanned), and dependabot's
+`docker` / `docker-compose` entries rewrite tag and digest together.
+
+**A compose file's _name_ decides whether dependabot manages it.** The
+`docker-compose` ecosystem matches filenames against
+`(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`. The gluetun service fragment was
+`gluetun.reference.yaml` — no "compose" in it, so dependabot never fetched it
+and its pin moved by hand; it is `compose.gluetun.reference.yaml` now, and the
+three tunnelled stacks `extends` it by that path. A new file holding an image
+pin must satisfy that regex, and must sit in a directory `dependabot.yml` lists
+— `/docker/deploy/*` matches the directories _under_ `deploy`, not `deploy`
+itself, which is why `/docker/deploy` is listed separately.
+
+**Three scheduled workflows notify by keeping one issue current**, rather than by
+turning a run red: `image-scan.yml`'s `pins` job, `tool-versions.yml`, and
+`advisories.yml`. Each opens a single labelled issue when its finding appears,
+rewrites that issue's body on every later run, and **closes it** on the run that
+finds things clean. The shape is deliberate — every one of these findings is a
+standing state of the repo that nobody caused with a commit, and a scheduled run
+that goes red on a Monday morning is not a notification if nobody opens it. If
+you add a fifth, follow the same shape: `gh label create --force`, reuse the
+first open issue with that label, `--body-file` (never `--body`, which arrives
+YAML-indented into the code block).
+
+None of the three blocks a merge. `ci.yml` is the gate — it fails on anything a
+diff introduces; these four report on what upstream did while nobody was
+looking.
+
+**`image-scan.yml` runs two scans that answer different questions.** `trivy`
+scans the image the repo _publishes_ ("has what we shipped gone stale");
+`pins` scans the images it _builds on_ ("is there a better base for the next
+one"). The second only speaks when a repin is verified to reduce the fixable
+CVE count — it scans the pinned digest, scans what the tag points at now, and
+stays quiet unless the second is strictly better. `--ignore-unfixed` is
+load-bearing there, not a flag: without it the permanent won't-fix pile makes
+every comparison noise against noise.
+
+**Pinned tool versions that dependabot cannot see** are zizmor and actionlint,
+installed by `pip` and `go install` in `ci.yml`. `check_tool_versions.sh`
+extracts each pin _out of `ci.yml` by regex_ rather than duplicating it, so the
+roster cannot drift from what CI runs — a row whose regex stops matching is
+reported as an error, not skipped. hadolint and trivy are deliberately
+unpinned (newest release, always), so they have no row.
+
 The roadmap is `docs/ROADMAP.md`; the original design brief and the two premises
 the implementation disproved are in `docs/DESIGN.md`.

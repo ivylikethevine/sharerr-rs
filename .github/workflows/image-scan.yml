@@ -1,12 +1,34 @@
-# Scans the image this repo actually publishes, not the base images it starts
-# from — Trivy against `ghcr.io/<repo>:latest`, for fixable HIGH/CRITICAL
-# vulnerabilities in whatever ended up in the runtime layer: the pinned
-# ca-certificates/curl from `apt-get`, plus whatever the Rust binary itself
-# statically links. A CVE landing upstream is not a reason to redden somebody's
+# Two trivy scans that answer different questions, kept in one file because
+# they share a schedule and a subject.
+#
+# `trivy` scans the image this repo *publishes* — `ghcr.io/<repo>:latest` — for
+# fixable HIGH/CRITICAL vulnerabilities in whatever ended up in the runtime
+# layer: the pinned ca-certificates/curl from `apt-get`, plus whatever the Rust
+# binary itself statically links. It asks "has what we shipped gone stale".
+#
+# `pins` scans the images this repo *builds on* — every `FROM` and `image:`
+# digest pin across the Dockerfiles and the compose stacks. It asks "is there a
+# better base to build the next one from", and it only speaks when the answer
+# is yes: it scans the pinned digest, scans what the tag points at now, and
+# reports only when the second is verifiably better than the first. The state
+# machine and the reasoning live in .github/scripts/scan_pinned_images.sh's
+# header; the short version is that dependabot bumps on release, not on
+# severity, and nothing else here would say "the digest you are pinned to now
+# has a fixable hole".
+#
+# Both are advisory. A CVE landing upstream is not a reason to redden somebody's
 # unrelated PR, so this runs on its own schedule and never blocks a merge —
 # `docker.yml`'s manual-approval gate is what stops a genuinely bad image from
 # reaching `:latest` in the first place; this is what tells you a *previous*
 # one has gone stale.
+#
+# They differ in how they speak, and deliberately. `trivy` writes a ::warning
+# and a step summary: its subject is one image that a rebuild fixes, and the
+# rebuild is a decision somebody makes while looking at the release anyway.
+# `pins` keeps a tracking issue current, because a repin that would close a CVE
+# is a standing state nobody is otherwise looking at, and an annotation in a
+# scheduled run that goes unopened is not a notification.
+
 name: Image scan
 
 on:
@@ -91,3 +113,90 @@ jobs:
         name: Say so
         run: |
           echo "trivy: no fixable HIGH/CRITICAL vulnerabilities in ${IMAGE}:latest"
+
+  pins:
+    name: scan the pinned base images (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # the one write this job does: upsert (and close) its own tracking issue
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      # Intentionally the newest Trivy and the newest vulnerability database
+      # rather than a pin, for the reason the `trivy` job above gives: a stale
+      # scanner is a scanner that stops finding anything.
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      # The three advisory verdicts (0 clean, 1 a finding with no better image
+      # to move to, 2 a repin that demonstrably helps) are all green here.
+      # Captured as an output rather than left to continue-on-error, which
+      # collapses them all to "failure" and would lose the distinction the next
+      # step is built on; anything else really is a broken job (127 is a missing
+      # trivy or jq, or an empty checkout) and still fails loudly.
+      - id: scan
+        name: Compare each pinned digest against its current tag
+        env:
+          SHARERR_SCAN_REPORT: ${{ runner.temp }}/image-scan-report.md
+        run: |
+          set -uo pipefail
+          rc=0
+          .github/scripts/scan_pinned_images.sh || rc=$?
+          echo "verdict=$rc" >>"$GITHUB_OUTPUT"
+          [ "$rc" -le 2 ] || exit "$rc"
+
+      # The report is the summary and the issue body both, so the two can never
+      # drift into saying different things.
+      - name: Say what it found, and open an issue when a repin would help
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ runner.temp }}/image-scan-report.md
+          VERDICT: ${{ steps.scan.outputs.verdict }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cat "$REPORT" >>"$GITHUB_STEP_SUMMARY"
+
+          label=image-scan
+          title="Base image repin would close known vulnerabilities"
+
+          # --force is create-or-update, so a deleted label heals itself rather
+          # than turning every later `issue create` into a hard failure
+          gh label create "$label" --force --color D93F0B \
+            --description "A pinned base image can be repinned to fix a CVE" >/dev/null
+
+          # one issue, reused: the finding is a standing state of the pins, not
+          # an event, so a new issue per weekly run would be pure noise
+          open="$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')"
+
+          if [ "$VERDICT" != 2 ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "The pins no longer have a fixable finding a repin would clear. [Latest run]($RUN_URL)."
+            fi
+            echo "nothing actionable"
+            exit 0
+          fi
+
+          # --body-file, not --body: the report is markdown with blank lines and
+          # backticks in it, and a YAML-indented shell string would arrive with
+          # every continuation line four-space-indented into a code block
+          # the backticks are a markdown code span, not a substitution
+          # shellcheck disable=SC2016
+          printf '\nFound by [`image-scan`](%s). Closed automatically once the pins no longer need it.\n' \
+            "$RUN_URL" >>"$REPORT"
+
+          if [ -n "$open" ]; then
+            gh issue edit "$open" --title "$title" --body-file "$REPORT"
+            echo "updated #$open"
+          else
+            gh issue create --label "$label" --title "$title" --body-file "$REPORT"
+          fi
+
+          echo "::warning title=trivy::A pinned base image can be repinned to close known vulnerabilities - see the issue"
