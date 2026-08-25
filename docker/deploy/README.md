@@ -18,10 +18,11 @@ fixtures, and are driven by `run_docker_tests.sh`. Do not deploy from those.
 
 Two shared files:
 
-- **[`gluetun.reference.yaml`](gluetun.reference.yaml)** — the gluetun service
-  the three tunnelled layouts `extends`. Every environment variable gluetun
-  v3.41.3 accepts is in it, with its real default, so turning something on is
-  uncommenting a line. Not a stack; it does not come up on its own.
+- **[`compose.gluetun.reference.yaml`](compose.gluetun.reference.yaml)** — the
+  gluetun service the three tunnelled layouts `extends`. Every environment
+  variable gluetun v3.41.3 accepts is in it, with its real default, so turning
+  something on is uncommenting a line. Not a stack; it does not come up on its
+  own.
 - **[`gluetun-auth.example.toml`](gluetun-auth.example.toml)** — per-route
   control-server roles, for when one key for everything is too much key.
 

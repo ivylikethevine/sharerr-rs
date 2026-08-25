@@ -103,12 +103,12 @@ services:
   # The namespace owner. Everything else in this file is a passenger.
   #
   # The image pin, the tunnel credentials, the capabilities, the healthcheck and
-  # gluetun's full variable surface live in ../gluetun.reference.yaml. What stays
+  # gluetun's full variable surface live in ../compose.gluetun.reference.yaml. What stays
   # here is what is specific to *this* stack: which ports it publishes, what the
   # firewall lets in, and where the control server listens.
   gluetun:
     extends:
-      file: ../gluetun.reference.yaml
+      file: ../compose.gluetun.reference.yaml
       service: gluetun
     container_name: gluetun
     environment:
@@ -164,7 +164,7 @@ services:
   # password — stateless, no session to expire. Generate one under
   # Options -> Web UI -> API key once the stack is up.
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
     container_name: qbittorrent
     # No `networks:` and no `ports:`. Both belong to gluetun now.
     network_mode: "service:gluetun"
@@ -225,7 +225,7 @@ services:
 
 volumes:
   # gluetun-config is referenced by the extended service in
-  # ../gluetun.reference.yaml. Compose does not import the resources an extended
+  # ../compose.gluetun.reference.yaml. Compose does not import the resources an extended
   # service names, so it has to be declared here.
   gluetun-config:
   qbittorrent-config:

@@ -22,11 +22,11 @@ services:
   # ------------------------------------------------------------------ gluetun
   #
   # The image pin, the tunnel credentials, the capabilities, the healthcheck and
-  # gluetun's full variable surface live in ../../gluetun.reference.yaml. What
+  # gluetun's full variable surface live in ../../compose.gluetun.reference.yaml. What
   # stays here is what is specific to *this* tunnel.
   gluetun:
     extends:
-      file: ../../gluetun.reference.yaml
+      file: ../../compose.gluetun.reference.yaml
       service: gluetun
     container_name: sharerr-gluetun
     networks: [default, sharerr-shared]
@@ -108,7 +108,7 @@ services:
 
 volumes:
   # gluetun-config is referenced by the extended service in
-  # ../../gluetun.reference.yaml. Compose does not import the resources an
+  # ../../compose.gluetun.reference.yaml. Compose does not import the resources an
   # extended service names, so it has to be declared here.
   gluetun-config:
   sharerr-data:

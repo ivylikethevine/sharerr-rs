@@ -227,9 +227,10 @@ jobs:
       - run: docker compose -f docker/compose.test.yml config -q
 
       # The same check for the deployment recipes, which are what people
-      # actually run. Three of them `extends` docker/deploy/gluetun.reference.yaml,
-      # so this also catches a fragment edit that breaks its consumers — the
-      # failure mode that made a shared fragment worth the indirection.
+      # actually run. Three of them `extends` the shared gluetun fragment,
+      # docker/deploy/compose.gluetun.reference.yaml, so this also catches a
+      # fragment edit that breaks its consumers — the failure mode that made a
+      # shared fragment worth the indirection.
       #
       # The placeholders exist because every stack guards its required inputs
       # with `${VAR:?}`, which `config` evaluates. Values are shaped like the

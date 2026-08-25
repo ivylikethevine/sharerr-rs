@@ -24,11 +24,11 @@ services:
   # ------------------------------------------------------------------ gluetun
   #
   # The image pin, the tunnel credentials, the capabilities, the healthcheck and
-  # gluetun's full variable surface live in ../../gluetun.reference.yaml. What
+  # gluetun's full variable surface live in ../../compose.gluetun.reference.yaml. What
   # stays here is what is specific to *this* tunnel.
   gluetun:
     extends:
-      file: ../../gluetun.reference.yaml
+      file: ../../compose.gluetun.reference.yaml
       service: gluetun
     container_name: media-gluetun
     networks: [default, sharerr-shared]
@@ -100,7 +100,7 @@ services:
       - "127.0.0.1:8080:8080"
 
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
     container_name: media-qbittorrent
     # No `networks:` and no `ports:` — both belong to gluetun, which is the
     # only member of this stack that also touches sharerr-shared.
@@ -120,7 +120,7 @@ services:
     restart: unless-stopped
 
   sonarr:
-    image: lscr.io/linuxserver/sonarr:4.0.15
+    image: lscr.io/linuxserver/sonarr:4.0.15@sha256:fbe67c25693dc5f3de220c5691f374576ae265df782c16918cc071b630490bd7
     container_name: sonarr
     networks: [default, sharerr-shared]
     environment:
@@ -135,7 +135,7 @@ services:
     restart: unless-stopped
 
   radarr:
-    image: lscr.io/linuxserver/radarr:5.14.0
+    image: lscr.io/linuxserver/radarr:5.14.0@sha256:3329fbf778701cf53703b342b3a84da31caafec970ef9310be5723dd057666dc
     container_name: radarr
     networks: [default, sharerr-shared]
     environment:
@@ -151,7 +151,7 @@ services:
 
 volumes:
   # gluetun-config is referenced by the extended service in
-  # ../../gluetun.reference.yaml. Compose does not import the resources an
+  # ../../compose.gluetun.reference.yaml. Compose does not import the resources an
   # extended service names, so it has to be declared here.
   gluetun-config:
   qbittorrent-config:
