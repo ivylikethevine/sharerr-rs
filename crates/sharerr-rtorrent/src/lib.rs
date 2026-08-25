@@ -267,7 +267,7 @@ impl TorrentClient for RtorrentClient {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let [hash, name, directory, base_path, custom1, complete, active] =
-                take7("d.multicall2", row)?;
+                take("d.multicall2", row)?;
 
             let tag = as_str(&custom1).to_owned();
             if let Some(wanted) = category
@@ -308,7 +308,7 @@ impl TorrentClient for RtorrentClient {
 
         rows.into_iter()
             .map(|row| {
-                let [path, size] = take2("f.multicall", row)?;
+                let [path, size] = take("f.multicall", row)?;
                 Ok(TorrentFileEntry {
                     name: as_str(&path).to_owned(),
                     size: as_u64(&size),
@@ -452,27 +452,14 @@ fn quote_command_arg(value: &str) -> String {
     out
 }
 
-fn take2(method: &str, mut row: Vec<XmlValue>) -> Result<[XmlValue; 2]> {
-    if row.len() != 2 {
-        return Err(ClientError::Malformed {
-            kind: KIND,
-            detail: format!(
-                "{method} returned a row of {} values, expected 2",
-                row.len()
-            ),
-        });
-    }
-    let b = row.pop().unwrap_or(XmlValue::Str(String::new()));
-    let a = row.pop().unwrap_or(XmlValue::Str(String::new()));
-    Ok([a, b])
-}
-
-fn take7(method: &str, row: Vec<XmlValue>) -> Result<[XmlValue; 7]> {
+/// One multicall row as exactly `N` values, or a [`ClientError::Malformed`]
+/// naming the call that returned the wrong shape.
+fn take<const N: usize>(method: &str, row: Vec<XmlValue>) -> Result<[XmlValue; N]> {
     row.try_into()
         .map_err(|row: Vec<XmlValue>| ClientError::Malformed {
             kind: KIND,
             detail: format!(
-                "{method} returned a row of {} values, expected 7",
+                "{method} returned a row of {} values, expected {N}",
                 row.len()
             ),
         })
@@ -1301,13 +1288,14 @@ mod tests {
 
     #[test]
     fn take2_rejects_a_row_of_the_wrong_length() {
-        let err = take2("f.multicall", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
+        let err = take::<2>("f.multicall", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
         assert!(err.to_string().contains("expected 2"), "{err}");
     }
 
     #[test]
     fn take7_rejects_a_row_of_the_wrong_length() {
-        let err = take7("d.multicall2", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
+        let err =
+            take::<7>("d.multicall2", vec![XmlValue::Str("only-one".to_owned())]).unwrap_err();
         assert!(err.to_string().contains("expected 7"), "{err}");
     }
 

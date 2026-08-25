@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use reqwest::{Method, RequestBuilder, Response};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -17,11 +18,12 @@ use crate::models::{SystemStatus, Tag};
 use crate::{Discovered, lidarr, radarr, readarr, sonarr};
 
 /// The API prefix is per-source: Sonarr, Radarr and Whisparr are on `v3`, Lidarr
-/// and Readarr on `v1`. See [`MediaSource::api_version`].
+/// and Readarr on `v1`. Matched on the source directly rather than through
+/// `MediaSource::api_version`, so a new source cannot fall into the wrong
+/// prefix by way of a string that no longer matches.
 fn api_prefix(kind: MediaSource) -> &'static str {
-    // Static rather than formatted: this runs on every single HTTP call.
-    match kind.api_version() {
-        "v1" => "api/v1/",
+    match kind {
+        MediaSource::Lidarr | MediaSource::Readarr => "api/v1/",
         _ => "api/v3/",
     }
 }
@@ -35,9 +37,11 @@ use sharerr_client::clamp_body;
 /// is what decides the resource walk.
 pub struct ArrClient {
     kind: MediaSource,
-    /// Always ends in `/`, so `Url::join` appends rather than replacing the last
-    /// segment. This is what makes reverse-proxy subpaths (`http://host/sonarr/`) work.
-    base: Url,
+    /// The API root — the normalised base plus [`api_prefix`], joined once at
+    /// construction rather than on every call. Always ends in `/`, so
+    /// `Url::join` appends rather than replacing the last segment. This is what
+    /// makes reverse-proxy subpaths (`http://host/sonarr/`) work.
+    api_base: Url,
     api_key: SecretString,
     http: reqwest::Client,
 }
@@ -48,7 +52,7 @@ impl std::fmt::Debug for ArrClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArrClient")
             .field("kind", &self.kind)
-            .field("base", &self.base.as_str())
+            .field("api_base", &self.api_base.as_str())
             .field("api_key", &"<redacted>")
             // `finish_non_exhaustive` rather than `finish`: the omission is
             // deliberate, and rendering `..` says so to whoever reads the log
@@ -68,9 +72,15 @@ impl ArrClient {
             .timeout(DEFAULT_TIMEOUT)
             .build()
             .map_err(ArrError::Client)?;
+        let api_base = sharerr_client::normalise_base(base)
+            .join(api_prefix(kind))
+            .map_err(|source| ArrError::Url {
+                service: kind,
+                source,
+            })?;
         Ok(Self {
             kind,
-            base: sharerr_client::normalise_base(base),
+            api_base,
             api_key,
             http,
         })
@@ -82,13 +92,39 @@ impl ArrClient {
     }
 
     fn endpoint(&self, path: &str) -> Result<Url> {
-        self.base
-            .join(api_prefix(self.kind))
-            .and_then(|u| u.join(path))
-            .map_err(|source| ArrError::Url {
-                service: self.kind,
-                source,
-            })
+        self.api_base.join(path).map_err(|source| ArrError::Url {
+            service: self.kind,
+            source,
+        })
+    }
+
+    /// The only place the API key is read. Every request starts here, so there
+    /// is exactly one line to audit.
+    fn request(&self, method: Method, path: &str) -> Result<(Url, RequestBuilder)> {
+        let url = self.endpoint(path)?;
+        let builder = self
+            .http
+            .request(method, url.clone())
+            .header("X-Api-Key", self.api_key.expose_secret());
+        Ok((url, builder))
+    }
+
+    fn unreachable(&self, url: &Url, source: &reqwest::Error) -> ArrError {
+        ArrError::Unreachable {
+            service: self.kind,
+            url: url.to_string(),
+            detail: sharerr_client::error_chain(source),
+        }
+    }
+
+    /// Send a prepared request and require a 2xx, handing back the response
+    /// for the caller to read the body.
+    async fn send(&self, url: &Url, path: &str, builder: RequestBuilder) -> Result<Response> {
+        let response = builder
+            .send()
+            .await
+            .map_err(|source| self.unreachable(url, &source))?;
+        self.check_status(response, path).await
     }
 
     /// Turn a non-2xx response into the matching [`ArrError`], `path` named for the
@@ -117,40 +153,21 @@ impl ArrClient {
         Ok(response)
     }
 
-    /// The only place the API key is read. Everything else goes through here, so
-    /// there is exactly one line to audit.
-    pub(crate) async fn get<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        query: &[(&str, String)],
-    ) -> Result<T> {
-        let url = self.endpoint(path)?;
-
-        let response = self
-            .http
-            .get(url.clone())
-            .header("X-Api-Key", self.api_key.expose_secret())
-            .query(query)
-            .send()
-            .await
-            .map_err(|source| ArrError::Unreachable {
-                service: self.kind,
-                url: url.to_string(),
-                detail: sharerr_client::error_chain(&source),
-            })?;
-
-        let response = self.check_status(response, path).await?;
+    /// `GET` a resource and decode its JSON body.
+    pub(crate) async fn get<T, Q>(&self, path: &str, query: &Q) -> Result<T>
+    where
+        T: DeserializeOwned,
+        Q: Serialize + ?Sized,
+    {
+        let (url, builder) = self.request(Method::GET, path)?;
+        let response = self.send(&url, path, builder.query(query)).await?;
 
         // Decode from bytes rather than `response.json()` so a malformed payload
         // reports which endpoint produced it.
         let bytes = response
             .bytes()
             .await
-            .map_err(|source| ArrError::Unreachable {
-                service: self.kind,
-                url: url.to_string(),
-                detail: sharerr_client::error_chain(&source),
-            })?;
+            .map_err(|source| self.unreachable(&url, &source))?;
 
         serde_json::from_slice(&bytes).map_err(|source| ArrError::Decode {
             service: self.kind,
@@ -161,7 +178,7 @@ impl ArrClient {
 
     /// Cheap liveness + auth probe for `doctor`.
     pub async fn system_status(&self) -> Result<SystemStatus> {
-        self.get("system/status", &[]).await
+        self.get("system/status", &()).await
     }
 
     /// Resolve a tag label to its numeric id.
@@ -171,7 +188,7 @@ impl ArrClient {
     /// otherwise get a silent no-op — the exact failure mode this project treats as
     /// the most likely source of "sharerr does nothing" reports.
     pub async fn tag_id(&self, label: &str) -> Result<i64> {
-        let tags: Vec<Tag> = self.get("tag", &[]).await?;
+        let tags: Vec<Tag> = self.get("tag", &()).await?;
 
         tags.iter()
             .find(|t| t.label.eq_ignore_ascii_case(label))
@@ -195,21 +212,9 @@ impl ArrClient {
             label: &'a str,
         }
 
-        let url = self.endpoint("tag")?;
-        let response = self
-            .http
-            .post(url.clone())
-            .header("X-Api-Key", self.api_key.expose_secret())
-            .json(&NewTag { label })
-            .send()
-            .await
-            .map_err(|source| ArrError::Unreachable {
-                service: self.kind,
-                url: url.to_string(),
-                detail: sharerr_client::error_chain(&source),
-            })?;
-
-        self.check_status(response, "tag").await?;
+        let (url, builder) = self.request(Method::POST, "tag")?;
+        self.send(&url, "tag", builder.json(&NewTag { label }))
+            .await?;
         Ok(())
     }
 

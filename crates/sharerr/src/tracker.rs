@@ -56,10 +56,9 @@ const BENCODE: &str = "text/plain; charset=utf-8";
 /// Everything the tracker handlers need.
 #[derive(Debug)]
 pub struct TrackerState {
+    /// The swarms this router writes are [`ServeState::swarms`]'s — the
+    /// status page reads the same ones.
     pub serve: Arc<ServeState>,
-    /// Borrowed from [`ServeState`], not owned: the status page reads the same
-    /// swarms this router writes.
-    pub swarms: Arc<Swarms>,
 }
 
 /// When the previous (rotated-out) shared tracker token was last actually
@@ -94,10 +93,7 @@ impl LegacyTokenStatus {
 
 impl TrackerState {
     pub fn new(serve: Arc<ServeState>) -> Self {
-        Self {
-            swarms: serve.swarms(),
-            serve,
-        }
+        Self { serve }
     }
 }
 
@@ -272,18 +268,24 @@ async fn handle_announce(
     remote: SocketAddr,
     query: &[u8],
 ) -> Result<Vec<u8>, AnnounceError> {
+    // Parsed first: a malformed query needs neither lookup below.
+    let request = AnnounceRequest::parse(query)?;
+
     // Fails closed: an announce this instance cannot check the token for is
     // no more admissible than one for a hash it cannot check either — see
-    // `is_served`'s own identical reasoning just below.
-    let (store, auth) = authenticate(state, token.as_deref()).await?;
-
-    let request = AnnounceRequest::parse(query)?;
-    if !is_served(state, &request.info_hash).await {
+    // `is_served`'s own identical reasoning. The two checks are independent,
+    // so they run together.
+    let (auth, served) = tokio::join!(
+        authenticate(state, token.as_deref()),
+        is_served(state, &request.info_hash)
+    );
+    let (store, auth) = auth?;
+    if !served {
         return Err(AnnounceError::UnknownTorrent);
     }
 
     let addr = request.resolve_addr(remote.ip());
-    let response = state.swarms.announce(&request, addr).await;
+    let response = state.serve.swarms().announce(&request, addr).await;
 
     if let Some(peer_id) = auth.attributed_to {
         crate::torznab::record_sighting(
@@ -379,7 +381,7 @@ async fn handle_scrape(
         return bencode(scrape_bencode(&[]));
     }
 
-    let (complete, incomplete) = state.swarms.scrape(&info_hash).await;
+    let (complete, incomplete) = state.serve.swarms().scrape(&info_hash).await;
     bencode(scrape_bencode(&[(info_hash, complete, incomplete)]))
 }
 
@@ -585,8 +587,8 @@ pub async fn torrent_file(
         return (StatusCode::NOT_FOUND, "not shared").into_response();
     }
 
-    let config = state.serve.config().await;
-    let path = sharerr_torrent::torrent_file_path(&config.torrent_dir(), &hex::encode(info_hash));
+    let path =
+        sharerr_torrent::torrent_file_path(&state.serve.torrent_dir().await, &hex::encode(info_hash));
 
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -600,7 +602,7 @@ pub async fn torrent_file(
     };
 
     let bytes = match query.token.as_deref() {
-        Some(supplied) => attributed_bytes(&state, &bytes, supplied).await,
+        Some(supplied) => attributed_bytes(&state, bytes, supplied).await,
         None => bytes,
     };
 
@@ -626,18 +628,21 @@ pub async fn torrent_file(
 /// that fails to parse — falls back to serving `bytes` unchanged: this
 /// parameter only ever narrows attribution, so a caller for whom it cannot be
 /// honoured still gets the same file an unauthenticated download always got.
-async fn attributed_bytes(state: &TrackerState, bytes: &[u8], supplied: &str) -> Vec<u8> {
+///
+/// Takes `bytes` by value so every fallback arm hands the same buffer back
+/// rather than copying it.
+async fn attributed_bytes(state: &TrackerState, bytes: Vec<u8>, supplied: &str) -> Vec<u8> {
     let store = match state.serve.store().await {
         Ok(store) => store,
-        Err(_) => return bytes.to_vec(),
+        Err(_) => return bytes,
     };
 
     let peer = match store.peer_by_key_hash(supplied).await {
         Ok(Some(peer)) => peer,
-        Ok(None) => return bytes.to_vec(),
+        Ok(None) => return bytes,
         Err(err) => {
             tracing::warn!(error = %err, "could not check a peer's download token");
-            return bytes.to_vec();
+            return bytes;
         }
     };
 
@@ -646,15 +651,15 @@ async fn attributed_bytes(state: &TrackerState, bytes: &[u8], supplied: &str) ->
             Ok(announce) => announce,
             Err(err) => {
                 tracing::warn!(error = %err, "could not build a per-peer announce set");
-                return bytes.to_vec();
+                return bytes;
             }
         };
 
-    match sharerr_torrent::rewrite_announce(bytes, &announce) {
+    match sharerr_torrent::rewrite_announce(&bytes, &announce) {
         Ok(rewritten) => rewritten,
         Err(err) => {
             tracing::warn!(error = %err, "could not attribute a .torrent download");
-            bytes.to_vec()
+            bytes
         }
     }
 }

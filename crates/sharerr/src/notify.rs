@@ -82,10 +82,7 @@ fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            match reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-            {
+            match sharerr_client::http_client_with_timeout(Duration::from_secs(10)) {
                 Ok(client) => Some(client),
                 Err(err) => {
                     tracing::warn!(error = %err, "could not build the notification HTTP client");
@@ -111,7 +108,7 @@ async fn webhook(state: &ServeState) -> Option<Webhook> {
 
     Some(Webhook {
         url,
-        kind: state.config().await.notifications.kind,
+        kind: state.with_config(|c| c.notifications.kind).await,
         client: http_client()?.clone(),
     })
 }

@@ -36,6 +36,56 @@ mod sonarr;
 /// possibly running on the same small box.
 pub(crate) const DISCOVERY_CONCURRENCY: usize = 8;
 
+use std::future::Future;
+
+use futures::stream::{self, StreamExt, TryStreamExt};
+
+/// An *arr entity at the level the sharerr tag is applied — a series, movie,
+/// artist, or author.
+pub(crate) trait Tagged {
+    fn tags(&self) -> &[i64];
+}
+
+/// The discovery scaffold every walk shares: keep the entities carrying
+/// `tag_id`, run `fetch` over them [`DISCOVERY_CONCURRENCY`] at a time, and hand
+/// back each tagged entity paired with what was fetched for it.
+///
+/// `buffered` preserves input order, which is what makes the zip sound — and
+/// it is why the fetch results are collected before any `Discovered` is built:
+/// assembling one is pure CPU, and the output order must not depend on which
+/// response landed first. `what` names the entity in the scan log line.
+pub(crate) async fn fetch_tagged<'a, E, P, F, Fut>(
+    client: &'a ArrClient,
+    entities: &'a [E],
+    tag_id: i64,
+    what: &'static str,
+    fetch: F,
+) -> Result<Vec<(&'a E, P)>>
+where
+    E: Tagged,
+    F: Fn(&'a ArrClient, &'a E) -> Fut,
+    Fut: Future<Output = Result<P>>,
+{
+    let tagged: Vec<&'a E> = entities
+        .iter()
+        .filter(|e| e.tags().contains(&tag_id))
+        .collect();
+
+    tracing::debug!(
+        total = entities.len(),
+        tagged = tagged.len(),
+        "{what} scanned for the sharerr tag"
+    );
+
+    let fetched: Vec<P> = stream::iter(tagged.iter().copied())
+        .map(|entity| fetch(client, entity))
+        .buffered(DISCOVERY_CONCURRENCY)
+        .try_collect()
+        .await?;
+
+    Ok(tagged.into_iter().zip(fetched).collect())
+}
+
 pub use client::ArrClient;
 pub use error::{ArrError, Result};
 pub use models::SystemStatus;

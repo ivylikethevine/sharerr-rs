@@ -117,13 +117,10 @@ impl PathResolver {
             return Err(PathError::NotAbsolute(path.to_path_buf()));
         }
 
-        let (mapping_applied, qbit) = match most_specific_match(&self.maps, |m| &m.sharerr, path) {
-            Some((map, rest)) => match &map.qbit {
-                Some(qbit_prefix) => (true, qbit_prefix.join(&rest)),
-                None => (false, path.to_path_buf()),
-            },
-            None => (false, path.to_path_buf()),
-        };
+        let mapped = most_specific_match(&self.maps, |m| &m.sharerr, path)
+            .and_then(|(map, rest)| map.qbit.as_ref().map(|prefix| prefix.join(&rest)));
+        let mapping_applied = mapped.is_some();
+        let qbit = mapped.unwrap_or_else(|| path.to_path_buf());
         Ok(ResolvedPaths {
             arr: path.to_path_buf(),
             sharerr: path.to_path_buf(),

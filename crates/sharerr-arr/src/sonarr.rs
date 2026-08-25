@@ -12,57 +12,41 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use futures::stream::{self, StreamExt, TryStreamExt};
 use sharerr_core::{ExternalIds, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
 use crate::models::{Episode, EpisodeFile, Series, non_empty, non_zero};
-use crate::{DISCOVERY_CONCURRENCY, Discovered};
+use crate::{Discovered, Tagged, fetch_tagged};
+
+impl Tagged for Series {
+    fn tags(&self) -> &[i64] {
+        &self.tags
+    }
+}
 
 /// What one tagged series needs fetching for it.
-///
-/// Fetched by series id rather than by reference: a future that borrows a
-/// per-item reference is not general enough over lifetimes for
-/// `StreamExt::buffered`, and an id sidesteps the question. `buffered` preserves
-/// input order, so the caller zips the results back onto the series list.
 type SeriesPayload = (Vec<EpisodeFile>, Vec<Episode>);
 
-async fn fetch_series(client: &ArrClient, series_id: i64) -> Result<SeriesPayload> {
-    let series_id = series_id.to_string();
+async fn fetch_series(client: &ArrClient, series: &Series) -> Result<SeriesPayload> {
     // Independent lookups, so they run concurrently — per tagged series this
     // halves the round trips paid in sequence.
-    let by_series = [("seriesId", series_id)];
+    let by_series = [("seriesId", series.id)];
     let (files, episodes) = tokio::try_join!(
-        client.get::<Vec<EpisodeFile>>("episodefile", &by_series),
-        client.get::<Vec<Episode>>("episode", &by_series),
+        client.get::<Vec<EpisodeFile>, _>("episodefile", &by_series),
+        client.get::<Vec<Episode>, _>("episode", &by_series),
     )?;
     Ok((files, episodes))
 }
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let series: Vec<Series> = client.get("series", &[]).await?;
-    let tagged: Vec<&Series> = series.iter().filter(|s| s.tags.contains(&tag_id)).collect();
-
-    tracing::debug!(
-        total = series.len(),
-        tagged = tagged.len(),
-        "sonarr series scanned for the sharerr tag"
-    );
-
+    let series: Vec<Series> = client.get("series", &()).await?;
     // The per-series lookups run concurrently across series as well as within
-    // one — see `DISCOVERY_CONCURRENCY`. Collected before the build loop rather
-    // than folded into it because assembling a `Discovered` is pure CPU and the
-    // order of the output should not depend on which response landed first.
-    let ids: Vec<i64> = tagged.iter().map(|s| s.id).collect();
-    let fetched: Vec<SeriesPayload> = stream::iter(ids)
-        .map(|id| fetch_series(client, id))
-        .buffered(DISCOVERY_CONCURRENCY)
-        .try_collect()
-        .await?;
+    // one — see `fetch_tagged`.
+    let fetched = fetch_tagged(client, &series, tag_id, "sonarr series", fetch_series).await?;
 
     let mut discovered = Vec::new();
-    for (show, (files, episodes)) in tagged.into_iter().zip(fetched) {
+    for (show, (files, episodes)) in fetched {
         if files.is_empty() {
             tracing::debug!(series = %show.title, "tagged but has no files on disk");
             continue;
@@ -72,7 +56,6 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
 
         let ids = ExternalIds {
             tvdb: non_zero(show.tvdb_id),
-            tmdb: None,
             tvmaze: non_zero(show.tv_maze_id),
             imdb: non_empty(show.imdb_id.clone()),
             ..ExternalIds::default()

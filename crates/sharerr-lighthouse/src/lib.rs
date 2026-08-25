@@ -55,6 +55,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -167,15 +168,14 @@ fn now_epoch() -> i64 {
 // State
 // ---------------------------------------------------------------------------
 
-struct Stored {
-    record: EndpointRecord,
-}
-
 /// The whole lighthouse: a map of key hash to latest record, plus the secret
 /// that makes decoys deterministic.
 pub struct LighthouseState {
-    records: RwLock<HashMap<String, Stored>>,
+    records: RwLock<HashMap<String, EndpointRecord>>,
     decoy_secret: [u8; 32],
+    /// Epoch seconds of the last expiry sweep of a full table — see
+    /// [`SWEEP_INTERVAL_SECS`]. Only touched under the `records` write lock.
+    last_sweep_at: AtomicI64,
 }
 
 impl std::fmt::Debug for LighthouseState {
@@ -227,11 +227,18 @@ pub const RECORD_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 /// body limit; this bounds the count.
 pub const MAX_RECORDS: usize = 10_000;
 
+/// How often a full table is swept for expired records. Without a floor,
+/// every new-key report against a full table would walk all
+/// [`MAX_RECORDS`] entries — and the reports that find it full are exactly
+/// the flood that filled it.
+pub const SWEEP_INTERVAL_SECS: i64 = 60;
+
 impl LighthouseState {
     pub fn new(decoy_secret: [u8; 32]) -> Self {
         Self {
             records: RwLock::new(HashMap::new()),
             decoy_secret,
+            last_sweep_at: AtomicI64::new(0),
         }
     }
 
@@ -297,30 +304,36 @@ impl LighthouseState {
             // path in the doc comment. Decided here rather than left to the
             // capacity sweep below, which only runs when the table is full and
             // would make rotation depend on how busy the lighthouse is.
-            let expired = now.saturating_sub(existing.record.signed_at) >= RECORD_TTL_SECS;
+            let expired = now.saturating_sub(existing.signed_at) >= RECORD_TTL_SECS;
 
             // Before the staleness check, not after: a displacement attempt
             // that also happens to be stale is still a displacement attempt,
             // and an operator reading `stale` would go looking at clocks.
-            if !expired && !existing.record.pubkey.eq_ignore_ascii_case(&record.pubkey) {
+            if !expired && !existing.pubkey.eq_ignore_ascii_case(&record.pubkey) {
                 return Err(ReportError::PubkeyMismatch);
             }
 
             // Applied whether or not the slot expired: `signed_at` only ever
             // moves forward for a given reporter, and a record that has aged
             // out is still no reason to accept an older one over it.
-            if existing.record.signed_at >= record.signed_at {
+            if existing.signed_at >= record.signed_at {
                 return Ok(ReportOutcome::Stale);
             }
         }
         if !records.contains_key(&key_hash) && records.len() >= MAX_RECORDS {
-            records
-                .retain(|_, stored| now.saturating_sub(stored.record.signed_at) < RECORD_TTL_SECS);
+            // Throttled: a sweep that found nothing to free a moment ago will
+            // not find anything now, and the table only needs one per interval.
+            let last_sweep = self.last_sweep_at.load(Ordering::Relaxed);
+            if now.saturating_sub(last_sweep) < SWEEP_INTERVAL_SECS {
+                return Err(ReportError::Full);
+            }
+            self.last_sweep_at.store(now, Ordering::Relaxed);
+            records.retain(|_, stored| now.saturating_sub(stored.signed_at) < RECORD_TTL_SECS);
             if records.len() >= MAX_RECORDS {
                 return Err(ReportError::Full);
             }
         }
-        records.insert(key_hash, Stored { record });
+        records.insert(key_hash, record);
         Ok(ReportOutcome::Accepted)
     }
 
@@ -330,7 +343,7 @@ impl LighthouseState {
     /// two cases in its return type — that is the entire privacy property.
     pub async fn lookup(&self, key_hash: &str) -> EndpointRecord {
         if let Some(stored) = self.records.read().await.get(key_hash) {
-            return stored.record.clone();
+            return stored.clone();
         }
         self.decoy(key_hash)
     }

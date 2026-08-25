@@ -347,18 +347,21 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
         // The ids are what let the far end match a release to a known series or
         // film rather than parsing the title and hoping.
         for (name, value) in [
-            ("tvdbid", item.ids.tvdb.map(|v| v.to_string())),
-            ("tmdbid", item.ids.tmdb.map(|v| v.to_string())),
-            ("tvmazeid", item.ids.tvmaze.map(|v| v.to_string())),
-            ("imdbid", item.ids.imdb.clone()),
+            ("tvdbid", item.ids.tvdb),
+            ("tmdbid", item.ids.tmdb),
+            ("tvmazeid", item.ids.tvmaze),
         ] {
             if let Some(value) = value {
-                let _ = writeln!(
-                    out,
-                    "      <torznab:attr name=\"{name}\" value=\"{}\"/>",
-                    escape(&value)
-                );
+                // An integer needs no escaping and no intermediate `String`.
+                let _ = writeln!(out, "      <torznab:attr name=\"{name}\" value=\"{value}\"/>");
             }
+        }
+        if let Some(imdb) = item.ids.imdb.as_deref() {
+            let _ = writeln!(
+                out,
+                "      <torznab:attr name=\"imdbid\" value=\"{}\"/>",
+                escape(imdb)
+            );
         }
 
         if let MediaSpec::Episode {
@@ -482,17 +485,33 @@ impl SearchQuery {
         match needle {
             None => true,
             Some(needle) => {
-                item.release_title.to_lowercase().contains(needle)
+                contains_ci(&item.release_title, needle)
                     // Music and books are searched by creator far more than film
                     // and television are, so an artist or author name has to match.
-                    || item
-                        .spec
-                        .creator()
-                        .is_some_and(|c| c.to_lowercase().contains(needle))
-                    || item.spec.title().to_lowercase().contains(needle)
+                    || item.spec.creator().is_some_and(|c| contains_ci(c, needle))
+                    || contains_ci(item.spec.title(), needle)
             }
         }
     }
+}
+
+/// Whether `hay` contains `needle` case-insensitively, where `needle` is
+/// already lowercased (by [`SearchQuery::needle`]).
+///
+/// ASCII text — every release title in practice — is compared in place over
+/// byte windows rather than allocating a lowercased copy per field per item
+/// per search. Anything else falls back to the full Unicode lowercasing, so
+/// the answer is exactly what `hay.to_lowercase().contains(needle)` gives.
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    if !hay.is_ascii() {
+        return hay.to_lowercase().contains(needle);
+    }
+    let needle = needle.as_bytes();
+    needle.is_empty()
+        || hay
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Compare IMDb ids tolerantly, via [`ExternalIds::imdb_bare`] on both sides.

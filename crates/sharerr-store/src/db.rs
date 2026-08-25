@@ -271,8 +271,8 @@ impl Store {
                 -- Never clear a known infohash: discovery rebuilds items with
                 -- `info_hash: None`, and a plain assignment would drop the hash
                 -- of a torrent qBittorrent is still seeding, leaving nothing to
-                -- remove if the item is later untagged. Use `set_info_hash` to
-                -- change it, and `set_state(Unshared)` to retire it.
+                -- remove if the item is later untagged. `set_seeding` is what
+                -- records it, and `set_state(Unshared)` retires it.
                 info_hash     = COALESCE(excluded.info_hash, shared_items.info_hash),
                 -- Same reasoning as info_hash: a rediscovery must not blank out a
                 -- fingerprint that only `set_seeding`/`set_announce_token_fp` know.

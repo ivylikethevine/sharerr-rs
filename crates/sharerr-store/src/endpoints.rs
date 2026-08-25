@@ -68,6 +68,9 @@ pub enum ObservedVia {
 }
 
 impl ObservedVia {
+    pub const ALL: &'static [Self] = &[Self::Direct, Self::Gossip, Self::Lighthouse];
+
+    /// The value stored in the `via` column.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Direct => "direct",
@@ -76,14 +79,16 @@ impl ObservedVia {
         }
     }
 
+    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
+    ///
+    /// Anything unrecognised reads as gossip — the *less* trusted rank, which
+    /// is the safe direction for a value a newer version may have written.
     pub fn parse(value: &str) -> Self {
-        // Anything unrecognised reads as gossip — the *less* trusted rank, which
-        // is the safe direction for a value a newer version may have written.
-        match value {
-            "direct" => Self::Direct,
-            "lighthouse" => Self::Lighthouse,
-            _ => Self::Gossip,
-        }
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|via| via.as_str() == value)
+            .unwrap_or(Self::Gossip)
     }
 }
 
@@ -120,7 +125,8 @@ impl Store {
         // below forever, past the point the sender's clock is fixed — see
         // `MAX_FUTURE_SKEW_SECS`.
         let observed_at = observed_at.min(now_epoch().saturating_add(MAX_FUTURE_SKEW_SECS));
-        sqlx::query(
+        let mut tx = self.pool().begin().await?;
+        let written = sqlx::query(
             "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT (peer_id, kind, addr) DO UPDATE \
@@ -132,22 +138,28 @@ impl Store {
         .bind(addr)
         .bind(observed_at)
         .bind(via.as_str())
-        .execute(self.pool())
-        .await?;
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
 
         // Prune beyond the newest MAX_HISTORY. Done here rather than on a timer:
-        // inserts are the only thing that grows the table.
-        sqlx::query(
-            "DELETE FROM peer_endpoints WHERE peer_id = ?1 AND kind = ?2 AND id NOT IN \
-             (SELECT id FROM peer_endpoints WHERE peer_id = ?1 AND kind = ?2 \
-              ORDER BY observed_at DESC, id DESC LIMIT ?3)",
-        )
-        .bind(peer_id)
-        .bind(kind.as_str())
-        .bind(MAX_HISTORY as i64)
-        .execute(self.pool())
-        .await?;
+        // inserts are the only thing that grows the table — so an upsert that
+        // changed nothing (an older sighting of a known address) has nothing
+        // to prune either.
+        if written > 0 {
+            sqlx::query(
+                "DELETE FROM peer_endpoints WHERE peer_id = ?1 AND kind = ?2 AND id NOT IN \
+                 (SELECT id FROM peer_endpoints WHERE peer_id = ?1 AND kind = ?2 \
+                  ORDER BY observed_at DESC, id DESC LIMIT ?3)",
+            )
+            .bind(peer_id)
+            .bind(kind.as_str())
+            .bind(MAX_HISTORY as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
 
+        tx.commit().await?;
         Ok(())
     }
 
@@ -166,10 +178,10 @@ impl Store {
             .filter_map(|row| {
                 Some(PeerEndpoint {
                     // A kind written by a newer version is skipped, not an error.
-                    kind: EndpointKind::parse(&row.try_get::<String, _>("kind").ok()?)?,
+                    kind: EndpointKind::parse(row.try_get::<&str, _>("kind").ok()?)?,
                     addr: row.try_get("addr").ok()?,
                     observed_at: row.try_get("observed_at").ok()?,
-                    via: ObservedVia::parse(&row.try_get::<String, _>("via").ok()?),
+                    via: ObservedVia::parse(row.try_get::<&str, _>("via").ok()?),
                 })
             })
             .collect())

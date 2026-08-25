@@ -20,13 +20,14 @@
 //! only `doctor` currently does it — folding it in would mean this module growing a
 //! second shape for one caller.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use secrecy::SecretString;
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::{ClientKind, TorrentClient};
 use sharerr_core::config::{TorrentBackend, TorrentClientConfig};
-use sharerr_core::paths::ResolvedPaths;
+use sharerr_core::paths::{PathResolver, ResolvedPaths};
 use sharerr_core::{Config, MediaSource};
 use sharerr_qbit::QbitClient;
 use sharerr_rtorrent::RtorrentClient;
@@ -192,20 +193,38 @@ impl PathReport {
 /// hunted. Only sharerr's own view can be checked this way; the qBittorrent view
 /// is another container's filesystem and has to be verified against qBittorrent.
 pub fn check_paths(config: &Config, discovered: &[Discovered]) -> PathReport {
+    check_paths_of(
+        config.path_map.len(),
+        &config.resolver(),
+        discovered
+            .iter()
+            .map(|item| (item.source, item.arr_path.as_path())),
+    )
+}
+
+/// [`check_paths`] over just the two things it needs per file — where the
+/// path came from and the path itself — so a caller that already holds the
+/// discovered items borrowed elsewhere (see [`snapshot`]) does not have to
+/// clone every one of them, and the whole `Config`, to run the walk on a
+/// blocking thread.
+pub fn check_paths_of<'a>(
+    rules: usize,
+    resolver: &PathResolver,
+    items: impl IntoIterator<Item = (MediaSource, &'a Path)>,
+) -> PathReport {
     let mut report = PathReport {
-        rules: config.path_map.len(),
-        checked: discovered.len(),
+        rules,
         ..PathReport::default()
     };
 
-    let resolver = config.resolver();
-    for item in discovered {
-        match resolver.resolve_for(item.source, &item.arr_path) {
+    for (source, arr_path) in items {
+        report.checked += 1;
+        match resolver.resolve_for(source, arr_path) {
             Ok(paths) => {
                 // "Matched no rule" is the normal case for a directory item,
                 // not the warning sign it is for a path another container
                 // reported.
-                if !paths.mapping_applied && item.source != MediaSource::Directory {
+                if !paths.mapping_applied && source != MediaSource::Directory {
                     report.unmapped += 1;
                 }
                 if !paths.sharerr.exists() {
@@ -310,22 +329,34 @@ pub async fn snapshot(
         Err(err) => LibraryScan::Panicked(err.to_string()),
     };
 
-    let mut discovered: Vec<Discovered> = Vec::new();
-    for (_, outcome) in &sources {
-        discovered.extend(outcome.items().iter().cloned());
-    }
-    if let LibraryScan::Scanned(scanned) = &libraries {
-        for (_, outcome) in scanned {
-            discovered.extend(outcome.items().iter().cloned());
-        }
-    }
+    // Only the source and path of each item cross to the blocking thread —
+    // the items themselves stay borrowed by the outcomes returned below.
+    let scanned_items = match &libraries {
+        LibraryScan::Scanned(scanned) => scanned.as_slice(),
+        LibraryScan::Panicked(_) => &[],
+    };
+    let discovered: Vec<(MediaSource, PathBuf)> = sources
+        .iter()
+        .flat_map(|(_, outcome)| outcome.items())
+        .chain(scanned_items.iter().flat_map(|(_, outcome)| outcome.items()))
+        .map(|item| (item.source, item.arr_path.clone()))
+        .collect();
 
     // Filesystem-bound too, and depends on everything either phase above
     // discovered, so it cannot start until both are done.
     let paths = {
-        let config = config.clone();
-        tokio::task::spawn_blocking(move || check_paths(&config, &discovered))
-            .await
+        let rules = config.path_map.len();
+        let resolver = config.resolver();
+        tokio::task::spawn_blocking(move || {
+            check_paths_of(
+                rules,
+                &resolver,
+                discovered
+                    .iter()
+                    .map(|(source, path)| (*source, path.as_path())),
+            )
+        })
+        .await
             // A panicked walk renders as an empty report rather than a 500;
             // the source/library lines still carry the useful half of the page.
             .unwrap_or_default()
@@ -429,24 +460,7 @@ impl DirOutcome {
 
 /// Scan one `[[library]]` directory and establish what sharerr would share.
 pub fn check_library(library: &sharerr_core::config::LibraryConfig) -> DirOutcome {
-    match std::fs::metadata(&library.path) {
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return DirOutcome::Missing,
-        Err(err) => return DirOutcome::Unreadable(err.to_string()),
-        Ok(meta) if !meta.is_dir() => return DirOutcome::NotADirectory,
-        Ok(_) => {}
-    }
-
-    // `scan` refuses an empty root — it is what an unmounted bind mount looks
-    // like, and scanning it to nothing would withdraw everything. Classified
-    // here first so the probes report "empty" rather than a scan failure.
-    match std::fs::read_dir(&library.path) {
-        Ok(mut entries) => {
-            if entries.next().is_none() {
-                return DirOutcome::Empty;
-            }
-        }
-        Err(err) => return DirOutcome::Unreadable(err.to_string()),
-    }
+    use crate::library::ScanError;
 
     match crate::library::scan(library) {
         Ok(outcome) if outcome.items.is_empty() && outcome.skipped == 0 => DirOutcome::Empty,
@@ -454,7 +468,14 @@ pub fn check_library(library: &sharerr_core::config::LibraryConfig) -> DirOutcom
             skipped: outcome.skipped,
             items: outcome.items,
         },
-        Err(err) => DirOutcome::Unreadable(format!("{err:#}")),
+        Err(ScanError::Missing(_)) => DirOutcome::Missing,
+        Err(ScanError::NotADirectory(_)) => DirOutcome::NotADirectory,
+        // `scan` refuses an empty root — it is what an unmounted bind mount
+        // looks like, and scanning it to nothing would withdraw everything.
+        // The probes report it as "empty" rather than as a scan failure.
+        Err(ScanError::Empty(_)) => DirOutcome::Empty,
+        Err(err @ ScanError::NotAbsolute(_)) => DirOutcome::Unreadable(err.to_string()),
+        Err(ScanError::Unreadable { source, .. }) => DirOutcome::Unreadable(source.to_string()),
     }
 }
 

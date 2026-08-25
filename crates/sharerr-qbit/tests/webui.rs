@@ -536,8 +536,8 @@ async fn set_torrent_trackers_adds_then_removes_and_skips_pseudo_entries() {
         .set_torrent_trackers(
             "aabbcc",
             &[
-                "http://new.example:41234/announce".to_owned(),
-                "http://kept.example:8477/announce".to_owned(),
+                Url::parse("http://new.example:41234/announce").expect("literal url"),
+                Url::parse("http://kept.example:8477/announce").expect("literal url"),
             ],
         )
         .await
@@ -574,7 +574,7 @@ async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
     client(&server)
         .set_torrent_trackers(
             "aabbcc",
-            &["http://current.example:8477/announce".to_owned()],
+            &[Url::parse("http://current.example:8477/announce").expect("literal url")],
         )
         .await
         .unwrap();

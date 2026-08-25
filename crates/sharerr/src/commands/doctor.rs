@@ -94,7 +94,7 @@ pub async fn run(
     print_config_summary(config);
 
     report.section("vault");
-    let vault = check_vault(config, &mut report);
+    let (vault, torrent_credential) = check_vault(config, &mut report);
 
     report.section("database");
     check_database(config, &mut report).await;
@@ -120,7 +120,7 @@ pub async fn run(
     }
 
     report.section(config.torrent_backend.as_str());
-    check_qbit(config, vault.as_ref(), fix, &mut report).await;
+    check_qbit(config, torrent_credential, fix, &mut report).await;
 
     if config.gluetun.control_url.is_some() {
         report.section("gluetun");
@@ -709,7 +709,7 @@ fn check_tracker(config: &Config, vault: Option<&Vault>, report: &mut Report) {
         );
     }
 
-    match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+    match advertised_base(config) {
         Ok(Some(base)) => report.ok(format!(
             "advertised endpoint: {}",
             sharerr_core::endpoint::base_string(&base)
@@ -805,36 +805,50 @@ async fn check_gluetun(
 /// warning rather than a failure — some networks cannot hairpin their own
 /// public address even when it works from outside.
 async fn check_reachability(config: &Config, report: &mut Report) {
-    let base =
-        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
-            Ok(Some(base)) => base,
-            // Already reported by check_tracker.
-            _ => return,
-        };
-
-    let Some(host) = base.host_str() else {
-        return;
+    let base = match advertised_base(config) {
+        Ok(Some(base)) => base,
+        // Already reported by check_tracker.
+        _ => return,
     };
-    let Some(port) = base.port_or_known_default() else {
-        return;
-    };
-    let target = format!("{}:{port}", host.trim_matches(['[', ']']));
+    // Dialled the same way `checks::check_reachable` does, so the message
+    // names the exact host:port it tried.
+    let target = format!(
+        "{}:{}",
+        base.host_str().unwrap_or_default().trim_matches(['[', ']']),
+        base.port_or_known_default().unwrap_or_default()
+    );
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::net::TcpStream::connect(&target),
-    )
-    .await
-    {
-        Ok(Ok(_)) => report.ok(format!("{target} accepts TCP connections from here")),
-        Ok(Err(err)) => report.warn(format!(
+    match checks::check_reachable(Some(&base)).await {
+        checks::ReachOutcome::Reachable => {
+            report.ok(format!("{target} accepts TCP connections from here"));
+        }
+        checks::ReachOutcome::Refused(err) => report.warn(format!(
             "could not connect to {target}: {err}. If this instance cannot reach its \
              own public address (common behind NAT), verify the port from outside"
         )),
-        Err(_) => report.warn(format!(
+        checks::ReachOutcome::TimedOut => report.warn(format!(
             "connecting to {target} timed out. If this instance cannot reach its own \
              public address (common behind NAT), verify the port from outside"
         )),
+        // An address with no host or port is `check_tracker`'s finding, not
+        // this one's — as before, nothing is dialled and nothing is said.
+        checks::ReachOutcome::NotConfigured | checks::ReachOutcome::Unusable(_) => {}
+    }
+}
+
+/// The advertised endpoint the config resolves to, via the one resolver the
+/// tracker itself uses — see `sharerr_core::endpoint::advertised_base`.
+fn advertised_base(config: &Config) -> Result<Option<Url>, sharerr_core::endpoint::EndpointError> {
+    sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port())
+}
+
+/// The advertised endpoint rendered for a summary line: the address, or why
+/// there is none.
+fn describe_advertised(config: &Config) -> String {
+    match advertised_base(config) {
+        Ok(Some(base)) => sharerr_core::endpoint::base_string(&base),
+        Ok(None) => "(unset)".to_owned(),
+        Err(err) => format!("(invalid: {err})"),
     }
 }
 
@@ -1016,11 +1030,7 @@ fn print_config_summary(config: &Config) {
     }
     println!(
         "  tracker:   builtin, advertised as {}",
-        match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
-            Ok(Some(base)) => sharerr_core::endpoint::base_string(&base),
-            Ok(None) => "(unset)".to_owned(),
-            Err(err) => format!("(invalid: {err})"),
-        }
+        describe_advertised(config)
     );
     if config.path_map.is_empty() {
         println!("  path map:  (none — all three views assumed identical)");

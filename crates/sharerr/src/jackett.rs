@@ -262,11 +262,9 @@ pub(crate) struct ServerConfigDto {
     ),
 )]
 async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
-    let config = state.config().await;
-
     json(ServerConfigDto {
         notices: Vec::new(),
-        port: config.server.bind.port(),
+        port: state.with_config(|c| c.server.bind.port()).await,
         external: false,
         api_key: "",
         app_version: env!("CARGO_PKG_VERSION"),

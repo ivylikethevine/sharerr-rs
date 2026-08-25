@@ -40,7 +40,7 @@ use std::time::Duration;
 use secrecy::ExposeSecret;
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
-use sharerr_core::endpoint::now_epoch;
+use sharerr_core::endpoint::{join_path, now_epoch};
 use sharerr_lighthouse::EndpointRecord as LighthouseRecord;
 use sharerr_lighthouse::RecordEndpoint as LighthouseRecordEndpoint;
 use sharerr_store::{EndpointKind, ObservedVia, Peer, Store, Vault};
@@ -183,10 +183,7 @@ pub async fn sync_loop(state: Arc<ServeState>) {
     // reporting/lookup for the process's life rather than retrying every
     // fifteen minutes; nothing here can fix a broken TLS backend by trying
     // again.
-    let http = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-    {
+    let http = match sharerr_client::http_client_with_timeout(Duration::from_secs(15)) {
         Ok(http) => http,
         Err(err) => {
             tracing::warn!(error = %err, "could not build the lighthouse HTTP client — lighthouse is disabled");
@@ -201,7 +198,7 @@ pub async fn sync_loop(state: Arc<ServeState>) {
 }
 
 async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
-    let urls = state.config().await.lighthouse.urls;
+    let urls = state.with_config(|c| c.lighthouse.urls.clone()).await;
     if urls.is_empty() {
         return;
     }
@@ -302,10 +299,7 @@ async fn report_one(
     record: &LighthouseRecord,
     tracked: &LighthouseStatus,
 ) {
-    let endpoint = format!(
-        "{}/lighthouse/v1/report/{key_hash}",
-        base.as_str().trim_end_matches('/')
-    );
+    let endpoint = join_path(base, &format!("/lighthouse/v1/report/{key_hash}"));
     let response = match http.post(&endpoint).json(record).send().await {
         Ok(response) => response,
         Err(err) => {
@@ -420,10 +414,7 @@ async fn lookup_one(
     key_hash: &str,
     expected_pubkey: &str,
 ) -> Result<Option<LighthouseRecord>, String> {
-    let endpoint = format!(
-        "{}/lighthouse/v1/lookup/{key_hash}",
-        base.as_str().trim_end_matches('/')
-    );
+    let endpoint = join_path(base, &format!("/lighthouse/v1/lookup/{key_hash}"));
     let response = http
         .get(&endpoint)
         .send()

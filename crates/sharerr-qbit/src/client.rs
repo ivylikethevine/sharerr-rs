@@ -23,8 +23,6 @@
 //! port therefore makes a correct key look rejected. [`QbitError::ApiKeyRejected`]
 //! says so, because no amount of rotating the key fixes it.
 
-use std::time::Duration;
-
 use reqwest::header::{AUTHORIZATION, HeaderValue, REFERER};
 use reqwest::{Method, RequestBuilder, Response};
 use secrecy::{ExposeSecret, SecretString};
@@ -34,7 +32,6 @@ use url::Url;
 use crate::error::{QbitError, Result};
 
 const API_PREFIX: &str = "api/v2/";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The prefix every qBittorrent-issued API key carries. Keys are `qbt_` followed
 /// by 28 alphanumeric characters, 32 in total.
@@ -53,6 +50,8 @@ pub(crate) type BuildRequest<'a> = &'a (dyn Fn(RequestBuilder) -> RequestBuilder
 pub struct QbitClient {
     /// Always ends in `/` so `Url::join` appends rather than replaces.
     base: Url,
+    /// `base` plus [`API_PREFIX`], joined once here rather than on every call.
+    api_base: Url,
     /// A key from Options → Web UI → API key, sent as `Authorization: Bearer`.
     /// Requires qBittorrent 5.2 or newer; older builds have no such feature.
     ///
@@ -96,11 +95,17 @@ impl QbitClient {
             .map_err(|_| QbitError::MalformedApiKey)?;
         bearer.set_sensitive(true);
 
+        // The shared torrent-client timeout; built here rather than through
+        // `sharerr_client::http_client` only so the failure keeps its
+        // `reqwest::Error` source in `QbitError::Client`.
         let http = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
+            .timeout(sharerr_client::DEFAULT_TIMEOUT)
             .build()
             .map_err(QbitError::Client)?;
         let base = sharerr_client::normalise_base(base);
+        let api_base = base
+            .join(API_PREFIX)
+            .map_err(|source| QbitError::Url { source })?;
 
         // Origin only — scheme, host, and port, no path. That is what qBittorrent
         // compares against, and a path would just be noise in its logs.
@@ -113,6 +118,7 @@ impl QbitClient {
 
         Ok(Self {
             base,
+            api_base,
             bearer,
             http,
             referer,
@@ -125,9 +131,8 @@ impl QbitClient {
     }
 
     fn endpoint(&self, path: &str) -> Result<Url> {
-        self.base
-            .join(API_PREFIX)
-            .and_then(|u| u.join(path))
+        self.api_base
+            .join(path)
             .map_err(|source| QbitError::Url { source })
     }
 
@@ -188,25 +193,38 @@ impl QbitClient {
         Ok(response)
     }
 
-    /// Send and require a 2xx, discarding the body.
-    pub(crate) async fn send_ok(
+    /// Send and require a 2xx, handing the response back unread so the caller
+    /// chooses how to consume the body — text for the API's plain replies,
+    /// bytes for a `.torrent` export.
+    pub(crate) async fn send_checked(
         &self,
         method: Method,
         path: &str,
         build: BuildRequest<'_>,
-    ) -> Result<String> {
+    ) -> Result<Response> {
         let response = self.send(method, path, build).await?;
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
             return Err(QbitError::Status {
                 status: status.as_u16(),
                 path: path.to_owned(),
                 body: clamp_body(&body),
             });
         }
-        Ok(body)
+        Ok(response)
+    }
+
+    /// Send, require a 2xx, and read the body as text.
+    pub(crate) async fn send_ok(
+        &self,
+        method: Method,
+        path: &str,
+        build: BuildRequest<'_>,
+    ) -> Result<String> {
+        let response = self.send_checked(method, path, build).await?;
+        Ok(response.text().await.unwrap_or_default())
     }
 
     /// Send and decode a JSON body.

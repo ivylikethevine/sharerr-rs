@@ -96,8 +96,14 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// [`DEFAULT_TIMEOUT`], nothing else. One place so a client cannot forget the
 /// timeout — two of the three already had.
 pub fn http_client() -> Result<reqwest::Client> {
+    http_client_with_timeout(DEFAULT_TIMEOUT)
+}
+
+/// [`http_client`] with an explicit timeout, for callers whose round trips are
+/// bounded differently from a torrent client's (gossip, gluetun, notifications).
+pub fn http_client_with_timeout(timeout: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .timeout(DEFAULT_TIMEOUT)
+        .timeout(timeout)
         .build()
         .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))
 }

@@ -105,15 +105,13 @@ impl TorrentClient for QbitClient {
     }
 
     async fn set_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
-        let urls: Vec<String> = urls.iter().map(url::Url::to_string).collect();
-        self.set_torrent_trackers(hash, &urls)
+        self.set_torrent_trackers(hash, urls)
             .await
             .map_err(|e| self.translate(e))
     }
 
     async fn add_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
-        let urls: Vec<String> = urls.iter().map(url::Url::to_string).collect();
-        self.add_torrent_trackers(hash, &urls)
+        self.add_torrent_trackers(hash, urls)
             .await
             .map_err(|e| self.translate(e))
     }

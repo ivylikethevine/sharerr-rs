@@ -23,7 +23,7 @@
 //! sharerr's category and tags both land there. That means a category filter is
 //! applied by this crate rather than by the server — see [`TransmissionClient::list`].
 
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -34,7 +34,6 @@ use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
     http_client, is_auth_rejection, normalise_base,
 };
-use tokio::sync::RwLock;
 use url::Url;
 
 const KIND: ClientKind = ClientKind::Transmission;
@@ -52,11 +51,11 @@ const SESSION_HEADER: &str = "X-Transmission-Session-Id";
 pub struct TransmissionClient {
     http: reqwest::Client,
     endpoint: Url,
-    base: Url,
     username: String,
     password: SecretString,
-    /// Learned from a 409 and replayed on every later request.
-    session: Arc<RwLock<Option<String>>>,
+    /// Learned from a 409 and replayed on every later request. A plain mutex:
+    /// it is only ever held for a clone or a store, never across an await.
+    session: Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for TransmissionClient {
@@ -89,11 +88,20 @@ impl TransmissionClient {
         Ok(Self {
             http,
             endpoint,
-            base,
             username: username.to_owned(),
             password,
-            session: Arc::new(RwLock::new(None)),
+            session: Mutex::new(None),
         })
+    }
+
+    /// The session lock. A poisoned mutex only means another task panicked
+    /// mid-store of a `String`; the value is still a valid (if stale) token,
+    /// and a stale token is exactly what the 409 handshake already recovers
+    /// from.
+    fn session(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Issue one RPC call, paying the session handshake if the server asks.
@@ -105,7 +113,7 @@ impl TransmissionClient {
         let body = json!({ "method": method, "arguments": arguments });
 
         for attempt in 0..2 {
-            let session = self.session.read().await.clone();
+            let session = self.session().clone();
             let mut request = self
                 .http
                 .post(self.endpoint.clone())
@@ -118,7 +126,7 @@ impl TransmissionClient {
             let response = request
                 .send()
                 .await
-                .map_err(|e| sharerr_client::unreachable(KIND, self.base.as_str(), &e))?;
+                .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
             let status = response.status();
 
             if status == reqwest::StatusCode::CONFLICT && attempt == 0 {
@@ -131,7 +139,7 @@ impl TransmissionClient {
                 match token {
                     Some(token) => {
                         tracing::debug!("picked up a Transmission session id");
-                        *self.session.write().await = Some(token);
+                        *self.session() = Some(token);
                         continue;
                     }
                     None => {
@@ -223,6 +231,21 @@ struct FilesTorrent {
 struct ListedFile {
     name: String,
     length: u64,
+}
+
+/// The slice of a `torrent-get` reply that [`TorrentClient::add_trackers`]
+/// reads back before rewriting the list.
+#[derive(Debug, Deserialize)]
+struct TrackerListResponse {
+    #[serde(default)]
+    torrents: Vec<TrackerListTorrent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackerListTorrent {
+    #[serde(default)]
+    tracker_list: String,
 }
 
 /// Decode one RPC response body, naming the call on failure.
@@ -446,19 +469,19 @@ impl TorrentClient for TransmissionClient {
         // uses, rather than the `trackerAdd` argument it replaced: 4.0
         // deprecated `trackerAdd` in favour of exactly this field, and
         // carrying both spellings would mean two code paths for one call.
-        let existing = self
+        let arguments = self
             .rpc(
                 "torrent-get",
                 json!({ "ids": [hash], "fields": ["trackerList"] }),
             )
-            .await?
-            .get("torrents")
-            .and_then(Value::as_array)
-            .and_then(|t| t.first())
-            .and_then(|t| t.get("trackerList"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+            .await?;
+        let response: TrackerListResponse = decode("torrent-get", arguments)?;
+        let existing = response
+            .torrents
+            .into_iter()
+            .next()
+            .map(|t| t.tracker_list)
+            .unwrap_or_default();
 
         // The new tiers go first, so the endpoint sharerr knows is live is
         // tried before whatever the torrent already carried — and the existing

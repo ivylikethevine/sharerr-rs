@@ -23,9 +23,9 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 use sharerr_core::config::{LibraryConfig, LibraryKind};
 use sharerr_core::{Discovered, ExternalIds, MediaSource, MediaSpec};
@@ -57,38 +57,67 @@ pub struct ScanOutcome {
     pub incomplete: usize,
 }
 
+/// Why a `[[library]]` root could not be scanned at all.
+///
+/// Typed so callers that classify the root — `checks::check_library` — can
+/// match on the condition instead of re-statting the directory to rediscover
+/// it. Every variant names the root, so the `Display` text reads the same as
+/// the prose `scan` used to return.
+#[derive(Debug, thiserror::Error)]
+pub enum ScanError {
+    #[error("library {} is not an absolute path", .0.display())]
+    NotAbsolute(PathBuf),
+    #[error("library {} does not exist", .0.display())]
+    Missing(PathBuf),
+    #[error("library {} is not a directory", .0.display())]
+    NotADirectory(PathBuf),
+    #[error(
+        "library {} is empty — nothing to share yet, or the mount is not up; \
+         existing shares are left alone",
+        .0.display()
+    )]
+    Empty(PathBuf),
+    #[error("could not read {}", .path.display())]
+    Unreadable {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
 /// Scan one `[[library]]` directory.
 ///
 /// Synchronous on purpose — it is filesystem-bound and callers run it on a
 /// blocking thread. Items come back in a deterministic (sorted) order so runs
 /// are comparable.
-pub fn scan(library: &LibraryConfig) -> Result<ScanOutcome> {
+pub fn scan(library: &LibraryConfig) -> Result<ScanOutcome, ScanError> {
     let root = &library.path;
+    let unreadable = |source: io::Error| ScanError::Unreadable {
+        path: root.clone(),
+        source,
+    };
     // Relative paths would scan fine against the current directory and then
     // fail at share time, when the path resolver refuses them — a green doctor
     // followed by a failing sync. Refuse where the operator can see why.
     if !root.is_absolute() {
-        bail!("library {} is not an absolute path", root.display());
+        return Err(ScanError::NotAbsolute(root.clone()));
     }
-    let metadata = fs::metadata(root)
-        .with_context(|| format!("library {} is not readable", root.display()))?;
+    let metadata = match fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(ScanError::Missing(root.clone()));
+        }
+        Err(err) => return Err(unreadable(err)),
+    };
     if !metadata.is_dir() {
-        bail!("library {} is not a directory", root.display());
+        return Err(ScanError::NotADirectory(root.clone()));
     }
     // A directory with no entries at all is what an unmounted bind mount looks
     // like, and a successful empty scan would withdraw every share this source
     // owns. Failing keeps them: a genuinely new library starts scanning the
     // moment it holds anything.
-    if fs::read_dir(root)
-        .with_context(|| format!("could not read {}", root.display()))?
-        .next()
-        .is_none()
-    {
-        bail!(
-            "library {} is empty — nothing to share yet, or the mount is not up; \
-             existing shares are left alone",
-            root.display()
-        );
+    if fs::read_dir(root).map_err(unreadable)?.next().is_none() {
+        return Err(ScanError::Empty(root.clone()));
     }
 
     let source_id = path_id(root);
@@ -105,7 +134,7 @@ fn walk(
     source_id: i64,
     depth: usize,
     outcome: &mut ScanOutcome,
-) -> Result<()> {
+) -> Result<(), ScanError> {
     if depth > MAX_DEPTH {
         tracing::warn!(
             dir = %dir.display(),
@@ -132,7 +161,10 @@ fn walk(
             return Ok(());
         }
         Err(err) => {
-            return Err(err).with_context(|| format!("could not read {}", dir.display()));
+            return Err(ScanError::Unreadable {
+                path: dir.to_path_buf(),
+                source: err,
+            });
         }
     };
     for entry in entries {
@@ -195,7 +227,7 @@ fn walk(
                 source_id,
                 file_id: path_id(&path),
                 spec,
-                arr_path: path.clone(),
+                arr_path: path,
                 size: meta.len(),
                 ids: ExternalIds::default(),
                 scene_name: None,
