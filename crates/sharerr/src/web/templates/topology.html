@@ -7,35 +7,43 @@
 <p class="hint">
   How this instance connects to everything around it: sources on the left,
   this instance and its torrent client in the middle, friends on the right.
-  Solid means directly observed, dashed means learned through gossip, dotted
-  means learned from a lighthouse. Each friend's box and its lines share one
-  color, so it is easy to trace which lines belong to whom.
+  A box's border is its health; the colored bar on its left edge and its icon
+  say what kind of thing it is. Hover any box or line for the full detail.
 </p>
 
-<p class="hint">
-  <label>
+<div class="topo-controls">
+  <label title="Blank the last two octets of every IPv4 address and the tail of every port, so the page is safe to screenshot and still readable to whoever owns the network">
     <input type="checkbox" id="topo-hide-addresses" checked>
     Hide the second half of every IP and port
   </label>
-</p>
+  <label title="Drop the *arr apps and library directories — they feed sharerr files but are not part of the network — and keep only this instance, its torrent client, and friends">
+    <input type="checkbox" id="topo-networking">
+    Networking only — hide sources and libraries
+  </label>
+</div>
 
 <div class="panel wide">
   <div class="table-scroll">
-    <svg viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}"
+    <svg id="topo-diagram" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}"
          role="img" aria-label="Topology diagram">
       {% for edge in edges %}
       {% if let Some(dash) = edge.style.dasharray() %}
-      <line class="topo-edge" x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"
-            stroke="{{ edge.accent }}" stroke-dasharray="{{ dash }}"></line>
-      {% if !edge.label.is_empty() %}
-      <text class="topo-edge-label" text-anchor="middle"
-            x="{{ (edge.x1 + edge.x2) / 2 }}" y="{{ (edge.y1 + edge.y2) / 2 - 4 }}">{{ edge.label }}</text>
-      {% endif %}
+      <g class="topo-edge-group" data-kind="{{ edge.kind.as_str() }}">
+        {% if !edge.label.is_empty() || !edge.style.describe().is_empty() %}
+        <title>{% if !edge.label.is_empty() %}{{ edge.label }}{% if !edge.style.describe().is_empty() %} — {% endif %}{% endif %}{{ edge.style.describe() }}</title>
+        {% endif %}
+        <line class="topo-edge" x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"
+              stroke="{{ edge.accent }}" stroke-dasharray="{{ dash }}"></line>
+        {% if !edge.label.is_empty() %}
+        <text class="topo-edge-label" text-anchor="middle"
+              x="{{ (edge.x1 + edge.x2) / 2 }}" y="{{ (edge.y1 + edge.y2) / 2 - 4 }}">{{ edge.label }}</text>
+        {% endif %}
+      </g>
       {% endif %}
       {% endfor %}
 
       {% for node in nodes %}
-      <g class="topo-node topo-node--{{ node.status.css_class() }}">
+      <g class="topo-node topo-node--{{ node.status.css_class() }}" data-lane="{{ node.lane.as_str() }}">
         <title>{{ node.label }}{% for l in node.lines %} — {% if !l.tag.is_empty() %}{{ l.tag }}: {% endif %}{{ l.text }}{% endfor %}</title>
         <rect class="topo-node-box" x="{{ node.x }}" y="{{ node.y }}" width="{{ node.w }}" height="{{ node.h }}" rx="10"></rect>
         <rect class="topo-node-accent" x="{{ node.x }}" y="{{ node.y }}" width="5" height="{{ node.h }}" rx="2.5" fill="{{ node.accent }}"></rect>
@@ -47,11 +55,42 @@
         <text class="topo-line-tag" x="{{ node.x + 18 }}" y="{{ l.y }}">{{ l.tag }}</text>
         {% endif %}
         <text class="topo-line-value topo-address" x="{{ node.x + 82 }}" y="{{ l.y }}"
-              data-full="{{ l.text }}" data-masked="{{ l.masked }}">{{ l.masked }}</text>
+              data-full="{{ l.text }}" data-masked="{{ l.masked }}"><title>{{ l.text }}</title>{{ l.masked }}</text>
         {% endfor %}
       </g>
       {% endfor %}
     </svg>
+  </div>
+
+  {# The legend is HTML rather than more SVG so it reflows on a narrow screen
+     and its text is selectable; the swatches reuse the diagram's own glyph
+     paths via `NodeIcon::path`, so they cannot drift from what is drawn. #}
+  <div class="topo-legend" aria-label="Legend">
+    <div class="topo-legend-group">
+      <span class="topo-legend-title">Boxes</span>
+      {% for entry in self.legend() %}
+      <span class="topo-legend-item" data-lane="{{ entry.lane.as_str() }}" title="{{ entry.meaning }}">
+        <svg class="topo-legend-swatch" viewBox="0 0 16 16" aria-hidden="true">
+          <path class="topo-icon" d="{{ entry.icon.path() }}" stroke="{{ entry.accent }}"></path>
+        </svg>{{ entry.name }}
+      </span>
+      {% endfor %}
+    </div>
+    <div class="topo-legend-group">
+      <span class="topo-legend-title">Border</span>
+      <span class="topo-legend-item" title="Reachable and doing what sharerr expects"><i class="topo-legend-box topo-node--ok"></i>Healthy</span>
+      <span class="topo-legend-item" title="Reachable, but something needs a look — a tag nobody uses, a torrent the client is not seeding, an unconfirmed reachability check"><i class="topo-legend-box topo-node--warn"></i>Needs attention</span>
+      <span class="topo-legend-item" title="Unreachable, misconfigured, or a rejected credential"><i class="topo-legend-box topo-node--error"></i>Failing</span>
+      <span class="topo-legend-item" title="Nothing to report yet: a friend never seen, a directory not yet scanned"><i class="topo-legend-box topo-node--hint"></i>Unknown</span>
+    </div>
+    <div class="topo-legend-group">
+      <span class="topo-legend-title">Lines</span>
+      <span class="topo-legend-item" title="This instance and theirs have spoken directly. Firmest."><svg class="topo-legend-line" viewBox="0 0 40 8" aria-hidden="true"><line x1="0" y1="4" x2="40" y2="4"></line></svg>Direct</span>
+      <span class="topo-legend-item" title="Another friend relayed their address in a gossip exchange"><svg class="topo-legend-line" viewBox="0 0 40 8" aria-hidden="true"><line x1="0" y1="4" x2="40" y2="4" stroke-dasharray="6 4"></line></svg>Gossip</span>
+      <span class="topo-legend-item" title="A lighthouse reported their address — the fallback when nobody has seen them. Least firm."><svg class="topo-legend-line" viewBox="0 0 40 8" aria-hidden="true"><line x1="0" y1="4" x2="40" y2="4" stroke-dasharray="1.5 4"></line></svg>Lighthouse</span>
+      <span class="topo-legend-item" data-lane="source" title="A source hands sharerr its tagged files; the label on the sharerr–client line is how many of them resolve to a path the client can read"><svg class="topo-legend-line" viewBox="0 0 40 8" aria-hidden="true"><line x1="0" y1="4" x2="40" y2="4" stroke="var(--topo-arr)"></line></svg>Source → sharerr</span>
+      <span class="topo-legend-item" title="A friend's lines each land on the row they describe — indexer, client, tracker — and each is learned and dated on its own">Each line lands on its row: indexer, client, tracker</span>
+    </div>
   </div>
 </div>
 
@@ -92,7 +131,7 @@
   </p>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Torrent</th><th>Info hash</th></tr></thead>
+    <thead><tr><th>Torrent</th><th title="The torrent's identity, and the join key for finding it in the client's own UI">Info hash</th></tr></thead>
     <tbody>
       {% for row in check.absent %}
       <tr>
@@ -120,7 +159,7 @@
   </p>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Torrent</th><th>Info hash</th></tr></thead>
+    <thead><tr><th>Torrent</th><th title="The torrent's identity, and the join key for finding it in the client's own UI">Info hash</th></tr></thead>
     <tbody>
       {% for row in check.idle %}
       <tr>
@@ -156,7 +195,11 @@
   </p>
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Torrent</th><th>Peers</th><th>Connected from</th></tr></thead>
+    <thead><tr>
+      <th title="The shared item this swarm belongs to">Torrent</th>
+      <th title="Complete = has the whole file (a seeder); incomplete = still downloading">Peers</th>
+      <th title="Every address currently announcing to this instance's tracker for the torrent">Connected from</th>
+    </tr></thead>
     <tbody>
       {% for swarm in swarms %}
       <tr>
@@ -181,16 +224,73 @@
 
 <script>
 (function () {
-  var toggle = document.getElementById("topo-hide-addresses");
-  var addresses = document.querySelectorAll(".topo-address");
-  function apply() {
-    for (var i = 0; i < addresses.length; i++) {
-      var el = addresses[i];
-      el.textContent = toggle.checked ? el.getAttribute("data-masked") : el.getAttribute("data-full");
-    }
+  var addresses = document.getElementById("topo-hide-addresses");
+  var networking = document.getElementById("topo-networking");
+  var svg = document.getElementById("topo-diagram");
+  var fullViewBox = svg.getAttribute("viewBox");
+  var fullWidth = svg.getAttribute("width");
+  var margin = 40;
+
+  // Both toggles survive a reload: an operator who prefers the networking
+  // view should not have to re-tick it every visit. Storage can be absent or
+  // throw (private windows, blocked site data), and the page must still work.
+  function remember(key, value) {
+    try { localStorage.setItem(key, value ? "1" : "0"); } catch (e) {}
   }
-  toggle.addEventListener("change", apply);
-  apply();
+  function recall(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v === null ? fallback : v === "1";
+    } catch (e) { return fallback; }
+  }
+
+  function applyAddresses() {
+    var els = document.querySelectorAll(".topo-address");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var text = addresses.checked ? el.getAttribute("data-masked") : el.getAttribute("data-full");
+      // An SVG <text> may carry a <title> child for its tooltip: replace only
+      // the text node, not the whole content.
+      var last = el.lastChild;
+      if (last && last.nodeType === 3) { last.nodeValue = text; } else { el.appendChild(document.createTextNode(text)); }
+    }
+    remember("topo.hideAddresses", addresses.checked);
+  }
+
+  // Networking only: hide the sources lane and every edge into it, then
+  // re-frame the viewBox to start at the instance column so the diagram does
+  // not open on an empty third. The instance box's own x is the only
+  // coordinate needed, so the layout math stays in Rust.
+  function applyNetworking() {
+    var on = networking.checked;
+    var hide = document.querySelectorAll('[data-lane="source"], [data-kind="source"]');
+    for (var i = 0; i < hide.length; i++) hide[i].classList.toggle("topo-hidden", on);
+    var pathLabel = svg.querySelector('[data-kind="client"] .topo-edge-label');
+    if (pathLabel) pathLabel.classList.toggle("topo-hidden", on);
+
+    var instance = svg.querySelector('[data-lane="instance"] rect');
+    if (on && instance) {
+      var x0 = Math.max(0, parseInt(instance.getAttribute("x"), 10) - margin);
+      var parts = fullViewBox.split(" ");
+      var w = parseInt(parts[2], 10) - x0;
+      svg.setAttribute("viewBox", x0 + " 0 " + w + " " + parts[3]);
+      svg.setAttribute("width", String(w));
+    } else {
+      svg.setAttribute("viewBox", fullViewBox);
+      svg.setAttribute("width", fullWidth);
+    }
+    remember("topo.networkingOnly", on);
+  }
+
+  // `?view=networking` in the URL wins over what was remembered, so the
+  // networking view can be linked to from a README or a chat message.
+  var wantsNetworking = /[?&]view=networking(&|$)/.test(location.search);
+  addresses.checked = recall("topo.hideAddresses", addresses.checked);
+  networking.checked = wantsNetworking || recall("topo.networkingOnly", false);
+  addresses.addEventListener("change", applyAddresses);
+  networking.addEventListener("change", applyNetworking);
+  applyAddresses();
+  applyNetworking();
 })();
 </script>
 {% endblock %}

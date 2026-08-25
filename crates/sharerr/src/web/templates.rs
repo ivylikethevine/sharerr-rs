@@ -212,6 +212,11 @@ pub struct Glance {
     /// two counts above and previously discarded — without it, twenty peers on
     /// one torrent and one peer on each of twenty read identically.
     pub swarm_torrents: usize,
+    /// When the next periodic sync is due, rendered relative ("in ~4 min",
+    /// "due now") — derived from the last finished run plus the configured
+    /// interval, since the sync loop stores no deadline of its own. Empty when
+    /// periodic sync is off or nothing has run yet.
+    pub next_sync: String,
 }
 
 /// One row of the path-mapping table.
@@ -572,6 +577,10 @@ pub struct PeerRow {
     /// The absolute instant behind `last_seen`, empty when it is "never".
     pub last_seen_absolute: String,
     pub revoked: bool,
+    /// How many seeding items this friend's scope admits right now, or
+    /// `None` when the store could not say. What "Can see: TV only"
+    /// actually amounts to in files.
+    pub sharing: Option<usize>,
     /// When the key was revoked, rendered relative — stored all along and never
     /// shown, so "(revoked)" gave no clue whether it happened today or a year
     /// ago. Empty for a friend who is not revoked.
@@ -638,6 +647,8 @@ pub struct FilterOption {
 #[derive(Debug)]
 pub struct SortLink {
     pub label: &'static str,
+    /// One sentence for the header's tooltip, saying what the column means.
+    pub hint: &'static str,
     pub href: String,
     /// Whether this is the column the list is currently sorted by.
     pub active: bool,
@@ -690,6 +701,11 @@ pub struct ItemRow {
     /// [`TokenStatus::None`] before a torrent exists.
     pub token_fp: Option<String>,
     pub token_status: TokenStatus,
+    /// The metadata IDs carried in the feed — "tvdb 12345 · imdb tt0111161" —
+    /// which are what a friend's *arr matches the release on. Empty when
+    /// the item has none, which is itself the reason a friend's app
+    /// would ignore it.
+    pub ids: String,
     pub last_error: Option<String>,
     /// Whether sharerr added this torrent itself, rather than reusing one that
     /// already covered the file. Changes what withdrawing the item does, so it
@@ -787,6 +803,71 @@ pub struct TopologyPage {
     pub swarms: Vec<SwarmRow>,
 }
 
+/// The running binary's version, for the page footer — so a bug report or a
+/// "which build has that fix" question can be answered from any page.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+impl TopologyPage {
+    /// The legend's "what each box is" row, in lane order. Built from
+    /// [`NodeIcon`] itself so the legend can never show a glyph the diagram
+    /// does not draw, or the other way round.
+    pub fn legend(&self) -> &'static [LegendEntry] {
+        LEGEND
+    }
+}
+
+/// One swatch in the topology legend: the glyph, the color it is drawn in
+/// on the diagram, and what it stands for.
+#[derive(Debug, Clone, Copy)]
+pub struct LegendEntry {
+    pub icon: NodeIcon,
+    pub lane: Lane,
+    /// The same `var(--...)` reference the matching node's accent bar uses.
+    pub accent: &'static str,
+    pub name: &'static str,
+    pub meaning: &'static str,
+}
+
+const LEGEND: &[LegendEntry] = &[
+    LegendEntry {
+        icon: NodeIcon::Arr,
+        lane: Lane::Source,
+        accent: "var(--topo-arr)",
+        name: "*arr app",
+        meaning: "Sonarr, Radarr, Lidarr or Readarr — a source sharerr reads tagged files from",
+    },
+    LegendEntry {
+        icon: NodeIcon::Library,
+        lane: Lane::Source,
+        accent: "var(--topo-library)",
+        name: "Library",
+        meaning: "A plain [[library]] directory sharerr scans",
+    },
+    LegendEntry {
+        icon: NodeIcon::Instance,
+        lane: Lane::Instance,
+        accent: "var(--accent)",
+        name: "sharerr",
+        meaning: "This instance: the tracker friends announce to and the feed they pull",
+    },
+    LegendEntry {
+        icon: NodeIcon::Client,
+        lane: Lane::Client,
+        accent: "var(--topo-client)",
+        name: "Torrent client",
+        meaning: "The client that actually seeds — qBittorrent, Transmission or rTorrent",
+    },
+    LegendEntry {
+        icon: NodeIcon::Friend,
+        lane: Lane::Friend,
+        accent: "var(--topo-peer-1)",
+        name: "Friend",
+        meaning: "One friend. Each gets a color of their own, shared by their box and both lines reaching it",
+    },
+];
+
 /// One torrent's live swarm, for the "Active swarms" table below the
 /// diagram.
 #[derive(Debug, Clone)]
@@ -832,6 +913,36 @@ pub struct Node {
     /// as one connected thing at a glance. A CSS `var(--...)` reference,
     /// applied to the box's left accent bar and its icon.
     pub accent: &'static str,
+    /// Which column of the diagram this box stands in — what the "networking
+    /// only" toggle keys on to hide the sources lane, and what the legend's
+    /// swatches name.
+    pub lane: Lane,
+}
+
+/// The three swimlanes of the diagram, plus the client's own slot in the
+/// middle one. Rendered as a `data-lane` attribute so the page's script can
+/// hide a whole lane without knowing anything about coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// An *arr app or `[[library]]` directory — where media comes from.
+    Source,
+    /// This instance.
+    Instance,
+    /// This instance's torrent client.
+    Client,
+    /// A friend.
+    Friend,
+}
+
+impl Lane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Instance => "instance",
+            Self::Client => "client",
+            Self::Friend => "friend",
+        }
+    }
 }
 
 /// One detail row inside a [`Node`].
@@ -924,6 +1035,30 @@ pub struct Edge {
     /// category color, a friend's two edges match that friend's unique
     /// color, and the sharerr-to-client edge is left neutral.
     pub accent: &'static str,
+    /// What the line stands for — rendered as `data-kind` so the "networking
+    /// only" toggle can drop the source edges along with their boxes.
+    pub kind: EdgeKind,
+}
+
+/// What an [`Edge`] connects, independent of how it was learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// A source feeding this instance — a media relationship, not a network one.
+    Source,
+    /// This instance to its torrent client, labelled with the path-mapping result.
+    Client,
+    /// This instance to a friend's indexer or torrent client.
+    Friend,
+}
+
+impl EdgeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Client => "client",
+            Self::Friend => "friend",
+        }
+    }
 }
 
 /// How an edge was learned, or whatever else distinguishes one connection
@@ -941,6 +1076,18 @@ pub enum EdgeStyle {
 }
 
 impl EdgeStyle {
+    /// A sentence for the line's hover tooltip: the diagram encodes this as
+    /// a dash pattern, and a pattern is exactly the kind of thing a reader
+    /// forgets between visits.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Solid => "Observed directly: this instance and theirs have spoken",
+            Self::Dashed => "Learned through gossip: another friend relayed their address",
+            Self::Dotted => "Learned from a lighthouse: the fallback when nobody has seen them",
+            Self::None => "",
+        }
+    }
+
     /// The SVG `stroke-dasharray` value, or `None` when [`Self::None`] means
     /// the edge should not be drawn at all.
     pub fn dasharray(self) -> Option<&'static str> {

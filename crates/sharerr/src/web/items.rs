@@ -35,6 +35,24 @@ pub struct ItemsQuery {
 }
 
 /// Sortable columns, in the order the header row offers them.
+/// The tooltip for each sortable header — kept beside the column list so a
+/// column added there gets its sentence here, and the template stays free of
+/// per-column branches.
+pub(crate) fn column_hint(field: &str) -> &'static str {
+    match field {
+        "since" => "When sharerr first discovered the file",
+        "title" => {
+            "The title as the *arr knows it; the release name underneath is what the feed advertises"
+        }
+        "source" => "Which *arr app or library directory the file came from",
+        "size" => "Size of the file on disk",
+        "state" => {
+            "Pending: waiting for a sync. Seeding: a torrent exists and the client holds it. Failed: the last attempt to share it did not work"
+        }
+        _ => "",
+    }
+}
+
 pub(crate) const SORT_COLUMNS: &[(&str, &str)] = &[
     ("since", "Since"),
     ("title", "Title"),
@@ -140,6 +158,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
             };
             SortLink {
                 label,
+                hint: column_hint(field),
                 href: format!(
                     "?source={}&state={}&q={}&sort={field}&dir={next_dir}",
                     urlencode(&query.source),
@@ -277,6 +296,7 @@ fn row(
         announce_url: item.info_hash.as_ref().and(announce_url).map(str::to_owned),
         token_fp: item.announce_token_fp.clone(),
         token_status: token_status(item, current_token_fp),
+        ids: ids_summary(&item.ids),
         last_error: item.last_error.clone(),
         created_by_sharerr: item.created_by_sharerr,
         since_absolute: item
@@ -284,6 +304,34 @@ fn row(
             .map(super::peers::absolute)
             .unwrap_or_default(),
     }
+}
+
+/// "tvdb 12345 · imdb tt0111161": every external ID the item carries, in the
+/// order a friend's *arr would try them. Empty when there are none.
+fn ids_summary(ids: &sharerr_core::ExternalIds) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = ids.tvdb {
+        parts.push(format!("tvdb {v}"));
+    }
+    if let Some(v) = ids.tmdb {
+        parts.push(format!("tmdb {v}"));
+    }
+    if let Some(v) = ids.tvmaze {
+        parts.push(format!("tvmaze {v}"));
+    }
+    if let Some(v) = &ids.imdb {
+        parts.push(format!("imdb {v}"));
+    }
+    if let Some(v) = &ids.musicbrainz {
+        parts.push(format!("musicbrainz {v}"));
+    }
+    if let Some(v) = &ids.goodreads {
+        parts.push(format!("goodreads {v}"));
+    }
+    if let Some(v) = &ids.isbn {
+        parts.push(format!("isbn {v}"));
+    }
+    parts.join(" · ")
 }
 
 /// Whether this item's last-confirmed announce token still matches the one

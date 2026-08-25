@@ -342,7 +342,20 @@ code {
    inline pill above — background, padding, rounded corners — repeats per line
    inside one, boxing every line separately. The block owns the presentation;
    the `<code>` inside it is only there for semantics. */
-pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--text-sm); }
+/* Boxed and scrollable in its own right: a `<pre>` sitting bare inside a panel
+   with an overlay scrollbar reads as *clipped* when a line runs past the edge,
+   because nothing marks where the block ends. The border and fill make the
+   edge visible, so a cut-off line reads as "more to the right". */
+pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
 pre code {
   background: none;
   padding: 0;
@@ -576,6 +589,68 @@ svg text { font-family: inherit; }
 .topo-node--warn .topo-node-box  { stroke: var(--warn-ink);  fill: var(--warn-bg); }
 .topo-node--error .topo-node-box { stroke: var(--error-ink); fill: var(--error-bg); }
 
+/* The two diagram toggles, side by side and wrapping — a `.hint` paragraph
+   each would stack them and cost two lines for two checkboxes. */
+.topo-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-6);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.topo-controls label { display: inline-flex; align-items: center; margin: 0; font-weight: 500; font-size: inherit; cursor: pointer; }
+
+/* Hidden by the "networking only" toggle. `display: none` rather than opacity
+   so a hidden box also drops out of hover, focus, and the accessibility tree. */
+.topo-hidden, .topo-legend-item.topo-hidden { display: none; }
+
+/* Legend under the diagram: three labelled rows of swatches, each swatch a
+   miniature of the real thing (the glyph path, the box border, the dash
+   pattern) so it teaches by resemblance rather than by description. */
+.topo-legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+.topo-legend-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-5);
+}
+.topo-legend-title {
+  min-width: 3.5rem;
+  font-size: var(--text-2xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.topo-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: help;
+}
+.topo-legend-swatch { width: 1rem; height: 1rem; flex: none; }
+.topo-legend-line { width: 2.5rem; height: 0.5rem; flex: none; }
+.topo-legend-line line { stroke: var(--muted); stroke-width: 2; }
+.topo-legend-box {
+  display: inline-block;
+  width: 1.1rem;
+  height: 0.8rem;
+  border-radius: 3px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--panel-2);
+}
+.topo-node--ok.topo-legend-box    { border-color: var(--ok-ink);    background: var(--ok-bg); }
+.topo-node--warn.topo-legend-box  { border-color: var(--warn-ink);  background: var(--warn-bg); }
+.topo-node--error.topo-legend-box { border-color: var(--error-ink); background: var(--error-bg); }
+
 /* `main` is capped at 46rem, which is right for prose and forms and much too
    narrow for a wide table or a three-lane diagram. This breaks one block out
    of that column and centres it on the viewport instead, so the block that
@@ -608,9 +683,21 @@ main > * + section { margin-top: var(--section-gap); }
    across lines than it does pushing the table one column wider. */
 .nowrap { white-space: nowrap; }
 
+/* The Items table's title cell carries three lines — title, release name,
+   path — and the auto layout was squeezing it to the width of the widest
+   *other* column, so a release name broke mid-token. A floor here lets the
+   table scroll instead. */
+td.title { min-width: 20rem; }
+/* Same reason, smaller: the state cell is a word plus a short sentence of
+   hint, which at one-word-per-line no longer reads as a sentence. */
+td.state { min-width: 10rem; }
+td.visible { min-width: 7rem; }
+td.title code { white-space: nowrap; }
+td.title .hint:not(:has(code)) { overflow-wrap: anywhere; }
+
 .truncate {
   display: inline-block;
-  max-width: 14ch;
+  max-width: 12ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -701,7 +788,16 @@ main > * + section { margin-top: var(--section-gap); }
   letter-spacing: 0.04em;
 }
 .stat dd { margin: 0; font-size: var(--text-md); line-height: 1.4; }
-.stat dd strong { font-size: var(--text-xl); font-weight: 700; letter-spacing: -0.01em; }
+/* The number sits on its own line above its caption. Inline, "5 peer(s)
+   connected, 3 seeding" wrapped into three ragged lines with the headline
+   figure buried in the first, which is the opposite of at-a-glance. */
+.stat dd strong {
+  display: block;
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
 
 /* Settings is one long page of sections; a row of jump links at the top turns
    it back into something navigable without JS or a fixed sidebar. */
@@ -781,7 +877,9 @@ table { border-collapse: collapse; width: 100%; }
 .table-scroll { overflow-x: auto; }
 .table-scroll table { width: auto; min-width: 100%; }
 th, td { text-align: left; padding: var(--sp-2) var(--sp-2) var(--sp-2) 0; font-size: var(--text-md); border-bottom: 1px solid var(--line); }
-th { color: var(--muted); font-weight: 650; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.03em; }
+/* `nowrap`: a two-word header ("Last accepted") otherwise breaks onto two
+   lines the moment the auto layout is tight, lifting the whole header row. */
+th { color: var(--muted); font-weight: 650; font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: var(--accent-wash); }
 
@@ -791,8 +889,12 @@ tr.revoked td { color: var(--muted); text-decoration: line-through; }
 tr.revoked td .error { text-decoration: none; }
 tr.revoked:hover td { background: transparent; }
 
-/* Revoke/Delete sit together on one row without wrapping onto two lines. */
-td.actions { display: flex; gap: var(--sp-3); white-space: nowrap; }
+/* Revoke/Delete sit together on one row without wrapping onto two lines.
+   Not `display: flex`: that took the cell out of the table layout, so its
+   links floated above the row's text and its bottom border no longer lined
+   up with the neighbouring cells'. */
+td.actions { white-space: nowrap; }
+td.actions > * + * { margin-left: var(--sp-3); }
 
 /* Path lists on the diagnostics page: many similar strings, so they want to be
    scannable and monospaced rather than prose. */
@@ -804,4 +906,60 @@ td.actions { display: flex; gap: var(--sp-3); white-space: nowrap; }
   main { padding: var(--sp-6) var(--sp-4) 4rem; }
   .bar { padding: var(--sp-3) var(--sp-4); }
   h1 { font-size: var(--text-xl); }
+}
+
+/* ---- Nav icons, banner glyphs, footer ---------------------------------
+   Inline 16×16 stroke glyphs beside each nav link, drawn in the link's own
+   colour so they follow hover and aria-current for free. The banners get a
+   glyph from CSS alone — a check, a bang, a cross — via a mask filled with
+   currentColor, so no template has to carry markup for it and both themes
+   inherit the banner's ink. */
+.bar nav a svg {
+  width: 1rem;
+  height: 1rem;
+  vertical-align: -0.15em;
+  margin-right: 0.35rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* A `div` banner opens with a `<p>` (a heading line, then prose), so the glyph
+   goes on that first paragraph — on the div itself it sat alone on a line
+   above the block children. */
+p.ok::before, p.warn::before, p.error::before,
+div.ok > p:first-child::before, div.warn > p:first-child::before, div.error > p:first-child::before {
+  content: "";
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.5em;
+  vertical-align: -0.15em;
+  background: currentColor;
+  -webkit-mask: var(--glyph) center / contain no-repeat;
+  mask: var(--glyph) center / contain no-repeat;
+}
+p.ok, div.ok {
+  --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zm-1 9.4L4.3 8.2l1.1-1.1L7 8.7l3.6-3.6 1.1 1.1z'/%3E%3C/svg%3E");
+}
+p.warn, div.warn {
+  --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5L15 14H1zm-.75 4.5v4h1.5V6zm0 5v1.5h1.5V11z'/%3E%3C/svg%3E");
+}
+p.error, div.error {
+  --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM5.4 4.3L8 6.9l2.6-2.6 1.1 1.1L9.1 8l2.6 2.6-1.1 1.1L8 9.1l-2.6 2.6-1.1-1.1L6.9 8 4.3 5.4z'/%3E%3C/svg%3E");
+}
+
+.foot {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 0 var(--sp-5) var(--sp-8);
+  color: var(--faint);
+  font-size: var(--text-xs);
+  text-align: right;
+}
+
+@media (max-width: 32rem) {
+  .bar nav a svg { display: none; }
 }

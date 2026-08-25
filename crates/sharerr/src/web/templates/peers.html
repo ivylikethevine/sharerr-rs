@@ -78,7 +78,7 @@
   <table>
     <thead>
       <tr>
-        <th>Name</th><th>Can see</th><th>Added</th><th>Last seen</th>
+        <th title="The name you gave them — nobody else sees it">Name</th><th title="Which sources their feed admits; content outside it is never listed or offered">Can see</th><th title="How many seeding items their scope admits right now">Sharing</th><th title="When their key was generated">Added</th><th title="When their key was last used against the feed">Last seen</th>
         <th><span class="visually-hidden">Actions</span></th>
       </tr>
     </thead>
@@ -105,6 +105,7 @@
           </form>
           {% endif %}
         </td>
+        <td class="nowrap">{% if let Some(n) = peer.sharing %}{{ n }} item(s){% else %}<span class="hint">—</span>{% endif %}</td>
         <td class="nowrap" title="{{ peer.created_absolute }}">{{ peer.created }}</td>
         <td class="nowrap"{% if !peer.last_seen_absolute.is_empty() %} title="{{ peer.last_seen_absolute }}"{% endif %}>{{ peer.last_seen }}</td>
         <td class="actions">

@@ -292,11 +292,18 @@ async fn build(
             Ok(peers) => {
                 // One extra query per friend; the list is people, not rows —
                 // but run concurrently rather than one round trip at a time.
-                let endpoints =
-                    futures::future::join_all(peers.iter().map(|peer| async {
-                        store.peer_endpoints(peer.id).await.unwrap_or_default()
-                    }))
-                    .await;
+                // The seeding count per scope rides along in the same fan-out:
+                // it is the concrete answer to what "Can see: TV only" means.
+                let endpoints = futures::future::join_all(peers.iter().map(|peer| async {
+                    let endpoints = store.peer_endpoints(peer.id).await.unwrap_or_default();
+                    let sharing = store
+                        .seeding_items(peer.scope)
+                        .await
+                        .ok()
+                        .map(|items| items.len());
+                    (endpoints, sharing)
+                }))
+                .await;
                 (peers, endpoints, None)
             }
             Err(err) => (
@@ -322,9 +329,9 @@ async fn build(
         peers: peers
             .iter()
             .zip(&endpoints)
-            .map(|(peer, endpoints)| {
+            .map(|(peer, (endpoints, sharing))| {
                 let key_set = stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id));
-                row(peer, endpoints, key_set)
+                row(peer, endpoints, key_set, *sharing)
             })
             .collect(),
         error: error.or(list_error),
@@ -336,8 +343,14 @@ async fn build(
     }
 }
 
-fn row(peer: &Peer, endpoints: &[sharerr_store::PeerEndpoint], gossip_key_set: bool) -> PeerRow {
+fn row(
+    peer: &Peer,
+    endpoints: &[sharerr_store::PeerEndpoint],
+    gossip_key_set: bool,
+    sharing: Option<usize>,
+) -> PeerRow {
     PeerRow {
+        sharing,
         id: peer.id,
         label: peer.label.clone(),
         scope: peer.scope.as_str(),
@@ -509,8 +522,8 @@ mod tests {
             key_hash: "hash".to_owned(),
         };
 
-        assert_eq!(row(&peer, &[], false).last_seen, "never");
-        assert!(!row(&peer, &[], false).revoked);
+        assert_eq!(row(&peer, &[], false, None).last_seen, "never");
+        assert!(!row(&peer, &[], false, None).revoked);
     }
 
     #[test]
@@ -527,7 +540,7 @@ mod tests {
             key_hash: "hash".to_owned(),
         };
 
-        assert!(row(&peer, &[], false).revoked);
+        assert!(row(&peer, &[], false, None).revoked);
     }
 
     // ------------------------------------------------------------- handlers

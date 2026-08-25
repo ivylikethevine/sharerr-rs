@@ -247,10 +247,17 @@ async fn endpoint_status(
 /// away from what `doctor` reports.
 fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> ServiceLine {
     let (ok, message) = match outcome {
-        ArrOutcome::Ready { version, items, .. } => (
+        ArrOutcome::Ready {
+            version,
+            items,
+            app_name,
+            ..
+        } => (
             true,
+            // The app's own name, so a Sonarr URL that actually answers as
+            // Radarr is visible here rather than only in `doctor`.
             format!(
-                "{} file(s) tagged {:?} (v{version})",
+                "{} file(s) tagged {:?} ({app_name} v{version})",
                 items.len(),
                 config.tag
             ),

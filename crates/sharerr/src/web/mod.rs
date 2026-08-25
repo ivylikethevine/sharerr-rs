@@ -186,7 +186,8 @@ async fn status_page(State(state): State<WebState>) -> Response {
     // half — it probes every *arr over HTTP and stats every discovered file,
     // while `glance` is two store queries. Run in series the cheap one sat
     // behind the slow one on the page an operator lands on.
-    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state));
+    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
+    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state, sync_every));
 
     render(&StatusPage {
         signed_in: true,
@@ -226,7 +227,10 @@ async fn status_page(State(state): State<WebState>) -> Response {
 /// `None` when the database is unavailable — the page's existing banners
 /// already name that problem, and a strip of zeros next to them would claim
 /// "nothing shared" when the truth is "cannot tell".
-async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
+async fn glance(
+    state: &WebState,
+    sync_every: Option<u64>,
+) -> Option<crate::web::templates::Glance> {
     let store = state.serve.store().await.ok()?;
 
     let items_shared = store.count_seeding().await.unwrap_or(0);
@@ -252,6 +256,26 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
     };
 
     let now = now_epoch();
+    // The loop sleeps `interval` after each pass finishes, so the deadline is
+    // the last finish plus the interval — an estimate, and worded as one.
+    let next_sync = match (
+        sync_every,
+        last_run.as_ref().and_then(|run| run.finished_at),
+    ) {
+        (Some(every), Some(finished)) => {
+            let due_in = finished + every as i64 - now;
+            if due_in <= 0 {
+                "due now".to_owned()
+            } else if due_in < 90 {
+                "in under 2 min".to_owned()
+            } else if due_in < 3600 {
+                format!("in ~{} min", due_in / 60)
+            } else {
+                format!("in ~{} h", due_in / 3600)
+            }
+        }
+        _ => String::new(),
+    };
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
     let friends_recent = active
@@ -271,6 +295,7 @@ async fn glance(state: &WebState) -> Option<crate::web::templates::Glance> {
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
         swarm_torrents: swarm.swarms,
+        next_sync,
     })
 }
 
@@ -429,7 +454,7 @@ mod tests {
             serve,
             sessions: Arc::new(Sessions::default()),
         };
-        let glance = glance(&state).await.expect("the store is available");
+        let glance = glance(&state, None).await.expect("the store is available");
 
         assert_eq!(glance.items_shared, 1);
         assert_eq!((glance.friends_recent, glance.friends_total), (1, 2));

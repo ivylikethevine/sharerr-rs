@@ -393,15 +393,24 @@ to a friend means their address was seen directly; dashed means gossip relayed
 it; dotted means a lighthouse answered it; no line at all means that friend's
 sharerr has not been heard from yet. Every friend gets their own colour, shared
 between their box and the lines reaching it, so which lines belong to whom is
-readable at a glance. Under the diagram, **Active swarms** lists who is
-connected to each torrent right now, from the tracker's own bookkeeping.
+readable at a glance. Each friend's box carries three rows — the address their
+feed requests arrive from, their torrent client, and their own sharerr's
+announce endpoint — and each line lands on the row it describes. A legend
+under the diagram spells out the icons, the border colours (health), and the
+line styles. Under that, **Active swarms** lists who is connected to each
+torrent right now, from the tracker's own bookkeeping.
+
+**Networking only** hides the sources lane — the *arr apps and library
+directories feed sharerr files but are not part of the network — and reframes
+the diagram on this instance, its client, and friends. The choice is
+remembered per browser, and `/topology?view=networking` links straight to it.
 
 Addresses are redacted by default: an IPv4 keeps its first two octets and hides
 the last two (`203.0.113.9` shows as `203.0.•••.•`), and a port keeps only its
 leading half. The first half is what you recognise as your own network; the
 second half is what identifies one machine on it — so the page stays readable
 to you and stays safe to screenshot. A checkbox at the top reveals the real
-values.
+values; that choice is remembered per browser too.
 
 ### Checking that you are actually reachable
 

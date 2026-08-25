@@ -7,11 +7,11 @@
 {% if let Some(glance) = glance %}
 <dl class="stat-grid">
   <div class="stat">
-    <dt>Shared</dt>
+    <dt title="Items with a torrent the client is seeding right now">Shared</dt>
     <dd><strong>{{ glance.items_shared }}</strong> item(s) seeding</dd>
   </div>
   <div class="stat">
-    <dt>Last sync</dt>
+    <dt title="The most recent finished reconciliation pass">Last sync</dt>
     <dd>
       {% if let Some(when) = glance.last_sync %}
       {{ when }}{% if !glance.last_sync_note.is_empty() %} —
@@ -21,10 +21,13 @@
       {% else %}
       never
       {% endif %}
+      {% if !glance.next_sync.is_empty() %}
+      <br><span class="hint" title="Estimated from the last finished sync plus the configured interval">next {{ glance.next_sync }}</span>
+      {% endif %}
     </dd>
   </div>
   <div class="stat">
-    <dt>Friends</dt>
+    <dt title="Friends whose key was used within the last hour, over all active friends">Friends</dt>
     <dd>
       {% if glance.friends_total == 0 %}
       none yet — add one on the <a href="/peers">Friends</a> page
@@ -34,7 +37,7 @@
     </dd>
   </div>
   <div class="stat">
-    <dt>Swarms</dt>
+    <dt title="Live peers across this instance's tracker right now — first-hand, this process is the tracker">Swarms</dt>
     <dd>
       {% if glance.swarm_peers == 0 %}
       no peers announcing right now
@@ -92,11 +95,11 @@
 {% endif %}
 
 <dl class="facts">
-  <dt>Tag watched</dt><dd><code>{{ tag }}</code></dd>
-  <dt>{{ client_name }}</dt><dd><code>{{ client_url }}</code></dd>
-  <dt>Periodic sync</dt>
+  <dt title="Only *arr content carrying this tag is shared">Tag watched</dt><dd><code>{{ tag }}</code></dd>
+  <dt title="The torrent client sharerr hands torrents to">{{ client_name }}</dt><dd><code>{{ client_url }}</code></dd>
+  <dt title="How often sharerr re-reads the sources and reconciles the client">Periodic sync</dt>
   <dd>{% if sync_enabled %}every {{ sync_interval_secs }}s{% else %}disabled{% endif %}</dd>
-  <dt>Config file</dt><dd><code>{{ config_path }}</code></dd>
+  <dt title="The file the Settings page rewrites in place">Config file</dt><dd><code>{{ config_path }}</code></dd>
 </dl>
 
 <h2>Recent syncs</h2>
@@ -106,7 +109,7 @@
   {% else %}
   <div class="table-scroll">
   <table>
-    <thead><tr><th>When</th><th>Took</th><th>Result</th></tr></thead>
+    <thead><tr><th title="When the pass finished">When</th><th title="Wall-clock duration of the pass">Took</th><th title="What changed, or why the pass failed">Result</th></tr></thead>
     <tbody>
       {% for run in runs %}
       <tr>
@@ -239,7 +242,7 @@
   {% else %}
   <div class="table-scroll">
   <table>
-    <thead><tr><th>Lighthouse</th><th>Last accepted</th><th>Last refusal</th></tr></thead>
+    <thead><tr><th title="A rendezvous service this instance publishes its endpoint to">Lighthouse</th><th title="When it last accepted this instance's report">Last accepted</th><th title="The most recent report it turned down, and why">Last refusal</th></tr></thead>
     <tbody>
       {% for row in lighthouse.rows %}
       <tr>

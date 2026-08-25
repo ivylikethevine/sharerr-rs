@@ -64,21 +64,21 @@
     <thead>
       <tr>
         {% for link in sort_links %}
-        <th><a href="{{ link.href }}">{{ link.label }}{% if link.active %}
+        <th title="{{ link.hint }}"><a href="{{ link.href }}">{{ link.label }}{% if link.active %}
           {% if link.dir == "desc" %} &#9660;{% else %} &#9650;{% endif %}
         {% endif %}</a></th>
         {% endfor %}
-        <th>Visible to</th>
-        <th>Info hash</th>
-        <th>Announce URL</th>
-        <th>Token</th>
+        <th title="Friends whose scope admits this item — what they see in their feed">Visible to</th>
+        <th title="The torrent's identity, and the join key for finding it in the client">Info hash</th>
+        <th title="The tracker URL baked into this item's torrent — this instance">Announce URL</th>
+        <th title="Fingerprint of the announce token the torrent carries; red means the tracker no longer accepts it">Token</th>
       </tr>
     </thead>
     <tbody>
       {% for item in items %}
       <tr>
         <td class="nowrap"{% if !item.since_absolute.is_empty() %} title="{{ item.since_absolute }}"{% endif %}>{{ item.since }}</td>
-        <td>
+        <td class="title">
           {{ item.title }}
           <span class="hint">({{ item.kind }})</span>
           {# Two different strings by design — conflating them stalls seeding at
@@ -87,13 +87,16 @@
              something the operator could not read. #}
           <br><span class="hint"><code>{{ item.release_title }}</code></span>
           <br><span class="hint">{{ item.arr_path }}</span>
+          {% if !item.ids.is_empty() %}
+          <br><span class="hint ids" title="Metadata IDs carried in the feed — what a friend's *arr matches the release on">{{ item.ids }}</span>
+          {% endif %}
           {% if let Some(reason) = item.last_error %}
           <br><span class="error">{{ reason }}</span>
           {% endif %}
         </td>
         <td>{{ item.source_label }}</td>
         <td class="nowrap">{{ item.size }}</td>
-        <td>
+        <td class="state">
           {{ item.state_label }}
           {% if let Some(hint) = item.state_hint %}
           <br><span class="hint">{{ hint }}</span>
@@ -107,7 +110,7 @@
           </span>
           {% endif %}
         </td>
-        <td>
+        <td class="visible">
           {% if item.visible_to.is_empty() %}
           <span class="hint">—</span>
           {% else %}

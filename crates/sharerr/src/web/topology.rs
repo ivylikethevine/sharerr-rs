@@ -21,8 +21,8 @@ use sharerr_store::{EndpointKind, ObservedVia, PeerEndpoint};
 
 use super::WebState;
 use super::templates::{
-    AddressCell, ClientCheck, ClientMismatch, Edge, EdgeStyle, Node, NodeIcon, NodeLine,
-    NodeStatus, SwarmRow, TopologyPage, render,
+    AddressCell, ClientCheck, ClientMismatch, Edge, EdgeKind, EdgeStyle, Lane, Node, NodeIcon,
+    NodeLine, NodeStatus, SwarmRow, TopologyPage, render,
 };
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
@@ -130,6 +130,11 @@ pub(crate) struct FriendNode {
     pub(crate) accent: &'static str,
     pub(crate) indexer: Channel,
     pub(crate) client: Channel,
+    /// Their own sharerr's announce/feed endpoint, as their gossip reports
+    /// it — the address *their* friends announce to. Stored and listed on
+    /// the Friends page all along, and previously the one channel the
+    /// diagram left out.
+    pub(crate) tracker: Channel,
 }
 
 /// One address channel on a [`FriendNode`]: `addr` is `None` when nothing
@@ -162,7 +167,17 @@ impl Channel {
 
 impl FriendNode {
     fn lines(&self) -> Vec<NodeLine> {
-        vec![self.indexer.row("indexer"), self.client.row("client")]
+        vec![
+            self.indexer.row("indexer"),
+            self.client.row("client"),
+            self.tracker.row("tracker"),
+        ]
+    }
+
+    /// The channels in row order — the index is the detail row each one's
+    /// edge lands on, so this is the one place that order is decided.
+    fn channels(&self) -> [&Channel; 3] {
+        [&self.indexer, &self.client, &self.tracker]
     }
 }
 
@@ -501,6 +516,12 @@ async fn client_node(
     let label = backend.display_name().to_owned();
 
     let mut lines = vec![address_line("url", client.url.to_string())];
+    // The address the client is *advertised* on — what friends' clients
+    // actually dial, and the thing this page is about. Only present on the
+    // split-VPN deployment, where it differs from the URL sharerr uses.
+    if let Some(public) = state.serve.client_endpoint().current() {
+        lines.push(address_line("public", public.to_string()));
+    }
     // `Ready` carries the authenticated client precisely so a caller with more
     // to ask does not build a second one — see `QbitOutcome::Ready`. This page
     // has more to ask: every other check reports what sharerr *believes*, and
@@ -591,8 +612,13 @@ fn arr_node(kind: MediaSource, url: Option<&url::Url>, outcome: &ArrOutcome) -> 
     }
 
     let status = match outcome {
-        ArrOutcome::Ready { version, items, .. } => {
-            lines.push(line("version", format!("v{version}")));
+        ArrOutcome::Ready {
+            version,
+            items,
+            app_name,
+            ..
+        } => {
+            lines.push(line("version", format!("{app_name} v{version}")));
             lines.push(line("tagged", format!("{} file(s)", items.len())));
             NodeStatus::Ok
         }
@@ -720,6 +746,7 @@ fn friend_node(label: &str, endpoints: &[PeerEndpoint], accent: &'static str) ->
         accent,
         indexer: channel(endpoints, EndpointKind::Api),
         client: channel(endpoints, EndpointKind::Client),
+        tracker: channel(endpoints, EndpointKind::Tracker),
     }
 }
 
@@ -912,6 +939,7 @@ pub(crate) fn layout(
             lines: placed(&source.lines, y),
             status: source.status,
             accent: source.accent,
+            lane: Lane::Source,
         });
         source_mid_ys.push((y + h / 2, source.accent));
         y += h + ROW_GAP;
@@ -929,6 +957,7 @@ pub(crate) fn layout(
         lines: placed(instance_lines, sharerr_y),
         status: instance_status,
         accent: ACCENT_INSTANCE,
+        lane: Lane::Instance,
     });
     nodes.push(Node {
         x: instance_x,
@@ -940,6 +969,7 @@ pub(crate) fn layout(
         lines: placed(client_lines, client_y),
         status: client_status,
         accent: ACCENT_CLIENT,
+        lane: Lane::Client,
     });
     edges.push(Edge {
         x1: instance_x + COL_W / 2,
@@ -949,6 +979,7 @@ pub(crate) fn layout(
         label: path_edge_label.to_owned(),
         style: EdgeStyle::Solid,
         accent: ACCENT_NEUTRAL,
+        kind: EdgeKind::Client,
     });
 
     let sharerr_left = instance_x;
@@ -963,12 +994,13 @@ pub(crate) fn layout(
             label: String::new(),
             style: EdgeStyle::Solid,
             accent,
+            kind: EdgeKind::Source,
         });
     }
 
     let mut y = MARGIN + center_offset(friends_h, content_h);
     for (friend, h) in friends.iter().zip(&friend_hs) {
-        let status = if friend.indexer.addr.is_some() || friend.client.addr.is_some() {
+        let status = if friend.channels().iter().any(|c| c.addr.is_some()) {
             NodeStatus::Ok
         } else {
             NodeStatus::Unknown
@@ -983,6 +1015,7 @@ pub(crate) fn layout(
             lines: placed(&friend.lines(), y),
             status,
             accent: friend.accent,
+            lane: Lane::Friend,
         });
 
         // Each channel's edge lands on its own row, so which line a given
@@ -994,26 +1027,27 @@ pub(crate) fn layout(
         // landed on top of each other and rendered as unreadable doubled text.
         // Identical labels are drawn once.
         let row_y = |index: i32| y + NODE_HEAD_H + index * NODE_LINE_H - NODE_LINE_H / 3;
-        let duplicate_label = friend.indexer.style != EdgeStyle::None
-            && friend.client.style != EdgeStyle::None
-            && friend.indexer.edge_label == friend.client.edge_label;
-        for (channel, index) in [(&friend.indexer, 0), (&friend.client, 1)] {
-            if channel.style != EdgeStyle::None {
-                let label = if duplicate_label && index == 1 {
-                    String::new()
-                } else {
-                    channel.edge_label.clone()
-                };
-                edges.push(Edge {
-                    x1: sharerr_right,
-                    y1: sharerr_mid_y,
-                    x2: friends_x,
-                    y2: row_y(index),
-                    label,
-                    style: channel.style,
-                    accent: friend.accent,
-                });
+        let mut drawn_labels: Vec<&str> = Vec::new();
+        for (index, channel) in friend.channels().into_iter().enumerate() {
+            if channel.style == EdgeStyle::None {
+                continue;
             }
+            let label = if drawn_labels.contains(&channel.edge_label.as_str()) {
+                String::new()
+            } else {
+                drawn_labels.push(&channel.edge_label);
+                channel.edge_label.clone()
+            };
+            edges.push(Edge {
+                x1: sharerr_right,
+                y1: sharerr_mid_y,
+                x2: friends_x,
+                y2: row_y(index as i32),
+                label,
+                style: channel.style,
+                accent: friend.accent,
+                kind: EdgeKind::Friend,
+            });
         }
         y += h + ROW_GAP;
     }
@@ -1184,6 +1218,7 @@ mod tests {
         FriendNode {
             label: label.to_owned(),
             accent: peer_color(0),
+            tracker: Channel::unseen(),
             indexer: Channel::unseen(),
             client: Channel::unseen(),
         }
@@ -1264,6 +1299,7 @@ mod tests {
         let friends = vec![FriendNode {
             label: "Sam".to_owned(),
             accent: peer_color(0),
+            tracker: Channel::unseen(),
             indexer: Channel {
                 addr: Some("203.0.113.5:1".to_owned()),
                 style: EdgeStyle::Solid,
@@ -1299,6 +1335,7 @@ mod tests {
         let friends = vec![FriendNode {
             label: "Sam".to_owned(),
             accent: peer_color(0),
+            tracker: Channel::unseen(),
             indexer: same(),
             client: same(),
         }];
