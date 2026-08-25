@@ -97,6 +97,11 @@ pub(crate) struct MovieFile {
     pub size: u64,
     #[serde(default)]
     pub scene_name: Option<String>,
+    /// Where the file was before Radarr renamed it on import. Sonarr's
+    /// `EpisodeFileResource` has no counterpart, which is why this field sits on
+    /// [`MovieFile`] rather than alongside the shared ones.
+    #[serde(default)]
+    pub original_file_path: Option<String>,
 }
 
 /// Both apps use `""` and `0` for "unset" in places a JSON `null` would be more

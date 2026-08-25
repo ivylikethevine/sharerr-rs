@@ -231,6 +231,7 @@ fn walk(
                 size: meta.len(),
                 ids: ExternalIds::default(),
                 scene_name: None,
+                original_path: None,
             }),
             None => {
                 outcome.skipped += 1;

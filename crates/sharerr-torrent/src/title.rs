@@ -86,12 +86,25 @@ impl ParsedTitle {
 /// 1. The scene name the *arr app recorded on import. This is the best possible
 ///    answer — it is a title that a real indexer already published and a real
 ///    Sonarr already parsed.
-/// 2. The file's own basename, but **only if it parses back to the right thing**.
+/// 2. The basename the file had when the *arr app imported it (Radarr's
+///    `originalFilePath`), **only if it parses back to the right thing**. A
+///    library renamed after import keeps the pre-rename name here, so this often
+///    recovers a real release name that step 3 no longer sees.
+/// 3. The file's own basename, but **only if it parses back to the right thing**.
 ///    Renamed libraries often produce names like `Show - S02E01 - Episode Name`,
 ///    which parse fine; but a library renamed to `01 - Episode Name` does not, and
 ///    using it would produce a release nobody can match.
-/// 3. A synthesised scene-style name.
-pub fn resolve(spec: &MediaSpec, scene_name: Option<&str>, path: &Path) -> String {
+/// 4. A synthesised scene-style name.
+///
+/// Steps 2 and 3 share the parse gate for the same reason: neither name is known
+/// to describe this file. Only step 1 is trusted unconditionally, because the
+/// scene name is one an indexer published and an *arr already parsed.
+pub fn resolve(
+    spec: &MediaSpec,
+    scene_name: Option<&str>,
+    original_path: Option<&Path>,
+    path: &Path,
+) -> String {
     if let Some(scene) = scene_name {
         let cleaned = strip_extension(scene.trim());
         if !cleaned.is_empty() {
@@ -99,10 +112,12 @@ pub fn resolve(spec: &MediaSpec, scene_name: Option<&str>, path: &Path) -> Strin
         }
     }
 
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-        && parse(stem).describes(spec)
-    {
-        return stem.to_owned();
+    for candidate in [original_path, Some(path)].into_iter().flatten() {
+        if let Some(stem) = candidate.file_stem().and_then(|s| s.to_str())
+            && parse(stem).describes(spec)
+        {
+            return stem.to_owned();
+        }
     }
 
     synthesize(spec)
@@ -539,6 +554,7 @@ mod tests {
         let resolved = resolve(
             &episode(),
             Some(scene),
+            None,
             &PathBuf::from("/tv/Lanternwick Hollow/Season 02/whatever.mkv"),
         );
         assert_eq!(resolved, scene);
@@ -549,6 +565,7 @@ mod tests {
         let resolved = resolve(
             &episode(),
             Some("Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-FAKEGRP.mkv"),
+            None,
             &PathBuf::from("/tv/x.mkv"),
         );
         assert_eq!(
@@ -562,6 +579,7 @@ mod tests {
         let resolved = resolve(
             &episode(),
             None,
+            None,
             &PathBuf::from(
                 "/tv/Lanternwick Hollow/Season 02/Lanternwick Hollow - S02E01 - Pilot.mkv",
             ),
@@ -573,6 +591,7 @@ mod tests {
     fn an_unparseable_basename_is_replaced_rather_than_published() {
         let resolved = resolve(
             &episode(),
+            None,
             None,
             &PathBuf::from("/tv/Lanternwick Hollow/Season 02/01.mkv"),
         );
@@ -586,6 +605,7 @@ mod tests {
         let resolved = resolve(
             &episode(),
             None,
+            None,
             &PathBuf::from("/tv/Copper Vale/Copper.Vale.S05E09.WEB-DL.mkv"),
         );
         assert_eq!(resolved, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
@@ -596,9 +616,67 @@ mod tests {
         let resolved = resolve(
             &episode(),
             Some("   "),
+            None,
             &PathBuf::from("/tv/Lanternwick/01.mkv"),
         );
         assert_eq!(resolved, "Lanternwick.Hollow.S02E01.WEB-DL.x264-SHARERR");
+    }
+
+    /// The case the fallback exists for: Radarr renamed the file on import, so the
+    /// basename on disk no longer carries a release name, but `originalFilePath`
+    /// still does.
+    #[test]
+    fn an_original_path_is_used_when_the_current_basename_is_unparseable() {
+        let resolved = resolve(
+            &movie(),
+            None,
+            Some(&PathBuf::from(
+                "/downloads/The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv",
+            )),
+            &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+        );
+        assert_eq!(resolved, "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP");
+    }
+
+    /// The original path is a candidate, not a truth: it goes through the same
+    /// parse gate as the basename, so an import from a junk-named download does
+    /// not get published as a release title.
+    #[test]
+    fn an_unparseable_original_path_falls_through_to_the_basename() {
+        let resolved = resolve(
+            &movie(),
+            None,
+            Some(&PathBuf::from("/downloads/rrqx7z1p/file1.mkv")),
+            &PathBuf::from("/movies/The Gilded Ferry (2019)/The Gilded Ferry (2019).mkv"),
+        );
+        assert_eq!(resolved, "The Gilded Ferry (2019)");
+    }
+
+    /// Same rejection the basename gets: parses cleanly, describes something else.
+    #[test]
+    fn an_original_path_describing_different_content_is_rejected() {
+        let resolved = resolve(
+            &movie(),
+            None,
+            Some(&PathBuf::from(
+                "/downloads/Copper.Vale.2011.1080p.WEB-DL.mkv",
+            )),
+            &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+        );
+        assert_eq!(resolved, "The.Gilded.Ferry.2019.WEB-DL.x264-SHARERR");
+    }
+
+    #[test]
+    fn a_scene_name_still_outranks_the_original_path() {
+        let resolved = resolve(
+            &movie(),
+            Some("The.Gilded.Ferry.2019.2160p.UHD.BluRay-SCENEGRP"),
+            Some(&PathBuf::from(
+                "/downloads/The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv",
+            )),
+            &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+        );
+        assert_eq!(resolved, "The.Gilded.Ferry.2019.2160p.UHD.BluRay-SCENEGRP");
     }
 
     #[test]
@@ -606,12 +684,14 @@ mod tests {
         let parseable = resolve(
             &movie(),
             None,
+            None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/The Gilded Ferry (2019).mkv"),
         );
         assert_eq!(parseable, "The Gilded Ferry (2019)");
 
         let unparseable = resolve(
             &movie(),
+            None,
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
         );

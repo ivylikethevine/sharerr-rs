@@ -48,6 +48,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 ..ExternalIds::default()
             },
             scene_name: non_empty(file.scene_name.clone()),
+            original_path: non_empty(file.original_file_path.clone()).map(PathBuf::from),
         });
     }
 

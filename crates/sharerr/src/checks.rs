@@ -897,6 +897,7 @@ mod tests {
             size: 2,
             ids: ExternalIds::default(),
             scene_name: None,
+            original_path: None,
         };
 
         let report = check_paths(&config, &[item]);
@@ -948,6 +949,7 @@ mod tests {
             arr_path: "/tv/Gilded.Ferry.2019.mkv".into(),
             size: 2,
             ids: sharerr_core::ExternalIds::default(),
+            original_path: None,
             scene_name: None,
         };
         let ready = ArrOutcome::Ready {
@@ -973,6 +975,7 @@ mod tests {
             },
             arr_path: "/movies/Gilded.Ferry.2019.mkv".into(),
             size: 2,
+            original_path: None,
             ids: sharerr_core::ExternalIds::default(),
             scene_name: None,
         };
@@ -1027,6 +1030,7 @@ mod tests {
                 year: Some(2019),
             },
             arr_path: "/tv/Gilded.Ferry.2019.mkv".into(),
+            original_path: None,
             size: 2,
             ids: sharerr_core::ExternalIds::default(),
             scene_name: None,
@@ -1052,6 +1056,7 @@ mod tests {
                 title: "Gilded Ferry".to_owned(),
                 year: Some(2019),
             },
+            original_path: None,
             arr_path: "relative/Gilded.Ferry.2019.mkv".into(),
             size: 2,
             ids: sharerr_core::ExternalIds::default(),

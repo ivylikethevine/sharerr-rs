@@ -578,7 +578,12 @@ impl Syncer {
         // file's basename is identical under `item.arr_path` and under
         // `paths.sharerr` once resolved. That means the release title can be
         // computed now, without waiting on resolution to succeed.
-        let release_title = title::resolve(&item.spec, item.scene_name.as_deref(), &item.arr_path);
+        let release_title = title::resolve(
+            &item.spec,
+            item.scene_name.as_deref(),
+            item.original_path.as_deref(),
+            &item.arr_path,
+        );
 
         if !dry_run {
             // Record before anything can fail — including resolution itself. A

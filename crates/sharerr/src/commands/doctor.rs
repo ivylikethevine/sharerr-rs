@@ -2046,6 +2046,7 @@ mod tests {
             size,
             ids: sharerr_core::ExternalIds::default(),
             scene_name: None,
+            original_path: None,
         }
     }
 

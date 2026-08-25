@@ -128,6 +128,8 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                     ..ExternalIds::default()
                 },
                 scene_name: non_empty(file.scene_name.clone()),
+                // Lidarr and Readarr report no pre-rename path.
+                original_path: None,
             });
         }
     }

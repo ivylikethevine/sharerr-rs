@@ -25,7 +25,7 @@ x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
 
 services:
   sonarr:
-    image: lscr.io/linuxserver/sonarr:4.0.15@sha256:fbe67c25693dc5f3de220c5691f374576ae265df782c16918cc071b630490bd7
+    image: lscr.io/linuxserver/sonarr:4.0.19@sha256:c19aa4ecdf03d73e1d5c901da33744cb7eb4d921f89bafed1ca264601d7fa224
     container_name: sharerr-tm-test-sonarr
     environment:
       PUID: *puid
@@ -38,7 +38,7 @@ services:
       - "127.0.0.1:38989:8989"
 
   radarr:
-    image: lscr.io/linuxserver/radarr:5.14.0@sha256:3329fbf778701cf53703b342b3a84da31caafec970ef9310be5723dd057666dc
+    image: lscr.io/linuxserver/radarr:6.3.0@sha256:119aaa4a4f7349bcd2a136c5373a0d7925b5479915c7dfe0c0ad352db2a6d438
     container_name: sharerr-tm-test-radarr
     environment:
       PUID: *puid
@@ -53,7 +53,7 @@ services:
   transmission:
     # Pinned like the rest. The RPC is stable, but label handling is not something
     # to discover from a silent minor bump.
-    image: lscr.io/linuxserver/transmission:4.0.5@sha256:c6a95f014f7ec812c9173be5a0afef4656e7c09be1c2d063786f42bdc3ee3d8a
+    image: lscr.io/linuxserver/transmission:4.1.3@sha256:c85eb732f0ae9e4152b76c2d7da26e50c1fb54c05d9723800c198385ff66c247
     container_name: sharerr-tm-test-transmission
     environment:
       PUID: *puid
