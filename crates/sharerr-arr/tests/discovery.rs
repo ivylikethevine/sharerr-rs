@@ -646,6 +646,137 @@ async fn radarr_carries_the_pre_rename_path_when_it_reports_one() {
     assert_eq!(by_file(902).original_path, None, "the field may be absent");
 }
 
+/// `mediaInfo` is the free half of the metadata feature: Sonarr and Radarr have
+/// already analysed every file they imported, so nothing needs to read the file
+/// when they report it.
+#[tokio::test]
+async fn radarr_carries_the_media_info_it_already_computed() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/movie",
+        json!([
+            {
+                "id": 31,
+                "title": "The Gilded Ferry",
+                "year": 2019,
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": {
+                    "id": 900,
+                    "path": "/movies/gilded.ferry.2019.mkv",
+                    "size": 10,
+                    "mediaInfo": {
+                        "resolution": "1920x1080",
+                        "videoCodec": "x265",
+                        "videoDynamicRangeType": "HDR10",
+                        "audioCodec": "EAC3",
+                        // A JSON number, not a string — and `5.1` must survive the
+                        // float round-trip without becoming `5.0999999`.
+                        "audioChannels": 5.1,
+                        "audioLanguages": "English/Japanese",
+                        "subtitles": "English",
+                        "runTime": "1:56:38",
+                    },
+                },
+            },
+            {
+                // Analysed, but the object came back empty — a file Radarr has
+                // queued and not yet looked at. That is "unknown", not "empty".
+                "id": 32,
+                "title": "Paper Lantern Sky",
+                "year": 2021,
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": {
+                    "id": 901, "path": "/movies/pls.mkv", "size": 10, "mediaInfo": {},
+                },
+            },
+            {
+                "id": 33,
+                "title": "Harrowmere",
+                "year": 2024,
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": { "id": 902, "path": "/movies/harrowmere.mkv", "size": 10 },
+            },
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Radarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    let by_file = |id: i64| {
+        found
+            .iter()
+            .find(|d| d.file_id == id)
+            .expect("every tagged movie has a file")
+    };
+
+    let media = by_file(900).media.as_ref().expect("mediaInfo was reported");
+    assert_eq!(media.resolution.as_deref(), Some("1920x1080"));
+    assert_eq!(media.video_codec.as_deref(), Some("x265"));
+    assert_eq!(media.dynamic_range.as_deref(), Some("HDR10"));
+    assert_eq!(media.audio_codec.as_deref(), Some("EAC3"));
+    assert_eq!(media.audio_channels.as_deref(), Some("5.1"));
+    assert_eq!(media.audio_languages.as_deref(), Some("English/Japanese"));
+    assert_eq!(media.subtitles.as_deref(), Some("English"));
+    assert_eq!(media.runtime.as_deref(), Some("1:56:38"));
+
+    assert_eq!(by_file(901).media, None, "an empty object is not metadata");
+    assert_eq!(by_file(902).media, None, "an absent object is not metadata");
+}
+
+/// Sonarr reports the identical structure, and the sync pass must not be able to
+/// tell which app an item came from once it holds the metadata.
+#[tokio::test]
+async fn sonarr_carries_the_media_info_it_already_computed() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/series",
+        json!([{ "id": 11, "title": "Lanternwick Hollow", "tags": [TAG_ID] }]),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/episodefile"))
+        .and(query_param("seriesId", "11"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+            "id": 501,
+            "path": "/tv/lanternwick.s02e01.mkv",
+            "size": 10,
+            "mediaInfo": {
+                "resolution": "1280x720",
+                "audioCodec": "AAC",
+                "audioChannels": 2.0,
+            },
+        }])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/episode"))
+        .and(query_param("seriesId", "11"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "seasonNumber": 2, "episodeNumber": 1, "episodeFileId": 501 },
+        ])))
+        .mount(&server)
+        .await;
+
+    let found = client(MediaSource::Sonarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    let media = found[0].media.as_ref().expect("mediaInfo was reported");
+    assert_eq!(media.resolution.as_deref(), Some("1280x720"));
+    assert_eq!(media.audio_channels.as_deref(), Some("2.0"));
+}
+
 #[tokio::test]
 async fn radarr_falls_back_to_the_moviefile_endpoint() {
     let server = MockServer::start().await;

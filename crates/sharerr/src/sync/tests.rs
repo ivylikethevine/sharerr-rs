@@ -106,6 +106,7 @@ fn a_real_torrent(dir: &Path, name: &str) -> Vec<u8> {
         .create(&TorrentRequest {
             path: &path,
             announce: &AnnounceSet::single(Url::parse(FOREIGN_ANNOUNCE).unwrap()),
+            media: None,
         })
         .unwrap()
         .data
@@ -737,10 +738,13 @@ async fn release_titles_come_from_the_scene_name_when_there_is_one() {
         "a recorded scene name is the best possible title and must win"
     );
     // No scene name, and `lanternwick.s02e02` does not parse to a series title, so
-    // it is synthesised rather than published as-is.
+    // it is synthesised rather than published as-is. The quality tokens are the
+    // fallback guess: the fixtures are seeded pseudo-random bytes with a `.mkv`
+    // suffix, so the probe rejects them as containers and there is no real
+    // resolution or codec to fold in.
     assert_eq!(
         without_scene.release_title,
-        "Lanternwick.Hollow.S02E02.WEB-DL.x264-SHARERR"
+        "Lanternwick.Hollow.S02E02.1080p.WEB-DL.x264-SHARERR"
     );
 }
 
@@ -984,6 +988,7 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
         arr_path: PathBuf::from(r"C:\tv\Windowsy Show\ep.mkv"),
         size: 1024,
         ids: sharerr_core::ExternalIds::default(),
+        media: None,
         scene_name: None,
         original_path: None,
     };
@@ -1449,6 +1454,7 @@ async fn a_broken_arr_app_never_causes_its_shares_to_be_withdrawn() {
         arr_path: PathBuf::from("/movies/The Gilded Ferry (2019)/gilded.ferry.2019.mkv"),
         size: 1024,
         ids: sharerr_core::ExternalIds::default(),
+        media: None,
         info_hash: Some("radarrhash0000000000000000000000000000aa".to_owned()),
         announce_token_fp: None,
         created_by_sharerr: true,

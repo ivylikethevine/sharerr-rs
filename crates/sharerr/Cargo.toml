@@ -41,6 +41,7 @@ sharerr-lighthouse = { workspace = true }
 sharerr-qbit = { workspace = true }
 sharerr-rtorrent = { workspace = true }
 sharerr-store = { workspace = true }
+sharerr-probe = { workspace = true }
 sharerr-torrent = { workspace = true }
 sharerr-transmission = { workspace = true }
 thiserror = { workspace = true }

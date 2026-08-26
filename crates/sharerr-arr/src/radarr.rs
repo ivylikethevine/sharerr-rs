@@ -9,7 +9,7 @@ use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
-use crate::models::{Movie, MovieFile, non_empty, non_zero};
+use crate::models::{MediaInfo, Movie, MovieFile, non_empty, non_zero};
 use crate::{Discovered, Tagged, fetch_tagged};
 
 impl Tagged for Movie {
@@ -49,6 +49,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             },
             scene_name: non_empty(file.scene_name.clone()),
             original_path: non_empty(file.original_file_path.clone()).map(PathBuf::from),
+            media: file.media_info.clone().and_then(MediaInfo::into_meta),
         });
     }
 

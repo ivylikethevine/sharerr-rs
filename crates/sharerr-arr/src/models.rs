@@ -6,6 +6,8 @@
 
 use serde::Deserialize;
 
+use sharerr_core::MediaMeta;
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Tag {
     pub id: i64,
@@ -21,6 +23,57 @@ pub struct SystemStatus {
     pub version: String,
     #[serde(default)]
     pub app_name: String,
+}
+
+/// The `mediaInfo` object Sonarr and Radarr attach to a file they have analysed.
+///
+/// Identical in both APIs, which is why it lives here rather than beside either.
+/// Every field is optional twice over: absent when the *arr never ran its analysis,
+/// and `""` when the analysis ran but found no such stream — [`MediaInfo::into_meta`]
+/// collapses both to `None`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaInfo {
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub video_codec: Option<String>,
+    #[serde(default)]
+    pub video_dynamic_range_type: Option<String>,
+    #[serde(default)]
+    pub audio_codec: Option<String>,
+    /// A number in the JSON (`5.1`), not a string, so it is captured as one and
+    /// formatted back — `serde_json::Value` would be heavier for no gain.
+    #[serde(default)]
+    pub audio_channels: Option<f32>,
+    #[serde(default)]
+    pub audio_languages: Option<String>,
+    #[serde(default)]
+    pub subtitles: Option<String>,
+    #[serde(default)]
+    pub run_time: Option<String>,
+}
+
+impl MediaInfo {
+    /// Convert to the shared shape, dropping the fields that carry nothing.
+    ///
+    /// Yields `None` rather than an all-empty [`MediaMeta`] when the *arr sent an
+    /// object with nothing in it, which it does for a file queued for analysis.
+    pub(crate) fn into_meta(self) -> Option<MediaMeta> {
+        let meta = MediaMeta {
+            resolution: non_empty(self.resolution),
+            video_codec: non_empty(self.video_codec),
+            dynamic_range: non_empty(self.video_dynamic_range_type),
+            audio_codec: non_empty(self.audio_codec),
+            // `5.1` must not render as `5.1000000238`, and `2` must not render as
+            // `2` where every other producer writes `2.0`.
+            audio_channels: self.audio_channels.map(|c| format!("{c:.1}")),
+            audio_languages: non_empty(self.audio_languages),
+            subtitles: non_empty(self.subtitles),
+            runtime: non_empty(self.run_time),
+        };
+        (!meta.is_empty()).then_some(meta)
+    }
 }
 
 // ---------------------------------------------------------------- Sonarr
@@ -49,6 +102,8 @@ pub(crate) struct EpisodeFile {
     pub size: u64,
     #[serde(default)]
     pub scene_name: Option<String>,
+    #[serde(default)]
+    pub media_info: Option<MediaInfo>,
 }
 
 /// An episode record. Sonarr keeps episode numbering here rather than on the file,
@@ -102,6 +157,8 @@ pub(crate) struct MovieFile {
     /// [`MovieFile`] rather than alongside the shared ones.
     #[serde(default)]
     pub original_file_path: Option<String>,
+    #[serde(default)]
+    pub media_info: Option<MediaInfo>,
 }
 
 /// Both apps use `""` and `0` for "unset" in places a JSON `null` would be more

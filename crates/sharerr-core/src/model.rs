@@ -133,6 +133,127 @@ pub struct ExternalIds {
     pub isbn: Option<String>,
 }
 
+/// What the file actually is, as opposed to what its name claims.
+///
+/// Two sources fill this in, in order of preference: the `mediaInfo` the *arr
+/// apps already computed (free — it arrives in the same JSON as everything else),
+/// and a direct probe of the file for the cases that have no *arr behind them —
+/// a `[[library]]` directory, or a file the *arr never analysed. See
+/// `sharerr_probe`.
+///
+/// Every field is optional and every field is a `String`. Optional because a
+/// probe that recognises the container but not one of its streams must be able to
+/// report what it did learn rather than nothing; `String` because these values are
+/// rendered verbatim into a feed and never computed with, and because
+/// `audioChannels` is `5.1` — a float, which would cost this type its `Eq`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaMeta {
+    /// Pixel dimensions as `WIDTHxHEIGHT`, e.g. `1920x1080`. Stored in full
+    /// rather than as `1080p` because the scene shorthand throws away the aspect
+    /// ratio, and [`Self::scene_resolution`] can derive the shorthand back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+    /// `HDR10`, `DV`, and so on. Empty for SDR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamic_range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_codec: Option<String>,
+    /// `2.0`, `5.1`, … — a string, see the type docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_channels: Option<String>,
+    /// Slash-separated, as the *arr apps report it: `English/Japanese`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_languages: Option<String>,
+    /// Slash-separated subtitle languages, same shape as [`Self::audio_languages`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitles: Option<String>,
+    /// `H:MM:SS`, as the *arr apps report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+}
+
+impl MediaMeta {
+    /// Whether this carries nothing at all.
+    ///
+    /// A probe that recognised no stream yields `Some(MediaMeta::default())`
+    /// rather than `None`, which would render an item's worth of empty attributes.
+    /// Callers store `None` instead when this is true.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The scene shorthand for [`Self::resolution`] — `1920x1080` becomes `1080p`.
+    ///
+    /// Keyed on height, and on the *standard* heights only: a release named
+    /// `816p` communicates nothing a parser on the far end can use, so anything
+    /// off-ladder yields `None` and the caller omits the token rather than
+    /// inventing one. Widescreen encodes are cropped vertically (a 1920x816
+    /// scope film is universally called 1080p), so the ladder matches on width
+    /// first and falls back to height.
+    pub fn scene_resolution(&self) -> Option<&'static str> {
+        let (width, height) = self.dimensions()?;
+        let ladder = [
+            (7680, 4320, "4320p"),
+            (3840, 2160, "2160p"),
+            (1920, 1080, "1080p"),
+            (1280, 720, "720p"),
+            (720, 576, "576p"),
+            (720, 480, "480p"),
+        ];
+        ladder
+            .iter()
+            .find(|(w, h, _)| width == *w || height == *h)
+            .map(|(_, _, name)| *name)
+    }
+
+    /// [`Self::resolution`] split into numbers, when it has the expected shape.
+    fn dimensions(&self) -> Option<(u32, u32)> {
+        let raw = self.resolution.as_deref()?;
+        let (width, height) = raw.split_once(['x', 'X'])?;
+        Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+    }
+
+    /// The video codec as a release title spells it.
+    ///
+    /// The *arr apps and the containers themselves disagree on spelling for what
+    /// is one codec to a parser — `V_MPEG4/ISO/AVC`, `avc1`, `h264` and `x264` all
+    /// mean the same release token. Anything unrecognised yields `None`: an
+    /// unknown string dropped into a release title is worse than no token, since
+    /// the far end parses it as part of the name.
+    pub fn scene_video_codec(&self) -> Option<&'static str> {
+        // Separators are stripped, not just case: `H.264`, `H-264` and `h264`
+        // are one codec written three ways, and matching on the raw string would
+        // recognise only the third.
+        let raw: String = self
+            .video_codec
+            .as_deref()?
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        for (needle, token) in [
+            ("av1", "AV1"),
+            ("hevc", "x265"),
+            ("h265", "x265"),
+            ("x265", "x265"),
+            ("avc", "x264"),
+            ("h264", "x264"),
+            ("x264", "x264"),
+            ("vp9", "VP9"),
+            ("mpeg2", "MPEG2"),
+            ("xvid", "XviD"),
+        ] {
+            if raw.contains(needle) {
+                return Some(token);
+            }
+        }
+        None
+    }
+}
+
 impl ExternalIds {
     /// Any IMDb id spelling reduced to the bare number.
     ///
@@ -335,6 +456,11 @@ pub struct SharedItem {
     /// is not decoration — without it a friend cannot add sharerr as an indexer at
     /// all. `None` on an item that has not been stored yet.
     pub created_at: Option<i64>,
+    /// What the file actually is — resolution, codecs, runtime. Published as
+    /// Torznab attributes so a friend's Sonarr can filter on quality rather than
+    /// guessing from the title, and folded into the release title itself when
+    /// there was no real name to use. See [`MediaMeta`].
+    pub media: Option<MediaMeta>,
 }
 
 impl SharedItem {
@@ -375,6 +501,10 @@ pub struct Discovered {
     /// it is not known to parse, so it is only used if it does. `None` for every
     /// other source: Sonarr, Lidarr and Readarr do not report it.
     pub original_path: Option<PathBuf>,
+    /// What the file actually is, when the source knew. `None` here does not mean
+    /// "unknown for good": the sync pass probes the file itself for anything that
+    /// arrives without it. See [`MediaMeta`].
+    pub media: Option<MediaMeta>,
 }
 
 impl Discovered {
@@ -396,6 +526,7 @@ impl Discovered {
             arr_path: self.arr_path,
             size: self.size,
             ids: self.ids,
+            media: self.media,
             info_hash: None,
             announce_token_fp: None,
             // No torrent exists yet; `Store::set_seeding` records which branch
@@ -415,6 +546,90 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    // ------------------------------------------------------------ MediaMeta
+
+    fn meta(resolution: &str, codec: &str) -> MediaMeta {
+        MediaMeta {
+            resolution: Some(resolution.to_owned()),
+            video_codec: Some(codec.to_owned()),
+            ..MediaMeta::default()
+        }
+    }
+
+    #[test]
+    fn standard_ladder_heights_get_their_scene_shorthand() {
+        assert_eq!(meta("1920x1080", "").scene_resolution(), Some("1080p"));
+        assert_eq!(meta("1280x720", "").scene_resolution(), Some("720p"));
+        assert_eq!(meta("3840x2160", "").scene_resolution(), Some("2160p"));
+    }
+
+    /// A scope film is cropped vertically — 1920x816 is universally called 1080p,
+    /// and matching on height alone would call it nothing.
+    #[test]
+    fn a_widescreen_crop_is_named_by_its_width() {
+        assert_eq!(meta("1920x816", "").scene_resolution(), Some("1080p"));
+        assert_eq!(meta("3840x1600", "").scene_resolution(), Some("2160p"));
+    }
+
+    /// Off-ladder yields nothing rather than an invented token: `816p` in a
+    /// release title communicates nothing a parser on the far end can use.
+    #[test]
+    fn an_off_ladder_resolution_is_not_named() {
+        assert_eq!(meta("1024x768", "").scene_resolution(), None);
+        assert_eq!(meta("garbage", "").scene_resolution(), None);
+        assert_eq!(MediaMeta::default().scene_resolution(), None);
+    }
+
+    #[test]
+    fn every_spelling_of_one_codec_maps_to_one_token() {
+        for spelling in ["V_MPEG4/ISO/AVC", "avc1", "h264", "x264", "H.264"] {
+            assert_eq!(
+                meta("", spelling).scene_video_codec(),
+                Some("x264"),
+                "{spelling}"
+            );
+        }
+        for spelling in ["HEVC", "h265", "x265"] {
+            assert_eq!(
+                meta("", spelling).scene_video_codec(),
+                Some("x265"),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// An unrecognised codec yields nothing rather than being passed through: it
+    /// would land in a release title, where the far end parses it as part of the
+    /// name.
+    #[test]
+    fn an_unknown_codec_contributes_no_token() {
+        assert_eq!(meta("", "SOMETHING_NEW").scene_video_codec(), None);
+        assert_eq!(MediaMeta::default().scene_video_codec(), None);
+    }
+
+    #[test]
+    fn an_all_absent_meta_is_empty_and_a_populated_one_is_not() {
+        assert!(MediaMeta::default().is_empty());
+        assert!(!meta("1920x1080", "x264").is_empty());
+    }
+
+    /// Absent fields must not serialize, or a stored row grows a wall of nulls
+    /// and every consumer has to tell "null" from "absent".
+    #[test]
+    fn absent_fields_are_omitted_from_the_stored_json() {
+        let json = serde_json::to_string(&MediaMeta {
+            resolution: Some("1920x1080".to_owned()),
+            ..MediaMeta::default()
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"resolution":"1920x1080"}"#);
+
+        // ...and a row written before a field existed still loads.
+        let back: MediaMeta = serde_json::from_str(r#"{"resolution":"1920x1080"}"#).unwrap();
+        assert_eq!(back.resolution.as_deref(), Some("1920x1080"));
+        assert_eq!(back.audio_codec, None);
+    }
 
     #[test]
     fn media_source_names_round_trip() {
@@ -593,6 +808,7 @@ mod tests {
             arr_path: PathBuf::from("/media/movies/copper-vale.mkv"),
             size: 1024,
             ids: ExternalIds::default(),
+            media: None,
             scene_name: Some("Copper.Vale.2001.mkv".to_owned()),
             original_path: None,
         }

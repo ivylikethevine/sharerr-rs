@@ -1,0 +1,20 @@
+[package]
+name = "sharerr-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reading what a media file actually is, for the sources that have no *arr to ask."
+
+[lints]
+workspace = true
+
+[dependencies]
+matroska = { workspace = true }
+mp4 = { workspace = true }
+sharerr-core = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

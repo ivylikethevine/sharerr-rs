@@ -323,6 +323,28 @@ pub(crate) struct JsonResult {
     tvdb: Option<i64>,
     #[serde(rename = "TMDb", skip_serializing_if = "Option::is_none")]
     tmdb: Option<i64>,
+    // What the file actually is. Jackett's own names for these, so a client that
+    // already reads Jackett needs no special case for sharerr; omitted rather
+    // than null when unknown, matching the ids above and the XML feed's
+    // attributes. The XML renderer emits the same set from the same
+    // `item.media` — the two disagreeing about one release is the failure mode
+    // this whole module is kept in step to avoid.
+    #[serde(rename = "Resolution", skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+    #[serde(rename = "VideoCodec", skip_serializing_if = "Option::is_none")]
+    video_codec: Option<String>,
+    #[serde(rename = "AudioCodec", skip_serializing_if = "Option::is_none")]
+    audio_codec: Option<String>,
+    #[serde(rename = "AudioChannels", skip_serializing_if = "Option::is_none")]
+    audio_channels: Option<String>,
+    #[serde(rename = "Languages", skip_serializing_if = "Option::is_none")]
+    languages: Option<String>,
+    #[serde(rename = "Subs", skip_serializing_if = "Option::is_none")]
+    subs: Option<String>,
+    #[serde(rename = "Runtime", skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
+    #[serde(rename = "Hdr", skip_serializing_if = "Option::is_none")]
+    hdr: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -444,6 +466,14 @@ async fn json_results(
                 imdb: item.ids.imdb_numeric().and_then(|id| id.parse().ok()),
                 tvdb: item.ids.tvdb,
                 tmdb: item.ids.tmdb,
+                resolution: item.media.as_ref().and_then(|m| m.resolution.clone()),
+                video_codec: item.media.as_ref().and_then(|m| m.video_codec.clone()),
+                audio_codec: item.media.as_ref().and_then(|m| m.audio_codec.clone()),
+                audio_channels: item.media.as_ref().and_then(|m| m.audio_channels.clone()),
+                languages: item.media.as_ref().and_then(|m| m.audio_languages.clone()),
+                subs: item.media.as_ref().and_then(|m| m.subtitles.clone()),
+                runtime: item.media.as_ref().and_then(|m| m.runtime.clone()),
+                hdr: item.media.as_ref().and_then(|m| m.dynamic_range.clone()),
             }
         })
         .collect();
@@ -574,6 +604,14 @@ mod tests {
                 imdb: Some("tt1234567".to_owned()),
                 ..ExternalIds::default()
             },
+            media: Some(sharerr_core::MediaMeta {
+                resolution: Some("1920x1080".to_owned()),
+                video_codec: Some("HEVC".to_owned()),
+                audio_codec: Some("EAC3".to_owned()),
+                audio_channels: Some("5.1".to_owned()),
+                subtitles: Some("English".to_owned()),
+                ..sharerr_core::MediaMeta::default()
+            }),
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
@@ -812,5 +850,32 @@ mod tests {
             result["Link"].as_str().unwrap().ends_with(".torrent"),
             "{result}"
         );
+    }
+
+    /// The JSON renderer and the XML feed read the same `item.media`, and the two
+    /// disagreeing about one release is the failure this module is kept in step
+    /// to avoid — so the same fields have to arrive here too.
+    #[tokio::test]
+    async fn a_json_release_carries_its_media_metadata() {
+        let (_dir, state) = with_a_release().await;
+
+        let (status, body) = send(
+            &state,
+            "/api/v2.0/indexers/sharerr/results?t=search&apikey=sam-key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let result = parse(&body)["Results"][0].clone();
+        assert_eq!(result["Resolution"], "1920x1080");
+        assert_eq!(result["VideoCodec"], "HEVC");
+        assert_eq!(result["AudioCodec"], "EAC3");
+        assert_eq!(result["AudioChannels"], "5.1");
+        assert_eq!(result["Subs"], "English");
+        // Unset fields are omitted, matching the ids above rather than arriving
+        // as JSON nulls a client has to special-case.
+        assert!(result.get("Runtime").is_none(), "{result}");
+        assert!(result.get("Hdr").is_none(), "{result}");
+        assert!(result.get("Languages").is_none(), "{result}");
     }
 }

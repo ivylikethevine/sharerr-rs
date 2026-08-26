@@ -11,5 +11,7 @@ pub mod paths;
 
 pub use config::Config;
 pub use endpoint::EndpointError;
-pub use model::{Discovered, ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+pub use model::{
+    Discovered, ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareState, SharedItem,
+};
 pub use paths::{PathError, PathResolver};

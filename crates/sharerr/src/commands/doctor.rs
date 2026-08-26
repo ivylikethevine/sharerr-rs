@@ -2045,6 +2045,7 @@ mod tests {
             arr_path: arr_path.into(),
             size,
             ids: sharerr_core::ExternalIds::default(),
+            media: None,
             scene_name: None,
             original_path: None,
         }
