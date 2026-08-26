@@ -15,10 +15,14 @@ real debugging time.
 ## The verification loop
 
 ```bash
-cargo test --workspace && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo build
+cargo test --workspace && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo build && cargo fmt --all --check
 ```
 
-Run it before declaring anything done.
+Run it before declaring anything done. `cargo fmt --all --check` is what `ci.yml`'s
+`fmt` job actually runs — a change that compiles and passes clippy but was never
+run through `cargo fmt` still fails CI on this step alone, which has cost more
+than one otherwise-green PR. Run plain `cargo fmt --all` (no `--check`) first if
+this fails, then re-run the loop.
 
 **Clippy must stay at zero warnings.** The workspace sets `unwrap_used` and
 `expect_used` to `warn` because the vault and the service clients handle secrets;

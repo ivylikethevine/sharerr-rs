@@ -741,10 +741,17 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].ratio, Some(1.85));
         assert_eq!(all[0].ratio_limit, Some(2.0), "mode 1 is a fixed limit");
-        assert_eq!(all[1].ratio, Some(f64::INFINITY), "TR_RATIO_INF is a real ratio");
+        assert_eq!(
+            all[1].ratio,
+            Some(f64::INFINITY),
+            "TR_RATIO_INF is a real ratio"
+        );
         assert_eq!(all[1].ratio_limit, None, "mode 2 is unlimited");
         assert_eq!(all[2].ratio, None, "TR_RATIO_NA is genuinely unknown");
-        assert_eq!(all[2].ratio_limit, None, "mode 0 follows the global default");
+        assert_eq!(
+            all[2].ratio_limit, None,
+            "mode 0 follows the global default"
+        );
     }
 
     /// Transmission cannot filter by category server-side, so this crate does it —

@@ -22,13 +22,17 @@ the decision does not get re-litigated.
 
 ### What's left
 
-One feature-sized item — **[request flow](#functionality)** — and one
-follow-up to media metadata. The metadata cluster closed on 2026-08-26: Lidarr
-and Readarr now carry the `mediaInfo` they had already computed, `MediaMeta`
-holds sample rate and bit depth, and a synthesised music title names the format
-the file actually is rather than always claiming FLAC. What remains of it is the
-audio backend for `sharerr-probe`, which serves only directory-sourced music.
-The 2026-08-21 code review is otherwise closed out: what is left of it is a
+One feature-sized item — **[request flow](#functionality)**. The metadata
+cluster closed on 2026-08-26: Lidarr and Readarr now carry the `mediaInfo`
+they had already computed, `MediaMeta` holds sample rate and bit depth, and a
+synthesised music title names the format the file actually is rather than
+always claiming FLAC. The same day closed its last two pieces: an audio
+backend for `sharerr-probe` (`symphonia`, metadata-only like its MKV and
+ISO-BMFF siblings) now covers the directory-sourced music the *arr-managed
+path never needed to reach, and achieved ratio gives the items page what each
+torrent client itself reports for a torrent's ratio and per-torrent limit,
+rather than only ever showing what sharerr asked for at add time. The
+2026-08-21 code review is otherwise closed out: what is left of it is a
 single entry kept only so its documented behaviour reads as a decision rather
 than an oversight. Past those, the rest of [Open work, by scope](#open-work-by-scope)
 below is ideas that have been thought through but not all committed to —
@@ -66,43 +70,18 @@ as of the review commit and may have drifted.
    Stale while the tracker admits it. The doc comment frames that as
    intended; listed so the decision is a decision.
 
-2. **Achieved ratio** — sharerr sets `ratio_limit` and `upload_limit_kib` at
-   add time and then never mentions them again, so whether a torrent actually
-   reached its seeding goal is not visible anywhere and the setting is hard to
-   tune. The honest version shows what the client reports, not what sharerr
-   asked for — and the column is partly empty by backend and should say so
-   rather than render blank: rTorrent has no per-torrent ratio limit at all
-   (its enforcement is an `.rtorrent.rc` schedule keyed to a view), so
-   sharerr drops `ratio_limit` there with a warning. Depends on whether
-   `TorrentClient::list` already carries the field or needs widening across
-   all three backends.
-
-3. **A dashboard-widget JSON endpoint** — Homepage, Homarr and Glance are
+2. **A dashboard-widget JSON endpoint** — Homepage, Homarr and Glance are
    near-universal in this audience, and all three read a "custom API" JSON
    endpoint. The `Glance` struct in `crates/sharerr/src/web/templates.rs` is
    already exactly that payload — items shared, size on disk, last sync,
    friends seen recently, live swarm totals — so this is one serializer over a
    struct that already exists, not a new API surface to design. It stands or
-   falls with item 6's authentication question below and should not ship
+   falls with item 4's authentication question below and should not ship
    first with its own answer.
 
 ### Medium — a subsystem, or one shape repeated across several files
 
-4. **An audio backend for `sharerr-probe`** — the probe covers MKV/WebM and
-   ISO-BMFF; a bare `flac`, `mp3` or `opus` in a `[[library]]` directory gets
-   nothing. `symphonia` is the obvious backend and clears the MSRV floor. It is
-   the last of the audio cluster and the only part of it that is not free:
-   wherever an *arr manages the file, the `mediaInfo` path already carries the
-   codec, sample rate and bit depth for nothing, so this serves **only**
-   directory-sourced music. The fields it would fill — and the
-   `scene_audio_format` table it would feed — landed on 2026-08-26, so what
-   this needs is a second producer for a shape that already exists rather than
-   a new shape.
-
-   Note it would be the first new dependency in a while: `symphonia` has to
-   clear the MSRV floor, which `docker build .` is what actually proves.
-
-5. **Swarm history** — `Swarms` (`crates/sharerr-torrent/src/announce.rs`) is
+3. **Swarm history** — `Swarms` (`crates/sharerr-torrent/src/announce.rs`) is
    deliberately in-memory: it is rebuilt within one announce interval, so
    persisting it for correctness would be pointless. But that also means the
    "Swarms" stat tile can only ever say *right now*, and a restart erases the
@@ -118,7 +97,7 @@ as of the review commit and may have drifted.
    `crates/sharerr/src/web/templates.rs`), not a client library — the web UI
    compiles every asset into the binary and reaches no CDN.
 
-6. **A metrics endpoint** — `ops_router()` in
+4. **A metrics endpoint** — `ops_router()` in
    `crates/sharerr/src/commands/serve.rs` serves `/health` and `/ready`.
    There is no `/metrics`, and this is the highest-leverage integration
    available for this audience: it hands Grafana every chart this UI will
@@ -143,7 +122,7 @@ as of the review commit and may have drifted.
      hand-writes Torznab XML and bencode, both harder; a page of OpenMetrics
      is in character and adds nothing to the dependency tree.
 
-7. **A per-item detail page** — `/items` is a wide table with no drill-down,
+5. **A per-item detail page** — `/items` is a wide table with no drill-down,
    so everything about one item has to fit in a row or be omitted. A detail
    page would mostly be re-composition rather than new work — the path chain
    is already computed by `checks.rs`, the swarm by `Swarms`, the scope match
@@ -156,7 +135,7 @@ as of the review commit and may have drifted.
    token status, current swarm, and the full `last_error` rather than a
    truncated cell.
 
-8. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
+6. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
    two things: a sync that failed, and a friend gone quiet. Everything routes
    through a single `send()`, so adding triggers is cheap — the cost is not
    plumbing, it is restraint. The ones that seem worth having, on the test of
@@ -175,7 +154,7 @@ as of the review commit and may have drifted.
    heartbeat push is one more trigger through the same `send()`, not a
    feature of its own.
 
-9. **Manual per-item actions** — discovery is tag-driven end to end, which is
+7. **Manual per-item actions** — discovery is tag-driven end to end, which is
    the right default and the one control an operator already understands. But
    it means there is no way to retry a single `failed` item, force a torrent
    to be rebuilt, or stop sharing one file without going to Sonarr and editing
@@ -187,29 +166,29 @@ as of the review commit and may have drifted.
    distinguishes because every backend had to answer that question to be
    supported at all.
 
-10. **Config backup and restore** — master-key loss is unrecoverable by
-    design, and the vault is doing exactly what it should. What is missing is
-    the *other* half: a way to capture the configuration — sources, mappings,
-    peers, scopes — so that rebuilding an instance does not mean retyping
-    everything from screenshots. Secrets stay out of any export, and that is
-    the point rather than a limitation: an export containing recoverable
-    credentials would be a plaintext copy of the vault, which is the thing the
-    vault exists to prevent. A restore path therefore ends with re-entering
-    secrets, and the documentation should say so plainly instead of leaving
-    it to be discovered.
+8. **Config backup and restore** — master-key loss is unrecoverable by
+   design, and the vault is doing exactly what it should. What is missing is
+   the *other* half: a way to capture the configuration — sources, mappings,
+   peers, scopes — so that rebuilding an instance does not mean retyping
+   everything from screenshots. Secrets stay out of any export, and that is
+   the point rather than a limitation: an export containing recoverable
+   credentials would be a plaintext copy of the vault, which is the thing the
+   vault exists to prevent. A restore path therefore ends with re-entering
+   secrets, and the documentation should say so plainly instead of leaving
+   it to be discovered.
 
 ### Large — a protocol, a data model, or a release process
 
-11. **Transfer accounting** — the largest gap between what sharerr *knows*
-    and what it *keeps*; see [Transfer accounting](#transfer-accounting) below
-    for the full write-up, including the caveats that matter before building
-    it.
+9. **Transfer accounting** — the largest gap between what sharerr *knows*
+   and what it *keeps*; see [Transfer accounting](#transfer-accounting) below
+   for the full write-up, including the caveats that matter before building
+   it.
 
-12. **Request flow** — a new inbound request queue and approve step, touching
+10. **Request flow** — a new inbound request queue and approve step, touching
     the sync engine and the web UI on both sides of a friendship; see
     [Functionality](#functionality).
 
-13. **A two-instance end-to-end test** — every tier-2 check today
+11. **A two-instance end-to-end test** — every tier-2 check today
     (`./run_docker_tests.sh`, `docs/CLAUDE.md`'s Testing tiers) drives one
     sharerr against a real Sonarr/Radarr/qBittorrent stack; nothing proves the
     actual friend-to-friend loop. This would stand up two full sharerr

@@ -71,14 +71,20 @@ sha1 = "0.11.0"
 # Peer API keys are hashed with SHA-256, not Argon2 — they are 160 bits of CSPRNG
 # output rather than a human password, and the lookup has to be an indexed
 # equality on every Torznab request. See migrations/0003_peers.sql.
-# Media probing, for the library sources with no *arr behind them to ask. Two
-# crates because neither covers the other's containers: `matroska` reads MKV/WebM
-# EBML track headers, `mp4` reads ISO-BMFF boxes. Both are metadata-only here —
-# nothing decodes a frame, and nothing opens a file for writing, which is what
-# keeps the probe compatible with never modifying the library. Audio-only
-# containers have no backend yet; see docs/ROADMAP.md.
+# Media probing, for the library sources with no *arr behind them to ask.
+# Three crates because none covers the others' containers: `matroska` reads
+# MKV/WebM EBML track headers, `mp4` reads ISO-BMFF boxes, `symphonia` reads
+# the audio-only containers neither does — FLAC and MP3 natively, Opus via its
+# `ogg` format reader (which recognises an Opus identification packet with no
+# separate codec feature; nothing here ever needs to actually decode one).
+# All three are metadata-only in how this project uses them — nothing decodes
+# a frame, and nothing opens a file for writing, which is what keeps the probe
+# compatible with never modifying the library. `default-features = false`
+# drops every codec/format/tag reader none of the three formats above need
+# (Vorbis and WAV decoding, ID3/APE tags, SIMD decode paths, ...).
 matroska = "0.30"
 mp4 = "0.14"
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "ogg"] }
 sha2 = "0.10.9"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds

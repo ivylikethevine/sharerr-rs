@@ -267,8 +267,16 @@ impl TorrentClient for RtorrentClient {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let [hash, name, directory, base_path, custom1, complete, active, ratio] =
-                take("d.multicall2", row)?;
+            let [
+                hash,
+                name,
+                directory,
+                base_path,
+                custom1,
+                complete,
+                active,
+                ratio,
+            ] = take("d.multicall2", row)?;
 
             let tag = as_str(&custom1).to_owned();
             if let Some(wanted) = category
