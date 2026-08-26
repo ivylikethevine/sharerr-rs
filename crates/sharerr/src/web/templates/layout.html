@@ -107,6 +107,32 @@
     if (here) links[i].setAttribute("aria-current", "page");
   }
 })();
+
+// Fades whichever edge of a `.table-scroll` still has content past it, so a
+// wide table reads as scrollable before the operator has touched it — the
+// scrollbar `overflow-x: auto` relies on otherwise never appears on a phone.
+(function () {
+  var EPS = 2;
+  function paint(el) {
+    var canLeft = el.scrollLeft > EPS;
+    var canRight = el.scrollLeft < el.scrollWidth - el.clientWidth - EPS;
+    if (canLeft && canRight) el.setAttribute("data-edge", "both");
+    else if (canRight) el.setAttribute("data-edge", "right");
+    else if (canLeft) el.setAttribute("data-edge", "left");
+    else el.removeAttribute("data-edge");
+  }
+  function paintAll() {
+    var els = document.querySelectorAll(".table-scroll");
+    for (var i = 0; i < els.length; i++) paint(els[i]);
+  }
+  // `scroll` does not bubble, so the listener has to be capturing to catch it
+  // via delegation instead of one handler per table.
+  document.addEventListener("scroll", function (event) {
+    if (event.target.classList && event.target.classList.contains("table-scroll")) paint(event.target);
+  }, true);
+  window.addEventListener("resize", paintAll);
+  paintAll();
+})();
 </script>
 {% endif %}
 </body>
