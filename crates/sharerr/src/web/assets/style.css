@@ -624,6 +624,40 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
    by position alone. */
 svg text { font-family: inherit; }
 
+/* The sync-history strip above the run table. Bar geometry is computed in Rust
+   (`diagnostics::run_chart`) exactly like the topology diagram's, so everything
+   here is colour and spacing — nothing in this block affects layout of the
+   bars themselves.
+
+   It draws at its natural size rather than stretching to the panel. Filling
+   the width scales the viewBox on both axes, which turns a 56px plot into a
+   150px one and gives the summary more weight than the table it summarises.
+   `max-width` still lets it shrink on a narrow viewport, where losing the
+   shape's scale costs nothing — there are no values to read off it. */
+.runchart {
+  margin: 0 0 var(--sp-5);
+}
+.runchart svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.runchart figcaption {
+  margin-top: var(--sp-2);
+}
+
+.runchart-bar { fill: var(--line-strong); }
+/* A pass that found things and changed nothing is the common case, and it is
+   deliberately the quietest — the eye should land on the other two. */
+.runchart-bar--ok      { fill: var(--line-strong); }
+.runchart-bar--changed { fill: var(--accent); }
+.runchart-bar--failed  { fill: var(--error-ink); }
+
+/* Behind a failed run only — see `RunBar::wash`. Faint enough to stay a
+   backdrop rather than compete with the bar in front of it, but full height,
+   so a failure is findable at the scale the strip is scanned at. */
+.runchart-wash { fill: var(--error-bg); }
+
 .topo-node-box {
   stroke-width: 1.5;
   stroke: var(--line-strong);

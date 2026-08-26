@@ -53,7 +53,8 @@ design is built around.
 See also: [the configuration reference](docs/CONFIGURATION.md), [supported
 services](docs/SUPPORTED.md), [what's deliberately not
 supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
-roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
+roadmap](docs/ROADMAP.md), [ideas that are considered but not
+committed](docs/IDEAS.md), [the original design brief](docs/DESIGN.md), and
 [the security policy](docs/SECURITY.md).
 
 ## What works today
@@ -69,6 +70,7 @@ roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Media metadata in the feeds: resolution, codecs, channels, runtime               | ✅ |
 | Web UI: first-run wizard, settings, connection tests                             | ✅ |
 | Items page: every discovered file, its torrent and announce-token status         | ✅ |
+| Sync history strip: every recent pass at a glance, failures marked               | ✅ |
 | Path-mapping diagnostics in the browser                                          | ✅ |
 | Friend/peer management: per-friend keys, revoke, last-seen                       | ✅ |
 | Per-friend scoping: this friend sees TV, that one films                          | ✅ |

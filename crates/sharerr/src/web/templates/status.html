@@ -125,6 +125,27 @@
   {% if diag.runs.is_empty() %}
   {% call ui::empty("No sync has finished yet", "The first pass runs shortly after startup, and again on every interval. Anything that stopped it appears here.") %}{% endcall %}
   {% else %}
+  {# The strip answers "is that typical", the table below answers "what
+     happened". It is aria-hidden because the table is the same data in an
+     accessible form, immediately after it — announcing both would read the
+     history twice. #}
+  {% if let Some(chart) = diag.run_chart %}
+  <figure class="runchart">
+    <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" width="{{ chart.width }}" height="{{ chart.height }}"
+         role="presentation" aria-hidden="true" focusable="false">
+      {% for bar in chart.bars %}
+      {% if bar.wash %}
+      <rect class="runchart-wash" x="{{ bar.x }}" y="0" width="{{ bar.w }}" height="{{ chart.height }}" rx="2"></rect>
+      {% endif %}
+      <rect class="runchart-bar runchart-bar--{{ bar.state }}"
+            x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.w }}" height="{{ bar.h }}" rx="2">
+        <title>{{ bar.title }}</title>
+      </rect>
+      {% endfor %}
+    </svg>
+    <figcaption class="hint">Oldest to newest, tallest bar is the biggest pass. Hover for a run.</figcaption>
+  </figure>
+  {% endif %}
   <div class="table-scroll">
   <table>
     <thead><tr><th title="When the pass finished">When</th><th title="Wall-clock duration of the pass">Took</th><th title="What changed, or why the pass failed">Result</th></tr></thead>

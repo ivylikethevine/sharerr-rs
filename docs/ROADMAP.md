@@ -5,7 +5,9 @@ Where sharerr is going next.
 sharerr is **experimental**. Nothing below is a release commitment, and the
 ordering is a judgement about value, not a schedule. What has already shipped
 lives in [the README](../README.md#what-works-today), not here — this page
-tracks what is still ahead.
+tracks what is still ahead. Candidates that have been weighed but not committed
+to are in [`IDEAS.md`](IDEAS.md), so that appearing on this page means
+something.
 
 ## Table of contents
 

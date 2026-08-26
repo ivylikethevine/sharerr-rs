@@ -78,6 +78,84 @@ fn page<T: Template>(template: T) -> String {
 }
 
 fn status_page() -> StatusPage {
+    // Newest first, as the store hands them over. Varied enough to exercise
+    // every state the history strip can draw: a busy pass, several quiet
+    // ones, and an outright failure.
+    let runs = vec![
+        RunRow {
+            when: "4 minutes ago".to_owned(),
+            when_absolute: "2024-05-06 11:18:04 UTC".to_owned(),
+            took: "12s".to_owned(),
+            summary: "412 discovered, 2 added".to_owned(),
+            failed: false,
+            discovered: 412,
+            changed: true,
+        },
+        RunRow {
+            when: "19 minutes ago".to_owned(),
+            when_absolute: "2024-05-06 11:03:41 UTC".to_owned(),
+            took: "under a second".to_owned(),
+            summary: "410 discovered".to_owned(),
+            failed: false,
+            discovered: 410,
+            changed: false,
+        },
+        RunRow {
+            when: "34 minutes ago".to_owned(),
+            when_absolute: "2024-05-06 10:48:22 UTC".to_owned(),
+            took: "2m 5s".to_owned(),
+            summary: "could not reach qBittorrent".to_owned(),
+            failed: true,
+            discovered: 0,
+            changed: false,
+        },
+        RunRow {
+            when: "49 minutes ago".to_owned(),
+            when_absolute: "2024-05-06 10:33:12 UTC".to_owned(),
+            took: "9s".to_owned(),
+            summary: "398 discovered, 6 added, 1 unshared".to_owned(),
+            failed: false,
+            discovered: 398,
+            changed: true,
+        },
+        RunRow {
+            when: "about an hour ago".to_owned(),
+            when_absolute: "2024-05-06 10:18:47 UTC".to_owned(),
+            took: "under a second".to_owned(),
+            summary: "393 discovered".to_owned(),
+            failed: false,
+            discovered: 393,
+            changed: false,
+        },
+        RunRow {
+            when: "about an hour ago".to_owned(),
+            when_absolute: "2024-05-06 10:03:29 UTC".to_owned(),
+            took: "under a second".to_owned(),
+            summary: "393 discovered".to_owned(),
+            failed: false,
+            discovered: 393,
+            changed: false,
+        },
+        RunRow {
+            when: "2 hours ago".to_owned(),
+            when_absolute: "2024-05-06 09:48:05 UTC".to_owned(),
+            took: "41s".to_owned(),
+            summary: "393 discovered, 18 added".to_owned(),
+            failed: false,
+            discovered: 393,
+            changed: true,
+        },
+        RunRow {
+            when: "2 hours ago".to_owned(),
+            when_absolute: "2024-05-06 09:32:58 UTC".to_owned(),
+            took: "under a second".to_owned(),
+            summary: "375 discovered".to_owned(),
+            failed: false,
+            discovered: 375,
+            changed: false,
+        },
+    ];
+
     StatusPage {
         signed_in: true,
         glance: Some(Glance {
@@ -173,29 +251,8 @@ fn status_page() -> StatusPage {
                     ),
                 },
             ],
-            runs: vec![
-                RunRow {
-                    when: "4 minutes ago".to_owned(),
-                    when_absolute: "2024-05-06 11:18:04 UTC".to_owned(),
-                    took: "12s".to_owned(),
-                    summary: "2 added, 1 failed".to_owned(),
-                    failed: false,
-                },
-                RunRow {
-                    when: "19 minutes ago".to_owned(),
-                    when_absolute: "2024-05-06 11:03:41 UTC".to_owned(),
-                    took: "under a second".to_owned(),
-                    summary: "up to date".to_owned(),
-                    failed: false,
-                },
-                RunRow {
-                    when: "34 minutes ago".to_owned(),
-                    when_absolute: "2024-05-06 10:48:22 UTC".to_owned(),
-                    took: "2m 5s".to_owned(),
-                    summary: "could not reach qBittorrent".to_owned(),
-                    failed: true,
-                },
-            ],
+            run_chart: crate::web::diagnostics::run_chart(&runs),
+            runs,
             // One accepting and one refusing, so the preview shows both the row
             // shape and the warning verdict that a partial failure produces.
             lighthouse: Some(LighthouseView {

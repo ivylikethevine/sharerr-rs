@@ -20,7 +20,8 @@ use sharerr_core::{Config, MediaSource};
 use super::WebState;
 use super::peers::ago;
 use super::templates::{
-    DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunRow, SampleRow, ServiceLine,
+    DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunBar, RunChart, RunRow,
+    SampleRow, ServiceLine,
 };
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
@@ -134,6 +135,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
             qbit: sample.qbit.display().to_string(),
         }),
         gluetun,
+        run_chart: run_chart(&runs),
         runs,
         lighthouse: lighthouse_view(state, config).await,
     }
@@ -230,6 +232,10 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
                     took: String::new(),
                     summary: "still running".to_owned(),
                     failed: false,
+                    // Its counts are still being accumulated, so anything read
+                    // off them now would be a number that shrinks on reload.
+                    discovered: 0,
+                    changed: false,
                 };
             };
             let (summary, failed) = run.summary.describe(true);
@@ -239,9 +245,93 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
                 took: super::peers::took(run.started_at, finished_at),
                 summary,
                 failed,
+                discovered: run.summary.discovered,
+                changed: run.summary.added > 0 || run.summary.unshared > 0,
             }
         })
         .collect()
+}
+
+/// One bar's width, and the gap to the next.
+const BAR_W: i32 = 24;
+const BAR_GAP: i32 = 8;
+/// How tall the tallest bar is drawn. The strip sits above a table it
+/// summarises, so it is deliberately short — this is a shape to glance at, not
+/// a chart to read values off.
+const PLOT_H: i32 = 56;
+/// Floor under every bar, so a pass that discovered nothing — or failed before
+/// it could scan — is still a visible, hoverable mark rather than a gap. A run
+/// that happened and found nothing is a different fact from no run at all, and
+/// the strip has to be able to show both.
+const MIN_BAR_H: i32 = 3;
+/// Headroom above the tallest bar, so it does not sit flush against the edge.
+const PAD_TOP: i32 = 4;
+
+/// Lays out the run history as a bar strip: one bar per run, height by how much
+/// the pass discovered, colour by what it did.
+///
+/// **Time runs left to right**, so this reverses the rows — they arrive newest
+/// first, which is right for a table you read top-down and wrong for a strip
+/// you read as a trend.
+///
+/// Height encodes `discovered` and nothing else. It is tempting to segment each
+/// bar by added/unshared/failed, but those do not partition it: `unshared`
+/// counts items that were *not* discovered this pass (they lost the tag), and
+/// `failed` merges failed items with whole sources that could not be scanned,
+/// which is not an item count at all. Stacking them inside a discovered-height
+/// bar would draw a part-of relationship the data does not have. So magnitude
+/// is the scale of the pass, the three states below carry the outcome, and the
+/// exact counts stay in the table underneath where they can be read properly.
+pub(crate) fn run_chart(runs: &[RunRow]) -> Option<RunChart> {
+    if runs.is_empty() {
+        return None;
+    }
+
+    let tallest = runs.iter().map(|run| run.discovered).max().unwrap_or(0);
+    let count = i32::try_from(runs.len()).unwrap_or(i32::MAX);
+
+    let bars = runs
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, run)| {
+            let index = i32::try_from(index).unwrap_or(i32::MAX);
+            // Every pass sits at the floor until one of them has actually
+            // discovered something, rather than dividing by zero to get there.
+            let scaled = if tallest > 0 {
+                let ratio = run.discovered as f64 / tallest as f64;
+                (ratio * f64::from(PLOT_H)).round() as i32
+            } else {
+                0
+            };
+            let h = scaled.clamp(MIN_BAR_H, PLOT_H);
+            RunBar {
+                x: index * (BAR_W + BAR_GAP),
+                y: PAD_TOP + PLOT_H - h,
+                w: BAR_W,
+                h,
+                state: if run.failed {
+                    "failed"
+                } else if run.changed {
+                    "changed"
+                } else {
+                    "ok"
+                },
+                wash: run.failed,
+                title: if run.summary.is_empty() {
+                    run.when.clone()
+                } else {
+                    format!("{} — {}", run.when, run.summary)
+                },
+            }
+        })
+        .collect();
+
+    Some(RunChart {
+        bars,
+        width: count * BAR_W + (count - 1) * BAR_GAP,
+        height: PAD_TOP + PLOT_H,
+    })
 }
 
 /// The torrent client's line in the services list: sign in and read its
@@ -410,6 +500,139 @@ mod tests {
     use super::*;
 
     use super::super::web_state;
+
+    /// A `RunRow` at the given scale, with only the fields the strip reads set
+    /// to anything meaningful.
+    fn row(discovered: i64, changed: bool, failed: bool) -> RunRow {
+        RunRow {
+            when: format!("{discovered} ago"),
+            when_absolute: String::new(),
+            took: String::new(),
+            summary: format!("{discovered} discovered"),
+            failed,
+            discovered,
+            changed,
+        }
+    }
+
+    /// Nothing to draw is `None` rather than an empty chart, so the template
+    /// omits the figure instead of rendering a zero-width box above the
+    /// empty-state message.
+    #[test]
+    fn run_chart_is_absent_when_there_are_no_runs() {
+        assert_eq!(run_chart(&[]), None);
+    }
+
+    /// The rows arrive newest first because that is how the table reads; the
+    /// strip is a trend, so time has to run left to right. This is the one
+    /// thing about the layout that is easy to get backwards and impossible to
+    /// notice by eye once the bars are similar heights.
+    #[test]
+    fn run_chart_reverses_the_rows_so_the_newest_is_rightmost() {
+        let chart = run_chart(&[row(100, true, false), row(50, false, false)]).unwrap();
+
+        let [older, newer] = &chart.bars[..] else {
+            panic!("expected two bars, got {}", chart.bars.len());
+        };
+        assert!(older.x < newer.x);
+        // The 50-discovered run is the older one, so it is the shorter bar and
+        // it is on the left.
+        assert!(older.h < newer.h);
+    }
+
+    /// Height is relative to the tallest pass in the window, and the tallest
+    /// one fills the plot.
+    #[test]
+    fn run_chart_scales_bars_against_the_biggest_pass() {
+        let chart = run_chart(&[row(400, false, false), row(200, false, false)]).unwrap();
+
+        let [half, full] = &chart.bars[..] else {
+            panic!("expected two bars");
+        };
+        assert_eq!(full.h, PLOT_H);
+        assert_eq!(half.h, PLOT_H / 2);
+        // Bars hang from a shared baseline, so a shorter one starts lower.
+        assert!(half.y > full.y);
+        assert_eq!(full.y + full.h, half.y + half.h);
+    }
+
+    /// A pass that discovered nothing still gets a mark. "A run happened and
+    /// found nothing" and "no run happened" are different facts, and a bar of
+    /// height zero would render them identically.
+    #[test]
+    fn run_chart_gives_an_empty_pass_a_visible_floor() {
+        let chart = run_chart(&[row(300, false, false), row(0, false, true)]).unwrap();
+
+        for bar in &chart.bars {
+            assert!(bar.h >= MIN_BAR_H, "bar too short to see: {bar:?}");
+        }
+    }
+
+    /// Every run at zero must not divide by zero on the way to the floor.
+    #[test]
+    fn run_chart_handles_every_pass_discovering_nothing() {
+        let chart = run_chart(&[row(0, false, false), row(0, false, true)]).unwrap();
+
+        assert!(chart.bars.iter().all(|bar| bar.h == MIN_BAR_H));
+    }
+
+    /// Failure outranks having changed something: a pass that added items and
+    /// then failed is a failure, and that is the one state the strip exists to
+    /// make findable.
+    #[test]
+    fn run_chart_states_rank_failure_over_change() {
+        let chart = run_chart(&[
+            row(10, false, false),
+            row(10, true, false),
+            row(10, true, true),
+        ])
+        .unwrap();
+
+        let states: Vec<&str> = chart.bars.iter().map(|bar| bar.state).collect();
+        // Reversed, so oldest first: failed, changed, quiet.
+        assert_eq!(states, ["failed", "changed", "ok"]);
+    }
+
+    /// The tint is what makes a failure findable, and a failed pass is normally
+    /// the *shortest* bar on the strip because it broke before discovering
+    /// anything — so the tint has to key off the failure rather than off the
+    /// height, and it must not appear behind anything else.
+    #[test]
+    fn run_chart_tints_failed_runs_and_only_those() {
+        let chart = run_chart(&[row(300, true, false), row(0, false, true)]).unwrap();
+
+        let washed: Vec<bool> = chart.bars.iter().map(|bar| bar.wash).collect();
+        assert_eq!(washed, [true, false]);
+        // And the bar it sits behind is still telling the truth about scale.
+        assert_eq!(chart.bars[0].h, MIN_BAR_H);
+    }
+
+    /// The tooltip is built from the row's own rendered strings rather than
+    /// re-derived from the counts, which is what stops the strip and the table
+    /// disagreeing about the same run.
+    #[test]
+    fn run_chart_titles_reuse_the_rows_own_wording() {
+        let chart = run_chart(&[row(7, false, false)]).unwrap();
+
+        assert_eq!(chart.bars[0].title, "7 ago — 7 discovered");
+    }
+
+    /// The box has to actually contain the bars — a viewBox narrower than the
+    /// last bar's right edge silently clips it.
+    #[test]
+    fn run_chart_box_contains_every_bar() {
+        let chart = run_chart(&[
+            row(400, false, false),
+            row(1, false, false),
+            row(80, true, false),
+        ])
+        .unwrap();
+
+        for bar in &chart.bars {
+            assert!(bar.x >= 0 && bar.x + bar.w <= chart.width, "{bar:?}");
+            assert!(bar.y >= 0 && bar.y + bar.h <= chart.height, "{bar:?}");
+        }
+    }
 
     // ---------------------------------------------------------------- gather
 

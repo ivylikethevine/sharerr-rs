@@ -541,6 +541,10 @@ pub struct DiagnosticsData {
     /// The last few sync runs, newest first — the glance above only shows the
     /// single latest one.
     pub runs: Vec<RunRow>,
+    /// The same runs as a bar strip, oldest to newest. `None` when there is
+    /// nothing to draw, so the template omits the figure rather than rendering
+    /// an empty box above an empty-state message.
+    pub run_chart: Option<RunChart>,
     /// What the lighthouse poller is doing, or `None` when none is configured
     /// — the section is omitted entirely in that case.
     pub lighthouse: Option<LighthouseView>,
@@ -559,6 +563,51 @@ pub struct RunRow {
     /// Either the run's own error, or a summary of what it did.
     pub summary: String,
     pub failed: bool,
+    /// How many items the pass found, raw rather than rendered — the one
+    /// number the history strip needs a magnitude for. Zero for a run still in
+    /// flight and for one that failed before it could scan anything.
+    pub discovered: i64,
+    /// Whether the pass actually moved anything, which the counts answer but
+    /// `summary` does not: with the discovered count leading, a quiet pass and
+    /// a busy one both render as a non-empty sentence.
+    pub changed: bool,
+}
+
+/// One bar in the sync-history strip: a run, placed.
+///
+/// The same division of labour as [`Node`] — every coordinate is computed by
+/// `diagnostics::run_chart` so the template only places what it is handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunBar {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// `ok`, `changed` or `failed` — the modifier suffix, so the stylesheet
+    /// owns the colours rather than this struct carrying them.
+    pub state: &'static str,
+    /// Whether to draw a full-height tint behind this bar.
+    ///
+    /// Set for a failed run, and it exists because height and importance point
+    /// opposite ways there: a pass that broke before it could scan discovered
+    /// nothing, so it earns the shortest bar on the strip — the least visible
+    /// mark for the one event the strip is meant to make findable. The tint
+    /// carries the failure at full height while the bar keeps telling the truth
+    /// about magnitude, rather than inflating the bar and lying about both.
+    pub wash: bool,
+    /// Hover text, built from the row's own `when` and `summary`. Reusing
+    /// those rather than re-deriving them is what keeps the strip and the
+    /// table beneath it from disagreeing about the same run, the same reason
+    /// `RunSummary::describe` is shared.
+    pub title: String,
+}
+
+/// The sync-history strip: bars left to right, oldest to newest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunChart {
+    pub bars: Vec<RunBar>,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// One gluetun-tracked endpoint's state, pre-rendered for display.
