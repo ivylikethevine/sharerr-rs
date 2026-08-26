@@ -1,0 +1,28 @@
+# Configuration for instance B of the two-instance compose stack — the friend
+# requesting content. Present for topological realism (a real friend runs
+# their own sharerr too); its own sync is a legitimate no-op in this test,
+# since its Radarr's only catalog entry is seeded fileless and untagged — see
+# `run_docker_tests_two_instance.sh`.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[radarr]
+url = "http://radarr-b:7878"
+
+[qbittorrent]
+url = "http://qbittorrent-b:8080"
+category = "sharerr"
+tag = "sharerr"
+skip_checking = true
+
+[tracker]
+advertised_host = "sharerr-b"
+port = 8477
+
+[sync]
+enabled = false
+interval_secs = 900

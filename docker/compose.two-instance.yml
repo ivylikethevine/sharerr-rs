@@ -1,0 +1,132 @@
+# Two independent friend-to-friend stacks, `a` and `b`, on one network — the
+# tier-2 test that proves the actual friend-to-friend loop rather than a
+# local add. See `run_docker_tests_two_instance.sh` and docker/README.md's
+# "The two-instance stack" section for what each piece is and why it exists
+# as its own script rather than another `run_docker_tests.sh` flag.
+#
+# ## Why `advertised_host` here is a service name, not `localhost`
+#
+# Every other stack in this project sets `tracker.advertised_host = "localhost"`
+# — correct for those, because nothing in any of them ever needs a *different
+# container* to dial that address back: qBittorrent there seeds a file it
+# already has, with nobody downloading it. Here `qbittorrent-b` genuinely has
+# to reach `sharerr-a`'s tracker and then `qbittorrent-a` itself, from inside
+# its own container — where `localhost` resolves to `qbittorrent-b`, not
+# `sharerr-a`. `docker/config-two-instance-a/sharerr.toml` therefore advertises
+# `sharerr-a` (Docker's embedded DNS resolves it within this network) on port
+# 8477, sharerr's own internal listen port — not the host-published one.
+#
+# ## Why there is no `internal: true` network
+#
+# Same reasoning as `compose.test.yml`: the host-side control plane (readiness
+# probes, `seed-arr` against both Radarr databases directly, scraping both
+# peer keys) needs the host->container path only published ports give.
+
+name: sharerr-two-instance
+
+x-puid: &puid "${SHARERR_TEST_UID:-1000}"
+x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
+
+services:
+  radarr-a:
+    image: lscr.io/linuxserver/radarr:6.3.0@sha256:119aaa4a4f7349bcd2a136c5373a0d7925b5479915c7dfe0c0ad352db2a6d438
+    container_name: sharerr-two-instance-radarr-a
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-two-instance/a/radarr:/config
+      # Instance A shares a file that already exists — same fixture the
+      # single-instance stack uses, mounted read-only.
+      - ../tests/fixtures/media/movies:/movies:ro
+    ports:
+      - "127.0.0.1:58878:7878"
+
+  radarr-b:
+    image: lscr.io/linuxserver/radarr:6.3.0@sha256:119aaa4a4f7349bcd2a136c5373a0d7925b5479915c7dfe0c0ad352db2a6d438
+    container_name: sharerr-two-instance-radarr-b
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-two-instance/b/radarr:/config
+      # Deliberately no media mount: instance B never has the file until it
+      # grabs it. Its Radarr's own catalog entry (seeded fileless, via
+      # `seed-arr --radarr-wanted`) is what gives its automatic search
+      # something to look for.
+    ports:
+      - "127.0.0.1:59878:7878"
+
+  qbittorrent-a:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
+    container_name: sharerr-two-instance-qbittorrent-a
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+      WEBUI_PORT: "8080"
+    volumes:
+      - qbit-config-a:/config
+      - ../tests/fixtures/media:/downloads:ro
+    ports:
+      - "127.0.0.1:58080:8080"
+
+  qbittorrent-b:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
+    container_name: sharerr-two-instance-qbittorrent-b
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+      WEBUI_PORT: "8080"
+    volumes:
+      - qbit-config-b:/config
+      # Bind, not a named volume — unlike every other qBittorrent in this
+      # project, this one's downloads have to be readable from the host,
+      # because the assertion this whole stack exists for is "read the bytes
+      # this client actually saved and compare them to instance A's copy".
+      - ./state-two-instance/b/downloads:/downloads
+    ports:
+      - "127.0.0.1:59080:8080"
+
+  sharerr-a:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sharerr-two-instance-sharerr-a
+    depends_on: [radarr-a, qbittorrent-a]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      - ./config-two-instance-a:/config
+      - sharerr-data-a:/data
+      - ../tests/fixtures/media:/media:ro
+    ports:
+      - "127.0.0.1:58477:8477"
+
+  sharerr-b:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: sharerr-two-instance-sharerr-b
+    depends_on: [radarr-b, qbittorrent-b]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      - ./config-two-instance-b:/config
+      - sharerr-data-b:/data
+      # No media mount: instance B's own sharerr has nothing tagged to share
+      # in this test — it exists for topological realism (a real friend runs
+      # their own sharerr too), not because its own sync is exercised here.
+    ports:
+      - "127.0.0.1:59477:8477"
+
+volumes:
+  qbit-config-a:
+  qbit-config-b:
+  sharerr-data-a:
+  sharerr-data-b:

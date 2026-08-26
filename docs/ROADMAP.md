@@ -32,11 +32,18 @@ ISO-BMFF siblings) now covers the directory-sourced music the *arr-managed
 path never needed to reach, and achieved ratio gives the items page what each
 torrent client itself reports for a torrent's ratio and per-torrent limit,
 rather than only ever showing what sharerr asked for at add time. The
-2026-08-21 code review is otherwise closed out: what is left of it is a
-single entry kept only so its documented behaviour reads as a decision rather
-than an oversight. Past those, the rest of [Open work, by scope](#open-work-by-scope)
-below is ideas that have been thought through but not all committed to —
-appearing here means the reasoning is written down, not that it is scheduled.
+two-instance end-to-end test is in progress
+(`./run_docker_tests_two_instance.sh`, see `docker/README.md`'s "The
+two-instance stack") — the orchestration, indexer/download-client wiring, and
+Radarr's real automatic-search-and-grab all verified working end to end, but
+the final BitTorrent transfer between the two instances' torrent clients has
+not yet completed in testing; see the entry in Open work below. The 2026-08-21
+code review is otherwise closed
+out: what is left of it is a single entry kept only so its documented
+behaviour reads as a decision rather than an oversight. Past those, the rest
+of [Open work, by scope](#open-work-by-scope) below is ideas that have been
+thought through but not all committed to — appearing here means the
+reasoning is written down, not that it is scheduled.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
 and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
@@ -188,22 +195,26 @@ as of the review commit and may have drifted.
     the sync engine and the web UI on both sides of a friendship; see
     [Functionality](#functionality).
 
-11. **A two-instance end-to-end test** — every tier-2 check today
-    (`./run_docker_tests.sh`, `docs/CLAUDE.md`'s Testing tiers) drives one
-    sharerr against a real Sonarr/Radarr/qBittorrent stack; nothing proves the
-    actual friend-to-friend loop. This would stand up two full sharerr
-    instances on separate IPs — each with its own torrent client and its own
-    Radarr — sharing a friendship, and assert the whole chain for real: instance
-    A shares a file, instance B's Radarr indexes it from A's Torznab feed,
-    grabs it, and the file lands on B's disk byte-for-byte identical to A's
-    copy. That last assertion is the same one tier 2's single-instance test
-    already makes for a local add (same inode, mtime, and length survive a
-    real qBittorrent) — this extends it across the wire, through a real
-    announce/handshake/download, which no existing test does. Docker Compose
-    is the natural shape (two sharerr containers, two client containers, two
-    Radarr containers, one network), and it would need to stay opt-in and
-    `#[ignore]`d the same way tier 2 does — this is slower and heavier than
-    tier 2, not a replacement for it.
+11. **A two-instance end-to-end test — last mile** — `docker/compose.two-instance.yml`,
+    `run_docker_tests_two_instance.sh`, and `crates/sharerr/tests/e2e_two_instance.rs`
+    exist and the whole chain up to the actual file transfer is independently
+    verified against a real stack: sharerr's tracker returns a byte-correct
+    bencoded peer list, a hand-fed `.torrent` transfers between the two
+    containers' qBittorrents instantly and byte-perfectly, and Radarr-B's
+    real automatic search finds, grabs, and hands the release to its download
+    client. What doesn't yet complete in testing is the BitTorrent transfer
+    itself once Radarr converts the grab to a magnet link: qBittorrent-B
+    connects to qBittorrent-A (confirmed via packet capture — a real TCP
+    handshake, BT handshake, and extended handshake all complete), but the
+    `ut_metadata` (BEP9) exchange that would hand it the actual torrent
+    metadata never finishes — qBittorrent-A's only reply is a bare 5-byte
+    control message, never a metadata piece. Every other explanation was
+    ruled out by direct testing: not the tracker (raw bencode verified
+    correct), not plain connectivity (TCP/raw transfer works), not
+    encryption, protocol (TCP vs µTP), DHT/PEX/LSD, or upload-slot
+    configuration (all toggled, none changed the outcome). Suspected to be
+    an environment-specific quirk of the sandboxed build environment rather
+    than a sharerr defect, but unconfirmed against a plain Docker host.
 
 ---
 
