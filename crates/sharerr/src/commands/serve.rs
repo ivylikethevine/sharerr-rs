@@ -185,7 +185,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
 
 /// Resolves on SIGINT or SIGTERM; never resolves if neither can be listened
 /// for, so the servers simply run as before.
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(err) = tokio::signal::ctrl_c().await {
             tracing::warn!(error = %err, "could not listen for ctrl-c");

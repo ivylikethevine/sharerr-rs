@@ -644,9 +644,29 @@ mod tests {
     use secrecy::SecretString;
     use sharerr_store::PeerScope;
 
+    /// Distinct, non-constant key material for a test identity.
+    ///
+    /// `seed` distinguishes one test identity from another — 1 is Alex, 2 is
+    /// Sam — and is deliberately *not* the key itself. The key is that label
+    /// mixed into a per-run random base, so no cryptographic key is hard-coded
+    /// in the tree while identities stay distinct, and stable within a run.
+    ///
+    /// Ed25519 accepts any 32 bytes as a seed, so mixing this way is sound.
+    fn test_key_bytes(seed: u8) -> [u8; 32] {
+        static BASE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        let mut bytes = *BASE.get_or_init(|| {
+            let mut base = [0u8; 32];
+            getrandom::fill(&mut base).expect("the OS RNG is available");
+            base
+        });
+        // XOR into one byte: distinct labels stay distinct.
+        bytes[0] ^= seed;
+        bytes
+    }
+
     fn identity(seed: u8) -> Identity {
         Identity {
-            signing: SigningKey::from_bytes(&[seed; 32]),
+            signing: SigningKey::from_bytes(&test_key_bytes(seed)),
         }
     }
 
@@ -1210,7 +1230,7 @@ mod tests {
         let debug = format!("{id:?}");
         assert!(debug.contains(&id.pubkey_hex()));
         assert!(
-            !debug.contains(&hex::encode([7u8; 32])),
+            !debug.contains(&hex::encode(test_key_bytes(7))),
             "the private key bytes must never appear in Debug output: {debug}"
         );
     }
