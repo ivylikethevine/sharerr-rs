@@ -597,6 +597,11 @@ p.ok,   div.ok    { background: var(--ok-bg); border-color: color-mix(in srgb, v
 p.warn, div.warn  { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn-ink) 20%, transparent); }
 p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb, var(--error-ink) 20%, transparent); }
 
+/* The Feed URL is this box's last line and the thing most worth copying
+   correctly — worth a bigger gap to the edge than the standard banner
+   padding gives every other `.ok`/`.warn`/`.error` box on the site. */
+.key-reveal { padding-bottom: var(--sp-6); }
+
 /* A small pill next to a field's label, so "is this secret already stored"
    reads at a glance instead of depending on placeholder text that vanishes
    the moment the input is focused. */
@@ -1201,6 +1206,18 @@ table { border-collapse: collapse; width: 100%; }
    the box when that content is narrower than the viewport. */
 .table-scroll { overflow-x: auto; }
 .table-scroll table { width: auto; min-width: 100%; }
+/* `overflow-x: auto` alone gives no hint that a table extends past the
+   viewport until the operator happens to touch it — the one place this bites
+   is a phone, where there is no hover scrollbar at all. `mask-image` fades
+   the edge that still has content to reveal instead of a `box-shadow`,
+   because a shadow would need its color to match whatever background this
+   div sits on (`--panel` in a `.card`, `--panel-2` in a nested table) and
+   drift out of sync with it; a mask just reveals less of the real content,
+   so it is correct on any background in both themes for free. `data-edge` is
+   set by the delegated scroll listener in layout.html. */
+.table-scroll[data-edge="right"] { -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent); mask-image: linear-gradient(to right, black calc(100% - 28px), transparent); }
+.table-scroll[data-edge="left"] { -webkit-mask-image: linear-gradient(to left, black calc(100% - 28px), transparent); mask-image: linear-gradient(to left, black calc(100% - 28px), transparent); }
+.table-scroll[data-edge="both"] { -webkit-mask-image: linear-gradient(to right, transparent, black 28px, black calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, black 28px, black calc(100% - 28px), transparent); }
 th, td { text-align: left; padding: var(--sp-2) var(--sp-2) var(--sp-2) 0; font-size: var(--text-md); border-bottom: 1px solid var(--line); }
 /* `nowrap`: a two-word header ("Last accepted") otherwise breaks onto two
    lines the moment the auto layout is tight, lifting the whole header row. */
@@ -1544,6 +1561,11 @@ main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
    two-word name with a "(revoked …)" note after it breaks to one word per
    line — unreadable in exactly the cell that says which friend this is. */
 td.peer-name { min-width: 9rem; }
+/* The floor above stops one-word-per-line, but a longer name plus its
+   "(revoked …)" note still don't fit 9rem on one line together — instead of
+   wrapping mid-phrase across both, give the note its own line so the break
+   falls in the one place it reads cleanly. */
+td.peer-name .error { display: block; }
 
 /* The glance strip's glyphs. Sized against the label rather than the number:
    they belong to the caption, and at the number's size they competed with it. */
