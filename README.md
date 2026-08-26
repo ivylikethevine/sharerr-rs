@@ -99,7 +99,12 @@ Readarr as a direct indexer, and more), see
 | ![Topology](docs/screenshots/topology.webp) | ![Topology, networking only](docs/screenshots/topology-networking.webp) |
 | ![Friends](docs/screenshots/peers.webp) | ![Debug](docs/screenshots/debug.webp) |
 
-![Settings](docs/screenshots/settings.webp)
+Settings is one long page; it is shown here in four parts, top to bottom.
+
+| | |
+|---|---|
+| ![Settings: general and library sources](docs/screenshots/settings-1.webp) | ![Settings: torrent client](docs/screenshots/settings-2.webp) |
+| ![Settings: tracker and path mappings](docs/screenshots/settings-3.webp) | ![Settings: seeding limits, gluetun, lighthouse, sync and account](docs/screenshots/settings-4.webp) |
 
 ## Quickstart
 

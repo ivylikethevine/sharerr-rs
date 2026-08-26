@@ -114,6 +114,12 @@
   <dt title="The file the Settings page rewrites in place">Config file</dt><dd><code>{{ config_path }}</code></dd>
 </dl>
 
+{# Five independent reports, none of which follows from the one above it. On a
+   screen with the room they sit two abreast (see `.deck`); below that the
+   wrapper is inert and they stack exactly as they did. #}
+<div class="deck">
+
+<section>
 <h2>Recent syncs</h2>
 <div class="panel">
   {% if diag.runs.is_empty() %}
@@ -147,7 +153,9 @@
   </div>
   {% endif %}
 </div>
+</section>
 
+<section>
 <h2>Networking</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_GLUETUN, "Gluetun configuration") %}{% endcall %}
@@ -200,10 +208,12 @@
     <code>docker/deploy/dual-vpn/</code> — most instances leave it unconfigured.
   </p>
 </div>
+</section>
 
 {# Omitted entirely when no lighthouse is configured: it is an opt-in fallback
    for friends gossip cannot reach, and most instances never set one up. #}
 {% if let Some(lighthouse) = diag.lighthouse %}
+<section>
 <h2>Lighthouse</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_LIGHTHOUSE, "Lighthouse configuration") %}{% endcall %}
@@ -289,8 +299,10 @@
   </div>
   {% endif %}
 </div>
+</section>
 {% endif %}
 
+<section>
 <h2>Services</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::SUPPORTED_SOURCES, "Which sources work") %}{% endcall %}
@@ -314,7 +326,9 @@
     {% endfor %}
   </dl>
 </div>
+</section>
 
+<section>
 <h2>Path mapping</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_PATH_MAP, "Path mapping reference") %}{% endcall %}
@@ -397,5 +411,7 @@
   {% endif %}
 
   {% endif %}
+</div>
+</section>
 </div>
 {% endblock %}
