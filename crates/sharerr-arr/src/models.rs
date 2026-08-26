@@ -52,6 +52,14 @@ pub(crate) struct MediaInfo {
     pub subtitles: Option<String>,
     #[serde(default)]
     pub run_time: Option<String>,
+    /// Bits per sample. Reported by the *arr apps that manage audio — Lidarr for
+    /// music, Readarr for audiobooks — and absent from Sonarr's and Radarr's copy
+    /// of this object, which is why it is `Option` twice over like the rest.
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub audio_bits: Option<String>,
+    /// Sampling frequency in hertz, from the same two apps.
+    #[serde(default, deserialize_with = "number_or_string")]
+    pub audio_sample_rate: Option<String>,
 }
 
 impl MediaInfo {
@@ -71,6 +79,8 @@ impl MediaInfo {
             audio_languages: non_empty(self.audio_languages),
             subtitles: non_empty(self.subtitles),
             runtime: non_empty(self.run_time),
+            audio_sample_rate: self.audio_sample_rate,
+            audio_bit_depth: self.audio_bits,
         };
         (!meta.is_empty()).then_some(meta)
     }
@@ -169,4 +179,35 @@ pub(crate) fn non_empty(value: Option<String>) -> Option<String> {
 
 pub(crate) fn non_zero<T: PartialEq + Default>(value: Option<T>) -> Option<T> {
     value.filter(|v| *v != T::default())
+}
+
+/// Read a numeric `mediaInfo` field that has shipped as both a JSON number and a
+/// JSON string into the one `String` shape [`MediaMeta`] stores.
+///
+/// Lidarr reports `audioSampleRate` as a bare number in current releases and has
+/// reported it as a string. Every field on [`MediaInfo`] is `#[serde(default)]`,
+/// so a type that matched only one of the two spellings would fail *silently* to
+/// `None` against the other: discovery would keep working and quietly carry no
+/// metadata, which is the failure this whole struct is shaped to avoid.
+///
+/// A `0` collapses to `None` for the same reason [`non_zero`] exists — these apps
+/// use it where a `null` would be more honest, and `0 Hz` is not a sample rate.
+pub(crate) fn number_or_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Text(String),
+        Number(f64),
+    }
+
+    Ok(match Option::<Either>::deserialize(deserializer)? {
+        None => None,
+        Some(Either::Text(text)) => non_empty(Some(text)).filter(|t| t != "0"),
+        // `{n}` on an `f64` prints `44100` for `44100.0`, so a whole number that
+        // arrived through a float-shaped JSON number reads back as an integer.
+        Some(Either::Number(number)) => (number != 0.0).then(|| format!("{number}")),
+    })
 }

@@ -1,0 +1,73 @@
+{# The status page's four headline numbers, on their own so they can be polled.
+   Everything here comes from `Glance` and nothing from `diag`, which is the whole
+   reason this is worth polling: refreshing the page would re-probe every *arr
+   app, and refreshing this costs two store queries and an in-memory swarm read.
+
+   Rendered both as part of `status.html` and on its own by `/status/tiles`,
+   which is why it is a partial rather than markup inlined in the page. #}
+{% if let Some(glance) = glance %}
+<dl class="stat-grid">
+  <div class="stat">
+    <dt title="Items with a torrent the client is seeding right now"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.5V4M4.8 7.2L8 4l3.2 3.2M3 14h10"/></svg>Shared</dt>
+    <dd>
+      <strong>{{ glance.items_shared }}</strong> item(s) seeding
+      {% if !glance.shared_size.is_empty() %}
+      <br><span class="hint" title="Combined size of every seeding item">{{ glance.shared_size }} on disk</span>
+      {% endif %}
+    </dd>
+  </div>
+  <div class="stat">
+    <dt title="The most recent finished reconciliation pass"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 01-9.7 3.6M2.5 8a5.5 5.5 0 019.7-3.6M12.2 1.9v2.5H9.7M3.8 14.1v-2.5h2.5"/></svg>Last sync</dt>
+    <dd>
+      {% if let Some(when) = glance.last_sync %}
+      {{ when }}{% if !glance.last_sync_note.is_empty() %} —
+        {% if glance.last_sync_failed %}<span class="error">{{ glance.last_sync_note }}</span>
+        {% else %}{{ glance.last_sync_note }}{% endif %}
+      {% endif %}
+      {% else %}
+      never
+      {% endif %}
+      {% if !glance.next_sync.is_empty() %}
+      <br><span class="hint" title="Estimated from the last finished sync plus the configured interval">next {{ glance.next_sync }}</span>
+      {% endif %}
+    </dd>
+  </div>
+  <div class="stat">
+    <dt title="Friends whose key was used within the last hour, over all active friends"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 7.5a2 2 0 100-4 2 2 0 000 4M2 13a4 4 0 018 0M10.5 3.6a2 2 0 010 3.8M11.5 9.2a3.5 3.5 0 012.5 3.8"/></svg>Friends</dt>
+    <dd>
+      {% if glance.friends_total == 0 %}
+      none yet — add one on the <a href="/peers">Friends</a> page
+      {% else %}
+      <strong>{{ glance.friends_recent }}</strong> of {{ glance.friends_total }} seen in the last hour
+      {% endif %}
+    </dd>
+  </div>
+  <div class="stat">
+    <dt title="Live peers across this instance's tracker right now — first-hand, this process is the tracker"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3M4.8 4.8a4.5 4.5 0 000 6.4M11.2 4.8a4.5 4.5 0 010 6.4M2.6 2.6a7.6 7.6 0 000 10.8M13.4 2.6a7.6 7.6 0 010 10.8"/></svg>Swarms</dt>
+    <dd>
+      {% if glance.swarm_peers == 0 %}
+      no peers announcing right now
+      {% else %}
+      <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
+      <br><span class="hint">across {{ glance.swarm_torrents }} torrent(s)</span>
+      {% endif %}
+    </dd>
+  </div>
+  <div class="stat">
+    <dt title="This host's CPU, memory, and disk usage — sampled every few seconds, not read live on each poll"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4h8v8H4z"/><path d="M6.5 1.5v2.5M9.5 1.5v2.5M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg>Host</dt>
+    <dd>
+      {% if let Some(cpu) = glance.cpu_percent %}
+      <strong>{{ cpu }}</strong> CPU
+      {% if let Some(memory) = glance.memory_usage %}
+      <br><span class="hint">{{ memory }} memory</span>
+      {% endif %}
+      {% if let Some(disk) = glance.disk_usage %}
+      <br><span class="hint">{{ disk }} disk</span>
+      {% endif %}
+      {% else %}
+      not sampled yet
+      {% endif %}
+    </dd>
+  </div>
+</dl>
+{% endif %}

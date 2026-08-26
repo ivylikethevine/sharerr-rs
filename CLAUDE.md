@@ -3,13 +3,26 @@
 Conventions that are not derivable from the code, and traps that have each cost
 real debugging time.
 
+## Table of contents
+
+- [The verification loop](#the-verification-loop)
+- [MSRV](#msrv)
+- [Dependencies](#dependencies)
+- [Testing tiers](#testing-tiers)
+- [Traps](#traps)
+- [Repository](#repository)
+
 ## The verification loop
 
 ```bash
-cargo test --workspace && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo build
+cargo test --workspace && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo build && cargo fmt --all --check
 ```
 
-Run it before declaring anything done.
+Run it before declaring anything done. `cargo fmt --all --check` is what `ci.yml`'s
+`fmt` job actually runs — a change that compiles and passes clippy but was never
+run through `cargo fmt` still fails CI on this step alone, which has cost more
+than one otherwise-green PR. Run plain `cargo fmt --all` (no `--check`) first if
+this fails, then re-run the loop.
 
 **Clippy must stay at zero warnings.** The workspace sets `unwrap_used` and
 `expect_used` to `warn` because the vault and the service clients handle secrets;
@@ -194,5 +207,7 @@ roster cannot drift from what CI runs — a row whose regex stops matching is
 reported as an error, not skipped. hadolint and trivy are deliberately
 unpinned (newest release, always), so they have no row.
 
-The roadmap is `docs/ROADMAP.md`; the original design brief and the two premises
-the implementation disproved are in `docs/DESIGN.md`.
+The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
+weighed but not all committed to as well as firm intentions — an idea belongs
+there or in `docs/UNSUPPORTED.md`, never in both. The original design brief and
+the two premises the implementation disproved are in `docs/DESIGN.md`.

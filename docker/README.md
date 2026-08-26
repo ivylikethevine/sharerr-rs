@@ -26,6 +26,8 @@ pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhe
 - [The VPN stack](#the-vpn-stack)
   - [There is a WireGuard server in the stack](#there-is-a-wireguard-server-in-the-stack)
   - [Ports](#ports-1)
+- [The two-instance stack](#the-two-instance-stack)
+  - [Ports](#ports-2)
 - [Tearing down](#tearing-down)
 
 ## Running it
@@ -351,6 +353,73 @@ Tear it down with the same two halves as the plain stack, against the other file
 
 ```bash
 docker compose -f docker/compose.vpn.yml down -v && rm -rf docker/state-vpn
+```
+
+## The two-instance stack
+
+```bash
+./run_docker_tests_two_instance.sh
+```
+
+Its own script, not another `run_docker_tests.sh` flag — every stack above is
+one sharerr against one *arr stack, and this is fundamentally a different
+shape: **two** independent sharerr+Radarr+qBittorrent stacks, wired together
+as friends. Nothing above proves the actual friend-to-friend loop; each of
+them proves a local add is safe, which says nothing about whether a friend's
+Radarr can find, grab, and correctly receive what was shared.
+
+|                    | Every stack above                          | Two-instance stack                                          |
+| ------------------ | ------------------------------------------- | ------------------------------------------------------------- |
+| What it proves      | a local add never moves or rewrites a file  | a friend's Radarr can index, grab, and correctly download one |
+| Torrent transport   | never actually downloaded by anyone         | a real BitTorrent handshake between two separate containers   |
+| Grab trigger        | `sharerr sync`, driven by the test           | Radarr's own automatic search, the same command its UI sends  |
+| Runtime             | one Radarr, one qBittorrent, one sharerr    | two of each, plus real indexer/download-client wiring         |
+
+Instance A is seeded exactly like the plain stack's Radarr — one tagged movie,
+written straight into its database for the reason `seed-arr`'s own module doc
+gives. Instance B's Radarr gets the *same* movie by TMDB id, seeded via
+`seed-arr --radarr-wanted` — untagged and with no file, so it is a genuine
+"wanted" entry its own automatic search can match against instance A's shared
+release. The script then does by API exactly what an operator would do by
+hand: creates a peer on instance A, registers instance A as a Torznab indexer
+on instance B's Radarr, registers instance B's qBittorrent as its download
+client, and triggers `MoviesSearch` — Radarr's real automatic-search-and-grab
+command, not a `sharerr sync`.
+
+The one assertion that justifies the whole heavier stack:
+[`e2e_two_instance.rs`](../crates/sharerr/tests/e2e_two_instance.rs) reads the
+bytes instance B's qBittorrent actually saved and compares them, byte for
+byte, against instance A's original copy.
+
+### Why `tracker.advertised_host` is a service name here, not `localhost`
+
+Every stack above sets it to `localhost`, which works only because nothing in
+any of them ever needs a genuinely different container to dial it back —
+their qBittorrent seeds a file it already has, to nobody. Here
+`qbittorrent-b` really does have to reach `sharerr-a`'s tracker, and then
+`qbittorrent-a` itself, from inside its own container, where `localhost`
+resolves to itself. `docker/config-two-instance-a/sharerr.toml` advertises
+`sharerr-a` — resolved by Docker's own embedded DNS on this stack's shared
+network — on port 8477, sharerr's internal listen port, not the
+host-published one. See the compose file's own header for the full reasoning.
+
+### Ports
+
+A fresh block, after the existing 18xxx (plain) / 28xxx (VPN) / 38xxx
+(Transmission) / 48xxx (rTorrent) ranges — 58xxx for instance A, 59xxx for
+instance B, so this stack can run alongside any of the others.
+
+| Service       | Instance A | Instance B |
+| -------------- | ---------- | ---------- |
+| Radarr          | 58878      | 59878      |
+| qBittorrent WebUI | 58080    | 59080      |
+| sharerr         | 58477      | 59477      |
+
+Tear it down the same two-halves way as the plain stack, against the other
+file and state directory:
+
+```bash
+docker compose -f docker/compose.two-instance.yml down -v && rm -rf docker/state-two-instance
 ```
 
 ## Tearing down

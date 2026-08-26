@@ -1,0 +1,40 @@
+# Configuration for instance A of the two-instance compose stack — the friend
+# doing the sharing.
+#
+# Secrets are deliberately absent: API keys and the qBittorrent password live
+# in the encrypted vault, not here — see
+# `run_docker_tests_two_instance.sh`.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[radarr]
+url = "http://radarr-a:7878"
+
+[qbittorrent]
+url = "http://qbittorrent-a:8080"
+category = "sharerr"
+tag = "sharerr"
+skip_checking = true
+
+[tracker]
+# Unlike every single-instance stack, this has to be genuinely reachable by
+# *another container* — instance B's qBittorrent dials this directly to
+# announce and to fetch instance A's peer list. `sharerr-a` is this
+# service's own name on the compose network; 8477 is sharerr's internal
+# listen port, not the host-published one. See the compose file's own note
+# on why this differs from `localhost`.
+advertised_host = "sharerr-a"
+port = 8477
+
+[sync]
+enabled = false
+interval_secs = 900
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"

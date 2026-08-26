@@ -1141,6 +1141,8 @@ mod tests {
             category: String::new(),
             tags: Vec::new(),
             is_seeding: true,
+            ratio: None,
+            ratio_limit: None,
         }
     }
 

@@ -956,6 +956,8 @@ mod tests {
                     state: ShareState::Pending,
                     last_error: None,
                     created_at: None,
+                    achieved_ratio: None,
+                    ratio_limit_reported: None,
                 })
                 .await
                 .unwrap();
@@ -1250,6 +1252,8 @@ mod tests {
                     state: ShareState::Pending,
                     last_error: None,
                     created_at: None,
+                    achieved_ratio: None,
+                    ratio_limit_reported: None,
                 })
                 .await
                 .unwrap();
@@ -1310,6 +1314,8 @@ mod tests {
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
+                achieved_ratio: None,
+                ratio_limit_reported: None,
             })
             .await
             .unwrap();

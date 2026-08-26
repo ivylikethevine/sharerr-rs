@@ -20,6 +20,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::gluetun::{GluetunStatus, GluetunTarget};
 use crate::notify::QuietNotified;
 use crate::sync::Syncer;
+use crate::system_stats::SystemStatus;
 use crate::tracker::LegacyTokenStatus;
 
 /// How soon to retry building the syncer after the first failure.
@@ -135,6 +136,9 @@ pub struct ServeState {
     swarms: Arc<sharerr_torrent::Swarms>,
     /// Dedupe for the peer-quiet notification — see [`crate::notify`].
     quiet_notified: Arc<QuietNotified>,
+    /// What the CPU/memory/disk sampler last measured — see
+    /// [`crate::system_stats`].
+    system_status: Arc<SystemStatus>,
 }
 
 /// Everything one gluetun poller reads and writes, one per [`GluetunTarget`].
@@ -205,6 +209,7 @@ impl ServeState {
             legacy_token_status: Arc::new(LegacyTokenStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
             quiet_notified: Arc::new(QuietNotified::default()),
+            system_status: Arc::new(SystemStatus::default()),
         }
     }
 
@@ -217,6 +222,11 @@ impl ServeState {
     /// Dedupe state for the peer-quiet notification.
     pub fn quiet_notified(&self) -> Arc<QuietNotified> {
         Arc::clone(&self.quiet_notified)
+    }
+
+    /// What the CPU/memory/disk sampler last measured.
+    pub fn system_status(&self) -> Arc<SystemStatus> {
+        Arc::clone(&self.system_status)
     }
 
     /// The live advertised endpoint this whole process shares — where friends
@@ -311,6 +321,13 @@ impl ServeState {
     /// whole-`Config` clone.
     pub async fn torrent_dir(&self) -> PathBuf {
         self.with_config(Config::torrent_dir).await
+    }
+
+    /// Where the database, vault, and `.torrent` cache all live — what the
+    /// system sampler measures disk usage against, since it is the one path
+    /// an operator running out of room here would actually feel.
+    pub async fn data_dir(&self) -> PathBuf {
+        self.with_config(|c| c.data_dir.clone()).await
     }
 
     pub fn config_path(&self) -> &Path {
@@ -942,6 +959,7 @@ mod tests {
             &state.quiet_notified()
         ));
         assert!(Arc::ptr_eq(&state.swarms(), &state.swarms()));
+        assert!(Arc::ptr_eq(&state.system_status(), &state.system_status()));
     }
 
     /// `endpoint_for`/`gluetun_status` must route `Client` to the client-facing

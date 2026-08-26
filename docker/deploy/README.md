@@ -7,6 +7,14 @@ These are deployment recipes. `docker/*.yml` one directory up are the
 **tier-2 test stacks**: they build the image from source, seed synthetic
 fixtures, and are driven by `run_docker_tests.sh`. Do not deploy from those.
 
+## Table of contents
+
+- [Which one](#which-one)
+- [What every layout needs](#what-every-layout-needs)
+- [One port, several audiences](#one-port-several-audiences)
+- [gluetun, and the key that has two halves](#gluetun-and-the-key-that-has-two-halves)
+- [The thing that is invisible from inside](#the-thing-that-is-invisible-from-inside)
+
 ## Which one
 
 | | Layout | Use it when |

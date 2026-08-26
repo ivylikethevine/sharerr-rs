@@ -27,12 +27,19 @@
 //! |---|---|---|
 //! | `mkv`, `webm` | `matroska` | resolution, video codec, audio codec, channels, audio languages, subtitles, runtime |
 //! | `mp4`, `m4v`, `mov` | `mp4` | resolution, video codec, audio codec, channels, runtime |
+//! | `flac`, `mp3`, `opus` | `symphonia` | audio codec, channels, sample rate, bit depth, runtime |
 //! | anything else | — | `None` |
 //!
-//! Audio-only containers (`flac`, `mp3`, `opus`, …) are deliberately absent for
-//! now — see `docs/ROADMAP.md`. They carry no resolution or video codec, which is
-//! the metadata every one of the four surfaces actually renders, and Lidarr's own
-//! `mediaInfo` is the better source for them in any case.
+//! The audio-only row exists for exactly one case: music in a `[[library]]`
+//! directory with no *arr behind it. Wherever an *arr manages the file its own
+//! `mediaInfo` already reports the codec, sample rate and bit depth for free —
+//! Lidarr and Readarr feed that into `MediaMeta` alongside Sonarr's and
+//! Radarr's — so this backend is never reached for those. `symphonia` is
+//! trimmed to exactly these three formats (`default-features = false`); it
+//! never decodes a frame here either, matching the "read headers and stop"
+//! rule the other two backends already follow. Opus needs no dedicated
+//! `symphonia` feature — its `ogg`-format Opus mapper reads the identification
+//! packet's sample rate and channel count without a registered decoder.
 
 use std::path::Path;
 use std::time::Duration;
@@ -55,6 +62,7 @@ pub fn probe(path: &Path) -> Option<MediaMeta> {
     let meta = match extension.as_str() {
         "mkv" | "webm" => matroska_meta(path),
         "mp4" | "m4v" | "mov" => isobmff_meta(path),
+        "flac" | "mp3" | "opus" => symphonia_meta(path),
         _ => {
             tracing::trace!(file = %path.display(), extension, "no probe backend for this container");
             return None;
@@ -186,6 +194,87 @@ fn isobmff_meta(path: &Path) -> Option<MediaMeta> {
 
     meta.audio_languages = join_languages(audio_languages);
     Some(meta)
+}
+
+/// FLAC, MP3 and Opus, via `symphonia`'s format readers.
+///
+/// Unlike the two container backends above, this never opens a video track —
+/// there isn't one — so there is no `resolution`/`video_codec` to fill in, and
+/// no per-track language the way MKV/MP4 carry it.
+fn symphonia_meta(path: &Path) -> Option<MediaMeta> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::debug!(file = %path.display(), %err, "not readable");
+            return None;
+        }
+    };
+    let mss = symphonia::core::io::MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint = symphonia::core::formats::probe::Hint::new();
+    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(extension);
+    }
+
+    let format = match symphonia::default::get_probe().probe(
+        &hint,
+        mss,
+        Default::default(),
+        Default::default(),
+    ) {
+        Ok(format) => format,
+        Err(err) => {
+            tracing::debug!(file = %path.display(), %err, "not readable by symphonia");
+            return None;
+        }
+    };
+
+    let Some((track, audio)) = format
+        .tracks()
+        .iter()
+        .find_map(|track| match &track.codec_params {
+            Some(symphonia::core::codecs::CodecParameters::Audio(audio)) => Some((track, audio)),
+            _ => None,
+        })
+    else {
+        tracing::debug!(file = %path.display(), "no audio track");
+        return None;
+    };
+
+    let mut meta = MediaMeta {
+        audio_codec: audio_codec_name(audio.codec),
+        audio_channels: audio
+            .channels
+            .as_ref()
+            .map(|channels| channel_layout(channels.count() as u64)),
+        audio_sample_rate: audio.sample_rate.map(|hz| hz.to_string()),
+        audio_bit_depth: audio.bits_per_sample.map(|bits| bits.to_string()),
+        ..MediaMeta::default()
+    };
+
+    if let (Some(time_base), Some(num_frames)) = (track.time_base, track.num_frames)
+        && let Some(time) = time_base.calc_time(symphonia::core::units::Timestamp::new(
+            i64::try_from(num_frames).unwrap_or(i64::MAX),
+        ))
+    {
+        meta.runtime = Some(format_runtime(Duration::from_secs_f64(time.as_secs_f64())));
+    }
+
+    Some(meta)
+}
+
+/// The three codecs [`symphonia_meta`]'s feature set (`flac`, `mp3`, `ogg`)
+/// can ever produce, by symphonia's well-known codec id — deliberately not a
+/// general lookup table, since nothing outside those three formats reaches
+/// this function.
+fn audio_codec_name(codec: symphonia::core::codecs::audio::AudioCodecId) -> Option<String> {
+    use symphonia::core::codecs::audio::well_known::{CODEC_ID_FLAC, CODEC_ID_MP3, CODEC_ID_OPUS};
+    match codec {
+        CODEC_ID_FLAC => Some("FLAC".to_owned()),
+        CODEC_ID_MP3 => Some("MP3".to_owned()),
+        CODEC_ID_OPUS => Some("Opus".to_owned()),
+        _ => None,
+    }
 }
 
 /// A Matroska codec id reduced to the name a release title would use.
@@ -446,6 +535,126 @@ mod tests {
         std::fs::write(path, cat(&[header, segment])).unwrap();
     }
 
+    // ---------------------------------------------------------------- FLAC
+
+    /// Hand-build a minimal FLAC file: the `fLaC` marker, one `STREAMINFO`
+    /// metadata block, and one empty frame.
+    ///
+    /// Like the Matroska fixture, `symphonia` has no writer crate, so this is
+    /// assembled from the spec. Unlike Matroska, header-only is not enough
+    /// here: `symphonia-bundle-flac` resynchronizes to the first frame while
+    /// *opening* the reader (`FlacReader::init_with_metadata`), before this
+    /// crate ever asks for a track — so the frame has to exist and pass a
+    /// strict header check against the declared `STREAMINFO`, even though
+    /// nothing here ever decodes its (absent) sample data. The frame is the
+    /// minimum valid size (`FLAC_MIN_FRAME_HEADER_SIZE`, 6 bytes: sync +
+    /// description + a zero frame number + its own CRC-8) with every
+    /// optional field pointed back at `STREAMINFO` (`get sample rate`, `get
+    /// bits per sample` codes) so it never has to duplicate what the
+    /// metadata block already says.
+    fn write_flac(
+        path: &Path,
+        sample_rate: u32,
+        channels: u8,
+        bits_per_sample: u8,
+        total_samples: u64,
+    ) {
+        let mut info = Vec::new();
+        info.extend_from_slice(&4096u16.to_be_bytes()); // minimum block size (samples)
+        info.extend_from_slice(&4096u16.to_be_bytes()); // maximum block size (samples)
+        info.extend_from_slice(&[0, 0, 0]); // minimum frame size, unknown
+        info.extend_from_slice(&[0, 0, 0]); // maximum frame size, unknown
+
+        // Sample rate (20 bits), channels - 1 (3 bits), bits per sample - 1 (5
+        // bits) and total samples (36 bits), packed into one 64-bit field —
+        // see `symphonia_common::xiph::audio::flac::StreamInfo::read`.
+        let packed = (u64::from(sample_rate) << 44)
+            | (u64::from(channels - 1) << 41)
+            | (u64::from(bits_per_sample - 1) << 36)
+            | (total_samples & 0xF_FFFF_FFFF);
+        info.extend_from_slice(&packed.to_be_bytes());
+        info.extend_from_slice(&[0u8; 16]); // MD5 of the decoded audio, absent
+
+        let mut file = Vec::new();
+        file.extend_from_slice(b"fLaC");
+        // Metadata block header: top bit set marks this the last block, the
+        // remaining 7 bits are the block type — 0 is STREAMINFO.
+        file.push(0x80);
+        file.extend_from_slice(&(info.len() as u32).to_be_bytes()[1..]); // 24-bit length
+        file.extend_from_slice(&info);
+        file.extend_from_slice(&flac_frame());
+
+        std::fs::write(path, file).unwrap();
+    }
+
+    /// The smallest valid FLAC frame header, with no sample data — see
+    /// `write_flac`'s doc comment for why one has to exist at all. Fixed
+    /// (not a parameter) because both codes it hard-codes point back at
+    /// `STREAMINFO` rather than asserting a value of their own: fixed
+    /// blocksize of 192 samples (`0001`, valid up to a 4096-sample max
+    /// block, which every caller uses), 2 independently-coded channels
+    /// (`0001`), sample rate and bits-per-sample both "get from
+    /// `STREAMINFO`" (`0000`, `000`) — every `write_flac` caller passes 2
+    /// channels for exactly this reason. Frame number `0`, encoded as its
+    /// own single byte the way this UTF-8-like scheme encodes any value
+    /// under 128.
+    fn flac_frame() -> [u8; 6] {
+        let header = [0xFF, 0xF8, 0x10, 0x10, 0x00];
+        let mut frame = [0u8; 6];
+        frame[..5].copy_from_slice(&header);
+        frame[5] = crc8_ccitt(&header);
+        frame
+    }
+
+    /// CRC-8/CCITT (polynomial `0x07`, no reflection, no final XOR) — the
+    /// exact algorithm `symphonia_core::checksum::Crc8Ccitt` implements via a
+    /// lookup table, reproduced here bit-by-bit instead of transcribing that
+    /// table, since the two are defined to agree and only one needs to be
+    /// readable as an algorithm.
+    fn crc8_ccitt(data: &[u8]) -> u8 {
+        let mut crc: u8 = 0;
+        for &byte in data {
+            crc ^= byte;
+            for _ in 0..8 {
+                crc = if crc & 0x80 != 0 {
+                    (crc << 1) ^ 0x07
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        crc
+    }
+
+    #[test]
+    fn a_flac_file_yields_its_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Midnight Frequency.flac");
+        write_flac(&path, 44_100, 2, 16, 44_100 * 3);
+
+        let meta = probe(&path).expect("a valid stream describes itself");
+        assert_eq!(meta.audio_codec.as_deref(), Some("FLAC"));
+        assert_eq!(meta.audio_channels.as_deref(), Some("2.0"));
+        assert_eq!(meta.audio_sample_rate.as_deref(), Some("44100"));
+        assert_eq!(meta.audio_bit_depth.as_deref(), Some("16"));
+        assert_eq!(meta.runtime.as_deref(), Some("0:00:03"));
+        assert_eq!(meta.resolution, None, "an audio-only stream has no video");
+    }
+
+    /// The same lookup `MediaMeta::audio_format` already used for `mediaInfo`
+    /// still recognises what this backend writes into `audio_codec` — proving
+    /// the two producers agree on the shape without adding a second table.
+    #[test]
+    fn a_probed_flac_is_recognised_as_lossless() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("whatever.flac");
+        write_flac(&path, 96_000, 2, 24, 96_000 * 10);
+
+        let meta = probe(&path).unwrap();
+        assert_eq!(meta.scene_audio_format(), Some("FLAC"));
+        assert_eq!(meta.is_lossless(), Some(true));
+    }
+
     #[test]
     fn a_matroska_file_yields_its_tracks() {
         let dir = tempfile::tempdir().unwrap();
@@ -517,10 +726,27 @@ mod tests {
         assert_eq!(meta.scene_video_codec(), Some("x264"));
     }
 
+    /// Also the only coverage `mp3` and `opus` get beyond dispatch: proving
+    /// they reach `symphonia_meta` (rather than the "no backend" arm
+    /// `unknown_extensions_are_not_opened` covers) and fail the same honest
+    /// way every other backend does. `flac` gets a real fixture above because
+    /// `STREAMINFO` is a fixed, well-specified 34-byte layout; MP3's own
+    /// format *detector* needs two consecutive, correctly bitrate-sized frame
+    /// headers just to recognise the file at all (confirmed in
+    /// `symphonia-bundle-mp3`'s `Scoreable::score`) — a materially bigger
+    /// fixture for coverage the FLAC test, which exercises the same
+    /// extraction code every format shares, already provides.
     #[test]
     fn a_file_that_is_not_the_container_it_claims_yields_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        for name in ["not-really.mkv", "not-really.mp4", "not-really.mov"] {
+        for name in [
+            "not-really.mkv",
+            "not-really.mp4",
+            "not-really.mov",
+            "not-really.flac",
+            "not-really.mp3",
+            "not-really.opus",
+        ] {
             let path = dir.path().join(name);
             std::fs::write(&path, b"this is not a media container at all").unwrap();
             assert_eq!(probe(&path), None, "{name}");

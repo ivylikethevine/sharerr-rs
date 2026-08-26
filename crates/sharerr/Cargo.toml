@@ -44,6 +44,7 @@ sharerr-store = { workspace = true }
 sharerr-probe = { workspace = true }
 sharerr-torrent = { workspace = true }
 sharerr-transmission = { workspace = true }
+sysinfo = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

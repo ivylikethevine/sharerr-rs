@@ -102,6 +102,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         .filter(|item| item.state == ShareState::Seeding)
         .map(|item| item.size)
         .sum();
+    // Third read of the same unfiltered slice, and the last one before the
+    // filters below narrow it — a composition that moved with the search box
+    // would answer a different question on every page load.
+    let composition = crate::web::composition::compose(&items);
 
     let needle = query.q.trim().to_lowercase();
     if !needle.is_empty() {
@@ -222,6 +226,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         state_counts,
         seeding_size: human_size(seeding_bytes),
         shown_size: human_size(shown_bytes),
+        composition,
         items: items
             .iter()
             .map(|item| {
@@ -350,6 +355,32 @@ fn peers_cell(swarm: Option<SwarmCount>) -> (String, String) {
     }
 }
 
+/// What the torrent client itself reports for this item's ratio — see
+/// `SharedItem::achieved_ratio`. Empty (rendered as a dash) before a torrent
+/// has reported anything; once it has, the tooltip either names the specific
+/// limit the client is enforcing on this torrent, or says plainly that it
+/// isn't holding this torrent to one — a client's own global default,
+/// unlimited, or (on some backends) simply not something it can report,
+/// which sharerr does not try to distinguish from here.
+fn ratio_cell(item: &SharedItem) -> (String, String) {
+    let Some(ratio) = item.achieved_ratio else {
+        return (String::new(), String::new());
+    };
+    let value = if ratio.is_infinite() {
+        "∞".to_owned()
+    } else {
+        format!("{ratio:.2}")
+    };
+    let hint = match item.ratio_limit_reported {
+        Some(limit) => format!("Per-torrent limit the client is enforcing: {limit:.2}"),
+        None => "The client is not holding this torrent to a fixed per-torrent limit \
+                  — its own global default, unlimited, or (on some backends) not \
+                  something it can report"
+            .to_owned(),
+    };
+    (value, hint)
+}
+
 /// The first 12 hex characters, or the whole thing if somehow shorter: enough
 /// to tell two torrents apart at a glance, narrow enough not to squeeze the
 /// title column. The full hash stays on hover and behind the copy button.
@@ -365,6 +396,7 @@ fn row(
     swarm: Option<SwarmCount>,
 ) -> ItemRow {
     let (peers_live, peers_hint) = peers_cell(swarm);
+    let (ratio, ratio_hint) = ratio_cell(item);
     ItemRow {
         title: item.spec.title().to_owned(),
         release_title: item.release_title.clone(),
@@ -374,6 +406,8 @@ fn row(
         size: human_size(item.size),
         state_label: title_case(item.state.as_str()),
         state_hint: state_hint(item.state),
+        ratio,
+        ratio_hint,
         visible_to: visible_to(item, peers),
         since: item.created_at.map(ago).unwrap_or_default(),
         info_hash: item.info_hash.clone(),
@@ -516,6 +550,8 @@ mod tests {
             state,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 
@@ -643,6 +679,46 @@ mod tests {
         let mut it = seeding_with_hash("bb".repeat(20).as_str());
         it.announce_token_fp = None;
         assert_eq!(token_status(&it, Some("abc123")), TokenStatus::Stale);
+    }
+
+    #[test]
+    fn ratio_cell_is_empty_before_the_client_reports_anything() {
+        let it = seeding_with_hash("aa".repeat(20).as_str());
+        assert_eq!(ratio_cell(&it), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn ratio_cell_names_the_clients_own_limit_when_it_reports_one() {
+        let mut it = seeding_with_hash("aa".repeat(20).as_str());
+        it.achieved_ratio = Some(1.85);
+        it.ratio_limit_reported = Some(2.0);
+        let (value, hint) = ratio_cell(&it);
+        assert_eq!(value, "1.85");
+        assert!(hint.contains("2.00"), "{hint}");
+    }
+
+    /// No limit reported still shows the achieved ratio — the honest-blank
+    /// convention `ROADMAP.md`'s "Achieved ratio" entry asks for, not a row
+    /// that quietly shows nothing.
+    #[test]
+    fn ratio_cell_explains_a_missing_limit_without_hiding_the_ratio() {
+        let mut it = seeding_with_hash("aa".repeat(20).as_str());
+        it.achieved_ratio = Some(0.42);
+        it.ratio_limit_reported = None;
+        let (value, hint) = ratio_cell(&it);
+        assert_eq!(value, "0.42");
+        assert!(
+            !hint.is_empty(),
+            "a missing limit still needs an explanation"
+        );
+    }
+
+    #[test]
+    fn ratio_cell_renders_an_infinite_ratio_as_the_symbol() {
+        let mut it = seeding_with_hash("aa".repeat(20).as_str());
+        it.achieved_ratio = Some(f64::INFINITY);
+        let (value, _) = ratio_cell(&it);
+        assert_eq!(value, "∞");
     }
 
     #[test]
@@ -1082,15 +1158,15 @@ mod tests {
         assert!(apple_at < zebra_at, "{html}");
     }
 
-    /// The header row is `sort_links` plus five fixed columns, and the body
-    /// row is ten cells — so a `sort_links` of any other length silently
+    /// The header row is `sort_links` plus six fixed columns, and the body
+    /// row is eleven cells — so a `sort_links` of any other length silently
     /// renders every header against the wrong column. `commands::preview`
     /// shipped exactly that bug by hand-writing three of the five, which is
     /// why this asserts on the constant rather than on one page render.
     #[test]
     fn the_sortable_columns_plus_the_fixed_ones_match_the_body_row() {
-        const FIXED_HEADERS: usize = 5; // Peers, Visible to, Info hash, Announce URL, Token
-        const BODY_CELLS: usize = 10;
+        const FIXED_HEADERS: usize = 6; // Ratio, Peers, Visible to, Info hash, Announce URL, Token
+        const BODY_CELLS: usize = 11;
 
         assert_eq!(
             SORT_COLUMNS.len() + FIXED_HEADERS,

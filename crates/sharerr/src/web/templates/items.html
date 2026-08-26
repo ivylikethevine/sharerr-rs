@@ -20,6 +20,56 @@
 <p class="error" role="alert">{{ message }}</p>
 {% endif %}
 
+{% if let Some(composition) = composition %}
+{# Folded shut by default. The summary carries the headline on its own, so the
+   panel costs one line of the page until somebody wants the detail — and the
+   table an operator came here to read is not pushed below three charts.
+
+   Every bar is `aria-hidden`: the table beside it carries the same figures, and
+   a screen reader announcing a row of `<rect>`s says nothing useful. #}
+<section class="wide">
+<details class="fold composition">
+  <summary>Composition — {{ composition.items }} item(s), {{ composition.total_size }}</summary>
+  <p class="hint">
+    The whole library, not the filter below — so the same question gets the same
+    answer whatever is typed in the search box.
+  </p>
+
+  {% for breakdown in composition.breakdowns %}
+  <div class="composition-block">
+    <h3>{{ breakdown.title }}</h3>
+    <p class="hint">{{ breakdown.hint }}</p>
+    <svg class="composition-bar" viewBox="0 0 {{ breakdown.width }} {{ breakdown.height }}"
+         preserveAspectRatio="none" role="presentation" aria-hidden="true" focusable="false">
+      {% for segment in breakdown.segments %}
+      <rect class="composition-seg composition-seg--{{ segment.accent }}"
+            x="{{ segment.x }}" y="0" width="{{ segment.w }}" height="{{ segment.h }}">
+        <title>{{ segment.title }}</title>
+      </rect>
+      {% endfor %}
+    </svg>
+    <table class="composition-legend">
+      <caption class="visually-hidden">{{ breakdown.title }}: {{ breakdown.hint }}</caption>
+      <thead>
+        <tr><th scope="col">{{ breakdown.title }}</th><th scope="col">Items</th><th scope="col">Size</th><th scope="col">Share</th></tr>
+      </thead>
+      <tbody>
+        {% for row in breakdown.rows %}
+        <tr>
+          <th scope="row"><span class="composition-key composition-seg--{{ row.accent }}" aria-hidden="true"></span>{{ row.label }}</th>
+          <td>{{ row.count }}</td>
+          <td>{{ row.size }}</td>
+          <td>{{ row.share }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+</details>
+</section>
+{% endif %}
+
 {# Laid out as a row rather than the stacked label/input every other form on
    this app uses: three short controls stacked filled most of a screen before
    the table an operator came here to read even started. #}
@@ -86,6 +136,7 @@
           {% if link.dir == "desc" %} &#9660;{% else %} &#9650;{% endif %}
         {% endif %}</a></th>
         {% endfor %}
+        <th title="Uploaded ÷ downloaded, as the torrent client itself reports it for this torrent. A dash means it has not reported anything yet">Ratio</th>
         <th title="Peers announcing to this instance's tracker right now: ↑ have the whole file, ↓ are still downloading. A dash means nobody is in the swarm at the moment">Peers</th>
         <th title="Friends whose scope admits this item — what they see in their feed">Visible to</th>
         <th title="The torrent's identity, and the join key for finding it in the client">Info hash</th>
@@ -127,6 +178,13 @@
           <br><span class="hint">
             {% if item.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}
           </span>
+          {% endif %}
+        </td>
+        <td class="nowrap"{% if !item.ratio_hint.is_empty() %} title="{{ item.ratio_hint }}"{% endif %}>
+          {% if item.ratio.is_empty() %}
+          <span class="hint">—</span>
+          {% else %}
+          {{ item.ratio }}
           {% endif %}
         </td>
         {# The tracker's own live count — first-hand, unlike anything the

@@ -8,19 +8,22 @@
 //!     --lidarr docker/state/lidarr/lidarr.db
 //! ```
 //!
+//! Also seeds a *second, independent* Radarr's own "wanted" catalog entry —
+//! untagged, and with no file — for the two-instance stack's requesting
+//! friend, via `--radarr-wanted`; see [`seed_radarr_wanted`].
+//!
 //! # Why not the API
 //!
 //! `POST /api/v3/series` triggers a metadata lookup against `services.sonarr.tv`,
 //! `POST /api/v3/movie` one against `api.radarr.video`, and adding an artist or
-//! album to Lidarr one against MusicBrainz. The compose stack's network is
-//! `internal: true` precisely so nothing can reach any of them, and even with
-//! egress the lookup would fail: every fixture title is invented, so there is
-//! nothing out there to find. Writing the rows directly is the only way to get
-//! tagged content while keeping the stack sealed.
+//! album to Lidarr one against MusicBrainz. Every fixture title is invented, so
+//! the lookup would find nothing even with egress — writing the rows directly
+//! is the only way to get tagged content at all, independent of whether the
+//! compose network can reach the internet.
 //!
 //! # Two consequences
 //!
-//! **All three apps must be stopped.** Each holds its SQLite database open and
+//! **Every named app must be stopped.** Each holds its SQLite database open and
 //! will not observe an external write while running.
 //!
 //! **This is coupled to their schemas**, which is why `compose.test.yml` pins
@@ -71,23 +74,30 @@ const MUSIC_ROOT: &str = ARR_MUSIC_PREFIX;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (sonarr, radarr, lidarr) = match parse_args() {
-        Ok(paths) => paths,
+    let args = match parse_args() {
+        Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");
             eprintln!(
                 "usage: seed-arr --sonarr <sonarr.db> --radarr <radarr.db> \
-                 [--lidarr <lidarr.db>]\n\
+                 [--lidarr <lidarr.db>] [--radarr-wanted <radarr.db>]\n\
                  \n\
                  Every named app must be stopped: it holds its database open and will\n\
-                 not see an external write while running. --lidarr is omitted by the\n\
-                 VPN and Transmission stacks, which carry no Lidarr container."
+                 not see an external write while running. Each flag is independent —\n\
+                 give any combination, though the single-instance stack always passes\n\
+                 --sonarr/--radarr[/--lidarr] together.\n\
+                 \n\
+                 --radarr-wanted seeds a *different* Radarr's own catalog entry for\n\
+                 the same fixture movie — untagged, and with no file — so its\n\
+                 automatic search has something to match another instance's shared\n\
+                 release against by TmdbId. Point it at a second Radarr's database,\n\
+                 never the same one --radarr already seeded."
             );
             return ExitCode::FAILURE;
         }
     };
 
-    if let Err(err) = run(&sonarr, &radarr, lidarr.as_deref()).await {
+    if let Err(err) = run(&args).await {
         eprintln!("seeding failed: {err}");
         return ExitCode::FAILURE;
     }
@@ -95,71 +105,98 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn parse_args() -> Result<(PathBuf, PathBuf, Option<PathBuf>), String> {
-    let mut sonarr = None;
-    let mut radarr = None;
-    let mut lidarr = None;
-    let mut args = std::env::args().skip(1);
+#[derive(Default)]
+struct Args {
+    sonarr: Option<PathBuf>,
+    radarr: Option<PathBuf>,
+    lidarr: Option<PathBuf>,
+    radarr_wanted: Option<PathBuf>,
+}
 
-    while let Some(flag) = args.next() {
+fn parse_args() -> Result<Args, String> {
+    let mut args = Args::default();
+    let mut raw = std::env::args().skip(1);
+
+    while let Some(flag) = raw.next() {
         let target = match flag.as_str() {
-            "--sonarr" => &mut sonarr,
-            "--radarr" => &mut radarr,
-            "--lidarr" => &mut lidarr,
+            "--sonarr" => &mut args.sonarr,
+            "--radarr" => &mut args.radarr,
+            "--lidarr" => &mut args.lidarr,
+            "--radarr-wanted" => &mut args.radarr_wanted,
             other => return Err(format!("unexpected argument {other:?}")),
         };
-        let value = args.next().ok_or(format!("{flag} needs a path"))?;
+        let value = raw.next().ok_or(format!("{flag} needs a path"))?;
         *target = Some(PathBuf::from(value));
     }
 
-    match (sonarr, radarr) {
-        (Some(sonarr), Some(radarr)) => Ok((sonarr, radarr, lidarr)),
-        _ => Err("--sonarr and --radarr are required".to_owned()),
+    if args.sonarr.is_none()
+        && args.radarr.is_none()
+        && args.lidarr.is_none()
+        && args.radarr_wanted.is_none()
+    {
+        return Err(
+            "nothing to do: give at least one of --sonarr, --radarr, --lidarr, --radarr-wanted"
+                .to_owned(),
+        );
     }
+
+    Ok(args)
 }
 
-async fn run(
-    sonarr_db: &std::path::Path,
-    radarr_db: &std::path::Path,
-    lidarr_db: Option<&std::path::Path>,
-) -> anyhow::Result<()> {
+async fn run(args: &Args) -> anyhow::Result<()> {
     // The fixture root is irrelevant here — only `arr_path`, `size` and
     // `scene_name` are used, and those describe how the *arr app sees the file,
     // not where it is on this host.
     let unused_root = std::path::Path::new("/");
-    let tv = tv_files(unused_root);
-    let movies = movie_files(unused_root);
 
-    let sonarr = open(sonarr_db).await?;
-    let tag_id = ensure_tag(&sonarr).await?;
-    seed_sonarr(&sonarr, tag_id, &tv).await?;
-    sonarr.close().await;
+    // Every flag is independent — the single-instance stack always passes
+    // `--sonarr`/`--radarr`/`--lidarr` together, but the two-instance stack's
+    // instance A has no Sonarr at all, so `--radarr` has to work alone.
+    if let Some(sonarr_db) = &args.sonarr {
+        let tv = tv_files(unused_root);
+        let sonarr = open(sonarr_db).await?;
+        let tag_id = ensure_tag(&sonarr).await?;
+        seed_sonarr(&sonarr, tag_id, &tv).await?;
+        sonarr.close().await;
+        println!(
+            "tagged {TAG_LABEL:?}: {} episode file(s) on {SERIES_TITLE:?}",
+            tv.len()
+        );
+    }
 
-    let radarr = open(radarr_db).await?;
-    let tag_id = ensure_tag(&radarr).await?;
-    seed_radarr(&radarr, tag_id, &movies).await?;
-    radarr.close().await;
+    if let Some(radarr_db) = &args.radarr {
+        let movies = movie_files(unused_root);
+        let radarr = open(radarr_db).await?;
+        let tag_id = ensure_tag(&radarr).await?;
+        seed_radarr(&radarr, tag_id, &movies).await?;
+        radarr.close().await;
+        println!(
+            "tagged {TAG_LABEL:?}: {} movie file(s) on {MOVIE_TITLE:?}",
+            movies.len()
+        );
+    }
 
-    let music_count = if let Some(lidarr_db) = lidarr_db {
+    if let Some(lidarr_db) = &args.lidarr {
         let music = music_files(unused_root);
         let lidarr = open(lidarr_db).await?;
         let tag_id = ensure_tag(&lidarr).await?;
         seed_lidarr(&lidarr, tag_id, &music).await?;
         lidarr.close().await;
-        Some(music.len())
-    } else {
-        None
-    };
-
-    print!(
-        "tagged {TAG_LABEL:?}: {} episode file(s) on {SERIES_TITLE:?}, {} movie file(s) on {MOVIE_TITLE:?}",
-        tv.len(),
-        movies.len()
-    );
-    match music_count {
-        Some(count) => println!(", {count} track file(s) on {ARTIST_NAME:?}"),
-        None => println!(" (no --lidarr given, so nothing was tagged on {ARTIST_NAME:?})"),
+        println!(
+            "tagged {TAG_LABEL:?}: {} track file(s) on {ARTIST_NAME:?}",
+            music.len()
+        );
     }
+
+    if let Some(radarr_wanted_db) = &args.radarr_wanted {
+        let db = open(radarr_wanted_db).await?;
+        seed_radarr_wanted(&db).await?;
+        db.close().await;
+        println!(
+            "seeded a wanted (untagged, fileless) {MOVIE_TITLE:?} for a second Radarr's own automatic search"
+        );
+    }
+
     println!("start the apps just stopped again to pick this up");
     Ok(())
 }
@@ -293,27 +330,7 @@ async fn seed_radarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
 
     db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(MOVIE_ROOT))
         .await?;
-
-    // Radarr 5 keeps the descriptive half of a movie in its own table, so the row
-    // has to exist before `Movies` can point at it.
-    sqlx::query(
-        "INSERT OR REPLACE INTO MovieMetadata (
-             Id, TmdbId, ImdbId, Images, Genres, Title, SortTitle, CleanTitle,
-             OriginalTitle, CleanOriginalTitle, OriginalLanguage, Status, Runtime,
-             Year, Ratings, Recommendations, Overview
-         ) VALUES (?, ?, ?, '[]', '[]', ?, ?, ?, ?, ?, 1, 3, 100, ?, '{}', '[]', '')",
-    )
-    .bind(MOVIE_ID)
-    .bind(MOVIE_TMDB_ID)
-    .bind(MOVIE_IMDB_ID)
-    .bind(MOVIE_TITLE)
-    .bind(MOVIE_TITLE.to_lowercase())
-    .bind(clean(MOVIE_TITLE))
-    .bind(MOVIE_TITLE)
-    .bind(clean(MOVIE_TITLE))
-    .bind(MOVIE_YEAR)
-    .execute(db)
-    .await?;
+    insert_movie_metadata(db).await?;
 
     sqlx::query(
         "INSERT OR REPLACE INTO Movies (
@@ -344,6 +361,65 @@ async fn seed_radarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
     .bind(file.scene_name.as_deref())
     .bind(QUALITY)
     .bind(LANGUAGES)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+/// The descriptive half of the fixture movie, shared by [`seed_radarr`]
+/// (tagged, with a file) and [`seed_radarr_wanted`] (untagged, fileless — a
+/// second, independent Radarr's own catalog entry, so its automatic search
+/// has something to match the first Radarr's shared release against by
+/// `TmdbId`). Radarr 5 keeps this in its own table, so it has to exist
+/// before either caller's `Movies` row can point at it.
+async fn insert_movie_metadata(db: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO MovieMetadata (
+             Id, TmdbId, ImdbId, Images, Genres, Title, SortTitle, CleanTitle,
+             OriginalTitle, CleanOriginalTitle, OriginalLanguage, Status, Runtime,
+             Year, Ratings, Recommendations, Overview
+         ) VALUES (?, ?, ?, '[]', '[]', ?, ?, ?, ?, ?, 1, 3, 100, ?, '{}', '[]', '')",
+    )
+    .bind(MOVIE_ID)
+    .bind(MOVIE_TMDB_ID)
+    .bind(MOVIE_IMDB_ID)
+    .bind(MOVIE_TITLE)
+    .bind(MOVIE_TITLE.to_lowercase())
+    .bind(clean(MOVIE_TITLE))
+    .bind(MOVIE_TITLE)
+    .bind(clean(MOVIE_TITLE))
+    .bind(MOVIE_YEAR)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// A second Radarr's own "wanted" catalog entry for the fixture movie — no
+/// tag, and critically no `MovieFiles` row, so this Radarr considers it
+/// missing and eligible for its own automatic search. Exists for the
+/// two-instance end-to-end test: instance A's Radarr is seeded by
+/// [`seed_radarr`] and shares the file; instance B's Radarr is seeded by
+/// this function so its real automatic-search-and-grab flow has a matching
+/// `TmdbId` to search for, without B's own sharerr ever discovering or
+/// tagging the row itself.
+async fn seed_radarr_wanted(db: &SqlitePool) -> anyhow::Result<()> {
+    let movie_path = format!("{MOVIE_ROOT}/{MOVIE_FOLDER}");
+
+    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(MOVIE_ROOT))
+        .await?;
+    insert_movie_metadata(db).await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO Movies (
+             Id, Path, Monitored, QualityProfileId, Added, Tags, MovieFileId,
+             MinimumAvailability, MovieMetadataId
+         ) VALUES (?, ?, 1, 1, ?, '[]', 0, 3, ?)",
+    )
+    .bind(MOVIE_ID)
+    .bind(&movie_path)
+    .bind(ADDED)
+    .bind(MOVIE_ID)
     .execute(db)
     .await?;
 

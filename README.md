@@ -1,5 +1,12 @@
 # sharerr
 
+[![CI](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml)
+[![Docker](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml)
+[![CodeQL](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/codeql.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/codeql.yml)
+[![Coverage](https://codecov.io/gh/ivylikethevine/sharerr-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/ivylikethevine/sharerr-rs)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
+
 ---
 
 ## EXPERIMENTAL UNTIL v1.0.0-stable RELEASES
@@ -53,7 +60,8 @@ design is built around.
 See also: [the configuration reference](docs/CONFIGURATION.md), [supported
 services](docs/SUPPORTED.md), [what's deliberately not
 supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
-roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
+roadmap, including ideas considered but not all committed
+to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 [the security policy](docs/SECURITY.md).
 
 ## What works today
@@ -67,8 +75,12 @@ roadmap](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Torznab feed for Prowlarr, with magnet links                                     | ✅ |
 | Jackett compatibility: URLs, indexer list, JSON results                          | ✅ |
 | Media metadata in the feeds: resolution, codecs, channels, runtime               | ✅ |
+| Audio metadata too: sample rate, bit depth, and the real format in the title     | ✅ |
 | Web UI: first-run wizard, settings, connection tests                             | ✅ |
 | Items page: every discovered file, its torrent and announce-token status         | ✅ |
+| Library composition: what you are sharing, by format, state and source           | ✅ |
+| Sync history strip: every recent pass at a glance, failures marked               | ✅ |
+| Status tiles that refresh themselves, without re-polling your *arr apps          | ✅ |
 | Path-mapping diagnostics in the browser                                          | ✅ |
 | Friend/peer management: per-friend keys, revoke, last-seen                       | ✅ |
 | Per-friend scoping: this friend sees TV, that one films                          | ✅ |

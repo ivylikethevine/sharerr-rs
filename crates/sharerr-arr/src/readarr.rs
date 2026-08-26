@@ -14,7 +14,7 @@ use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
-use crate::models::non_empty;
+use crate::models::{MediaInfo, non_empty};
 use crate::{Discovered, Tagged, fetch_tagged};
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +68,12 @@ struct BookFile {
     size: u64,
     #[serde(default)]
     scene_name: Option<String>,
+    /// Audiobooks only. An ebook has no streams to analyse, so Readarr reports
+    /// `null` here for most of a typical library — which the shared
+    /// [`MediaInfo::into_meta`] already collapses to "unknown" rather than
+    /// "nothing", the same as an *arr that has not got round to a file yet.
+    #[serde(default)]
+    media_info: Option<MediaInfo>,
 }
 
 /// What one tagged author needs fetching for it.
@@ -130,9 +136,8 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 scene_name: non_empty(file.scene_name.clone()),
                 // Lidarr and Readarr report no pre-rename path.
                 original_path: None,
-                // Not yet read from Readarr's `mediaInfo`; the sync pass probes the
-                // file instead. See docs/ROADMAP.md.
-                media: None,
+                // Populated for an audiobook, `None` for an ebook.
+                media: file.media_info.and_then(MediaInfo::into_meta),
             });
         }
     }

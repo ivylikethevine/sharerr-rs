@@ -1861,6 +1861,18 @@
               "string",
               "null"
             ]
+          },
+          "AudioSampleRate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "AudioBitDepth": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

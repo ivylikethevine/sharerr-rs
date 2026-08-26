@@ -260,14 +260,23 @@ impl TorrentClient for RtorrentClient {
                     Param::Str("d.custom1="),
                     Param::Str("d.complete="),
                     Param::Str("d.is_active="),
+                    Param::Str("d.ratio="),
                 ],
             )
             .await?;
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let [hash, name, directory, base_path, custom1, complete, active] =
-                take("d.multicall2", row)?;
+            let [
+                hash,
+                name,
+                directory,
+                base_path,
+                custom1,
+                complete,
+                active,
+                ratio,
+            ] = take("d.multicall2", row)?;
 
             let tag = as_str(&custom1).to_owned();
             if let Some(wanted) = category
@@ -288,6 +297,12 @@ impl TorrentClient for RtorrentClient {
                 } else {
                     vec![tag]
                 },
+                // `d.ratio=` reports the up/down ratio scaled by 1000 (rTorrent's
+                // XML-RPC has no float type), e.g. `1850` means a ratio of 1.85.
+                ratio: Some(as_u64(&ratio) as f64 / 1000.0),
+                // No per-torrent ratio-limit RPC exists at all — see the module
+                // docs' "What rTorrent cannot do".
+                ratio_limit: None,
             });
         }
         Ok(out)
@@ -841,14 +856,13 @@ mod tests {
     }
 
     /// The shape `d.multicall2` actually returns: an outer array of one inner
-    /// array per torrent.
-    fn multicall_body(rows: &[[&str; 7]]) -> String {
+    /// array per torrent. The last three cells — complete, is_active, ratio —
+    /// come back as rTorrent's own i8, not a <boolean> or <double> tag.
+    fn multicall_body(rows: &[[&str; 8]]) -> String {
         let mut inner = String::new();
         for row in rows {
             inner.push_str("<value><array><data>");
             for (i, cell) in row.iter().enumerate() {
-                // Booleans (complete/is_active, the last two slots) come back
-                // as rTorrent's own i8, not a <boolean> tag.
                 if i >= 5 {
                     let _ = write!(inner, "<value><i8>{cell}</i8></value>");
                 } else {
@@ -897,6 +911,7 @@ mod tests {
                     "sharerr",
                     "1",
                     "1",
+                    "1850",
                 ],
                 [
                     "123456",
@@ -906,6 +921,7 @@ mod tests {
                     "other",
                     "0",
                     "1",
+                    "0",
                 ],
             ])))
             .mount(&server)
@@ -918,6 +934,11 @@ mod tests {
         assert_eq!(all[0].content_path, "/downloads/a");
         assert!(all[0].is_seeding, "complete=1 and is_active=1 is seeding");
         assert!(!all[1].is_seeding, "complete=0 is not seeding yet");
+        // `d.ratio=` is scaled by 1000: 1850 means a ratio of 1.85.
+        assert_eq!(all[0].ratio, Some(1.85));
+        assert_eq!(all[1].ratio, Some(0.0));
+        // rTorrent has no per-torrent ratio-limit RPC at all.
+        assert_eq!(all[0].ratio_limit, None);
     }
 
     #[tokio::test]
@@ -925,8 +946,8 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_string(multicall_body(&[
-                ["aa", "a", "/d", "/d/a", "sharerr", "1", "1"],
-                ["bb", "b", "/d", "/d/b", "something-else", "1", "1"],
+                ["aa", "a", "/d", "/d/a", "sharerr", "1", "1", "0"],
+                ["bb", "b", "/d", "/d/b", "something-else", "1", "1", "0"],
             ])))
             .mount(&server)
             .await;

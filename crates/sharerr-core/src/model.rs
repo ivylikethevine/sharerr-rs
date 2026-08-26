@@ -146,6 +146,9 @@ pub struct ExternalIds {
 /// report what it did learn rather than nothing; `String` because these values are
 /// rendered verbatim into a feed and never computed with, and because
 /// `audioChannels` is `5.1` — a float, which would cost this type its `Eq`.
+/// The audio pair added for music keeps that invariant even though a sample rate
+/// and a bit depth are both integers: one rule for the whole type is easier to
+/// hold than a rule with two exceptions, and neither value is ever arithmetic.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MediaMeta {
@@ -173,6 +176,15 @@ pub struct MediaMeta {
     /// `H:MM:SS`, as the *arr apps report it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Sampling frequency in hertz, e.g. `44100`. Stored raw for the same reason
+    /// [`Self::resolution`] is: the shorthand is derivable from the number
+    /// ([`Self::sample_rate_khz`]) and the number is not derivable back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<String>,
+    /// Bits per sample, e.g. `16` or `24`. Absent for a lossy codec, which has no
+    /// bit depth to report — see [`Self::is_lossless`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_bit_depth: Option<String>,
 }
 
 impl MediaMeta {
@@ -251,6 +263,85 @@ impl MediaMeta {
             }
         }
         None
+    }
+
+    /// The audio codec as a release title spells it.
+    ///
+    /// The audio counterpart of [`Self::scene_video_codec`], and unrecognised
+    /// values yield `None` for the same reason. A music release is matched on this
+    /// token far more strictly than a video one is: a Lidarr quality profile
+    /// distinguishes FLAC from MP3 and nothing else in the name substitutes.
+    pub fn scene_audio_format(&self) -> Option<&'static str> {
+        Self::audio_format(self.audio_codec.as_deref()?).map(|(token, _)| token)
+    }
+
+    /// Whether the audio is stored losslessly, when the codec says so.
+    ///
+    /// Derived from [`Self::audio_codec`] rather than stored beside it: a stored
+    /// flag can end up contradicting the codec it sits next to, and no producer
+    /// this project reads reports the two independently anyway.
+    pub fn is_lossless(&self) -> Option<bool> {
+        Self::audio_format(self.audio_codec.as_deref()?).map(|(_, lossless)| lossless)
+    }
+
+    /// One lookup behind [`Self::scene_audio_format`] and [`Self::is_lossless`], so
+    /// the token and the lossless flag cannot disagree about the same codec.
+    ///
+    /// Matching is `contains` over the codec with separators stripped, because the
+    /// same codec arrives spelled several ways: `A_AC3` from a Matroska header,
+    /// `EAC3` from Sonarr, `DTS-HD MA` from a remux. Order is therefore load
+    /// bearing — a needle that is a substring of another codec's name must be
+    /// tried after it, which is why `eac3` precedes `ac3` and `wavpack` precedes
+    /// `wav`.
+    fn audio_format(codec: &str) -> Option<(&'static str, bool)> {
+        let raw: String = codec
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        for (needle, token, lossless) in [
+            ("wavpack", "WV", true),
+            ("truehd", "TrueHD", true),
+            ("dtshd", "DTS-HD", true),
+            ("flac", "FLAC", true),
+            ("alac", "ALAC", true),
+            ("eac3", "EAC3", false),
+            ("ac3", "AC3", false),
+            ("dts", "DTS", false),
+            ("mp3", "MP3", false),
+            // `A_MPEG/L3` from a Matroska header, `MPEG Audio (Layer 3)` from
+            // MediaInfo — the same codec, and neither spelling contains `mp3`.
+            ("mpegl3", "MP3", false),
+            ("layer3", "MP3", false),
+            ("aac", "AAC", false),
+            ("opus", "OPUS", false),
+            ("vorbis", "VORBIS", false),
+            ("wma", "WMA", false),
+            ("ape", "APE", true),
+            ("pcm", "PCM", true),
+            ("wav", "WAV", true),
+        ] {
+            if raw.contains(needle) {
+                return Some((token, lossless));
+            }
+        }
+        None
+    }
+
+    /// [`Self::audio_sample_rate`] as a release and a reader both write it —
+    /// `44100` becomes `44.1 kHz`.
+    ///
+    /// Display only: a trailing `.0` is dropped, so `48000` is `48 kHz` rather
+    /// than `48.0 kHz`. Anything that does not parse as a whole number of hertz
+    /// yields `None` rather than being echoed through unformatted.
+    pub fn sample_rate_khz(&self) -> Option<String> {
+        let hz: u32 = self.audio_sample_rate.as_deref()?.trim().parse().ok()?;
+        let khz = f64::from(hz) / 1000.0;
+        if khz.fract() == 0.0 {
+            Some(format!("{} kHz", hz / 1000))
+        } else {
+            Some(format!("{khz:.1} kHz"))
+        }
     }
 }
 
@@ -411,7 +502,7 @@ impl ShareState {
 }
 
 /// One file that has been (or is being) shared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SharedItem {
     pub id: Option<i64>,
     pub source: MediaSource,
@@ -461,6 +552,17 @@ pub struct SharedItem {
     /// guessing from the title, and folded into the release title itself when
     /// there was no real name to use. See [`MediaMeta`].
     pub media: Option<MediaMeta>,
+    /// Uploaded ÷ downloaded, as the torrent client itself reports it for this
+    /// specific torrent. Refreshed each sync pass by
+    /// `sharerr_store::Store::set_ratio`; `None` before a torrent exists, or for
+    /// a row that predates this column.
+    pub achieved_ratio: Option<f64>,
+    /// The per-torrent seed-ratio limit the client is actually enforcing, when
+    /// it can express one as a plain number. `None` covers "no limit set on
+    /// this torrent", "the client falls back to its own global default", and
+    /// (rTorrent) "this backend has no per-torrent ratio-limit RPC at all" —
+    /// see `sharerr_client::TorrentSummary::ratio_limit`.
+    pub ratio_limit_reported: Option<f64>,
 }
 
 impl SharedItem {
@@ -537,6 +639,11 @@ impl Discovered {
             // Assigned by the store on insert; a discovered item has not been
             // recorded yet, so it has no publication date to report.
             created_at: None,
+            // A rediscovery describes a file, not a torrent, so it never knows
+            // these — `Store::upsert`'s COALESCE preserves whatever
+            // `Store::set_ratio` last wrote.
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 }
@@ -629,6 +736,87 @@ mod tests {
         let back: MediaMeta = serde_json::from_str(r#"{"resolution":"1920x1080"}"#).unwrap();
         assert_eq!(back.resolution.as_deref(), Some("1920x1080"));
         assert_eq!(back.audio_codec, None);
+    }
+
+    /// The audio counterpart of the video codec table, and the one the naming of a
+    /// music release turns on.
+    #[test]
+    fn audio_codecs_reduce_to_the_token_a_release_uses() {
+        for (reported, token, lossless) in [
+            ("FLAC", "FLAC", true),
+            ("flac", "FLAC", true),
+            ("A_FLAC", "FLAC", true),
+            ("ALAC", "ALAC", true),
+            ("MP3", "MP3", false),
+            ("MPEG Audio (Layer 3)", "MP3", false),
+            ("A_MPEG/L3", "MP3", false),
+            ("AAC", "AAC", false),
+            ("Opus", "OPUS", false),
+            ("Vorbis", "VORBIS", false),
+            ("WavPack", "WV", true),
+            ("TrueHD", "TrueHD", true),
+            ("DTS-HD MA", "DTS-HD", true),
+        ] {
+            let meta = MediaMeta {
+                audio_codec: Some(reported.to_owned()),
+                ..MediaMeta::default()
+            };
+            assert_eq!(meta.scene_audio_format(), Some(token), "{reported}");
+            assert_eq!(meta.is_lossless(), Some(lossless), "{reported}");
+        }
+    }
+
+    /// The table is `contains`-matched, so a needle that is a substring of another
+    /// codec's name has to be tried after it. These three are the pairs that
+    /// actually collide, and getting the order wrong reads `A_AC3` as AAC.
+    #[test]
+    fn colliding_audio_codec_names_resolve_to_the_longer_match() {
+        for (reported, token) in [
+            ("A_AC3", "AC3"),
+            ("EAC3", "EAC3"),
+            ("WavPack", "WV"),
+            ("DTS-HD MA", "DTS-HD"),
+        ] {
+            let meta = MediaMeta {
+                audio_codec: Some(reported.to_owned()),
+                ..MediaMeta::default()
+            };
+            assert_eq!(meta.scene_audio_format(), Some(token), "{reported}");
+        }
+    }
+
+    /// An unknown codec yields no token, for the same reason an unknown video
+    /// codec does: the string would be parsed as part of the release name.
+    #[test]
+    fn an_unknown_audio_codec_yields_no_token_and_no_verdict() {
+        let meta = MediaMeta {
+            audio_codec: Some("Some Future Codec".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(meta.scene_audio_format(), None);
+        assert_eq!(meta.is_lossless(), None);
+        assert_eq!(MediaMeta::default().is_lossless(), None);
+    }
+
+    #[test]
+    fn a_sample_rate_renders_in_kilohertz_without_a_trailing_zero() {
+        let rate = |hz: &str| {
+            MediaMeta {
+                audio_sample_rate: Some(hz.to_owned()),
+                ..MediaMeta::default()
+            }
+            .sample_rate_khz()
+        };
+        assert_eq!(rate("44100").as_deref(), Some("44.1 kHz"));
+        assert_eq!(rate("48000").as_deref(), Some("48 kHz"));
+        assert_eq!(rate("96000").as_deref(), Some("96 kHz"));
+        assert_eq!(rate("192000").as_deref(), Some("192 kHz"));
+        assert_eq!(
+            rate("not a number"),
+            None,
+            "an unparseable rate is dropped rather than echoed through"
+        );
+        assert_eq!(MediaMeta::default().sample_rate_khz(), None);
     }
 
     #[test]

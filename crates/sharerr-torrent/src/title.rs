@@ -131,11 +131,13 @@ pub fn resolve(
 /// tokens. Which ones depends on how much is known about the file:
 ///
 /// - With [`MediaMeta`], the resolution and video codec are the file's real
-///   ones, and only the source token stays invented (see below).
+///   ones — or, for music, the real audio format — and only the source token
+///   stays invented (see below).
 /// - Without it, the tokens are the flat guess this function has always
 ///   produced. `1080p.WEB-DL.x264` is not a claim about the file so much as the
 ///   most common shape of one, chosen because it is the least likely to be
-///   filtered out.
+///   filtered out. `FLAC` is the same kind of guess for a track: the format a
+///   friend's Lidarr is least likely to reject, not something read off the file.
 ///
 /// **The source token is a fiction either way.** `WEB-DL` versus `BluRay` versus
 /// `HDTV` describes where a release came from, and no amount of reading the file
@@ -150,6 +152,9 @@ pub fn synthesize(spec: &MediaSpec, media: Option<&MediaMeta>) -> String {
     let codec = media
         .and_then(MediaMeta::scene_video_codec)
         .unwrap_or("x264");
+    let audio = media
+        .and_then(MediaMeta::scene_audio_format)
+        .unwrap_or("FLAC");
     match spec {
         MediaSpec::Episode {
             series_title,
@@ -170,18 +175,20 @@ pub fn synthesize(spec: &MediaSpec, media: Option<&MediaMeta>) -> String {
         },
         // Music convention is `Artist-Album-FORMAT-GROUP`, hyphen-separated rather
         // than dotted, and with an audio format instead of a video codec. A music
-        // release named like a TV episode is rejected by the profiles that matter.
+        // release named like a TV episode is rejected by the profiles that matter,
+        // and one named `FLAC` that is really an MP3 is rejected on arrival — the
+        // format token is the one thing a Lidarr quality profile reads closely.
         MediaSpec::Track {
             artist,
             album,
             track,
         } => match track {
             Some(track) => format!(
-                "{}-{}-{track:02}-FLAC-{GROUP}",
+                "{}-{}-{track:02}-{audio}-{GROUP}",
                 dotted(artist),
                 dotted(album)
             ),
-            None => format!("{}-{}-FLAC-{GROUP}", dotted(artist), dotted(album)),
+            None => format!("{}-{}-{audio}-{GROUP}", dotted(artist), dotted(album)),
         },
         // Books have no scene convention worth imitating; author and title are what
         // a reader and a parser both look for.
@@ -614,19 +621,59 @@ mod tests {
         );
     }
 
+    fn track() -> MediaSpec {
+        MediaSpec::Track {
+            artist: "Copper Vale".to_owned(),
+            album: "Harrowmere".to_owned(),
+            track: Some(3),
+        }
+    }
+
     /// Music and books have no resolution or video codec, so metadata must not
-    /// leak into their naming conventions.
+    /// leak into their naming conventions — and a track whose metadata says
+    /// nothing about its audio keeps the historical `FLAC` guess.
     #[test]
     fn audio_and_book_titles_ignore_video_metadata() {
-        let track = synthesize(
-            &MediaSpec::Track {
-                artist: "Copper Vale".to_owned(),
-                album: "Harrowmere".to_owned(),
-                track: Some(3),
-            },
-            Some(&full_meta()),
+        assert_eq!(
+            synthesize(&track(), Some(&full_meta())),
+            "Copper.Vale-Harrowmere-03-FLAC-SHARERR"
         );
-        assert_eq!(track, "Copper.Vale-Harrowmere-03-FLAC-SHARERR");
+        assert_eq!(
+            synthesize(
+                &MediaSpec::Book {
+                    author: "Copper Vale".to_owned(),
+                    title: "Harrowmere".to_owned(),
+                },
+                Some(&full_meta()),
+            ),
+            "Copper.Vale-Harrowmere-EPUB-SHARERR"
+        );
+    }
+
+    /// The whole point of reading Lidarr's `mediaInfo`: a friend's quality profile
+    /// reads the format token, and calling an MP3 a FLAC gets the release rejected
+    /// on arrival rather than filtered out up front.
+    #[test]
+    fn a_tracks_format_token_is_the_format_the_file_actually_is() {
+        let lossy = MediaMeta {
+            audio_codec: Some("MP3".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(
+            synthesize(&track(), Some(&lossy)),
+            "Copper.Vale-Harrowmere-03-MP3-SHARERR"
+        );
+
+        // An unrecognised codec falls back rather than dropping a string nobody
+        // parses into the middle of a release name.
+        let unknown = MediaMeta {
+            audio_codec: Some("Some Future Codec".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(
+            synthesize(&track(), Some(&unknown)),
+            "Copper.Vale-Harrowmere-03-FLAC-SHARERR"
+        );
     }
 
     /// The metadata reaches `synthesize` only through the fallback path — a real

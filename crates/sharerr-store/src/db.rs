@@ -251,9 +251,10 @@ impl Store {
             INSERT INTO shared_items (
                 source, source_id, file_id, spec_json, release_title, arr_path,
                 size, ids_json, info_hash, announce_token_fp, created_by_sharerr,
-                state, last_error, created_at, updated_at, media_json
+                state, last_error, created_at, updated_at, media_json,
+                achieved_ratio, ratio_limit_reported
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17)
             ON CONFLICT (source, file_id) DO UPDATE SET
                 source_id     = excluded.source_id,
                 spec_json     = excluded.spec_json,
@@ -282,6 +283,12 @@ impl Store {
                 -- would silently lose attributes it had been publishing. A source
                 -- that later reports better metadata still overwrites.
                 media_json    = COALESCE(excluded.media_json, shared_items.media_json),
+                -- A rediscovery describes a file, not a torrent, so it never
+                -- carries these — only `set_ratio` does, on the sync pass's
+                -- fast (Unchanged) path. Same reasoning as media_json.
+                achieved_ratio = COALESCE(excluded.achieved_ratio, shared_items.achieved_ratio),
+                ratio_limit_reported =
+                    COALESCE(excluded.ratio_limit_reported, shared_items.ratio_limit_reported),
                 state         = excluded.state,
                 last_error    = excluded.last_error,
                 updated_at    = excluded.updated_at
@@ -303,6 +310,8 @@ impl Store {
         .bind(item.last_error.as_deref())
         .bind(now)
         .bind(media_json.as_deref())
+        .bind(item.achieved_ratio)
+        .bind(item.ratio_limit_reported)
         .fetch_one(&self.pool)
         .await?;
 
@@ -389,6 +398,32 @@ impl Store {
              WHERE source = ?3 AND file_id = ?4",
         )
         .bind(announce_token_fp)
+        .bind(now_epoch())
+        .bind(source.as_str())
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Record what the torrent client itself reports for an already-seeding
+    /// item's achieved ratio and per-torrent limit. Called from the sync pass's
+    /// fast path alongside [`Self::set_announce_token_fp`], for the same
+    /// reason: touching only these columns is one write instead of a full
+    /// [`Self::upsert`] for every unchanged item on every pass.
+    pub async fn set_ratio(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        ratio: Option<f64>,
+        ratio_limit: Option<f64>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE shared_items SET achieved_ratio = ?1, ratio_limit_reported = ?2, \
+             updated_at = ?3 WHERE source = ?4 AND file_id = ?5",
+        )
+        .bind(ratio)
+        .bind(ratio_limit)
         .bind(now_epoch())
         .bind(source.as_str())
         .bind(file_id)
@@ -605,7 +640,7 @@ pub struct RunRecord {
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
      arr_path, size, ids_json, info_hash, announce_token_fp, created_by_sharerr, state, \
-     last_error, created_at, media_json \
+     last_error, created_at, media_json, achieved_ratio, ratio_limit_reported \
      FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
@@ -655,6 +690,8 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at").ok(),
         media,
+        achieved_ratio: row.try_get("achieved_ratio")?,
+        ratio_limit_reported: row.try_get("ratio_limit_reported")?,
     })
 }
 
@@ -722,6 +759,8 @@ mod tests {
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 
@@ -862,6 +901,8 @@ mod tests {
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 
@@ -1080,6 +1121,49 @@ mod tests {
 
         let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
         assert_eq!(got.announce_token_fp.as_deref(), Some("fp1"));
+    }
+
+    /// The fast path's other write, alongside `set_announce_token_fp` — proving
+    /// `set_ratio` cannot be confused with `set_seeding` or `upsert` at the SQL
+    /// layer either.
+    #[tokio::test]
+    async fn set_ratio_touches_only_the_ratio_columns() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .await
+            .unwrap();
+
+        store
+            .set_ratio(MediaSource::Sonarr, 1001, Some(1.85), Some(2.0))
+            .await
+            .unwrap();
+
+        let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
+        assert_eq!(got.info_hash.as_deref(), Some("abc123"), "must not change");
+        assert_eq!(got.state, ShareState::Seeding, "must not change");
+        assert_eq!(got.achieved_ratio, Some(1.85));
+        assert_eq!(got.ratio_limit_reported, Some(2.0));
+    }
+
+    /// A rediscovery must not blank a ratio only `set_ratio` knows — same
+    /// COALESCE reasoning as `upsert_never_blanks_an_existing_fingerprint`.
+    #[tokio::test]
+    async fn upsert_never_blanks_an_existing_ratio() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        store
+            .set_ratio(MediaSource::Sonarr, 1001, Some(1.85), Some(2.0))
+            .await
+            .unwrap();
+
+        // A plain rediscovery, as `Discovered::into_shared_item` produces one.
+        store.upsert(&episode(1001)).await.unwrap();
+
+        let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
+        assert_eq!(got.achieved_ratio, Some(1.85));
+        assert_eq!(got.ratio_limit_reported, Some(2.0));
     }
 
     #[tokio::test]

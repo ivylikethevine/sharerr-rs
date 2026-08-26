@@ -62,6 +62,13 @@ struct AddedTorrent {
     /// fake has no bytes for, which the route answers as a 404 — the same
     /// shape a real qBittorrent gives for an unknown hash.
     data: Vec<u8>,
+    /// What `torrents/info` reports for this torrent's achieved ratio and
+    /// per-torrent limit. `ratio_limit: -2.0` is qBittorrent's own
+    /// "use the global default" sentinel — the same default a freshly added
+    /// torrent actually has — which `TorrentInfo::ratio_limit_reported` maps
+    /// to `None`.
+    ratio: f64,
+    ratio_limit: f64,
 }
 
 impl AddedTorrent {
@@ -78,6 +85,8 @@ impl AddedTorrent {
             files: files.iter().map(|f| (*f).to_owned()).collect(),
             form: String::new(),
             data: Vec::new(),
+            ratio: 0.0,
+            ratio_limit: -2.0,
         }
     }
 
@@ -140,6 +149,8 @@ impl FakeQbit {
                     // Nothing to export: sharerr keeps its own copy of every
                     // torrent it adds, so it never asks the client for one back.
                     data: Vec::new(),
+                    ratio: 0.0,
+                    ratio_limit: -2.0,
                 });
                 ResponseTemplate::new(200).set_body_string("Ok.")
             })
@@ -165,6 +176,8 @@ impl FakeQbit {
                             "progress": 1.0,
                             "category": "sharerr",
                             "tags": "sharerr",
+                            "ratio": t.ratio,
+                            "ratio_limit": t.ratio_limit,
                         })
                     })
                     .collect();
@@ -286,6 +299,17 @@ impl FakeQbit {
             })
             .mount(server)
             .await;
+    }
+
+    /// What a subsequent `torrents/info` poll reports for this torrent's
+    /// achieved ratio and per-torrent limit — simulating a pass where the
+    /// client has since accumulated seeding progress.
+    fn set_ratio(&self, hash: &str, ratio: f64, ratio_limit: f64) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(torrent) = state.torrents.iter_mut().find(|t| t.hash == hash) {
+            torrent.ratio = ratio;
+            torrent.ratio_limit = ratio_limit;
+        }
     }
 
     fn snapshot(&self) -> QbitSnapshot {
@@ -565,6 +589,34 @@ async fn a_rotated_endpoint_rewrites_torrents_and_repoints_the_client() {
         2,
         "rotation must be idempotent"
     );
+}
+
+/// The Unchanged fast path — an already-seeding item whose torrent is still
+/// live — is what carries the achieved ratio into the store on every later
+/// pass, not just the add. See `docs/ROADMAP.md`'s "Achieved ratio" entry.
+#[tokio::test]
+async fn the_unchanged_fast_path_records_the_reported_ratio() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    let items = h.syncer.store().all_items().await.unwrap();
+    let item = items.first().expect("the default library shares something");
+    assert_eq!(item.achieved_ratio, None, "nothing reported yet");
+    let hash = item.info_hash.clone().expect("a seeding item has a hash");
+
+    h.qbit.set_ratio(&hash, 1.85, 2.0);
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.unchanged, 2, "a second pass must still be a no-op");
+
+    let updated = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.achieved_ratio, Some(1.85));
+    assert_eq!(updated.ratio_limit_reported, Some(2.0));
 }
 
 #[tokio::test]
@@ -998,7 +1050,7 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
         .share(
             &item,
             &announce,
-            &HashSet::new(),
+            &HashMap::new(),
             &super::seed::KnownTorrents::default(),
             None,
             false,
@@ -1461,6 +1513,8 @@ async fn a_broken_arr_app_never_causes_its_shares_to_be_withdrawn() {
         state: ShareState::Seeding,
         last_error: None,
         created_at: None,
+        achieved_ratio: None,
+        ratio_limit_reported: None,
     };
     h.syncer.store().upsert(&movie).await.unwrap();
 

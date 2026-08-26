@@ -87,6 +87,62 @@ impl LoginPage {
     }
 }
 
+/// What the library is made of, three ways — see `web::composition`.
+#[derive(Debug)]
+pub struct Composition {
+    pub items: usize,
+    /// Bytes across the whole library, pre-rendered.
+    pub total_size: String,
+    pub breakdowns: Vec<Breakdown>,
+}
+
+/// One roll-up: a stacked bar and the table that carries the same figures for a
+/// reader who cannot see it.
+#[derive(Debug)]
+pub struct Breakdown {
+    pub title: &'static str,
+    pub hint: &'static str,
+    pub segments: Vec<Segment>,
+    pub rows: Vec<CompositionRow>,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// One slice of a stacked bar, in user units. Colour is a CSS modifier suffix,
+/// not a value — the same arrangement `RunBar` uses, so the palette lives in one
+/// stylesheet rather than being computed per request.
+#[derive(Debug)]
+pub struct Segment {
+    pub x: i32,
+    pub w: i32,
+    pub h: i32,
+    pub accent: &'static str,
+    pub title: String,
+}
+
+/// A [`Segment`]'s figures, for the table beneath the bar. The bar is
+/// `aria-hidden`; this is what is actually read out.
+#[derive(Debug)]
+pub struct CompositionRow {
+    pub label: String,
+    pub accent: &'static str,
+    pub count: usize,
+    pub size: String,
+    pub share: String,
+}
+
+/// The status page's four headline numbers on their own, for `/status/tiles`.
+///
+/// The same partial `status.html` includes, rendered without the page around it
+/// so htmx can swap it in place. It carries `Glance` and nothing else on purpose:
+/// the moment this needs a field from `DiagnosticsData`, polling it starts firing
+/// live requests at every configured *arr app on a timer.
+#[derive(Debug, Template)]
+#[template(path = "_stat_tiles.html")]
+pub struct StatTiles {
+    pub glance: Option<Glance>,
+}
+
 /// The one page a signed-in operator lands on: what is working, what is not,
 /// and why. Status and Diagnostics live together here because they answer
 /// the same underlying question ("is this instance healthy") at two
@@ -193,6 +249,17 @@ pub struct Glance {
     /// interval, since the sync loop stores no deadline of its own. Empty when
     /// periodic sync is off or nothing has run yet.
     pub next_sync: String,
+    /// Current CPU utilization across every core, pre-rendered ("12.3%").
+    /// `None` before the background sampler's first tick has completed — see
+    /// `crate::system_stats`.
+    pub cpu_percent: Option<String>,
+    /// Memory in use versus total, pre-rendered ("4.2 GiB of 15.6 GiB").
+    /// `None` before the first sample.
+    pub memory_usage: Option<String>,
+    /// Disk usage of the filesystem holding the data directory, pre-rendered
+    /// the same way. `None` before the first sample, or if no mounted
+    /// filesystem was found covering it.
+    pub disk_usage: Option<String>,
 }
 
 /// One row of the path-mapping table.
@@ -541,6 +608,10 @@ pub struct DiagnosticsData {
     /// The last few sync runs, newest first — the glance above only shows the
     /// single latest one.
     pub runs: Vec<RunRow>,
+    /// The same runs as a bar strip, oldest to newest. `None` when there is
+    /// nothing to draw, so the template omits the figure rather than rendering
+    /// an empty box above an empty-state message.
+    pub run_chart: Option<RunChart>,
     /// What the lighthouse poller is doing, or `None` when none is configured
     /// — the section is omitted entirely in that case.
     pub lighthouse: Option<LighthouseView>,
@@ -559,6 +630,51 @@ pub struct RunRow {
     /// Either the run's own error, or a summary of what it did.
     pub summary: String,
     pub failed: bool,
+    /// How many items the pass found, raw rather than rendered — the one
+    /// number the history strip needs a magnitude for. Zero for a run still in
+    /// flight and for one that failed before it could scan anything.
+    pub discovered: i64,
+    /// Whether the pass actually moved anything, which the counts answer but
+    /// `summary` does not: with the discovered count leading, a quiet pass and
+    /// a busy one both render as a non-empty sentence.
+    pub changed: bool,
+}
+
+/// One bar in the sync-history strip: a run, placed.
+///
+/// The same division of labour as [`Node`] — every coordinate is computed by
+/// `diagnostics::run_chart` so the template only places what it is handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunBar {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// `ok`, `changed` or `failed` — the modifier suffix, so the stylesheet
+    /// owns the colours rather than this struct carrying them.
+    pub state: &'static str,
+    /// Whether to draw a full-height tint behind this bar.
+    ///
+    /// Set for a failed run, and it exists because height and importance point
+    /// opposite ways there: a pass that broke before it could scan discovered
+    /// nothing, so it earns the shortest bar on the strip — the least visible
+    /// mark for the one event the strip is meant to make findable. The tint
+    /// carries the failure at full height while the bar keeps telling the truth
+    /// about magnitude, rather than inflating the bar and lying about both.
+    pub wash: bool,
+    /// Hover text, built from the row's own `when` and `summary`. Reusing
+    /// those rather than re-deriving them is what keeps the strip and the
+    /// table beneath it from disagreeing about the same run, the same reason
+    /// `RunSummary::describe` is shared.
+    pub title: String,
+}
+
+/// The sync-history strip: bars left to right, oldest to newest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunChart {
+    pub bars: Vec<RunBar>,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// One gluetun-tracked endpoint's state, pre-rendered for display.
@@ -709,6 +825,13 @@ pub struct ItemRow {
     /// that it is not a fault at all. `None` for `Seeding` and `Failed`,
     /// which already explain themselves (the second via `last_error`).
     pub state_hint: Option<&'static str>,
+    /// What the torrent client reports for this item's achieved ratio —
+    /// see `web::items::ratio_cell`. Empty before a torrent has reported
+    /// anything, rendered as a dash the same way `peers` is.
+    pub ratio: String,
+    /// The client's own per-torrent limit if it reports a fixed one, or an
+    /// explanation of why it doesn't, for hover.
+    pub ratio_hint: String,
     /// Which friends' scopes admit this item, joined for display — empty
     /// unless the item is actually seeding, since nothing else reaches a
     /// friend's feed.
@@ -1213,6 +1336,10 @@ pub struct ItemsPage {
     pub kind_filter: String,
     pub q: String,
     pub sort_links: Vec<SortLink>,
+    /// How the whole library breaks down by format, state and source — counted
+    /// over the same unfiltered rows `state_counts` is, and `None` when there is
+    /// nothing to break down.
+    pub composition: Option<Composition>,
 }
 
 #[cfg(test)]
