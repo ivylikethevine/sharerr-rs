@@ -203,7 +203,7 @@ roster cannot drift from what CI runs — a row whose regex stops matching is
 reported as an error, not skipped. hadolint and trivy are deliberately
 unpinned (newest release, always), so they have no row.
 
-The roadmap is `docs/ROADMAP.md`, and `docs/IDEAS.md` holds the candidates that
-have been weighed but not committed to — an idea belongs in one of those two or
-in `docs/UNSUPPORTED.md`, never in more than one. The original design brief and
+The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
+weighed but not all committed to as well as firm intentions — an idea belongs
+there or in `docs/UNSUPPORTED.md`, never in both. The original design brief and
 the two premises the implementation disproved are in `docs/DESIGN.md`.

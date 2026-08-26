@@ -630,6 +630,8 @@ mod tests {
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         };
         store.upsert(&item).await.unwrap();
         // `seeding_items` requires both, which is what makes a release visible to

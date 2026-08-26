@@ -326,6 +326,15 @@ async fn glance(
 
     let swarm = state.serve.swarms().stats().await;
 
+    let (cpu_percent, memory_usage, disk_usage) = match state.serve.system_status().snapshot().await
+    {
+        Some(sample) => {
+            let (cpu, memory, disk) = crate::system_stats::format(sample);
+            (Some(cpu), Some(memory), disk)
+        }
+        None => (None, None, None),
+    };
+
     Some(crate::web::templates::Glance {
         items_shared,
         shared_size,
@@ -338,6 +347,9 @@ async fn glance(
         swarm_seeders: swarm.seeders,
         swarm_torrents: swarm.swarms,
         next_sync,
+        cpu_percent,
+        memory_usage,
+        disk_usage,
     })
 }
 
@@ -437,6 +449,8 @@ mod tests {
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         };
         store.upsert(&item).await.unwrap();
         store

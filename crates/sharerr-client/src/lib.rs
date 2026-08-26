@@ -208,7 +208,7 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 /// Deliberately not the union of every client's fields: this is what sharerr's
 /// reconciliation actually reads, and a field nobody reads is a field two clients
 /// have to agree about for no reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TorrentSummary {
     /// Lowercase hex info hash. sharerr's join key between its store and the client.
     pub hash: String,
@@ -229,6 +229,17 @@ pub struct TorrentSummary {
     pub tags: Vec<String>,
     /// Whether the client considers this complete and uploading.
     pub is_seeding: bool,
+    /// Uploaded ÷ downloaded, as the client itself computes it for this specific
+    /// torrent. `None` only on a genuine read/parse failure — every supported
+    /// backend can report this, unlike [`Self::ratio_limit`].
+    pub ratio: Option<f64>,
+    /// The per-torrent seed-ratio limit the client is actually enforcing on this
+    /// torrent, when it can express one as a plain number. `None` covers three
+    /// different backend realities, deliberately not distinguished here: no limit
+    /// is set on this torrent, the client falls back to its own global default, or
+    /// (rTorrent) the backend has no per-torrent ratio-limit RPC at all — see the
+    /// module docs on `sharerr_rtorrent`.
+    pub ratio_limit: Option<f64>,
 }
 
 /// One file inside a torrent.

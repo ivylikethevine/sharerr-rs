@@ -4,7 +4,8 @@ Things that were tried and removed, or considered and deliberately left out —
 kept here as one place to check before re-proposing them, rather than
 re-litigating a decision that already has a reason attached. For what *is*
 supported, see [`SUPPORTED.md`](SUPPORTED.md); for what has been considered
-without being either committed to or declined, see [`IDEAS.md`](IDEAS.md).
+without being either committed to or declined, see
+[`ROADMAP.md`](ROADMAP.md#open-work-by-scope).
 
 ## Table of contents
 

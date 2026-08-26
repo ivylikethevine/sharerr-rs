@@ -249,6 +249,17 @@ pub struct Glance {
     /// interval, since the sync loop stores no deadline of its own. Empty when
     /// periodic sync is off or nothing has run yet.
     pub next_sync: String,
+    /// Current CPU utilization across every core, pre-rendered ("12.3%").
+    /// `None` before the background sampler's first tick has completed — see
+    /// `crate::system_stats`.
+    pub cpu_percent: Option<String>,
+    /// Memory in use versus total, pre-rendered ("4.2 GiB of 15.6 GiB").
+    /// `None` before the first sample.
+    pub memory_usage: Option<String>,
+    /// Disk usage of the filesystem holding the data directory, pre-rendered
+    /// the same way. `None` before the first sample, or if no mounted
+    /// filesystem was found covering it.
+    pub disk_usage: Option<String>,
 }
 
 /// One row of the path-mapping table.
@@ -814,6 +825,13 @@ pub struct ItemRow {
     /// that it is not a fault at all. `None` for `Seeding` and `Failed`,
     /// which already explain themselves (the second via `last_error`).
     pub state_hint: Option<&'static str>,
+    /// What the torrent client reports for this item's achieved ratio —
+    /// see `web::items::ratio_cell`. Empty before a torrent has reported
+    /// anything, rendered as a dash the same way `peers` is.
+    pub ratio: String,
+    /// The client's own per-torrent limit if it reports a fixed one, or an
+    /// explanation of why it doesn't, for hover.
+    pub ratio_hint: String,
     /// Which friends' scopes admit this item, joined for display — empty
     /// unless the item is actually seeding, since nothing else reaches a
     /// friend's feed.

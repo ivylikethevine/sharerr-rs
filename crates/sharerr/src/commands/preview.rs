@@ -98,6 +98,9 @@ fn glance() -> Glance {
         swarm_seeders: 3,
         swarm_torrents: 4,
         next_sync: "in ~11 min".to_owned(),
+        cpu_percent: Some("12.3%".to_owned()),
+        memory_usage: Some("4.2 GiB of 15.6 GiB".to_owned()),
+        disk_usage: Some("120.4 GiB of 500.0 GiB".to_owned()),
     }
 }
 
@@ -788,6 +791,8 @@ fn composition_fixture() -> Option<crate::web::templates::Composition> {
             last_error: None,
             created_at: None,
             media,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 
@@ -889,6 +894,8 @@ fn items_page() -> ItemsPage {
                 size: "1.9 GiB".to_owned(),
                 state_label: "Seeding".to_owned(),
                 state_hint: None,
+                ratio: "1.85".to_owned(),
+                ratio_hint: "Per-torrent limit the client is enforcing: 2.00".to_owned(),
                 visible_to: "Sam, Alex".to_owned(),
                 since: "3 months ago".to_owned(),
                 info_hash: Some("ab".repeat(20)),
@@ -913,6 +920,11 @@ fn items_page() -> ItemsPage {
                 size: "8.1 GiB".to_owned(),
                 state_label: "Seeding".to_owned(),
                 state_hint: None,
+                ratio: "0.42".to_owned(),
+                ratio_hint: "The client is not holding this torrent to a fixed per-torrent limit \
+                             — its own global default, unlimited, or (on some backends) not \
+                             something it can report"
+                    .to_owned(),
                 visible_to: "Sam".to_owned(),
                 since: "1 month ago".to_owned(),
                 info_hash: Some("cd".repeat(20)),
@@ -939,6 +951,8 @@ fn items_page() -> ItemsPage {
                 size: "2.0 GiB".to_owned(),
                 state_label: "Pending".to_owned(),
                 state_hint: Some("waiting for the next sync"),
+                ratio: String::new(),
+                ratio_hint: String::new(),
                 visible_to: String::new(),
                 since: "2 minutes ago".to_owned(),
                 info_hash: None,
@@ -963,6 +977,8 @@ fn items_page() -> ItemsPage {
                 size: "8.4 MiB".to_owned(),
                 state_label: "Failed".to_owned(),
                 state_hint: None,
+                ratio: String::new(),
+                ratio_hint: String::new(),
                 visible_to: String::new(),
                 since: "40 minutes ago".to_owned(),
                 info_hash: None,
@@ -989,6 +1005,8 @@ fn items_page() -> ItemsPage {
                 size: "1.2 MiB".to_owned(),
                 state_label: "Seeding".to_owned(),
                 state_hint: None,
+                ratio: "∞".to_owned(),
+                ratio_hint: "Per-torrent limit the client is enforcing: 0.50".to_owned(),
                 visible_to: "no friend's scope covers it".to_owned(),
                 since: "6 days ago".to_owned(),
                 info_hash: Some("ef".repeat(20)),

@@ -23,6 +23,12 @@ pub struct TorrentInfo {
     /// Comma-separated in the wire format; use [`TorrentInfo::tag_list`].
     #[serde(default)]
     pub tags: String,
+    #[serde(default)]
+    pub ratio: f64,
+    /// `-2` means "use qBittorrent's global default", `-1` means "unlimited" —
+    /// see [`TorrentInfo::ratio_limit_reported`], which resolves both to `None`.
+    #[serde(default)]
+    pub ratio_limit: f64,
 }
 
 impl TorrentInfo {
@@ -37,6 +43,13 @@ impl TorrentInfo {
             self.state.as_str(),
             "uploading" | "stalledUP" | "queuedUP" | "forcedUP" | "checkingUP" | "pausedUP"
         )
+    }
+
+    /// The actual per-torrent limit, resolving qBittorrent's `-2`
+    /// (use-global-default) and `-1` (unlimited) sentinels to `None` — neither is
+    /// a fixed number this specific torrent is held to.
+    pub fn ratio_limit_reported(&self) -> Option<f64> {
+        (self.ratio_limit >= 0.0).then_some(self.ratio_limit)
     }
 }
 

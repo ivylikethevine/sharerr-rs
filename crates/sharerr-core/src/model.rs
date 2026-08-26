@@ -502,7 +502,7 @@ impl ShareState {
 }
 
 /// One file that has been (or is being) shared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SharedItem {
     pub id: Option<i64>,
     pub source: MediaSource,
@@ -552,6 +552,17 @@ pub struct SharedItem {
     /// guessing from the title, and folded into the release title itself when
     /// there was no real name to use. See [`MediaMeta`].
     pub media: Option<MediaMeta>,
+    /// Uploaded ÷ downloaded, as the torrent client itself reports it for this
+    /// specific torrent. Refreshed each sync pass by
+    /// `sharerr_store::Store::set_ratio`; `None` before a torrent exists, or for
+    /// a row that predates this column.
+    pub achieved_ratio: Option<f64>,
+    /// The per-torrent seed-ratio limit the client is actually enforcing, when
+    /// it can express one as a plain number. `None` covers "no limit set on
+    /// this torrent", "the client falls back to its own global default", and
+    /// (rTorrent) "this backend has no per-torrent ratio-limit RPC at all" —
+    /// see `sharerr_client::TorrentSummary::ratio_limit`.
+    pub ratio_limit_reported: Option<f64>,
 }
 
 impl SharedItem {
@@ -628,6 +639,11 @@ impl Discovered {
             // Assigned by the store on insert; a discovered item has not been
             // recorded yet, so it has no publication date to report.
             created_at: None,
+            // A rediscovery describes a file, not a torrent, so it never knows
+            // these — `Store::upsert`'s COALESCE preserves whatever
+            // `Store::set_ratio` last wrote.
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 }

@@ -214,6 +214,35 @@ struct ListedTorrent {
     #[serde(default)]
     labels: Vec<String>,
     status: i64,
+    #[serde(default)]
+    upload_ratio: f64,
+    #[serde(default)]
+    seed_ratio_limit: f64,
+    /// `0` = use Transmission's global default, `1` = `seed_ratio_limit` applies
+    /// to this torrent, `2` = unlimited. Only `1` is a fixed number this specific
+    /// torrent is held to — see [`ratio_limit_reported`].
+    #[serde(default)]
+    seed_ratio_mode: i64,
+}
+
+/// The actual per-torrent limit Transmission is enforcing, or `None` when this
+/// torrent instead follows the global default or has no limit at all.
+fn ratio_limit_reported(torrent: &ListedTorrent) -> Option<f64> {
+    (torrent.seed_ratio_mode == 1).then_some(torrent.seed_ratio_limit)
+}
+
+/// Transmission uses two negative sentinels for `uploadRatio`: `TR_RATIO_NA`
+/// (`-2`, nothing downloaded yet — genuinely unknown) and `TR_RATIO_INF` (`-1`,
+/// a completed torrent with nothing ever uploaded is still a real infinite
+/// ratio, not a missing one).
+fn ratio_reported(upload_ratio: f64) -> Option<f64> {
+    if upload_ratio <= -2.0 {
+        None
+    } else if upload_ratio <= -1.0 {
+        Some(f64::INFINITY)
+    } else {
+        Some(upload_ratio)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,7 +320,8 @@ impl TorrentClient for TransmissionClient {
             .rpc(
                 "torrent-get",
                 json!({
-                    "fields": ["hashString", "name", "downloadDir", "labels", "status"]
+                    "fields": ["hashString", "name", "downloadDir", "labels", "status",
+                               "uploadRatio", "seedRatioLimit", "seedRatioMode"]
                 }),
             )
             .await?;
@@ -322,6 +352,7 @@ impl TorrentClient for TransmissionClient {
                 )
             };
 
+            let ratio_limit = ratio_limit_reported(&torrent);
             out.push(TorrentSummary {
                 // Lowercased because sharerr joins on this against its own store,
                 // which holds lowercase hex.
@@ -331,6 +362,8 @@ impl TorrentClient for TransmissionClient {
                 content_path,
                 category: category.unwrap_or_default().to_owned(),
                 is_seeding: is_seeding_status(torrent.status),
+                ratio: ratio_reported(torrent.upload_ratio),
+                ratio_limit,
                 tags: torrent.labels,
             });
         }
@@ -680,6 +713,38 @@ mod tests {
         assert_eq!(all[0].hash, "abcdef");
         assert!(all[0].is_seeding, "status 6 is seeding");
         assert!(!all[1].is_seeding, "status 4 is still downloading");
+    }
+
+    /// `seedRatioMode` decides whether `seedRatioLimit` is a fixed number this
+    /// torrent is held to (`1`) or Transmission's own global default / no
+    /// limit at all (`0` / `2`) — only the first should surface as `Some`.
+    /// `uploadRatio`'s own sentinels (`TR_RATIO_NA` = `-2`, `TR_RATIO_INF` =
+    /// `-1`) are distinct: the first is genuinely unknown, the second a real
+    /// infinite ratio.
+    #[tokio::test]
+    async fn listing_maps_ratio_and_resolves_transmissions_sentinels() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [
+                { "hashString": "aa", "name": "a", "downloadDir": "/d", "labels": [], "status": 6,
+                  "uploadRatio": 1.85, "seedRatioLimit": 2.0, "seedRatioMode": 1 },
+                { "hashString": "bb", "name": "b", "downloadDir": "/d", "labels": [], "status": 6,
+                  "uploadRatio": -1.0, "seedRatioLimit": 5.0, "seedRatioMode": 2 },
+                { "hashString": "cc", "name": "c", "downloadDir": "/d", "labels": [], "status": 6,
+                  "uploadRatio": -2.0, "seedRatioLimit": 5.0, "seedRatioMode": 0 }
+            ]})),
+        )
+        .await;
+
+        let all = client(&server).list(None).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].ratio, Some(1.85));
+        assert_eq!(all[0].ratio_limit, Some(2.0), "mode 1 is a fixed limit");
+        assert_eq!(all[1].ratio, Some(f64::INFINITY), "TR_RATIO_INF is a real ratio");
+        assert_eq!(all[1].ratio_limit, None, "mode 2 is unlimited");
+        assert_eq!(all[2].ratio, None, "TR_RATIO_NA is genuinely unknown");
+        assert_eq!(all[2].ratio_limit, None, "mode 0 follows the global default");
     }
 
     /// Transmission cannot filter by category server-side, so this crate does it —

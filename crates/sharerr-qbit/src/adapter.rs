@@ -66,6 +66,8 @@ impl TorrentClient for QbitClient {
             .map(|t| TorrentSummary {
                 is_seeding: t.is_seeding(),
                 tags: t.tag_list().into_iter().map(str::to_owned).collect(),
+                ratio: Some(t.ratio),
+                ratio_limit: t.ratio_limit_reported(),
                 hash: t.hash,
                 name: t.name,
                 save_path: t.save_path,
@@ -268,6 +270,37 @@ mod tests {
         assert_eq!(list[0].category, "sharerr");
         assert_eq!(list[0].tags, vec!["a".to_owned(), "b".to_owned()]);
         assert!(list[0].is_seeding, "state=uploading is seeding");
+    }
+
+    /// qBittorrent's `-2` ("use the global default") and `-1` ("unlimited")
+    /// ratio_limit sentinels both resolve to `None` — neither is a fixed
+    /// number this specific torrent is held to. A genuine positive value
+    /// passes through unchanged.
+    #[tokio::test]
+    async fn list_maps_ratio_and_resolves_qbittorrents_sentinels() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "hash": "fixed", "ratio": 1.85, "ratio_limit": 2.0 },
+                { "hash": "unlimited", "ratio": 0.5, "ratio_limit": -1.0 },
+                { "hash": "global", "ratio": 0.1, "ratio_limit": -2.0 },
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = mocked_client(&server);
+        let list = client.list(None).await.unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].ratio, Some(1.85));
+        assert_eq!(list[0].ratio_limit, Some(2.0));
+        assert_eq!(list[1].ratio, Some(0.5));
+        assert_eq!(list[1].ratio_limit, None, "unlimited is not a fixed number");
+        assert_eq!(list[2].ratio, Some(0.1));
+        assert_eq!(
+            list[2].ratio_limit, None,
+            "using the global default is not a fixed number"
+        );
     }
 
     #[tokio::test]

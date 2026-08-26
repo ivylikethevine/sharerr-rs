@@ -53,5 +53,21 @@
       {% endif %}
     </dd>
   </div>
+  <div class="stat">
+    <dt title="This host's CPU, memory, and disk usage — sampled every few seconds, not read live on each poll"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4h8v8H4z"/><path d="M6.5 1.5v2.5M9.5 1.5v2.5M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg>Host</dt>
+    <dd>
+      {% if let Some(cpu) = glance.cpu_percent %}
+      <strong>{{ cpu }}</strong> CPU
+      {% if let Some(memory) = glance.memory_usage %}
+      <br><span class="hint">{{ memory }} memory</span>
+      {% endif %}
+      {% if let Some(disk) = glance.disk_usage %}
+      <br><span class="hint">{{ disk }} disk</span>
+      {% endif %}
+      {% else %}
+      not sampled yet
+      {% endif %}
+    </dd>
+  </div>
 </dl>
 {% endif %}

@@ -401,9 +401,16 @@ impl Syncer {
         // the stored side while `known` is built below — rather than per item
         // in `share`. Every writer already produces lowercase hex, so folding
         // the stored hash in place changes nothing that is looked up by it.
-        let live: HashSet<String> = torrents
+        //
+        // Keyed by hash for two things at once: whether the torrent is still
+        // live (key presence — a plain `HashSet` would otherwise sit beside
+        // this and say nothing a lookup here doesn't), and what the client
+        // itself reports for its ratio, read on the Unchanged fast path below
+        // and written to the store via `Store::set_ratio` — see
+        // `docs/ROADMAP.md`'s "Achieved ratio" entry.
+        let live: HashMap<String, (Option<f64>, Option<f64>)> = torrents
             .iter()
-            .map(|t| t.hash.to_ascii_lowercase())
+            .map(|t| (t.hash.to_ascii_lowercase(), (t.ratio, t.ratio_limit)))
             .collect();
 
         let known: HashMap<(MediaSource, i64), SharedItem> = known_items?
@@ -520,7 +527,7 @@ impl Syncer {
         &self,
         item: &Discovered,
         announce: &AnnounceSet,
-        live: &HashSet<String>,
+        live: &HashMap<String, (Option<f64>, Option<f64>)>,
         torrents: &seed::KnownTorrents,
         known: Option<&SharedItem>,
         dry_run: bool,
@@ -534,7 +541,7 @@ impl Syncer {
         if let Some(known) = known
             && known.state == ShareState::Seeding
             && let Some(hash) = &known.info_hash
-            && live.contains(hash)
+            && let Some(&(ratio, ratio_limit)) = live.get(hash)
         {
             if !dry_run {
                 match self.seeder.refresh_announce(hash, announce).await {
@@ -568,6 +575,17 @@ impl Syncer {
                         error = format!("{err:#}"),
                         "could not refresh announce URLs"
                     ),
+                }
+                if let Err(err) = self
+                    .store
+                    .set_ratio(item.source, item.file_id, ratio, ratio_limit)
+                    .await
+                {
+                    tracing::warn!(
+                        item = %item.spec,
+                        error = %err,
+                        "could not record the reported ratio"
+                    );
                 }
             }
             return Ok(Step::Unchanged);

@@ -13,6 +13,7 @@ mod secrets;
 mod settings;
 mod state;
 mod sync;
+mod system_stats;
 mod torznab;
 mod tracker;
 mod web;

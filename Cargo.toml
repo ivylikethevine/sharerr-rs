@@ -84,6 +84,9 @@ sha2 = "0.10.9"
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
 sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
+# CPU/memory/disk usage for the status page's stat tiles. `default-features =
+# false` drops network/user/component support this project never reads.
+sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "system"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }

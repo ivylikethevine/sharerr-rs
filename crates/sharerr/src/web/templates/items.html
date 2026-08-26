@@ -136,6 +136,7 @@
           {% if link.dir == "desc" %} &#9660;{% else %} &#9650;{% endif %}
         {% endif %}</a></th>
         {% endfor %}
+        <th title="Uploaded ÷ downloaded, as the torrent client itself reports it for this torrent. A dash means it has not reported anything yet">Ratio</th>
         <th title="Peers announcing to this instance's tracker right now: ↑ have the whole file, ↓ are still downloading. A dash means nobody is in the swarm at the moment">Peers</th>
         <th title="Friends whose scope admits this item — what they see in their feed">Visible to</th>
         <th title="The torrent's identity, and the join key for finding it in the client">Info hash</th>
@@ -177,6 +178,13 @@
           <br><span class="hint">
             {% if item.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}
           </span>
+          {% endif %}
+        </td>
+        <td class="nowrap"{% if !item.ratio_hint.is_empty() %} title="{{ item.ratio_hint }}"{% endif %}>
+          {% if item.ratio.is_empty() %}
+          <span class="hint">—</span>
+          {% else %}
+          {{ item.ratio }}
           {% endif %}
         </td>
         {# The tracker's own live count — first-hand, unlike anything the

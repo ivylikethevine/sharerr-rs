@@ -1115,6 +1115,8 @@ mod tests {
             state: ShareState::Seeding,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         }
     }
 

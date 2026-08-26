@@ -1128,6 +1128,8 @@ mod tests {
             category: String::new(),
             tags: Vec::new(),
             is_seeding: seeding,
+            ratio: None,
+            ratio_limit: None,
         }
     }
 
@@ -1661,6 +1663,8 @@ mod tests {
             state: ShareState::Seeding,
             last_error: None,
             created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
         };
 
         // Seeding with a torrent: the only shape the client can be asked about.

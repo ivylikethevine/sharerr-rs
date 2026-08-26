@@ -60,8 +60,8 @@ design is built around.
 See also: [the configuration reference](docs/CONFIGURATION.md), [supported
 services](docs/SUPPORTED.md), [what's deliberately not
 supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
-roadmap](docs/ROADMAP.md), [ideas that are considered but not
-committed](docs/IDEAS.md), [the original design brief](docs/DESIGN.md), and
+roadmap, including ideas considered but not all committed
+to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 [the security policy](docs/SECURITY.md).
 
 ## What works today
