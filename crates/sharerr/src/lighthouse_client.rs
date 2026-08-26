@@ -458,6 +458,20 @@ async fn apply_lookup(store: &Store, peer_id: i64, record: &LighthouseRecord) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
+    /// Distinct, non-constant key material for a test identity — see the
+    /// identical helper in `gossip.rs`. `seed` labels an identity; it is not
+    /// the key.
+    fn test_key_bytes(seed: u8) -> [u8; 32] {
+        static BASE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        let mut bytes = *BASE.get_or_init(|| {
+            let mut base = [0u8; 32];
+            getrandom::fill(&mut base).expect("the OS RNG is available");
+            base
+        });
+        bytes[0] ^= seed;
+        bytes
+    }
+
     use std::net::SocketAddr;
 
     use ed25519_dalek::{Signer, SigningKey};
@@ -586,7 +600,7 @@ mod tests {
             signed_at: i64,
         }
 
-        let signing = SigningKey::from_bytes(&[seed; 32]);
+        let signing = SigningKey::from_bytes(&test_key_bytes(seed));
         let pubkey = hex::encode(signing.verifying_key().to_bytes());
         let endpoints = vec![LighthouseRecordEndpoint {
             kind: "tracker".to_owned(),
@@ -611,7 +625,12 @@ mod tests {
     /// Start a real lighthouse on a loopback port, returning its state (for
     /// pre-seeding/inspecting directly) and its base URL.
     async fn spawn_lighthouse() -> (Arc<sharerr_lighthouse::LighthouseState>, Url) {
-        let state = Arc::new(sharerr_lighthouse::LighthouseState::new([7u8; 32]));
+        // A random decoy secret, never a constant: see the note on the same
+        // choice in `sharerr-lighthouse`'s own tests. Nothing below depends on
+        // its value.
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).expect("the OS RNG is available");
+        let state = Arc::new(sharerr_lighthouse::LighthouseState::new(secret));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let router = sharerr_lighthouse::routes(Arc::clone(&state));

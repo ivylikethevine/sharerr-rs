@@ -171,6 +171,13 @@ fn doc_to_json(doc: &utoipa::openapi::OpenApi) -> serde_json::Result<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    /// See `sharerr-lighthouse`'s tests: never a fixed array.
+    fn random_secret() -> [u8; 32] {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).expect("the OS RNG is available");
+        secret
+    }
+
     use super::*;
 
     /// Each operation in the document, as `(method, path, operation)`.
@@ -336,8 +343,13 @@ mod tests {
                 // Not sharerr's own router: the lighthouse ships as its own
                 // service and `serve` merges it in, so its routes are checked
                 // against the thing that actually serves them.
+                // A random secret rather than a constant. This document
+                // generator never exercises a decoy, so the value is
+                // irrelevant here — but an all-zero cryptographic key sitting
+                // in the tree is exactly what a copy-paste turns into a
+                // production default.
                 sharerr_lighthouse::routes(std::sync::Arc::new(
-                    sharerr_lighthouse::LighthouseState::new([0u8; 32]),
+                    sharerr_lighthouse::LighthouseState::new(random_secret()),
                 ))
             } else if path.starts_with("/api") {
                 crate::torznab::routes(serve.clone())

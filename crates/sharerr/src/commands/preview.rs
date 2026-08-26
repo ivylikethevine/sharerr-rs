@@ -58,7 +58,11 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
          on a real instance. Ctrl+C to stop."
     );
 
+    // The same handler `serve` installs, for the same reason plus one: this
+    // command tells the operator "Ctrl+C to stop", and without it that is a
+    // SIGINT killing the process by default disposition rather than a stop.
     axum::serve(listener, router.into_make_service())
+        .with_graceful_shutdown(super::serve::shutdown_signal())
         .await
         .context("preview server failed")
 }

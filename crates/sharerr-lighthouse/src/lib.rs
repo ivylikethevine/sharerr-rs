@@ -575,8 +575,28 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use tower::ServiceExt;
 
+    /// Distinct, non-constant key material for a test identity.
+    ///
+    /// `seed` distinguishes one test identity from another — 1 is Alex, 2 is
+    /// Sam — and is deliberately *not* the key itself. The key is that label
+    /// mixed into a per-run random base, so no cryptographic key is hard-coded
+    /// in the tree while identities stay distinct, and stable within a run.
+    ///
+    /// Ed25519 accepts any 32 bytes as a seed, so mixing this way is sound.
+    fn test_key_bytes(seed: u8) -> [u8; 32] {
+        static BASE: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        let mut bytes = *BASE.get_or_init(|| {
+            let mut base = [0u8; 32];
+            getrandom::fill(&mut base).expect("the OS RNG is available");
+            base
+        });
+        // XOR into one byte: distinct labels stay distinct.
+        bytes[0] ^= seed;
+        bytes
+    }
+
     fn signed_record(seed: u8, addr: &str, signed_at: i64) -> EndpointRecord {
-        let signing = SigningKey::from_bytes(&[seed; 32]);
+        let signing = SigningKey::from_bytes(&test_key_bytes(seed));
         let pubkey = hex::encode(signing.verifying_key().to_bytes());
         let endpoints = vec![RecordEndpoint {
             kind: "tracker".to_owned(),
@@ -593,8 +613,25 @@ mod tests {
         }
     }
 
+    /// A fresh random decoy secret for each run.
+    ///
+    /// Deliberately *not* a fixed array. A constant here is a hard-coded
+    /// cryptographic key — the thing static analysis flags, and rightly: it is one
+    /// copy-paste away from becoming a production default, and the lighthouse's
+    /// whole privacy property rests on this value being unguessable. It also makes
+    /// a stronger test, since a fixed secret cannot catch a change that stopped
+    /// mixing the secret in at all.
+    ///
+    /// Nothing here depends on its value: the decoy assertions check that a
+    /// fabricated record never verifies and is never recorded, not what it contains.
+    fn random_secret() -> [u8; 32] {
+        let mut secret = [0u8; 32];
+        getrandom::fill(&mut secret).expect("the OS RNG is available");
+        secret
+    }
+
     fn state() -> Arc<LighthouseState> {
-        Arc::new(LighthouseState::new([7u8; 32]))
+        Arc::new(LighthouseState::new(random_secret()))
     }
 
     #[test]
@@ -753,7 +790,7 @@ mod tests {
         // The signature covers the pubkey *as written*, so re-sign for the
         // uppercase spelling — otherwise this would be rejected as unsigned
         // and prove nothing about the pin.
-        let signing = SigningKey::from_bytes(&[1u8; 32]);
+        let signing = SigningKey::from_bytes(&test_key_bytes(1));
         let bytes =
             signable_bytes(&same_key.pubkey, &same_key.endpoints, same_key.signed_at).unwrap();
         same_key.signature = hex::encode(signing.sign(&bytes).to_bytes());
