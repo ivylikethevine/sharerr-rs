@@ -67,6 +67,27 @@
   --section-gap: var(--sp-10); /* above an <h2> or a wide section */
   --panel-pad: var(--sp-6);
 
+  /* The two page widths -- the one deliberate exception to the rule above that
+     every width keeps its own literal. That rule holds when a width is one
+     decision made once. These are not: the same number has to appear in `main`,
+     in `.foot`, and in the grid that centres the wide tier, and those three
+     drifting apart is exactly the bug this replaced. Named once, they cannot.
+
+     `--measure` is a comfortable line of prose and the widest a form field
+     should be.
+
+     `--wide` is what a table or a diagram may break out to, and it is an outer
+     width: what a block inside a panel actually gets is this minus `main`'s
+     20px padding and the panel's own 24px, each side — 88px in all. The three
+     widest things in the app are the topology diagram at 1350px (computed in
+     `web/topology.rs` as 3 lanes + 2 gaps + margins), the Friends table at
+     1351px and the Items table at 1322px, so 1440 - 88 = 1352px is the
+     smallest value at which none of them has to scroll sideways. Wider than
+     this and the step down to `--measure` stops reading as a breakout and
+     starts reading as two pages stacked on each other. */
+  --measure: 46rem;
+  --wide: 90rem;
+
   /* Type. Whole pixels at a 16px root, so nothing lands on a half-pixel. */
   --text-2xs: 0.75rem;    /* 12px — uppercase micro-labels */
   --text-xs: 0.8125rem;   /* 13px — table headers, diagram detail */
@@ -131,13 +152,26 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* The 5rem foot stays a literal: it is scroll runway under the last block so a
+/* Three named columns, not one width. `content` is the measure everything lands
+   in by default; `wide` is the full padded width of `main`, for the handful of
+   blocks that need it. Both are centred on the same axis, so a table breaking
+   out sits symmetrically around the prose above it instead of beside it.
+
+   The 5rem foot stays a literal: it is scroll runway under the last block so a
    page does not end flush against the viewport, not part of the rhythm. */
 main {
-  max-width: 46rem;
+  display: grid;
+  grid-template-columns:
+    [wide-start] minmax(0, 1fr)
+    [content-start] min(var(--measure), 100%) [content-end]
+    minmax(0, 1fr) [wide-end];
+  max-width: var(--wide);
   margin: 0 auto;
   padding: var(--sp-8) var(--sp-5) 5rem;
 }
+
+/* Everything is prose-width unless it asks not to be. */
+main > * { grid-column: content; }
 
 /* Screen-reader-only until focused, so keyboard users can jump past the nav
    without a visible skip link cluttering every page for everyone else. */
@@ -278,10 +312,10 @@ h3 { font-size: var(--text-base); font-weight: 650; letter-spacing: -0.01em; mar
    `:where()` holds this at zero specificity deliberately: it is the default,
    not a fight. A field's own tighter pairing — `label`, `input`, `.locked` —
    is a plain element or class rule below and still wins. */
-:where(main, section, .panel, .card, details.fold,
+:where(main, section, .panel, .card, details.fold, .deck,
        div.ok, div.warn, div.error) > * { margin-block: 0; }
 
-:where(main, section, .panel, .card, details.fold,
+:where(main, section, .panel, .card, details.fold, .deck,
        div.ok, div.warn, div.error) > * + * { margin-block-start: var(--flow); }
 
 /* A heading owns the gap on both sides of itself: a large one above, because it
@@ -290,10 +324,10 @@ h3 { font-size: var(--text-base); font-weight: 650; letter-spacing: -0.01em; mar
    the small one stick — without it the heading's bottom margin collapses
    against the flow gap and every heading drifts a step away from what it
    labels. */
-:where(main, section, .panel, .card, details.fold) > :is(h1, h2, h3) + * {
+:where(main, section, .panel, .card, details.fold, .deck) > :is(h1, h2, h3) + * {
   margin-top: 0;
 }
-:where(main, section, .panel, .card, details.fold) > :first-child { margin-top: 0; }
+:where(main, section, .panel, .card, details.fold, .deck) > :first-child { margin-top: 0; }
 
 /* The disclosure the secondary service sections fold into. The summary is
    styled to sit in the heading rhythm, so closed it reads as one more section
@@ -389,6 +423,12 @@ pre code {
    centering it here — rather than in the page templates — keeps every other
    `.card` user (there are none yet, but the class is generic) unaffected. */
 main:has(> form.card) {
+  /* Back to the measure. These pages are a 26rem card and one line of lede;
+     given the wide page's width the lede stretched to the far left while the
+     card stayed centred under a centred <h1>, and the three stopped looking
+     like one thing. `display: flex` also drops the page grid, so `.wide` has
+     no meaning here — there is nothing on these pages that wants it. */
+  max-width: var(--measure);
   min-height: calc(100vh - 8rem);
   display: flex;
   flex-direction: column;
@@ -655,29 +695,64 @@ svg text { font-family: inherit; }
 .topo-node--warn.topo-legend-box  { border-color: var(--warn-ink);  background: var(--warn-bg); }
 .topo-node--error.topo-legend-box { border-color: var(--error-ink); background: var(--error-bg); }
 
-/* `main` is capped at 46rem, which is right for prose and forms and much too
-   narrow for a wide table or a three-lane diagram. This breaks one block out
-   of that column and centres it on the viewport instead, so the block that
-   needs width gets it without every other page changing shape.
+/* `content` is right for prose and forms and much too narrow for a wide table
+   or a three-lane diagram. This moves one block into the `wide` column instead,
+   so the block that needs width gets it without every other page changing
+   shape.
 
    Put it on a `<section class="wide">` wrapping the heading *and* the block it
    labels whenever there is a heading. On the panel alone, the <h2> and its
-   underline stayed behind in the 46rem column while the thing they named
+   underline stayed behind in the narrow column while the thing they named
    started ~340px further left. A block with no heading — the topology
    diagram — can still carry `.wide` directly. */
-.wide {
-  width: min(96vw, 1600px);
-  margin-left: calc(50% - min(48vw, 800px));
-}
+.wide { grid-column: wide; }
 
-/* A second breakout inside the first would double the offset and run off
-   screen. This also makes the markup forgiving: a `.panel.wide` left inside a
-   new wrapper degrades to an ordinary panel rather than breaking the page. */
-.wide .wide { width: auto; margin-left: 0; }
+/* A second breakout inside the first is inert on its own: a nested `.wide` is
+   not a grid item of `main`, so `grid-column` does not apply to it and it fills
+   its parent like any other block. Kept as an explicit rule because the markup
+   contract is worth stating — a `.panel.wide` left inside a new wrapper
+   degrades to an ordinary panel rather than breaking the page. */
+.wide .wide { grid-column: auto; }
 
 /* A wide section opens like an <h2> does. Needed explicitly because the
    heading is now the section's first child, so its own top margin is zeroed. */
 main > * + section { margin-top: var(--section-gap); }
+
+/* Status' five reports. Independent of each other and each shorter than the
+   column it sits in, so on a screen with the room they go two abreast and the
+   page stops being 3,500px of mostly-empty scroll. Below the breakpoint this
+   wrapper does nothing but restate the spacing the sections already had.
+
+   `align-items: start` so a short report keeps its own height instead of being
+   stretched to match whatever landed beside it. */
+.deck > * + * { margin-block-start: var(--section-gap); }
+
+@media (min-width: 90rem) {
+  /* Columns rather than a two-column grid. A grid puts these in rows, and a
+     row is as tall as its tallest cell — pairing the three-line sync table
+     with the Networking panel left ~380px of nothing under the short one.
+     Nothing here lines up across the pair, so there is no row to preserve;
+     balanced columns simply fill. `break-inside` keeps a report whole. */
+  main > .deck {
+    grid-column: wide;
+    columns: 2;
+    column-gap: var(--sp-8);
+  }
+  .deck > * {
+    break-inside: avoid;
+    margin-block-start: 0;
+    margin-block-end: var(--section-gap);
+  }
+
+  /* With the deck out at `wide`, the page above it has to come too, or the
+     heading and the glance strip are left stranded in a narrow column beside
+     it — the exact misalignment the grid above exists to remove. Prose keeps
+     its measure; it just starts from the same left edge as everything else. */
+  main:has(> .deck) > * { grid-column: wide; }
+  main:has(> .deck) > :is(p, dl.facts, div.ok, div.warn, div.error) {
+    max-width: var(--measure);
+  }
+}
 
 /* A value that is long by nature — a 40-character info hash, a full announce
    URL — clipped to a readable width with the whole thing on hover, rather
@@ -839,8 +914,11 @@ td.title .hint:not(:has(code)) { overflow-wrap: anywhere; }
   position: sticky;
   top: var(--bar-h);
   z-index: 9;
-  /* Negative inline margins let the strip's background run to the page
-     edge; the padding puts the pills back where they were. */
+  /* The `wide` column plus negative inline margins let the strip's background
+     run to the page edge; the padding puts the pills back where they were.
+     Without the column it would bleed only past the measure and float as a
+     panel-width bar in the middle of a wide screen. */
+  grid-column: wide;
   margin-inline: calc(-1 * var(--sp-5));
   padding: var(--sp-2) var(--sp-5);
   background: color-mix(in srgb, var(--bg) 92%, transparent);
@@ -849,6 +927,65 @@ td.title .hint:not(:has(code)) { overflow-wrap: anywhere; }
   border-bottom: 1px solid var(--line);
 }
 .quicknav--sticky a { white-space: nowrap; }
+
+/* Given a screen with room beside the content, the strip becomes a rail: the
+   whole section list stays visible and marks where you are, instead of costing
+   a row of vertical space on a page that is already 11,000px tall. Scoped by
+   `:has()` rather than a page class because Settings is the only page with a
+   sticky quicknav and the selector says so directly.
+
+   `grid-row` spans far past the real row count on purpose. `1 / -1` looks like
+   the rule to write and is wrong here: -1 is the last *explicit* row line, and
+   these rows are all implicit, so it resolves to row 1 alone — leaving the rail
+   one row tall with nothing to stick inside. */
+@media (min-width: 64rem) {
+  main:has(> .quicknav--sticky) {
+    grid-template-columns:
+      [wide-start] minmax(0, 1fr)
+      [rail-start] 13rem [rail-end]
+      var(--sp-8)
+      [content-start] min(var(--measure), 100%) [content-end]
+      minmax(0, 1fr) [wide-end];
+  }
+
+  .quicknav--sticky {
+    grid-column: rail;
+    grid-row: 1 / span 999;
+    align-self: start;
+    top: calc(var(--bar-h) + var(--sp-5));
+    /* A 12-item list cannot outgrow the viewport and strand its own tail. */
+    max-height: calc(100vh - var(--bar-h) - var(--sp-10));
+    overflow-y: auto;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    /* Undo the strip: no bleed, no blur, no rule under it. */
+    margin-inline: 0;
+    padding: 0;
+    background: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-bottom: 0;
+  }
+
+  /* Uniform width, so the rail reads as one column of targets rather than a
+     ragged stack of pills — and a short label like "Sync" is still a full-width
+     click target. */
+  .quicknav--sticky a {
+    display: block;
+    text-align: left;
+    border-radius: var(--radius-sm);
+  }
+
+  /* Where you are, in the same treatment as hover — the rail is worth nothing
+     if it only lists sections and never points at one. */
+  .quicknav--sticky a[aria-current] {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-wash);
+  }
+}
+
 @media (max-width: 40rem) {
   .quicknav--sticky {
     flex-wrap: nowrap;
@@ -1026,8 +1163,14 @@ p.error, div.error {
   --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM5.4 4.3L8 6.9l2.6-2.6 1.1 1.1L9.1 8l2.6 2.6-1.1 1.1L8 9.1l-2.6 2.6-1.1-1.1L6.9 8 4.3 5.4z'/%3E%3C/svg%3E");
 }
 
+/* Page chrome, so it tracks the widest thing a page can hold rather than the
+   measure — under the Items table, a footer at `--measure` hung off-centre from
+   everything above it. The auth pages are the exception, being a narrow card on
+   an otherwise empty page: there the wide footer is the thing hanging off. */
+body:has(main > form.card) .foot { max-width: var(--measure); }
+
 .foot {
-  max-width: 46rem;
+  max-width: var(--wide);
   margin: 0 auto;
   padding: 0 var(--sp-5) var(--sp-8);
   color: var(--faint);
