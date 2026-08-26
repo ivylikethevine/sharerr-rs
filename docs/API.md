@@ -5,6 +5,13 @@ sharerr's machine-facing HTTP surface has a formal contract:
 or feed it to a generator — every operation has an `operationId`, so the
 generated method names are stable.
 
+## Table of contents
+
+- [What it covers](#what-it-covers)
+- [Why it cannot go stale](#why-it-cannot-go-stale)
+- [Regenerating it](#regenerating-it)
+- [What is not served at runtime](#what-is-not-served-at-runtime)
+
 ## What it covers
 
 | Tag          | What it is                                                              |

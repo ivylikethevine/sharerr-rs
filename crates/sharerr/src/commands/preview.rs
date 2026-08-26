@@ -45,6 +45,21 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .route("/items", get(|| async { Html(page(items_page())) }))
         .route("/topology", get(|| async { Html(page(topology_page())) }))
         .route("/debug", get(|| async { Html(page(debug_page())) }))
+        // The status page polls this every thirty seconds. Without it here the
+        // preview's own status page would 404 on a timer, which contradicts what
+        // this command promises: that everything renders as it would live.
+        .route(
+            "/status/tiles",
+            get(|| async {
+                Html(
+                    crate::web::templates::StatTiles {
+                        glance: Some(glance()),
+                    }
+                    .render()
+                    .unwrap_or_else(|err| format!("<p class=\"error\">{err}</p>")),
+                )
+            }),
+        )
         .route("/assets/{file}", get(crate::web::asset));
 
     let listener = tokio::net::TcpListener::bind(bind)
@@ -65,6 +80,25 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .with_graceful_shutdown(super::serve::shutdown_signal())
         .await
         .context("preview server failed")
+}
+
+/// The four headline numbers, shared by the status page and the fragment it
+/// polls — one fixture, so the tiles cannot render differently depending on
+/// which of the two produced them.
+fn glance() -> Glance {
+    Glance {
+        items_shared: 128,
+        shared_size: "412.6 GiB".to_owned(),
+        last_sync: Some("4 minutes ago".to_owned()),
+        last_sync_note: "2 added, 1 failed".to_owned(),
+        last_sync_failed: false,
+        friends_recent: 2,
+        friends_total: 3,
+        swarm_peers: 5,
+        swarm_seeders: 3,
+        swarm_torrents: 4,
+        next_sync: "in ~11 min".to_owned(),
+    }
 }
 
 /// Render a template, or fail loudly with the Askama error rather than
@@ -158,19 +192,7 @@ fn status_page() -> StatusPage {
 
     StatusPage {
         signed_in: true,
-        glance: Some(Glance {
-            items_shared: 128,
-            shared_size: "412.6 GiB".to_owned(),
-            last_sync: Some("4 minutes ago".to_owned()),
-            last_sync_note: "2 added, 1 failed".to_owned(),
-            last_sync_failed: false,
-            friends_recent: 2,
-            friends_total: 3,
-            swarm_peers: 5,
-            swarm_seeders: 3,
-            swarm_torrents: 4,
-            next_sync: "in ~11 min".to_owned(),
-        }),
+        glance: Some(glance()),
         blocked: None,
         config_error: None,
         recovery_secs: 60,
@@ -729,6 +751,114 @@ fn peers_page() -> PeersPage {
     }
 }
 
+/// A synthetic library for the composition panel.
+///
+/// Built as real `SharedItem`s and run through the real `compose`, rather than
+/// hand-writing the bars: the geometry is the part of that panel most likely to
+/// be wrong, and a hand-written fixture would render a picture no operator will
+/// ever see. Sizes are chosen so the roll-up is lopsided — a preview where every
+/// slice is the same width proves nothing about a stacked bar.
+fn composition_fixture() -> Option<crate::web::templates::Composition> {
+    use sharerr_core::model::{MediaMeta, MediaSource, MediaSpec, ShareState, SharedItem};
+
+    fn item(
+        file_id: i64,
+        source: MediaSource,
+        state: ShareState,
+        size: u64,
+        media: Option<MediaMeta>,
+    ) -> SharedItem {
+        SharedItem {
+            id: Some(file_id),
+            source,
+            source_id: 1,
+            file_id,
+            spec: MediaSpec::Movie {
+                title: "Harborlight".to_owned(),
+                year: Some(2019),
+            },
+            release_title: "Harborlight.2019.1080p.WEB-DL.x264-SYNTH".to_owned(),
+            arr_path: std::path::PathBuf::from("/data/movies/Harborlight (2019).mkv"),
+            size,
+            ids: sharerr_core::ExternalIds::default(),
+            info_hash: None,
+            announce_token_fp: None,
+            created_by_sharerr: false,
+            state,
+            last_error: None,
+            created_at: None,
+            media,
+        }
+    }
+
+    fn video(resolution: &str, codec: &str) -> MediaMeta {
+        MediaMeta {
+            resolution: Some(resolution.to_owned()),
+            video_codec: Some(codec.to_owned()),
+            ..MediaMeta::default()
+        }
+    }
+
+    fn audio(codec: &str) -> MediaMeta {
+        MediaMeta {
+            audio_codec: Some(codec.to_owned()),
+            audio_sample_rate: Some("44100".to_owned()),
+            audio_bit_depth: Some("16".to_owned()),
+            ..MediaMeta::default()
+        }
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let mut items = Vec::new();
+    let mut next = 1;
+    let mut push = |count: usize, source, state, size, media: Option<MediaMeta>| {
+        for _ in 0..count {
+            items.push(item(next, source, state, size, media.clone()));
+            next += 1;
+        }
+    };
+
+    push(
+        48,
+        MediaSource::Sonarr,
+        ShareState::Seeding,
+        2 * GIB,
+        Some(video("1920x1080", "x264")),
+    );
+    push(
+        14,
+        MediaSource::Radarr,
+        ShareState::Seeding,
+        9 * GIB,
+        Some(video("3840x2160", "x265")),
+    );
+    push(
+        22,
+        MediaSource::Sonarr,
+        ShareState::Seeding,
+        900 * 1024 * 1024,
+        Some(video("1280x720", "x264")),
+    );
+    push(
+        61,
+        MediaSource::Lidarr,
+        ShareState::Seeding,
+        280 * 1024 * 1024,
+        Some(audio("FLAC")),
+    );
+    push(
+        9,
+        MediaSource::Readarr,
+        ShareState::Seeding,
+        4 * 1024 * 1024,
+        None,
+    );
+    push(2, MediaSource::Directory, ShareState::Pending, GIB, None);
+    push(2, MediaSource::Sonarr, ShareState::Failed, 2 * GIB, None);
+
+    crate::web::composition::compose(&items)
+}
+
 fn items_page() -> ItemsPage {
     ItemsPage {
         signed_in: true,
@@ -879,6 +1009,7 @@ fn items_page() -> ItemsPage {
         shown: 5,
         seeding_size: "412.6 GiB".to_owned(),
         shown_size: "12.0 GiB".to_owned(),
+        composition: composition_fixture(),
         source_options: vec![
             FilterOption {
                 value: "",

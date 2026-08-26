@@ -992,6 +992,117 @@ async fn a_lidarr_file_holding_a_whole_album_carries_no_track_number() {
     );
 }
 
+/// The same free metadata Sonarr and Radarr hand over, from the app that manages
+/// music — and Lidarr reports the two fields a video *arr has no use for.
+#[tokio::test]
+async fn lidarr_carries_the_media_info_it_already_computed() {
+    let server = MockServer::start().await;
+    mount_lidarr(&server).await;
+    mount_json(
+        &server,
+        "/api/v1/trackfile",
+        json!([
+            {
+                "id": 31, "albumId": 21,
+                "path": "/music/Lanternwick Ensemble/Hollow Songs/01.flac",
+                "size": 41_943_040_u64,
+                "mediaInfo": {
+                    "audioCodec": "FLAC",
+                    "audioChannels": 2.0,
+                    // Numbers, which is how current Lidarr reports them.
+                    "audioBits": 16,
+                    "audioSampleRate": 44100,
+                },
+            },
+            {
+                // The same two fields as JSON strings. Lidarr has shipped both
+                // spellings, and a struct that matched only one would fail
+                // silently to `None` against the other rather than loudly.
+                "id": 32, "albumId": 21,
+                "path": "/music/Lanternwick Ensemble/Hollow Songs/02.flac",
+                "size": 41_943_040_u64,
+                "mediaInfo": {
+                    "audioCodec": "FLAC",
+                    "audioBits": "24",
+                    "audioSampleRate": "96000",
+                },
+            },
+            {
+                // `0` is this app's other spelling of "unset".
+                "id": 33, "albumId": 21,
+                "path": "/music/Lanternwick Ensemble/Hollow Songs/03.mp3",
+                "size": 41_943_040_u64,
+                "mediaInfo": { "audioCodec": "MP3", "audioBits": 0, "audioSampleRate": 0 },
+            },
+            {
+                "id": 34, "albumId": 21,
+                "path": "/music/Lanternwick Ensemble/Hollow Songs/04.flac",
+                "size": 41_943_040_u64,
+                "mediaInfo": {},
+            },
+            {
+                "id": 35, "albumId": 21,
+                "path": "/music/Lanternwick Ensemble/Hollow Songs/05.flac",
+                "size": 41_943_040_u64,
+            },
+        ]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/track",
+        json!([
+            { "trackFileId": 31, "absoluteTrackNumber": 1 },
+            { "trackFileId": 32, "absoluteTrackNumber": 2 },
+            { "trackFileId": 33, "absoluteTrackNumber": 3 },
+            { "trackFileId": 34, "absoluteTrackNumber": 4 },
+            { "trackFileId": 35, "absoluteTrackNumber": 5 }
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Lidarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    let by_file = |id: i64| {
+        found
+            .iter()
+            .find(|d| d.file_id == id)
+            .expect("every track file belongs to the listed album")
+    };
+
+    let media = by_file(31).media.as_ref().expect("mediaInfo was reported");
+    assert_eq!(media.audio_codec.as_deref(), Some("FLAC"));
+    assert_eq!(media.audio_channels.as_deref(), Some("2.0"));
+    assert_eq!(media.audio_bit_depth.as_deref(), Some("16"));
+    assert_eq!(media.audio_sample_rate.as_deref(), Some("44100"));
+    assert_eq!(media.sample_rate_khz().as_deref(), Some("44.1 kHz"));
+    assert_eq!(media.scene_audio_format(), Some("FLAC"));
+    assert_eq!(media.is_lossless(), Some(true));
+
+    let media = by_file(32).media.as_ref().expect("mediaInfo was reported");
+    assert_eq!(
+        media.audio_bit_depth.as_deref(),
+        Some("24"),
+        "a string-shaped bit depth reads the same as a number-shaped one"
+    );
+    assert_eq!(media.audio_sample_rate.as_deref(), Some("96000"));
+    assert_eq!(media.sample_rate_khz().as_deref(), Some("96 kHz"));
+
+    let media = by_file(33)
+        .media
+        .as_ref()
+        .expect("the codec alone is metadata");
+    assert_eq!(media.audio_bit_depth, None, "`0` bits is not a bit depth");
+    assert_eq!(media.audio_sample_rate, None, "`0` Hz is not a sample rate");
+    assert_eq!(media.is_lossless(), Some(false), "MP3 is not lossless");
+
+    assert_eq!(by_file(34).media, None, "an empty object is not metadata");
+    assert_eq!(by_file(35).media, None, "an absent object is not metadata");
+}
+
 #[tokio::test]
 async fn readarr_discovers_a_tagged_authors_books() {
     let server = MockServer::start().await;
@@ -1041,6 +1152,77 @@ async fn readarr_discovers_a_tagged_authors_books() {
     assert_eq!(found[0].ids.goodreads.as_deref(), Some("gr-9001"));
     // The monitored edition's ISBN, not just the first one listed.
     assert_eq!(found[0].ids.isbn.as_deref(), Some("9780000000002"));
+}
+
+/// Readarr reports `mediaInfo` only for an audiobook, and `null` for the ebooks
+/// that are most of a typical library. Both have to be right: an audiobook's
+/// format is what a friend's Readarr filters on, and an ebook must not end up
+/// carrying an empty object as though it were a fact about the file.
+#[tokio::test]
+async fn readarr_carries_media_info_for_an_audiobook_and_none_for_an_ebook() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v1").await;
+    mount_json(
+        &server,
+        "/api/v1/author",
+        json!([{ "id": 41, "authorName": "Marisol Vane", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/book",
+        json!([
+            { "id": 51, "title": "The Gilded Ferry", "foreignBookId": "gr-9001" },
+            { "id": 52, "title": "Paper Lantern Sky", "foreignBookId": "gr-9002" },
+        ]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/bookfile",
+        json!([
+            {
+                "id": 61, "bookId": 51,
+                "path": "/books/Marisol Vane/The Gilded Ferry.m4b",
+                "size": 1_048_576_u64,
+                "mediaInfo": {
+                    "audioCodec": "AAC",
+                    "audioChannels": 2.0,
+                    "audioSampleRate": 44100,
+                },
+            },
+            {
+                // An ebook: analysed, nothing to analyse.
+                "id": 62, "bookId": 52,
+                "path": "/books/Marisol Vane/Paper Lantern Sky.epub",
+                "size": 1_048_576_u64,
+                "mediaInfo": null,
+            },
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Readarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    let by_file = |id: i64| {
+        found
+            .iter()
+            .find(|d| d.file_id == id)
+            .expect("every book file belongs to a listed book")
+    };
+
+    let media = by_file(61)
+        .media
+        .as_ref()
+        .expect("an audiobook was analysed");
+    assert_eq!(media.audio_codec.as_deref(), Some("AAC"));
+    assert_eq!(media.audio_sample_rate.as_deref(), Some("44100"));
+    assert_eq!(media.is_lossless(), Some(false));
+
+    assert_eq!(by_file(62).media, None, "an ebook has nothing to report");
 }
 
 /// Whisparr is Sonarr's codebase, so it walks series and episode files with the

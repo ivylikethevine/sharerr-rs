@@ -345,6 +345,13 @@ pub(crate) struct JsonResult {
     runtime: Option<String>,
     #[serde(rename = "Hdr", skip_serializing_if = "Option::is_none")]
     hdr: Option<String>,
+    // Jackett has no established name for either, having never indexed a source
+    // that reports them. These follow its `PascalCase` convention so a consumer
+    // reading the rest of this object needs no second rule for them.
+    #[serde(rename = "AudioSampleRate", skip_serializing_if = "Option::is_none")]
+    audio_sample_rate: Option<String>,
+    #[serde(rename = "AudioBitDepth", skip_serializing_if = "Option::is_none")]
+    audio_bit_depth: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -474,6 +481,11 @@ async fn json_results(
                 subs: item.media.as_ref().and_then(|m| m.subtitles.clone()),
                 runtime: item.media.as_ref().and_then(|m| m.runtime.clone()),
                 hdr: item.media.as_ref().and_then(|m| m.dynamic_range.clone()),
+                audio_sample_rate: item
+                    .media
+                    .as_ref()
+                    .and_then(|m| m.audio_sample_rate.clone()),
+                audio_bit_depth: item.media.as_ref().and_then(|m| m.audio_bit_depth.clone()),
             }
         })
         .collect();

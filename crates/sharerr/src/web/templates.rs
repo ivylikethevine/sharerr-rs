@@ -87,6 +87,62 @@ impl LoginPage {
     }
 }
 
+/// What the library is made of, three ways — see `web::composition`.
+#[derive(Debug)]
+pub struct Composition {
+    pub items: usize,
+    /// Bytes across the whole library, pre-rendered.
+    pub total_size: String,
+    pub breakdowns: Vec<Breakdown>,
+}
+
+/// One roll-up: a stacked bar and the table that carries the same figures for a
+/// reader who cannot see it.
+#[derive(Debug)]
+pub struct Breakdown {
+    pub title: &'static str,
+    pub hint: &'static str,
+    pub segments: Vec<Segment>,
+    pub rows: Vec<CompositionRow>,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// One slice of a stacked bar, in user units. Colour is a CSS modifier suffix,
+/// not a value — the same arrangement `RunBar` uses, so the palette lives in one
+/// stylesheet rather than being computed per request.
+#[derive(Debug)]
+pub struct Segment {
+    pub x: i32,
+    pub w: i32,
+    pub h: i32,
+    pub accent: &'static str,
+    pub title: String,
+}
+
+/// A [`Segment`]'s figures, for the table beneath the bar. The bar is
+/// `aria-hidden`; this is what is actually read out.
+#[derive(Debug)]
+pub struct CompositionRow {
+    pub label: String,
+    pub accent: &'static str,
+    pub count: usize,
+    pub size: String,
+    pub share: String,
+}
+
+/// The status page's four headline numbers on their own, for `/status/tiles`.
+///
+/// The same partial `status.html` includes, rendered without the page around it
+/// so htmx can swap it in place. It carries `Glance` and nothing else on purpose:
+/// the moment this needs a field from `DiagnosticsData`, polling it starts firing
+/// live requests at every configured *arr app on a timer.
+#[derive(Debug, Template)]
+#[template(path = "_stat_tiles.html")]
+pub struct StatTiles {
+    pub glance: Option<Glance>,
+}
+
 /// The one page a signed-in operator lands on: what is working, what is not,
 /// and why. Status and Diagnostics live together here because they answer
 /// the same underlying question ("is this instance healthy") at two
@@ -1262,6 +1318,10 @@ pub struct ItemsPage {
     pub kind_filter: String,
     pub q: String,
     pub sort_links: Vec<SortLink>,
+    /// How the whole library breaks down by format, state and source — counted
+    /// over the same unfiltered rows `state_counts` is, and `None` when there is
+    /// nothing to break down.
+    pub composition: Option<Composition>,
 }
 
 #[cfg(test)]

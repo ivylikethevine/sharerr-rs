@@ -22,8 +22,3 @@
 # Local agent scratch: memory, plans, session settings. Note this does *not* cover
 # the tracked CLAUDE.md at the repository root, which is shared on purpose.
 .claude
-
-# Editor settings — personal, and not the same for two people.
-.zed
-.vscode
-.idea

@@ -30,9 +30,12 @@
 //! | anything else | — | `None` |
 //!
 //! Audio-only containers (`flac`, `mp3`, `opus`, …) are deliberately absent for
-//! now — see `docs/ROADMAP.md`. They carry no resolution or video codec, which is
-//! the metadata every one of the four surfaces actually renders, and Lidarr's own
-//! `mediaInfo` is the better source for them in any case.
+//! now — see `docs/ROADMAP.md`. They carry no resolution or video codec, and
+//! wherever an *arr manages the file its own `mediaInfo` already reports the
+//! codec, sample rate and bit depth for free — which Lidarr and Readarr now
+//! feed into `MediaMeta` alongside Sonarr's and Radarr's. What is left
+//! uncovered is music in a `[[library]]` directory with no *arr behind it,
+//! which is the whole of what a backend here would serve.
 
 use std::path::Path;
 use std::time::Duration;

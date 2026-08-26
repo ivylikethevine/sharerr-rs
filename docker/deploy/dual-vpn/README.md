@@ -14,6 +14,14 @@ Two `docker compose` projects:
 - **`media/`** — gluetun, qBittorrent, Sonarr, Radarr. The library lives here.
 - **`sharerr/`** — its own gluetun, and sharerr.
 
+## Table of contents
+
+- [Why they can still talk to each other](#why-they-can-still-talk-to-each-other)
+- [Bring it up](#bring-it-up)
+  - [Then the two gluetun keys, which are not optional](#then-the-two-gluetun-keys-which-are-not-optional)
+- [What this changes about addresses](#what-this-changes-about-addresses)
+- [Provider port forwarding](#provider-port-forwarding)
+
 ## Why they can still talk to each other
 
 Both gluetun containers additionally join one shared bridge network,

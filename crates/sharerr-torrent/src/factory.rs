@@ -215,12 +215,23 @@ pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Ve
 /// the parseable form. `None` when nothing is known, so no comment is written at
 /// all — an empty comment field is worse than none.
 fn describe(media: &MediaMeta) -> Option<String> {
+    // The audio pair is formatted rather than raw, because this line is the one
+    // place a person reads it: `24-bit` and `48 kHz` are how a person writes what
+    // `24` and `48000` mean. The feeds still publish the raw numbers.
+    let bit_depth = media
+        .audio_bit_depth
+        .as_deref()
+        .map(|bits| format!("{bits}-bit"));
+    let sample_rate = media.sample_rate_khz();
+
     let parts: Vec<&str> = [
         media.resolution.as_deref(),
         media.video_codec.as_deref(),
         media.dynamic_range.as_deref(),
         media.audio_codec.as_deref(),
         media.audio_channels.as_deref(),
+        bit_depth.as_deref(),
+        sample_rate.as_deref(),
         media.runtime.as_deref(),
     ]
     .into_iter()
@@ -375,6 +386,23 @@ mod tests {
             ..MediaMeta::default()
         };
         assert_eq!(describe(&partial).as_deref(), Some("1280x720 0:42:11"));
+    }
+
+    /// A music file's comment is built from the fields a video file has none of.
+    #[test]
+    fn a_comment_describes_audio_in_the_terms_a_person_writes() {
+        let track = MediaMeta {
+            audio_codec: Some("FLAC".to_owned()),
+            audio_channels: Some("2.0".to_owned()),
+            audio_bit_depth: Some("24".to_owned()),
+            audio_sample_rate: Some("96000".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(
+            describe(&track).as_deref(),
+            Some("FLAC 2.0 24-bit 96 kHz"),
+            "the raw hertz belong in the feed, not in a line a person reads"
+        );
     }
 
     #[test]

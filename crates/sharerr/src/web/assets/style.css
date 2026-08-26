@@ -658,6 +658,88 @@ svg text { font-family: inherit; }
    so a failure is findable at the scale the strip is scanned at. */
 .runchart-wash { fill: var(--error-bg); }
 
+/* --- Library composition ------------------------------------------------ */
+
+/* Charts, not health: these borrow the diagram palette above rather than
+   ok/warn/error, because "17% of the library is 720p" is a fact about the
+   library and not a warning about it. Nine colours, cycled — past that a
+   stacked bar stops being readable at any palette. */
+.composition-block + .composition-block {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+.composition-block h3 { margin-bottom: var(--sp-1); }
+
+/* `preserveAspectRatio="none"` in the markup lets the bar stretch to whatever
+   width the panel has while keeping its height fixed here — the segment widths
+   are proportions, so distorting them horizontally is exactly right. */
+.composition-bar {
+  display: block;
+  width: 100%;
+  height: 0.875rem;
+  margin: var(--sp-3) 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.composition-seg { stroke: none; }
+
+/* The key beside a legend row, so the table is readable without cross-checking
+   against the bar by position. */
+.composition-key {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  margin-right: var(--sp-2);
+  border-radius: 2px;
+  vertical-align: baseline;
+}
+
+.composition-seg--1 { fill: var(--topo-arr); }
+.composition-seg--2 { fill: var(--topo-peer-1); }
+.composition-seg--3 { fill: var(--topo-library); }
+.composition-seg--4 { fill: var(--topo-peer-2); }
+.composition-seg--5 { fill: var(--topo-client); }
+.composition-seg--6 { fill: var(--topo-peer-3); }
+.composition-seg--7 { fill: var(--topo-peer-5); }
+.composition-seg--8 { fill: var(--topo-peer-4); }
+.composition-seg--9 { fill: var(--topo-peer-6); }
+
+/* `fill` paints the SVG rect, `background` the HTML key — one class has to do
+   both, since the two sit side by side and must never disagree about a colour. */
+.composition-key.composition-seg--1 { background: var(--topo-arr); }
+.composition-key.composition-seg--2 { background: var(--topo-peer-1); }
+.composition-key.composition-seg--3 { background: var(--topo-library); }
+.composition-key.composition-seg--4 { background: var(--topo-peer-2); }
+.composition-key.composition-seg--5 { background: var(--topo-client); }
+.composition-key.composition-seg--6 { background: var(--topo-peer-3); }
+.composition-key.composition-seg--7 { background: var(--topo-peer-5); }
+.composition-key.composition-seg--8 { background: var(--topo-peer-4); }
+.composition-key.composition-seg--9 { background: var(--topo-peer-6); }
+
+.composition-legend {
+  width: auto;
+  min-width: min(28rem, 100%);
+  font-size: var(--text-sm);
+}
+.composition-legend td { text-align: right; }
+
+/* A row header here is a value, not a column label — `2160p`, not `2160P`. The
+   base `th` rule uppercases and mutes every header, which is right for the
+   column names above and wrong for the thing being measured. */
+.composition-legend th[scope="row"] {
+  color: var(--ink);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+/* The base rule drops the last row's rule from its `td`s only, which left the
+   row header underlined and the cells beside it not. */
+.composition-legend tbody tr:last-child th { border-bottom: none; }
+
 .topo-node-box {
   stroke-width: 1.5;
   stroke: var(--line-strong);

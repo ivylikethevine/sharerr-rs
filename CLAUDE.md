@@ -3,6 +3,15 @@
 Conventions that are not derivable from the code, and traps that have each cost
 real debugging time.
 
+## Table of contents
+
+- [The verification loop](#the-verification-loop)
+- [MSRV](#msrv)
+- [Dependencies](#dependencies)
+- [Testing tiers](#testing-tiers)
+- [Traps](#traps)
+- [Repository](#repository)
+
 ## The verification loop
 
 ```bash

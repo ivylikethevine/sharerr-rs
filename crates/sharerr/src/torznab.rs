@@ -372,9 +372,10 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
         // quality profile match on `""` rather than skip the comparison.
         //
         // `video`, `audio`, `resolution` and `subs` are the names Jackett
-        // established and every Torznab consumer reads; `audiochannels` and `hdr`
-        // are not in that set, and are emitted anyway because an unknown attribute
-        // costs a consumer nothing to ignore and the information is real.
+        // established and every Torznab consumer reads; `audiochannels`, `hdr`,
+        // `audiosamplerate` and `audiobitdepth` are not in that set, and are
+        // emitted anyway because an unknown attribute costs a consumer nothing to
+        // ignore and the information is real.
         if let Some(media) = item.media.as_ref() {
             for (name, value) in [
                 ("resolution", media.resolution.as_deref()),
@@ -385,6 +386,8 @@ pub fn feed_xml(items: &[FeedItem<'_>]) -> String {
                 ("subs", media.subtitles.as_deref()),
                 ("runtime", media.runtime.as_deref()),
                 ("hdr", media.dynamic_range.as_deref()),
+                ("audiosamplerate", media.audio_sample_rate.as_deref()),
+                ("audiobitdepth", media.audio_bit_depth.as_deref()),
             ] {
                 if let Some(value) = value {
                     let _ = writeln!(
@@ -999,6 +1002,8 @@ mod tests {
             audio_languages: Some("English/Japanese".to_owned()),
             subtitles: Some("English".to_owned()),
             runtime: Some("0:42:11".to_owned()),
+            audio_sample_rate: Some("48000".to_owned()),
+            audio_bit_depth: Some("24".to_owned()),
         }
     }
 
@@ -1017,6 +1022,8 @@ mod tests {
             ("subs", "English"),
             ("runtime", "0:42:11"),
             ("hdr", "HDR10"),
+            ("audiosamplerate", "48000"),
+            ("audiobitdepth", "24"),
         ] {
             let expected = format!(r#"<torznab:attr name="{name}" value="{value}"/>"#);
             assert!(xml.contains(&expected), "missing {name}: {xml}");
@@ -1036,7 +1043,16 @@ mod tests {
         let xml = render(&item);
 
         assert!(xml.contains(r#"<torznab:attr name="resolution" value="1280x720"/>"#));
-        for absent in ["video", "audio", "audiochannels", "subs", "runtime", "hdr"] {
+        for absent in [
+            "video",
+            "audio",
+            "audiochannels",
+            "subs",
+            "runtime",
+            "hdr",
+            "audiosamplerate",
+            "audiobitdepth",
+        ] {
             assert!(
                 !xml.contains(&format!(r#"name="{absent}""#)),
                 "{absent} must not appear at all: {xml}"

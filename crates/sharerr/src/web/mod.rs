@@ -14,6 +14,7 @@
 //! copy.
 
 pub mod auth;
+pub mod composition;
 pub mod config_io;
 pub mod debug;
 pub mod diagnostics;
@@ -105,6 +106,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         // Diagnostics merged into the page above; kept as a redirect so an old
         // bookmark or a link in an issue still lands somewhere useful.
         .route("/diagnostics", get(|| async { Redirect::to("/") }))
+        .route("/status/tiles", get(stat_tiles))
         .route("/items", get(items::page))
         .route("/topology", get(topology::page))
         .route("/debug", get(debug::page))
@@ -206,6 +208,26 @@ async fn status_page(State(state): State<WebState>) -> Response {
         sync_interval_secs: config.sync.interval_secs,
         config_path: state.serve.config_path().display().to_string(),
         diag,
+    })
+}
+
+/// The status page's stat tiles on their own, for htmx to poll.
+///
+/// Deliberately *not* `status_page` minus the rendering: this calls `glance`
+/// alone and never `diagnostics::gather`, so a browser left open on the status
+/// page does not put a request on every configured *arr app every thirty
+/// seconds. That distinction is the whole reason the fragment exists.
+///
+/// Always answers `200`, including when the store will not open — htmx does not
+/// swap a non-2xx response, so an error status would leave the last good numbers
+/// on screen looking current. The `None` branch of the partial says "unavailable"
+/// instead, which is the truth.
+async fn stat_tiles(State(state): State<WebState>) -> Response {
+    let config = state.serve.config().await;
+    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
+
+    render(&crate::web::templates::StatTiles {
+        glance: glance(&state, sync_every).await,
     })
 }
 
@@ -512,6 +534,35 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// The polled fragment is the tiles and nothing else: no `<html>` around it
+    /// (htmx swaps it into a div), and none of the page's banners or diagnostics
+    /// sections, which would otherwise be duplicated into the page every thirty
+    /// seconds.
+    #[tokio::test]
+    async fn the_stat_tiles_fragment_is_the_tiles_alone() {
+        let (_dir, serve) = unconfigured();
+        let state = web_state(serve);
+
+        let response = stat_tiles(State(state)).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "htmx does not swap a non-2xx response, so this must not report failure as a status"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("stat-grid"), "{html}");
+        assert!(!html.contains("<html"), "a fragment, not a page: {html}");
+        assert!(
+            !html.contains("hx-get=\"/status/tiles\""),
+            "the swap target lives in the page, not in what it swaps in — nesting \
+             it here would multiply the pollers on every refresh: {html}"
+        );
+    }
+
     #[tokio::test]
     async fn the_topology_page_renders_for_a_fresh_unconfigured_instance() {
         let (_dir, serve) = unconfigured();
@@ -545,6 +596,7 @@ mod tests {
     async fn every_protected_route_refuses_an_anonymous_visitor() {
         let protected_gets = [
             "/",
+            "/status/tiles",
             "/settings",
             "/diagnostics",
             "/items",

@@ -6,6 +6,12 @@ is no image to patch yet either. There is exactly one line of support: the
 `main` branch and `dev`, the branch active development happens on. There are
 no older versions to patch.
 
+## Table of contents
+
+- [Reporting a vulnerability](#reporting-a-vulnerability)
+- [What is in scope](#what-is-in-scope)
+- [What is out of scope](#what-is-out-of-scope)
+
 ## Reporting a vulnerability
 
 Please report it privately through

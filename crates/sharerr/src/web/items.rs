@@ -102,6 +102,10 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         .filter(|item| item.state == ShareState::Seeding)
         .map(|item| item.size)
         .sum();
+    // Third read of the same unfiltered slice, and the last one before the
+    // filters below narrow it — a composition that moved with the search box
+    // would answer a different question on every page load.
+    let composition = crate::web::composition::compose(&items);
 
     let needle = query.q.trim().to_lowercase();
     if !needle.is_empty() {
@@ -222,6 +226,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         state_counts,
         seeding_size: human_size(seeding_bytes),
         shown_size: human_size(shown_bytes),
+        composition,
         items: items
             .iter()
             .map(|item| {

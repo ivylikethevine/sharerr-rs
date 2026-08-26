@@ -18,12 +18,15 @@ something.
 
 ### What's left
 
-One feature-sized item — **[request flow](#functionality)** — and a cluster of
-follow-ups to media metadata, which landed for Sonarr and Radarr and stops
-short of Lidarr and Readarr. The 2026-08-21 code review is otherwise closed
-out: what is left of it is a single entry kept only so its documented
-behaviour reads as a decision rather than an oversight. All are in
-[Open work, by scope](#open-work-by-scope) below.
+One feature-sized item — **[request flow](#functionality)** — and one
+follow-up to media metadata. The metadata cluster closed on 2026-08-26: Lidarr
+and Readarr now carry the `mediaInfo` they had already computed, `MediaMeta`
+holds sample rate and bit depth, and a synthesised music title names the format
+the file actually is rather than always claiming FLAC. What remains of it is the
+audio backend for `sharerr-probe`, which serves only directory-sourced music.
+The 2026-08-21 code review is otherwise closed out: what is left of it is a
+single entry kept only so its documented behaviour reads as a decision rather
+than an oversight. All are in [Open work, by scope](#open-work-by-scope) below.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
 and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
@@ -45,8 +48,10 @@ independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
 (the nineteenth: the lighthouse's `report` now pins a key hash to the first
 keypair that claims it, so a leaked key hash can no longer be used to displace
 the genuine record — and a refused report is logged by the reporting instance
-instead of vanishing) and what is listed here is what remains. File references
-are as of the review commit and may have drifted.
+instead of vanishing), and a twentieth on 2026-08-26 closed the media-metadata
+cluster along with two candidates promoted out of [`IDEAS.md`](IDEAS.md) — the
+library-composition roll-up and the polled status tiles. What is listed here is
+what remains. File references are as of the review commit and may have drifted.
 
 ### Small — one function or one file
 
@@ -55,41 +60,25 @@ are as of the review commit and may have drifted.
    Stale while the tracker admits it. The doc comment frames that as
    intended; listed so the decision is a decision.
 
-2. **Lidarr `mediaInfo` → `MediaMeta`** — Lidarr's `TrackFileResource` reports
-   the same `mediaInfo` object Sonarr and Radarr do, and `lidarr.rs` passes
-   `media: None` today with a comment pointing here. Wiring it is the same
-   shape as the Sonarr/Radarr path in `models.rs` — one wire struct reused, one
-   `into_meta` call — and it is the *cheap* half of the audio story: Lidarr has
-   already analysed the file, so nothing needs to read it.
-
-3. **Readarr `mediaInfo`** — the same one-line wiring as Lidarr, if Readarr's
-   `BookFileResource` turns out to report the object at all. Verify before
-   writing the struct: an ebook has no streams to analyse, so this may be an
-   entry that closes as "there is nothing to read".
-
 ### Medium — a subsystem, or one shape repeated across several files
 
-4. **Audio metadata fields worth carrying** — `MediaMeta` is shaped around what
-   a video release advertises (resolution, video codec, dynamic range). Music
-   releases are matched on different things: sample rate, bit depth, and
-   lossless-vs-lossy are what a friend's Lidarr quality profile actually
-   filters on, and none has a field today. Adding them means widening
-   `MediaMeta`, the `media_json` payload, both feed renderers, and the
-   `-FLAC-` token `title::synthesize` currently hard-codes for every track
-   regardless of what the file is. Worth doing **after** item 2, since Lidarr's
-   `mediaInfo` is where the values would come from.
-
-5. **An audio backend for `sharerr-probe`** — the probe covers MKV/WebM and
+2. **An audio backend for `sharerr-probe`** — the probe covers MKV/WebM and
    ISO-BMFF; a bare `flac`, `mp3` or `opus` in a `[[library]]` directory gets
-   nothing. `symphonia` is the obvious backend and clears the MSRV floor. This
-   is deliberately behind items 2 and 4: for anything Lidarr manages the
-   `mediaInfo` path is free and better, so this only ever serves
-   directory-sourced music — and it is worth knowing whether item 4's fields
-   are the right ones before building a second producer for them.
+   nothing. `symphonia` is the obvious backend and clears the MSRV floor. It is
+   the last of the audio cluster and the only part of it that is not free:
+   wherever an *arr manages the file, the `mediaInfo` path already carries the
+   codec, sample rate and bit depth for nothing, so this serves **only**
+   directory-sourced music. The fields it would fill — and the
+   `scene_audio_format` table it would feed — landed on 2026-08-26, so what
+   this needs is a second producer for a shape that already exists rather than
+   a new shape.
+
+   Note it would be the first new dependency in a while: `symphonia` has to
+   clear the MSRV floor, which `docker build .` is what actually proves.
 
 ### Large — a protocol, a data model, or a release process
 
-6. **Request flow** — a new inbound request queue and approve step, touching
+3. **Request flow** — a new inbound request queue and approve step, touching
     the sync engine and the web UI on both sides of a friendship; see
     [Functionality](#functionality).
 

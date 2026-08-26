@@ -31,36 +31,21 @@ right.
 ## Visualisation and insight
 
 One constraint shapes every entry below, so it is stated once here rather than
-three times: **a chart in this project is server-rendered SVG, not a client
+per entry: **a chart in this project is server-rendered SVG, not a client
 library.** The web UI compiles every asset into the binary and reaches no CDN,
-because the container is expected to have no egress. The topology diagram and
-the sync-history strip are the working proof that this is enough — the
-coordinates of both are computed in Rust (`Node`/`Edge` and `RunBar` in
+because the container is expected to have no egress. The topology diagram,
+the sync-history strip and the library-composition bars are the working proof
+that this is enough — the coordinates of all three are computed in Rust
+(`Node`/`Edge`, `RunBar` and `Segment` in
 `crates/sharerr/src/web/templates.rs`) and the templates do no arithmetic at
 all, they just place what they were handed. Anything here would follow that
 same shape.
 
 The other relevant fact: apart from `sync_runs`, **nothing in this project is
 written down over time.** There is no samples table, no counters, no request
-log. Two of the three entries below are cheap precisely because they only
-re-read rows that already exist; the third needs somewhere to put history.
-
-### Library composition
-
-Migration `0009` added `media_json`, and it is read by exactly two things: the
-Torznab renderer and the Jackett renderer. Nothing aggregates it. Neither does
-anything aggregate `size` beyond one total on the status tile.
-
-Rolled up — by resolution, by codec, by source, by state — it answers a
-question an operator currently cannot ask without reading the whole items
-table: *is what I am sharing what I think I am sharing?* A library that is
-quietly 80% 720p, or one where a third of the rows are `failed`, is not visible
-today until you go looking for it.
-
-Reads rows that already exist. The work is the aggregation query and the
-drawing, not the data.
-
-**Small–medium** — a store query, a stat block, and the bars.
+log. The entries below that are cheap are cheap precisely because they
+only re-read rows that already exist; the ones that need history need somewhere
+to put it first.
 
 ### Swarm history
 
@@ -268,21 +253,6 @@ one of three supported clients would read as a bug.
 
 **Small–medium** — depends on whether `TorrentClient::list` already carries the
 field or needs widening across three backends.
-
-### Auto-refreshing status tiles
-
-There is no live view anywhere: no SSE, no websockets, and although htmx is
-vendored it is used only by the seven click-to-test buttons — there is not one
-`hx-trigger` in the tree. Every number updates only on reload.
-
-The constraint is the interesting part. `status_page` runs live probes of every
-*arr app on each load, so polling the *page* would be expensive and would put
-real traffic on the *arr apps for a number nobody is watching. Polling a
-*fragment* containing only the stat tiles would not. That is the smallest
-honest step toward a live view, and it needs the tiles split out of the page
-handler first.
-
-**Small–medium** — a fragment route, and the tiles extracted from `status_page`.
 
 ### Config backup and restore
 

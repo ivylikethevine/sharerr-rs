@@ -19,7 +19,7 @@ use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
-use crate::models::non_empty;
+use crate::models::{MediaInfo, non_empty};
 use crate::{Discovered, Tagged, fetch_tagged};
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +63,8 @@ struct TrackFile {
     /// Present when the file was imported from a scene release.
     #[serde(default)]
     scene_name: Option<String>,
+    #[serde(default)]
+    media_info: Option<MediaInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,9 +146,9 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 scene_name: non_empty(file.scene_name.clone()),
                 // Lidarr and Readarr report no pre-rename path.
                 original_path: None,
-                // Not yet read from Lidarr's `mediaInfo`; the sync pass probes the
-                // file instead. See docs/ROADMAP.md.
-                media: None,
+                // Lidarr has already analysed the file, so this costs nothing:
+                // it arrives in the same JSON as everything else above.
+                media: file.media_info.and_then(MediaInfo::into_meta),
             });
         }
     }

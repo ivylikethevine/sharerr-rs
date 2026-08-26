@@ -56,6 +56,12 @@ jobs:
       - name: Render the HTML report
         run: cargo llvm-cov report --html --output-dir coverage-html
 
+      # Codecov reads lcov, so the same profile data is rendered a third time
+      # rather than re-run. `--fail-under-lines 0` is deliberately absent: the
+      # gate on coverage is review, not a number this workflow enforces.
+      - name: Render the lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
       - name: Summarize
         run: |
           set -euo pipefail
@@ -66,6 +72,23 @@ jobs:
             cargo llvm-cov report --summary-only
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
+
+      # What the README badge reads. The upload is what makes the number public;
+      # the HTML artifact below is what makes it explorable, and neither
+      # replaces the other.
+      #
+      # Because this workflow is dispatch-only (see the header), the badge shows
+      # the coverage of the last run somebody asked for, not of the last commit.
+      # Adding `push: branches: [main]` to the triggers above is what would make
+      # it track the default branch — at the cost of the full instrumented
+      # rebuild the header declines to pay on every push.
+      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          files: lcov.info
+          # Tier 1 only, matching what was actually instrumented.
+          flags: tier1
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
