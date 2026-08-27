@@ -149,7 +149,7 @@
       <tr>
         <td class="nowrap"{% if !item.since_absolute.is_empty() %} title="{{ item.since_absolute }}"{% endif %}>{{ item.since }}</td>
         <td class="title">
-          {{ item.title }}
+          <a href="/items/{{ item.source }}/{{ item.file_id }}">{{ item.title }}</a>
           <span class="hint">({{ item.kind }})</span>
           {# Two different strings by design — conflating them stalls seeding at
              0%, see `sharerr-torrent`. The release title is also what the

@@ -934,6 +934,8 @@ fn items_page() -> ItemsPage {
                 last_error: None,
                 created_by_sharerr: true,
                 since_absolute: "2024-02-14 09:21:07 UTC".to_owned(),
+                source: "sonarr",
+                file_id: 1337,
             },
             ItemRow {
                 title: "Harborlight (2019)".to_owned(),
@@ -963,6 +965,8 @@ fn items_page() -> ItemsPage {
                 last_error: None,
                 created_by_sharerr: false,
                 since_absolute: "2024-04-02 17:44:55 UTC".to_owned(),
+                source: "radarr",
+                file_id: 91,
             },
             ItemRow {
                 title: "Lanternwick Hollow S02E04".to_owned(),
@@ -991,6 +995,8 @@ fn items_page() -> ItemsPage {
                 last_error: None,
                 created_by_sharerr: false,
                 since_absolute: "2024-05-06 11:20:31 UTC".to_owned(),
+                source: "sonarr",
+                file_id: 2051,
             },
             ItemRow {
                 title: "Midnight Frequency".to_owned(),
@@ -1019,6 +1025,8 @@ fn items_page() -> ItemsPage {
                 ),
                 created_by_sharerr: false,
                 since_absolute: "2024-05-06 10:42:12 UTC".to_owned(),
+                source: "lidarr",
+                file_id: 610,
             },
             ItemRow {
                 title: "Seaglass & Static".to_owned(),
@@ -1045,6 +1053,8 @@ fn items_page() -> ItemsPage {
                 last_error: None,
                 created_by_sharerr: false,
                 since_absolute: "2024-04-30 08:05:44 UTC".to_owned(),
+                source: "readarr",
+                file_id: 12,
             },
         ],
         total: 132,

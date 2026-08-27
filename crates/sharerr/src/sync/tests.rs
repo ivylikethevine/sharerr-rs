@@ -879,6 +879,100 @@ async fn an_item_that_loses_its_tag_is_unshared_and_its_torrent_removed() {
     }
 }
 
+/// The manual "unshare one file" action — same effect the tag-diff path
+/// above gives an item whose tag disappeared, but callable directly for one
+/// item an operator chose, without waiting for the source to stop reporting
+/// its tag first.
+#[tokio::test]
+async fn unshare_one_removes_the_torrent_and_marks_unshared() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    let known = known(&h).await;
+    let item = known.values().next().expect("one item was shared");
+    let hash = item.info_hash.clone().expect("it has a torrent");
+
+    h.syncer.unshare_one(item).await.unwrap();
+
+    let snapshot = h.qbit.snapshot();
+    assert!(snapshot.removed.contains(&hash));
+
+    let got = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.state, ShareState::Unshared);
+
+    for file in &h.library.files {
+        assert!(
+            file.disk_path.exists(),
+            "{} was deleted",
+            file.disk_path.display()
+        );
+    }
+}
+
+/// The manual "force rebuild" action: the old torrent is removed and the
+/// row's identity cleared, so the very next pass — triggered immediately by
+/// the real web handler, run manually here — treats the file as freshly
+/// discovered and rebuilds it, never moving or rewriting the file itself.
+#[tokio::test]
+async fn prepare_rebuild_forces_a_fresh_torrent_on_the_next_pass() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    let known_before = known(&h).await;
+    let item = known_before.values().next().expect("one item was shared");
+    let old_hash = item.info_hash.clone().expect("it has a torrent");
+    let identities_before: Vec<_> = h
+        .library
+        .files
+        .iter()
+        .map(|f| file_identity(&f.disk_path))
+        .collect();
+
+    h.syncer.prepare_rebuild(item).await.unwrap();
+
+    let cleared = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cleared.state, ShareState::Pending);
+    assert_eq!(cleared.info_hash, None);
+
+    let snapshot = h.qbit.snapshot();
+    assert!(snapshot.removed.contains(&old_hash));
+
+    h.syncer.run(false).await.unwrap();
+
+    let after = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.state, ShareState::Seeding);
+    assert!(after.info_hash.is_some(), "a fresh torrent was built");
+
+    let identities_after: Vec<_> = h
+        .library
+        .files
+        .iter()
+        .map(|f| file_identity(&f.disk_path))
+        .collect();
+    assert_eq!(
+        identities_before, identities_after,
+        "the file itself must never move or change"
+    );
+}
+
 /// Withdrawal is not only for a `Seeding` item: one that never got that far —
 /// stuck `Failed` because its file could not be found — must still be cleared
 /// out once its tag is gone, or a stale error keeps haunting the Items page

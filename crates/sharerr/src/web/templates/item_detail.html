@@ -1,0 +1,213 @@
+{% extends "layout.html" %}
+{% import "macros.html" as ui %}
+{% block title %}{{ title }} — sharerr{% endblock %}
+
+{% block content %}
+<p><a href="/items">&larr; All items</a></p>
+<h1>{{ title }} <span class="hint">({{ kind }})</span></h1>
+
+{% if let Some(message) = message %}
+{% if message_failed %}
+<p class="error" role="alert">{{ message }}</p>
+{% else %}
+<p class="ok" role="status">{{ message }}</p>
+{% endif %}
+{% endif %}
+
+<section class="wide">
+<div class="panel">
+  {# The one thing worth a whole page: these two strings are not the same,
+     and conflating them stalls seeding at 0% — see `CLAUDE.md`'s first
+     trap. There was previously no view anywhere that showed both. #}
+  <dl class="facts">
+    <dt>Release title <span class="hint" title="What the feed advertises">(the feed)</span></dt>
+    <dd><code>{{ release_title }}</code></dd>
+    <dt>File name <span class="hint" title="What the torrent is actually named — it always describes the file where it sits">(the torrent)</span></dt>
+    <dd>
+      {% if let Some(name) = file_name %}<code>{{ name }}</code>{% else %}<span class="hint">—</span>{% endif %}
+    </dd>
+  </dl>
+</div>
+</section>
+
+<section class="wide">
+<div class="panel">
+  <dl class="facts">
+    <dt>Source</dt>
+    <dd title="{{ source_hint }}">{{ source_label }}</dd>
+    <dt>Size</dt>
+    <dd>{{ size }}</dd>
+    <dt>State</dt>
+    <dd class="state">
+      {{ state_label }}
+      {% if let Some(hint) = state_hint %}<br><span class="hint">{{ hint }}</span>{% endif %}
+      {% if info_hash.is_some() %}
+      <br><span class="hint">{% if created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}</span>
+      {% endif %}
+    </dd>
+    {% if let Some(reason) = last_error %}
+    <dt>Last error</dt>
+    <dd><pre class="wrap error">{{ reason }}</pre></dd>
+    {% endif %}
+    <dt>Discovered</dt>
+    <dd{% if !since_absolute.is_empty() %} title="{{ since_absolute }}"{% endif %}>{{ since }}</dd>
+    {% if !ids.is_empty() %}
+    <dt>Metadata IDs <span class="hint" title="What a friend's *arr matches the release on">(the feed)</span></dt>
+    <dd class="ids">{{ ids }}</dd>
+    {% endif %}
+    <dt>Visible to</dt>
+    <dd>{% if visible_to.is_empty() %}<span class="hint">—</span>{% else %}{{ visible_to }}{% endif %}</dd>
+  </dl>
+</div>
+</section>
+
+{% if let Some(media) = media %}
+<section class="wide">
+<h2>Media</h2>
+<div class="panel">
+  <dl class="facts">
+    {% if let Some(v) = media.resolution %}<dt>Resolution</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.video_codec %}<dt>Video codec</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.dynamic_range %}<dt>Dynamic range</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.audio_codec %}<dt>Audio codec</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.audio_channels %}<dt>Audio channels</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.audio_languages %}<dt>Audio languages</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.subtitles %}<dt>Subtitles</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.runtime %}<dt>Runtime</dt><dd>{{ v }}</dd>{% endif %}
+    {% if let Some(v) = media.audio_sample_rate %}<dt>Sample rate</dt><dd>{{ v }} Hz</dd>{% endif %}
+    {% if let Some(v) = media.audio_bit_depth %}<dt>Bit depth</dt><dd>{{ v }}-bit</dd>{% endif %}
+  </dl>
+</div>
+</section>
+{% endif %}
+
+<section class="wide">
+<h2>Torrent and tracker</h2>
+<div class="panel">
+  <dl class="facts">
+    <dt>Info hash</dt>
+    <dd>
+      {% if let Some(hash) = info_hash %}
+      <code title="{{ hash }}">{{ hash }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ hash }}" aria-label="Copy the full info hash for {{ title }}">copy</button>
+      {% else %}
+      <span class="hint">none yet</span>
+      {% endif %}
+    </dd>
+    <dt>Announce URL</dt>
+    <dd>
+      {% if let Some(url) = announce_url %}
+      <code class="truncate" title="{{ url }}">{{ url }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ url }}" aria-label="Copy the full announce URL for {{ title }}">copy</button>
+      {% else %}
+      <span class="hint">none yet</span>
+      {% endif %}
+    </dd>
+    <dt>Announce token</dt>
+    <dd>
+      {% if let Some(fp) = token_fp %}
+      <span class="field-status {{ token_status.css_class() }}" title="{{ token_status.label() }}"><code>{{ fp }}</code></span>
+      {% else %}
+      <span class="field-status {{ token_status.css_class() }}">{{ token_status.label() }}</span>
+      {% endif %}
+    </dd>
+    <dt>Ratio</dt>
+    <dd{% if !ratio_hint.is_empty() %} title="{{ ratio_hint }}"{% endif %}>
+      {% if ratio.is_empty() %}<span class="hint">—</span>{% else %}{{ ratio }}{% endif %}
+    </dd>
+  </dl>
+
+  {% if let Some(swarm) = swarm %}
+  <h3>Live swarm</h3>
+  <p class="hint">{{ swarm.complete }} seeding &middot; {{ swarm.incomplete }} downloading, as the tracker sees it right now.</p>
+  {% if !swarm.peers.is_empty() %}
+  <p>
+    {% for peer in swarm.peers %}
+    <code title="{{ peer.full }}">{{ peer.masked }}</code>{% if !loop.last %}, {% endif %}
+    {% endfor %}
+    {% if swarm.more > 0 %}
+    <span class="hint">… and {{ swarm.more }} more</span>
+    {% endif %}
+  </p>
+  {% endif %}
+  {% else %}
+  <p class="hint">Nobody is announcing to this torrent right now.</p>
+  {% endif %}
+</div>
+</section>
+
+<section class="wide">
+<h2>Path resolution</h2>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_PATH_MAP, "Why a path resolves the way it does") %}{% endcall %}
+</div>
+<div class="panel">
+  <dl class="facts">
+    <dt>*arr view</dt>
+    <dd><code>{{ arr_path }}</code></dd>
+    {% if !sharerr_path.is_empty() %}
+    <dt>sharerr view</dt>
+    <dd>
+      <code>{{ sharerr_path }}</code>
+      {% if let Some(exists) = path_exists %}
+      {% if exists %}<span class="ok">readable</span>{% else %}<span class="error">not found here</span>{% endif %}
+      {% endif %}
+    </dd>
+    <dt>qBittorrent view</dt>
+    <dd><code>{{ qbit_path }}</code> <span class="hint">(verify against the client itself)</span></dd>
+    {% endif %}
+  </dl>
+  {% if !mapping_applied && !sharerr_path.is_empty() %}
+  <p class="hint">No <code>[[path_map]]</code> rule matched — every view above is the same path, unmapped.</p>
+  {% endif %}
+  {% if sharerr_path.is_empty() %}
+  <p class="error">This path could not be resolved — it is not absolute. <code>sharerr doctor</code> reports this as a problem.</p>
+  {% endif %}
+</div>
+</section>
+
+<section class="wide">
+<h2>Actions</h2>
+<p class="hint">
+  None of these move, rename, re-link, or delete the file itself — see
+  <a href="{{ crate::web::docs::CONFIG_PATH_MAP }}" target="_blank" rel="noopener noreferrer">how sharerr handles paths</a>.
+</p>
+<div class="panel">
+  {% if can_retry %}
+  <form method="post" action="/items/{{ source }}/{{ file_id }}/retry" class="inline">
+    <button type="submit">Retry now</button>
+  </form>
+  <p class="hint">
+    Runs a sync pass immediately instead of waiting for the next scheduled
+    one. This reprocesses every pending or failed item, not only this one.
+  </p>
+  {% endif %}
+
+  {% if can_rebuild %}
+  <form method="post" action="/items/{{ source }}/{{ file_id }}/rebuild" class="inline">
+    <button type="submit" class="secondary">Force rebuild</button>
+  </form>
+  <p class="hint">
+    Removes the current torrent from the client (without touching the file)
+    and builds a fresh one from the file as it exists on disk right now, in
+    the same sync pass. Use this if the file changed but its *arr identifier
+    did not.
+  </p>
+  {% endif %}
+
+  {% if can_unshare %}
+  <form method="post" action="/items/{{ source }}/{{ file_id }}/unshare" class="inline">
+    <button type="submit" class="link">Unshare</button>
+  </form>
+  <p class="hint">
+    Stops seeding without deleting the file — the same effect removing the
+    tag upstream has, without waiting for the next sync to notice.
+  </p>
+  {% endif %}
+
+  {% if !can_retry && !can_rebuild && !can_unshare %}
+  <p class="hint">Nothing to do here — this item has never had a torrent and is not sharing.</p>
+  {% endif %}
+</div>
+</section>
+{% endblock %}

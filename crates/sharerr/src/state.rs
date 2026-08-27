@@ -942,9 +942,17 @@ pub(crate) mod fixtures {
             ratio_limit: None,
             torrent_dir: dir.path().to_path_buf(),
         };
+        // Opened from `config.database_path()`, the same path `ServeState::store`
+        // itself lazily opens — two independent `Store`/pool handles sharing one
+        // file, exactly as `Syncer::build` and `ServeState::store` do in
+        // production. An in-memory store here would be its own, permanently
+        // empty database, invisible to anything that reaches the store through
+        // `state.store()` instead of `state.syncer().store()` — which is exactly
+        // what a web handler that looks an item up one way and mutates it
+        // through the syncer the other way needs to be a faithful test of.
         let syncer = Syncer::new(
-            config,
-            Store::open_in_memory().await.unwrap(),
+            config.clone(),
+            Store::open(&config.database_path()).await.unwrap(),
             sources,
             Arc::new(AlwaysReadyTracker) as Arc<dyn sharerr_torrent::TrackerProvider>,
             seeder,
