@@ -24,6 +24,7 @@ default, and what sets it.
 - [`[sync]`](#sync)
 - [`[checks]`](#checks)
 - [`[notifications]`](#notifications)
+- [`[metrics]`](#metrics)
 - [Vault secrets](#vault-secrets)
 - [Environment variable overrides](#environment-variable-overrides)
 
@@ -281,6 +282,25 @@ Vault secret: `notifications.webhook_url` — in the vault rather than
 `sharerr.toml` even though it is not credential-shaped at a glance, because a
 Discord webhook URL embeds its own bearer token in the path.
 
+## `[metrics]`
+
+`/metrics` (OpenMetrics, for Prometheus) and a JSON dashboard-widget endpoint
+(for Homepage, Homarr, or Glance). Both off by default and both require the
+bearer token below once enabled — unlike `/health` and `/ready`, they hand out
+how much this instance is sharing and to how many friends, which is exactly
+what the tracker's and the lighthouse's don't-confirm-existence posture exists
+to avoid leaking to a bare port scan.
+
+| TOML key           | Type | Default | Notes                                          |
+| ------------------ | ---- | ------- | ----------------------------------------------- |
+| `metrics.enabled`  | bool | `false` | Serve `/metrics` and the dashboard-widget JSON. |
+
+Vault secret: `metrics.token` — the bearer token both endpoints require,
+sent as `Authorization: Bearer <token>`. There is no unauthenticated form of
+either endpoint; a request with a missing or wrong token gets the same `404`
+as when `metrics.enabled` is `false`, so a probe cannot tell "off" from
+"wrong token" from "instance does not exist".
+
 ## Vault secrets
 
 Every secret sharerr reads, all set the same way:
@@ -305,8 +325,9 @@ sharerr vault remove <key>
 | `gluetun.api_key`           | Tracker-facing gluetun control server API key                |
 | `gluetun_client.api_key`    | Torrent-client-facing gluetun control server API key         |
 | `notifications.webhook_url` | Where a sync-failure/peer-quiet notification is POSTed       |
+| `metrics.token`             | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics)) |
 
-Those twelve are the keys `sharerr vault set` accepts. `sharerr vault list`
+Those thirteen are the keys `sharerr vault set` accepts. `sharerr vault list`
 shows every key the vault holds, which includes a few sharerr manages
 itself and `vault set` refuses: `tracker.token_previous` (the rotated-out
 announce token, see [`[tracker]`](#tracker)), `identity.signing_key` (this

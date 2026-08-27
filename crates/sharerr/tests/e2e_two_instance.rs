@@ -8,13 +8,17 @@
 //! ./run_docker_tests_two_instance.sh
 //! ```
 //!
-//! which brings up two independent sharerr+Radarr+qBittorrent stacks, shares
-//! a file from instance A, registers instance A as a real Torznab indexer on
-//! instance B's Radarr, triggers a real automatic search and grab, and ends
-//! by running this. Driving it by hand is documented in
-//! `docker/README.md`'s "The two-instance stack" section; the invocation
-//! expected there is
-//! `cargo test -p sharerr --features e2e -- --ignored two_instance --test-threads=1`.
+//! which brings up two independent sharerr+Radarr+qBittorrent stacks plus a
+//! Prowlarr, shares a file from instance A, registers instance A as a real
+//! Torznab indexer on Prowlarr — with "Prefer Magnet URL" pinned off, since
+//! sharerr's torrents are private and a magnet can never complete against
+//! one — syncs it down to instance B's Radarr as an application, triggers a
+//! real automatic search and grab, and ends by running this. Driving it by
+//! hand is documented in `docker/README.md`'s "The two-instance stack"
+//! section; the invocation expected there is
+//! `cargo test -p sharerr --features e2e --test e2e_two_instance -- --ignored --test-threads=1`
+//! — targeting the binary directly, since this file's test name does not
+//! contain "two_instance" for a name filter to match.
 //!
 //! The one assertion: after a real Radarr automatic search, a real grab, and
 //! a real BitTorrent transfer between two separate containers, the bytes

@@ -152,6 +152,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
             "/settings/notifications",
             post(settings::save_notifications),
         )
+        .route("/settings/metrics", post(settings::save_metrics))
         .route(
             "/settings/generate/{field}",
             post(settings::generate_secret),
@@ -335,6 +336,21 @@ async fn glance(
 
     let swarm = state.serve.swarms().stats().await;
 
+    // Only worth asking when the swarm is quiet right now — a peer visibly
+    // announcing needs no "since when" to tell it apart from a fortnight of
+    // silence. `unwrap_or_default()` reads a store error the same way an
+    // empty result does: "unknown" rather than a banner of its own for a
+    // number nothing else on this tile depends on.
+    let swarm_quiet_since = if swarm.peers == 0 {
+        store
+            .last_active_swarm_sample_at()
+            .await
+            .unwrap_or_default()
+            .map(peers::ago)
+    } else {
+        None
+    };
+
     let (cpu_percent, memory_usage, disk_usage) = match state.serve.system_status().snapshot().await
     {
         Some(sample) => {
@@ -355,6 +371,7 @@ async fn glance(
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
         swarm_torrents: swarm.swarms,
+        swarm_quiet_since,
         next_sync,
         cpu_percent,
         memory_usage,
@@ -517,6 +534,40 @@ mod tests {
         assert_eq!(glance.last_sync_note, "1 added");
         assert!(!glance.last_sync_failed);
         assert_eq!(glance.swarm_peers, 0, "nobody has announced");
+        assert_eq!(
+            glance.swarm_quiet_since, None,
+            "no swarm sample has ever been recorded"
+        );
+    }
+
+    /// The tile's "quiet since" wording depends on the swarm-history sampler
+    /// having recorded a past peer, not the live in-memory swarm this test
+    /// leaves empty.
+    #[tokio::test]
+    async fn swarm_quiet_since_reports_the_last_time_anyone_was_seen() {
+        let (_dir, serve) = unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .record_swarm_sample(sharerr_store::SwarmSample {
+                sampled_at: now_epoch() - 3600,
+                swarms: 1,
+                peers: 2,
+                seeders: 1,
+            })
+            .await
+            .unwrap();
+
+        let state = web_state(serve);
+        let glance = glance(&state, None).await.expect("the store is available");
+
+        assert_eq!(
+            glance.swarm_peers, 0,
+            "the live swarm is empty in this test"
+        );
+        assert!(
+            glance.swarm_quiet_since.is_some(),
+            "a past active sample exists"
+        );
     }
 
     /// The status page's "next sync" estimate must reflect the backoff a

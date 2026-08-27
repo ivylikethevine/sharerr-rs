@@ -244,6 +244,13 @@ pub struct Glance {
     /// two counts above and previously discarded — without it, twenty peers on
     /// one torrent and one peer on each of twenty read identically.
     pub swarm_torrents: usize,
+    /// Rendered relative time of the last hourly sample that saw at least one
+    /// peer — see `migrations/0011_swarm_samples.sql`. Only meaningful, and
+    /// only rendered, when `swarm_peers` is `0`: it is what tells "nobody is
+    /// here right now" apart from "nobody has been here in a fortnight",
+    /// which otherwise read identically. `None` when no sample has ever seen
+    /// a peer, including before the sampler's first hour has passed.
+    pub swarm_quiet_since: Option<String>,
     /// When the next periodic sync is due, rendered relative ("in ~4 min",
     /// "due now") — derived from the last finished run plus the configured
     /// interval, since the sync loop stores no deadline of its own. Empty when
@@ -494,6 +501,13 @@ pub struct SettingsPage {
     pub notifications_kind: &'static str,
     pub notifications_peer_quiet_secs: u64,
 
+    /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
+    /// see [`sharerr_core::config::MetricsConfig`].
+    pub metrics_enabled: bool,
+    /// Whether the bearer token they require is stored — see
+    /// `secret_keys::METRICS_TOKEN`.
+    pub metrics_token_set: bool,
+
     /// One row per `[[library]]` directory, plus a spare blank row.
     pub libraries: Vec<LibraryRow>,
 
@@ -612,6 +626,10 @@ pub struct DiagnosticsData {
     /// nothing to draw, so the template omits the figure rather than rendering
     /// an empty box above an empty-state message.
     pub run_chart: Option<RunChart>,
+    /// Up to a fortnight of hourly swarm-activity samples, oldest to newest —
+    /// see `migrations/0011_swarm_samples.sql`. `None` when nothing has been
+    /// sampled yet, same convention as `run_chart`.
+    pub swarm_chart: Option<SwarmChart>,
     /// What the lighthouse poller is doing, or `None` when none is configured
     /// — the section is omitted entirely in that case.
     pub lighthouse: Option<LighthouseView>,
@@ -675,6 +693,39 @@ pub struct RunChart {
     pub bars: Vec<RunBar>,
     pub width: i32,
     pub height: i32,
+}
+
+/// One hour's swarm sample, drawn as a contiguous bar — see [`SwarmChart`]
+/// for why these have no gap and no state colour, unlike [`RunBar`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmBar {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// Hover text: when this sample was taken and what it saw.
+    pub title: String,
+}
+
+/// The swarm-history strip: up to a fortnight of hourly samples, oldest to
+/// newest, plus one pre-rendered sentence answering what the chart shows at
+/// a glance.
+///
+/// A fortnight of hourly bars is up to 336 of them — an order of magnitude
+/// more than [`RunChart`] ever draws, so bars here are contiguous and sized
+/// to fill a fixed total width rather than [`RunBar`]'s fixed per-bar width
+/// and gap; at this count a gap would vanish and a fixed width would make
+/// the strip several thousand pixels wide. Individual hourly samples are
+/// also not the individually-meaningful events sync runs are, so the
+/// accessible equivalent here is `summary`, one sentence, rather than
+/// `RunChart`'s full per-row table — a table of 336 nearly-identical rows
+/// would tell a screen reader user less than the sentence does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwarmChart {
+    pub bars: Vec<SwarmBar>,
+    pub width: i32,
+    pub height: i32,
+    pub summary: String,
 }
 
 /// One gluetun-tracked endpoint's state, pre-rendered for display.

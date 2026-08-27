@@ -45,7 +45,7 @@
 //! Both are held to the router by the tests at the bottom of this file, which
 //! drive the real thing and check that every documented path answers.
 
-use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 /// The parts of the document that are not derived from a handler: the
@@ -102,7 +102,7 @@ exists — verify the signature against the pubkey you expect."),
 Liveness, readiness, and the two hooks gluetun calls when a forwarded port \
 appears or goes away."),
     ),
-    modifiers(&PeerApiKey),
+    modifiers(&PeerApiKey, &MetricsToken),
     paths(
         // See the module docs: mounted by hand, so listed by hand.
         crate::tracker::announce,
@@ -136,6 +136,22 @@ impl Modify for PeerApiKey {
                  one means issuing a new one, which is the correct behaviour for a \
                  bearer credential.",
             ))),
+        );
+    }
+}
+
+/// The `Authorization: Bearer` token `/metrics` and `/dashboard` require —
+/// see [`crate::metrics`]. A separate scheme from [`PeerApiKey`] because it is
+/// a different credential entirely: one shared secret for every caller, set
+/// from Settings → Metrics, not one key per friend.
+struct MetricsToken;
+
+impl Modify for MetricsToken {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "metricsToken",
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
         );
     }
 }
@@ -237,6 +253,8 @@ mod tests {
             "/ready",
             "/gluetun/refresh",
             "/gluetun/down",
+            "/metrics",
+            "/dashboard",
             "/lighthouse/v1/health",
             "/lighthouse/v1/report/{key_hash}",
             "/lighthouse/v1/lookup/{key_hash}",

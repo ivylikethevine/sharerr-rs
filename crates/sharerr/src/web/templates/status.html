@@ -132,6 +132,30 @@
 </section>
 
 <section>
+<h2>Swarm history</h2>
+<div class="panel">
+  {% if let Some(chart) = diag.swarm_chart %}
+  {# Accessible equivalent is `chart.summary` below, not a per-bar table — see
+     `SwarmChart`'s own doc for why 336 nearly-identical hourly rows would say
+     less than one sentence does. #}
+  <figure class="swarmchart">
+    <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" width="{{ chart.width }}" height="{{ chart.height }}"
+         role="presentation" aria-hidden="true" focusable="false">
+      {% for bar in chart.bars %}
+      <rect class="swarmchart-bar" x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.w }}" height="{{ bar.h }}">
+        <title>{{ bar.title }}</title>
+      </rect>
+      {% endfor %}
+    </svg>
+    <figcaption class="hint">Oldest to newest, one bar per hour. {{ chart.summary }}</figcaption>
+  </figure>
+  {% else %}
+  {% call ui::empty("No swarm samples yet", "Recorded once an hour while sharerr serve runs, so the first one lands within an hour of startup. This is what turns 'nobody is here right now' and 'nobody has been here in a fortnight' into two different, visible facts.") %}{% endcall %}
+  {% endif %}
+</div>
+</section>
+
+<section>
 <h2>Networking</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_GLUETUN, "Gluetun configuration") %}{% endcall %}

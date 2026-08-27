@@ -373,7 +373,7 @@ Radarr can find, grab, and correctly receive what was shared.
 | What it proves      | a local add never moves or rewrites a file  | a friend's Radarr can index, grab, and correctly download one |
 | Torrent transport   | never actually downloaded by anyone         | a real BitTorrent handshake between two separate containers   |
 | Grab trigger        | `sharerr sync`, driven by the test           | Radarr's own automatic search, the same command its UI sends  |
-| Runtime             | one Radarr, one qBittorrent, one sharerr    | two of each, plus real indexer/download-client wiring         |
+| Runtime             | one Radarr, one qBittorrent, one sharerr    | two of each, plus a Prowlarr and real indexer/download-client wiring |
 
 Instance A is seeded exactly like the plain stack's Radarr — one tagged movie,
 written straight into its database for the reason `seed-arr`'s own module doc
@@ -382,14 +382,36 @@ gives. Instance B's Radarr gets the *same* movie by TMDB id, seeded via
 "wanted" entry its own automatic search can match against instance A's shared
 release. The script then does by API exactly what an operator would do by
 hand: creates a peer on instance A, registers instance A as a Torznab indexer
-on instance B's Radarr, registers instance B's qBittorrent as its download
-client, and triggers `MoviesSearch` — Radarr's real automatic-search-and-grab
-command, not a `sharerr sync`.
+on a **Prowlarr** sitting between the two Radarrs (not a direct indexer on
+instance B's Radarr — see the next section for why), registers instance B's
+qBittorrent as its download client, and triggers `MoviesSearch` — Radarr's
+real automatic-search-and-grab command, not a `sharerr sync`.
 
 The one assertion that justifies the whole heavier stack:
 [`e2e_two_instance.rs`](../crates/sharerr/tests/e2e_two_instance.rs) reads the
 bytes instance B's qBittorrent actually saved and compares them, byte for
 byte, against instance A's original copy.
+
+### Why Prowlarr sits in front of instance B's Radarr
+
+Radarr's own direct Torznab indexer has no setting to prefer a `.torrent`
+enclosure over a `magnet` link when a feed offers both, and the first live run
+of this stack showed it choosing the magnet — confirmed after the fact from
+qBittorrent-B's own torrent record (`has_metadata: false`, and a `magnet_uri`
+whose `dn=` was the release title rather than the torrent's real internal
+filename). Every torrent sharerr builds is private (see `CLAUDE.md`'s
+"Torrent name vs release title" trap and `sharerr-torrent`'s `factory.rs`), so
+a magnet can never complete against it in any environment — nothing in the
+swarm will ever answer its `ut_metadata` request. This is not the
+sandboxed-build-environment quirk `docs/ROADMAP.md` once suspected; it
+reproduces identically on a plain Docker host.
+
+Prowlarr's per-indexer "Prefer Magnet URL" — `false` by default — is the one
+place this preference is actually configurable, so the script pins it
+explicitly on the indexer it creates and confirms the pin took, rather than
+relying on the default holding across a Prowlarr upgrade. This is also the
+setup a real friend should use: point Radarr at sharerr through Prowlarr,
+not directly, if the friend's automation software supports it.
 
 ### Why `tracker.advertised_host` is a service name here, not `localhost`
 
@@ -414,6 +436,7 @@ instance B, so this stack can run alongside any of the others.
 | Radarr          | 58878      | 59878      |
 | qBittorrent WebUI | 58080    | 59080      |
 | sharerr         | 58477      | 59477      |
+| Prowlarr        | —          | 59696      |
 
 Tear it down the same two-halves way as the plain stack, against the other
 file and state directory:

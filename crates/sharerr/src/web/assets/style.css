@@ -639,15 +639,15 @@ svg text { font-family: inherit; }
    150px one and gives the summary more weight than the table it summarises.
    `max-width` still lets it shrink on a narrow viewport, where losing the
    shape's scale costs nothing — there are no values to read off it. */
-.runchart {
+.runchart, .swarmchart {
   margin: 0 0 var(--sp-5);
 }
-.runchart svg {
+.runchart svg, .swarmchart svg {
   display: block;
   max-width: 100%;
   height: auto;
 }
-.runchart figcaption {
+.runchart figcaption, .swarmchart figcaption {
   margin-top: var(--sp-2);
 }
 
@@ -662,6 +662,10 @@ svg text { font-family: inherit; }
    backdrop rather than compete with the bar in front of it, but full height,
    so a failure is findable at the scale the strip is scanned at. */
 .runchart-wash { fill: var(--error-bg); }
+
+/* No state to colour by — unlike a sync run, an hourly swarm sample either
+   happened or it did not. */
+.swarmchart-bar { fill: var(--line-strong); }
 
 /* --- Library composition ------------------------------------------------ */
 

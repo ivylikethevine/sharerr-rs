@@ -210,6 +210,7 @@
   <li><a href="#periodic-sync">Sync</a></li>
   <li><a href="#checks">Checks</a></li>
   <li><a href="#notifications">Notifications</a></li>
+  <li><a href="#metrics">Metrics</a></li>
   <li><a href="#your-account">Account</a></li>
 </ul>
 
@@ -906,6 +907,46 @@
     How long a friend must go unseen before this fires — once per quiet spell,
     not on a repeat. <code>0</code> turns just this check off; sync-failure
     notifications still fire as long as a webhook URL is set.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
+</details>
+
+<details class="fold" id="metrics">
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 13.5h11M4 13V8.5M7.5 13V4M11 13v-6"/></svg>Metrics
+    {%- if metrics_enabled %}{% call chip("set", "enabled") %}{% endcall %}
+    {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_METRICS, "Metrics configuration") %}{% endcall %}
+</div>
+<form method="post" action="/settings/metrics" class="panel">
+  <p class="hint">
+    An OpenMetrics <code>/metrics</code> endpoint for Prometheus, and a JSON
+    dashboard-widget endpoint for Homepage, Homarr, or Glance. Both require
+    the bearer token below and answer <code>404</code> — the same as when
+    this is off — for a missing or wrong one, so a bare port scan cannot
+    tell the difference.
+  </p>
+
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if metrics_enabled %}checked{% endif %}
+           {% call lock_attr("metrics.enabled") %}{% endcall %}>
+    Serve <code>/metrics</code> and the dashboard-widget endpoint
+  </label>
+  {% call locked("metrics.enabled") %}{% endcall %}
+
+  <label for="metrics_token">Bearer token {% call field_status(metrics_token_set) %}{% endcall %}</label>
+  <input id="metrics_token" name="token" type="password" autocomplete="off"
+         placeholder="{% call stored(metrics_token_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if metrics_token_set %}
+  <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
+  {% endif %}
+  <p class="hint">
+    Sent by the caller as <code>Authorization: Bearer &lt;token&gt;</code>.
+    Leaving this unset while enabled means neither endpoint will ever answer —
+    there is no unauthenticated form of either.
   </p>
 
   <button type="submit">Save</button>

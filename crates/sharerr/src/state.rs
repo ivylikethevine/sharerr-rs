@@ -99,6 +99,12 @@ pub struct ServeState {
     /// `tracker_token` — loading it means opening the vault, and the pull side of
     /// gossip is asked on every friend's poll.
     gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
+    /// The bearer token `/metrics` requires, cached the same way and for the
+    /// same reason as `tracker_token` — a scrape target is polled on
+    /// whatever interval the operator's Prometheus uses, often as tight as
+    /// every 15 seconds. See [`Self::try_metrics_token`] for the fail-closed
+    /// contract this cache exists to serve, not just to speed up.
+    metrics_token: RwLock<Option<Option<String>>>,
     /// The embedded lighthouse's state, built lazily the first time
     /// `[lighthouse] enabled = true` is actually observed — see
     /// [`Self::lighthouse_state`]. Same `Option<Option<_>>` shape as
@@ -209,6 +215,7 @@ impl ServeState {
             tracker_token: RwLock::new(None),
             tracker_token_previous: RwLock::new(None),
             gossip_identity: RwLock::new(None),
+            metrics_token: RwLock::new(None),
             lighthouse_state: RwLock::new(None),
             wake: Notify::new(),
             tracker,
@@ -518,6 +525,17 @@ impl ServeState {
         .await
     }
 
+    /// The bearer token `/metrics` requires, or `Err` when the vault could not
+    /// be opened so the endpoint can fail *closed* — same reasoning as
+    /// [`Self::tracker_tokens`]: `Ok(None)` is the genuine "no token
+    /// configured" answer and only ever comes from an opened vault, so a
+    /// transient vault error cannot be mistaken for "there is no token" and
+    /// admit an unauthenticated scrape.
+    pub async fn try_metrics_token(&self) -> Result<Option<String>, String> {
+        self.try_vault_string(&self.metrics_token, secret_keys::METRICS_TOKEN)
+            .await
+    }
+
     /// When the previous shared tracker token was last actually used.
     pub fn legacy_token_status(&self) -> Arc<LegacyTokenStatus> {
         Arc::clone(&self.legacy_token_status)
@@ -625,6 +643,7 @@ impl ServeState {
         *self.tracker_token.write().await = None;
         *self.tracker_token_previous.write().await = None;
         *self.gossip_identity.write().await = None;
+        *self.metrics_token.write().await = None;
         *self.tracker.api_key.write().await = None;
         *self.client.api_key.write().await = None;
         // `lighthouse_state` is not cleared here: its only vault input is the

@@ -97,6 +97,7 @@ fn glance() -> Glance {
         swarm_peers: 5,
         swarm_seeders: 3,
         swarm_torrents: 4,
+        swarm_quiet_since: None,
         next_sync: "in ~11 min".to_owned(),
         cpu_percent: Some("12.3%".to_owned()),
         memory_usage: Some("4.2 GiB of 15.6 GiB".to_owned()),
@@ -193,6 +194,25 @@ fn status_page() -> StatusPage {
         },
     ];
 
+    // A quiet stretch, a busy stretch, and a quiet tail — enough for the
+    // strip to show real variation without hand-drawing a fortnight's worth
+    // of hours.
+    let swarm_samples: Vec<sharerr_store::SwarmSample> = (0i64..48)
+        .map(|hour| {
+            let peers = match hour {
+                0..=11 => 0,
+                12..=35 => 3 + (hour % 4),
+                _ => 1,
+            };
+            sharerr_store::SwarmSample {
+                sampled_at: 1_700_000_000 + hour * 3600,
+                swarms: if peers > 0 { 1 } else { 0 },
+                peers,
+                seeders: peers / 2,
+            }
+        })
+        .collect();
+
     StatusPage {
         signed_in: true,
         glance: Some(glance()),
@@ -278,6 +298,7 @@ fn status_page() -> StatusPage {
             ],
             run_chart: crate::web::diagnostics::run_chart(&runs),
             runs,
+            swarm_chart: crate::web::diagnostics::swarm_chart(&swarm_samples),
             // One accepting and one refusing, so the preview shows both the row
             // shape and the warning verdict that a partial failure produces.
             lighthouse: Some(LighthouseView {
@@ -627,6 +648,9 @@ fn settings_page() -> SettingsPage {
         notifications_webhook_set: true,
         notifications_kind: "generic",
         notifications_peer_quiet_secs: 86_400,
+
+        metrics_enabled: false,
+        metrics_token_set: false,
 
         libraries: vec![
             LibraryRow {

@@ -180,6 +180,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = crate::notify::quiet_peers_loop(Arc::clone(&state)) => Ok(()),
         () = crate::gossip::exchange_loop(Arc::clone(&state)) => Ok(()),
         () = crate::system_stats::poll_loop(Arc::clone(&state)) => Ok(()),
+        () = crate::swarm_history::poll_loop(Arc::clone(&state)) => Ok(()),
         () = crate::lighthouse_client::sync_loop(state) => Ok(()),
     }
 }
@@ -371,6 +372,7 @@ pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
         .routes(routes!(ready))
         .routes(routes!(gluetun_refresh))
         .routes(routes!(gluetun_down))
+        .merge(crate::metrics::routes())
 }
 
 /// in this handler turns a fixable configuration gap into a restart loop.
