@@ -77,6 +77,13 @@ pub struct ServeState {
     /// [`Self::invalidate`] — a credential was just written, so the next attempt is
     /// a fresh question rather than a continuation of the old one.
     recovery_failures: RwLock<u32>,
+    /// Consecutive sync *passes* that failed outright once a syncer had already
+    /// built — distinct from `recovery_failures`, which is about never having
+    /// built one at all. [`Self::sync_retry_delay`] backs off on this the same
+    /// way, so a torrent client or *arr app that dies mid-pass is retried within
+    /// seconds instead of waiting out the rest of the configured interval.
+    /// Reset on any pass that returns `Ok`, and by [`Self::invalidate`].
+    sync_failures: RwLock<u32>,
     /// The builtin tracker's announce token, cached because it is consulted on
     /// every announce from every peer and reading it means an Argon2 derivation.
     ///
@@ -198,6 +205,7 @@ impl ServeState {
             // between binding the listener and that first attempt finishing.
             syncer: RwLock::new(Err("still starting up".to_owned())),
             recovery_failures: RwLock::new(0),
+            sync_failures: RwLock::new(0),
             tracker_token: RwLock::new(None),
             tracker_token_previous: RwLock::new(None),
             gossip_identity: RwLock::new(None),
@@ -626,6 +634,9 @@ impl ServeState {
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.
         *self.recovery_failures.write().await = 0;
+        // Same reasoning: a rebuilt syncer has run no passes yet, so a backoff
+        // earned by the syncer this replaces must not carry over.
+        *self.sync_failures.write().await = 0;
         self.wake.notify_one();
     }
 
@@ -642,12 +653,42 @@ impl ServeState {
     /// actually changes something the next attempt is immediate.
     pub async fn recovery_delay(&self) -> Duration {
         let failures = *self.recovery_failures.read().await;
-        // Saturating, and capped well below the point where the shift itself could
-        // overflow.
-        let factor = 1_u32.checked_shl(failures.min(16)).unwrap_or(u32::MAX);
-        RECOVERY_INTERVAL
-            .saturating_mul(factor)
-            .min(RECOVERY_INTERVAL_MAX)
+        backoff_for(failures)
+    }
+
+    /// Record that a sync pass returned successfully, clearing any backoff a
+    /// prior failed pass built up.
+    pub async fn note_sync_success(&self) {
+        *self.sync_failures.write().await = 0;
+    }
+
+    /// Record that a sync pass failed outright, so [`Self::sync_retry_delay`]
+    /// backs off the next attempt instead of repeating the same failure on a
+    /// fixed schedule.
+    pub async fn note_sync_failure(&self) {
+        *self.sync_failures.write().await += 1;
+    }
+
+    /// How long to wait before the next sync attempt, given `interval` — the
+    /// configured (or default) delay between passes.
+    ///
+    /// Zero failures is `interval` exactly, unlike [`Self::recovery_delay`]
+    /// (whose zero-failures floor is [`RECOVERY_INTERVAL`], because there it
+    /// answers "how long until the very first attempt"): a healthy instance
+    /// with nothing to recover from must sync on the schedule it was
+    /// configured with, not race ahead of it every fifteen seconds. Only once
+    /// a pass has actually failed does this back off on the same schedule
+    /// [`Self::recovery_delay`] backs off a failed *build* on — and never past
+    /// `interval` itself, so backoff can only shorten the wait, never lengthen
+    /// it. A torrent client or *arr app that comes back after a brief restart
+    /// is then retried within seconds rather than whatever is left of a
+    /// 15-minute interval.
+    pub async fn sync_retry_delay(&self, interval: Duration) -> Duration {
+        let failures = *self.sync_failures.read().await;
+        if failures == 0 {
+            return interval;
+        }
+        backoff_for(failures).min(interval)
     }
 
     /// Sleep for `interval`, or until [`Self::invalidate`] cuts it short.
@@ -709,6 +750,19 @@ impl ServeState {
     }
 }
 
+/// The exponential backoff shared by [`ServeState::recovery_delay`] (a failed
+/// *build*) and [`ServeState::sync_retry_delay`] (a failed *pass*): doubles
+/// from [`RECOVERY_INTERVAL`] per consecutive failure, capped at
+/// [`RECOVERY_INTERVAL_MAX`].
+fn backoff_for(failures: u32) -> Duration {
+    // Saturating, and capped well below the point where the shift itself could
+    // overflow.
+    let factor = 1_u32.checked_shl(failures.min(16)).unwrap_or(u32::MAX);
+    RECOVERY_INTERVAL
+        .saturating_mul(factor)
+        .min(RECOVERY_INTERVAL_MAX)
+}
+
 /// The advertised base as configuration alone resolves it, with an unusable
 /// address treated as unset rather than fatal — `serve` must come up either way,
 /// and the tracker provider reports the absence with the sentence that names the
@@ -768,6 +822,168 @@ pub(crate) mod fixtures {
             Some("invalid key `taag`".to_owned()),
         );
         (dir, Arc::new(state))
+    }
+
+    /// A tracker that always reports ready, standing in for the real one a
+    /// syncer built by [`ready`] has no use for — nothing here ever runs a
+    /// sync pass, so it only has to satisfy the trait.
+    #[derive(Debug, Default)]
+    struct AlwaysReadyTracker;
+
+    #[async_trait::async_trait]
+    impl sharerr_torrent::TrackerProvider for AlwaysReadyTracker {
+        async fn ensure_ready(&self) -> sharerr_torrent::Result<()> {
+            Ok(())
+        }
+        async fn announce_set(&self) -> sharerr_torrent::Result<sharerr_torrent::AnnounceSet> {
+            Ok(sharerr_torrent::AnnounceSet::single(
+                url::Url::parse("http://sharerr.example/announce").unwrap(),
+            ))
+        }
+    }
+
+    /// A qBittorrent stand-in that answers `list` with nothing and never
+    /// dials out — standing in for the real client neither [`ready`] nor
+    /// [`ready_with_source`] has a live qBittorrent to reach. Everything
+    /// besides `kind`/`list` is `unimplemented!()`: a pass with no discovered
+    /// items never calls them, and a test that starts needing one is a sign
+    /// this stub has outgrown its purpose, not a reason to fill them in blind.
+    #[derive(Debug, Default)]
+    struct AlwaysEmptyQbit;
+
+    #[async_trait::async_trait]
+    impl sharerr_client::TorrentClient for AlwaysEmptyQbit {
+        fn kind(&self) -> sharerr_client::ClientKind {
+            sharerr_client::ClientKind::QBittorrent
+        }
+        async fn login(&self) -> sharerr_client::Result<()> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn version(&self) -> sharerr_client::Result<String> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn list(
+            &self,
+            _category: Option<&str>,
+        ) -> sharerr_client::Result<Vec<sharerr_client::TorrentSummary>> {
+            Ok(Vec::new())
+        }
+        async fn files(
+            &self,
+            _hash: &str,
+        ) -> sharerr_client::Result<Vec<sharerr_client::TorrentFileEntry>> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn add(
+            &self,
+            _request: &sharerr_client::AddRequest<'_>,
+        ) -> sharerr_client::Result<()> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn set_trackers(
+            &self,
+            _hash: &str,
+            _urls: &[url::Url],
+        ) -> sharerr_client::Result<()> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn add_trackers(
+            &self,
+            _hash: &str,
+            _urls: &[url::Url],
+        ) -> sharerr_client::Result<()> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+        async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
+    }
+
+    /// Builds the config/qbit/seeder/syncer plumbing [`ready`] and
+    /// [`ready_with_source`] both need, differing only in which library
+    /// sources the syncer gets.
+    async fn ready_state(
+        config: Config,
+        dir: &tempfile::TempDir,
+        sources: Vec<Box<dyn crate::sync::LibrarySource>>,
+    ) -> Arc<ServeState> {
+        let path = dir.path().join("sharerr.toml");
+        let state = ServeState::new(config.clone(), path, None);
+
+        let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(AlwaysEmptyQbit);
+        let seeder = crate::sync::seed::Seeder {
+            qbit,
+            category: "sharerr".to_owned(),
+            tag: "sharerr".to_owned(),
+            skip_checking: true,
+            upload_limit_kib: None,
+            ratio_limit: None,
+            torrent_dir: dir.path().to_path_buf(),
+        };
+        let syncer = Syncer::new(
+            config,
+            Store::open_in_memory().await.unwrap(),
+            sources,
+            Arc::new(AlwaysReadyTracker) as Arc<dyn sharerr_torrent::TrackerProvider>,
+            seeder,
+        );
+        *state.syncer.write().await = Ok(Arc::new(syncer));
+
+        Arc::new(state)
+    }
+
+    /// A container whose syncer has already built successfully — the state
+    /// `serve`'s background loop reaches once credentials are accepted, which
+    /// neither [`unconfigured`] nor [`unloadable`] ever does. Exists for
+    /// `/ready`'s two remaining branches, which only occur once a syncer is
+    /// present: the database answering, and the database going away under it.
+    ///
+    /// No mock server behind the torrent client and no library source: nothing
+    /// here runs a sync pass, so the harness `crate::sync::tests` builds for
+    /// that would be pure unused weight — this only has to exist as a value.
+    /// A pass run against this fixture always fails outright (nothing was
+    /// scanned) — see [`ready_with_source`] for the opposite case.
+    pub(crate) async fn ready() -> (tempfile::TempDir, Arc<ServeState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let state = ready_state(config, &dir, Vec::new()).await;
+        (dir, state)
+    }
+
+    /// Same as [`ready`], except the syncer has one `[[library]]` source — a
+    /// subdirectory of its own tempdir holding one dotfile, which `library::scan`
+    /// skips while walking but which still keeps `fs::read_dir` from seeing an
+    /// empty directory. That distinction is load-bearing: `library::scan`
+    /// deliberately treats a *truly* empty directory as [`crate::library::ScanError::Empty`]
+    /// (an unmounted bind mount must not read as "nothing to share" and withdraw
+    /// every existing share), so a genuinely empty directory here would make the
+    /// scan fail exactly like [`ready`]'s sourceless syncer does — the dotfile is
+    /// what lets the scan complete with zero items instead. Exists for testing the
+    /// success arm of `serve`'s background loop, which [`ready`] can never reach.
+    pub(crate) async fn ready_with_source() -> (tempfile::TempDir, Arc<ServeState>) {
+        let dir = tempfile::tempdir().unwrap();
+        let library_path = dir.path().join("library");
+        std::fs::create_dir_all(&library_path).unwrap();
+        std::fs::write(library_path.join(".keep"), b"").unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: library_path,
+                kind: sharerr_core::config::LibraryKind::Movie,
+            }],
+            ..Config::default()
+        };
+        let source: Box<dyn crate::sync::LibrarySource> = Box::new(
+            crate::library::DirectoryScanner::new(config.library.clone()),
+        );
+        let state = ready_state(config, &dir, vec![source]).await;
+        (dir, state)
     }
 }
 
@@ -945,6 +1161,86 @@ mod tests {
         state.invalidate("credentials changed").await;
 
         assert_eq!(state.recovery_delay().await, RECOVERY_INTERVAL);
+    }
+
+    /// The case that matters most: a healthy instance with nothing to recover
+    /// from must sync on schedule, not race ahead of its own configured
+    /// interval — unlike `recovery_delay`, zero failures is not a 15s floor
+    /// here.
+    #[tokio::test]
+    async fn a_healthy_instance_waits_the_full_configured_interval() {
+        let (_dir, state) = unconfigured();
+        let interval = Duration::from_secs(900);
+
+        assert_eq!(state.sync_retry_delay(interval).await, interval);
+    }
+
+    /// The point of the fix: a pass that fails outright is retried within
+    /// seconds, not left to wait out the rest of a long configured interval.
+    #[tokio::test]
+    async fn a_failed_pass_backs_off_instead_of_waiting_the_full_interval() {
+        let (_dir, state) = unconfigured();
+        let interval = Duration::from_secs(900);
+
+        state.note_sync_failure().await;
+        assert_eq!(
+            state.sync_retry_delay(interval).await,
+            Duration::from_secs(30)
+        );
+
+        state.note_sync_failure().await;
+        assert_eq!(
+            state.sync_retry_delay(interval).await,
+            Duration::from_secs(60)
+        );
+    }
+
+    /// Backoff must never make a pass wait *longer* than it would have on a
+    /// healthy schedule — only ever shorter. A short configured interval must
+    /// cap the backoff rather than the other way around.
+    #[tokio::test]
+    async fn backed_off_pass_retries_never_exceed_the_configured_interval() {
+        let (_dir, state) = unconfigured();
+        let interval = Duration::from_secs(45);
+
+        for _ in 0..10 {
+            state.note_sync_failure().await;
+        }
+
+        assert_eq!(state.sync_retry_delay(interval).await, interval);
+    }
+
+    /// A pass that succeeds clears whatever backoff earlier failures built up
+    /// — the next scheduled pass runs on the normal interval again.
+    #[tokio::test]
+    async fn a_successful_pass_clears_the_sync_backoff() {
+        let (_dir, state) = unconfigured();
+        let interval = Duration::from_secs(900);
+
+        state.note_sync_failure().await;
+        state.note_sync_failure().await;
+        assert!(state.sync_retry_delay(interval).await < interval);
+
+        state.note_sync_success().await;
+
+        assert_eq!(state.sync_retry_delay(interval).await, interval);
+    }
+
+    /// Invalidating rebuilds the syncer from scratch, so a backoff earned by
+    /// the syncer it replaces must not carry over to the first pass of the new
+    /// one.
+    #[tokio::test]
+    async fn invalidating_also_resets_the_sync_backoff() {
+        let (_dir, state) = unconfigured();
+        let interval = Duration::from_secs(900);
+
+        state.note_sync_failure().await;
+        state.note_sync_failure().await;
+        assert!(state.sync_retry_delay(interval).await < interval);
+
+        state.invalidate("credentials changed").await;
+
+        assert_eq!(state.sync_retry_delay(interval).await, interval);
     }
 
     /// `quiet_notified` and `swarms` both hand out one shared handle for the

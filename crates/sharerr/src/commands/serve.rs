@@ -336,18 +336,26 @@ async fn background(state: Arc<ServeState>) {
         }
 
         match syncer.run(false).await {
-            Ok(report) => tracing::info!(%report, "sync complete"),
+            Ok(report) => {
+                tracing::info!(%report, "sync complete");
+                state.note_sync_success().await;
+            }
             Err(err) => {
                 let reason = format!("{err:#}");
                 tracing::error!(error = reason, "sync failed");
                 crate::notify::send(&state, "sync failed", &reason).await;
+                state.note_sync_failure().await;
             }
         }
 
         // Sleeping after the pass rather than on a fixed schedule, so a slow sync is
-        // never followed by a burst of catch-up runs.
+        // never followed by a burst of catch-up runs. A pass that failed outright
+        // backs off instead of waiting out the rest of the configured interval —
+        // see `ServeState::sync_retry_delay` — so a torrent client or *arr app
+        // that comes back after a brief restart is caught up within seconds.
+        let interval = Duration::from_secs(sync.effective_interval_secs());
         state
-            .sleep_or_wake(Duration::from_secs(sync.effective_interval_secs()))
+            .sleep_or_wake(state.sync_retry_delay(interval).await)
             .await;
     }
 }
@@ -633,5 +641,176 @@ mod tests {
             .strip_prefix("not configured: ")
             .unwrap_or_else(|| panic!("unexpected body: {body}"));
         assert!(!reason.trim().is_empty(), "no reason given");
+    }
+
+    /// The success arm, previously untested: once a syncer has actually built
+    /// and the database answers, `/ready` must say so rather than staying on
+    /// whichever earlier branch got exercised elsewhere.
+    #[tokio::test]
+    async fn ready_reports_ok_once_the_syncer_is_built_and_the_database_answers() {
+        let (_dir, state) = crate::state::fixtures::ready().await;
+
+        let (status, body) = ready(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "ready");
+    }
+
+    /// The one failure `/ready` distinguishes from a configuration problem: the
+    /// syncer built fine, but the database itself stopped answering. Forcing
+    /// this by closing the pool out from under a live `Syncer` is the only way
+    /// to reach it — a config or credential problem never gets this far.
+    #[tokio::test]
+    async fn ready_reports_503_when_the_database_stops_answering() {
+        let (_dir, state) = crate::state::fixtures::ready().await;
+        let syncer = state
+            .syncer()
+            .await
+            .expect("setup: the fixture's syncer must be present");
+        syncer.store().pool().close().await;
+
+        let (status, body) = ready(State(state)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "database unavailable");
+    }
+
+    /// The wiring the backoff fix actually depends on: `background` itself
+    /// must record a failed pass, not just the `ServeState` methods it calls
+    /// in isolation. The fixture's syncer has no library source, so its one
+    /// pass fails immediately with "no library source could be scanned"
+    /// rather than needing a live service to fail against.
+    #[tokio::test]
+    async fn a_failed_pass_backs_off_the_next_attempt() {
+        let (_dir, state) = crate::state::fixtures::ready().await;
+        let interval = Duration::from_secs(state.config().await.sync.effective_interval_secs());
+        assert_eq!(
+            state.sync_retry_delay(interval).await,
+            interval,
+            "setup: no failures recorded yet"
+        );
+
+        // `background` never returns and its future is not `Send` (a
+        // `tracing` macro holds a non-`Send` value across an `.await`
+        // upstream in `ensure_ready`), so it is raced on the current task via
+        // `select!` — exactly how `run` itself drives it — rather than
+        // spawned. The other arm polls for the effect `background` is
+        // expected to have had rather than yielding a fixed number of times,
+        // since a fixed count is exactly the kind of thing that gets flaky
+        // under a loaded test binary; the 5s ceiling is only ever hit if the
+        // wiring is actually broken.
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                () = background(Arc::clone(&state)) => {}
+                () = async {
+                    while state.sync_retry_delay(interval).await >= interval {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await;
+
+        assert!(
+            state.sync_retry_delay(interval).await < interval,
+            "a failed pass must shorten the next attempt's wait"
+        );
+    }
+
+    /// `run`'s startup sequence — building the router, binding listeners, and
+    /// logging why (or whether) reconciliation is running — was previously
+    /// only exercised indirectly, by `tests/cli.rs`'s subprocess suite, and
+    /// only with that suite's one default, single-listener, lighthouse-off
+    /// configuration. This drives it with a config-load failure and no
+    /// dedicated tracker listener, which additionally means `tracker_serve`
+    /// takes its "nothing to serve" arm rather than the one below binding an
+    /// actual listener.
+    ///
+    /// `run` never returns and its future is not `Send` (the same `tracing`
+    /// macro issue that affects `background` propagates up through it), so it
+    /// is raced via `select!` against a real sleep long enough for startup to
+    /// finish and the final `select!` inside `run` to be reached — at which
+    /// point this drops it there rather than waiting on it forever.
+    #[tokio::test]
+    async fn run_logs_the_config_error_with_no_dedicated_tracker_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            server: sharerr_core::config::ServerConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+            },
+            ..Config::default()
+        };
+        let path = dir.path().join("sharerr.toml");
+
+        tokio::select! {
+            result = run(&config, &path, Some("bad field".to_owned())) => {
+                panic!("run must not return on its own: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+    }
+
+    /// The other half: a dedicated tracker listener actually gets bound and
+    /// served, and a disabled sync logs the other startup branch — mutually
+    /// exclusive with the config-error branch the previous test covers.
+    #[tokio::test]
+    async fn run_serves_a_dedicated_tracker_listener_with_sync_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            server: sharerr_core::config::ServerConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+            },
+            tracker: sharerr_core::config::TrackerConfig {
+                bind: Some("127.0.0.1:0".parse().unwrap()),
+                ..Config::default().tracker
+            },
+            sync: sharerr_core::config::SyncConfig {
+                enabled: false,
+                ..Config::default().sync
+            },
+            ..Config::default()
+        };
+        let path = dir.path().join("sharerr.toml");
+
+        tokio::select! {
+            result = run(&config, &path, None) => {
+                panic!("run must not return on its own: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(300)) => {}
+        }
+    }
+
+    /// The mirror of `a_failed_pass_backs_off_the_next_attempt`: a pass that
+    /// actually succeeds must clear a backoff a prior failure built up, not
+    /// merely avoid growing it further. `ready`'s deliberately sourceless
+    /// syncer can never reach `background`'s success arm — this fixture's one
+    /// (empty) library source lets a pass complete instead of bailing.
+    #[tokio::test]
+    async fn a_successful_pass_clears_the_backoff() {
+        let (_dir, state) = crate::state::fixtures::ready_with_source().await;
+        let interval = Duration::from_secs(state.config().await.sync.effective_interval_secs());
+        state.note_sync_failure().await;
+        assert!(
+            state.sync_retry_delay(interval).await < interval,
+            "setup: a failure must be recorded first"
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                () = background(Arc::clone(&state)) => {}
+                () = async {
+                    while state.sync_retry_delay(interval).await < interval {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await;
+
+        assert_eq!(
+            state.sync_retry_delay(interval).await,
+            interval,
+            "a successful pass must clear the backoff"
+        );
     }
 }

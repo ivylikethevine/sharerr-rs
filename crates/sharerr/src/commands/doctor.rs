@@ -1125,6 +1125,48 @@ mod tests {
         assert_eq!(report.failures, 2);
     }
 
+    // ------------------------------------------------------------ check_vault
+
+    /// `check_vault`'s success path — actually opening the vault and reporting
+    /// each configured key's status — is the one thing here that resolves
+    /// `SHARERR_MASTER_KEY` from the process env, so (per CLAUDE.md's "no
+    /// tier-1 fixture opens a real vault") it can only be exercised inside a
+    /// `Jail`. Configuring Sonarr and pre-seeding its key drives the loop's
+    /// `Ok(Some(_))` arm specifically — `fail_missing`/`fail_unreadable` above
+    /// already cover the other two arms on their own, but never through
+    /// `check_vault` itself.
+    #[test]
+    fn check_vault_opens_a_real_vault_and_reports_each_configured_key() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                sonarr: Some(ServiceConfig {
+                    url: Url::parse("http://sonarr.example").unwrap(),
+                }),
+                ..Config::default()
+            };
+            let mut vault = sharerr_store::Vault::open(
+                config.vault_path(),
+                &SecretString::from("a-master-key"),
+            )
+            .unwrap();
+            vault
+                .put(secret_keys::SONARR_API_KEY, &SecretString::from("a-key"))
+                .unwrap();
+
+            let mut report = Report::default();
+            let (opened, _credential) = check_vault(&config, &mut report);
+
+            assert!(opened.is_some(), "the vault must open");
+            // One failure, not two: qBittorrent's key was never seeded (its
+            // absence is `check_torrent_credential`'s own concern, already
+            // covered elsewhere), but Sonarr's *was*, so it must not also fail.
+            assert_eq!(report.failures, 1, "only the unseeded qbit key should fail");
+            Ok(())
+        });
+    }
+
     // ------------------------------------------------------- quiet_secret/secret
 
     #[test]

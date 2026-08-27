@@ -678,6 +678,78 @@ fn sync_continues_when_the_gluetun_lookup_fails() {
     );
 }
 
+/// The success half of the test above: when the control server actually
+/// answers, the resolved endpoint is adopted rather than falling back to the
+/// static one. `AdvertisedEndpoint::observe` has no CLI-visible output of its
+/// own, so this is asserted indirectly — neither failure warning fired — the
+/// same shape as `serve_mounts_the_tracker_and_indexer_routes`'s "a refusal
+/// proves something is routed there" reasoning, mirrored here as "no warning
+/// proves the lookup actually succeeded".
+///
+/// `wiremock::MockServer::start` is async; a `Runtime` built by hand drives it
+/// the same way `sync/tests.rs`'s `Jail`-based tests build one for `Syncer::build`.
+/// The runtime is multi-threaded (the default), so the mock server's own
+/// background task keeps answering on another worker thread while this one
+/// blocks on the subprocess — both the runtime and the `MockServer` have to
+/// outlive that call, which is why neither is dropped until after `sync` runs.
+#[test]
+fn sync_adopts_a_freshly_resolved_gluetun_endpoint() {
+    let dir = sync_fixture();
+    let media = dir.path().join("media");
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let gluetun = runtime.block_on(async {
+        let server = wiremock::MockServer::start().await;
+        sharerr_testkit::mock::mount_json(
+            &server,
+            "/v1/publicip/ip",
+            serde_json::json!({ "public_ip": "203.0.113.9" }),
+        )
+        .await;
+        sharerr_testkit::mock::mount_json(
+            &server,
+            "/v1/openvpn/portforwarded",
+            serde_json::json!({ "port": 51413 }),
+        )
+        .await;
+        server
+    });
+
+    std::fs::write(
+        dir.path().join("sharerr.toml"),
+        format!(
+            "data_dir = {:?}\n\n[tracker]\nadvertised_host = \"seed.example\"\n\n\
+             [gluetun]\ncontrol_url = {:?}\n\n\
+             [[library]]\npath = {:?}\nkind = \"tv\"\n",
+            dir.path().join("data"),
+            gluetun.uri(),
+            media.join("tv"),
+        ),
+    )
+    .unwrap();
+
+    let out = sync(&dir, &["--dry-run"]);
+    let logged = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        !logged.contains("continuing with the statically configured endpoint"),
+        "a successful lookup must not log the fallback warning: {logged}"
+    );
+    assert!(
+        !logged.contains("could not build a gluetun client"),
+        "{logged}"
+    );
+    // ...and the run still got as far as the torrent client, same as the
+    // failed-lookup case — a working gluetun call must not change that.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("qBittorrent"),
+        "{out:?}"
+    );
+
+    drop(gluetun);
+    drop(runtime);
+}
+
 // ----------------------------------------------------------------- preview
 
 /// `sharerr preview` serves the whole UI against hand-built mock state, with no

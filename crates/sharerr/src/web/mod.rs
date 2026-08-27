@@ -28,6 +28,7 @@ pub mod topology;
 pub mod wizard;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -298,13 +299,21 @@ async fn glance(
 
     let now = now_epoch();
     // The loop sleeps `interval` after each pass finishes, so the deadline is
-    // the last finish plus the interval — an estimate, and worded as one.
+    // the last finish plus the interval — an estimate, and worded as one. A
+    // pass that failed outright backs off to a shorter wait (see
+    // `ServeState::sync_retry_delay`), so this has to ask the same question
+    // the loop itself just did rather than assume the full interval.
     let next_sync = match (
         sync_every,
         last_run.as_ref().and_then(|run| run.finished_at),
     ) {
         (Some(every), Some(finished)) => {
-            let due_in = finished + every as i64 - now;
+            let every = state
+                .serve
+                .sync_retry_delay(Duration::from_secs(every))
+                .await
+                .as_secs() as i64;
+            let due_in = finished + every - now;
             if due_in <= 0 {
                 "due now".to_owned()
             } else if due_in < 90 {
@@ -508,6 +517,42 @@ mod tests {
         assert_eq!(glance.last_sync_note, "1 added");
         assert!(!glance.last_sync_failed);
         assert_eq!(glance.swarm_peers, 0, "nobody has announced");
+    }
+
+    /// The status page's "next sync" estimate must reflect the backoff a
+    /// failed pass earns (see `ServeState::sync_retry_delay`), not blindly
+    /// promise the full configured interval while the background loop is
+    /// actually about to retry within seconds.
+    #[tokio::test]
+    async fn next_sync_reflects_a_failed_passs_backoff() {
+        let (_dir, serve) = unconfigured();
+        let store = serve.store().await.unwrap();
+
+        let run = store.begin_run().await.unwrap();
+        store
+            .finish_run(
+                run,
+                &sharerr_store::RunSummary {
+                    discovered: 0,
+                    added: 0,
+                    unshared: 0,
+                    failed: 0,
+                    error: Some("qBittorrent unreachable".to_owned()),
+                },
+            )
+            .await
+            .unwrap();
+        serve.note_sync_failure().await;
+
+        let state = web_state(serve);
+        // A 15-minute interval: if this ignored the backoff it would say
+        // "in ~15 min", not the ~30s a first failure actually backs off to.
+        let glance = glance(&state, Some(900))
+            .await
+            .expect("the store is available");
+
+        assert!(glance.last_sync_failed);
+        assert_eq!(glance.next_sync, "in under 2 min", "{glance:?}");
     }
 
     /// `secret` opens the vault and forwards its `.get`, rather than only

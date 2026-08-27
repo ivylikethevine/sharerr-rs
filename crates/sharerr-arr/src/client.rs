@@ -245,3 +245,98 @@ impl ArrClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn a_key() -> SecretString {
+        SecretString::from("test-key")
+    }
+
+    /// The one thing the redaction exists to prevent: the key must never
+    /// appear in the client's own `Debug` output, since `Config` (and by
+    /// extension anything holding one) is logged wholesale at debug level.
+    #[test]
+    fn debug_redacts_the_api_key() {
+        let client = ArrClient::new(
+            MediaSource::Sonarr,
+            &Url::parse("http://sonarr.example").unwrap(),
+            SecretString::from("super-secret-key"),
+        )
+        .unwrap();
+
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains("super-secret-key"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(
+            rendered.contains("Sonarr") || rendered.contains("sonarr"),
+            "{rendered}"
+        );
+    }
+
+    /// `MediaSource::Directory` has no *arr HTTP API at all — refusing to
+    /// build a client for it here is what keeps every later call in this
+    /// module total, rather than pushing the check onto every caller.
+    #[test]
+    fn new_refuses_a_non_arr_media_source() {
+        let err = ArrClient::new(
+            MediaSource::Directory,
+            &Url::parse("http://sonarr.example").unwrap(),
+            a_key(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ArrError::NotAnApp { .. }), "{err:?}");
+    }
+
+    /// A base URL that cannot act as a base (no authority/path to join
+    /// against) must be reported as the specific `Url` error `new` names,
+    /// rather than panicking on the `.join` inside it.
+    #[test]
+    fn new_reports_a_base_url_that_cannot_be_joined() {
+        let unjoinable = Url::parse("data:text/plain,hello").unwrap();
+
+        let err = ArrClient::new(MediaSource::Sonarr, &unjoinable, a_key()).unwrap_err();
+
+        assert!(matches!(err, ArrError::Url { .. }), "{err:?}");
+    }
+
+    /// Same underlying `Url::join` failure as `new`'s, reached from the other
+    /// call site: a request path that cannot be resolved against an
+    /// otherwise-valid `api_base`.
+    #[test]
+    fn request_reports_an_unjoinable_path() {
+        let client = ArrClient::new(
+            MediaSource::Sonarr,
+            &Url::parse("http://sonarr.example").unwrap(),
+            a_key(),
+        )
+        .unwrap();
+
+        let err = client.request(Method::GET, "http://[bad").unwrap_err();
+
+        assert!(matches!(err, ArrError::Url { .. }), "{err:?}");
+    }
+
+    /// The match in `discover_with_tag_id` is only exhaustive because this arm
+    /// exists — `new` already refuses to build a client for `Directory`, so
+    /// this is defensive rather than reachable through the public API. Built
+    /// via a struct literal (private fields, same module) specifically to
+    /// exercise it.
+    #[tokio::test]
+    async fn discover_with_tag_id_refuses_a_non_arr_kind() {
+        let client = ArrClient {
+            kind: MediaSource::Directory,
+            api_base: Url::parse("http://sonarr.example/api/v3/").unwrap(),
+            api_key: a_key(),
+            http: reqwest::Client::new(),
+        };
+
+        let err = client.discover_with_tag_id(1).await.unwrap_err();
+
+        assert!(matches!(err, ArrError::NotAnApp { .. }), "{err:?}");
+    }
+}
