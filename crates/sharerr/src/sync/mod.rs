@@ -210,6 +210,15 @@ impl SyncReport {
         }
     }
 
+    /// How this pass reads to an operator — the same wording the status
+    /// page's glance and Diagnostics' run history use, via the same
+    /// `RunSummary` they render, so a sync triggered from a "Retry now" or
+    /// "Force rebuild" button cannot describe itself differently from the
+    /// row it will show up as in the run history a moment later.
+    pub(crate) fn describe(&self, with_discovered: bool) -> (String, bool) {
+        self.to_summary().describe(with_discovered)
+    }
+
     /// Whether anything needs an operator's attention.
     pub fn has_problems(&self) -> bool {
         self.failed > 0 || self.sources_failed > 0
@@ -755,40 +764,82 @@ impl Syncer {
                 continue;
             }
 
-            match (&item.info_hash, item.created_by_sharerr) {
-                (Some(hash), true) => {
-                    if let Err(err) = self.seeder.qbit.remove(hash).await {
-                        // Worth continuing: marking the row Unshared is still correct, and
-                        // the torrent can be cleaned up by hand.
-                        // The client's own name, not a hardcoded one: this field is a
-                        // `dyn TorrentClient` and may well be Transmission.
-                        let client = self.seeder.qbit.kind();
-                        tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
-                    }
-                }
-                (Some(hash), false) => tracing::info!(
-                    %hash,
-                    item = %item.spec,
-                    "the torrent was already in the client before sharerr shared this \
-                     file, so it is left running — only the share is withdrawn"
-                ),
-                (None, _) => {}
-            }
-
-            match self
-                .store
-                .set_state(item.source, item.file_id, ShareState::Unshared, None)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(item = %item.spec, "unshared (the file was not touched)");
-                    count += 1;
-                }
-                Err(err) => tracing::warn!(item = %item.spec, %err, "could not mark unshared"),
+            if self.unshare_one(item).await.is_ok() {
+                count += 1;
             }
         }
 
         count
+    }
+
+    /// Remove `item`'s torrent from the client, if this instance added it,
+    /// and mark it `Unshared` — the file itself is never touched. Shared by
+    /// [`Self::withdraw_untagged`]'s tag-diff loop above and a manual
+    /// "unshare" action an operator can trigger for one file directly,
+    /// without waiting for its tag to disappear upstream first.
+    pub(crate) async fn unshare_one(
+        &self,
+        item: &SharedItem,
+    ) -> Result<(), sharerr_store::StoreError> {
+        match (&item.info_hash, item.created_by_sharerr) {
+            (Some(hash), true) => {
+                if let Err(err) = self.seeder.qbit.remove(hash).await {
+                    // Worth continuing: marking the row Unshared is still correct, and
+                    // the torrent can be cleaned up by hand.
+                    // The client's own name, not a hardcoded one: this field is a
+                    // `dyn TorrentClient` and may well be Transmission.
+                    let client = self.seeder.qbit.kind();
+                    tracing::warn!(%hash, %err, %client, "could not remove the torrent from the client");
+                }
+            }
+            (Some(hash), false) => tracing::info!(
+                %hash,
+                item = %item.spec,
+                "the torrent was already in the client before sharerr shared this \
+                 file, so it is left running — only the share is withdrawn"
+            ),
+            (None, _) => {}
+        }
+
+        match self
+            .store
+            .set_state(item.source, item.file_id, ShareState::Unshared, None)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(item = %item.spec, "unshared (the file was not touched)");
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(item = %item.spec, %err, "could not mark unshared");
+                Err(err)
+            }
+        }
+    }
+
+    /// Prepare `item` for a fresh torrent on the next sync pass: remove the
+    /// current one from the client, if this instance owns it, and clear the
+    /// item's torrent identity in the store — the manual counterpart to the
+    /// self-healing behaviour `reconcile`'s own doc comment describes (a
+    /// torrent removed behind sharerr's back is simply re-added). Does not
+    /// itself run a pass; the caller triggers one immediately afterward so
+    /// the rebuild happens now rather than at the next scheduled interval.
+    pub(crate) async fn prepare_rebuild(
+        &self,
+        item: &SharedItem,
+    ) -> Result<(), sharerr_store::StoreError> {
+        if let (Some(hash), true) = (&item.info_hash, item.created_by_sharerr)
+            && let Err(err) = self.seeder.qbit.remove(hash).await
+        {
+            let client = self.seeder.qbit.kind();
+            tracing::warn!(
+                %hash, %err, %client,
+                "could not remove the torrent from the client before rebuilding"
+            );
+        }
+        self.store
+            .reset_for_rebuild(item.source, item.file_id)
+            .await
     }
 }
 

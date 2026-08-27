@@ -18,6 +18,7 @@ the decision does not get re-litigated.
 - [Functionality](#functionality)
 - [Open work, by scope](#open-work-by-scope)
 - [Transfer accounting](#transfer-accounting)
+- [Closed: the per-item detail page and manual per-item actions](#closed-the-per-item-detail-page-and-manual-per-item-actions)
 - [Closed: the two-instance end-to-end test's last mile](#closed-the-two-instance-end-to-end-tests-last-mile)
 - [The lighthouse](#the-lighthouse)
 
@@ -38,7 +39,9 @@ two-instance end-to-end test closed on 2026-08-27
 two-instance stack") — the byte-for-byte transfer assertion now passes
 end to end; see the item's own history below for what the last-mile stall
 actually was, since "environment quirk" turned out to be the wrong
-diagnosis. The 2026-08-21 code review is otherwise closed out: what is left
+diagnosis. The same day also closed the per-item detail page and its three
+manual actions — retry, force rebuild, unshare — see that item's own history
+below too. The 2026-08-21 code review is otherwise closed out: what is left
 of it is a single entry kept only so its documented behaviour reads as a
 decision rather than an oversight. Past those, the rest of
 [Open work, by scope](#open-work-by-scope) below is ideas that have been
@@ -67,11 +70,12 @@ keypair that claims it, so a leaked key hash can no longer be used to displace
 the genuine record — and a refused report is logged by the reporting instance
 instead of vanishing), a twentieth on 2026-08-26 closed the media-metadata
 cluster along with two candidates promoted out of the ideas list — the
-library-composition roll-up and the polled status tiles — and a twenty-first
+library-composition roll-up and the polled status tiles — a twenty-first
 on 2026-08-27 closed three more candidates outright: the dashboard-widget
 JSON endpoint, swarm history, and a metrics endpoint, plus the two-instance
-end-to-end test's last mile below. File references are as of the review
-commit and may have drifted.
+end-to-end test's last mile below — and a twenty-second the same day closed
+the per-item detail page and manual per-item actions. File references are as
+of the review commit and may have drifted.
 
 ### Small — one function or one file
 
@@ -82,24 +86,11 @@ commit and may have drifted.
 
 ### Medium — a subsystem, or one shape repeated across several files
 
-2. **A per-item detail page** — `/items` is a wide table with no drill-down,
-   so everything about one item has to fit in a row or be omitted. A detail
-   page would mostly be re-composition rather than new work — the path chain
-   is already computed by `checks.rs`, the swarm by `Swarms`, the scope match
-   by the same predicate the feed uses. The entry worth naming on its own is
-   **release title against torrent name, side by side**. Conflating those two
-   strings is the first trap `CLAUDE.md` lists, it stalls seeding at 0%, and
-   there is currently no view anywhere in the product that shows both at
-   once. A page that does would make the distinction legible instead of
-   folkloric. The rest of the page: media metadata, which friends can see it,
-   token status, current swarm, and the full `last_error` rather than a
-   truncated cell.
-
-3. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
+2. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
    two things: a sync that failed, and a friend gone quiet. Everything routes
    through a single `send()`, so adding triggers is cheap — the cost is not
    plumbing, it is restraint. The ones that seem worth having, on the test of
-   *would an operator want to be told without having to look*: an item newly
+   _would an operator want to be told without having to look_: an item newly
    shared (digested, not one message per file), an item that failed and why,
    a new friend's first contact, a friend revoked, the tracker becoming
    unreachable, and a `[[library]]` path that has stopped being readable. The
@@ -114,21 +105,9 @@ commit and may have drifted.
    heartbeat push is one more trigger through the same `send()`, not a
    feature of its own.
 
-4. **Manual per-item actions** — discovery is tag-driven end to end, which is
-   the right default and the one control an operator already understands. But
-   it means there is no way to retry a single `failed` item, force a torrent
-   to be rebuilt, or stop sharing one file without going to Sonarr and editing
-   tags. The web UI can see the failure and can do nothing about it. A small
-   set of per-item actions would close that loop. The constraint is absolute
-   and worth restating in any implementation: none of them may move, rename,
-   re-link, or delete data. "Unshare" means removing the torrent from the
-   client *without* deleting its files, which `TorrentClient` already
-   distinguishes because every backend had to answer that question to be
-   supported at all.
-
-5. **Config backup and restore** — master-key loss is unrecoverable by
+3. **Config backup and restore** — master-key loss is unrecoverable by
    design, and the vault is doing exactly what it should. What is missing is
-   the *other* half: a way to capture the configuration — sources, mappings,
+   the _other_ half: a way to capture the configuration — sources, mappings,
    peers, scopes — so that rebuilding an instance does not mean retyping
    everything from screenshots. Secrets stay out of any export, and that is
    the point rather than a limitation: an export containing recoverable
@@ -139,14 +118,74 @@ commit and may have drifted.
 
 ### Large — a protocol, a data model, or a release process
 
-6. **Transfer accounting** — the largest gap between what sharerr *knows*
-   and what it *keeps*; see [Transfer accounting](#transfer-accounting) below
+4. **Transfer accounting** — the largest gap between what sharerr _knows_
+   and what it _keeps_; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-7. **Request flow** — a new inbound request queue and approve step, touching
+5. **Request flow** — a new inbound request queue and approve step, touching
    the sync engine and the web UI on both sides of a friendship; see
    [Functionality](#functionality).
+
+---
+
+## Closed: the per-item detail page and manual per-item actions
+
+Closed on 2026-08-27. `/items` was a wide table with no drill-down and no
+way to act on a row beyond editing tags in the source app; both gaps are
+closed together since the detail page is where the three actions live.
+
+**The detail page** (`/items/{source}/{file_id}`, linked from every row's
+title) answers what the table's column width couldn't: **release title
+against the file's actual on-disk name, side by side** — conflating the two
+is the first trap `CLAUDE.md` lists, and there was previously no view
+anywhere that showed both at once. The torrent's own name always describes
+the file where it sits, so the file name doubles as "what the torrent is
+named" without needing to read the cached `.torrent` bytes back off disk.
+Alongside that: media metadata, which friends' scopes admit it, the full
+`last_error` unconstrained by a table cell, the live swarm (reusing
+`topology::SwarmRow`'s masked-address convention), and the `[[path_map]]`
+resolution for this one file with a live existence check.
+
+**The three actions** — Retry, Force rebuild, Unshare — all route through
+existing, already-tested machinery rather than a bespoke single-item share:
+
+- **Retry** and **Force rebuild** both call `Syncer::run(false)` directly,
+  the same thing `sharerr sync` does, run synchronously in the request
+  rather than merely nudging the background loop. That distinction mattered:
+  `ServeState::request_sync` only wakes the *periodic* loop, which itself
+  takes no action at all while `[sync] enabled = false` — a bare nudge would
+  have silently done nothing for anyone who syncs manually or on a cron
+  outside sharerr. A bespoke single-item share was considered and rejected:
+  `Syncer::share` needs a freshly `Discovered` item straight from the
+  source, which a stored `SharedItem` cannot honestly stand in for (it
+  carries neither `scene_name` nor `original_path`, both of which feed
+  release-title synthesis) — so "retry" is a full pass, honestly labelled as
+  one in the UI, exactly matching `ShareState::Failed`'s own doc ("retried
+  on the next sync").
+- **Force rebuild** additionally removes the current torrent from the
+  client first (only if this instance added it) and clears the item's
+  torrent identity in the store (`Store::reset_for_rebuild`, new), so the
+  pass that follows cannot take the `Seeding` fast path and is forced to
+  rebuild from the file as it exists on disk right now.
+- **Unshare** is the tag-diff withdrawal path's own per-item body,
+  extracted into `Syncer::unshare_one` and called by both — not a copy of
+  it. Runs immediately, no sync pass needed.
+
+None of the three ever move, rename, re-link, or delete the underlying
+file — `TorrentClient::remove` has no delete-data path on any backend to
+begin with.
+
+One test-fixture correction fell out of building this: `state::fixtures::ready`
+and `ready_with_source` gave their `Syncer` an isolated in-memory store,
+separate from whatever `ServeState::store()` would open — harmless for the
+tests they were built for, but it meant no test could exercise a handler
+that looks an item up one way and mutates it through the syncer the other
+way, which is exactly what these three actions do. Fixed to open the
+syncer's store from `config.database_path()`, the same path
+`ServeState::store` itself lazily opens — two independent `Store`/pool
+handles sharing one file, matching what `Syncer::build` and `ServeState::store`
+already do in production.
 
 ---
 
@@ -205,7 +244,7 @@ transfer assertion in `e2e_two_instance.rs` passes end to end.
 What this does not change: sharerr's own Torznab feed still advertises a
 `magneturl` alongside the `.torrent` enclosure, for the indexers and clients
 where a magnet is the only thing that ever mattered. A friend connecting
-Radarr or Sonarr *directly* to a sharerr feed, with no Prowlarr in front,
+Radarr or Sonarr _directly_ to a sharerr feed, with no Prowlarr in front,
 still has no lever over this — their app decides magnet-or-`.torrent` on its
 own, and evidence from this investigation is that at least one popular one
 decides wrong for a private torrent. That is a real gap for a direct
@@ -218,14 +257,14 @@ Prowlarr-routed and DHT-capable consumers get from it today.
 
 ## Transfer accounting
 
-The largest gap between what sharerr *knows* and what it *keeps*, and the
+The largest gap between what sharerr _knows_ and what it _keeps_, and the
 entry with the most caveats attached — which is why it is written out at
 length rather than as a bullet.
 
 Every BitTorrent client sends `uploaded` and `downloaded` on every announce.
 `AnnounceRequest` parses `left` and drops both. And because announce URLs carry
 a per-friend token, `authenticate_token` in `crates/sharerr/src/tracker.rs` has
-*already resolved which friend this is* by the time the request is handled — a
+_already resolved which friend this is_ by the time the request is handled — a
 successful attribution writes to peer endpoint memory today, so the seam
 exists and is already covered by tests.
 
@@ -242,10 +281,10 @@ because each of these is a property to accept rather than a bug to fix later:
 - **Advisory, not authoritative.** The values are whatever the friend's client
   reports, and a client can report anything. This is a friend-to-friend tool;
   the value here is insight, not enforcement, and any UI must not imply
-  otherwise. Nothing should ever be *gated* on these numbers.
+  otherwise. Nothing should ever be _gated_ on these numbers.
 - **The counters reset.** They are cumulative per client session, so a restart
   or a re-add sends them back to zero. Accounting therefore records monotonic
-  deltas and treats a *decrease* as a new session counted from zero, not as
+  deltas and treats a _decrease_ as a new session counted from zero, not as
   negative traffic. Getting this backwards produces plausible-looking totals
   that are quietly wrong.
 - **Peer ids churn.** Re-adding a torrent yields a fresh `peer_id`, so the
@@ -261,8 +300,8 @@ because each of these is a property to accept rather than a bug to fix later:
 ### What it would record
 
 Two shapes, and they answer different questions. Lifetime totals per
-(peer, info hash) answer *who has pulled what*; time-bucketed samples answer
-*when*, and are what any chart would read. The second is optional and can
+(peer, info hash) answer _who has pulled what_; time-bucketed samples answer
+_when_, and are what any chart would read. The second is optional and can
 follow the first — the totals are useful on their own, and are the cheaper
 half.
 

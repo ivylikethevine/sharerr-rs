@@ -927,6 +927,10 @@ pub struct ItemRow {
     pub created_by_sharerr: bool,
     /// The absolute instant behind `since`, for a `title=` tooltip.
     pub since_absolute: String,
+    /// The natural-key pair a detail-page link or action form addresses this
+    /// item by — items have no single-column id, see `SharedItem::key`.
+    pub source: &'static str,
+    pub file_id: i64,
 }
 
 /// Whether an item's confirmed announce-token fingerprint still matches the
@@ -1391,6 +1395,83 @@ pub struct ItemsPage {
     /// over the same unfiltered rows `state_counts` is, and `None` when there is
     /// nothing to break down.
     pub composition: Option<Composition>,
+}
+
+/// Everything about one item, reached from a row on [`ItemsPage`] — the page
+/// `docs/ROADMAP.md`'s per-item detail entry names, with **release title
+/// against the file's actual name, side by side** as the reason worth
+/// building a whole page for: conflating the two is the first trap
+/// `CLAUDE.md` lists, and there was previously no view anywhere that showed
+/// both at once. Also carries the manual actions an operator otherwise has
+/// no way to trigger without editing tags in the source app.
+#[derive(Debug, Template)]
+#[template(path = "item_detail.html")]
+pub struct ItemDetailPage {
+    pub signed_in: bool,
+    /// The natural key, for the three action forms' `action=` URLs.
+    pub source: &'static str,
+    pub file_id: i64,
+
+    pub title: String,
+    pub release_title: String,
+    /// The file's actual name on disk, from `SharedItem::arr_path` — what a
+    /// torrent sharerr built for this item is named, since the torrent's own
+    /// name always describes the file where it sits. `None` only if the path
+    /// somehow has no final component.
+    pub file_name: Option<String>,
+    pub kind: &'static str,
+    pub source_label: String,
+    pub source_hint: String,
+    pub size: String,
+    pub state_label: String,
+    pub state_hint: Option<&'static str>,
+    /// The failure reason in full — [`ItemRow::last_error`] is the same
+    /// string, but rendered here without the table cell's width constraint.
+    pub last_error: Option<String>,
+    pub since: String,
+    pub since_absolute: String,
+    pub info_hash: Option<String>,
+    pub created_by_sharerr: bool,
+    pub ratio: String,
+    pub ratio_hint: String,
+    pub token_fp: Option<String>,
+    pub token_status: TokenStatus,
+    pub announce_url: Option<String>,
+    pub ids: String,
+    /// Which friends' scopes admit this item — empty unless it is actually
+    /// seeding, same rule [`ItemRow::visible_to`] follows.
+    pub visible_to: String,
+    /// Present only when the item carries something — a probe or an *arr's
+    /// own `mediaInfo` found nothing, or nothing has looked yet.
+    pub media: Option<sharerr_core::MediaMeta>,
+
+    pub arr_path: String,
+    pub sharerr_path: String,
+    pub qbit_path: String,
+    /// Whether a `[[path_map]]` rule actually matched — `false` means every
+    /// container shares the same mounts, or a mapping bug `doctor` would
+    /// also catch.
+    pub mapping_applied: bool,
+    /// Whether the resolved sharerr-side path exists on disk right now.
+    /// `None` when the path could not be resolved at all (a non-absolute
+    /// `arr_path`, which `doctor` would already be reporting as a problem).
+    pub path_exists: Option<bool>,
+
+    /// The tracker's own live view of this torrent's swarm — `None` before a
+    /// torrent exists or when nobody is announcing right now.
+    pub swarm: Option<SwarmRow>,
+
+    /// Whether the action forms below should render at all — the operator's
+    /// last click, or a store error, or nothing to say.
+    pub can_retry: bool,
+    pub can_rebuild: bool,
+    pub can_unshare: bool,
+
+    /// A flash message from the action just taken, and whether it reads as
+    /// a failure — same one-shot, redirect-then-render convention every
+    /// other mutating page on this app uses.
+    pub message: Option<String>,
+    pub message_failed: bool,
 }
 
 #[cfg(test)]

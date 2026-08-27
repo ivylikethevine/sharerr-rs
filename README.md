@@ -78,6 +78,8 @@ to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Audio metadata too: sample rate, bit depth, and the real format in the title     | ✅ |
 | Web UI: first-run wizard, settings, connection tests                             | ✅ |
 | Items page: every discovered file, its torrent and announce-token status         | ✅ |
+| Per-item detail page: release title vs. file name, media, swarm, path chain      | ✅ |
+| Manual per-item actions: retry, force rebuild, unshare — never touches the file  | ✅ |
 | Library composition: what you are sharing, by format, state and source           | ✅ |
 | Sync history strip: every recent pass at a glance, failures marked               | ✅ |
 | Status tiles that refresh themselves, without re-polling your *arr apps          | ✅ |

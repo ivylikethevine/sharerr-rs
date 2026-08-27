@@ -455,6 +455,28 @@ impl Store {
         Ok(())
     }
 
+    /// Clear an item's torrent identity back to "never shared", so a fresh
+    /// sync pass cannot take the `Seeding` fast path in `Syncer::share` and
+    /// rebuilds it from the file as it exists on disk right now.
+    ///
+    /// The store half of a manual "force rebuild" — the caller removes the
+    /// current torrent from the client first, if this instance owns it (see
+    /// `Syncer::prepare_rebuild`), since this call only touches the row.
+    pub async fn reset_for_rebuild(&self, source: MediaSource, file_id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE shared_items SET info_hash = NULL, announce_token_fp = NULL, \
+             created_by_sharerr = 0, state = ?1, last_error = NULL, updated_at = ?2 \
+             WHERE source = ?3 AND file_id = ?4",
+        )
+        .bind(ShareState::Pending.as_str())
+        .bind(now_epoch())
+        .bind(source.as_str())
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Open a reconciliation run, returning its id for [`Self::finish_run`].
     pub async fn begin_run(&self) -> Result<i64> {
         let row = sqlx::query("INSERT INTO sync_runs (started_at) VALUES (?1) RETURNING id")
@@ -1079,6 +1101,37 @@ mod tests {
         assert_eq!(got.state, ShareState::Seeding);
         assert_eq!(got.info_hash.as_deref(), Some("abc123"));
         assert_eq!(got.announce_token_fp.as_deref(), Some("fp1"));
+    }
+
+    #[tokio::test]
+    async fn reset_for_rebuild_clears_the_torrent_identity() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .await
+            .unwrap();
+
+        store
+            .reset_for_rebuild(MediaSource::Sonarr, 1001)
+            .await
+            .unwrap();
+
+        let got = store.get(MediaSource::Sonarr, 1001).await.unwrap().unwrap();
+        assert_eq!(got.state, ShareState::Pending);
+        assert_eq!(got.info_hash, None);
+        assert_eq!(got.announce_token_fp, None);
+        assert!(!got.created_by_sharerr);
+        assert_eq!(got.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn reset_for_rebuild_on_an_unknown_item_is_a_harmless_no_op() {
+        let store = Store::open_in_memory().await.unwrap();
+        store
+            .reset_for_rebuild(MediaSource::Sonarr, 999)
+            .await
+            .unwrap();
     }
 
     /// The fast path for an item that already exists: only the fingerprint

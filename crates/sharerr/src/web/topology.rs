@@ -39,7 +39,7 @@ const MAX_LINE: usize = 32;
 
 /// How many of one torrent's live peers to name before summarising the
 /// rest — the same shape `doctor`'s `report_capped` caps a long list with.
-const MAX_SWARM_PEERS: usize = 12;
+pub(crate) const MAX_SWARM_PEERS: usize = 12;
 
 const MARGIN: i32 = 40;
 const COL_W: i32 = 290;

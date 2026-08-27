@@ -9,18 +9,22 @@
 //! keeps every operator-facing knob in one place instead of split across a query
 //! builder and a template.
 
-use axum::extract::{Query, State};
-use axum::response::Response;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use sharerr_core::{MediaSource, ShareState, SharedItem};
-use sharerr_store::{Peer, PeerScope};
+use sharerr_store::{Peer, PeerScope, Store};
 
 use std::collections::HashMap;
 
 use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
-use super::templates::{FilterOption, ItemRow, ItemsPage, SortLink, TokenStatus, render};
+use super::templates::{
+    AddressCell, FilterOption, ItemDetailPage, ItemRow, ItemsPage, SortLink, SwarmRow, TokenStatus,
+    render,
+};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ItemsQuery {
@@ -381,6 +385,25 @@ fn ratio_cell(item: &SharedItem) -> (String, String) {
     (value, hint)
 }
 
+/// `"Sonarr series 42, file 1337"`: the *arr's own identifiers — the join key
+/// an operator greps its logs for when a row here and an entry there
+/// disagree. Shared by the table row and the detail page so the two cannot
+/// word it differently.
+fn source_hint(item: &SharedItem) -> String {
+    format!(
+        "{} {} {}, file {}",
+        title_case(item.source.as_str()),
+        match item.spec {
+            sharerr_core::MediaSpec::Episode { .. } => "series",
+            sharerr_core::MediaSpec::Movie { .. } => "movie",
+            sharerr_core::MediaSpec::Track { .. } => "artist",
+            sharerr_core::MediaSpec::Book { .. } => "author",
+        },
+        item.source_id,
+        item.file_id
+    )
+}
+
 /// The first 12 hex characters, or the whole thing if somehow shorter: enough
 /// to tell two torrents apart at a glance, narrow enough not to squeeze the
 /// title column. The full hash stays on hover and behind the copy button.
@@ -416,18 +439,7 @@ fn row(
         peers_hint,
         // The *arr's own identifiers — the join key an operator greps its
         // logs for when a row here and an entry there disagree.
-        source_hint: format!(
-            "{} {} {}, file {}",
-            title_case(item.source.as_str()),
-            match item.spec {
-                sharerr_core::MediaSpec::Episode { .. } => "series",
-                sharerr_core::MediaSpec::Movie { .. } => "movie",
-                sharerr_core::MediaSpec::Track { .. } => "artist",
-                sharerr_core::MediaSpec::Book { .. } => "author",
-            },
-            item.source_id,
-            item.file_id
-        ),
+        source_hint: source_hint(item),
         // A torrent with no info hash has not been built yet, so there is
         // nothing meaningful to announce either — `None` regardless of
         // whether the tracker itself is configured.
@@ -441,6 +453,8 @@ fn row(
             .created_at
             .map(super::peers::absolute)
             .unwrap_or_default(),
+        source: item.source.as_str(),
+        file_id: item.file_id,
     }
 }
 
@@ -522,6 +536,335 @@ pub(crate) fn human_size(bytes: u64) -> String {
         format!("{bytes} {}", UNITS[unit])
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The per-item detail page and manual actions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DetailQuery {
+    #[serde(default)]
+    ok: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Everything about one item — see `docs/ROADMAP.md`'s per-item detail page
+/// entry. Reached from a row on [`page`] above.
+pub async fn detail(
+    State(state): State<WebState>,
+    Path((source, file_id)): Path<(MediaSource, i64)>,
+    Query(query): Query<DetailQuery>,
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    let item = match fetch(&store, source, file_id).await {
+        Ok(item) => item,
+        Err(response) => return *response,
+    };
+
+    render(&build_detail(&state, &store, item, query).await)
+}
+
+/// Force a fresh torrent right now: retry a `Failed` item, or ask a `Seeding`
+/// one to be rebuilt from the file as it exists on disk today.
+///
+/// Both are a full sync pass, not a bespoke single-item share — see
+/// [`trigger_sync_now`]'s doc for why that is the correct choice here, not a
+/// shortcut around a harder one.
+pub async fn retry(
+    State(state): State<WebState>,
+    Path((source, file_id)): Path<(MediaSource, i64)>,
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    if let Err(response) = fetch(&store, source, file_id).await {
+        return *response;
+    }
+
+    tracing::info!(%source, file_id, "retry requested — running a sync pass now");
+    redirect_with_outcome(source, file_id, trigger_sync_now(&state).await)
+}
+
+/// Remove the current torrent (if this instance owns it), clear the item's
+/// torrent identity, and run a sync pass now so the rebuild happens
+/// immediately rather than at the next scheduled interval.
+pub async fn rebuild(
+    State(state): State<WebState>,
+    Path((source, file_id)): Path<(MediaSource, i64)>,
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    let item = match fetch(&store, source, file_id).await {
+        Ok(item) => item,
+        Err(response) => return *response,
+    };
+
+    let syncer = match state.serve.syncer().await {
+        Ok(syncer) => syncer,
+        Err(err) => return redirect_with_error(source, file_id, &err),
+    };
+    if let Err(err) = syncer.prepare_rebuild(&item).await {
+        return redirect_with_error(source, file_id, &err.to_string());
+    }
+
+    tracing::info!(%source, file_id, "rebuild requested — running a sync pass now");
+    redirect_with_outcome(source, file_id, trigger_sync_now(&state).await)
+}
+
+/// Stop sharing one file on demand — the same effect a tag removal upstream
+/// has, without waiting for one. Never touches the file itself; see
+/// `Syncer::unshare_one`.
+pub async fn unshare(
+    State(state): State<WebState>,
+    Path((source, file_id)): Path<(MediaSource, i64)>,
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    let item = match fetch(&store, source, file_id).await {
+        Ok(item) => item,
+        Err(response) => return *response,
+    };
+    if item.state == ShareState::Unshared {
+        // Already unshared is not an error worth showing — same convention
+        // `peers::revoke` follows for an already-revoked key.
+        return Redirect::to(&format!("/items/{source}/{file_id}")).into_response();
+    }
+
+    let syncer = match state.serve.syncer().await {
+        Ok(syncer) => syncer,
+        Err(err) => return redirect_with_error(source, file_id, &err),
+    };
+    match syncer.unshare_one(&item).await {
+        Ok(()) => {
+            tracing::info!(%source, file_id, "unshared (the file was not touched)");
+            redirect_with_ok(
+                source,
+                file_id,
+                "unshared — the file itself was not touched",
+            )
+        }
+        Err(err) => redirect_with_error(source, file_id, &err.to_string()),
+    }
+}
+
+/// One item, or the 404/500 response every action and the detail page answer
+/// with identically when it is missing or unreadable.
+///
+/// Boxed for the same reason `WebState::store_or_503` is: `Response` alone is
+/// well over clippy's `result_large_err` threshold.
+async fn fetch(
+    store: &Store,
+    source: MediaSource,
+    file_id: i64,
+) -> Result<SharedItem, Box<Response>> {
+    match store.get(source, file_id).await {
+        Ok(Some(item)) => Ok(item),
+        Ok(None) => Err(Box::new(
+            (StatusCode::NOT_FOUND, "no such item").into_response(),
+        )),
+        Err(err) => Err(Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not load that item: {err}"),
+            )
+                .into_response(),
+        )),
+    }
+}
+
+/// Run a full sync pass right now, for the "Retry" and "Force rebuild"
+/// actions.
+///
+/// A full pass, not a bespoke single-item share, for two reasons.
+/// `Syncer::share` needs a freshly [`sharerr_core::Discovered`] item straight
+/// from the source — a stored `SharedItem` cannot honestly stand in for one,
+/// since it carries neither `scene_name` nor `original_path`, both of which
+/// feed release-title synthesis. And a bare [`crate::state::ServeState::request_sync`]
+/// nudge would silently do nothing on an instance that has periodic sync
+/// turned off: that only wakes the background loop, which itself takes no
+/// action at all while `[sync] enabled = false` — see `commands::serve::background`.
+/// Running the pass directly, the same way `sharerr sync` does, is correct
+/// regardless of that setting. `ShareState::Failed`'s own doc already frames
+/// a retry as sync-pass-shaped ("retried on the next sync"), so this is
+/// "the next sync", requested now instead of waited for.
+async fn trigger_sync_now(state: &WebState) -> Result<(String, bool), String> {
+    let syncer = state.serve.syncer().await?;
+    match syncer.run(false).await {
+        Ok(report) => Ok(report.describe(false)),
+        Err(err) => Err(format!("{err:#}")),
+    }
+}
+
+fn redirect_with_outcome(
+    source: MediaSource,
+    file_id: i64,
+    outcome: Result<(String, bool), String>,
+) -> Response {
+    match outcome {
+        Ok((message, failed)) if failed => redirect_with_error(source, file_id, &message),
+        Ok((message, _)) => redirect_with_ok(source, file_id, &message),
+        Err(err) => redirect_with_error(source, file_id, &err),
+    }
+}
+
+fn redirect_with_ok(source: MediaSource, file_id: i64, message: &str) -> Response {
+    Redirect::to(&format!(
+        "/items/{source}/{file_id}?ok={}",
+        urlencode(message)
+    ))
+    .into_response()
+}
+
+fn redirect_with_error(source: MediaSource, file_id: i64, message: &str) -> Response {
+    Redirect::to(&format!(
+        "/items/{source}/{file_id}?error={}",
+        urlencode(message)
+    ))
+    .into_response()
+}
+
+/// The tracker's own live view of this item's swarm — `None` before a
+/// torrent exists or when nobody is announcing right now.
+async fn swarm_for(state: &WebState, item: &SharedItem) -> Option<SwarmRow> {
+    let hash = item.info_hash.as_deref()?;
+    let target = hash.to_lowercase();
+    let swarm = state
+        .serve
+        .swarms()
+        .snapshots()
+        .await
+        .into_iter()
+        .find(|s| hex::encode(s.info_hash) == target)?;
+
+    let more = swarm
+        .peers
+        .len()
+        .saturating_sub(super::topology::MAX_SWARM_PEERS);
+    let peers = swarm
+        .peers
+        .iter()
+        .take(super::topology::MAX_SWARM_PEERS)
+        .map(|addr| {
+            let full = addr.to_string();
+            AddressCell {
+                masked: super::topology::mask_address(&full),
+                full,
+            }
+        })
+        .collect();
+
+    Some(SwarmRow {
+        title: item.spec.title().to_owned(),
+        complete: swarm.complete,
+        incomplete: swarm.incomplete,
+        peers,
+        more,
+    })
+}
+
+async fn build_detail(
+    state: &WebState,
+    store: &Store,
+    item: SharedItem,
+    query: DetailQuery,
+) -> ItemDetailPage {
+    let config = state.serve.config().await;
+    let peers = store.list_peers().await.unwrap_or_default();
+    let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
+
+    let announce_url = current_announce_url(&state.serve).await;
+    let current_token_fp = state
+        .serve
+        .tracker_token()
+        .await
+        .map(|token| crate::sync::fingerprint(&token));
+    let (ratio, ratio_hint) = ratio_cell(&item);
+
+    // A path that fails to resolve at all (a non-absolute `arr_path`) is a
+    // configuration problem `doctor` already reports; the detail page shows
+    // the unmapped path and says plainly that it could not check existence,
+    // rather than pretending it knows.
+    let resolved = config.resolver().resolve_for(item.source, &item.arr_path);
+    let (arr_path, sharerr_path, qbit_path, mapping_applied, path_exists) = match &resolved {
+        Ok(paths) => (
+            paths.arr.display().to_string(),
+            paths.sharerr.display().to_string(),
+            paths.qbit.display().to_string(),
+            paths.mapping_applied,
+            Some(paths.sharerr.exists()),
+        ),
+        Err(_) => (
+            item.arr_path.display().to_string(),
+            String::new(),
+            String::new(),
+            false,
+            None,
+        ),
+    };
+
+    let swarm = swarm_for(state, &item).await;
+
+    ItemDetailPage {
+        signed_in: true,
+        source: item.source.as_str(),
+        file_id: item.file_id,
+        title: item.spec.title().to_owned(),
+        release_title: item.release_title.clone(),
+        // The torrent's own name always describes the file where it sits —
+        // see `CLAUDE.md`'s first trap — so this and `release_title` are the
+        // two strings worth showing side by side.
+        file_name: item
+            .arr_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
+        kind: item.spec.kind_tag(),
+        source_label: title_case(item.source.as_str()),
+        source_hint: source_hint(&item),
+        size: human_size(item.size),
+        state_label: title_case(item.state.as_str()),
+        state_hint: state_hint(item.state),
+        last_error: item.last_error.clone(),
+        since: item.created_at.map(ago).unwrap_or_default(),
+        since_absolute: item
+            .created_at
+            .map(super::peers::absolute)
+            .unwrap_or_default(),
+        info_hash: item.info_hash.clone(),
+        created_by_sharerr: item.created_by_sharerr,
+        ratio,
+        ratio_hint,
+        token_fp: item.announce_token_fp.clone(),
+        token_status: token_status(&item, current_token_fp.as_deref()),
+        announce_url: item
+            .info_hash
+            .as_ref()
+            .and(announce_url.as_deref())
+            .map(str::to_owned),
+        ids: ids_summary(&item.ids),
+        visible_to: visible_to(&item, &active),
+        media: item.media.clone(),
+        arr_path,
+        sharerr_path,
+        qbit_path,
+        mapping_applied,
+        path_exists,
+        swarm,
+        can_retry: item.state == ShareState::Failed,
+        can_rebuild: item.info_hash.is_some(),
+        can_unshare: item.state != ShareState::Unshared,
+        message_failed: query.error.is_some(),
+        message: query.ok.or(query.error),
     }
 }
 
@@ -770,7 +1113,7 @@ mod tests {
 
     // -------------------------------------------------------------- page()
 
-    use super::super::web_state;
+    use super::super::{location, web_state};
 
     fn named(source: MediaSource, title: &str, file_id: i64) -> SharedItem {
         let spec = MediaSpec::Movie {
@@ -1173,5 +1516,221 @@ mod tests {
             BODY_CELLS,
             "items.html's header count must match its body row"
         );
+    }
+
+    // ----------------------------------------------------------- detail page
+
+    #[tokio::test]
+    async fn detail_shows_the_release_title_and_the_file_name_side_by_side() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.release_title = "Lanternwick.Hollow.S01E01.SYNTH".to_owned();
+        source_item.arr_path = "/tv/Lanternwick Hollow/S01E01.mkv".into();
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            detail(
+                State(state),
+                Path((MediaSource::Sonarr, 1)),
+                Query(DetailQuery::default()),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("Lanternwick.Hollow.S01E01.SYNTH"), "{html}");
+        assert!(html.contains("S01E01.mkv"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn detail_answers_404_for_an_unknown_item() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = detail(
+            State(state),
+            Path((MediaSource::Sonarr, 999)),
+            Query(DetailQuery::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn detail_shows_the_flash_message_from_the_query_string() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(
+            detail(
+                State(state),
+                Path((MediaSource::Sonarr, 1)),
+                Query(DetailQuery {
+                    error: Some("could not reach qBittorrent".to_owned()),
+                    ..Default::default()
+                }),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("could not reach qBittorrent"), "{html}");
+    }
+
+    // -------------------------------------------------------- manual actions
+
+    #[tokio::test]
+    async fn retry_answers_404_for_an_unknown_item() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = retry(State(state), Path((MediaSource::Sonarr, 999))).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `unconfigured()`'s syncer never finishes building — see
+    /// `ServeState::new`'s initial `Err("still starting up")` — so a retry
+    /// must say so rather than claiming success or panicking.
+    #[tokio::test]
+    async fn retry_redirects_with_an_error_when_the_syncer_is_not_ready() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.state = ShareState::Failed;
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = retry(State(state), Path((MediaSource::Sonarr, 1))).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?error="), "{location}");
+    }
+
+    /// A syncer that builds but has nothing to scan bails outright — still
+    /// the honest outcome to show, not a silent no-op.
+    #[tokio::test]
+    async fn retry_redirects_with_an_error_when_nothing_can_be_scanned() {
+        let (_dir, serve) = crate::state::fixtures::ready().await;
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.state = ShareState::Failed;
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = retry(State(state), Path((MediaSource::Sonarr, 1))).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?error="), "{location}");
+    }
+
+    #[tokio::test]
+    async fn rebuild_answers_404_for_an_unknown_item() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = rebuild(State(state), Path((MediaSource::Sonarr, 999))).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The store-side half of "force rebuild" must take effect even though
+    /// the immediate sync pass that follows has nothing to scan and errors
+    /// out — an operator who fixed the file and clicked rebuild should not
+    /// have the clear silently undone by the pass failing.
+    #[tokio::test]
+    async fn rebuild_clears_the_torrent_identity_even_though_the_pass_then_fails() {
+        let (_dir, serve) = crate::state::fixtures::ready().await;
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.info_hash = Some("ab".repeat(20));
+        source_item.created_by_sharerr = false; // no client call needed to clear it
+        source_item.state = ShareState::Seeding;
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = rebuild(State(state), Path((MediaSource::Sonarr, 1))).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let cleared = store.get(MediaSource::Sonarr, 1).await.unwrap().unwrap();
+        assert_eq!(cleared.state, ShareState::Pending);
+        assert_eq!(cleared.info_hash, None);
+    }
+
+    #[tokio::test]
+    async fn unshare_answers_404_for_an_unknown_item() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = unshare(State(state), Path((MediaSource::Sonarr, 999))).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Already unshared redirects rather than erroring — same convention
+    /// `peers::revoke` follows for an already-revoked key.
+    #[tokio::test]
+    async fn unsharing_an_already_unshared_item_still_redirects() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.state = ShareState::Unshared;
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = unshare(State(state), Path((MediaSource::Sonarr, 1))).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/items/sonarr/1");
+    }
+
+    /// No info hash means no client to call at all — the `(None, _)` arm of
+    /// `Syncer::unshare_one` — so this exercises the whole handler without
+    /// needing a real torrent client behind it.
+    #[tokio::test]
+    async fn unsharing_a_pending_item_marks_it_unshared() {
+        let (_dir, serve) = crate::state::fixtures::ready().await;
+        let store = serve.store().await.unwrap();
+        let source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = unshare(State(state), Path((MediaSource::Sonarr, 1))).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?ok="), "{location}");
+        let got = store.get(MediaSource::Sonarr, 1).await.unwrap().unwrap();
+        assert_eq!(got.state, ShareState::Unshared);
+    }
+
+    /// A torrent this instance did not add is left running — the
+    /// `(Some(_), false)` arm — which also needs no working client call.
+    #[tokio::test]
+    async fn unsharing_an_adopted_torrent_leaves_it_in_the_client() {
+        let (_dir, serve) = crate::state::fixtures::ready().await;
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.info_hash = Some("ab".repeat(20));
+        source_item.created_by_sharerr = false;
+        source_item.state = ShareState::Seeding;
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = unshare(State(state), Path((MediaSource::Sonarr, 1))).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let got = store.get(MediaSource::Sonarr, 1).await.unwrap().unwrap();
+        assert_eq!(got.state, ShareState::Unshared);
     }
 }
