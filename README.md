@@ -93,8 +93,11 @@ to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | The lighthouse: rendezvous for a friend whose address rotated while unwatched    | ✅ |
 | Topology diagram: sources, this instance, and friends in one picture             | ✅ |
 | Live per-torrent swarm view: who is connected to each torrent right now          | ✅ |
+| Swarm history: an hourly chart, so "quiet now" and "quiet for a fortnight" differ | ✅ |
 | Reachability script for checking from outside your network (`/debug`)            | ✅ |
 | Webhook notifications (generic, Discord, Apprise): sync failed, friend gone quiet | ✅ |
+| `/metrics` (OpenMetrics) for Prometheus, bearer-token gated and off by default   | ✅ |
+| A dashboard-widget JSON endpoint, for Homepage, Homarr, or Glance                | ✅ |
 | OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)              | ✅ |
 
 Full detail on which *arr apps, torrent clients, and indexers are supported —

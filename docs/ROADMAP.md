@@ -18,6 +18,7 @@ the decision does not get re-litigated.
 - [Functionality](#functionality)
 - [Open work, by scope](#open-work-by-scope)
 - [Transfer accounting](#transfer-accounting)
+- [Closed: the two-instance end-to-end test's last mile](#closed-the-two-instance-end-to-end-tests-last-mile)
 - [The lighthouse](#the-lighthouse)
 
 ### What's left
@@ -32,16 +33,15 @@ ISO-BMFF siblings) now covers the directory-sourced music the *arr-managed
 path never needed to reach, and achieved ratio gives the items page what each
 torrent client itself reports for a torrent's ratio and per-torrent limit,
 rather than only ever showing what sharerr asked for at add time. The
-two-instance end-to-end test is in progress
+two-instance end-to-end test closed on 2026-08-27
 (`./run_docker_tests_two_instance.sh`, see `docker/README.md`'s "The
-two-instance stack") — the orchestration, indexer/download-client wiring, and
-Radarr's real automatic-search-and-grab all verified working end to end, but
-the final BitTorrent transfer between the two instances' torrent clients has
-not yet completed in testing; see the entry in Open work below. The 2026-08-21
-code review is otherwise closed
-out: what is left of it is a single entry kept only so its documented
-behaviour reads as a decision rather than an oversight. Past those, the rest
-of [Open work, by scope](#open-work-by-scope) below is ideas that have been
+two-instance stack") — the byte-for-byte transfer assertion now passes
+end to end; see the item's own history below for what the last-mile stall
+actually was, since "environment quirk" turned out to be the wrong
+diagnosis. The 2026-08-21 code review is otherwise closed out: what is left
+of it is a single entry kept only so its documented behaviour reads as a
+decision rather than an oversight. Past those, the rest of
+[Open work, by scope](#open-work-by-scope) below is ideas that have been
 thought through but not all committed to — appearing here means the
 reasoning is written down, not that it is scheduled.
 
@@ -65,10 +65,13 @@ independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
 (the nineteenth: the lighthouse's `report` now pins a key hash to the first
 keypair that claims it, so a leaked key hash can no longer be used to displace
 the genuine record — and a refused report is logged by the reporting instance
-instead of vanishing), and a twentieth on 2026-08-26 closed the media-metadata
+instead of vanishing), a twentieth on 2026-08-26 closed the media-metadata
 cluster along with two candidates promoted out of the ideas list — the
-library-composition roll-up and the polled status tiles. File references are
-as of the review commit and may have drifted.
+library-composition roll-up and the polled status tiles — and a twenty-first
+on 2026-08-27 closed three more candidates outright: the dashboard-widget
+JSON endpoint, swarm history, and a metrics endpoint, plus the two-instance
+end-to-end test's last mile below. File references are as of the review
+commit and may have drifted.
 
 ### Small — one function or one file
 
@@ -77,59 +80,9 @@ as of the review commit and may have drifted.
    Stale while the tracker admits it. The doc comment frames that as
    intended; listed so the decision is a decision.
 
-2. **A dashboard-widget JSON endpoint** — Homepage, Homarr and Glance are
-   near-universal in this audience, and all three read a "custom API" JSON
-   endpoint. The `Glance` struct in `crates/sharerr/src/web/templates.rs` is
-   already exactly that payload — items shared, size on disk, last sync,
-   friends seen recently, live swarm totals — so this is one serializer over a
-   struct that already exists, not a new API surface to design. It stands or
-   falls with item 4's authentication question below and should not ship
-   first with its own answer.
-
 ### Medium — a subsystem, or one shape repeated across several files
 
-3. **Swarm history** — `Swarms` (`crates/sharerr-torrent/src/announce.rs`) is
-   deliberately in-memory: it is rebuilt within one announce interval, so
-   persisting it for correctness would be pointless. But that also means the
-   "Swarms" stat tile can only ever say *right now*, and a restart erases the
-   only record that anyone was ever connected. "Nobody is in the swarm at the
-   moment" and "nobody has been in the swarm for a fortnight" are very
-   different facts about a sharing tool, and today they render identically. A
-   periodic sampler writing `SwarmStats` — and per-torrent complete/incomplete
-   — into a small table would separate them, with retention copying the shape
-   `peer_endpoints` already has: prune to a handful of newest rows per key on
-   insert rather than growing without bound or needing a sweeper. Worth noting
-   for whatever chart this feeds: every chart in this project is
-   server-rendered SVG computed in Rust (`Node`/`Edge`, `RunBar`, `Segment` in
-   `crates/sharerr/src/web/templates.rs`), not a client library — the web UI
-   compiles every asset into the binary and reaches no CDN.
-
-4. **A metrics endpoint** — `ops_router()` in
-   `crates/sharerr/src/commands/serve.rs` serves `/health` and `/ready`.
-   There is no `/metrics`, and this is the highest-leverage integration
-   available for this audience: it hands Grafana every chart this UI will
-   never ship, for roughly one handler. Worth exporting: items by state,
-   seeding bytes, sync counters with the last run's timestamp and duration,
-   swarm totals, peer totals and how many are active, and the gluetun and
-   lighthouse last-success timestamps — the last two being exactly the "is the
-   tunnel still up" signal an operator wants alerting on rather than
-   discovering by reload. Three things this needs to decide rather than leave
-   open:
-   - **Authentication.** A bare public `/metrics` reintroduces precisely what
-     declining a runtime `/openapi.json` was meant to avoid: an
-     unauthenticated endpoint that confirms a sharerr instance exists here,
-     which undoes the tracker's and the lighthouse's don't-confirm-existence
-     posture. The consistent answer is a bearer token held in the vault and
-     wired through `secret_keys::ALL` — the mechanism this project already
-     uses for every other credential — with the endpoint off by default.
-   - **Cardinality.** Per-peer labels are bounded by the friends list and are
-     fine. Per-*item* labels are not: a large library would produce a metric
-     per file and make the endpoint a liability rather than a feature.
-   - **Dependency.** Hand-render the text format. This project already
-     hand-writes Torznab XML and bencode, both harder; a page of OpenMetrics
-     is in character and adds nothing to the dependency tree.
-
-5. **A per-item detail page** — `/items` is a wide table with no drill-down,
+2. **A per-item detail page** — `/items` is a wide table with no drill-down,
    so everything about one item has to fit in a row or be omitted. A detail
    page would mostly be re-composition rather than new work — the path chain
    is already computed by `checks.rs`, the swarm by `Swarms`, the scope match
@@ -142,7 +95,7 @@ as of the review commit and may have drifted.
    token status, current swarm, and the full `last_error` rather than a
    truncated cell.
 
-6. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
+3. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
    two things: a sync that failed, and a friend gone quiet. Everything routes
    through a single `send()`, so adding triggers is cheap — the cost is not
    plumbing, it is restraint. The ones that seem worth having, on the test of
@@ -161,7 +114,7 @@ as of the review commit and may have drifted.
    heartbeat push is one more trigger through the same `send()`, not a
    feature of its own.
 
-7. **Manual per-item actions** — discovery is tag-driven end to end, which is
+4. **Manual per-item actions** — discovery is tag-driven end to end, which is
    the right default and the one control an operator already understands. But
    it means there is no way to retry a single `failed` item, force a torrent
    to be rebuilt, or stop sharing one file without going to Sonarr and editing
@@ -173,7 +126,7 @@ as of the review commit and may have drifted.
    distinguishes because every backend had to answer that question to be
    supported at all.
 
-8. **Config backup and restore** — master-key loss is unrecoverable by
+5. **Config backup and restore** — master-key loss is unrecoverable by
    design, and the vault is doing exactly what it should. What is missing is
    the *other* half: a way to capture the configuration — sources, mappings,
    peers, scopes — so that rebuilding an instance does not mean retyping
@@ -186,35 +139,80 @@ as of the review commit and may have drifted.
 
 ### Large — a protocol, a data model, or a release process
 
-9. **Transfer accounting** — the largest gap between what sharerr *knows*
+6. **Transfer accounting** — the largest gap between what sharerr *knows*
    and what it *keeps*; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-10. **Request flow** — a new inbound request queue and approve step, touching
-    the sync engine and the web UI on both sides of a friendship; see
-    [Functionality](#functionality).
+7. **Request flow** — a new inbound request queue and approve step, touching
+   the sync engine and the web UI on both sides of a friendship; see
+   [Functionality](#functionality).
 
-11. **A two-instance end-to-end test — last mile** — `docker/compose.two-instance.yml`,
-    `run_docker_tests_two_instance.sh`, and `crates/sharerr/tests/e2e_two_instance.rs`
-    exist and the whole chain up to the actual file transfer is independently
-    verified against a real stack: sharerr's tracker returns a byte-correct
-    bencoded peer list, a hand-fed `.torrent` transfers between the two
-    containers' qBittorrents instantly and byte-perfectly, and Radarr-B's
-    real automatic search finds, grabs, and hands the release to its download
-    client. What doesn't yet complete in testing is the BitTorrent transfer
-    itself once Radarr converts the grab to a magnet link: qBittorrent-B
-    connects to qBittorrent-A (confirmed via packet capture — a real TCP
-    handshake, BT handshake, and extended handshake all complete), but the
-    `ut_metadata` (BEP9) exchange that would hand it the actual torrent
-    metadata never finishes — qBittorrent-A's only reply is a bare 5-byte
-    control message, never a metadata piece. Every other explanation was
-    ruled out by direct testing: not the tracker (raw bencode verified
-    correct), not plain connectivity (TCP/raw transfer works), not
-    encryption, protocol (TCP vs µTP), DHT/PEX/LSD, or upload-slot
-    configuration (all toggled, none changed the outcome). Suspected to be
-    an environment-specific quirk of the sandboxed build environment rather
-    than a sharerr defect, but unconfirmed against a plain Docker host.
+---
+
+## Closed: the two-instance end-to-end test's last mile
+
+Closed on 2026-08-27, and written out at length because the diagnosis
+changed twice before landing on the real defect — worth keeping so the same
+wrong turn is not taken again.
+
+`docker/compose.two-instance.yml`, `run_docker_tests_two_instance.sh`, and
+`crates/sharerr/tests/e2e_two_instance.rs` had the whole chain up to the
+actual file transfer independently verified against a real stack: sharerr's
+tracker returns a byte-correct bencoded peer list, a hand-fed `.torrent`
+transfers between the two containers' qBittorrents instantly and
+byte-perfectly, and Radarr-B's real automatic search finds, grabs, and hands
+the release to its download client. What did not complete was the BitTorrent
+transfer itself: qBittorrent-B connected to qBittorrent-A (confirmed via
+packet capture — a real TCP handshake, BT handshake, and extended handshake
+all completed), but the `ut_metadata` (BEP9) exchange that would hand it the
+actual torrent metadata never finished — qBittorrent-A's only reply was a
+bare 5-byte control message, never a metadata piece.
+
+That was first suspected to be an environment-specific quirk of the
+sandboxed build environment, since every other explanation had been ruled
+out by direct testing: not the tracker, not plain connectivity, not
+encryption, protocol, DHT/PEX/LSD, or upload-slot configuration. It was not
+an environment quirk, and re-running on a plain Docker host would have
+reproduced it identically — the real cause was structural. Every torrent
+sharerr builds is private (`sharerr-torrent/src/factory.rs`'s
+`set_privacy(true)`, correctly — that is the whole reason the tracker
+exists), and libtorrent does not run `ut_metadata` for a private torrent.
+Radarr-B's own qBittorrent record proved which path it had taken:
+`has_metadata: false`, and a `magnet_uri` whose `dn=` was the release title
+rather than the torrent's real internal filename — meaning Radarr-B added
+the release by magnet, not by the `.torrent` enclosure sharerr also
+advertises and which fetched perfectly the whole time. A magnet can never
+complete against a private torrent, in any environment: nothing in the
+swarm will ever answer its metadata request.
+
+Radarr's own direct Torznab client has no setting to prefer the `.torrent`
+over the magnet. The one place that preference is actually configurable is
+Prowlarr's per-indexer "Prefer Magnet URL" — `false`, i.e. prefer the
+`.torrent`, by default. The fix was to put a Prowlarr in front of
+instance B's Radarr, the way a real friend's setup should look when their
+automation supports it: the two-instance stack gained a third container,
+`run_docker_tests_two_instance.sh` now creates the Torznab indexer on
+Prowlarr with `torrentBaseSettings.preferMagnetUrl` explicitly pinned to
+`false` and confirms the pin took, adds Radarr-B to Prowlarr as a `fullSync`
+application, and waits for the indexer to sync down before triggering the
+search. Both schemas (indexer and application) are fetched from Prowlarr's
+own `/api/v1/*/schema` endpoints rather than hand-typed, so a Prowlarr
+upgrade that renames or reorders fields cannot silently stop this from
+pinning the one setting it exists to pin. With that in place, the byte-for-byte
+transfer assertion in `e2e_two_instance.rs` passes end to end.
+
+What this does not change: sharerr's own Torznab feed still advertises a
+`magneturl` alongside the `.torrent` enclosure, for the indexers and clients
+where a magnet is the only thing that ever mattered. A friend connecting
+Radarr or Sonarr *directly* to a sharerr feed, with no Prowlarr in front,
+still has no lever over this — their app decides magnet-or-`.torrent` on its
+own, and evidence from this investigation is that at least one popular one
+decides wrong for a private torrent. That is a real gap for a direct
+connection, tracked in [`UNSUPPORTED.md`](UNSUPPORTED.md) rather than left
+implicit, since it was weighed and not acted on here: removing the magnet
+entirely would close it for every consumer at the cost of the convenience
+Prowlarr-routed and DHT-capable consumers get from it today.
 
 ---
 

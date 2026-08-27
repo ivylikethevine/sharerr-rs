@@ -244,6 +244,14 @@ pub struct NotificationsForm {
     peer_quiet_secs: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct MetricsForm {
+    enabled: Option<String>,
+    token: String,
+    clear_token: Option<String>,
+}
+
 /// Repeated inputs, one entry per row. `axum_extra`'s `Form` is what makes this
 /// work — axum's own uses `serde_urlencoded`, which cannot decode repeated keys
 /// into a `Vec`.
@@ -816,6 +824,34 @@ pub async fn save_notifications(
         secret_keys::NOTIFICATIONS_WEBHOOK_URL,
         webhook,
         form.clear_webhook_url.is_some(),
+    )
+    .await
+}
+
+/// `/metrics` and the dashboard-widget endpoint. Same two-write shape as
+/// [`save_notifications`]: a bearer token in the vault, `enabled` in
+/// `sharerr.toml`. Enabling without setting a token is accepted rather than
+/// rejected — the settings page already says plainly that neither endpoint
+/// answers without one, so this is a documented degraded state, not a
+/// silent one, matching how `[gluetun]` can be enabled with no API key yet.
+pub async fn save_metrics(
+    State(state): State<WebState>,
+    Form(form): Form<MetricsForm>,
+) -> Response {
+    write_config_and_secret(
+        &state,
+        "metrics",
+        None,
+        |file| {
+            file.apply([Edit::bool(
+                config_paths::METRICS_ENABLED,
+                form.enabled.is_some(),
+            )]);
+            Ok(())
+        },
+        secret_keys::METRICS_TOKEN,
+        form.token.trim(),
+        form.clear_token.is_some(),
     )
     .await
 }
@@ -1533,6 +1569,9 @@ async fn build_page(
         notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),
         notifications_kind: config.notifications.kind.as_str(),
         notifications_peer_quiet_secs: config.notifications.peer_quiet_secs,
+
+        metrics_enabled: config.metrics.enabled,
+        metrics_token_set: is_set(secret_keys::METRICS_TOKEN),
 
         // A spare blank row so "add a library" needs no JavaScript, same as
         // the path map below.

@@ -13,6 +13,7 @@ without being either committed to or declined, see
 - [Readarr as a direct indexer](#readarr-as-a-direct-indexer)
 - [Transmission-compatible forks, as their own tier-2 target](#transmission-compatible-forks-as-their-own-tier-2-target)
 - [qBittorrent's embedded tracker as a second backend](#qbittorrents-embedded-tracker-as-a-second-backend)
+- [Removing the feed's magnet link entirely](#removing-the-feeds-magnet-link-entirely)
 - [Publishing to crates.io](#publishing-to-cratesio)
 
 ## Media-server library sources (Jellyfin, Emby, Plex)
@@ -52,6 +53,30 @@ handling had to be made twice. A `sharerr.toml` still naming
 `tracker.backend` fails to load with an error saying exactly this. See
 [`DESIGN.md`](DESIGN.md)'s "Corrections the implementation forced" for the
 fuller reasoning.
+
+## Removing the feed's magnet link entirely
+
+Considered and left in, for now. Every torrent sharerr builds is private
+(the whole reason its own tracker exists), and a magnet can never actually
+complete against one — nothing in the swarm will ever answer a
+`ut_metadata` request. That was confirmed the hard way: see
+[`ROADMAP.md`](ROADMAP.md)'s closed two-instance-test entry for the
+investigation, where Radarr's own direct Torznab client picked the magnet
+over the working `.torrent` enclosure and stalled forever. The fix chosen
+there was a Prowlarr in front of the requesting Radarr, with its
+`preferMagnetUrl` pinned to `false` — the one place that preference is
+actually configurable.
+
+That fix does nothing for a friend who points Radarr or Sonarr *directly*
+at a sharerr feed, no Prowlarr in between: their app decides magnet-or-`.torrent`
+on its own, with no setting to override it, and at least one popular one has
+been observed deciding wrong. Stripping the `magneturl` attribute from the
+feed (and Jackett's `magnet_uri`) would close that gap for every consumer at
+once, but was left in rather than removed: it still helps a genuinely DHT-capable
+consumer, and pulling it is a one-line change that can be made the moment a
+real report shows it biting a direct connection, rather than a
+speculative fix for a failure mode confirmed on exactly one integration
+shape so far.
 
 ## Publishing to crates.io
 

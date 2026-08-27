@@ -77,6 +77,42 @@ fn an_unwritable_destination_is_reported_and_fails() {
     assert!(stderr.contains("could not write"), "{stderr}");
 }
 
+/// The tv library writes first, so a permissions failure there is the only
+/// one the test above exercises. Blocking `movies` specifically (as a plain
+/// file, so this works without relying on unix permission bits) proves the
+/// second library's own failure is named too, not just the first's.
+#[test]
+fn a_failure_past_the_first_library_still_names_which_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("movies"), b"not a directory").unwrap();
+
+    let out = bin().arg(dir.path()).output().unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not write the movie library"),
+        "{stderr}"
+    );
+}
+
+/// Same reasoning, for the third and last library: nothing after it could
+/// mask its failure behind a more general message.
+#[test]
+fn a_music_library_failure_is_named_too() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("music"), b"not a directory").unwrap();
+
+    let out = bin().arg(dir.path()).output().unwrap();
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("could not write the music library"),
+        "{stderr}"
+    );
+}
+
 /// One file that is known to exist, found by walking rather than named, so a
 /// change to the fixture titles does not break this test for the wrong reason.
 fn sample_file(root: &std::path::Path) -> std::path::PathBuf {

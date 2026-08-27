@@ -31,6 +31,7 @@ QBIT_A_PORT=58080
 QBIT_B_PORT=59080
 SHARERR_A_PORT=58477
 SHARERR_B_PORT=59477
+PROWLARR_PORT=59696
 
 RADARR_A_DB=$STATE/a/radarr/radarr.db
 RADARR_B_DB=$STATE/b/radarr/radarr.db
@@ -162,7 +163,7 @@ cargo run -q -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 #    ours before the containers claim them — see `compose.test.yml`'s note on
 #    why (Docker would otherwise create them as root).
 remove_state
-mkdir -p "$STATE/a/radarr" "$STATE/b/radarr" "$STATE/b/downloads"
+mkdir -p "$STATE/a/radarr" "$STATE/b/radarr" "$STATE/b/downloads" "$STATE/prowlarr"
 "${COMPOSE[@]}" up -d --build
 
 wait_for radarr-a "$RADARR_A_PORT" /ping
@@ -187,6 +188,7 @@ wait_for qbittorrent-a "$QBIT_A_PORT" / '^(2[0-9][0-9]|401)$'
 wait_for qbittorrent-b "$QBIT_B_PORT" / '^(2[0-9][0-9]|401)$'
 wait_for sharerr-a "$SHARERR_A_PORT" /health
 wait_for sharerr-b "$SHARERR_B_PORT" /health
+wait_for prowlarr "$PROWLARR_PORT" /ping
 
 # 4. Credentials. Only instance A's go into a vault — instance B is never
 #    claimed and never synced in this test; see the compose file and
@@ -196,6 +198,7 @@ wait_for sharerr-b "$SHARERR_B_PORT" /health
 #    `X-Api-Key`, unlike the bare `/ping` `wait_for` above already used.
 RADARR_A_KEY=$(api_key radarr-a "$STATE/a/radarr/config.xml")
 RADARR_B_KEY=$(api_key radarr-b "$STATE/b/radarr/config.xml")
+PROWLARR_KEY=$(api_key prowlarr "$STATE/prowlarr/config.xml")
 QBIT_A_PW=$(qbittorrent_temp_password qbittorrent-a) || exit 1
 QBIT_A_KEY=$(qbittorrent_api_key "$QBIT_A_PW" qbittorrent-a sharerr-a) || exit 1
 QBIT_B_PW=$(qbittorrent_temp_password qbittorrent-b) || exit 1
@@ -248,44 +251,128 @@ cat /tmp/sharerr-a-doctor.log
 
 "${COMPOSE[@]}" exec -T sharerr-a sharerr sync >/dev/null
 
-# 7. Register instance A as a real Torznab indexer on Radarr-B, and
-#    instance B's own qBittorrent as its download client — the two halves a
-#    human would configure by hand in Radarr's UI. Category 2000 is
-#    Newznab/Torznab's "Movies" — the same convention the Sonarr (5000) and
-#    Lidarr (3000) checks in `run_docker_tests.sh` already rely on.
-radarr_b_indexer=$(cat <<JSON
-{
-  "enableRss": true, "enableAutomaticSearch": true, "enableInteractiveSearch": true,
-  "supportsRss": true, "supportsSearch": true, "protocol": "torrent", "priority": 25,
-  "name": "sharerr-a",
-  "implementation": "Torznab", "implementationName": "Torznab",
-  "configContract": "TorznabSettings",
-  "fields": [
-    {"name": "baseUrl", "value": "http://sharerr-a:8477"},
-    {"name": "apiPath", "value": "/api"},
-    {"name": "apiKey", "value": "$TORZNAB_KEY"},
-    {"name": "categories", "value": [2000]},
-    {"name": "minimumSeeders", "value": 1}
-  ]
-}
-JSON
-)
+# 7. Point Radarr-B at instance A *through Prowlarr*, not a direct Torznab
+#    indexer — the first live run of this script grabbed by magnet instead of
+#    the .torrent enclosure sharerr also advertises. Evidence: qBittorrent-B's
+#    own torrent record showed `has_metadata: false`, and its `magnet_uri`'s
+#    `dn=` was the release title, not the torrent's real internal filename
+#    (see docs/ROADMAP.md item 11's diagnosis). A magnet can never complete
+#    against a private torrent — nothing in the swarm will ever answer its
+#    `ut_metadata` request, which is the whole reason the tracker exists —
+#    and Radarr's own direct Torznab client has no setting to prefer the
+#    .torrent instead: that preference exists only on Prowlarr's indexer,
+#    "Prefer Magnet URL" (`torrentBaseSettings.preferMagnetUrl`, `false` by
+#    default), so this is also what a real friend's setup should look like.
+#
+#    Both schemas are fetched rather than hand-typed: a Prowlarr upgrade that
+#    renames or reorders `fields` cannot silently stop this from pinning the
+#    one setting it exists to pin, and the response is read back to confirm
+#    the pin actually took rather than assumed.
+schema=$(curl -sf -H "X-Api-Key: $PROWLARR_KEY" \
+    "http://127.0.0.1:$PROWLARR_PORT/api/v1/indexer/schema")
+generic_torznab=$(jq -c '.[] | select(.name == "Generic Torznab")' <<<"$schema")
+if [[ -z $generic_torznab ]]; then
+    echo "error: prowlarr's indexer schema has no \"Generic Torznab\" entry" >&2
+    exit 1
+fi
+
+# Every indexer needs an App Profile — Prowlarr ships one ("Standard") on
+# first start, fetched rather than assumed to be id 1: an upgrade or a
+# not-quite-fresh config could renumber or rename it.
+app_profile_id=$(curl -sf -H "X-Api-Key: $PROWLARR_KEY" \
+    "http://127.0.0.1:$PROWLARR_PORT/api/v1/appprofile" | jq -r '.[0].id')
+if [[ -z $app_profile_id || $app_profile_id == null ]]; then
+    echo "error: prowlarr has no app profile to assign the indexer to" >&2
+    exit 1
+fi
+
+prowlarr_indexer=$(jq -c \
+    --arg url "http://sharerr-a:8477" --arg key "$TORZNAB_KEY" \
+    --argjson profile "$app_profile_id" '
+    .enable = true | .name = "sharerr-a" | .appProfileId = $profile |
+    .fields = (.fields | map(
+        if .name == "baseUrl" then .value = $url
+        elif .name == "apiKey" then .value = $key
+        elif .name == "torrentBaseSettings.appMinimumSeeders" then .value = 1
+        elif .name == "torrentBaseSettings.preferMagnetUrl" then .value = false
+        else . end
+    ))' <<<"$generic_torznab")
+
 # Body and status captured separately — `-w '\n%{http_code}'` plus stripping
 # the last line with `sed` silently ate the body whenever curl's own output
 # had no trailing newline before the appended status, which is exactly what
-# cost time chasing a blank error message the first time this ran for real.
-indexer_body=/tmp/radarr-b-indexer-response.json
+# cost time chasing a blank error message the first time an add like this
+# ran for real (see the download-client add below, which inherited the fix).
+indexer_body=/tmp/prowlarr-indexer-response.json
 indexer_status=$(curl -s -o "$indexer_body" -w '%{http_code}' -X POST \
-    -H "X-Api-Key: $RADARR_B_KEY" -H 'Content-Type: application/json' \
-    --data "$radarr_b_indexer" \
-    "http://127.0.0.1:$RADARR_B_PORT/api/v3/indexer")
+    -H "X-Api-Key: $PROWLARR_KEY" -H 'Content-Type: application/json' \
+    --data "$prowlarr_indexer" \
+    "http://127.0.0.1:$PROWLARR_PORT/api/v1/indexer")
 if ((indexer_status >= 300)); then
-    echo "error: radarr-b refused to add sharerr-a as an indexer ($indexer_status):" >&2
+    echo "error: prowlarr refused to add sharerr-a as an indexer ($indexer_status):" >&2
     cat "$indexer_body" >&2
     exit 1
 fi
-echo "radarr-b: sharerr-a added as an indexer"
+if ! jq -e '.fields[] | select(.name == "torrentBaseSettings.preferMagnetUrl") | .value == false' \
+    "$indexer_body" >/dev/null
+then
+    echo "error: prowlarr did not save preferMagnetUrl=false on sharerr-a's indexer:" >&2
+    cat "$indexer_body" >&2
+    exit 1
+fi
+echo "prowlarr: sharerr-a added as an indexer, preferMagnetUrl=false confirmed"
 
+app_schema=$(curl -sf -H "X-Api-Key: $PROWLARR_KEY" \
+    "http://127.0.0.1:$PROWLARR_PORT/api/v1/applications/schema")
+radarr_app=$(jq -c '.[] | select(.implementation == "Radarr")' <<<"$app_schema")
+prowlarr_app=$(jq -c \
+    --arg base "http://radarr-b:7878" --arg key "$RADARR_B_KEY" '
+    .enable = true | .name = "radarr-b" |
+    .fields = (.fields | map(
+        if .name == "prowlarrUrl" then .value = "http://prowlarr:9696"
+        elif .name == "baseUrl" then .value = $base
+        elif .name == "apiKey" then .value = $key
+        else . end
+    ))' <<<"$radarr_app")
+
+app_body=/tmp/prowlarr-application-response.json
+app_status=$(curl -s -o "$app_body" -w '%{http_code}' -X POST \
+    -H "X-Api-Key: $PROWLARR_KEY" -H 'Content-Type: application/json' \
+    --data "$prowlarr_app" \
+    "http://127.0.0.1:$PROWLARR_PORT/api/v1/applications")
+if ((app_status >= 300)); then
+    echo "error: prowlarr refused to add radarr-b as an application ($app_status):" >&2
+    cat "$app_body" >&2
+    exit 1
+fi
+echo "prowlarr: radarr-b added as an application"
+
+# Prowlarr pushes the indexer down to a `fullSync` application on save, in
+# the background — polled here because radarr-b's own view of its indexers
+# is the state the search below actually reads, not prowlarr's say-so. The
+# synced copy is named "sharerr-a (Prowlarr)", not "sharerr-a" — Prowlarr's
+# own convention for distinguishing an app-managed indexer from one added by
+# hand — so this matches on the prefix rather than the exact name.
+printf 'waiting for prowlarr to sync sharerr-a down to radarr-b'
+sync_deadline=$((SECONDS + 60))
+while true; do
+    radarr_b_indexers=$(curl -sf -H "X-Api-Key: $RADARR_B_KEY" \
+        "http://127.0.0.1:$RADARR_B_PORT/api/v3/indexer" || true)
+    jq -e 'any(.[]; .name | startswith("sharerr-a"))' <<<"$radarr_b_indexers" >/dev/null 2>&1 && break
+    if ((SECONDS > sync_deadline)); then
+        echo " — gave up after 60s"
+        echo "${radarr_b_indexers:-<no response from radarr-b>}" >&2
+        exit 1
+    fi
+    printf .
+    [[ -t 1 ]] || printf '\n'
+    sleep 3
+done
+echo " ok"
+
+# Instance B's own qBittorrent as Radarr-B's download client — Prowlarr only
+# ever manages indexers, never download clients, so this half is still
+# registered directly, same as before.
 radarr_b_download_client=$(cat <<JSON
 {
   "enable": true, "protocol": "torrent", "priority": 1,
@@ -364,8 +451,18 @@ while ! find "$STATE/b/downloads" -type f 2>/dev/null | grep -q .; do
         echo " — gave up after 60s"
         echo "nothing under $STATE/b/downloads yet — Radarr grabbed and handed" >&2
         echo "the release to qbittorrent-b, but the torrent transfer itself" >&2
-        echo "has not landed a file. Check qbittorrent-b's own torrent list" >&2
-        echo "(port $QBIT_B_PORT) for its state on this info hash." >&2
+        echo "has not landed a file. qbittorrent-b's own torrent list:" >&2
+        # From inside the container, over its own "localhost" — qBittorrent
+        # validates the Host header against how it was addressed, so the
+        # same login from the host's published port answers 401 regardless
+        # of credentials (cost real time to work out once already).
+        # shellcheck disable=SC2016
+        "${COMPOSE[@]}" exec -T -e QBIT_PW="$QBIT_B_PW" qbittorrent-b sh -c '
+            curl -sf -c /tmp/qbit-cookie \
+                --data-urlencode "username=admin" --data-urlencode "password=$QBIT_PW" \
+                -H "Referer: http://localhost:8080" "http://localhost:8080/api/v2/auth/login" >/dev/null &&
+            curl -sf -b /tmp/qbit-cookie "http://localhost:8080/api/v2/torrents/info"
+        ' >&2 || echo "  (could not reach qbittorrent-b's API to report its state)" >&2
         break
     fi
     printf .

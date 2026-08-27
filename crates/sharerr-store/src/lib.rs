@@ -3,12 +3,14 @@
 pub mod db;
 pub mod endpoints;
 pub mod peers;
+pub mod swarm;
 pub mod users;
 pub mod vault;
 
 pub use db::{RunRecord, RunSummary, SeedingSummary, Store, StoreError};
 pub use endpoints::{EndpointKind, ObservedVia, PeerEndpoint};
 pub use peers::{Peer, PeerScope};
+pub use swarm::SwarmSample;
 
 pub use vault::{Vault, VaultError, master_key_from_env};
 

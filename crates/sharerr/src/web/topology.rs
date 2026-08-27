@@ -1794,4 +1794,278 @@ mod tests {
         assert!(page.nodes.iter().any(|n| n.label == "Sam"));
         assert!(!page.nodes.iter().any(|n| n.label == "Gone"));
     }
+
+    // ------------------------------------------------------------ arr_node
+
+    /// Every `ArrOutcome` `arr_node` can be handed, each producing the
+    /// status and headline line an operator actually needs to act on. Pure
+    /// and synchronous, so every variant is cheap to exercise directly
+    /// rather than through a live (or wiremocked) *arr app.
+    #[test]
+    fn arr_node_reports_every_outcome() {
+        let cases: &[(ArrOutcome, NodeStatus, &str)] = &[
+            (
+                ArrOutcome::Ready {
+                    version: "4.0".to_owned(),
+                    app_name: "Sonarr".to_owned(),
+                    items: Vec::new(),
+                },
+                NodeStatus::Ok,
+                "Sonarr v4.0",
+            ),
+            (
+                ArrOutcome::TagUnused {
+                    version: "4.0".to_owned(),
+                },
+                NodeStatus::Warn,
+                "nothing carries the tag",
+            ),
+            (
+                ArrOutcome::TagMissing {
+                    version: "4.0".to_owned(),
+                },
+                NodeStatus::Error,
+                "Tag missing",
+            ),
+            (ArrOutcome::AuthRejected, NodeStatus::Error, "Key rejected"),
+            (
+                ArrOutcome::Unreachable("refused".to_owned()),
+                NodeStatus::Error,
+                "Unreachable",
+            ),
+            (ArrOutcome::NoCredential, NodeStatus::Error, "No key stored"),
+            (
+                ArrOutcome::CredentialUnreadable("bad master key".to_owned()),
+                NodeStatus::Error,
+                "Vault unreadable",
+            ),
+            (
+                ArrOutcome::BadUrl("not a url".to_owned()),
+                NodeStatus::Error,
+                "Failed",
+            ),
+            (
+                ArrOutcome::Failed("500".to_owned()),
+                NodeStatus::Error,
+                "Failed",
+            ),
+            (
+                ArrOutcome::NotConfigured,
+                NodeStatus::Unknown,
+                "Not configured",
+            ),
+        ];
+
+        for (outcome, expected_status, expected_text) in cases {
+            let node = arr_node(MediaSource::Sonarr, None, outcome);
+            assert_eq!(node.status, *expected_status, "{outcome:?}");
+            assert!(
+                node.lines.iter().any(|l| l.text.contains(expected_text)),
+                "{outcome:?} -> {:?}",
+                node.lines
+            );
+        }
+    }
+
+    // -------------------------------------------------------- library_node
+
+    /// A library path with no final component (the filesystem root) must
+    /// still get a label, falling back to the whole displayed path rather
+    /// than panicking or rendering blank.
+    #[test]
+    fn library_node_falls_back_to_the_full_path_with_no_file_name() {
+        let node = library_node(Path::new("/"), &DirOutcome::Empty);
+        assert_eq!(node.label, "/");
+    }
+
+    // ----------------------------------------------------- instance_lines
+
+    #[tokio::test]
+    async fn instance_lines_reports_ok_once_an_address_is_advertised() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .endpoint()
+            .observe("http://203.0.113.9:51413".parse().unwrap());
+        let state = web_state(serve);
+
+        let (lines, status) = instance_lines(&Config::default(), &state).await;
+
+        assert_eq!(status, NodeStatus::Ok);
+        assert!(lines.iter().any(|l| l.text.contains("203.0.113.9")));
+    }
+
+    /// A gluetun poller is configured but has not resolved anything yet — a
+    /// different state from "not advertised" (no poller at all), and one an
+    /// operator should read as "give it a moment", not "broken".
+    #[tokio::test]
+    async fn instance_lines_waits_on_gluetun_before_anything_is_observed() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let config = Config {
+            gluetun: sharerr_core::config::GluetunConfig {
+                control_url: Some(url::Url::parse("http://127.0.0.1:8000").unwrap()),
+                ..Config::default().gluetun
+            },
+            ..Config::default()
+        };
+
+        let (lines, status) = instance_lines(&config, &state).await;
+
+        assert_eq!(status, NodeStatus::Unknown);
+        assert!(lines.iter().any(|l| l.text.contains("Waiting on gluetun")));
+    }
+
+    // ---------------------------------------------------------- swarm_rows
+
+    fn announce_request(hash: &str, peer_id: [u8; 20]) -> sharerr_torrent::AnnounceRequest {
+        sharerr_torrent::AnnounceRequest {
+            info_hash: sharerr_torrent::announce::info_hash_from_hex(hash).unwrap(),
+            peer_id,
+            port: 6881,
+            left: 0,
+            event: sharerr_torrent::Event::None,
+            compact: true,
+            numwant: 50,
+            declared_ip: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn swarm_rows_names_a_torrent_from_the_stored_title_and_counts_its_peers() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let hash = "ab".repeat(20);
+        serve
+            .swarms()
+            .announce(
+                &announce_request(&hash, [1; 20]),
+                "203.0.113.1:6881".parse().unwrap(),
+            )
+            .await;
+        let state = web_state(serve);
+        let mut titles = HashMap::new();
+        titles.insert(hash.as_str(), "Harborlight");
+
+        let rows = swarm_rows(&state, &titles).await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Harborlight");
+        assert_eq!(rows[0].peers.len(), 1);
+        assert_eq!(rows[0].more, 0);
+    }
+
+    /// A swarm whose hash cannot be matched back to a stored title is still
+    /// listed, named by its hash rather than silently dropped — the peers
+    /// connected to it are just as real either way.
+    #[tokio::test]
+    async fn swarm_rows_falls_back_to_the_hash_when_untitled() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let hash = "cd".repeat(20);
+        serve
+            .swarms()
+            .announce(
+                &announce_request(&hash, [2; 20]),
+                "203.0.113.2:6881".parse().unwrap(),
+            )
+            .await;
+        let state = web_state(serve);
+
+        let rows = swarm_rows(&state, &HashMap::new()).await;
+
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].title.starts_with("torrent "), "{:?}", rows[0].title);
+    }
+
+    /// A long list of peers on one torrent is capped and counted, the same
+    /// shape `reconcile`'s mismatch list uses — a swarm nobody culled from
+    /// must not blow out the row.
+    #[tokio::test]
+    async fn swarm_rows_caps_a_long_peer_list_and_counts_the_rest() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let hash = "ef".repeat(20);
+        for i in 0..(MAX_SWARM_PEERS + 3) {
+            let mut peer_id = [0u8; 20];
+            peer_id[0] = i as u8;
+            serve
+                .swarms()
+                .announce(
+                    &announce_request(&hash, peer_id),
+                    format!("203.0.113.{}:6881", 10 + i).parse().unwrap(),
+                )
+                .await;
+        }
+        let state = web_state(serve);
+
+        let rows = swarm_rows(&state, &HashMap::new()).await;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].peers.len(), MAX_SWARM_PEERS);
+        assert_eq!(rows[0].more, 3);
+    }
+
+    // --------------------------------------------------------- client_node
+
+    /// The two arms that need a vault that actually *opens* to tell apart
+    /// from `CredentialUnreadable`: no key stored at all, and a key stored
+    /// but the client failing to answer. Needs a real `SHARERR_MASTER_KEY`,
+    /// so — per this project's convention — a `figment::Jail` with a
+    /// manually driven runtime rather than `#[tokio::test]`.
+    #[test]
+    #[allow(
+        clippy::result_large_err,
+        reason = "figment::Error, from Jail::expect_with"
+    )]
+    fn client_node_reports_no_credential_then_failed_once_one_is_stored() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let data_dir = jail.directory().to_path_buf();
+            let mut config = Config {
+                data_dir: data_dir.clone(),
+                ..Config::default()
+            };
+            // Refused immediately rather than timing out, and never a real
+            // service some dev machine happens to have on 8080.
+            config.qbittorrent.url = url::Url::parse("http://127.0.0.1:1").unwrap();
+            let path = data_dir.join("sharerr.toml");
+            let serve =
+                std::sync::Arc::new(crate::state::ServeState::new(config.clone(), path, None));
+            let state = web_state(serve);
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let secret = crate::web::diagnostics::secret_reader(state.serve.open_vault().await);
+                let (_, lines, status, check) = client_node(&config, &state, &secret, &[]).await;
+                assert_eq!(status, NodeStatus::Error);
+                assert!(check.is_none());
+                assert!(
+                    lines.iter().any(|l| l.text.contains("No credential")),
+                    "{lines:?}"
+                );
+
+                let mut vault = sharerr_store::Vault::open(
+                    config.vault_path(),
+                    &secrecy::SecretString::from("a-master-key"),
+                )
+                .unwrap();
+                vault
+                    .put(
+                        sharerr_core::config::secret_keys::QBITTORRENT_API_KEY,
+                        &secrecy::SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
+                    )
+                    .unwrap();
+
+                // qBittorrent's `login()` is a no-op (API-key auth needs no
+                // handshake — see `QbitClient::login`), so an unreachable
+                // qBittorrent surfaces once `version()` itself fails, which
+                // `check_qbit` reports as `Failed` rather than `Unreachable`
+                // or `AuthRejected` — those two arms are only reachable
+                // through Transmission/rTorrent's real login dial.
+                let secret = crate::web::diagnostics::secret_reader(state.serve.open_vault().await);
+                let (_, lines, status, check) = client_node(&config, &state, &secret, &[]).await;
+                assert_eq!(status, NodeStatus::Error);
+                assert!(check.is_none());
+                assert!(lines.iter().any(|l| l.text.contains("Failed")), "{lines:?}");
+            });
+            Ok(())
+        });
+    }
 }

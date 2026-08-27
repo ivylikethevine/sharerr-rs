@@ -21,7 +21,7 @@ use super::WebState;
 use super::peers::ago;
 use super::templates::{
     DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunBar, RunChart, RunRow,
-    SampleRow, ServiceLine,
+    SampleRow, ServiceLine, SwarmBar, SwarmChart,
 };
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
@@ -55,10 +55,11 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     let config = &config;
     let tracker_endpoint = state.serve.endpoint_for(GluetunTarget::Tracker);
     let client_endpoint = state.serve.endpoint_for(GluetunTarget::Client);
-    let (snapshot, torrent_client, runs, tracker, client) = tokio::join!(
+    let (snapshot, torrent_client, runs, swarm_samples, tracker, client) = tokio::join!(
         checks::snapshot(config, &api_key),
         torrent_client_line(config, &api_key),
         recent_run_rows(state),
+        swarm_sample_rows(state),
         endpoint_status(
             display_label(GluetunTarget::Tracker),
             GluetunTarget::Tracker.config(config),
@@ -137,6 +138,7 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         gluetun,
         run_chart: run_chart(&runs),
         runs,
+        swarm_chart: swarm_chart(&swarm_samples),
         lighthouse: lighthouse_view(state, config).await,
     }
 }
@@ -252,6 +254,18 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
         .collect()
 }
 
+/// Up to a fortnight of hourly swarm-activity samples, oldest first — same
+/// empty-on-error tolerance as [`recent_run_rows`].
+async fn swarm_sample_rows(state: &WebState) -> Vec<sharerr_store::SwarmSample> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    store
+        .recent_swarm_samples(sharerr_store::swarm::MAX_SAMPLES)
+        .await
+        .unwrap_or_default()
+}
+
 /// One bar's width, and the gap to the next.
 const BAR_W: i32 = 24;
 const BAR_GAP: i32 = 8;
@@ -331,6 +345,73 @@ pub(crate) fn run_chart(runs: &[RunRow]) -> Option<RunChart> {
         bars,
         width: count * BAR_W + (count - 1) * BAR_GAP,
         height: PAD_TOP + PLOT_H,
+    })
+}
+
+/// Fixed total width for the swarm-history strip, however many samples it
+/// holds — see [`crate::web::templates::SwarmChart`]'s own doc for why this
+/// differs from the run-history strip's fixed per-bar width and gap above.
+const SWARM_CHART_W: i32 = 600;
+/// How tall the busiest sample is drawn — a glance-height shape, same
+/// reasoning as [`PLOT_H`].
+const SWARM_CHART_H: i32 = 48;
+/// Floor under every bar, so an hour that was genuinely quiet is still a
+/// visible, hoverable mark rather than a gap — same reasoning as
+/// [`MIN_BAR_H`], adapted to a shorter chart.
+const SWARM_MIN_BAR_H: i32 = 2;
+
+/// Lays out up to a fortnight of hourly swarm samples as a contiguous bar
+/// strip, oldest to newest, scaled against the busiest sample in the window.
+pub(crate) fn swarm_chart(samples: &[sharerr_store::SwarmSample]) -> Option<SwarmChart> {
+    let newest = samples.last()?;
+    let busiest = samples.iter().map(|s| s.peers).max().unwrap_or(0);
+    let count = i32::try_from(samples.len()).unwrap_or(i32::MAX);
+    // At least one pixel per bar even if the window somehow held more
+    // samples than the strip is wide — dividing to zero would draw nothing.
+    let w = (SWARM_CHART_W / count).max(1);
+
+    let bars = samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            let index = i32::try_from(index).unwrap_or(i32::MAX);
+            let scaled = if busiest > 0 {
+                let ratio = sample.peers as f64 / busiest as f64;
+                (ratio * f64::from(SWARM_CHART_H)).round() as i32
+            } else {
+                0
+            };
+            let h = scaled.clamp(SWARM_MIN_BAR_H, SWARM_CHART_H);
+            SwarmBar {
+                x: index * w,
+                y: SWARM_CHART_H - h,
+                w,
+                h,
+                title: format!(
+                    "{} — {} peer(s), {} seeder(s), {} torrent(s)",
+                    super::peers::absolute(sample.sampled_at),
+                    sample.peers,
+                    sample.seeders,
+                    sample.swarms
+                ),
+            }
+        })
+        .collect();
+
+    let summary = if newest.peers > 0 {
+        format!(
+            "{} peer(s) as of the last sample; the busiest sample in this window saw {busiest}.",
+            newest.peers
+        )
+    } else {
+        format!("No peers as of the last sample; the busiest sample in this window saw {busiest}.")
+    };
+
+    Some(SwarmChart {
+        bars,
+        width: count * w,
+        height: SWARM_CHART_H,
+        summary,
     })
 }
 
@@ -628,6 +709,77 @@ mod tests {
         ])
         .unwrap();
 
+        for bar in &chart.bars {
+            assert!(bar.x >= 0 && bar.x + bar.w <= chart.width, "{bar:?}");
+            assert!(bar.y >= 0 && bar.y + bar.h <= chart.height, "{bar:?}");
+        }
+    }
+
+    /// A `SwarmSample` with only the fields the strip reads set to anything
+    /// meaningful.
+    fn swarm_sample(sampled_at: i64, peers: i64) -> sharerr_store::SwarmSample {
+        sharerr_store::SwarmSample {
+            sampled_at,
+            swarms: i64::from(peers > 0),
+            peers,
+            seeders: 0,
+        }
+    }
+
+    #[test]
+    fn swarm_chart_is_absent_when_there_are_no_samples() {
+        assert_eq!(swarm_chart(&[]), None);
+    }
+
+    /// Samples arrive oldest first already (unlike `RunRow`, which arrives
+    /// newest first) — see `swarm_sample_rows` — so the chart must not
+    /// reverse them a second time.
+    #[test]
+    fn swarm_chart_keeps_the_samples_oldest_first() {
+        let chart = swarm_chart(&[swarm_sample(100, 1), swarm_sample(200, 5)]).unwrap();
+
+        let [older, newer] = &chart.bars[..] else {
+            panic!("expected two bars, got {}", chart.bars.len());
+        };
+        assert!(older.x < newer.x);
+        assert!(older.h < newer.h, "the busier sample is the taller bar");
+    }
+
+    /// Zero-peer hours are still visible marks, not gaps — same reasoning as
+    /// `run_chart`'s floor under an empty pass.
+    #[test]
+    fn swarm_chart_gives_a_quiet_hour_a_visible_floor() {
+        let chart = swarm_chart(&[swarm_sample(100, 0), swarm_sample(200, 10)]).unwrap();
+        assert!(chart.bars[0].h >= SWARM_MIN_BAR_H);
+    }
+
+    /// A totally quiet window — every sample zero — must not divide by zero
+    /// scaling against a busiest-of-zero.
+    #[test]
+    fn swarm_chart_handles_a_totally_quiet_window() {
+        let chart = swarm_chart(&[swarm_sample(100, 0), swarm_sample(200, 0)]).unwrap();
+        for bar in &chart.bars {
+            assert_eq!(bar.h, SWARM_MIN_BAR_H);
+        }
+        assert!(chart.summary.starts_with("No peers"), "{}", chart.summary);
+    }
+
+    #[test]
+    fn swarm_chart_summary_reports_the_latest_and_the_busiest() {
+        let chart = swarm_chart(&[swarm_sample(100, 8), swarm_sample(200, 2)]).unwrap();
+        assert!(chart.summary.contains('2'), "{}", chart.summary);
+        assert!(chart.summary.contains('8'), "{}", chart.summary);
+    }
+
+    /// However many samples the window holds, the strip stays within its
+    /// fixed total width rather than growing past it the way `run_chart`'s
+    /// fixed-per-bar strip would.
+    #[test]
+    fn swarm_chart_box_contains_every_bar_within_the_fixed_width() {
+        let samples: Vec<_> = (0..200).map(|i| swarm_sample(i, i % 7)).collect();
+        let chart = swarm_chart(&samples).unwrap();
+
+        assert!(chart.width <= SWARM_CHART_W, "{}", chart.width);
         for bar in &chart.bars {
             assert!(bar.x >= 0 && bar.x + bar.w <= chart.width, "{bar:?}");
             assert!(bar.y >= 0 && bar.y + bar.h <= chart.height, "{bar:?}");

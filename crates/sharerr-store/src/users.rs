@@ -110,6 +110,10 @@ impl Store {
 static DECOY_HASH: LazyLock<String> = LazyLock::new(|| {
     // A failure here would only degrade the timing defence, never break login, so
     // it falls back to a string `PasswordHash::new` rejects rather than panicking.
+    // codeql[rust/hard-coded-cryptographic-value] -- deliberately not a real
+    // hash: this string is chosen specifically because `PasswordHash::new`
+    // rejects it, so nothing can ever verify against it. It is reached only
+    // when hashing the decoy password above already failed.
     blocking_hash("decoy — matches nothing").unwrap_or_else(|_| "$argon2id$invalid".to_owned())
 });
 

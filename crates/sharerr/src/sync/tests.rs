@@ -879,6 +879,52 @@ async fn an_item_that_loses_its_tag_is_unshared_and_its_torrent_removed() {
     }
 }
 
+/// Withdrawal is not only for a `Seeding` item: one that never got that far —
+/// stuck `Failed` because its file could not be found — must still be cleared
+/// out once its tag is gone, or a stale error keeps haunting the Items page
+/// for a file the operator has already untagged. It has no info hash to remove
+/// from the client, which is the `(None, _)` arm right beside the `Seeding`
+/// removal branch.
+#[tokio::test]
+async fn a_failed_items_tag_removal_still_unshares_it() {
+    let h = tagged_harness().await;
+    std::fs::remove_file(&h.library.file(501).disk_path).unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.failed, 1, "setup: one item must be stuck Failed");
+
+    let known = known(&h).await;
+    let failed_key = known
+        .iter()
+        .find(|(_, item)| item.state == ShareState::Failed)
+        .map(|(key, _)| *key)
+        .expect("setup: a Failed item must be recorded");
+
+    // The whole source lost its tag, same as `an_item_that_loses_its_tag_...`
+    // below — both its items (one Seeding, one Failed) are eligible, but only
+    // the Failed one's `(None, _)` arm is new coverage here.
+    let removed = h
+        .syncer
+        .withdraw_untagged(
+            &known,
+            &Default::default(),
+            &HashSet::from([failed_key.0]),
+            false,
+        )
+        .await;
+
+    assert_eq!(removed, 2);
+    let item = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.key() == failed_key)
+        .expect("the item must still be recorded");
+    assert_eq!(item.state, ShareState::Unshared);
+}
+
 /// A torrent sharerr only *adopted* is left running when the item is withdrawn.
 ///
 /// `Seeder::seed` reuses whatever already covers a file instead of adding a

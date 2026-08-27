@@ -639,15 +639,15 @@ svg text { font-family: inherit; }
    150px one and gives the summary more weight than the table it summarises.
    `max-width` still lets it shrink on a narrow viewport, where losing the
    shape's scale costs nothing — there are no values to read off it. */
-.runchart {
+.runchart, .swarmchart {
   margin: 0 0 var(--sp-5);
 }
-.runchart svg {
+.runchart svg, .swarmchart svg {
   display: block;
   max-width: 100%;
   height: auto;
 }
-.runchart figcaption {
+.runchart figcaption, .swarmchart figcaption {
   margin-top: var(--sp-2);
 }
 
@@ -662,6 +662,10 @@ svg text { font-family: inherit; }
    backdrop rather than compete with the bar in front of it, but full height,
    so a failure is findable at the scale the strip is scanned at. */
 .runchart-wash { fill: var(--error-bg); }
+
+/* No state to colour by — unlike a sync run, an hourly swarm sample either
+   happened or it did not. */
+.swarmchart-bar { fill: var(--line-strong); }
 
 /* --- Library composition ------------------------------------------------ */
 
@@ -962,11 +966,16 @@ td.title .hint:not(:has(code)) { overflow-wrap: anywhere; }
 
 /* Status page's headline numbers — the first thing an operator should be able
    to read at a glance, so they get more visual weight than an ordinary
-   definition list. Falls back to a single column below ~26rem per card. */
-/* 10rem rather than 11: there are four glance stats and the content column is
-   46rem, and the wider floor fitted only three per row — leaving the fourth
-   stranded on a line of its own, which reads as a fifth thing that failed to
-   load rather than as part of the same strip. */
+   definition list. Promoted to the `wide` column (rather than left at the
+   default `content` one, capped to the 46rem measure) so `auto-fit` below
+   keeps adding tiles per row as the viewport grows, instead of sitting at
+   four-across until the unrelated 90rem breakpoint that promotes `.deck`
+   suddenly lets the fifth in. Falls back to a single column below ~26rem per
+   card. */
+#stat-tiles { grid-column: wide; }
+/* 10rem rather than 11: there are five glance stats, and the wider floor left
+   one stranded on a line of its own at in-between widths — reading as a sixth
+   thing that failed to load rather than as part of the same strip. */
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));

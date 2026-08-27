@@ -292,3 +292,69 @@ async fn a_flag_without_a_value_is_rejected() {
         "{out:?}"
     );
 }
+
+/// `--radarr-wanted` is the two-instance stack's own flag, seeding a second
+/// Radarr's catalog with an untagged, fileless entry for its automatic search
+/// to find — untested until now, unlike the other three flags above.
+#[tokio::test]
+async fn radarr_wanted_seeds_an_untagged_fileless_catalog_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("radarr_wanted.db");
+    create_schema(&db_path).await;
+
+    let out = Command::new(env!("CARGO_BIN_EXE_seed-arr"))
+        .arg("--radarr-wanted")
+        .arg(&db_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("seeded a wanted"), "{stdout}");
+
+    let db = open(&db_path).await;
+    assert_eq!(count(&db, "Movies").await, 1);
+    assert_eq!(count(&db, "MovieMetadata").await, 1);
+    assert_eq!(count(&db, "RootFolders").await, 1);
+
+    let tags: String = sqlx::query("SELECT Tags FROM Movies")
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        .get("Tags");
+    assert_eq!(tags, "[]", "wanted means untagged");
+    let file_id: i64 = sqlx::query("SELECT MovieFileId FROM Movies")
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        .get("MovieFileId");
+    assert_eq!(file_id, 0, "wanted means fileless");
+    assert_eq!(
+        count(&db, "MovieFiles").await,
+        0,
+        "no MovieFiles row must exist either"
+    );
+}
+
+/// Re-running `--radarr-wanted` must not duplicate its row, the same
+/// idempotence guarantee `seeding_twice_is_idempotent` covers for the other
+/// three flags.
+#[tokio::test]
+async fn radarr_wanted_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("radarr_wanted.db");
+    create_schema(&db_path).await;
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_seed-arr"))
+            .arg("--radarr-wanted")
+            .arg(&db_path)
+            .status()
+            .unwrap()
+    };
+
+    assert!(run().success());
+    assert!(run().success());
+
+    let db = open(&db_path).await;
+    assert_eq!(count(&db, "Movies").await, 1);
+    assert_eq!(count(&db, "MovieMetadata").await, 1);
+}

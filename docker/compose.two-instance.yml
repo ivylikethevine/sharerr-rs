@@ -91,6 +91,25 @@ services:
     ports:
       - "127.0.0.1:59080:8080"
 
+  prowlarr:
+    # Sits between sharerr-a and radarr-b so the test exercises the same
+    # `preferMagnetUrl: false` indexer setting a real friend would rely on —
+    # see `run_docker_tests_two_instance.sh`'s `prowlarr_add_indexer` for why:
+    # sharerr's torrents are private, so a magnet-preferring consumer can
+    # never actually complete the transfer, and Radarr/Sonarr's own direct
+    # Torznab client has no equivalent knob at all. Radarr-a needs no such
+    # front door — it only ever answers announces, never grabs.
+    image: lscr.io/linuxserver/prowlarr:2.5.2@sha256:ab91301778251f82a31bbfc87f0497376d59e84439d9a1ceff6a61d594d1e3d7
+    container_name: sharerr-two-instance-prowlarr
+    environment:
+      PUID: *puid
+      PGID: *pgid
+      TZ: Etc/UTC
+    volumes:
+      - ./state-two-instance/prowlarr:/config
+    ports:
+      - "127.0.0.1:59696:9696"
+
   sharerr-a:
     build:
       context: ..

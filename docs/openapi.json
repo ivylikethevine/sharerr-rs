@@ -1034,6 +1034,42 @@
         }
       }
     },
+    "/dashboard": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`GET /dashboard` — the same numbers as JSON, for a Homepage/Homarr/Glance\ncustom-API widget. Off by default and behind [`MetricsAuth`], same as\n`/metrics`.",
+        "operationId": "dashboardWidget",
+        "responses": {
+          "200": {
+            "description": "The dashboard-widget payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardWidget"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled, or the caller's bearer token was missing or wrong — the two are indistinguishable on purpose.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "metricsToken": []
+          }
+        ]
+      }
+    },
     "/gluetun/down": {
       "get": {
         "tags": [
@@ -1349,6 +1385,42 @@
         }
       }
     },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`GET /metrics` — OpenMetrics text for Prometheus. Off by default and\nbehind [`MetricsAuth`]; see the module doc for the full contract.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "OpenMetrics text.",
+            "content": {
+              "application/openmetrics-text; version=1.0.0; charset=utf-8": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled, or the caller's bearer token was missing or wrong — the two are indistinguishable on purpose.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "metricsToken": []
+          }
+        ]
+      }
+    },
     "/ready": {
       "get": {
         "tags": [
@@ -1513,6 +1585,62 @@
   },
   "components": {
     "schemas": {
+      "DashboardWidget": {
+        "type": "object",
+        "description": "The dashboard-widget payload — Homepage, Homarr, and Glance all read a\n\"custom API\" JSON endpoint shaped like this. Raw numbers, not the\npre-rendered strings the status page's tiles use: a dashboard widget does\nits own formatting, and the point of building this from [`MetricsSnapshot`]\nrather than the status page's `Glance` is that neither has to parse the\nother's prose.",
+        "required": [
+          "items_shared",
+          "shared_bytes",
+          "friends_total",
+          "friends_recent",
+          "swarm_torrents",
+          "swarm_peers",
+          "swarm_seeders"
+        ],
+        "properties": {
+          "items_shared": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shared_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_sync_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "last_sync_ok": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "friends_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "friends_recent": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "swarm_torrents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "swarm_peers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "swarm_seeders": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "GossipEndpointRecord": {
         "type": "object",
         "description": "One peer's self-described endpoints, signed by them.",
@@ -2016,6 +2144,10 @@
       }
     },
     "securitySchemes": {
+      "metricsToken": {
+        "type": "http",
+        "scheme": "bearer"
+      },
       "peerApiKey": {
         "type": "apiKey",
         "in": "query",

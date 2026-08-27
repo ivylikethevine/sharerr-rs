@@ -1,7 +1,8 @@
 {# The status page's four headline numbers, on their own so they can be polled.
    Everything here comes from `Glance` and nothing from `diag`, which is the whole
    reason this is worth polling: refreshing the page would re-probe every *arr
-   app, and refreshing this costs two store queries and an in-memory swarm read.
+   app, and refreshing this costs three store queries and an in-memory swarm
+   read.
 
    Rendered both as part of `status.html` and on its own by `/status/tiles`,
    which is why it is a partial rather than markup inlined in the page. #}
@@ -47,6 +48,9 @@
     <dd>
       {% if glance.swarm_peers == 0 %}
       no peers announcing right now
+      {% if let Some(quiet_since) = glance.swarm_quiet_since %}
+      <br><span class="hint">last seen {{ quiet_since }}</span>
+      {% endif %}
       {% else %}
       <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
       <br><span class="hint">across {{ glance.swarm_torrents }} torrent(s)</span>

@@ -71,6 +71,11 @@ pub mod secret_keys {
     /// bearer token in the path, so this is exactly the kind of value this
     /// project treats as a secret everywhere else.
     pub const NOTIFICATIONS_WEBHOOK_URL: &str = "notifications.webhook_url";
+    /// The bearer token `/metrics` and the dashboard-widget endpoint require,
+    /// when `[metrics] enabled = true`. Operator-typed like [`TRACKER_TOKEN`]
+    /// — unlike [`IDENTITY_SIGNING_KEY`] or [`LIGHTHOUSE_DECOY_SEED`] below,
+    /// nothing generates this on its own, so it belongs in [`ALL`].
+    pub const METRICS_TOKEN: &str = "metrics.token";
 
     /// This instance's Ed25519 signing key for gossip records, hex-encoded.
     ///
@@ -240,6 +245,11 @@ pub mod config_paths {
     /// How long a peer must go unseen before "gone quiet" fires, in seconds.
     pub const NOTIFICATIONS_PEER_QUIET_SECS: &str = "notifications.peer_quiet_secs";
 
+    /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
+    /// see [`super::MetricsConfig`]. The bearer token they require is a vault
+    /// secret, [`super::secret_keys::METRICS_TOKEN`].
+    pub const METRICS_ENABLED: &str = "metrics.enabled";
+
     /// The `SHARERR_*` variable that overrides a dotted config path — the inverse
     /// of the env scan's lowercase-and-`__`-to-`.` transform. Kept beside the
     /// paths so a consumer that needs the variable's name derives it from the
@@ -291,6 +301,7 @@ pub mod config_paths {
         CHECKS_REACHABILITY,
         NOTIFICATIONS_KIND,
         NOTIFICATIONS_PEER_QUIET_SECS,
+        METRICS_ENABLED,
     ];
 }
 
@@ -344,6 +355,9 @@ pub struct Config {
     /// A webhook fired on sync failure or a peer going quiet. The URL itself is
     /// a vault secret — see [`secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
     pub notifications: NotificationsConfig,
+    /// `/metrics` and the dashboard-widget JSON endpoint. Off by default — see
+    /// [`MetricsConfig`].
+    pub metrics: MetricsConfig,
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
     pub path_map: Vec<PathMapping>,
@@ -377,6 +391,7 @@ impl Default for Config {
             sync: SyncConfig::default(),
             checks: ChecksConfig::default(),
             notifications: NotificationsConfig::default(),
+            metrics: MetricsConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
         }
@@ -921,6 +936,22 @@ pub struct ChecksConfig {
     /// Dial the advertised tracker and feed addresses and report whether they
     /// accept a TCP connection.
     pub reachability: bool,
+}
+
+/// `/metrics` (OpenMetrics) and the dashboard-widget JSON endpoint.
+///
+/// Off by default, and deliberately opt-in: unlike `/health` and `/ready`,
+/// which answer nothing an unauthenticated caller could not already guess,
+/// these hand out how much this instance is sharing and to how many friends —
+/// exactly the kind of thing the tracker's and the lighthouse's
+/// don't-confirm-existence posture exists to avoid leaking to a bare port
+/// scan. Both endpoints also require the bearer token in
+/// [`super::secret_keys::METRICS_TOKEN`] once enabled; there is no
+/// unauthenticated form of either.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MetricsConfig {
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
