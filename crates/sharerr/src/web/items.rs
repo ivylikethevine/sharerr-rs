@@ -155,13 +155,14 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // nothing is configured to announce to yet — the same condition that
     // blocks the tracker itself (`TorrentError::NoAdvertisedHost`).
     let announce_url = current_announce_url(&state.serve).await;
-    // Same reasoning: one current token for the whole instance, hashed once
-    // and compared against each row's own stored fingerprint.
-    let current_token_fp = state
-        .serve
-        .tracker_token()
-        .await
-        .map(|token| crate::sync::fingerprint(&token));
+    // Same reasoning: one current (and, mid-rotation, one previous) token
+    // for the whole instance, hashed once and compared against each row's
+    // own stored fingerprint. A vault the tracker itself could not open
+    // renders as "no token info" rather than failing the page — admission
+    // fails closed elsewhere; this is display only.
+    let (current_token, previous_token) = state.serve.tracker_tokens().await.unwrap_or_default();
+    let current_token_fp = current_token.map(|token| crate::sync::fingerprint(&token));
+    let previous_token_fp = previous_token.map(|token| crate::sync::fingerprint(&token));
     // The tracker's own view of who is in each swarm right now — first-hand,
     // in memory, and only present for torrents with at least one live peer,
     // so a miss below means "nobody", not "unknown".
@@ -240,6 +241,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                     &active,
                     announce_url.as_deref(),
                     current_token_fp.as_deref(),
+                    previous_token_fp.as_deref(),
                     swarm,
                 )
             })
@@ -412,6 +414,7 @@ fn row(
     peers: &[Peer],
     announce_url: Option<&str>,
     current_token_fp: Option<&str>,
+    previous_token_fp: Option<&str>,
     swarm: Option<SwarmCount>,
 ) -> ItemRow {
     let (peers_live, peers_hint) = peers_cell(swarm);
@@ -441,7 +444,7 @@ fn row(
         // whether the tracker itself is configured.
         announce_url: item.info_hash.as_ref().and(announce_url).map(str::to_owned),
         token_fp: item.announce_token_fp.clone(),
-        token_status: token_status(item, current_token_fp),
+        token_status: token_status(item, current_token_fp, previous_token_fp),
         ids: ids_summary(&item.ids),
         last_error: item.last_error.clone(),
         created_by_sharerr: item.created_by_sharerr,
@@ -482,10 +485,19 @@ fn ids_summary(ids: &sharerr_core::ExternalIds) -> String {
     parts.join(" · ")
 }
 
-/// Whether this item's last-confirmed announce token still matches the one
-/// currently configured. See [`crate::sync::token_fingerprint`] for how each
-/// side is derived.
-fn token_status(item: &SharedItem, current_token_fp: Option<&str>) -> TokenStatus {
+/// Whether this item's last-confirmed announce token still matches one of
+/// the tokens the tracker currently admits. See
+/// [`crate::sync::token_fingerprint`] for how each side is derived, and
+/// [`crate::state::ServeState::tracker_tokens`] for why there are two:
+/// during a rotation the tracker admits the previous token alongside the
+/// current one, so an item on the previous token is still being served, not
+/// dead — it deserves a state of its own rather than reading identically to
+/// one the tracker has actually stopped admitting.
+fn token_status(
+    item: &SharedItem,
+    current_token_fp: Option<&str>,
+    previous_token_fp: Option<&str>,
+) -> TokenStatus {
     // No torrent, nothing to have confirmed yet — not the same condition as a
     // torrent that *was* confirmed and has since drifted.
     if item.info_hash.is_none() {
@@ -494,9 +506,13 @@ fn token_status(item: &SharedItem, current_token_fp: Option<&str>) -> TokenStatu
     match (item.announce_token_fp.as_deref(), current_token_fp) {
         (None, None) => TokenStatus::None,
         (Some(stored), Some(current)) if stored == current => TokenStatus::Valid,
-        // Either it changed, or nothing has confirmed this item since a token
-        // was first configured (or removed) — both are "not confirmed as
-        // current", which is exactly what red is for.
+        (Some(stored), _) if previous_token_fp.is_some_and(|previous| previous == stored) => {
+            TokenStatus::Rotating
+        }
+        // Either it changed with no rotation grace covering it, or nothing
+        // has confirmed this item since a token was first configured (or
+        // removed) — both are "not admitted by anything current", which is
+        // exactly what red is for.
         _ => TokenStatus::Stale,
     }
 }
@@ -780,11 +796,9 @@ async fn build_detail(
     let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
 
     let announce_url = current_announce_url(&state.serve).await;
-    let current_token_fp = state
-        .serve
-        .tracker_token()
-        .await
-        .map(|token| crate::sync::fingerprint(&token));
+    let (current_token, previous_token) = state.serve.tracker_tokens().await.unwrap_or_default();
+    let current_token_fp = current_token.map(|token| crate::sync::fingerprint(&token));
+    let previous_token_fp = previous_token.map(|token| crate::sync::fingerprint(&token));
     let (ratio, ratio_hint) = ratio_cell(&item);
 
     // A path that fails to resolve at all (a non-absolute `arr_path`) is a
@@ -841,7 +855,11 @@ async fn build_detail(
         ratio,
         ratio_hint,
         token_fp: item.announce_token_fp.clone(),
-        token_status: token_status(&item, current_token_fp.as_deref()),
+        token_status: token_status(
+            &item,
+            current_token_fp.as_deref(),
+            previous_token_fp.as_deref(),
+        ),
         announce_url: item
             .info_hash
             .as_ref()
@@ -986,7 +1004,7 @@ mod tests {
             ShareState::Pending,
         );
         assert_eq!(
-            token_status(&pending, Some("current")),
+            token_status(&pending, Some("current"), None),
             TokenStatus::None,
             "nothing has been confirmed yet, which is not the same as having drifted"
         );
@@ -996,14 +1014,49 @@ mod tests {
     fn a_matching_fingerprint_is_valid() {
         let mut it = seeding_with_hash("aa".repeat(20).as_str());
         it.announce_token_fp = Some("abc123".to_owned());
-        assert_eq!(token_status(&it, Some("abc123")), TokenStatus::Valid);
+        assert_eq!(token_status(&it, Some("abc123"), None), TokenStatus::Valid);
+    }
+
+    /// Matching the current token wins even when it also happens to equal the
+    /// previous one — `Valid` is checked first, so this must not read as
+    /// `Rotating` just because both comparisons would technically succeed.
+    #[test]
+    fn a_fingerprint_matching_both_current_and_previous_is_valid_not_rotating() {
+        let mut it = seeding_with_hash("ee".repeat(20).as_str());
+        it.announce_token_fp = Some("abc123".to_owned());
+        assert_eq!(
+            token_status(&it, Some("abc123"), Some("abc123")),
+            TokenStatus::Valid
+        );
+    }
+
+    /// The state dual-token admission exists for: an item still on the token
+    /// a rotation just replaced is genuinely still being served, not dead.
+    #[test]
+    fn a_fingerprint_matching_only_the_previous_token_is_rotating() {
+        let mut it = seeding_with_hash("cc".repeat(20).as_str());
+        it.announce_token_fp = Some("old".to_owned());
+        assert_eq!(
+            token_status(&it, Some("new"), Some("old")),
+            TokenStatus::Rotating
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_matching_neither_current_nor_previous_is_stale() {
+        let mut it = seeding_with_hash("dd".repeat(20).as_str());
+        it.announce_token_fp = Some("ancient".to_owned());
+        assert_eq!(
+            token_status(&it, Some("new"), Some("old")),
+            TokenStatus::Stale
+        );
     }
 
     #[test]
     fn a_different_fingerprint_is_stale() {
         let mut it = seeding_with_hash("aa".repeat(20).as_str());
         it.announce_token_fp = Some("old".to_owned());
-        assert_eq!(token_status(&it, Some("new")), TokenStatus::Stale);
+        assert_eq!(token_status(&it, Some("new"), None), TokenStatus::Stale);
     }
 
     /// A token that was configured and then removed (or vice versa) must not
@@ -1013,11 +1066,11 @@ mod tests {
     fn a_token_that_appeared_or_disappeared_is_stale_not_none() {
         let mut it = seeding_with_hash("aa".repeat(20).as_str());
         it.announce_token_fp = Some("abc123".to_owned());
-        assert_eq!(token_status(&it, None), TokenStatus::Stale);
+        assert_eq!(token_status(&it, None, None), TokenStatus::Stale);
 
         let mut it = seeding_with_hash("bb".repeat(20).as_str());
         it.announce_token_fp = None;
-        assert_eq!(token_status(&it, Some("abc123")), TokenStatus::Stale);
+        assert_eq!(token_status(&it, Some("abc123"), None), TokenStatus::Stale);
     }
 
     #[test]
@@ -1094,7 +1147,7 @@ mod tests {
                 ShareState::Seeding,
             )
         };
-        let row = row(&it, &[], None, None, None);
+        let row = row(&it, &[], None, None, None, None);
         assert_eq!(row.source_hint, "Sonarr series 42, file 1337");
         assert_eq!(row.info_hash_short, None);
     }
@@ -1146,7 +1199,7 @@ mod tests {
         source_item.release_title = "Harborlight.2019.2160p-SYNTH".to_owned();
         source_item.arr_path = "/data/movies/Harborlight (2019)/Harborlight.mkv".into();
 
-        let row = row(&source_item, &[], None, None, None);
+        let row = row(&source_item, &[], None, None, None, None);
 
         assert_eq!(row.release_title, "Harborlight.2019.2160p-SYNTH");
         assert_eq!(
@@ -1168,13 +1221,13 @@ mod tests {
         };
 
         let mine = item(MediaSource::Radarr, spec.clone(), ShareState::Seeding);
-        assert!(row(&mine, &[], None, None, None).created_by_sharerr);
+        assert!(row(&mine, &[], None, None, None, None).created_by_sharerr);
 
         let reused = SharedItem {
             created_by_sharerr: false,
             ..item(MediaSource::Radarr, spec, ShareState::Seeding)
         };
-        assert!(!row(&reused, &[], None, None, None).created_by_sharerr);
+        assert!(!row(&reused, &[], None, None, None, None).created_by_sharerr);
     }
 
     #[tokio::test]

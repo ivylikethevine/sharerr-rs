@@ -980,19 +980,29 @@ pub struct ItemRow {
     pub file_id: i64,
 }
 
-/// Whether an item's confirmed announce-token fingerprint still matches the
-/// currently configured token. Three states, not two: "no token in use" is
-/// not a fault the way "used to match and no longer does" is, and collapsing
-/// them would make an instance that has never set a tracker token look
-/// exactly like one whose token just rotated out from under every torrent.
+/// Whether an item's confirmed announce-token fingerprint still matches one
+/// of the tokens the tracker currently admits. Four states, not two: "no
+/// token in use" is not a fault the way "used to match and no longer does"
+/// is, and collapsing them would make an instance that has never set a
+/// tracker token look exactly like one whose token just rotated out from
+/// under every torrent. A third state sits between those two extremes:
+/// during a rotation the tracker admits both the current token and the one
+/// it replaced (see `ServeState::tracker_tokens`), so an item still on the
+/// previous token is genuinely still being served — showing it identically
+/// to one that is fully cut off (`Stale`) would be misleading in the exact
+/// window an operator most wants an accurate signal in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenStatus {
     /// No token configured, currently or as last recorded — nothing to check.
     None,
     /// Matches the currently configured token.
     Valid,
-    /// Does not — either the token rotated since this item's torrent was last
-    /// confirmed, or it has never been confirmed at all.
+    /// Does not match the current token, but does match the previous one —
+    /// still admitted while a rotation is in progress, on borrowed time.
+    Rotating,
+    /// Matches neither the current nor the previous token — either the
+    /// token rotated with no grace window covering it, or it has never been
+    /// confirmed at all.
     Stale,
 }
 
@@ -1001,6 +1011,7 @@ impl TokenStatus {
         match self {
             Self::None => "no token",
             Self::Valid => "valid",
+            Self::Rotating => "rotating",
             Self::Stale => "changed",
         }
     }
@@ -1012,6 +1023,7 @@ impl TokenStatus {
         match self {
             Self::None => "field-status--unset",
             Self::Valid => "field-status--set",
+            Self::Rotating => "field-status--warn",
             Self::Stale => "field-status--stale",
         }
     }
@@ -1337,6 +1349,11 @@ pub enum EdgeStyle {
     Solid,
     Dashed,
     Dotted,
+    /// Sparser than [`Self::Dotted`] — the least trusted rank an edge can
+    /// show, for a `[[peers]]` bootstrap import (see
+    /// `sharerr_store::ObservedVia::Restored`): sharerr never saw this
+    /// address itself, only an operator's word that it was once current.
+    Sparse,
     /// Nothing observed yet — no line at all, just the two boxes.
     None,
 }
@@ -1350,6 +1367,7 @@ impl EdgeStyle {
             Self::Solid => "Observed directly: this instance and theirs have spoken",
             Self::Dashed => "Learned through gossip: another friend relayed their address",
             Self::Dotted => "Learned from a lighthouse: the fallback when nobody has seen them",
+            Self::Sparse => "Restored from a backup: nobody has actually seen this address yet",
             Self::None => "",
         }
     }
@@ -1361,6 +1379,7 @@ impl EdgeStyle {
             Self::Solid => Some("none"),
             Self::Dashed => Some("6 4"),
             Self::Dotted => Some("1.5 4"),
+            Self::Sparse => Some("1 7"),
             Self::None => None,
         }
     }

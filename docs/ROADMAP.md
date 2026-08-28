@@ -47,27 +47,9 @@ independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
 = depends on ordering/config). File references are as of the review commit
 and may have drifted.
 
-### Small — one function or one file
-
-1. **Dual-token admission on the items page** — `items.rs` `token_status`
-   consults only the current fingerprint, so a previous-token item renders
-   Stale while the tracker admits it. The doc comment frames that as
-   intended; listed so the decision is a decision.
-
-2. **Parallel tracker announces in the rTorrent adapter** —
-   `sharerr-rtorrent`'s `set_trackers` awaits one full HTTP round trip per
-   URL, sequentially, across the whole seeded set after every VPN
-   reconnect. `system.multicall` — the adapter already parses arrays of
-   arrays through `call_multi` — or a `buffered(N)` the way
-   `sharerr-arr/src/lib.rs` already does for its own concurrent calls would
-   collapse it to one round trip. Left sequential for now: the module's own
-   doc comment says insertion order at group 0 decides the new trackers'
-   relative tier priority, and no test guards that order, so this needs a
-   test pinning tier order before it is safe to parallelise.
-
 ### Medium — a subsystem, or one shape repeated across several files
 
-3. **The remaining notification triggers** — `[notifications]` now has a
+1. **The remaining notification triggers** — `[notifications]` now has a
    per-trigger enable set and fires on six events: a sync failing outright, a
    friend going quiet, the advertised endpoint rotating, items newly shared,
    items failing to share, and a friend's key being revoked. Four candidates
@@ -82,24 +64,14 @@ and may have drifted.
    **Uptime-Kuma-style heartbeat push** (needs a trigger built from scratch,
    with no existing detection to hang off of).
 
-4. **Peer and scope backup** — the settings page's "Backup and restore"
-   section now covers `sharerr.toml` — the effective config, including
-   anything set via `SHARERR_*` environment variables, which the raw file on
-   disk never contains. What it does not cover: the peers table, entirely in
-   SQLite. A friend's key itself can never be exported regardless of what
-   backs it up — it is stored as a one-way hash, by design — so a restore
-   already ends with re-issuing keys; what is still missing is exporting the
-   rest of a friend's row (label, scope) so re-adding them after a full
-   data-directory loss is not typed from memory.
-
 ### Large — a protocol, a data model, or a release process
 
-5. **Transfer accounting** — the largest gap between what sharerr _knows_
+2. **Transfer accounting** — the largest gap between what sharerr _knows_
    and what it _keeps_; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-6. **Request flow** — a new inbound request queue and approve step, touching
+3. **Request flow** — a new inbound request queue and approve step, touching
    the sync engine and the web UI on both sides of a friendship; see
    [Functionality](#functionality).
 

@@ -216,6 +216,13 @@ impl ConfigFile {
         self.doc["library"] = Item::ArrayOfTables(tables);
     }
 
+    /// Remove a drained `[[peers]]` bootstrap block. One-directional, unlike
+    /// [`Self::set_path_map`]/[`Self::set_libraries`]: nothing ever writes
+    /// this array back — see `sharerr_core::config::PeerImport`.
+    pub fn clear_peers(&mut self) {
+        self.doc.remove("peers");
+    }
+
     /// Render the document as it would be written.
     pub fn to_toml(&self) -> String {
         self.doc.to_string()

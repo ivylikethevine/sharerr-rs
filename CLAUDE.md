@@ -7,6 +7,7 @@ real debugging time.
 
 - [The verification loop](#the-verification-loop)
 - [MSRV](#msrv)
+- [CodeQL](#codeql)
 - [Dependencies](#dependencies)
 - [Testing tiers](#testing-tiers)
 - [Traps](#traps)
@@ -51,6 +52,33 @@ already produced one confidently wrong conclusion here.
 toolchain is invariably newer and will not catch a breach. Two have shipped
 unnoticed this way (`str::split_at_checked` in a const context, then
 let-chains). Build the image before claiming the declared MSRV holds.
+
+## CodeQL
+
+`./scripts/run_codeql.sh` runs the same analysis `.github/workflows/codeql.yml`
+runs in CI — `rust` and `actions`, the default code-scanning suite for each,
+`build-mode: none` for both — entirely locally, so a finding surfaces before a
+push rather than after one. It needs the CodeQL CLI + bundled query packs
+installed once (the script's own header comment says where from and where to);
+after that it makes no network calls. Not part of the always-run verification
+loop above — the CLI is a large one-time download this repo does not manage,
+and a full database build/analyze is much slower than `cargo test`. Run it
+before pushing anything that touches crypto/secret handling or a workflow
+file, or whenever CI's CodeQL check disagrees with what shipped locally.
+
+**A PR's CodeQL check only ever shows alerts on lines that PR's diff touched** —
+GitHub's code-scanning UI is diff-scoped by design. Running this script with no
+argument scans the whole tree instead, which is a materially bigger picture: a
+first full run here surfaced 52 findings across files no recent PR had touched
+at all (chiefly two auth-adjacent test suites), none visible in any PR check
+before. Most were the same shape as the CodeQL section under Repository below
+— a test literal or a redaction-proving `Debug` print CodeQL's Rust queries
+(new since 2.23.3, and still prone to this) read as a real secret reaching a
+sink. Reading a `Cleartext logging of sensitive information` or
+`Hard-coded cryptographic value` finding therefore takes an extra step this
+repo's own history did not immediately suggest: before assuming it is new
+behaviour, check whether the flagged line is actually years-old code a diff
+simply never happened to include.
 
 ## Dependencies
 
@@ -131,6 +159,16 @@ reject it) *and* wiring the constant into the relevant handler in `web/settings.
 (which does not consult `ALL` at all — each save handler passes its own secret key
 to the shared `write_config_and_secret` helper; Transmission and rTorrent share
 one, `save_rpc_client`), or the web UI silently will not manage it.
+
+**One deliberate, documented exception**: `Config::peers` (`sharerr_core::config::PeerImport`),
+a one-time `[[peers]]` bootstrap block for restoring friends after a full
+data-directory loss. `gossip_key` genuinely is a credential sitting in
+`sharerr.toml`, briefly — `commands/serve::import_peers` drains it into the
+vault on the next `sharerr serve` start and strips the block from the file
+in the same write, so it exists on disk only until that first start. Not a
+precedent for anything else; see the struct's own doc comment,
+`docs/CONFIGURATION.md`'s "Restoring friends" section, and `SECURITY.md`'s
+by-design list before reaching for this pattern a second time.
 
 **The config file is rewritten in place by the web UI**, comments and all, via
 `toml_edit`. A settings path is a hand-typed string in more than one place; check

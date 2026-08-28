@@ -28,27 +28,67 @@ pub(crate) fn request_xml(method: &str, params: &[Param<'_>]) -> String {
     out.push_str("</methodName><params>");
     for param in params {
         out.push_str("<param><value>");
-        match param {
-            Param::Str(s) => {
-                out.push_str("<string>");
-                out.push_str(&quick_xml::escape::escape(*s));
-                out.push_str("</string>");
-            }
-            Param::Int(n) => {
-                out.push_str("<i8>");
-                out.push_str(&n.to_string());
-                out.push_str("</i8>");
-            }
-            Param::Base64(bytes) => {
-                out.push_str("<base64>");
-                out.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes));
-                out.push_str("</base64>");
-            }
-        }
+        write_param_value(&mut out, param);
         out.push_str("</value></param>");
     }
     out.push_str("</params></methodCall>");
     out
+}
+
+/// Build a `system.multicall` request batching several distinct method calls
+/// — each with its own name and params — into one document. rTorrent (like
+/// every XML-RPC server implementing the multicall extension) executes the
+/// entries server-side in array order, so this is the one case where this
+/// crate's calls have an order guarantee stronger than "whichever HTTP
+/// request lands first": there is only one request. See
+/// `RtorrentClient::call_batch`.
+pub(crate) fn multicall_request_xml(calls: &[(&str, &[Param<'_>])]) -> String {
+    let mut out = String::from(
+        "<?xml version=\"1.0\"?><methodCall><methodName>system.multicall</methodName>\
+         <params><param><value><array><data>",
+    );
+    for (method, params) in calls {
+        out.push_str(
+            "<value><struct>\
+             <member><name>methodName</name><value><string>",
+        );
+        out.push_str(&quick_xml::escape::escape(*method));
+        out.push_str(
+            "</string></value></member>\
+             <member><name>params</name><value><array><data>",
+        );
+        for param in *params {
+            out.push_str("<value>");
+            write_param_value(&mut out, param);
+            out.push_str("</value>");
+        }
+        out.push_str("</data></array></value></member></struct></value>");
+    }
+    out.push_str("</data></array></value></param></params></methodCall>");
+    out
+}
+
+/// The `<value>...</value>` contents for one [`Param`] — shared by
+/// [`request_xml`]'s flat param list and [`multicall_request_xml`]'s nested
+/// per-call param lists.
+fn write_param_value(out: &mut String, param: &Param<'_>) {
+    match param {
+        Param::Str(s) => {
+            out.push_str("<string>");
+            out.push_str(&quick_xml::escape::escape(*s));
+            out.push_str("</string>");
+        }
+        Param::Int(n) => {
+            out.push_str("<i8>");
+            out.push_str(&n.to_string());
+            out.push_str("</i8>");
+        }
+        Param::Base64(bytes) => {
+            out.push_str("<base64>");
+            out.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes));
+            out.push_str("</base64>");
+        }
+    }
 }
 
 /// Quote a value for use as a `d.*.set=` command argument, the way rTorrent's
@@ -107,7 +147,12 @@ pub(crate) fn parse_response(body: &str) -> std::result::Result<XmlValue, String
 
 /// rTorrent's fault struct is `{faultCode: int, faultString: string}`; find
 /// the named `faultString` member rather than assuming member order.
-fn fault_message(value: &XmlValue) -> String {
+///
+/// `pub(crate)`: also read by `RtorrentClient::call_batch` for a per-call
+/// fault inside a `system.multicall` response, which arrives as an ordinary
+/// struct value rather than through this module's own top-level `<fault>`
+/// handling in [`parse_response`].
+pub(crate) fn fault_message(value: &XmlValue) -> String {
     if let XmlValue::Struct(members) = value {
         for (name, member) in members {
             if name == "faultString"
@@ -337,6 +382,24 @@ mod tests {
         assert!(xml.contains("<methodName>load.raw_start</methodName>"));
         assert!(xml.contains("<base64>YWJj</base64>"));
         assert!(xml.contains("<i8>3</i8>"));
+    }
+
+    #[test]
+    fn multicall_request_xml_wraps_each_call_and_keeps_array_order() {
+        let first = [Param::Str("aabbcc"), Param::Int(0), Param::Str("http://a")];
+        let second = [Param::Str("aabbcc"), Param::Int(0), Param::Str("http://b")];
+        let xml =
+            multicall_request_xml(&[("d.tracker.insert", &first), ("d.tracker.insert", &second)]);
+
+        assert!(xml.contains("<methodName>system.multicall</methodName>"));
+        assert_eq!(
+            xml.matches("<string>d.tracker.insert</string>").count(),
+            2,
+            "{xml}"
+        );
+        let a_at = xml.find("http://a").expect("http://a missing");
+        let b_at = xml.find("http://b").expect("http://b missing");
+        assert!(a_at < b_at, "array order must match call order: {xml}");
     }
 
     fn scalar_response(inner: &str) -> String {

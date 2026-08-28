@@ -72,7 +72,10 @@
 </form>
 
 <section class="wide">
-<h2>Sharing with {{ peers.len() }} friend(s)</h2>
+<h2>Sharing with {{ peers.len() }} friend(s)
+  <a href="/peers/export" class="link micro"
+     title="Downloads a [[peers]] restore block: name, scope, last-known address, and the gossip key each friend issued this instance. Never a friend's own key into this instance — that is a one-way hash and cannot be exported under any circumstances.">export as backup block</a>
+</h2>
 <div class="panel">
   {% if peers.is_empty() %}
   <p class="hint">

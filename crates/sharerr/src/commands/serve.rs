@@ -60,6 +60,11 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         config_error.clone(),
     ));
 
+    // A one-time restore, before anything else touches the store — see
+    // `sharerr_core::config::PeerImport`. Almost always a no-op: the field is
+    // empty unless an operator hand-restored a `[[peers]]` block.
+    import_peers(&state, config_path, &config.peers).await;
+
     // One tracker state for however many listeners carry it — two swarm maps
     // would keep peers arriving on different listeners from meeting.
     let tracker = Arc::new(TrackerState::new(Arc::clone(&state)));
@@ -183,6 +188,141 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = crate::swarm_history::poll_loop(Arc::clone(&state)) => Ok(()),
         () = crate::lighthouse_client::sync_loop(state) => Ok(()),
     }
+}
+
+/// Drain a one-time `[[peers]]` bootstrap block (see
+/// [`sharerr_core::config::PeerImport`]) into the real peer store, then strip
+/// it from `sharerr.toml` in the same write that recorded the result.
+/// Logs and returns rather than propagating a failure: a bad restore file
+/// must not stop the instance from serving everything else.
+///
+/// All-or-nothing on the parts a partial attempt could not safely undo — with
+/// no store there is nowhere to write a peer at all, and with no vault a
+/// `gossip_key` would be lost the moment the block is stripped, so either
+/// missing accessor aborts the whole import and leaves the block in place to
+/// retry on the next start. Past that gate, each entry is independent: one
+/// that fails (most likely a duplicate label, because a previous attempt at
+/// this same block already created it) is logged and skipped rather than
+/// aborting the rest, and the block is still stripped afterward — leaving it
+/// in place would only repeat the same skips on every future start.
+async fn import_peers(
+    state: &ServeState,
+    config_path: &Path,
+    peers: &[sharerr_core::config::PeerImport],
+) {
+    if peers.is_empty() {
+        return;
+    }
+
+    let store = match state.store().await {
+        Ok(store) => store,
+        Err(reason) => {
+            tracing::error!(
+                error = %reason,
+                count = peers.len(),
+                "sharerr.toml carries a [[peers]] bootstrap block, but the store could not \
+                 be opened — leaving it in place to retry on the next start"
+            );
+            return;
+        }
+    };
+
+    let needs_vault = peers.iter().any(|peer| peer.gossip_key.is_some());
+    let mut vault = if needs_vault {
+        match state.open_vault().await {
+            Ok(vault) => Some(vault),
+            Err(reason) => {
+                tracing::error!(
+                    error = %reason,
+                    count = peers.len(),
+                    "sharerr.toml carries a [[peers]] bootstrap block with a gossip key, but \
+                     the vault could not be opened — leaving it in place to retry on the next start"
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut imported = 0usize;
+    for peer in peers {
+        match import_one_peer(&store, vault.as_mut(), peer).await {
+            Ok(()) => imported += 1,
+            Err(reason) => {
+                tracing::warn!(
+                    peer = %peer.label,
+                    error = %reason,
+                    "skipped one [[peers]] bootstrap entry"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        imported,
+        total = peers.len(),
+        "drained the [[peers]] bootstrap block; removing it from sharerr.toml"
+    );
+    if let Err(err) = strip_peers_block(config_path) {
+        tracing::error!(
+            error = %err,
+            "imported [[peers]] but could not remove the block from sharerr.toml — it will \
+             be re-imported (and every already-created label skipped) on the next start"
+        );
+    }
+}
+
+/// One `[[peers]]` entry: mint a fresh key exactly like adding a friend
+/// through the web UI (see `web::peers::add`) — this friend's own key into
+/// this instance can never be restored, only reissued — then apply whatever
+/// of the rest was supplied.
+async fn import_one_peer(
+    store: &sharerr_store::Store,
+    vault: Option<&mut sharerr_store::Vault>,
+    peer: &sharerr_core::config::PeerImport,
+) -> anyhow::Result<()> {
+    let key = crate::secrets::random_hex(crate::secrets::KEY_BYTES)
+        .map_err(|reason| anyhow::anyhow!(reason))?;
+    let scope = sharerr_store::PeerScope::parse(&peer.scope);
+    let created = store
+        .create_peer(&peer.label, &secrecy::SecretString::from(key), scope)
+        .await?;
+
+    if let Some(url) = peer.gossip_url.as_deref().filter(|url| !url.is_empty()) {
+        store.set_peer_gossip_url(created.id, Some(url)).await?;
+    }
+
+    if let Some(key) = peer.gossip_key.as_deref().filter(|key| !key.is_empty()) {
+        let vault =
+            vault.ok_or_else(|| anyhow::anyhow!("no vault handle available for a gossip key"))?;
+        vault.put(
+            &sharerr_core::config::secret_keys::peer_gossip_key(created.id),
+            &secrecy::SecretString::from(key.to_owned()),
+        )?;
+    }
+
+    if let Some(addr) = peer.last_addr.as_deref().filter(|addr| !addr.is_empty()) {
+        store
+            .record_peer_endpoint(
+                created.id,
+                sharerr_store::EndpointKind::Api,
+                addr,
+                sharerr_core::endpoint::now_epoch(),
+                sharerr_store::ObservedVia::Restored,
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn strip_peers_block(config_path: &Path) -> anyhow::Result<()> {
+    let mut file = crate::web::config_io::ConfigFile::open(config_path)?;
+    file.clear_peers();
+    let text = file.to_toml();
+    file.write_validated(&text)?;
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -874,5 +1014,235 @@ mod tests {
             interval,
             "a successful pass must clear the backoff"
         );
+    }
+
+    // ------------------------------------------------- import_peers()
+
+    fn peer_import(label: &str) -> sharerr_core::config::PeerImport {
+        sharerr_core::config::PeerImport {
+            label: label.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn write_peers_toml(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join("sharerr.toml");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn an_empty_peers_slice_touches_nothing() {
+        let (_dir, state) = unconfigured();
+        // No `[[peers]]` at all — must not even try to open the store, let
+        // alone write a file that was never created.
+        import_peers(&state, state.config_path(), &[]).await;
+        assert!(!state.config_path().exists());
+    }
+
+    /// The common restore case: label, scope, a last-known address, and a
+    /// gossip URL — nothing that needs the vault.
+    #[tokio::test]
+    async fn peers_with_no_gossip_key_import_without_touching_the_vault() {
+        let (dir, state) = unconfigured();
+        let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
+
+        let peers = vec![sharerr_core::config::PeerImport {
+            label: "Sam".to_owned(),
+            scope: "tv".to_owned(),
+            last_addr: Some("203.0.113.5:51413".to_owned()),
+            gossip_url: Some("https://sam.example/sharerr".to_owned()),
+            gossip_key: None,
+        }];
+
+        import_peers(&state, &path, &peers).await;
+
+        let store = state.store().await.unwrap();
+        let listed = store.list_peers().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label, "Sam");
+        assert_eq!(listed[0].scope, sharerr_store::PeerScope::Tv);
+        assert_eq!(
+            listed[0].gossip_url.as_deref(),
+            Some("https://sam.example/sharerr")
+        );
+
+        let endpoints = store.peer_endpoints(listed[0].id).await.unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].addr, "203.0.113.5:51413");
+        assert_eq!(
+            endpoints[0].via,
+            sharerr_store::ObservedVia::Restored,
+            "seeded from a bootstrap block, not an actual sighting"
+        );
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("[[peers]]"),
+            "block must be stripped: {text}"
+        );
+    }
+
+    /// The gate that stops a partial import from losing a credential:
+    /// without an openable vault, a `gossip_key` cannot be written anywhere,
+    /// so nothing must be created and the block must survive to retry.
+    ///
+    /// `master_key_from_env` reads the real process environment with no
+    /// injection point, so this — like any test asserting a vault-closed
+    /// outcome — must run inside `Jail` with `clear_env()`, exactly as if it
+    /// needed a var *set*: otherwise a concurrent `Jail` test elsewhere in
+    /// this binary that legitimately sets `SHARERR_MASTER_KEY` can make the
+    /// vault open here too, flipping this test's outcome. See `CLAUDE.md`'s
+    /// testing-tiers section.
+    #[test]
+    fn a_gossip_key_with_no_openable_vault_imports_nothing_and_keeps_the_block() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Config::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            std::fs::write(
+                &path,
+                "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\ngossip_key = \"sam-issued-us-this\"\n",
+            )
+            .unwrap();
+            let state = ServeState::new(config, path.clone(), None);
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let peers = vec![sharerr_core::config::PeerImport {
+                    label: "Sam".to_owned(),
+                    gossip_key: Some("sam-issued-us-this".to_owned()),
+                    ..Default::default()
+                }];
+                import_peers(&state, &path, &peers).await;
+
+                let store = state.store().await.unwrap();
+                assert!(
+                    store.list_peers().await.unwrap().is_empty(),
+                    "no vault, no import — nothing must be half-created"
+                );
+            });
+
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                text.contains("[[peers]]"),
+                "the block must survive to retry once the vault is reachable: {text}"
+            );
+            Ok(())
+        });
+    }
+
+    /// A label already used by an earlier entry in the same block (most
+    /// plausibly a previous, interrupted attempt at this exact block) is
+    /// skipped, not fatal to the rest — and the block is still stripped,
+    /// since leaving it in place would only repeat the same skip forever.
+    #[tokio::test]
+    async fn a_duplicate_label_is_skipped_but_the_rest_still_import() {
+        let (dir, state) = unconfigured();
+        let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
+
+        let peers = vec![peer_import("Sam"), peer_import("Sam"), peer_import("Alex")];
+
+        import_peers(&state, &path, &peers).await;
+
+        let store = state.store().await.unwrap();
+        let listed = store.list_peers().await.unwrap();
+        assert_eq!(
+            listed.len(),
+            2,
+            "the duplicate label must be skipped, not both created"
+        );
+        let labels: std::collections::BTreeSet<&str> =
+            listed.iter().map(|peer| peer.label.as_str()).collect();
+        assert!(labels.contains("Sam"));
+        assert!(labels.contains("Alex"));
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("[[peers]]"),
+            "block must still be stripped: {text}"
+        );
+    }
+
+    /// Without a store there is nowhere to write a peer at all — the whole
+    /// import must abort, leaving the block untouched to retry.
+    #[tokio::test]
+    async fn a_store_that_cannot_open_leaves_the_block_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where `data_dir` is expected to be a directory:
+        // `create_dir_all` fails on this shape reliably and portably.
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, b"").unwrap();
+        let config = Config {
+            data_dir: blocked,
+            ..Config::default()
+        };
+        let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
+        let state = ServeState::new(config, path.clone(), None);
+
+        import_peers(&state, &path, &[peer_import("Sam")]).await;
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("[[peers]]"),
+            "must survive when the store cannot open: {text}"
+        );
+    }
+
+    /// The one path that actually reaches the vault: a real `SHARERR_MASTER_KEY`,
+    /// via `Jail` per this repo's rule for vault-backed tests.
+    #[test]
+    fn a_gossip_key_is_written_to_the_vault_and_the_block_is_stripped() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Config::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            std::fs::write(
+                &path,
+                "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\ngossip_key = \"sam-issued-us-this\"\n",
+            )
+            .unwrap();
+            let state = ServeState::new(config, path.clone(), None);
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let peers = vec![sharerr_core::config::PeerImport {
+                    label: "Sam".to_owned(),
+                    gossip_key: Some("sam-issued-us-this".to_owned()),
+                    ..Default::default()
+                }];
+                import_peers(&state, &path, &peers).await;
+
+                let store = state.store().await.unwrap();
+                let listed = store.list_peers().await.unwrap();
+                assert_eq!(listed.len(), 1);
+                let peer_id = listed[0].id;
+
+                let vault = state.open_vault().await.unwrap();
+                let stored = vault
+                    .get(&sharerr_core::config::secret_keys::peer_gossip_key(peer_id))
+                    .unwrap();
+                assert_eq!(
+                    stored.map(|secret| {
+                        use secrecy::ExposeSecret;
+                        secret.expose_secret().to_owned()
+                    }),
+                    Some("sam-issued-us-this".to_owned())
+                );
+            });
+
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                !text.contains("[[peers]]"),
+                "block must be stripped: {text}"
+            );
+            Ok(())
+        });
     }
 }

@@ -16,14 +16,14 @@
 //! issuing another, which is the correct behaviour for a bearer credential.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::now_epoch;
-use sharerr_store::{Peer, PeerScope, SeedingSummary};
+use sharerr_store::{EndpointKind, Peer, PeerScope, SeedingSummary};
 
 use super::WebState;
 use super::settings::title_case;
@@ -261,6 +261,111 @@ pub async fn feed_preview(State(state): State<WebState>, Path(id): Path<i64>) ->
     };
 
     crate::torznab::xml(crate::torznab::render_feed(&matched))
+}
+
+/// Download every active friend as a one-time `[[peers]]` restore block —
+/// the export half of `sharerr_core::config::PeerImport`; see
+/// `CONFIGURATION.md`'s "Restoring friends after a full data-directory
+/// loss". Meant to be saved somewhere outside sharerr (a password manager,
+/// an offline backup) and hand-pasted back into `sharerr.toml` only if the
+/// data directory is ever lost — this does not write anywhere itself.
+///
+/// A revoked friend is deliberately excluded: importing this block always
+/// creates an *active* peer, and a revoked friend flowing back through it
+/// would silently un-revoke them on the next restore. No friend's own key
+/// *into* this instance ever appears here, revoked or not — only a one-way
+/// hash of it was ever stored, so there is nothing to export; a restore
+/// always mints a fresh one, exactly like adding a friend normally.
+pub async fn export(State(state): State<WebState>) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+
+    let peers = match store.list_peers().await {
+        Ok(peers) => peers,
+        Err(err) => return rejected(&state, &format!("could not list friends: {err}")).await,
+    };
+    let active: Vec<Peer> = peers
+        .into_iter()
+        .filter(|peer| !peer.is_revoked())
+        .collect();
+
+    let peer_ids: Vec<i64> = active.iter().map(|peer| peer.id).collect();
+    let endpoints_by_peer = store
+        .peer_endpoints_for(&peer_ids)
+        .await
+        .unwrap_or_default();
+
+    // Only opened when there is at least one friend to look a gossip key up
+    // for — the common case (nobody has an outbound gossip relationship
+    // configured yet) costs nothing extra. A failure here degrades the
+    // export rather than failing it outright: every other field is still
+    // useful on its own, and the missing keys are called out in the file.
+    let vault = if active.is_empty() {
+        None
+    } else {
+        state.serve.open_vault().await.ok()
+    };
+    let vault_unavailable = vault.is_none() && !active.is_empty();
+
+    let imports: Vec<sharerr_core::config::PeerImport> = active
+        .iter()
+        .map(|peer| {
+            let last_addr = endpoints_by_peer
+                .get(&peer.id)
+                .into_iter()
+                .flatten()
+                .filter(|endpoint| endpoint.kind == EndpointKind::Api)
+                .max_by_key(|endpoint| endpoint.observed_at)
+                .map(|endpoint| endpoint.addr.clone());
+            let gossip_key = vault.as_ref().and_then(|vault| {
+                vault
+                    .get(&secret_keys::peer_gossip_key(peer.id))
+                    .ok()
+                    .flatten()
+                    .map(|secret| secret.expose_secret().to_owned())
+            });
+
+            sharerr_core::config::PeerImport {
+                label: peer.label.clone(),
+                scope: peer.scope.as_str().to_owned(),
+                last_addr,
+                gossip_url: peer.gossip_url.clone(),
+                gossip_key,
+            }
+        })
+        .collect();
+
+    #[derive(serde::Serialize)]
+    struct ExportDocument {
+        peers: Vec<sharerr_core::config::PeerImport>,
+    }
+    let mut text = match toml_edit::ser::to_string_pretty(&ExportDocument { peers: imports }) {
+        Ok(text) => text,
+        Err(err) => return rejected(&state, &format!("could not export friends: {err}")).await,
+    };
+    if vault_unavailable {
+        text = format!(
+            "# The vault could not be opened during this export, so no gossip keys are\n\
+             # included below even for friends that have one configured. Re-export once\n\
+             # the vault is reachable to capture them.\n\n{text}"
+        );
+    }
+
+    tracing::info!(count = active.len(), "exported a [[peers]] restore block");
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/toml".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"sharerr-peers-export.toml\"".to_owned(),
+            ),
+        ],
+        text,
+    )
+        .into_response()
 }
 
 fn rejected_response(message: &str) -> Response {
@@ -1009,5 +1114,198 @@ mod tests {
         let response = feed_preview(State(state), Path(sam.id)).await;
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    // -------------------------------------------------------------- export()
+
+    async fn body_of(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn export_excludes_revoked_peers_and_never_carries_a_peer_key() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::Tv)
+            .await
+            .unwrap();
+        let alex = store
+            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store.revoke_peer(alex.id).await.unwrap();
+        let state = web_state(serve);
+
+        let response = export(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok()),
+            Some("attachment; filename=\"sharerr-peers-export.toml\"")
+        );
+        let body = body_of(response).await;
+
+        assert!(body.contains("label = \"Sam\""), "{body}");
+        assert!(
+            !body.contains("Alex"),
+            "a revoked friend must not be exported: {body}"
+        );
+        assert!(
+            !body.contains("sam-key") && !body.contains("alex-key"),
+            "a friend's own key into this instance must never be exported: {body}"
+        );
+    }
+
+    /// The field exists to answer "where do I reach them", not "everywhere
+    /// they have ever been seen" — an older sighting or a different kind
+    /// (their torrent client, not their API) must not win.
+    #[tokio::test]
+    async fn export_picks_only_the_most_recent_api_endpoint() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store
+            .record_peer_endpoint(
+                sam.id,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                100,
+                sharerr_store::ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+        store
+            .record_peer_endpoint(
+                sam.id,
+                EndpointKind::Api,
+                "203.0.113.9:2",
+                200,
+                sharerr_store::ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+        store
+            .record_peer_endpoint(
+                sam.id,
+                EndpointKind::Client,
+                "198.51.100.7:6881",
+                300,
+                sharerr_store::ObservedVia::Gossip,
+            )
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let body = body_of(export(State(state)).await).await;
+        assert!(body.contains("203.0.113.9:2"), "{body}");
+        assert!(
+            !body.contains("203.0.113.5:1"),
+            "must pick the newest sighting, not an older one: {body}"
+        );
+        assert!(
+            !body.contains("198.51.100.7"),
+            "must not use a non-API sighting: {body}"
+        );
+    }
+
+    /// Without an openable vault, a gossip key cannot be read back at
+    /// all — the export must still deliver everything else rather than
+    /// failing outright, and say plainly what it left out.
+    ///
+    /// `master_key_from_env` reads the real process environment with no
+    /// injection point, so — per this repo's testing rule for a
+    /// vault-closed outcome — this runs inside `Jail` with `clear_env()`,
+    /// exactly as if it needed a var *set*.
+    #[test]
+    fn export_degrades_gracefully_without_an_openable_vault() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..sharerr_core::Config::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+                store
+                    .set_peer_gossip_url(sam.id, Some("https://sam.example/sharerr"))
+                    .await
+                    .unwrap();
+                let state = web_state(serve);
+
+                let body = body_of(export(State(state)).await).await;
+                assert!(body.contains("gossip_url"), "{body}");
+                assert!(!body.contains("gossip_key"), "no vault, no key: {body}");
+                assert!(
+                    body.contains("vault could not be opened"),
+                    "must say why a key is missing: {body}"
+                );
+            });
+            Ok(())
+        });
+    }
+
+    /// The one path that actually reaches the vault: a real
+    /// `SHARERR_MASTER_KEY`, via `Jail` per this repo's rule for
+    /// vault-backed tests.
+    #[test]
+    fn export_includes_a_gossip_key_when_the_vault_is_reachable() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..sharerr_core::Config::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+                let mut vault = serve.open_vault().await.unwrap();
+                vault
+                    .put(
+                        &secret_keys::peer_gossip_key(sam.id),
+                        &SecretString::from("sam-issued-us-this"),
+                    )
+                    .unwrap();
+                let state = web_state(serve);
+
+                let body = body_of(export(State(state)).await).await;
+                assert!(body.contains("sam-issued-us-this"), "{body}");
+            });
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn export_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+
+        let response = export(State(state)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

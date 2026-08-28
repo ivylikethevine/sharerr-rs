@@ -221,7 +221,7 @@ jobs:
           persist-credentials: false
 
       # Would have caught the secret spliced into a remote `sh -c` string.
-      - run: shellcheck scripts/run_docker_tests.sh scripts/run_docker_tests_two_instance.sh scripts/screenshot_pages.sh
+      - run: shellcheck scripts/run_docker_tests.sh scripts/run_docker_tests_two_instance.sh scripts/screenshot_pages.sh scripts/run_codeql.sh
 
       # Schema-validates the compose file without needing the images or a daemon.
       - run: docker compose -f docker/compose.test.yml config -q

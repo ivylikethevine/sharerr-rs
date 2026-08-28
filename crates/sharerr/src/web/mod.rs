@@ -116,6 +116,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/topology", get(topology::page))
         .route("/debug", get(debug::page))
         .route("/peers", get(peers::page).post(peers::add))
+        .route("/peers/export", get(peers::export))
         .route("/peers/{id}/scope", post(peers::set_scope))
         .route("/peers/{id}/gossip", post(peers::set_gossip))
         .route("/peers/{id}/revoke", post(peers::revoke))
@@ -717,6 +718,7 @@ mod tests {
             "/diagnostics",
             "/items",
             "/peers",
+            "/peers/export",
             "/peers/1/feed",
             "/wizard",
             "/wizard/services",

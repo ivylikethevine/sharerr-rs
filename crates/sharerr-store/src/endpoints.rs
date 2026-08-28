@@ -42,9 +42,11 @@ sharerr_core::str_enum!(EndpointKind {
 /// Trust order, most to least: [`Self::Direct`] (we saw the connection
 /// ourselves) > [`Self::Gossip`] (a mutual friend relayed the subject's own
 /// signed record) > [`Self::Lighthouse`] (a semi-anonymous rendezvous
-/// service answered a lookup) — the lighthouse is the fallback for when
-/// gossip already had no path back to the peer, so it is furthest from a
-/// first-hand sighting.
+/// service answered a lookup) > [`Self::Restored`] (an operator typed it
+/// into a `[[peers]]` bootstrap block, with no way to say how stale it
+/// already was) — the lighthouse is the fallback for when gossip already had
+/// no path back to the peer, and a restored address is the fallback for when
+/// nothing has been observed at all since the friend was re-added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedVia {
     /// We saw the connection ourselves.
@@ -53,6 +55,10 @@ pub enum ObservedVia {
     Gossip,
     /// A record the subject signed, retrieved from a lighthouse.
     Lighthouse,
+    /// Seeded from a `[[peers]]` bootstrap block — see
+    /// `sharerr_core::config::PeerImport`. Least trusted: sharerr never saw
+    /// this address itself, and has no idea how long ago it was current.
+    Restored,
 }
 
 sharerr_core::str_enum!(
@@ -60,6 +66,7 @@ sharerr_core::str_enum!(
         Direct => "direct",
         Gossip => "gossip",
         Lighthouse => "lighthouse",
+        Restored => "restored",
     },
     lenient = Gossip,
     "Anything unrecognised reads as gossip — the *less* trusted rank, which \
@@ -489,6 +496,7 @@ mod tests {
             ObservedVia::Direct,
             ObservedVia::Gossip,
             ObservedVia::Lighthouse,
+            ObservedVia::Restored,
         ] {
             assert_eq!(ObservedVia::parse(via.as_str()), via);
         }

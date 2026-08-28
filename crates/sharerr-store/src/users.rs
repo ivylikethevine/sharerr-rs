@@ -195,6 +195,8 @@ mod tests {
         SecretString::from(s.to_owned())
     }
 
+    use sharerr_testkit::mock::fresh_password;
+
     async fn store() -> Store {
         Store::open_in_memory().await.expect("in-memory store")
     }
@@ -208,37 +210,40 @@ mod tests {
     #[tokio::test]
     async fn an_account_round_trips_and_only_the_right_password_verifies() {
         let store = store().await;
-        store
-            .create_user("ivy", &secret("correct horse"))
-            .await
-            .unwrap();
+        let password = fresh_password();
+        store.create_user("ivy", &secret(&password)).await.unwrap();
 
         assert_eq!(store.user_count().await.unwrap(), 1);
         assert!(
             store
-                .verify_password("ivy", &secret("correct horse"))
+                .verify_password("ivy", &secret(&password))
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .verify_password("ivy", &secret("wrong"))
+                .verify_password("ivy", &secret(&fresh_password()))
                 .await
                 .unwrap()
         );
+        // Deliberately empty, not generated: this is the one case that must
+        // exercise the empty-password path specifically, which `fresh_password`
+        // can never produce. CodeQL's hard-coded-cryptographic-value query
+        // cannot tell that from a real credential reaching this parameter.
         assert!(!store.verify_password("ivy", &secret("")).await.unwrap());
     }
 
     #[tokio::test]
     async fn an_unknown_user_is_rejected_without_erroring() {
         let store = store().await;
-        store.create_user("ivy", &secret("pw")).await.unwrap();
+        let password = fresh_password();
+        store.create_user("ivy", &secret(&password)).await.unwrap();
 
         // Must be a plain `false`, not an error — the login handler renders the
         // same message either way, and an error would leak the difference.
         assert!(
             !store
-                .verify_password("nobody", &secret("pw"))
+                .verify_password("nobody", &secret(&password))
                 .await
                 .unwrap()
         );
@@ -247,10 +252,8 @@ mod tests {
     #[tokio::test]
     async fn the_hash_is_not_the_password() {
         let store = store().await;
-        store
-            .create_user("ivy", &secret("SUPERSECRETVALUE"))
-            .await
-            .unwrap();
+        let password = fresh_password();
+        store.create_user("ivy", &secret(&password)).await.unwrap();
 
         let stored: String = sqlx::query("SELECT password_hash FROM users")
             .fetch_one(store.pool())
@@ -259,7 +262,7 @@ mod tests {
             .try_get("password_hash")
             .unwrap();
 
-        assert!(!stored.contains("SUPERSECRETVALUE"));
+        assert!(!stored.contains(&password));
         assert!(stored.starts_with("$argon2id$"), "got {stored}");
     }
 
@@ -268,8 +271,9 @@ mod tests {
         // Per-user salting: two accounts sharing a password must not share a hash,
         // or the database reveals which accounts to attack together.
         let store = store().await;
-        store.create_user("a", &secret("same")).await.unwrap();
-        store.create_user("b", &secret("same")).await.unwrap();
+        let password = fresh_password();
+        store.create_user("a", &secret(&password)).await.unwrap();
+        store.create_user("b", &secret(&password)).await.unwrap();
 
         let hashes: Vec<String> = sqlx::query("SELECT password_hash FROM users ORDER BY id")
             .fetch_all(store.pool())
@@ -285,10 +289,13 @@ mod tests {
     #[tokio::test]
     async fn a_duplicate_username_is_named_rather_than_a_raw_sql_error() {
         let store = store().await;
-        store.create_user("ivy", &secret("pw")).await.unwrap();
+        store
+            .create_user("ivy", &secret(&fresh_password()))
+            .await
+            .unwrap();
 
         let err = store
-            .create_user("ivy", &secret("other"))
+            .create_user("ivy", &secret(&fresh_password()))
             .await
             .unwrap_err();
         assert!(
@@ -300,18 +307,29 @@ mod tests {
     #[tokio::test]
     async fn usernames_are_trimmed_and_blanks_refused() {
         let store = store().await;
-        store.create_user("  ivy  ", &secret("pw")).await.unwrap();
-        assert!(store.verify_password("ivy", &secret("pw")).await.unwrap());
+        let password = fresh_password();
+        store
+            .create_user("  ivy  ", &secret(&password))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .verify_password("ivy", &secret(&password))
+                .await
+                .unwrap()
+        );
 
         for blank in ["", "   ", "\t\n"] {
             assert!(
                 matches!(
-                    store.create_user(blank, &secret("pw")).await,
+                    store.create_user(blank, &secret(&fresh_password())).await,
                     Err(StoreError::InvalidUser(_))
                 ),
                 "{blank:?} should be refused"
             );
         }
+        // Deliberately empty, same reasoning as the assertion above — this
+        // is the empty-password rejection itself, not a stand-in credential.
         assert!(matches!(
             store.create_user("someone", &secret("")).await,
             Err(StoreError::InvalidUser(_))
@@ -321,14 +339,19 @@ mod tests {
     #[tokio::test]
     async fn changing_a_password_invalidates_the_old_one() {
         let store = store().await;
-        store.create_user("ivy", &secret("old")).await.unwrap();
+        let old = fresh_password();
+        let new = fresh_password();
+        store.create_user("ivy", &secret(&old)).await.unwrap();
 
-        assert!(store.set_password("ivy", &secret("new")).await.unwrap());
-        assert!(!store.verify_password("ivy", &secret("old")).await.unwrap());
-        assert!(store.verify_password("ivy", &secret("new")).await.unwrap());
+        assert!(store.set_password("ivy", &secret(&new)).await.unwrap());
+        assert!(!store.verify_password("ivy", &secret(&old)).await.unwrap());
+        assert!(store.verify_password("ivy", &secret(&new)).await.unwrap());
 
         assert!(
-            !store.set_password("nobody", &secret("x")).await.unwrap(),
+            !store
+                .set_password("nobody", &secret(&fresh_password()))
+                .await
+                .unwrap(),
             "an absent account reports false rather than erroring"
         );
     }
@@ -336,8 +359,14 @@ mod tests {
     #[tokio::test]
     async fn user_count_tracks_every_account() {
         let store = store().await;
-        store.create_user("first", &secret("pw")).await.unwrap();
-        store.create_user("second", &secret("pw")).await.unwrap();
+        store
+            .create_user("first", &secret(&fresh_password()))
+            .await
+            .unwrap();
+        store
+            .create_user("second", &secret(&fresh_password()))
+            .await
+            .unwrap();
         assert_eq!(store.user_count().await.unwrap(), 2);
     }
 }
