@@ -53,6 +53,17 @@ ignore = [
     "RUSTSEC-2024-0436",
 ]
 
+# `RUSTSEC-2023-0071` (the `rsa` Marvin Attack) deliberately has no entry here.
+# `cargo deny` never flags it — `sqlx-mysql` is a lock entry `sqlx`'s own
+# manifest hands out for every optional backend regardless of activation, and
+# `rsa` reaches this workspace only through it, unreachable given this
+# workspace's `sqlx` features (`cargo tree -i rsa` finds nothing, even under
+# `--all-features`). Adding it to `ignore` above produces cargo-deny's own
+# `advisory-not-detected` warning instead of silence, so it stays out. Only
+# OpenSSF Scorecard's `Vulnerabilities` check still reports it, because that
+# scanner reads `Cargo.lock` flat and has no feature-reachability analysis;
+# see `docs/SECURITY.md`'s "What is out of scope" for that note.
+
 [licenses]
 version = 2
 # Permissive licences only, matching the project's own MIT. A copyleft dependency

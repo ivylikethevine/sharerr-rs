@@ -1,0 +1,78 @@
+name: Upsert tracking issue
+description: >
+  Create-or-update, or close, the one tracking issue a scheduled workflow uses
+  to report a finding that is a standing state of the repo rather than an
+  event — see CLAUDE.md's "Three scheduled workflows notify by keeping one
+  issue current" for why advisories.yml, tool-versions.yml, and image-scan.yml
+  (its `pins` job) all do this the same way instead of turning a run red. One
+  issue per label, reused across runs: closed with a comment on the run that
+  finds things clean, opened or edited with the caller's report on the run
+  that doesn't.
+
+inputs:
+  label:
+    description: Issue label name. Created (or healed, if deleted) on every run.
+    required: true
+  color:
+    description: Label color, hex digits only, no '#'.
+    required: true
+  label-description:
+    description: Label description, set on create and on every later run.
+    required: true
+  title:
+    description: Issue title, set on create and on every edit.
+    required: true
+  actionable:
+    description: >
+      'true' if this run has a finding to report; 'false' to close the open
+      issue, if there is one, instead.
+    required: true
+  clean-comment:
+    description: Comment posted when closing an issue because this run is clean.
+    required: true
+  report-file:
+    description: >
+      Path to the report to use as the issue body (`gh issue create/edit
+      --body-file`, never `--body` — every caller's report is markdown with
+      blank lines, often a fenced code block, and a YAML-indented shell
+      string would arrive indented into it). Only read when `actionable` is
+      'true'.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        LABEL: ${{ inputs.label }}
+        COLOR: ${{ inputs.color }}
+        LABEL_DESCRIPTION: ${{ inputs.label-description }}
+        TITLE: ${{ inputs.title }}
+        ACTIONABLE: ${{ inputs.actionable }}
+        CLEAN_COMMENT: ${{ inputs.clean-comment }}
+        REPORT_FILE: ${{ inputs.report-file }}
+      run: |
+        set -euo pipefail
+
+        # --force is create-or-update, so a deleted label heals itself rather
+        # than turning every later `issue create` into a hard failure
+        gh label create "$LABEL" --force --color "$COLOR" \
+          --description "$LABEL_DESCRIPTION" >/dev/null
+
+        open="$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number // empty')"
+
+        if [ "$ACTIONABLE" != "true" ]; then
+          if [ -n "$open" ]; then
+            gh issue close "$open" --comment "$CLEAN_COMMENT"
+          fi
+          exit 0
+        fi
+
+        if [ -n "$open" ]; then
+          gh issue edit "$open" --title "$TITLE" --body-file "$REPORT_FILE"
+          echo "updated #$open"
+        else
+          gh issue create --label "$LABEL" --title "$TITLE" --body-file "$REPORT_FILE"
+        fi

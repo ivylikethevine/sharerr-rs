@@ -49,29 +49,21 @@ jobs:
   # say, crates/sharerr-qbit cannot alter what this workflow would produce.
   # The lockfile and the root manifest are in the list because the build is
   # `--locked` and resolves against both. Tag pushes bypass this entirely.
+  # See changes.yml. This filter has no `!` exclusion, unlike ci.yml's and
+  # docker.yml's — changes.yml's `some-with-excludes` quantifier is a no-op
+  # against a purely positive pattern list, so this narrower, lighthouse-only
+  # fileset behaves exactly as it did inlined here.
   changes:
     name: detect changes
     if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - id: filter
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          filters: |
-            code:
-              - 'crates/sharerr-lighthouse/**'
-              - 'docker/Dockerfile.lighthouse'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
+    uses: ./.github/workflows/changes.yml
+    with:
+      filters: |
+        code:
+          - 'crates/sharerr-lighthouse/**'
+          - 'docker/Dockerfile.lighthouse'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
 
   runner:
     name: pick the runner

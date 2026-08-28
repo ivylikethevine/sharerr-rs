@@ -2,9 +2,13 @@
 
 [![CI](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml)
 [![Docker](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml)
+[![Docker (lighthouse)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker-lighthouse.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker-lighthouse.yml)
 [![CodeQL](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/codeql.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/codeql.yml)
-[![Coverage](https://codecov.io/gh/ivylikethevine/sharerr-rs/branch/main/graph/badge.svg)](https://codecov.io/gh/ivylikethevine/sharerr-rs)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/ivylikethevine/sharerr-rs/main/badges/coverage.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
+[![Docs](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/pages.yml/badge.svg)](https://ivylikethevine.github.io/sharerr-rs/)
+[![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](docs/SECURITY.md)
+[![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 
 ---

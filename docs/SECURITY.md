@@ -140,3 +140,19 @@ the process, so there is no privilege boundary here to enforce; these alerts
 are dismissed as won't-fix rather than coded around, since a containment check
 would only break legitimate `--config` values pointing outside a fixed
 directory. See `CLAUDE.md`'s CodeQL note for how alert dismissal is tracked.
+
+**`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack timing side-channel),
+as reported by OpenSSF Scorecard's `Vulnerabilities` check.** `rsa` reaches
+`Cargo.lock` only via `sqlx-mysql`, and `sqlx-mysql` is a lock entry `sqlx`'s
+own manifest hands out for every optional backend it has regardless of which
+ones are actually turned on — this workspace enables none of them beyond
+`sqlite` (see the `sqlx` entry in the root `Cargo.toml`). `cargo tree -i rsa`
+and `cargo metadata`'s resolved feature list for the `sqlx` node confirm it is
+never compiled in, even under `--all-features`; `cargo deny check advisories`
+already treats it as unreachable without needing an entry in `deny.toml`'s
+`ignore` list (adding one produces cargo-deny's own `advisory-not-detected`
+warning instead, so `deny.toml` deliberately has none — see the comment
+there). Scorecard's scanner has no such feature-reachability analysis; it
+reads `Cargo.lock` the same flat way `cargo generate-lockfile` populates it,
+so it will keep reporting this one. Revisit if `sqlx-mysql` genuinely becomes
+reachable, or if `rsa` ships a fix.

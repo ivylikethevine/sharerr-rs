@@ -44,33 +44,17 @@ jobs:
   # job doesn't even run, and the jobs below treat that skip as "assume yes" —
   # a diff against the wrong commit must never be the reason a real check goes
   # quiet.
+  # See changes.yml: shared with docker.yml, which wants the identical
+  # "anything outside .github/workflows/**" filter.
   changes:
     name: detect changes
     if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # some-with-excludes, not the default `some`: a bare negated pattern
-      # matches nothing on its own (picomatch needs a positive rule to negate
-      # against), and plain `some` would also count workflow files toward a
-      # match since `**` matches those too. This is the combination that
-      # actually means "some changed file lives outside .github/workflows/**".
-      - id: filter
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          predicate-quantifier: some-with-excludes
-          filters: |
-            code:
-              - '**'
-              - '!.github/workflows/**'
+    uses: ./.github/workflows/changes.yml
+    with:
+      filters: |
+        code:
+          - '**'
+          - '!.github/workflows/**'
 
   # See runner.yml: the one place that decides whether a run gets the
   # self-hosted box, so a fork's pull_request run — which executes the fork's
