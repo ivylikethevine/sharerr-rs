@@ -240,6 +240,24 @@ async fn stat_tiles(State(state): State<WebState>) -> Response {
     })
 }
 
+/// A `.toml` document offered as a download — the response shape every
+/// backup/restore-style export on this instance shares (the full config, a
+/// friends restore block): same content type, same `attachment` disposition,
+/// differing only in `filename` and the already-serialized `text`.
+pub(crate) fn toml_download(filename: &str, text: String) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/toml".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        text,
+    )
+        .into_response()
+}
+
 /// A `WebState` over a bare `ServeState`, for handler-level tests across the
 /// web modules — one definition rather than a copy per test module.
 #[cfg(test)]
@@ -248,6 +266,22 @@ pub(crate) fn web_state(serve: Arc<ServeState>) -> WebState {
         serve,
         sessions: Arc::new(Sessions::default()),
     }
+}
+
+/// The full UTF-8 body of a response, for tests that assert on rendered
+/// content — one definition rather than a copy per test module.
+///
+/// `unwrap`: test-only, and not nested in a `mod tests { #![allow(..)] }`
+/// block the way its callers are, since it needs to be reachable from all of
+/// them — a bad body here is this helper's own bug, not something a caller
+/// should have to handle.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+pub(crate) async fn body_of(response: Response) -> String {
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
 }
 
 /// The `Location` header of a redirect, or `""` — shared by the tests that

@@ -843,6 +843,21 @@ pub(crate) mod fixtures {
         (dir, Arc::new(state))
     }
 
+    /// A config whose database path is a directory rather than a file, so
+    /// `Store::open` fails deterministically — the hermetic way to reach a
+    /// handler's "store unavailable" branch without depending on real
+    /// filesystem permissions.
+    pub(crate) fn store_unopenable() -> (tempfile::TempDir, Arc<ServeState>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sharerr.db")).unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        let path = dir.path().join("sharerr.toml");
+        (dir, Arc::new(ServeState::new(config, path, None)))
+    }
+
     /// A tracker that always reports ready, standing in for the real one a
     /// syncer built by [`ready`] has no use for — nothing here ever runs a
     /// sync pass, so it only has to satisfy the trait.

@@ -580,13 +580,21 @@ mod tests {
     // A `WebState` over `state::fixtures::unconfigured()`, same as web/settings.rs's
     // handler tests — a real sqlite-backed `Store` (no vault involved), so account
     // creation, login, and password change all exercise the genuine store queries.
-    use crate::web::web_state;
+    use crate::web::{body_of, web_state};
 
-    async fn body_text(response: Response) -> String {
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+    /// Create `ivy` with a generated password on `serve`'s store, and hand the
+    /// password back for whichever form field needs it — the shape underneath
+    /// most of this module's tests.
+    async fn seeded_user(serve: &crate::state::ServeState) -> String {
+        let password = fresh_password();
+        serve
+            .store()
+            .await
+            .unwrap()
+            .create_user("ivy", &SecretString::from(password.clone()))
             .await
             .unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
+        password
     }
 
     #[tokio::test]
@@ -599,11 +607,7 @@ mod tests {
     #[tokio::test]
     async fn setup_page_redirects_to_login_once_claimed() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let store = serve.store().await.unwrap();
-        store
-            .create_user("ivy", &SecretString::from(fresh_password()))
-            .await
-            .unwrap();
+        seeded_user(&serve).await;
 
         let response = setup_page(State(web_state(serve))).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -634,7 +638,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(body_text(response).await.contains("do not match"));
+        assert!(body_of(response).await.contains("do not match"));
         assert_eq!(store.user_count().await.unwrap(), 0);
     }
 
@@ -725,13 +729,7 @@ mod tests {
     #[tokio::test]
     async fn login_page_renders_the_form_once_claimed() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        serve
-            .store()
-            .await
-            .unwrap()
-            .create_user("ivy", &SecretString::from(fresh_password()))
-            .await
-            .unwrap();
+        seeded_user(&serve).await;
 
         let response = login_page(State(web_state(serve)), CookieJar::new()).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -740,14 +738,7 @@ mod tests {
     #[tokio::test]
     async fn login_submit_signs_in_on_a_correct_password() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let password = fresh_password();
-        serve
-            .store()
-            .await
-            .unwrap()
-            .create_user("ivy", &SecretString::from(password.clone()))
-            .await
-            .unwrap();
+        let password = seeded_user(&serve).await;
 
         let response = login_submit(
             State(web_state(serve)),
@@ -772,13 +763,7 @@ mod tests {
     #[tokio::test]
     async fn login_submit_rejects_a_wrong_password_with_one_generic_message() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        serve
-            .store()
-            .await
-            .unwrap()
-            .create_user("ivy", &SecretString::from(fresh_password()))
-            .await
-            .unwrap();
+        seeded_user(&serve).await;
 
         let response = login_submit(
             State(web_state(serve)),
@@ -791,7 +776,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert!(body_text(response).await.contains("do not match"));
+        assert!(body_of(response).await.contains("do not match"));
     }
 
     #[tokio::test]
@@ -841,13 +826,7 @@ mod tests {
     #[tokio::test]
     async fn change_password_rejects_the_wrong_current_password() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        serve
-            .store()
-            .await
-            .unwrap()
-            .create_user("ivy", &SecretString::from(fresh_password()))
-            .await
-            .unwrap();
+        seeded_user(&serve).await;
         let state = web_state(serve);
         let token = state.sessions.create("ivy").await.unwrap();
         let jar = CookieJar::new().add(session_cookie(token));
@@ -866,7 +845,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(
-            body_text(response)
+            body_of(response)
                 .await
                 .contains("not your current password")
         );
@@ -875,12 +854,8 @@ mod tests {
     #[tokio::test]
     async fn change_password_succeeds_and_revokes_every_other_session() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let current_password = seeded_user(&serve).await;
         let store = serve.store().await.unwrap();
-        let current_password = fresh_password();
-        store
-            .create_user("ivy", &SecretString::from(current_password.clone()))
-            .await
-            .unwrap();
         let state = web_state(serve);
         let current = state.sessions.create("ivy").await.unwrap();
         let other = state.sessions.create("ivy").await.unwrap();

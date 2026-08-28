@@ -359,14 +359,16 @@ gossip_url = "https://sam.example/sharerr"    # optional
 gossip_key = "the key sam issued this instance"  # optional
 ```
 
-This is read exactly once, on the next `sharerr serve` start, and the block
-is removed from `sharerr.toml` the moment it has been applied — successfully
+This is read exactly once — on the next `sharerr serve` start, or immediately
+if it is instead pasted into a running instance through Settings → Backup and
+restore — and the block is removed from `sharerr.toml`, and from the running
+instance's own configuration, the moment it has been applied: successfully
 imported entries and skipped ones (a duplicate label, most likely) alike, so
-the same block is never replayed. Until that first start after restoring it,
-`[[peers]]` is the one place a secret is allowed to sit in `sharerr.toml`
-at all; if the vault cannot be opened yet (no `SHARERR_MASTER_KEY`) and any
-entry carries a `gossip_key`, nothing is imported and the block is left in
-place to retry, rather than importing everything except the one credential
+the same block is never replayed. Until that first read, `[[peers]]` is the
+one place a secret is allowed to sit in `sharerr.toml` at all; if the vault
+cannot be opened yet (no `SHARERR_MASTER_KEY`) and any entry carries a
+`gossip_key`, nothing is imported and the block is left in place to retry,
+rather than importing everything except the one credential
 that had nowhere to go.
 
 ## Vault secrets

@@ -218,9 +218,13 @@ impl ConfigFile {
 
     /// Remove a drained `[[peers]]` bootstrap block. One-directional, unlike
     /// [`Self::set_path_map`]/[`Self::set_libraries`]: nothing ever writes
-    /// this array back — see `sharerr_core::config::PeerImport`.
+    /// this array back — see `sharerr_core::config::PeerImport`. `"peers"` is
+    /// deliberately not registered in `sharerr_core::config::config_paths`:
+    /// that list is "every path the web UI writes back", and this key is
+    /// neither web-UI-editable nor ever written, only ever removed, by
+    /// `sharerr::commands::serve`.
     pub fn clear_peers(&mut self) {
-        self.doc.remove("peers");
+        self.apply([Edit::unset("peers")]);
     }
 
     /// Render the document as it would be written.
