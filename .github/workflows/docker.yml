@@ -48,28 +48,17 @@ jobs:
   # would build, so there's nothing here for a 30-minute multi-arch build to
   # re-prove. Tag pushes bypass this entirely (see `build`'s `if:` below): a
   # release must build regardless of what the diff says.
+  # See changes.yml: shared with ci.yml, which wants the identical "anything
+  # outside .github/workflows/**" filter.
   changes:
     name: detect changes
     if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      code: ${{ steps.filter.outputs.code }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - id: filter
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          predicate-quantifier: some-with-excludes
-          filters: |
-            code:
-              - '**'
-              - '!.github/workflows/**'
+    uses: ./.github/workflows/changes.yml
+    with:
+      filters: |
+        code:
+          - '**'
+          - '!.github/workflows/**'
 
   # See runner.yml: keeps a fork's pull_request build off the self-hosted box
   # the same way ci.yml does. This workflow's `build` job never pushes on a

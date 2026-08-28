@@ -1,17 +1,23 @@
 # Line/region coverage over the hermetic (tier 1) test suite, via
-# cargo-llvm-cov. Dispatch-only rather than on every push: instrumented builds
-# do not share ci.yml's cache-friendly artifacts, so this pays for its own
-# full rebuild every run — worth doing on demand, not on a timer nobody reads
-# and not on every PR at the cost of doubling CI's wall-clock.
+# cargo-llvm-cov.
 #
 # Tier 1 only, deliberately: this runs the same `cargo test --workspace
 # --all-features --locked` ci.yml's `test` job does, not `--include-ignored`.
 # The tier 2 suite drives a real Docker Compose stack (see CLAUDE.md and
 # scripts/run_docker_tests.sh) and stays local and opt-in there too — coverage over a
 # suite this workflow cannot run would just be a misleading percentage.
+#
+# `push: branches: [main]` rather than dispatch-only: the README badge below
+# needs a number that tracks the default branch, not the last time somebody
+# remembered to ask. Instrumented builds don't share ci.yml's cache-friendly
+# artifacts, so this does pay for its own full rebuild on every merge to
+# `main` — worth it for a badge that means something, not worth paying on
+# every `pull_request` too, so that trigger is deliberately absent.
 name: Coverage
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -25,10 +31,18 @@ jobs:
     name: cargo-llvm-cov (workspace)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The one write this job does: committing the refreshed badge endpoint
+    # below. Everything up to that point only needs `contents: read`, same as
+    # every other job in this repo, and the badge is the only reason this job
+    # differs.
+    permissions:
+      contents: write
     steps:
+      # `persist-credentials: true` (the default) rather than every other
+      # workflow's explicit `false` — this job is the one place in the repo
+      # that has a real reason to push, and needs the checked-out credential
+      # to do it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
@@ -56,12 +70,6 @@ jobs:
       - name: Render the HTML report
         run: cargo llvm-cov report --html --output-dir coverage-html
 
-      # Codecov reads lcov, so the same profile data is rendered a third time
-      # rather than re-run. `--fail-under-lines 0` is deliberately absent: the
-      # gate on coverage is review, not a number this workflow enforces.
-      - name: Render the lcov report
-        run: cargo llvm-cov report --lcov --output-path lcov.info
-
       - name: Summarize
         run: |
           set -euo pipefail
@@ -73,22 +81,58 @@ jobs:
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 
-      # What the README badge reads. The upload is what makes the number public;
-      # the HTML artifact below is what makes it explorable, and neither
-      # replaces the other.
+      # What the README badge reads: a shields.io "endpoint" badge
+      # (https://img.shields.io/endpoint) pointing at this file's raw content,
+      # rather than a Codecov upload — no third-party account, no token to
+      # provision, just a JSON file this repo already owns.
       #
-      # Because this workflow is dispatch-only (see the header), the badge shows
-      # the coverage of the last run somebody asked for, not of the last commit.
-      # Adding `push: branches: [main]` to the triggers above is what would make
-      # it track the default branch — at the cost of the full instrumented
-      # rebuild the header declines to pay on every push.
-      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        with:
-          files: lcov.info
-          # Tier 1 only, matching what was actually instrumented.
-          flags: tier1
-          fail_ci_if_error: true
-          token: ${{ secrets.CODECOV_TOKEN }}
+      # The Lines column specifically, not Regions: `cargo-llvm-cov
+      # report --summary-only`'s TOTAL row has three "N / Missed / Cover%"
+      # triples in a fixed order (Regions, Functions, Lines), so the *first*
+      # percentage on the line is Regions coverage, not Lines — field 10, not
+      # field 4. Same trap this repo's own coverage-column notes already warn
+      # about; getting the column wrong here would silently badge the wrong
+      # number.
+      - name: Compute the badge endpoint
+        run: |
+          set -euo pipefail
+          pct="$(cargo llvm-cov report --summary-only | awk '/^TOTAL/ {print $10}')"
+          value="${pct%\%}"
+          color=$(awk -v v="$value" 'BEGIN {
+            if (v >= 90) { print "brightgreen" }
+            else if (v >= 80) { print "green" }
+            else if (v >= 70) { print "yellowgreen" }
+            else if (v >= 60) { print "yellow" }
+            else if (v >= 50) { print "orange" }
+            else { print "red" }
+          }')
+          mkdir -p badges
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s"}\n' \
+            "$pct" "$color" >badges/coverage.json
+
+      # Committed with the default GITHUB_TOKEN, not a PAT — which is what
+      # keeps this from re-triggering itself. GitHub does not run `push`-
+      # triggered workflows off a push made with the job's own GITHUB_TOKEN
+      # (workflow_dispatch and repository_dispatch are the only exceptions),
+      # so this commit lands on `main` without looping back into this job.
+      #
+      # Gated to `main` specifically: `workflow_dispatch` can be run against
+      # any ref, and a manual run against a feature branch should still
+      # produce a step summary and an HTML artifact without pushing a badge
+      # commit to a branch nobody asked for one on.
+      - name: Publish the badge endpoint
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- badges/coverage.json; then
+            echo "coverage unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add badges/coverage.json
+          git commit -m "coverage: refresh badge endpoint"
+          git push
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

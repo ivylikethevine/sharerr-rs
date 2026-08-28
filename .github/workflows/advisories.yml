@@ -74,34 +74,12 @@ jobs:
           cat "$RUNNER_TEMP/advisories.txt"
           echo "found=$rc" >>"$GITHUB_OUTPUT"
 
-      - name: Keep the tracking issue current
+      - name: Build the report
+        if: steps.check.outputs.found != '0'
         env:
-          GH_TOKEN: ${{ github.token }}
-          FOUND: ${{ steps.check.outputs.found }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          label=advisories
-          title="A RUSTSEC advisory affects a dependency in Cargo.lock"
-
-          # --force is create-or-update, so a deleted label heals itself rather
-          # than turning every later `issue create` into a hard failure
-          gh label create "$label" --force --color B60205 \
-            --description "cargo-deny reports an advisory against the locked dependency tree" >/dev/null
-
-          # one issue, reused: the finding is a standing state of Cargo.lock,
-          # not an event, so a new issue per weekly run would be pure noise
-          open="$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty')"
-
-          if [ "$FOUND" = 0 ]; then
-            if [ -n "$open" ]; then
-              gh issue close "$open" --comment "cargo-deny reports no advisories against the current \`Cargo.lock\`. [Latest run]($RUN_URL)."
-            fi
-            echo "no advisories"
-            exit 0
-          fi
-
-          report="$RUNNER_TEMP/report.md"
           {
             echo "\`cargo deny check advisories\` is failing against the current \`Cargo.lock\`."
             echo
@@ -114,16 +92,23 @@ jobs:
             echo '```'
             echo
             echo "Found by [\`advisories\`]($RUN_URL). Closed automatically once the tree is clean."
-          } >"$report"
-          cat "$report" >>"$GITHUB_STEP_SUMMARY"
+          } >"$RUNNER_TEMP/report.md"
+          cat "$RUNNER_TEMP/report.md" >>"$GITHUB_STEP_SUMMARY"
 
-          # --body-file, not --body: the report is a code block with blank lines,
-          # and a YAML-indented shell string would arrive indented into it
-          if [ -n "$open" ]; then
-            gh issue edit "$open" --title "$title" --body-file "$report"
-            echo "updated #$open"
-          else
-            gh issue create --label "$label" --title "$title" --body-file "$report"
-          fi
+      # See .github/actions/upsert-tracking-issue for the shape this, tool-
+      # versions.yml, and image-scan.yml's `pins` job all share.
+      - name: Keep the tracking issue current
+        uses: ./.github/actions/upsert-tracking-issue
+        with:
+          label: advisories
+          color: B60205
+          label-description: cargo-deny reports an advisory against the locked dependency tree
+          title: A RUSTSEC advisory affects a dependency in Cargo.lock
+          actionable: ${{ steps.check.outputs.found != '0' }}
+          clean-comment: >-
+            cargo-deny reports no advisories against the current `Cargo.lock`.
+            [Latest run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          report-file: ${{ runner.temp }}/report.md
 
-          echo "::warning title=cargo-deny::A RUSTSEC advisory affects Cargo.lock - see the issue"
+      - if: steps.check.outputs.found != '0'
+        run: echo "::warning title=cargo-deny::A RUSTSEC advisory affects Cargo.lock - see the issue"

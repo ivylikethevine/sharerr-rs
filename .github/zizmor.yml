@@ -12,3 +12,12 @@ rules:
     ignore:
       - image-scan.yml:89
       - image-scan.yml:142
+
+  # coverage.yml's checkout is the one place in this repo with a real reason
+  # to push (the coverage badge endpoint, see that job's own comments) —
+  # every other `actions/checkout` sets `persist-credentials: false`
+  # specifically so there is no lingering credential for a job that never
+  # pushes. This is the job that does.
+  artipacked:
+    ignore:
+      - coverage.yml:45
