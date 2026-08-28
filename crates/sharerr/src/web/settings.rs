@@ -24,6 +24,7 @@
 use std::collections::BTreeSet;
 
 use axum::extract::{Query, State};
+use axum::http::header;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::{ExposeSecret, SecretString};
@@ -36,7 +37,7 @@ use crate::gluetun::GluetunTarget;
 
 use super::WebState;
 use super::config_io::{ConfigFile, Edit, parse_libraries, parse_path_map};
-use super::templates::{ArrSection, LibraryRow, PathRow, SettingsPage, render};
+use super::templates::{ArrSection, GluetunSection, LibraryRow, PathRow, SettingsPage, render};
 
 /// Mint a fresh secret and show it once.
 ///
@@ -242,6 +243,12 @@ pub struct NotificationsForm {
     clear_webhook_url: Option<String>,
     kind: String,
     peer_quiet_secs: String,
+    trigger_sync_failed: Option<String>,
+    trigger_peer_quiet: Option<String>,
+    trigger_endpoint_rotated: Option<String>,
+    trigger_items_shared: Option<String>,
+    trigger_item_failed: Option<String>,
+    trigger_peer_revoked: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -801,6 +808,26 @@ pub async fn save_notifications(
                 config_paths::NOTIFICATIONS_PEER_QUIET_SECS,
                 i64::try_from(secs).unwrap_or(604_800),
             )]);
+
+            use sharerr_core::config::NotificationTrigger as Trigger;
+            let selected: Vec<&'static str> = [
+                (form.trigger_sync_failed.is_some(), Trigger::SyncFailed),
+                (form.trigger_peer_quiet.is_some(), Trigger::PeerQuiet),
+                (
+                    form.trigger_endpoint_rotated.is_some(),
+                    Trigger::EndpointRotated,
+                ),
+                (form.trigger_items_shared.is_some(), Trigger::ItemsShared),
+                (form.trigger_item_failed.is_some(), Trigger::ItemFailed),
+                (form.trigger_peer_revoked.is_some(), Trigger::PeerRevoked),
+            ]
+            .into_iter()
+            .filter_map(|(checked, trigger)| checked.then_some(trigger.as_str()))
+            .collect();
+            file.apply([Edit::str_list(
+                config_paths::NOTIFICATIONS_TRIGGERS,
+                selected.into_iter().map(str::to_owned).collect(),
+            )]);
             Ok(())
         },
         secret_keys::NOTIFICATIONS_WEBHOOK_URL,
@@ -836,6 +863,87 @@ pub async fn save_metrics(
         form.clear_token.is_some(),
     )
     .await
+}
+
+/// The live, merged config (defaults + `sharerr.toml` + `SHARERR_*` env
+/// overrides), served as a downloadable file.
+///
+/// Deliberately the *effective* config rather than the raw file: an
+/// env-overridden field is never written to `sharerr.toml` in the first
+/// place (see `config_io::env_overrides`), so exporting the file bytes would
+/// silently drop anything an operator pinned via environment. `Config` is
+/// `deny_unknown_fields` with no secret field on it at all, so this cannot
+/// leak a credential no matter what is in the vault.
+pub async fn export_config(State(state): State<WebState>) -> Response {
+    let config = state.serve.config().await;
+    let text = match toml_edit::ser::to_string_pretty(&config) {
+        Ok(text) => text,
+        Err(err) => return reject(&state, &format!("could not export the config: {err}")).await,
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/toml".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"sharerr-config.toml\"".to_owned(),
+            ),
+        ],
+        text,
+    )
+        .into_response()
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ImportConfigForm {
+    toml_text: String,
+}
+
+/// Replace `sharerr.toml` wholesale with a pasted or uploaded document,
+/// rather than editing one field the way every other save on this page does.
+///
+/// Reuses the same validate-then-write discipline as everything else here:
+/// [`crate::settings::validate`] (the identical defaults→document→env stack
+/// `load()` uses, so an env var already set on *this* instance still
+/// correctly wins) runs before anything touches disk, and
+/// [`ConfigFile::replacing`] backs up whatever is currently there rather than
+/// clobbering it — the same machinery `replacement_for` uses to recover a
+/// config that failed to load. Only `sharerr.toml` is touched: this does not
+/// (and cannot) restore the vault or the peers table, both of which live
+/// entirely outside this file.
+pub async fn import_config(
+    State(state): State<WebState>,
+    Form(form): Form<ImportConfigForm>,
+) -> Response {
+    let text = form.toml_text;
+    let config = match crate::settings::validate(&text) {
+        Ok(config) => config,
+        Err(err) => return reject(&state, &format!("{err:#}")).await,
+    };
+
+    let guard = state.serve.lock_config_write().await;
+    let path = state.serve.config_path().to_path_buf();
+    let file = ConfigFile::replacing(&path);
+
+    let write_path = path.clone();
+    let written = {
+        let text = text.clone();
+        tokio::task::spawn_blocking(move || file.write_validated(&text))
+            .await
+            .map_err(|err| format!("writing the config file: {err}"))
+            .and_then(|result| result.map_err(|err| format!("{err:#}")))
+    };
+    drop(guard);
+
+    match written {
+        Ok(()) => {
+            state.serve.replace_config(config).await;
+            tracing::info!(path = %write_path.display(), "config imported through the web ui");
+            Redirect::to("/settings?saved=config").into_response()
+        }
+        Err(message) => reject(&state, &message).await,
+    }
 }
 
 pub async fn save_libraries(
@@ -1538,19 +1646,24 @@ async fn build_page(
             .collect::<Vec<_>>()
             .join("\n"),
         lighthouse_url_count: config.lighthouse.urls.len(),
-        gluetun_control_url: url_or_empty(config.gluetun.control_url.as_ref()),
-        gluetun_enabled: config.gluetun.enabled,
-        gluetun_api_key_set: is_set(secret_keys::GLUETUN_API_KEY),
-        gluetun_poll_secs: config.gluetun.poll_secs,
-        gluetun_last_observed: gluetun_last_observed(&state.serve.endpoint()),
-        gluetun_last_error: gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
-
-        gluetun_client_control_url: url_or_empty(config.gluetun_client.control_url.as_ref()),
-        gluetun_client_enabled: config.gluetun_client.enabled,
-        gluetun_client_api_key_set: is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
-        gluetun_client_poll_secs: config.gluetun_client.poll_secs,
-        gluetun_client_last_observed: gluetun_last_observed(&state.serve.client_endpoint()),
-        gluetun_client_last_error: gluetun_last_error(&state.serve, GluetunTarget::Client).await,
+        gluetun: GluetunSection::new(
+            GluetunTarget::Tracker,
+            url_or_empty(config.gluetun.control_url.as_ref()),
+            config.gluetun.enabled,
+            is_set(secret_keys::GLUETUN_API_KEY),
+            config.gluetun.poll_secs,
+            gluetun_last_observed(&state.serve.endpoint()),
+            gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
+        ),
+        gluetun_client: GluetunSection::new(
+            GluetunTarget::Client,
+            url_or_empty(config.gluetun_client.control_url.as_ref()),
+            config.gluetun_client.enabled,
+            is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
+            config.gluetun_client.poll_secs,
+            gluetun_last_observed(&state.serve.client_endpoint()),
+            gluetun_last_error(&state.serve, GluetunTarget::Client).await,
+        ),
         gluetun_client_configured: config.gluetun_client.control_url.is_some(),
 
         revealed: None,
@@ -1562,6 +1675,30 @@ async fn build_page(
         notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),
         notifications_kind: config.notifications.kind.as_str(),
         notifications_peer_quiet_secs: config.notifications.peer_quiet_secs,
+        notifications_trigger_sync_failed: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::SyncFailed),
+        notifications_trigger_peer_quiet: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::PeerQuiet),
+        notifications_trigger_endpoint_rotated: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::EndpointRotated),
+        notifications_trigger_items_shared: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::ItemsShared),
+        notifications_trigger_item_failed: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::ItemFailed),
+        notifications_trigger_peer_revoked: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::PeerRevoked),
 
         metrics_enabled: config.metrics.enabled,
         metrics_token_set: is_set(secret_keys::METRICS_TOKEN),
@@ -1761,33 +1898,50 @@ mod tests {
         assert!(written.contains("http://sonarr:8989/"), "{written}");
     }
 
-    #[tokio::test]
-    async fn save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config() {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let config_path = serve.config_path().to_path_buf();
-        let state = web_state(serve);
+    // `fixtures::unconfigured()` gives a `ServeState` with no master key set,
+    // and this test's whole point is that `apply_secret` then fails to open
+    // the vault — but `master_key_from_env` reads the real process
+    // environment, which several other tests in this binary legitimately
+    // mutate via `figment::Jail`. Wrapped in `Jail` too (with `clear_env`) so
+    // this is guaranteed to run with no other Jail closure's env mutation
+    // active, rather than racing the parallel runner for a var it needs
+    // absent — see `secrets.rs`'s `opening_a_vault_without_a_master_key_fails_with_no_side_effects`
+    // for the same pattern with no async involved.
+    #[test]
+    fn save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let config_path = serve.config_path().to_path_buf();
+            let state = web_state(serve);
 
-        // A non-blank api_key routes through `apply_secret`, which opens the
-        // vault — impossible here with no master key set. `save_arr` must reject
-        // before `write_config` ever runs, or a URL would land in `sharerr.toml`
-        // while the API key silently failed to save beside it.
-        let response = save_arr(
-            State(state),
-            axum::extract::Path(MediaSource::Sonarr),
-            Query(NextQuery::default()),
-            Form(ArrForm {
-                url: "sonarr:8989".to_owned(),
-                api_key: "some-api-key".to_owned(),
-                clear_api_key: None,
-            }),
-        )
-        .await;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                // A non-blank api_key routes through `apply_secret`, which opens
+                // the vault — impossible here with no master key set. `save_arr`
+                // must reject before `write_config` ever runs, or a URL would
+                // land in `sharerr.toml` while the API key silently failed to
+                // save beside it.
+                let response = save_arr(
+                    State(state),
+                    axum::extract::Path(MediaSource::Sonarr),
+                    Query(NextQuery::default()),
+                    Form(ArrForm {
+                        url: "sonarr:8989".to_owned(),
+                        api_key: "some-api-key".to_owned(),
+                        clear_api_key: None,
+                    }),
+                )
+                .await;
 
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert!(
-            !config_path.exists(),
-            "a rejected secret write must not leave a partial config file behind"
-        );
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(
+                    !config_path.exists(),
+                    "a rejected secret write must not leave a partial config file behind"
+                );
+            });
+            Ok(())
+        });
     }
 
     #[tokio::test]
@@ -1828,36 +1982,45 @@ mod tests {
         assert!(written.contains(r#"label = "shared""#), "{written}");
     }
 
-    #[tokio::test]
-    async fn save_transmission_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config()
-     {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let config_path = serve.config_path().to_path_buf();
-        let state = web_state(serve);
+    // Same race as `save_arr_rejects_when_the_vault_will_not_open_...` above —
+    // `Jail`-wrapped so no other Jail test's `SHARERR_MASTER_KEY` can be live
+    // while this one relies on it being absent.
+    #[test]
+    fn save_transmission_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let config_path = serve.config_path().to_path_buf();
+            let state = web_state(serve);
 
-        // A non-blank password routes through `apply_secret`, which opens the
-        // vault — impossible here with no master key set. The handler must
-        // reject before `write_config` ever runs, or the URL/username/label
-        // would land in `sharerr.toml` while the password silently failed to
-        // save beside it.
-        let response = save_transmission(
-            State(state),
-            Query(NextQuery::default()),
-            Form(RpcClientForm {
-                url: "transmission:9091".to_owned(),
-                username: "sam".to_owned(),
-                password: "hunter2".to_owned(),
-                clear_password: None,
-                label: "shared".to_owned(),
-            }),
-        )
-        .await;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                // A non-blank password routes through `apply_secret`, which opens
+                // the vault — impossible here with no master key set. The handler
+                // must reject before `write_config` ever runs, or the
+                // URL/username/label would land in `sharerr.toml` while the
+                // password silently failed to save beside it.
+                let response = save_transmission(
+                    State(state),
+                    Query(NextQuery::default()),
+                    Form(RpcClientForm {
+                        url: "transmission:9091".to_owned(),
+                        username: "sam".to_owned(),
+                        password: "hunter2".to_owned(),
+                        clear_password: None,
+                        label: "shared".to_owned(),
+                    }),
+                )
+                .await;
 
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert!(
-            !config_path.exists(),
-            "a rejected secret write must not leave a partial config file behind"
-        );
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(
+                    !config_path.exists(),
+                    "a rejected secret write must not leave a partial config file behind"
+                );
+            });
+            Ok(())
+        });
     }
 
     #[tokio::test]
@@ -1923,31 +2086,38 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn save_rtorrent_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config()
-    {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let config_path = serve.config_path().to_path_buf();
-        let state = web_state(serve);
+    // Same race as `save_arr_rejects_when_the_vault_will_not_open_...` above.
+    #[test]
+    fn save_rtorrent_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let config_path = serve.config_path().to_path_buf();
+            let state = web_state(serve);
 
-        let response = save_rtorrent(
-            State(state),
-            Query(NextQuery::default()),
-            Form(RpcClientForm {
-                url: "http://seedbox.example/RPC2".to_owned(),
-                username: "sam".to_owned(),
-                password: "hunter2".to_owned(),
-                clear_password: None,
-                label: "shared".to_owned(),
-            }),
-        )
-        .await;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let response = save_rtorrent(
+                    State(state),
+                    Query(NextQuery::default()),
+                    Form(RpcClientForm {
+                        url: "http://seedbox.example/RPC2".to_owned(),
+                        username: "sam".to_owned(),
+                        password: "hunter2".to_owned(),
+                        clear_password: None,
+                        label: "shared".to_owned(),
+                    }),
+                )
+                .await;
 
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert!(
-            !config_path.exists(),
-            "a rejected secret write must not leave a partial config file behind"
-        );
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(
+                    !config_path.exists(),
+                    "a rejected secret write must not leave a partial config file behind"
+                );
+            });
+            Ok(())
+        });
     }
 
     #[tokio::test]
@@ -2577,43 +2747,69 @@ mod tests {
     /// other secret-writing handler in this file — this is the regression
     /// check that rewiring both onto `rotate_tracker_token` did not lose
     /// that failure mode, without needing a real openable vault to prove it.
-    #[tokio::test]
-    async fn save_tracker_with_a_token_rejects_when_the_vault_will_not_open() {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let state = web_state(serve);
+    // Same race as `save_arr_rejects_when_the_vault_will_not_open_...` above:
+    // this asserts a rejection that depends on the vault failing to open,
+    // which needs `SHARERR_MASTER_KEY` to genuinely be absent, not merely
+    // absent from this fixture's own config.
+    #[test]
+    fn save_tracker_with_a_token_rejects_when_the_vault_will_not_open() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve);
 
-        let response = save_tracker(
-            State(state),
-            Query(NextQuery::default()),
-            Form(TrackerForm {
-                token: "typed-token".to_owned(),
-                ..Default::default()
-            }),
-        )
-        .await;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let response = save_tracker(
+                    State(state),
+                    Query(NextQuery::default()),
+                    Form(TrackerForm {
+                        token: "typed-token".to_owned(),
+                        ..Default::default()
+                    }),
+                )
+                .await;
 
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+            });
+            Ok(())
+        });
     }
 
-    #[tokio::test]
-    async fn generate_secret_rejects_when_the_vault_will_not_open() {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let state = web_state(serve);
+    // Same race as above.
+    #[test]
+    fn generate_secret_rejects_when_the_vault_will_not_open() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve);
 
-        let response =
-            generate_secret(State(state), axum::extract::Path("tracker".to_owned())).await;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let response =
+                    generate_secret(State(state), axum::extract::Path("tracker".to_owned())).await;
 
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+            });
+            Ok(())
+        });
     }
 
-    #[tokio::test]
-    async fn finalize_tracker_rejects_when_the_vault_cannot_open() {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let state = web_state(serve);
+    // Same race as above.
+    #[test]
+    fn finalize_tracker_rejects_when_the_vault_cannot_open() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve);
 
-        let response = finalize_tracker(State(state)).await;
-
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let response = finalize_tracker(State(state)).await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+            });
+            Ok(())
+        });
     }
 
     #[tokio::test]
@@ -3055,5 +3251,110 @@ mod tests {
     fn url_placeholder_names_each_arrs_documented_default_port() {
         assert_eq!(url_placeholder(MediaSource::Sonarr), "http://sonarr:8989");
         assert_eq!(url_placeholder(MediaSource::Directory), "");
+    }
+
+    // ------------------------------------------------ config export / import
+
+    #[tokio::test]
+    async fn export_config_serves_the_effective_config_as_a_downloadable_attachment() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let live = serve.config().await;
+        let state = web_state(serve);
+
+        let response = export_config(State(state)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "application/toml"
+        );
+        assert_eq!(
+            headers.get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"sharerr-config.toml\""
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        // Round-trips through the same validation every import goes through,
+        // and produces exactly what was live at the time of export.
+        let reparsed = crate::settings::validate(&text).unwrap();
+        assert_eq!(reparsed.tag, live.tag);
+        assert_eq!(reparsed.data_dir, live.data_dir);
+    }
+
+    #[tokio::test]
+    async fn import_config_replaces_the_file_and_takes_effect_immediately() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = import_config(
+            State(state.clone()),
+            Form(ImportConfigForm {
+                toml_text: "tag = \"restored-tag\"\n".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains(r#"tag = "restored-tag""#), "{written}");
+        // Live immediately, not only after a restart — matching every other
+        // settings save.
+        assert_eq!(state.serve.config().await.tag, "restored-tag");
+    }
+
+    #[tokio::test]
+    async fn import_config_rejects_invalid_text_without_touching_the_file() {
+        let (_dir, serve) = crate::state::fixtures::ready().await;
+        let config_path = serve.config_path().to_path_buf();
+        let before = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let state = web_state(serve);
+
+        let response = import_config(
+            State(state),
+            Form(ImportConfigForm {
+                toml_text: "this is not valid toml [[[".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap_or_default(),
+            before,
+            "a rejected import must not touch the file at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_config_backs_up_a_file_that_previously_would_not_load() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        std::fs::write(&config_path, "this is not [ valid toml").unwrap();
+        let state = web_state(serve);
+
+        let response = import_config(
+            State(state),
+            Form(ImportConfigForm {
+                toml_text: "tag = \"recovered\"\n".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let backup = config_path.with_extension("toml.invalid");
+        assert!(
+            backup.is_file(),
+            "the unparseable original must be kept, not discarded"
+        );
+        assert!(
+            std::fs::read_to_string(&config_path)
+                .unwrap()
+                .contains(r#"tag = "recovered""#)
+        );
     }
 }

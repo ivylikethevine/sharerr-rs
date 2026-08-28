@@ -7,7 +7,7 @@
 # Tier 1 only, deliberately: this runs the same `cargo test --workspace
 # --all-features --locked` ci.yml's `test` job does, not `--include-ignored`.
 # The tier 2 suite drives a real Docker Compose stack (see CLAUDE.md and
-# run_docker_tests.sh) and stays local and opt-in there too — coverage over a
+# scripts/run_docker_tests.sh) and stays local and opt-in there too — coverage over a
 # suite this workflow cannot run would just be a misleading percentage.
 name: Coverage
 

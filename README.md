@@ -97,7 +97,8 @@ to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
 | Live per-torrent swarm view: who is connected to each torrent right now          | ✅ |
 | Swarm history: an hourly chart, so "quiet now" and "quiet for a fortnight" differ | ✅ |
 | Reachability script for checking from outside your network (`/debug`)            | ✅ |
-| Webhook notifications (generic, Discord, Apprise): sync failed, friend gone quiet | ✅ |
+| Webhook notifications (generic, Discord, Apprise), six triggers, each on its own switch | ✅ |
+| Config backup and restore: download the effective `sharerr.toml`, restore it later    | ✅ |
 | `/metrics` (OpenMetrics) for Prometheus, bearer-token gated and off by default   | ✅ |
 | A dashboard-widget JSON endpoint, for Homepage, Homarr, or Glance                | ✅ |
 | OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)              | ✅ |
@@ -137,8 +138,8 @@ docker run -d --name sharerr \
 
 > Images are only published from a `v*` tag, and there are none yet — no `:latest`
 > and no branch tag exists on GHCR. Until the first release, build the image
-> yourself (`docker build -t sharerr-rs .` at the repository root) and use that
-> name in place of the `ghcr.io/…` reference.
+> yourself (`docker build -f docker/Dockerfile -t sharerr-rs .` at the repository
+> root) and use that name in place of the `ghcr.io/…` reference.
 
 Then open `http://localhost:8477/`. The first visit asks you to create an account —
 whoever gets there first claims the instance, so do it now rather than leaving it
@@ -349,8 +350,8 @@ friend's lighthouse needs nothing checked in Settings, and running one for
 friends needs nothing typed here.
 
 Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`,
-built from `Dockerfile.lighthouse`) is meant to be self-hosted by anyone on
-neutral ground:
+built from `docker/Dockerfile.lighthouse`) is meant to be self-hosted by anyone
+on neutral ground:
 
 ```bash
 docker run -d --name sharerr-lighthouse -p 7878:7878 \
@@ -365,7 +366,7 @@ behind its own approval — a sharerr release is not silently also a lighthouse
 release. To build it yourself instead:
 
 ```bash
-docker build -f Dockerfile.lighthouse -t sharerr-lighthouse .
+docker build -f docker/Dockerfile.lighthouse -t sharerr-lighthouse .
 docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
 ```
 
@@ -438,10 +439,13 @@ answers their pulls and accepts their pushes; it just never initiates.
 
 A friend who stops showing up can also be reported rather than noticed: with a
 webhook URL stored as `notifications.webhook_url` (Settings → Notifications),
-sharerr POSTs there when a sync fails and when a friend has not been seen for
-`notifications.peer_quiet_secs` (a week by default; `0` turns only the
-peer-quiet check off). `notifications.kind` picks the payload shape — `generic`
-JSON, a `discord` webhook, or an `apprise` API server's `/notify`.
+sharerr POSTs there on whichever of six triggers `notifications.triggers` has
+enabled — a sync failing outright, a friend going quiet (after
+`notifications.peer_quiet_secs`, a week by default; `0` turns just that check
+off), the advertised endpoint rotating, items newly shared or failing to
+share (each digested into one notification per sync pass), and a friend's key
+being revoked. `notifications.kind` picks the payload shape — `generic` JSON,
+a `discord` webhook, or an `apprise` API server's `/notify`.
 
 ## Topology
 
@@ -649,8 +653,9 @@ accepting a save that would be silently discarded.
 
 ## Building and testing
 
-Rust **1.98** or newer (the workspace sets `rust-version`; `docker build .` is the
-de-facto MSRV check, since a local toolchain is invariably newer).
+Rust **1.98** or newer (the workspace sets `rust-version`; `docker build -f
+docker/Dockerfile .` is the de-facto MSRV check, since a local toolchain is
+invariably newer).
 
 ```bash
 cargo build
@@ -670,7 +675,7 @@ service clients run against wiremock on loopback and sqlx against
 Sonarr + Radarr + qBittorrent stack:
 
 ```bash
-./run_docker_tests.sh
+./scripts/run_docker_tests.sh
 ```
 
 See [docker/README.md](docker/README.md) for what it does and how to drive it by

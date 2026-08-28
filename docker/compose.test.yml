@@ -1,6 +1,6 @@
 # A disposable *arr stack for exercising sharerr against real services.
 #
-#   ./run_docker_tests.sh
+#   ./scripts/run_docker_tests.sh
 #
 # This is the tier-2, opt-in stack. The default `cargo test` suite is hermetic and
 # needs none of this.
@@ -105,7 +105,7 @@ services:
     ports:
       - "127.0.0.1:18080:8080"
 
-  # Opt-in. Neither `run_docker_tests.sh` nor the e2e suite touches Prowlarr — it
+  # Opt-in. Neither `scripts/run_docker_tests.sh` nor the e2e suite touches Prowlarr — it
   # exists for the manual "add a Generic Torznab indexer" exercise in README.md.
   # Starting it by default cost a fifth container's startup latency and memory on
   # every run for nothing. Bring it up with:
@@ -127,7 +127,7 @@ services:
   sharerr:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: sharerr-test-sharerr
     depends_on: [sonarr, radarr, lidarr, qbittorrent]
 

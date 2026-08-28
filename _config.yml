@@ -2,6 +2,11 @@ title: sharerr
 description: Share your media library with friends, over the tools you already run.
 theme: minima
 
+# No Gemfile, deliberately: .github/workflows/pages.yml builds with
+# actions/jekyll-build-pages, which always builds against its own pre-installed
+# github-pages gem — the same Jekyll and plugin set github.com's own Pages
+# service runs — and never actually installs from a Gemfile even if one is
+# present. Every plugin and theme below already ships in that bundle.
 plugins:
   - jekyll-relative-links
   - jekyll-readme-index
@@ -36,14 +41,9 @@ exclude:
   - migrations/
   - tests/
   - target/
-  - run_docker_tests.sh
-  - Dockerfile
-  - Dockerfile.lighthouse
-  - Justfile
+  - scripts/
   - Cargo.toml
   - Cargo.lock
   - deny.toml
   - rustfmt.toml
   - CLAUDE.md
-  - Gemfile
-  - Gemfile.lock

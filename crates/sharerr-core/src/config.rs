@@ -241,6 +241,9 @@ pub mod config_paths {
         NOTIFICATIONS_KIND = "notifications.kind";
         /// How long a peer must go unseen before "gone quiet" fires, in seconds.
         NOTIFICATIONS_PEER_QUIET_SECS = "notifications.peer_quiet_secs";
+        /// Which [`super::NotificationTrigger`]s are enabled, as an array of
+        /// their wire strings.
+        NOTIFICATIONS_TRIGGERS = "notifications.triggers";
 
         /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
         /// see [`super::MetricsConfig`]. The bearer token they require is a vault
@@ -938,6 +941,10 @@ pub struct NotificationsConfig {
     /// `0` turns the peer-quiet check off without touching sync-failure
     /// notifications, which are unconditional once a webhook is configured.
     pub peer_quiet_secs: u64,
+    /// Which triggers actually send, once a webhook is configured. Every
+    /// trigger not listed here is silent regardless of what fires it — see
+    /// [`NotificationTrigger`] and `notify::send`.
+    pub triggers: Vec<NotificationTrigger>,
 }
 
 impl Default for NotificationsConfig {
@@ -949,6 +956,62 @@ impl Default for NotificationsConfig {
             // that "did Sam's instance die" is answered before it has been true
             // for a month.
             peer_quiet_secs: 7 * 24 * 3600,
+            // Everything, matching this project's existing behavior before a
+            // per-trigger toggle existed at all: notifications fire
+            // unconditionally once a webhook is set, and an operator narrows
+            // that down rather than opting each one in from nothing.
+            triggers: NotificationTrigger::ALL.to_vec(),
+        }
+    }
+}
+
+/// One thing `notify::send` can be called about. Whether it actually sends
+/// depends on [`NotificationsConfig::triggers`] — a webhook being configured
+/// is necessary but not sufficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationTrigger {
+    /// A sync pass failed outright — see `commands::serve::background`.
+    SyncFailed,
+    /// A friend has not been seen in longer than
+    /// [`NotificationsConfig::peer_quiet_secs`] — see `notify::check_quiet_peers`.
+    PeerQuiet,
+    /// The advertised endpoint (gluetun-resolved IP/port) changed — see
+    /// `gluetun::poll_once`. Tracker poller only; the torrent client's own
+    /// tunnel is never advertised to friends.
+    EndpointRotated,
+    /// One or more items were newly shared this sync pass, digested into one
+    /// notification rather than one per item — see `commands::serve::background`.
+    ItemsShared,
+    /// One or more items failed to share this sync pass, digested the same
+    /// way as `ItemsShared`.
+    ItemFailed,
+    /// A friend's key was revoked — see `web::peers::revoke`.
+    PeerRevoked,
+}
+
+crate::str_enum!(NotificationTrigger {
+    SyncFailed => "sync_failed",
+    PeerQuiet => "peer_quiet",
+    EndpointRotated => "endpoint_rotated",
+    ItemsShared => "items_shared",
+    ItemFailed => "item_failed",
+    PeerRevoked => "peer_revoked",
+});
+
+impl NotificationTrigger {
+    /// The human-readable event text a notification payload actually carries
+    /// — distinct from [`Self::as_str`], which is the wire spelling stored in
+    /// `notifications.triggers` and has no business appearing in a message a
+    /// person reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SyncFailed => "sync failed",
+            Self::PeerQuiet => "peer gone quiet",
+            Self::EndpointRotated => "advertised endpoint rotated",
+            Self::ItemsShared => "items newly shared",
+            Self::ItemFailed => "items failed to share",
+            Self::PeerRevoked => "friend revoked",
         }
     }
 }
@@ -1226,5 +1289,43 @@ mod tests {
         for path in config_paths::ALL {
             assert!(seen.insert(*path), "{path:?} is listed twice");
         }
+    }
+
+    #[test]
+    fn notification_trigger_names_round_trip() {
+        for trigger in NotificationTrigger::ALL {
+            assert_eq!(NotificationTrigger::parse(trigger.as_str()), Some(*trigger));
+        }
+        assert_eq!(NotificationTrigger::parse("carrier-pigeon"), None);
+    }
+
+    /// Every trigger needs a label distinct from the others, or two different
+    /// events would read identically in a notification.
+    #[test]
+    fn notification_trigger_labels_are_distinct_and_human_readable() {
+        let mut seen = std::collections::BTreeSet::new();
+        for trigger in NotificationTrigger::ALL {
+            let label = trigger.label();
+            assert_ne!(
+                label,
+                trigger.as_str(),
+                "{trigger:?}'s label should read as prose, not repeat its wire spelling"
+            );
+            assert!(
+                seen.insert(label),
+                "{label:?} is used by more than one trigger"
+            );
+        }
+    }
+
+    /// Every existing instance's `sharerr.toml` predates this field entirely —
+    /// the default must keep firing on everything it already fired on, or an
+    /// upgrade silently goes quiet on notifications an operator never touched.
+    #[test]
+    fn notifications_default_enables_every_trigger() {
+        assert_eq!(
+            NotificationsConfig::default().triggers,
+            NotificationTrigger::ALL.to_vec()
+        );
     }
 }

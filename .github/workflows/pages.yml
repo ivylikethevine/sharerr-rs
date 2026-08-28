@@ -14,7 +14,6 @@ on:
       - "README.md"
       - "docs/**"
       - "_config.yml"
-      - "Gemfile"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 

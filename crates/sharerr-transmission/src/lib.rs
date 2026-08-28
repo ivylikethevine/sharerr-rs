@@ -559,9 +559,9 @@ mod tests {
 
     fn client(server: &MockServer) -> TransmissionClient {
         let base = sharerr_testkit::mock::base_url(server);
-        // codeql[rust/hard-coded-cryptographic-value] -- endpoint is a
-        // wiremock::MockServer on loopback that answers every POST
-        // regardless of Authorization; no deployment accepts this password.
+        // A wiremock::MockServer on loopback that answers every POST regardless
+        // of Authorization; no deployment accepts this password.
+        // codeql[rust/hard-coded-cryptographic-value]
         TransmissionClient::new(&base, "admin", SecretString::from("pw")).unwrap()
     }
 
@@ -628,9 +628,9 @@ mod tests {
     async fn nothing_listening_is_reported_as_unreachable() {
         let port = sharerr_testkit::net::closed_port();
         let base = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        // codeql[rust/hard-coded-cryptographic-value] -- deliberately
-        // minimal placeholders: the socket is a closed port, so no request
-        // is ever built from them.
+        // Deliberately minimal placeholders: the socket is a closed port, so no
+        // request is ever built from them.
+        // codeql[rust/hard-coded-cryptographic-value]
         let client = TransmissionClient::new(&base, "admin", SecretString::from("pw")).unwrap();
 
         let err = client.version().await.unwrap_err();
@@ -969,9 +969,9 @@ mod tests {
     #[test]
     fn a_subpath_base_url_keeps_its_prefix() {
         let base = Url::parse("http://box.lan/transmission-proxy").unwrap();
-        // codeql[rust/hard-coded-cryptographic-value] -- arbitrary
-        // placeholders: this test only checks URL-join behavior, and no
-        // request is ever sent.
+        // Arbitrary placeholders: this test only checks URL-join behavior, and
+        // no request is ever sent.
+        // codeql[rust/hard-coded-cryptographic-value]
         let client = TransmissionClient::new(&base, "a", SecretString::from("b")).unwrap();
         assert_eq!(
             client.endpoint.as_str(),
@@ -983,10 +983,10 @@ mod tests {
     #[test]
     fn debug_does_not_leak_the_password() {
         let base = Url::parse("http://box.lan").unwrap();
-        // codeql[rust/hard-coded-cryptographic-value] -- the literal is the
-        // assertion: this test proves Debug redacts the password, so it has
-        // to be a known value.
+        // The literal is the assertion: this test proves Debug redacts the
+        // password, so it has to be a known value.
         let client =
+            // codeql[rust/hard-coded-cryptographic-value]
             TransmissionClient::new(&base, "admin", SecretString::from("hunter2")).unwrap();
         let rendered = format!("{client:?}");
         assert!(!rendered.contains("hunter2"), "{rendered}");

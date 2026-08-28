@@ -67,56 +67,39 @@ and may have drifted.
 
 ### Medium — a subsystem, or one shape repeated across several files
 
-3. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
-   two things: a sync that failed, and a friend gone quiet. Everything routes
-   through a single `send()`, so adding triggers is cheap — the cost is not
-   plumbing, it is restraint. The ones that seem worth having, on the test of
-   _would an operator want to be told without having to look_: an item newly
-   shared (digested, not one message per file), an item that failed and why,
-   a new friend's first contact, a friend revoked, the tracker becoming
-   unreachable, and a `[[library]]` path that has stopped being readable. The
-   strongest of them is **the advertised endpoint rotating**. When gluetun
-   hands over a new IP or forwarded port, every announce URL sharerr publishes
-   moves with it — that is the single event most likely to break a friend's
-   downloads while everything on this end still looks healthy. Anything added
-   here needs a per-trigger enable set under `[notifications]`; without one
-   this becomes noise and the operator mutes the whole channel, including the
-   two triggers that were worth having in the first place. Also worth
-   recording so it is not mistaken for separate work: an Uptime-Kuma-style
-   heartbeat push is one more trigger through the same `send()`, not a
-   feature of its own.
+3. **The remaining notification triggers** — `[notifications]` now has a
+   per-trigger enable set and fires on six events: a sync failing outright, a
+   friend going quiet, the advertised endpoint rotating, items newly shared,
+   items failing to share, and a friend's key being revoked. Four candidates
+   from the original review are still open, each needing more than a
+   `notify::send()` call beside code that already runs: **a new friend's
+   first contact** (needs a check for "is this the very first sighting"
+   before `touch_peer`'s own throttle-window logic, which today conflates the
+   two); **the tracker becoming unreachable** and **a `[[library]]` path
+   going unreadable** (both need a new periodic polling loop, modelled on the
+   existing `quiet_peers_loop`, that diffs against last-known state so a
+   persistently-broken thing does not notify every cycle); and an
+   **Uptime-Kuma-style heartbeat push** (needs a trigger built from scratch,
+   with no existing detection to hang off of).
 
-4. **Config backup and restore** — master-key loss is unrecoverable by
-   design, and the vault is doing exactly what it should. What is missing is
-   the _other_ half: a way to capture the configuration — sources, mappings,
-   peers, scopes — so that rebuilding an instance does not mean retyping
-   everything from screenshots. Secrets stay out of any export, and that is
-   the point rather than a limitation: an export containing recoverable
-   credentials would be a plaintext copy of the vault, which is the thing the
-   vault exists to prevent. A restore path therefore ends with re-entering
-   secrets, and the documentation should say so plainly instead of leaving
-   it to be discovered.
-
-5. **One gluetun template, not two parallel copies** — `settings.html`
-   carries twelve near-identical Askama fields, six per gluetun section
-   (the main poller and the client-only poller). The functional
-   duplication behind it is already gone: `sharerr::gluetun::GluetunTarget`
-   covers config, secret, and config-path lookups for both slots, and
-   `save_gluetun_section` takes a `GluetunTarget` instead of loose
-   constants. What is left is purely template and view-model — an Askama
-   macro parameterised by section, plus the Rust-side struct that currently
-   repeats each field by name. Left alone for now: that is a materially
-   bigger, riskier change for a cosmetic-only win once the functional
-   duplication it would have been fixing is already gone.
+4. **Peer and scope backup** — the settings page's "Backup and restore"
+   section now covers `sharerr.toml` — the effective config, including
+   anything set via `SHARERR_*` environment variables, which the raw file on
+   disk never contains. What it does not cover: the peers table, entirely in
+   SQLite. A friend's key itself can never be exported regardless of what
+   backs it up — it is stored as a one-way hash, by design — so a restore
+   already ends with re-issuing keys; what is still missing is exporting the
+   rest of a friend's row (label, scope) so re-adding them after a full
+   data-directory loss is not typed from memory.
 
 ### Large — a protocol, a data model, or a release process
 
-6. **Transfer accounting** — the largest gap between what sharerr _knows_
+5. **Transfer accounting** — the largest gap between what sharerr _knows_
    and what it _keeps_; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-7. **Request flow** — a new inbound request queue and approve step, touching
+6. **Request flow** — a new inbound request queue and approve step, touching
    the sync engine and the web UI on both sides of a friendship; see
    [Functionality](#functionality).
 

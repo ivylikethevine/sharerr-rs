@@ -79,7 +79,7 @@ COPY . .
 #
 # Note this does not help GitHub Actions: the `type=gha` cache backend does not
 # persist mount contents, so CI still builds cold. It is for local builds — which
-# is where `docker build .` gets run as the MSRV check.
+# is where `docker build -f docker/Dockerfile .` gets run as the MSRV check.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=registry-$TARGETARCH \
     --mount=type=cache,target=/src/target,id=target-$TARGETARCH \
     TRIPLE="$(cat /triple)" \

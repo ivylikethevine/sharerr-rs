@@ -66,7 +66,7 @@ the working `.torrent` enclosure and stalled forever. The fix there was a
 Prowlarr in front of the requesting Radarr, with its `preferMagnetUrl`
 pinned to `false` — the one place that preference is actually
 configurable; see `docker/README.md`'s "The two-instance stack" for how
-`run_docker_tests_two_instance.sh` exercises this.
+`scripts/run_docker_tests_two_instance.sh` exercises this.
 
 That fix does nothing for a friend who points Radarr or Sonarr *directly*
 at a sharerr feed, no Prowlarr in between: their app decides magnet-or-`.torrent`

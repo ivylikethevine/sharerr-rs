@@ -221,7 +221,7 @@ jobs:
           persist-credentials: false
 
       # Would have caught the secret spliced into a remote `sh -c` string.
-      - run: shellcheck run_docker_tests.sh run_docker_tests_two_instance.sh
+      - run: shellcheck scripts/run_docker_tests.sh scripts/run_docker_tests_two_instance.sh scripts/screenshot_pages.sh
 
       # Schema-validates the compose file without needing the images or a daemon.
       - run: docker compose -f docker/compose.test.yml config -q
@@ -341,7 +341,7 @@ jobs:
         run: |
           set -uo pipefail
           : >"$RUNNER_TEMP/hadolint.out"
-          hadolint -c .hadolint.yaml Dockerfile Dockerfile.lighthouse >>"$RUNNER_TEMP/hadolint.out" 2>&1
+          hadolint -c .hadolint.yaml docker/Dockerfile docker/Dockerfile.lighthouse >>"$RUNNER_TEMP/hadolint.out" 2>&1
           status=$?
           if [ -s "$RUNNER_TEMP/hadolint.out" ]; then
             cat "$RUNNER_TEMP/hadolint.out"

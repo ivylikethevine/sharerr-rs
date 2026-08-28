@@ -454,6 +454,12 @@ async fn poll_once(
                 if target == GluetunTarget::Tracker {
                     tracing::info!("waking the sync loop to re-announce and rewrite torrents");
                     state.request_sync();
+                    crate::notify::send(
+                        state,
+                        sharerr_core::config::NotificationTrigger::EndpointRotated,
+                        &format!("advertised endpoint is now {base}"),
+                    )
+                    .await;
                 }
             }
         }
@@ -880,6 +886,16 @@ mod tests {
                 )
                 .await;
 
+                // A separate server from the gluetun control server above — this
+                // one stands in for the notification webhook, so an endpoint
+                // change can be asserted to have fired one.
+                let webhook = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&webhook)
+                    .await;
+
                 let config = Config {
                     data_dir: jail.directory().to_path_buf(),
                     gluetun: GluetunConfig {
@@ -897,6 +913,12 @@ mod tests {
                 .unwrap();
                 vault
                     .put(target.api_key_secret(), &SecretString::from("a-key"))
+                    .unwrap();
+                vault
+                    .put(
+                        sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &SecretString::from(webhook.uri()),
+                    )
                     .unwrap();
                 drop(vault);
 
@@ -920,6 +942,8 @@ mod tests {
                     Some("http://203.0.113.9:41234/"),
                     "a successful resolve must advertise the new endpoint"
                 );
+                // The webhook mock's own `expect(1)` is checked on drop, proving
+                // the EndpointRotated notification actually fired.
             });
             Ok(())
         });

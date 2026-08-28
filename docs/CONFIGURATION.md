@@ -25,6 +25,7 @@ default, and what sets it.
 - [`[checks]`](#checks)
 - [`[notifications]`](#notifications)
 - [`[metrics]`](#metrics)
+- [Backup and restore](#backup-and-restore)
 - [Vault secrets](#vault-secrets)
 - [Environment variable overrides](#environment-variable-overrides)
 
@@ -270,13 +271,20 @@ See the README's
 
 ## `[notifications]`
 
-A webhook fired on sync failure or a peer going quiet — see the README's
+A webhook fired on whichever triggers below are enabled — see the README's
 mentions under ["Friends finding each other"](../README.md#friends-finding-each-other).
 
 | TOML key                        | Type                                | Default           | Notes                                                                           |
 | ------------------------------- | ----------------------------------- | ----------------- | ------------------------------------------------------------------------------- |
 | `notifications.kind`            | `generic` \| `discord` \| `apprise` | `generic`         | Which payload shape to send.                                                    |
-| `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off without touching sync-failure notifications. |
+| `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.            |
+| `notifications.triggers`        | array of strings                    | all six, below     | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
+
+The six triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
+`endpoint_rotated` (the gluetun-resolved advertised address changing —
+usually the one most likely to silently break a friend's downloads),
+`items_shared` and `item_failed` (each digested into one notification per
+sync pass rather than one per item), and `peer_revoked`.
 
 Vault secret: `notifications.webhook_url` — in the vault rather than
 `sharerr.toml` even though it is not credential-shaped at a glance, because a
@@ -300,6 +308,24 @@ sent as `Authorization: Bearer <token>`. There is no unauthenticated form of
 either endpoint; a request with a missing or wrong token gets the same `404`
 as when `metrics.enabled` is `false`, so a probe cannot tell "off" from
 "wrong token" from "instance does not exist".
+
+## Backup and restore
+
+The settings page's "Backup and restore" section downloads the *effective*
+config — defaults, `sharerr.toml`, and any `SHARERR_*` overrides, merged —
+rather than the raw file, since an env-overridden field is never written to
+the file at all (see "How configuration is layered" above). Restoring
+replaces `sharerr.toml` wholesale after validating the pasted document the
+same way a normal save does, moving the previous file aside as
+`sharerr.toml.invalid` rather than overwriting it.
+
+Deliberately narrower than "everything": nothing in the vault (API keys, the
+tracker token, this instance's Ed25519 signing key) or the peers table
+(friends and their scopes) is exported or touched by an import — both live
+outside `sharerr.toml` entirely. Those survive a config restore untouched as
+long as the data directory itself isn't lost; if it is, a restore ends with
+re-entering secrets and re-adding friends, since a friend's key is stored as
+a one-way hash and cannot be recovered from anywhere.
 
 ## Vault secrets
 

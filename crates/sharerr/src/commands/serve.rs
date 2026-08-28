@@ -310,11 +310,17 @@ async fn background(state: Arc<ServeState>) {
             Ok(report) => {
                 tracing::info!(%report, "sync complete");
                 state.note_sync_success().await;
+                notify_sync_report(&state, &report).await;
             }
             Err(err) => {
                 let reason = format!("{err:#}");
                 tracing::error!(error = reason, "sync failed");
-                crate::notify::send(&state, "sync failed", &reason).await;
+                crate::notify::send(
+                    &state,
+                    sharerr_core::config::NotificationTrigger::SyncFailed,
+                    &reason,
+                )
+                .await;
                 state.note_sync_failure().await;
             }
         }
@@ -328,6 +334,31 @@ async fn background(state: Arc<ServeState>) {
         state
             .sleep_or_wake(state.sync_retry_delay(interval).await)
             .await;
+    }
+}
+
+/// The two digest triggers a successful pass can fire — split out of
+/// `background`'s match arm so the gating logic is testable against a
+/// synthetic [`crate::sync::SyncReport`] without driving a real sync pass.
+async fn notify_sync_report(state: &ServeState, report: &crate::sync::SyncReport) {
+    if report.added > 0 {
+        crate::notify::send(
+            state,
+            sharerr_core::config::NotificationTrigger::ItemsShared,
+            &format!("{} item(s) newly shared", report.added),
+        )
+        .await;
+    }
+    if report.failed > 0 {
+        crate::notify::send(
+            state,
+            sharerr_core::config::NotificationTrigger::ItemFailed,
+            &format!(
+                "{} item(s) failed to share this pass — see the items page for details",
+                report.failed
+            ),
+        )
+        .await;
     }
 }
 
@@ -407,7 +438,7 @@ async fn ready(State(state): State<Arc<ServeState>>) -> (StatusCode, String) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use crate::state::fixtures::{unconfigured, unloadable};
@@ -685,6 +716,65 @@ mod tests {
             state.sync_retry_delay(interval).await < interval,
             "a failed pass must shorten the next attempt's wait"
         );
+    }
+
+    /// The digest notifications `background` fires on a successful pass —
+    /// tested directly against a synthetic report rather than by driving a
+    /// real share through a syncer, which `notify::send`'s own tests already
+    /// cover for the trigger-gating and payload shape.
+    #[test]
+    fn notify_sync_report_digests_added_and_failed_into_two_notifications() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = Config {
+                data_dir: dir.clone(),
+                ..Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(2)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                notify_sync_report(
+                    &state,
+                    &crate::sync::SyncReport {
+                        added: 3,
+                        failed: 1,
+                        ..Default::default()
+                    },
+                )
+                .await;
+                // The mock's `expect(2)` — one for ItemsShared, one for
+                // ItemFailed — is checked on drop.
+            });
+            Ok(())
+        });
+    }
+
+    /// The all-zero pass most sync runs actually are — nothing added, nothing
+    /// failed — must not notify at all.
+    #[tokio::test]
+    async fn notify_sync_report_is_silent_on_an_unchanged_pass() {
+        let (_dir, state) = crate::state::fixtures::unconfigured();
+        // No master key, so a webhook lookup would fail anyway — this proves
+        // the counts gate it before that, not incidentally.
+        notify_sync_report(&state, &crate::sync::SyncReport::default()).await;
     }
 
     /// `run`'s startup sequence — building the router, binding listeners, and

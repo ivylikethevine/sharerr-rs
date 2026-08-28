@@ -8,13 +8,20 @@
 //! a bug report; the vault is the one place this project already keeps that class
 //! of value. See [`sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
 //!
-//! # Two triggers, one sender
+//! # Several triggers, one sender
 //!
-//! [`send`] is the one place a request actually goes out, called from two very
-//! different callers: `commands::serve`'s background loop, on a sync that failed,
-//! and [`quiet_peers_loop`] here, on a timer, for a peer whose `last_seen_at` has
-//! not moved in longer than `notifications.peer_quiet_secs`. Neither trigger
-//! blocks on the other, and neither failing to reach the webhook stops anything
+//! [`send`] is the one place a request actually goes out for every trigger but
+//! one — [`quiet_peers_loop`] here calls `Webhook::post` directly instead, since
+//! it already resolves the webhook once per tick and reuses it across every
+//! quiet peer found, where `send` would resolve it again per call. Every
+//! trigger checks [`sharerr_core::config::NotificationsConfig::triggers`]
+//! before anything else, so a disabled one costs nothing beyond an in-memory
+//! read. Callers span `commands::serve`'s background loop (a sync that failed,
+//! or a digest of what it added/failed), [`quiet_peers_loop`] itself (a peer
+//! whose `last_seen_at` has not moved in longer than
+//! `notifications.peer_quiet_secs`), `gluetun::poll_once` (the advertised
+//! endpoint rotating), and `web::peers::revoke` (a friend's key revoked). None
+//! block on each other, and none failing to reach the webhook stops anything
 //! else sharerr does — a notification is best-effort by nature.
 
 use std::collections::HashMap;
@@ -22,7 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use secrecy::ExposeSecret;
-use sharerr_core::config::{NotifyKind, secret_keys};
+use sharerr_core::config::{NotificationTrigger, NotifyKind, secret_keys};
 use sharerr_core::endpoint::now_epoch;
 use tokio::sync::RwLock;
 
@@ -113,14 +120,30 @@ async fn webhook(state: &ServeState) -> Option<Webhook> {
     })
 }
 
-/// Send one notification, if a webhook is configured. Never fails outward: a
-/// misconfigured or unreachable webhook is logged and otherwise ignored, the
-/// same as any other best-effort side channel in this codebase.
-pub async fn send(state: &ServeState, event: &str, message: &str) {
+/// Send one notification, if a webhook is configured and `trigger` is
+/// enabled. Never fails outward: a misconfigured or unreachable webhook is
+/// logged and otherwise ignored, the same as any other best-effort side
+/// channel in this codebase.
+pub async fn send(state: &ServeState, trigger: NotificationTrigger, message: &str) {
+    if !trigger_enabled(state, trigger).await {
+        return;
+    }
     let Some(webhook) = webhook(state).await else {
         return;
     };
-    webhook.post(event, message).await;
+    webhook.post(trigger.label(), message).await;
+}
+
+/// Whether `trigger` is in [`sharerr_core::config::NotificationsConfig::triggers`]
+/// — checked ahead of resolving the webhook itself, so a disabled trigger
+/// costs nothing beyond reading the in-memory config.
+async fn trigger_enabled(state: &ServeState, trigger: NotificationTrigger) -> bool {
+    state
+        .config()
+        .await
+        .notifications
+        .triggers
+        .contains(&trigger)
 }
 
 impl Webhook {
@@ -168,7 +191,7 @@ pub async fn quiet_peers_loop(state: Arc<ServeState>) {
 
 async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
     let threshold = state.config().await.notifications.peer_quiet_secs;
-    if threshold == 0 {
+    if threshold == 0 || !trigger_enabled(state, NotificationTrigger::PeerQuiet).await {
         return Ok(());
     }
     // A threshold configured but no webhook to report through is the same as
@@ -204,7 +227,7 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
 
         webhook
             .post(
-                "peer gone quiet",
+                NotificationTrigger::PeerQuiet.label(),
                 &format!(
                     "{} has not been seen since {}",
                     peer.label,
@@ -434,7 +457,110 @@ mod tests {
                     .unwrap();
                 drop(vault);
 
-                send(&state, "sync failed", "could not reach qBittorrent").await;
+                send(
+                    &state,
+                    NotificationTrigger::SyncFailed,
+                    "could not reach qBittorrent",
+                )
+                .await;
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn send_uses_the_triggers_label_as_the_event_text() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_json(serde_json::json!({
+                        "event": "friend revoked",
+                        "message": "revoked friend #7's key"
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                send(
+                    &state,
+                    NotificationTrigger::PeerRevoked,
+                    "revoked friend #7's key",
+                )
+                .await;
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn send_does_nothing_when_the_trigger_is_disabled() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                notifications: sharerr_core::config::NotificationsConfig {
+                    // Every trigger but the one under test — proves `send` checks
+                    // the specific trigger, not merely "is anything enabled".
+                    triggers: sharerr_core::config::NotificationTrigger::ALL
+                        .iter()
+                        .copied()
+                        .filter(|t| *t != NotificationTrigger::EndpointRotated)
+                        .collect(),
+                    ..Default::default()
+                },
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                // No `.expect(1)` — any request at all fails the test via the
+                // server's own drop-time verification of zero-or-more, so the
+                // absence of a mount at all would also pass; mount one anyway so
+                // a regression shows as a real assertion failure, not a hang.
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(0)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                send(
+                    &state,
+                    NotificationTrigger::EndpointRotated,
+                    "advertised endpoint is now 203.0.113.5:51413",
+                )
+                .await;
             });
             Ok(())
         });
@@ -507,7 +633,7 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         // No master key is set, so `webhook()` cannot open the vault — the
         // same "not configured" outcome an operator who never set one sees.
-        send(&serve, "sync failed", "whatever").await;
+        send(&serve, NotificationTrigger::SyncFailed, "whatever").await;
     }
 
     #[tokio::test]
