@@ -192,6 +192,21 @@ pin must satisfy that regex, and must sit in a directory `dependabot.yml` lists
 — `/docker/deploy/*` matches the directories _under_ `deploy`, not `deploy`
 itself, which is why `/docker/deploy` is listed separately.
 
+**CodeQL (`.github/workflows/codeql.yml`) has no in-source suppression
+mechanism.** A `// codeql[rule-id]` or `// lgtm[rule-id]` comment above a flagged
+line does nothing — GitHub code scanning only recognizes a dismissal made in the
+Security tab (or the equivalent REST/`gh api` call), never a source comment. Nine
+such dead comments sat in the tree for a while before this was noticed, none of
+them suppressing anything. There are exactly two real options for a finding: fix
+the code so the value it flags no longer exists (see `sharerr_testkit::mock::rpc_credentials`,
+which replaced hard-coded Basic Auth literals across the rTorrent and
+Transmission test suites), or dismiss it in the Security tab with a reason and
+record *why* somewhere durable — `docs/SECURITY.md`'s "What is out of scope" for
+the `rust/path-injection` alerts is the model. A dismissal is also
+fingerprint-bound to the flagged line, not the underlying pattern: moving a
+literal to a new file (a crate split, a rename) resets the fingerprint and the
+same finding reappears as "new" even though nothing about it changed.
+
 **Three scheduled workflows notify by keeping one issue current**, rather than by
 turning a run red: `image-scan.yml`'s `pins` job, `tool-versions.yml`, and
 `advisories.yml`. Each opens a single labelled issue when its finding appears,

@@ -289,10 +289,8 @@ mod tests {
 
     fn client(server: &MockServer) -> RtorrentClient {
         let endpoint = sharerr_testkit::mock::base_url(server);
-        // A wiremock::MockServer on loopback that answers every POST regardless
-        // of Authorization; no deployment accepts this password.
-        // codeql[rust/hard-coded-cryptographic-value]
-        RtorrentClient::new(&endpoint, "sharerr", SecretString::from("pw")).unwrap()
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        RtorrentClient::new(&endpoint, &user, SecretString::from(pw)).unwrap()
     }
 
     fn scalar_response(inner: &str) -> String {
@@ -372,10 +370,9 @@ mod tests {
     async fn nothing_listening_is_reported_as_unreachable() {
         let port = sharerr_testkit::net::closed_port();
         let endpoint = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        // Deliberately minimal placeholders: the socket is a closed port, so no
-        // request is ever built from them.
-        // codeql[rust/hard-coded-cryptographic-value]
-        let client = RtorrentClient::new(&endpoint, "a", SecretString::from("b")).unwrap();
+        // The socket is a closed port, so no request is ever built from these.
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        let client = RtorrentClient::new(&endpoint, &user, SecretString::from(pw)).unwrap();
 
         let err = client.version().await.unwrap_err();
         assert!(err.is_unreachable(), "{err}");
@@ -637,13 +634,10 @@ mod tests {
     #[test]
     fn debug_does_not_leak_the_password() {
         let endpoint = Url::parse("http://box.lan/RPC2").unwrap();
-        // The literal is the assertion: this test proves Debug redacts the
-        // password, so it has to be a known value.
-        let client =
-            // codeql[rust/hard-coded-cryptographic-value]
-            RtorrentClient::new(&endpoint, "admin", SecretString::from("hunter2")).unwrap();
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        let client = RtorrentClient::new(&endpoint, &user, SecretString::from(pw.clone())).unwrap();
         let rendered = format!("{client:?}");
-        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains(&pw), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
     }
 

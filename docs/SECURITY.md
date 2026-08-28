@@ -100,3 +100,15 @@ Vulnerabilities in a service sharerr _talks to_ (Sonarr, Radarr, qBittorrent,
 Transmission, rTorrent, Prowlarr, gluetun) belong to those projects, not this
 one — unless sharerr is the thing misusing their API in a way that creates
 the exposure.
+
+**The `sharerr.toml` path CodeQL's `rust/path-injection` query flags in
+`config_io.rs`.** The path a `ConfigFile` opens or writes always traces back to
+`ServeState::config_path()`, which is set once at process start from the `-c` /
+`--config` CLI flag or `SHARERR_CONFIG` env var (`cli.rs`) and never
+reassigned. No HTTP handler passes a path in — the settings forms submit TOML
+text and field values, never a path (`web/settings.rs`'s `import_config` and
+`prepare_config`). Whoever controls that flag or that env var already controls
+the process, so there is no privilege boundary here to enforce; these alerts
+are dismissed as won't-fix rather than coded around, since a containment check
+would only break legitimate `--config` values pointing outside a fixed
+directory. See `CLAUDE.md`'s CodeQL note for how alert dismissal is tracked.

@@ -113,7 +113,6 @@ static DECOY_HASH: LazyLock<String> = LazyLock::new(|| {
     // Deliberately not a real hash: this string is chosen specifically because
     // `PasswordHash::new` rejects it, so nothing can ever verify against it. It is
     // reached only when hashing the decoy password above already failed.
-    // codeql[rust/hard-coded-cryptographic-value]
     blocking_hash("decoy — matches nothing").unwrap_or_else(|_| "$argon2id$invalid".to_owned())
 });
 
