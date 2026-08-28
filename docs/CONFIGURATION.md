@@ -321,11 +321,53 @@ same way a normal save does, moving the previous file aside as
 
 Deliberately narrower than "everything": nothing in the vault (API keys, the
 tracker token, this instance's Ed25519 signing key) or the peers table
-(friends and their scopes) is exported or touched by an import — both live
-outside `sharerr.toml` entirely. Those survive a config restore untouched as
-long as the data directory itself isn't lost; if it is, a restore ends with
-re-entering secrets and re-adding friends, since a friend's key is stored as
-a one-way hash and cannot be recovered from anywhere.
+(friends and their scopes) is exported or touched by this section's
+import/export — both live outside `sharerr.toml` entirely, and neither
+survives losing the data directory on their own. The peers table has its own,
+separate restore path — see below.
+
+### Restoring friends after a full data-directory loss
+
+A friend's own key *into* this instance is stored as a one-way hash and can
+never be recovered — that part always means reissuing a fresh key and
+re-sending it, no matter what. Everything else about a friendship — its
+label, scope, last-known address, and the gossip key *they* issued to *this*
+instance (a credential this instance genuinely does hold, in the vault) —
+can be restored.
+
+**Before losing the data directory**, the Friends page has its own
+"export as backup block" link, next to the friends list. It downloads a
+`sharerr-peers-export.toml` carrying every active (non-revoked) friend as a
+`[[peers]]` array — save that file somewhere outside sharerr, the same way
+you would any other credential (a password manager, an offline backup). A
+revoked friend is deliberately left out: importing this block always creates
+an *active* peer, and a revoked friend flowing back through it would silently
+un-revoke them. If the vault cannot be opened at export time, the file still
+downloads with everything except gossip keys, and says so in a leading
+comment.
+
+**To restore**, hand-add that file's `[[peers]]` array into the new
+instance's `sharerr.toml` — or write one from scratch, if nothing was ever
+exported:
+
+```toml
+[[peers]]
+label = "sam"
+scope = "all"                                 # "all", "tv", "movies", "music", or "books"
+last_addr = "203.0.113.5:51413"               # optional
+gossip_url = "https://sam.example/sharerr"    # optional
+gossip_key = "the key sam issued this instance"  # optional
+```
+
+This is read exactly once, on the next `sharerr serve` start, and the block
+is removed from `sharerr.toml` the moment it has been applied — successfully
+imported entries and skipped ones (a duplicate label, most likely) alike, so
+the same block is never replayed. Until that first start after restoring it,
+`[[peers]]` is the one place a secret is allowed to sit in `sharerr.toml`
+at all; if the vault cannot be opened yet (no `SHARERR_MASTER_KEY`) and any
+entry carries a `gossip_key`, nothing is imported and the block is left in
+place to retry, rather than importing everything except the one credential
+that had nowhere to go.
 
 ## Vault secrets
 

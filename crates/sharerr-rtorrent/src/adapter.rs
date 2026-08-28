@@ -236,18 +236,24 @@ impl TorrentClient for RtorrentClient {
         // tier they were added at and are simply skipped once group 0
         // answers.
         //
-        // Sequential, deliberately: insertion order at group 0 is what
-        // decides these URLs' relative priority within the tier, and
-        // rTorrent has no way to state that order except "call
-        // d.tracker.insert in the order you want it applied" — running these
-        // concurrently would let the daemon receive them in any order.
-        for url in urls {
-            self.call(
-                "d.tracker.insert",
-                &[Param::Str(hash), Param::Int(0), Param::Str(url.as_str())],
-            )
-            .await?;
-        }
+        // Batched into one `system.multicall` request rather than one
+        // `d.tracker.insert` call per URL: insertion order at group 0 is what
+        // decides these URLs' relative priority within the tier, and separate
+        // concurrent HTTP requests give no guarantee the daemon receives them
+        // in that order. A single request carrying an ordered array of calls
+        // does — rTorrent executes a multicall's entries in array order — so
+        // this collapses the whole seeded set to one round trip without
+        // losing the ordering the tier priority depends on.
+        let params: Vec<[Param<'_>; 3]> = urls
+            .iter()
+            .map(|url| [Param::Str(hash), Param::Int(0), Param::Str(url.as_str())])
+            .collect();
+        let calls: Vec<(&str, &[Param<'_>])> = params
+            .iter()
+            .map(|p| ("d.tracker.insert", p.as_slice()))
+            .collect();
+        self.call_batch(&calls).await?;
+
         tracing::debug!(
             hash,
             count = urls.len(),
@@ -314,6 +320,14 @@ mod tests {
             .respond_with(scalar_ok())
             .mount(server)
             .await;
+    }
+
+    /// The reply `system.multicall` returns for `n` successful calls: an
+    /// array of one-element arrays, each wrapping the same `<i8>0</i8>`
+    /// [`scalar_ok`] answers with for any other call in this module's tests.
+    fn multicall_ok_response(n: usize) -> String {
+        let row = "<value><array><data><value><i8>0</i8></value></data></array></value>";
+        scalar_response(&format!("<array><data>{}</data></array>", row.repeat(n)))
     }
 
     fn fault_response(message: &str) -> String {
@@ -553,7 +567,10 @@ mod tests {
     #[tokio::test]
     async fn add_trackers_inserts_the_same_way_set_trackers_does() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(1)))
+            .mount(&server)
+            .await;
 
         client(&server)
             .add_trackers(
@@ -567,9 +584,10 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let body = sharerr_testkit::mock::body_text(&requests[0]);
         assert!(
-            body.contains("<methodName>d.tracker.insert</methodName>"),
+            body.contains("<methodName>system.multicall</methodName>"),
             "{body}"
         );
+        assert!(body.contains("<string>d.tracker.insert</string>"), "{body}");
     }
 
     /// `d.loaded_file` names a path on the daemon's filesystem, not bytes on
@@ -587,7 +605,10 @@ mod tests {
     #[tokio::test]
     async fn set_trackers_inserts_a_new_tier_for_each_url() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
+            .mount(&server)
+            .await;
 
         client(&server)
             .set_trackers(
@@ -601,14 +622,59 @@ mod tests {
             .unwrap();
 
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2, "one d.tracker.insert call per URL");
-        for req in &requests {
-            let body = sharerr_testkit::mock::body_text(req);
-            assert!(
-                body.contains("<methodName>d.tracker.insert</methodName>"),
-                "{body}"
-            );
-        }
+        assert_eq!(
+            requests.len(),
+            1,
+            "both inserts batched into one system.multicall round trip"
+        );
+        let body = sharerr_testkit::mock::body_text(&requests[0]);
+        assert!(
+            body.contains("<methodName>system.multicall</methodName>"),
+            "{body}"
+        );
+        assert_eq!(
+            body.matches("<string>d.tracker.insert</string>").count(),
+            2,
+            "{body}"
+        );
+        // Insertion order at group 0 decides tier priority — the batch must
+        // preserve it, not just include both entries.
+        let new_at = body.find("new.example").expect("new.example missing");
+        let old_at = body.find("old.example").expect("old.example missing");
+        assert!(new_at < old_at, "new.example must precede old.example");
+    }
+
+    /// One tracker failing to insert must not be silently swallowed by the
+    /// batch — the caller still needs to know a share's endpoint may not have
+    /// actually rotated.
+    #[tokio::test]
+    async fn a_fault_inside_a_batched_call_is_reported() {
+        let server = MockServer::start().await;
+        let body = scalar_response(
+            "<array><data>\
+             <value><array><data><value><i8>0</i8></value></data></array></value>\
+             <value><struct>\
+             <member><name>faultCode</name><value><i4>-1</i4></value></member>\
+             <member><name>faultString</name><value><string>no such download</string></value></member>\
+             </struct></value>\
+             </data></array>",
+        );
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .set_trackers(
+                "aabbcc",
+                &[
+                    Url::parse("http://new.example/announce").unwrap(),
+                    Url::parse("http://old.example/announce").unwrap(),
+                ],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no such download"), "{err}");
     }
 
     #[tokio::test]

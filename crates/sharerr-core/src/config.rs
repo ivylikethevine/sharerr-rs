@@ -333,6 +333,11 @@ pub struct Config {
     /// path — but it loses every external id, so a friend's app can only parse
     /// the release name.
     pub library: Vec<LibraryConfig>,
+    /// A one-time bootstrap seed for the peers table, restored from an old
+    /// backup. Normally empty — see [`PeerImport`] for why this is the one
+    /// field allowed to carry a secret through `sharerr.toml`, and
+    /// `sharerr::commands::serve` for where it is drained and stripped.
+    pub peers: Vec<PeerImport>,
 }
 
 impl Default for Config {
@@ -361,6 +366,7 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
+            peers: Vec::new(),
         }
     }
 }
@@ -1087,6 +1093,49 @@ pub struct PathMapping {
     /// Prefix as qBittorrent sees it. Defaults to `sharerr` when omitted.
     #[serde(default)]
     pub qbit: Option<PathBuf>,
+}
+
+/// One friend to seed into the peers table the next time `sharerr serve`
+/// starts, from a `[[peers]]` block an operator hand-restored into
+/// `sharerr.toml` (typically from an old "Backup and restore" export).
+///
+/// This is the one deliberate exception to "secrets never go in
+/// `sharerr.toml`": [`Self::gossip_key`] is a real credential, briefly at
+/// rest in plaintext on disk. It exists here anyway because it is the one
+/// piece of a friendship's credentials that genuinely *can* be restored
+/// verbatim — see `secret_keys::peer_gossip_key`, which is where it lives
+/// once drained. This friend's own key *into* this instance cannot be
+/// restored under any circumstances — sharerr only ever stores a one-way
+/// hash of it (`peers.key_hash`) — so there is deliberately no field for it
+/// here; the drain always mints a fresh one, exactly like adding a friend
+/// through the web UI, and the operator re-sends it.
+///
+/// Read exactly once, by `sharerr::commands::serve::run`, and stripped from
+/// the file in the same write that records the result — never round-tripped
+/// back out through [`Config`]'s own `Serialize` impl once populated.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PeerImport {
+    /// This friend's name, as it will appear on the Friends page.
+    pub label: String,
+    /// One of `sharerr_store::PeerScope`'s names (`"all"`, `"tv"`,
+    /// `"movies"`, `"music"`, `"books"`). Parsed leniently at drain time —
+    /// the same rule an already-stored row gets — so a stray value widens to
+    /// "all" rather than blocking the rest of the restore. Not typed as
+    /// `PeerScope` directly: that type lives in `sharerr-store`, which
+    /// depends on this crate, not the other way around.
+    pub scope: String,
+    /// Where this friend was last reachable, as `host:port`. Seeded as a
+    /// low-trust observation (see `sharerr_store::endpoints::ObservedVia`) —
+    /// any real sighting after this friend's own sharerr next reaches out
+    /// supersedes it.
+    pub last_addr: Option<String>,
+    /// Where their sharerr can be pulled from, for outbound gossip.
+    pub gossip_url: Option<String>,
+    /// The API key *they* issued *us*, for pulling their gossip — see this
+    /// struct's own docs for why this is the one credential a restore can
+    /// carry.
+    pub gossip_key: Option<String>,
 }
 
 #[cfg(test)]

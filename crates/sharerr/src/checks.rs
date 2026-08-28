@@ -1082,7 +1082,9 @@ mod tests {
             TorrentBackend::Qbittorrent,
             &url,
             None,
-            TorrentCredential::Password(SecretString::from("hunter2")),
+            TorrentCredential::Password(
+                SecretString::from(sharerr_testkit::mock::fresh_password()),
+            ),
         )
         .unwrap_err();
         assert!(err.contains("API key"), "{err}");

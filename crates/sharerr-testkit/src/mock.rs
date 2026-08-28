@@ -36,15 +36,37 @@ pub fn base_url(server: &MockServer) -> Url {
 /// mock answers every request regardless of `Authorization`, and the
 /// closed-port tests never build a request at all. Generating it costs nothing
 /// and leaves no literal for a future reader to have to justify.
+///
+/// No fallback on a clock read failure, deliberately: a literal fallback
+/// value here is exactly the same taint shape CodeQL flags above — a
+/// constant reaching `basic_auth` — so this alert would just move from the
+/// rTorrent/Transmission call sites to this line instead of actually going
+/// away. `expect` is the honest choice: the system clock reading before 1970
+/// is not a real failure mode any of this crate's tests need to survive.
 pub fn rpc_credentials() -> (String, String) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    #[allow(clippy::expect_used)] // no realistic clock is ever set before the Unix epoch
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
+        .expect("system clock is before the Unix epoch")
+        .as_nanos();
 
     (format!("u{n:x}"), format!("{stamp:x}{n:x}"))
+}
+
+/// A throwaway account password, fresh per call — the same reasoning as
+/// [`rpc_credentials`], for the login/account test suites in `sharerr-store`
+/// and the `sharerr` app crate: a literal handed to `create_user`/
+/// `verify_password` reaches Argon2 and is a
+/// `rust/hard-coded-cryptographic-value` finding, same as a Basic Auth
+/// literal reaching `basic_auth`. Always well over any real minimum-length
+/// check — a hex-encoded nanosecond timestamp is never under 8 characters
+/// in this era — but that is a property of the current epoch, not a
+/// compile-time guarantee.
+pub fn fresh_password() -> String {
+    rpc_credentials().1
 }
 
 /// Mount `GET route` returning `200` with a JSON body.

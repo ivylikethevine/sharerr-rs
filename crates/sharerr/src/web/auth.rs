@@ -459,6 +459,7 @@ mod tests {
 
     use super::*;
     use axum::http::HeaderValue;
+    use sharerr_testkit::mock::fresh_password;
 
     #[tokio::test]
     async fn a_session_round_trips_and_can_be_revoked() {
@@ -556,19 +557,24 @@ mod tests {
     #[test]
     fn password_rejection_flags_mismatch_before_length() {
         assert_eq!(
-            password_rejection("short", "different"),
+            password_rejection(&fresh_password(), &fresh_password()),
             Some("Those passwords do not match.".to_owned())
         );
         assert_eq!(
+            // Deliberately short and matching: the one case that must reach
+            // the length check rather than the mismatch check, and a
+            // generated password (see `fresh_password`) is always long
+            // enough to pass it. `password_rejection` is pure string
+            // validation — nothing here is ever hashed or sent anywhere —
+            // but CodeQL's hard-coded-cryptographic-value query cannot tell
+            // that from a value reaching a parameter named `password`.
             password_rejection("short", "short"),
             Some(format!(
                 "Password must be at least {MIN_PASSWORD_LEN} characters."
             ))
         );
-        assert_eq!(
-            password_rejection("a-long-password", "a-long-password"),
-            None
-        );
+        let password = fresh_password();
+        assert_eq!(password_rejection(&password, &password), None);
     }
 
     // A `WebState` over `state::fixtures::unconfigured()`, same as web/settings.rs's
@@ -595,7 +601,7 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
         store
-            .create_user("ivy", &SecretString::from("a-long-password"))
+            .create_user("ivy", &SecretString::from(fresh_password()))
             .await
             .unwrap();
 
@@ -621,8 +627,8 @@ mod tests {
             CookieJar::new(),
             Form(SetupForm {
                 username: "ivy".to_owned(),
-                password: "a-long-password".to_owned(),
-                confirm: "not-the-same".to_owned(),
+                password: fresh_password(),
+                confirm: fresh_password(),
             }),
         )
         .await;
@@ -638,13 +644,14 @@ mod tests {
         let store = serve.store().await.unwrap();
         let state = web_state(serve);
 
+        let password = fresh_password();
         let response = setup_submit(
             State(state),
             CookieJar::new(),
             Form(SetupForm {
                 username: "ivy".to_owned(),
-                password: "a-long-password".to_owned(),
-                confirm: "a-long-password".to_owned(),
+                password: password.clone(),
+                confirm: password,
             }),
         )
         .await;
@@ -673,18 +680,19 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
         store
-            .create_user("first", &SecretString::from("a-long-password"))
+            .create_user("first", &SecretString::from(fresh_password()))
             .await
             .unwrap();
         let state = web_state(serve);
 
+        let password = fresh_password();
         let response = setup_submit(
             State(state),
             CookieJar::new(),
             Form(SetupForm {
                 username: "second".to_owned(),
-                password: "a-long-password".to_owned(),
-                confirm: "a-long-password".to_owned(),
+                password: password.clone(),
+                confirm: password,
             }),
         )
         .await;
@@ -721,7 +729,7 @@ mod tests {
             .store()
             .await
             .unwrap()
-            .create_user("ivy", &SecretString::from("a-long-password"))
+            .create_user("ivy", &SecretString::from(fresh_password()))
             .await
             .unwrap();
 
@@ -732,11 +740,12 @@ mod tests {
     #[tokio::test]
     async fn login_submit_signs_in_on_a_correct_password() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let password = fresh_password();
         serve
             .store()
             .await
             .unwrap()
-            .create_user("ivy", &SecretString::from("a-long-password"))
+            .create_user("ivy", &SecretString::from(password.clone()))
             .await
             .unwrap();
 
@@ -745,7 +754,7 @@ mod tests {
             CookieJar::new(),
             Form(LoginForm {
                 username: "ivy".to_owned(),
-                password: "a-long-password".to_owned(),
+                password,
             }),
         )
         .await;
@@ -767,7 +776,7 @@ mod tests {
             .store()
             .await
             .unwrap()
-            .create_user("ivy", &SecretString::from("a-long-password"))
+            .create_user("ivy", &SecretString::from(fresh_password()))
             .await
             .unwrap();
 
@@ -776,7 +785,7 @@ mod tests {
             CookieJar::new(),
             Form(LoginForm {
                 username: "ivy".to_owned(),
-                password: "wrong-password".to_owned(),
+                password: fresh_password(),
             }),
         )
         .await;
@@ -812,9 +821,9 @@ mod tests {
             State(web_state(serve)),
             CookieJar::new(),
             Form(ChangePasswordForm {
-                current_password: "whatever".to_owned(),
-                new_password: "a-new-password".to_owned(),
-                confirm_password: "a-new-password".to_owned(),
+                current_password: fresh_password(),
+                new_password: fresh_password(),
+                confirm_password: fresh_password(),
             }),
         )
         .await;
@@ -836,20 +845,21 @@ mod tests {
             .store()
             .await
             .unwrap()
-            .create_user("ivy", &SecretString::from("a-long-password"))
+            .create_user("ivy", &SecretString::from(fresh_password()))
             .await
             .unwrap();
         let state = web_state(serve);
         let token = state.sessions.create("ivy").await.unwrap();
         let jar = CookieJar::new().add(session_cookie(token));
 
+        let new_password = fresh_password();
         let response = change_password(
             State(state),
             jar,
             Form(ChangePasswordForm {
-                current_password: "not-the-current-one".to_owned(),
-                new_password: "a-new-password".to_owned(),
-                confirm_password: "a-new-password".to_owned(),
+                current_password: fresh_password(),
+                new_password: new_password.clone(),
+                confirm_password: new_password,
             }),
         )
         .await;
@@ -866,8 +876,9 @@ mod tests {
     async fn change_password_succeeds_and_revokes_every_other_session() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
+        let current_password = fresh_password();
         store
-            .create_user("ivy", &SecretString::from("a-long-password"))
+            .create_user("ivy", &SecretString::from(current_password.clone()))
             .await
             .unwrap();
         let state = web_state(serve);
@@ -875,13 +886,14 @@ mod tests {
         let other = state.sessions.create("ivy").await.unwrap();
         let jar = CookieJar::new().add(session_cookie(current.clone()));
 
+        let new_password = fresh_password();
         let response = change_password(
             State(state.clone()),
             jar,
             Form(ChangePasswordForm {
-                current_password: "a-long-password".to_owned(),
-                new_password: "a-new-password".to_owned(),
-                confirm_password: "a-new-password".to_owned(),
+                current_password,
+                new_password: new_password.clone(),
+                confirm_password: new_password.clone(),
             }),
         )
         .await;
@@ -896,7 +908,7 @@ mod tests {
         );
         assert!(
             store
-                .verify_password("ivy", &SecretString::from("a-new-password"))
+                .verify_password("ivy", &SecretString::from(new_password))
                 .await
                 .unwrap()
         );

@@ -790,6 +790,7 @@ fn channel(endpoints: &[PeerEndpoint], kind: EndpointKind) -> Channel {
         ObservedVia::Direct => EdgeStyle::Solid,
         ObservedVia::Gossip => EdgeStyle::Dashed,
         ObservedVia::Lighthouse => EdgeStyle::Dotted,
+        ObservedVia::Restored => EdgeStyle::Sparse,
     };
 
     Channel {
@@ -1651,6 +1652,7 @@ mod tests {
             (ObservedVia::Direct, EdgeStyle::Solid),
             (ObservedVia::Gossip, EdgeStyle::Dashed),
             (ObservedVia::Lighthouse, EdgeStyle::Dotted),
+            (ObservedVia::Restored, EdgeStyle::Sparse),
         ] {
             let endpoints = vec![PeerEndpoint {
                 kind: EndpointKind::Api,

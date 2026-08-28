@@ -616,6 +616,7 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
 }
 .field-status--set   { background: var(--ok-bg);    color: var(--ok-ink); }
 .field-status--unset { background: transparent; color: var(--muted); border: 1px solid var(--line-strong); }
+.field-status--warn  { background: var(--warn-bg);  color: var(--warn-ink); }
 .field-status--stale { background: var(--error-bg); color: var(--error-ink); }
 
 /* The topology diagram. A node's box color is its health — the same

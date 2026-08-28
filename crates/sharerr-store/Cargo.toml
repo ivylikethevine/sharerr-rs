@@ -29,4 +29,5 @@ tokio = { workspace = true, features = ["rt", "macros", "fs"] }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+sharerr-testkit = { workspace = true }
 tempfile = { workspace = true }

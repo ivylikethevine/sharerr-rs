@@ -93,6 +93,30 @@ happen — see [the README](../README.md#quickstart) before reporting:
   They cannot impersonate anyone — a friend compares the record's `pubkey`
   against the identity they already hold — and the remedy is to issue that
   friend a new key. Trust-on-first-use has no better answer.
+- **A `[[peers]]` block in `sharerr.toml` can hold a real credential — a
+  friend's gossip key — in plaintext, deliberately, contradicting every
+  other rule in this file about secrets never sitting outside the vault.**
+  This is a one-time, self-deleting restore path (see
+  [`CONFIGURATION.md`](CONFIGURATION.md#restoring-friends-after-a-full-data-directory-loss)):
+  an operator hand-writes it after a full data-directory loss, `sharerr
+  serve` drains it into the real store and vault on its next start, and
+  removes the block from the file in the same write. Nothing else in
+  sharerr ever writes a secret to `sharerr.toml`, and the field is never
+  written back out through it once populated. The exposure window is
+  exactly "on disk, unencrypted, until the next `serve` start" — treat a
+  `sharerr.toml` carrying an unconsumed `[[peers]]` block the same as you
+  would a raw vault secret sitting in a text file, because that is what it
+  is.
+- **The Friends page's "export as backup block" reads a gossip key back
+  out of the vault and puts it in a downloadable file — the one place in
+  sharerr's web UI that shows a *previously stored* secret again**, rather
+  than only ever revealing one once at creation (every other secret in this
+  instance, including a friend's own key into it, is write-only from the
+  moment it is first set). This exists to produce the `[[peers]]` block
+  above from a live instance rather than requiring an operator to have
+  separately saved every gossip key by hand. The download is behind the
+  same signed-in session guard as every other page here; nothing about it
+  is reachable without already being able to read the Friends page.
 
 ## What is out of scope
 

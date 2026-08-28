@@ -6,7 +6,9 @@ use sharerr_client::{ClientError, Result, http_client};
 use url::Url;
 
 use crate::KIND;
-use crate::xmlrpc::{Param, XmlValue, parse_response, request_xml};
+use crate::xmlrpc::{
+    Param, XmlValue, fault_message, multicall_request_xml, parse_response, request_xml,
+};
 
 /// An rTorrent XML-RPC client.
 pub struct RtorrentClient {
@@ -45,10 +47,10 @@ impl RtorrentClient {
         })
     }
 
-    /// Issue one XML-RPC call and return its single decoded return value.
-    pub(crate) async fn call(&self, method: &str, params: &[Param<'_>]) -> Result<XmlValue> {
-        let body = request_xml(method, params);
-
+    /// POST `body` and decode the reply, tagging any error with `label`
+    /// (a method name for [`Self::call`], or `"system.multicall"` for
+    /// [`Self::call_batch`]).
+    async fn send(&self, body: String, label: &str) -> Result<XmlValue> {
         let response = self
             .http
             .post(self.endpoint.clone())
@@ -59,17 +61,73 @@ impl RtorrentClient {
             .await
             .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
 
-        sharerr_client::check_status(KIND, response.status(), method)?;
+        sharerr_client::check_status(KIND, response.status(), label)?;
 
         let text = response
             .text()
             .await
-            .map_err(|e| sharerr_client::malformed(KIND, method, e))?;
+            .map_err(|e| sharerr_client::malformed(KIND, label, e))?;
 
         parse_response(&text).map_err(|detail| ClientError::Malformed {
             kind: KIND,
-            detail: format!("{method}: {detail}"),
+            detail: format!("{label}: {detail}"),
         })
+    }
+
+    /// Issue one XML-RPC call and return its single decoded return value.
+    pub(crate) async fn call(&self, method: &str, params: &[Param<'_>]) -> Result<XmlValue> {
+        self.send(request_xml(method, params), method).await
+    }
+
+    /// Issue several distinct method calls as one `system.multicall` request
+    /// — one HTTP round trip, executed by rTorrent in the given order — and
+    /// return one decoded value per call, in that same order.
+    ///
+    /// Unlike [`Self::call`], a per-call failure inside the batch does not
+    /// come back as this module's own `<fault>` (that only covers a fault in
+    /// `system.multicall` itself, e.g. an unknown method); it is a struct in
+    /// the results array, one per failed entry, which is why this reads
+    /// [`fault_message`] rather than relying on [`parse_response`] alone.
+    pub(crate) async fn call_batch(&self, calls: &[(&str, &[Param<'_>])]) -> Result<Vec<XmlValue>> {
+        let value = self
+            .send(multicall_request_xml(calls), "system.multicall")
+            .await?;
+
+        let XmlValue::Array(rows) = value else {
+            return Err(malformed_shape(
+                "system.multicall",
+                "an array of per-call results",
+                &value,
+            ));
+        };
+        if rows.len() != calls.len() {
+            return Err(ClientError::Malformed {
+                kind: KIND,
+                detail: format!(
+                    "system.multicall returned {} results for {} calls",
+                    rows.len(),
+                    calls.len()
+                ),
+            });
+        }
+
+        rows.into_iter()
+            .zip(calls)
+            .map(|(row, (method, _))| match row {
+                // The multicall extension wraps each successful return value
+                // in a one-element array.
+                XmlValue::Array(mut values) if values.len() == 1 => Ok(values.remove(0)),
+                XmlValue::Struct(members) => Err(ClientError::Api {
+                    kind: KIND,
+                    detail: format!("{method}: {}", fault_message(&XmlValue::Struct(members))),
+                }),
+                other => Err(malformed_shape(
+                    "system.multicall",
+                    "a one-element array or a fault struct",
+                    &other,
+                )),
+            })
+            .collect()
     }
 
     /// [`Self::call`], expecting the reply to be a plain string.
