@@ -1,0 +1,14 @@
+rules:
+  # `aquasecurity/setup-trivy` defaults its `version:` input to `latest`, which
+  # zizmor's `unpinned-tools` audit correctly reads as "installs a moving
+  # target". That is the point, not an oversight: image-scan.yml's own header
+  # comments (both `Install Trivy` steps) explain why — a pinned scanner is a
+  # scanner that stops finding anything, unlike hadolint's or actionlint's
+  # pins in ci.yml, where findings should only move when the code under test
+  # does. The action itself is still SHA-pinned; only the Trivy *version* it
+  # installs floats, same tradeoff CLAUDE.md already documents for hadolint
+  # and trivy under "Pinned tool versions that dependabot cannot see".
+  unpinned-tools:
+    ignore:
+      - image-scan.yml:89
+      - image-scan.yml:142

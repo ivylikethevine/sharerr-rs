@@ -79,10 +79,14 @@ jobs:
       # rather than a pin: a stale scanner is a scanner that stops finding
       # anything, which is the one failure mode a vulnerability scan cannot
       # afford — unlike hadolint's or actionlint's pinned versions, where the
-      # findings should only move when the code under test does.
+      # findings should only move when the code under test does. `version:
+      # latest` (the action's default) keeps that; only the mechanism moved,
+      # from an unpinned `curl | sh` off trivy's `main` branch to a SHA-pinned
+      # action, itself pinned to a specific install-script commit rather than
+      # a moving branch ref.
       - if: steps.probe.outputs.exists == '1'
         name: Install Trivy
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
 
       - if: steps.probe.outputs.exists == '1'
         id: scan
@@ -131,9 +135,11 @@ jobs:
 
       # Intentionally the newest Trivy and the newest vulnerability database
       # rather than a pin, for the reason the `trivy` job above gives: a stale
-      # scanner is a scanner that stops finding anything.
+      # scanner is a scanner that stops finding anything. See that job's
+      # install step for why this is now a SHA-pinned action rather than
+      # `curl | sh` off a moving branch.
       - name: Install Trivy
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
 
       # The three advisory verdicts (0 clean, 1 a finding with no better image
       # to move to, 2 a repin that demonstrably helps) are all green here.

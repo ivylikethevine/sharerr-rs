@@ -19,6 +19,10 @@ on:
         description: The runner label every other job in the caller should use.
         value: ${{ jobs.pick.outputs.label }}
 
+# This job only reads github.event/vars and writes a step output — no scope
+# needs to be broader than none at all.
+permissions: {}
+
 jobs:
   pick:
     name: pick the runner
