@@ -13,9 +13,8 @@ workspace = true
 [dependencies]
 async-trait = { workspace = true }
 # Adds to the workspace feature set rather than replacing it: `form` and
-# `multipart` are what post the .torrent file, and `cookies` carries qBittorrent's
-# session between the login call and everything after it.
-reqwest = { workspace = true, features = ["form", "multipart", "cookies"] }
+# `multipart` are what post the .torrent file.
+reqwest = { workspace = true, features = ["form", "multipart"] }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

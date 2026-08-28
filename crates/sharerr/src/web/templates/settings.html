@@ -191,6 +191,115 @@
 </form>
 {% endmacro %}
 
+{# The form body shared by both gluetun pollers — the tracker's and the
+   torrent client's own. The two callers keep their own outer wrapping (a
+   heading with a status chip vs. a folded `<details>`), since that shell
+   differs structurally rather than cosmetically; only the form itself, and
+   the handful of copy differences noted inline, are shared here. #}
+{% macro gluetun_panel(g) %}
+<form method="post" action="/settings/gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}/client{% endif %}" class="panel">
+  {% if g.target == crate::gluetun::GluetunTarget::Tracker %}
+  <p class="hint">
+    Behind a VPN with a forwarded port, the address friends reach you on changes
+    on every reconnect. Point this at gluetun's control server and sharerr
+    resolves its public IP and forwarded port from there, re-announcing and
+    rewriting torrents when they change — instead of trusting the static address
+    above.
+  </p>
+  {% else %}
+  <p class="hint">
+    For the deployment where the torrent client sits behind a <em>different</em>
+    tunnel from this instance's own — see <code>docker/deploy/dual-vpn/</code>.
+    Independent of the section above: its own control server, its own poll
+    interval, its own on/off switch. Leave this alone unless the torrent
+    client and sharerr are genuinely on separate VPN exits.
+  </p>
+  {% endif %}
+
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if g.enabled %}checked{% endif %}
+           {% call lock_attr(g.enabled_path) %}{% endcall %}>
+    {% if g.target == crate::gluetun::GluetunTarget::Tracker %}Poll gluetun{% else %}Poll the torrent client's gluetun{% endif %}
+  </label>
+  {% call locked(g.enabled_path) %}{% endcall %}
+  {% if g.target == crate::gluetun::GluetunTarget::Tracker %}
+  <p class="hint">
+    Unticking this pauses polling without losing the control server URL below —
+    useful for a temporary hold, since re-enabling later needs nothing retyped.
+  </p>
+  {% endif %}
+
+  <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_control_url">Control server URL</label>
+  <input id="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_control_url" name="control_url" value="{{ g.control_url }}"
+         placeholder="{% if g.target == crate::gluetun::GluetunTarget::Client %}http://media-gluetun:8000{% else %}http://localhost:8000{% endif %} — leave empty to disable"
+         {% call lock_attr(g.control_url_path) %}{% endcall %}>
+  {% call locked(g.control_url_path) %}{% endcall %}
+
+  <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_api_key">Control server API key {% call field_status(g.api_key_set) %}{% endcall %}</label>
+  <input id="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_api_key" name="api_key" type="password" autocomplete="off"
+         placeholder="{% call stored(g.api_key_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if g.api_key_set %}
+  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
+  {% endif %}
+  {% if g.target == crate::gluetun::GluetunTarget::Tracker %}
+  <p class="hint">
+    Required since gluetun v3.39.1 made every control server route private — an
+    unkeyed request now gets a bare <code>401</code>, so sharerr skips the poll
+    rather than send one. Set it on gluetun's side with
+    <code>HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE</code>, or in a role in its
+    <code>/gluetun/auth/config.toml</code>. A per-route role needs all three of
+    <code>GET /v1/publicip/ip</code>, <code>/v1/openvpn/portforwarded</code> and
+    <code>/v1/portforward</code> &mdash; gluetun redirects the second to the
+    third, and the redirect is authorised separately.
+  </p>
+  {% endif %}
+
+  <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_poll_secs">Poll interval (seconds)</label>
+  <input id="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_poll_secs" name="poll_secs" value="{{ g.poll_secs }}" inputmode="numeric"
+         {% call lock_attr(g.poll_secs_path) %}{% endcall %}>
+  {% call locked(g.poll_secs_path) %}{% endcall %}
+  {% if g.target == crate::gluetun::GluetunTarget::Tracker %}
+  <p class="hint">
+    The poll is the safety net; for reconnects to be picked up in seconds, set
+    gluetun's <code>VPN_PORT_FORWARDING_UP_COMMAND</code> to hit
+    <code>/gluetun/refresh</code> on this instance. Setting
+    <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> to hit
+    <code>/gluetun/down</code> too means a port that just went away is dropped
+    immediately rather than kept as a stale fallback until the next poll finds
+    out on its own.
+  </p>
+  {% else %}
+  <p class="hint">
+    For a fast reaction to that tunnel's own reconnects, point its
+    <code>VPN_PORT_FORWARDING_UP_COMMAND</code> and
+    <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> at
+    <code>/gluetun/refresh?target=client</code> and
+    <code>/gluetun/down?target=client</code> on this instance — the
+    <code>?target=client</code> is what keeps it from nudging the tracker's
+    own poller above instead.
+  </p>
+  {% endif %}
+
+  <dl>
+    <dt>Last observed</dt>
+    <dd>
+      {% if let Some(observed) = g.last_observed %}
+      <code>{{ observed }}</code>
+      {% else %}
+      <span class="hint">nothing yet</span>
+      {% endif %}
+    </dd>
+    {% if let Some(error) = g.last_error %}
+    <dt>Last error</dt>
+    <dd><span class="error">{{ error }}</span></dd>
+    {% endif %}
+  </dl>
+
+  <button type="submit">Save</button>
+</form>
+{% endmacro %}
+
 
 {% block content %}
 <h1>Settings</h1>
@@ -422,7 +531,7 @@
 </details>
 
 <h2 id="tracker"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3M4.8 4.8a4.5 4.5 0 000 6.4M11.2 4.8a4.5 4.5 0 010 6.4M2.6 2.6a7.6 7.6 0 000 10.8M13.4 2.6a7.6 7.6 0 010 10.8"/></svg>Tracker
-  {%- if tracker_advertised_host.is_empty() && tracker_advertised_url.is_empty() && !(gluetun_enabled && !gluetun_control_url.is_empty()) %}{% call chip("warn", "no advertised address") %}{% endcall %}
+  {%- if tracker_advertised_host.is_empty() && tracker_advertised_url.is_empty() && !(gluetun.enabled && !gluetun.control_url.is_empty()) %}{% call chip("warn", "no advertised address") %}{% endcall %}
   {%- else if tracker_token_previous_set %}{% call chip("warn", "token rotation in progress") %}{% endcall %}
   {%- else if tracker_token_set %}{% call chip("set", "address set · token set") %}{% endcall %}
   {%- else %}{% call chip("unset", "address set · no token") %}{% endcall %}{% endif %}</h2>
@@ -438,15 +547,15 @@
 
   <label for="advertised_host">Advertised host</label>
   <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
-         placeholder="{% if !gluetun_control_url.is_empty() && gluetun_enabled %}optional — gluetun below resolves this{% else %}the name or IP your friends reach you on{% endif %}"
+         placeholder="{% if !gluetun.control_url.is_empty() && gluetun.enabled %}optional — gluetun below resolves this{% else %}the name or IP your friends reach you on{% endif %}"
          {% call lock_attr("tracker.advertised_host") %}{% endcall %}>
   {% call locked("tracker.advertised_host") %}{% endcall %}
-  {% if !gluetun_control_url.is_empty() && gluetun_enabled %}
+  {% if !gluetun.control_url.is_empty() && gluetun.enabled %}
   <p class="hint">
     Not required here: the Gluetun section below is configured to resolve this
     dynamically instead, and a live observation always wins over whatever this
     field holds.
-    {% if let Some(observed) = gluetun_last_observed %}
+    {% if let Some(observed) = gluetun.last_observed %}
     It currently advertises <code>{{ observed }}</code>.
     {% else %}
     It has not resolved anything yet — leave this set as a fallback until it has.
@@ -603,156 +712,22 @@
 </form>
 
 <h2 id="gluetun"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8l5 1.7v4.2c0 3-2.1 5.3-5 6.5-2.9-1.2-5-3.5-5-6.5V3.5z"/></svg>Gluetun
-  {%- if gluetun_control_url.is_empty() %}{% call chip("unset", "off") %}{% endcall %}
-  {%- else if !gluetun_enabled %}{% call chip("unset", "paused") %}{% endcall %}
-  {%- else if gluetun_last_error.is_some() %}{% call chip("warn", "polling · last poll failed") %}{% endcall %}
+  {%- if gluetun.control_url.is_empty() %}{% call chip("unset", "off") %}{% endcall %}
+  {%- else if !gluetun.enabled %}{% call chip("unset", "paused") %}{% endcall %}
+  {%- else if gluetun.last_error.is_some() %}{% call chip("warn", "polling · last poll failed") %}{% endcall %}
   {%- else %}{% call chip("set", "polling") %}{% endcall %}{% endif %}</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_GLUETUN, "Gluetun configuration") %}{% endcall %}
   {% call ui::doc(crate::web::docs::GLUETUN_CONTROL_SERVER, "gluetun control server") %}{% endcall %}
   {% call ui::doc(crate::web::docs::GLUETUN_PORT_FORWARDING, "VPN port forwarding") %}{% endcall %}
 </div>
-<form method="post" action="/settings/gluetun" class="panel">
-  <p class="hint">
-    Behind a VPN with a forwarded port, the address friends reach you on changes
-    on every reconnect. Point this at gluetun's control server and sharerr
-    resolves its public IP and forwarded port from there, re-announcing and
-    rewriting torrents when they change — instead of trusting the static address
-    above.
-  </p>
-
-  <label class="hint">
-    <input type="checkbox" name="enabled" value="1" {% if gluetun_enabled %}checked{% endif %}
-           {% call lock_attr("gluetun.enabled") %}{% endcall %}>
-    Poll gluetun
-  </label>
-  {% call locked("gluetun.enabled") %}{% endcall %}
-  <p class="hint">
-    Unticking this pauses polling without losing the control server URL below —
-    useful for a temporary hold, since re-enabling later needs nothing retyped.
-  </p>
-
-  <label for="gluetun_control_url">Control server URL</label>
-  <input id="gluetun_control_url" name="control_url" value="{{ gluetun_control_url }}"
-         placeholder="http://localhost:8000 — leave empty to disable"
-         {% call lock_attr("gluetun.control_url") %}{% endcall %}>
-  {% call locked("gluetun.control_url") %}{% endcall %}
-
-  <label for="gluetun_api_key">Control server API key {% call field_status(gluetun_api_key_set) %}{% endcall %}</label>
-  <input id="gluetun_api_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(gluetun_api_key_set) %}{% endcall %}"
-         {% if !master_key_present %}disabled{% endif %}>
-  {% if gluetun_api_key_set %}
-  <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-  {% endif %}
-  <p class="hint">
-    Required since gluetun v3.39.1 made every control server route private — an
-    unkeyed request now gets a bare <code>401</code>, so sharerr skips the poll
-    rather than send one. Set it on gluetun's side with
-    <code>HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE</code>, or in a role in its
-    <code>/gluetun/auth/config.toml</code>. A per-route role needs all three of
-    <code>GET /v1/publicip/ip</code>, <code>/v1/openvpn/portforwarded</code> and
-    <code>/v1/portforward</code> &mdash; gluetun redirects the second to the
-    third, and the redirect is authorised separately.
-  </p>
-
-  <label for="gluetun_poll_secs">Poll interval (seconds)</label>
-  <input id="gluetun_poll_secs" name="poll_secs" value="{{ gluetun_poll_secs }}" inputmode="numeric"
-         {% call lock_attr("gluetun.poll_secs") %}{% endcall %}>
-  {% call locked("gluetun.poll_secs") %}{% endcall %}
-  <p class="hint">
-    The poll is the safety net; for reconnects to be picked up in seconds, set
-    gluetun's <code>VPN_PORT_FORWARDING_UP_COMMAND</code> to hit
-    <code>/gluetun/refresh</code> on this instance. Setting
-    <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> to hit
-    <code>/gluetun/down</code> too means a port that just went away is dropped
-    immediately rather than kept as a stale fallback until the next poll finds
-    out on its own.
-  </p>
-
-  <dl>
-    <dt>Last observed</dt>
-    <dd>
-      {% if let Some(observed) = gluetun_last_observed %}
-      <code>{{ observed }}</code>
-      {% else %}
-      <span class="hint">nothing yet</span>
-      {% endif %}
-    </dd>
-    {% if let Some(error) = gluetun_last_error %}
-    <dt>Last error</dt>
-    <dd><span class="error">{{ error }}</span></dd>
-    {% endif %}
-  </dl>
-
-  <button type="submit">Save</button>
-</form>
+{% call gluetun_panel(gluetun) %}{% endcall %}
 
 {# Folded unless it is already pointed at something — a second tunnel is the
    exception, and most instances never touch this panel. #}
 <details class="fold" {% if gluetun_client_configured %}open{% endif %}>
   <summary>Gluetun — torrent client's own tunnel</summary>
-  <form method="post" action="/settings/gluetun/client" class="panel">
-    <p class="hint">
-      For the deployment where the torrent client sits behind a <em>different</em>
-      tunnel from this instance's own — see <code>docker/deploy/dual-vpn/</code>.
-      Independent of the section above: its own control server, its own poll
-      interval, its own on/off switch. Leave this alone unless the torrent
-      client and sharerr are genuinely on separate VPN exits.
-    </p>
-
-    <label class="hint">
-      <input type="checkbox" name="enabled" value="1" {% if gluetun_client_enabled %}checked{% endif %}
-             {% call lock_attr("gluetun_client.enabled") %}{% endcall %}>
-      Poll the torrent client's gluetun
-    </label>
-    {% call locked("gluetun_client.enabled") %}{% endcall %}
-
-    <label for="gluetun_client_control_url">Control server URL</label>
-    <input id="gluetun_client_control_url" name="control_url" value="{{ gluetun_client_control_url }}"
-           placeholder="http://media-gluetun:8000 — leave empty to disable"
-           {% call lock_attr("gluetun_client.control_url") %}{% endcall %}>
-    {% call locked("gluetun_client.control_url") %}{% endcall %}
-
-    <label for="gluetun_client_api_key">Control server API key {% call field_status(gluetun_client_api_key_set) %}{% endcall %}</label>
-    <input id="gluetun_client_api_key" name="api_key" type="password" autocomplete="off"
-           placeholder="{% call stored(gluetun_client_api_key_set) %}{% endcall %}"
-           {% if !master_key_present %}disabled{% endif %}>
-    {% if gluetun_client_api_key_set %}
-    <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
-    {% endif %}
-
-    <label for="gluetun_client_poll_secs">Poll interval (seconds)</label>
-    <input id="gluetun_client_poll_secs" name="poll_secs" value="{{ gluetun_client_poll_secs }}" inputmode="numeric"
-           {% call lock_attr("gluetun_client.poll_secs") %}{% endcall %}>
-    {% call locked("gluetun_client.poll_secs") %}{% endcall %}
-    <p class="hint">
-      For a fast reaction to that tunnel's own reconnects, point its
-      <code>VPN_PORT_FORWARDING_UP_COMMAND</code> and
-      <code>VPN_PORT_FORWARDING_DOWN_COMMAND</code> at
-      <code>/gluetun/refresh?target=client</code> and
-      <code>/gluetun/down?target=client</code> on this instance — the
-      <code>?target=client</code> is what keeps it from nudging the tracker's
-      own poller above instead.
-    </p>
-
-    <dl>
-      <dt>Last observed</dt>
-      <dd>
-        {% if let Some(observed) = gluetun_client_last_observed %}
-        <code>{{ observed }}</code>
-        {% else %}
-        <span class="hint">nothing yet</span>
-        {% endif %}
-      </dd>
-      {% if let Some(error) = gluetun_client_last_error %}
-      <dt>Last error</dt>
-      <dd><span class="error">{{ error }}</span></dd>
-      {% endif %}
-    </dl>
-
-    <button type="submit">Save</button>
-  </form>
+  {% call gluetun_panel(gluetun_client) %}{% endcall %}
 </details>
 
 <h2 id="lighthouse"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4a1.6 1.6 0 100 3.2 1.6 1.6 0 000-3.2M6.4 6.4L4.3 13.6h7.4L9.6 6.4"/></svg>Lighthouse
@@ -763,12 +738,12 @@
   {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_LIGHTHOUSE, "Lighthouse configuration") %}{% endcall %}
-  {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "What a lighthouse is for") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::LIGHTHOUSE, "What a lighthouse is for") %}{% endcall %}
 </div>
 <form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
-    gossip alone has no path back — see {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "the roadmap's \"The lighthouse\"") %}{% endcall %}.
+    gossip alone has no path back — see {% call ui::doc(crate::web::docs::LIGHTHOUSE, "\"The lighthouse\"") %}{% endcall %}.
   </p>
 
   <label class="hint">
@@ -874,8 +849,8 @@
 </div>
 <form method="post" action="/settings/notifications" class="panel">
   <p class="hint">
-    A webhook fired when a sync fails outright, or when a friend has not been
-    seen in a while. Leave the URL blank to turn this off entirely.
+    A webhook fired on whichever of the triggers below are ticked. Leave the
+    URL blank to turn this off entirely, regardless of which triggers are set.
   </p>
 
   <label for="notifications_webhook_url">Webhook URL {% call field_status(notifications_webhook_set) %}{% endcall %}</label>
@@ -904,10 +879,36 @@
          {% call lock_attr("notifications.peer_quiet_secs") %}{% endcall %}>
   {% call locked("notifications.peer_quiet_secs") %}{% endcall %}
   <p class="hint">
-    How long a friend must go unseen before this fires — once per quiet spell,
-    not on a repeat. <code>0</code> turns just this check off; sync-failure
-    notifications still fire as long as a webhook URL is set.
+    How long a friend must go unseen before "a friend has gone quiet" (below)
+    fires — once per quiet spell, not on a repeat. <code>0</code> turns just
+    this check off, independent of the trigger's own tickbox.
   </p>
+
+  <p class="hint"><strong>Fires on:</strong></p>
+  <label class="hint">
+    <input type="checkbox" name="trigger_sync_failed" value="1" {% if notifications_trigger_sync_failed %}checked{% endif %}>
+    A sync fails outright
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_peer_quiet" value="1" {% if notifications_trigger_peer_quiet %}checked{% endif %}>
+    A friend has gone quiet
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_endpoint_rotated" value="1" {% if notifications_trigger_endpoint_rotated %}checked{% endif %}>
+    The advertised endpoint rotates
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_items_shared" value="1" {% if notifications_trigger_items_shared %}checked{% endif %}>
+    Items are newly shared (once per sync pass)
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_item_failed" value="1" {% if notifications_trigger_item_failed %}checked{% endif %}>
+    Items fail to share (once per sync pass)
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_peer_revoked" value="1" {% if notifications_trigger_peer_revoked %}checked{% endif %}>
+    A friend's key is revoked
+  </label>
 
   <button type="submit">Save</button>
 </form>
@@ -950,6 +951,41 @@
   </p>
 
   <button type="submit">Save</button>
+</form>
+</details>
+
+<details class="fold" id="config-backup">
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v9M4.5 7L8 10.5 11.5 7M3 12.5h10v2H3z"/></svg>Backup and restore</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIGURATION, "Configuration reference") %}{% endcall %}
+</div>
+<div class="panel">
+  <p class="hint">
+    Downloads the <em>effective</em> configuration — defaults, <code>sharerr.toml</code>,
+    and any <code>SHARERR_*</code> environment overrides, merged into one file —
+    rather than the raw file on disk, since an env-overridden field is never
+    written to that file at all. <strong>Not included</strong>: anything in the
+    vault (API keys, the tracker token, this instance's signing key) or the
+    peers table (friends and their scopes). Those live in the database and
+    vault files, untouched by this feature, and are preserved as long as those
+    files themselves survive a move or reinstall — this only rebuilds
+    <code>sharerr.toml</code> itself, the wizard's second half.
+  </p>
+  <a href="/settings/config/export">Download current config</a>
+</div>
+<form method="post" action="/settings/config/import" class="panel">
+  <p class="hint">
+    Restoring replaces <code>sharerr.toml</code> entirely — the current file is
+    kept alongside it as <code>sharerr.toml.invalid</code> rather than
+    overwritten in place, but a config saved through this page since the
+    export was taken is still lost. Paste the file's contents, or choose it
+    below to fill the box automatically.
+  </p>
+  <input type="file" accept=".toml,text/plain"
+         onchange="var r=new FileReader();r.onload=function(){document.getElementById('config_import_text').value=r.result};if(this.files[0])r.readAsText(this.files[0])">
+  <textarea id="config_import_text" name="toml_text" rows="10" spellcheck="false"
+            placeholder="Paste an exported sharerr.toml here"></textarea>
+  <button type="submit">Restore</button>
 </form>
 </details>
 

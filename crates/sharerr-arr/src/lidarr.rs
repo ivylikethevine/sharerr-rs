@@ -20,7 +20,7 @@ use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 use crate::client::ArrClient;
 use crate::error::Result;
 use crate::models::{MediaInfo, non_empty};
-use crate::{Discovered, Tagged, fetch_tagged};
+use crate::{Discovered, Tagged, fetch_tagged, join_by_parent};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,24 +105,18 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             continue;
         }
 
-        // Indexed once, then each file's lookups are O(1) — a 400-track
-        // discography was ~160k linear-scan comparisons per artist without this.
-        let album_by_id: std::collections::HashMap<i64, &Album> =
-            albums.iter().map(|a| (a.id, a)).collect();
         let numbers_by_file = numbers_by_file(&tracks);
+        let joined = join_by_parent(
+            &albums,
+            files,
+            |a| a.id,
+            |f| f.album_id,
+            |f| f.id,
+            &artist.artist_name,
+            "album",
+        );
 
-        for file in files {
-            let Some(album) = album_by_id.get(&file.album_id).copied() else {
-                // A file whose album Lidarr no longer lists. Sharing it would
-                // produce a release named after nothing.
-                tracing::warn!(
-                    artist = %artist.artist_name,
-                    file_id = file.id,
-                    "track file belongs to no listed album; skipping"
-                );
-                continue;
-            };
-
+        for (album, file) in joined {
             let track = track_number(numbers_by_file.get(&file.id).map(Vec::as_slice));
 
             discovered.push(Discovered {

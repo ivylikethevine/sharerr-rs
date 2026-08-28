@@ -20,6 +20,7 @@
 //! announce, and no peer list for a hash sharerr is not sharing — an open tracker
 //! on a home connection is a liability, not a feature.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -109,7 +110,7 @@ impl AnnounceRequest {
         let get = |key: &'static str| params.get(key).ok_or(AnnounceError::Missing(key));
         let hash = |key: &'static str| -> Result<InfoHash, AnnounceError> {
             let raw = get(key)?;
-            InfoHash::try_from(raw.as_slice()).map_err(|_| AnnounceError::BadLength {
+            InfoHash::try_from(raw.as_ref()).map_err(|_| AnnounceError::BadLength {
                 field: key,
                 len: raw.len(),
             })
@@ -138,7 +139,7 @@ impl AnnounceRequest {
             event: params.get("event").map_or(Event::None, |e| Event::parse(e)),
             // Compact is the default: virtually every client sets `compact=1`;
             // the non-compact form is only a fallback.
-            compact: params.get("compact").is_none_or(|v| v != b"0"),
+            compact: params.get("compact").is_none_or(|v| v.as_ref() != b"0"),
             numwant: usize::try_from(number("numwant", MAX_NUMWANT as u64)?)
                 .unwrap_or(MAX_NUMWANT)
                 .min(MAX_NUMWANT),
@@ -499,7 +500,7 @@ fn put_int(out: &mut Vec<u8>, key: &str, value: i64) {
 ///
 /// Last value wins for a repeated key, matching every other tracker. Keys are
 /// compared as UTF-8 because they always are; values never are.
-pub fn parse_query(query: &[u8]) -> HashMap<String, Vec<u8>> {
+pub fn parse_query(query: &[u8]) -> HashMap<&str, Cow<'_, [u8]>> {
     let mut params = HashMap::new();
 
     for pair in query.split(|b| *b == b'&') {
@@ -514,7 +515,7 @@ pub fn parse_query(query: &[u8]) -> HashMap<String, Vec<u8>> {
         let Ok(key) = std::str::from_utf8(key) else {
             continue;
         };
-        params.insert(key.to_owned(), percent_decode(value));
+        params.insert(key, percent_decode(value));
     }
 
     params
@@ -524,7 +525,16 @@ pub fn parse_query(query: &[u8]) -> HashMap<String, Vec<u8>> {
 ///
 /// `+` becomes a space: some clients still form-encode the query, and a peer_id
 /// containing a literal `+` byte would otherwise not round-trip.
-fn percent_decode(raw: &[u8]) -> Vec<u8> {
+///
+/// Borrows straight from `raw` when there is nothing to decode — every field
+/// this tracker reads except `info_hash` and `peer_id` is plain ASCII with no
+/// `%` or `+` in it, so `port`, `left`, `event`, `compact` and `numwant` cost
+/// no allocation on the hot path every announce takes.
+fn percent_decode(raw: &[u8]) -> Cow<'_, [u8]> {
+    if !raw.contains(&b'%') && !raw.contains(&b'+') {
+        return Cow::Borrowed(raw);
+    }
+
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0;
 
@@ -555,7 +565,7 @@ fn percent_decode(raw: &[u8]) -> Vec<u8> {
         }
     }
 
-    out
+    Cow::Owned(out)
 }
 
 /// Append one peer in BEP 23/7 compact form: address octets then a big-endian

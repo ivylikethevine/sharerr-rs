@@ -157,6 +157,8 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
             post(settings::save_notifications),
         )
         .route("/settings/metrics", post(settings::save_metrics))
+        .route("/settings/config/export", get(settings::export_config))
+        .route("/settings/config/import", post(settings::import_config))
         .route(
             "/settings/generate/{field}",
             post(settings::generate_secret),

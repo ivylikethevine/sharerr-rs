@@ -1,4 +1,4 @@
-# Builds `Dockerfile.lighthouse`, and publishes it to GHCR on a `v*` tag only.
+# Builds `docker/Dockerfile.lighthouse`, and publishes it to GHCR on a `v*` tag only.
 #
 # Deliberately its own workflow rather than a second job in docker.yml. The
 # lighthouse is a separate product: a standalone rendezvous service meant to be
@@ -69,7 +69,7 @@ jobs:
           filters: |
             code:
               - 'crates/sharerr-lighthouse/**'
-              - 'Dockerfile.lighthouse'
+              - 'docker/Dockerfile.lighthouse'
               - 'Cargo.toml'
               - 'Cargo.lock'
 
@@ -145,7 +145,7 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: Dockerfile.lighthouse
+          file: docker/Dockerfile.lighthouse
           platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref || steps.meta.outputs.tags }}

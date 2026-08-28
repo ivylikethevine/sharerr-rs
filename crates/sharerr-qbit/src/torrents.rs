@@ -8,7 +8,7 @@ use crate::client::QbitClient;
 use crate::error::{QbitError, Result};
 use sharerr_client::AddRequest;
 
-use crate::models::{Category, TorrentFile, TorrentInfo, TrackerEntry};
+use crate::models::{TorrentFile, TorrentInfo, TrackerEntry};
 
 /// qBittorrent wants the part typed as a real torrent, not `application/octet-stream`.
 const TORRENT_MIME: &str = "application/x-bittorrent";
@@ -34,7 +34,7 @@ impl QbitClient {
         category: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<TorrentInfo>> {
-        let build = move |rb: reqwest::RequestBuilder| {
+        self.send_json(Method::GET, "torrents/info", |rb| {
             let mut query: Vec<(&str, &str)> = Vec::new();
             if let Some(category) = category {
                 query.push(("category", category));
@@ -43,8 +43,8 @@ impl QbitClient {
                 query.push(("tag", tag));
             }
             rb.query(&query)
-        };
-        self.send_json(Method::GET, "torrents/info", &build).await
+        })
+        .await
     }
 
     /// `GET /api/v2/torrents/files` — the contents of one torrent.
@@ -52,8 +52,10 @@ impl QbitClient {
     /// Paths are relative to that torrent's `save_path`; join them against
     /// [`TorrentInfo::save_path`] to compare against a file on disk.
     pub async fn torrent_files(&self, hash: &str) -> Result<Vec<TorrentFile>> {
-        let build = move |rb: reqwest::RequestBuilder| rb.query(&[("hash", hash)]);
-        self.send_json(Method::GET, "torrents/files", &build).await
+        self.send_json(Method::GET, "torrents/files", |rb| {
+            rb.query(&[("hash", hash)])
+        })
+        .await
     }
 
     /// `POST /api/v2/torrents/add` — start seeding content that already exists.
@@ -76,7 +78,6 @@ impl QbitClient {
     /// already rely on.
     pub async fn add_torrent(&self, request: &AddRequest<'_>) -> Result<()> {
         let build = move |rb: reqwest::RequestBuilder| {
-            // Rebuilt per attempt: a multipart Form cannot be cloned for a retry.
             let part = Part::bytes(request.data.to_vec())
                 .file_name(request.filename.to_owned())
                 .mime_str(TORRENT_MIME)
@@ -111,7 +112,7 @@ impl QbitClient {
             rb.multipart(form)
         };
 
-        let body = self.send_ok(Method::POST, "torrents/add", &build).await?;
+        let body = self.send_ok(Method::POST, "torrents/add", build).await?;
 
         // As with login, a rejected torrent can still arrive as HTTP 200.
         if body.trim().eq_ignore_ascii_case("Fails.") {
@@ -133,20 +134,23 @@ impl QbitClient {
     /// `delete_files` is hardcoded `false`. sharerr shares files it does not own;
     /// removing a share must never remove the user's media.
     pub async fn remove_torrent(&self, hash: &str) -> Result<()> {
-        let build = move |rb: reqwest::RequestBuilder| {
+        self.send_ok(Method::POST, "torrents/delete", |rb| {
             rb.form(&[("hashes", hash), ("deleteFiles", "false")])
-        };
-        self.send_ok(Method::POST, "torrents/delete", &build)
-            .await?;
+        })
+        .await?;
         Ok(())
     }
 
-    /// `GET /api/v2/torrents/categories` — every category qBittorrent currently
-    /// knows, keyed by name. Used only by `sharerr doctor --fix` to tell "the
-    /// configured category does not exist yet" from "it does" before creating it.
-    pub async fn categories(&self) -> Result<std::collections::HashMap<String, Category>> {
-        self.send_json(Method::GET, "torrents/categories", &|rb| rb)
-            .await
+    /// `GET /api/v2/torrents/categories` — the name of every category
+    /// qBittorrent currently knows. Used only by `sharerr doctor --fix` to
+    /// tell "the configured category does not exist yet" from "it does"
+    /// before creating it — nothing needs more than the name, so the wire
+    /// response's per-category object is discarded rather than modeled.
+    pub async fn categories(&self) -> Result<std::collections::HashSet<String>> {
+        let categories: std::collections::HashMap<String, serde::de::IgnoredAny> = self
+            .send_json(Method::GET, "torrents/categories", |rb| rb)
+            .await?;
+        Ok(categories.into_keys().collect())
     }
 
     /// `POST /api/v2/torrents/createCategory`.
@@ -156,17 +160,19 @@ impl QbitClient {
     /// ever depends on a category's own save path — creating one is only about
     /// making the category selectable at all.
     pub async fn create_category(&self, name: &str) -> Result<()> {
-        let build = move |rb: reqwest::RequestBuilder| rb.form(&[("category", name)]);
-        self.send_ok(Method::POST, "torrents/createCategory", &build)
-            .await?;
+        self.send_ok(Method::POST, "torrents/createCategory", |rb| {
+            rb.form(&[("category", name)])
+        })
+        .await?;
         Ok(())
     }
 
     /// `GET /api/v2/torrents/trackers` — one torrent's tracker list.
     pub async fn torrent_trackers(&self, hash: &str) -> Result<Vec<TrackerEntry>> {
-        let build = move |rb: reqwest::RequestBuilder| rb.query(&[("hash", hash)]);
-        self.send_json(Method::GET, "torrents/trackers", &build)
-            .await
+        self.send_json(Method::GET, "torrents/trackers", |rb| {
+            rb.query(&[("hash", hash)])
+        })
+        .await
     }
 
     /// Replace one torrent's tracker list with `urls`.
@@ -221,9 +227,10 @@ impl QbitClient {
     /// Read as bytes, never as text: this is bencode, and a `String` round
     /// trip would mangle the binary `pieces` field and with it the infohash.
     pub async fn export_torrent(&self, hash: &str) -> Result<Vec<u8>> {
-        let build = move |rb: reqwest::RequestBuilder| rb.query(&[("hash", hash)]);
         let response = self
-            .send_checked(Method::GET, "torrents/export", &build)
+            .send_checked(Method::GET, "torrents/export", |rb| {
+                rb.query(&[("hash", hash)])
+            })
             .await?;
         let bytes = response
             .bytes()
@@ -249,10 +256,10 @@ impl QbitClient {
             return Ok(());
         }
         let joined = urls.join(sep);
-        let build = move |rb: reqwest::RequestBuilder| {
+        self.send_ok(Method::POST, endpoint, |rb| {
             rb.form(&[("hash", hash), ("urls", joined.as_str())])
-        };
-        self.send_ok(Method::POST, endpoint, &build).await?;
+        })
+        .await?;
         Ok(())
     }
 }

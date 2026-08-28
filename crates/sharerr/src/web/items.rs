@@ -13,7 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
-use sharerr_core::{MediaSource, ShareState, SharedItem};
+use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
 use sharerr_store::{Peer, PeerScope, Store};
 
 use std::collections::HashMap;
@@ -68,10 +68,6 @@ pub(crate) const SORT_COLUMNS: &[(&str, &str)] = &[
     ("size", "Size"),
     ("state", "State"),
 ];
-
-/// Every kind a `MediaSpec` can be, in the order the filter offers them —
-/// the same tags `MediaSpec::kind_tag` returns.
-pub(crate) const KINDS: &[&str] = &["episode", "movie", "track", "book"];
 
 pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>) -> Response {
     let store = match state.store_or_503().await {
@@ -262,7 +258,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                 label: title_case(s.as_str()),
             })
             .collect(),
-        kind_options: KINDS
+        kind_options: MediaSpec::KIND_TAGS
             .iter()
             .map(|k| FilterOption {
                 value: k,

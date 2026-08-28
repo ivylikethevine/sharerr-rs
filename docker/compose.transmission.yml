@@ -1,6 +1,6 @@
 # The same stack, seeding through Transmission instead of qBittorrent.
 #
-#   ./run_docker_tests.sh --transmission
+#   ./scripts/run_docker_tests.sh --transmission
 #
 # Transmission is the second torrent client sharerr supports, and it differs from
 # qBittorrent in two ways that matter far more than the shape of the API:
@@ -76,7 +76,7 @@ services:
   sharerr:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: sharerr-tm-test-sharerr
     depends_on: [sonarr, radarr, transmission]
     environment:

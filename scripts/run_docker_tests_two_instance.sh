@@ -7,7 +7,7 @@
 # byte-identical to instance A's copy. See docker/README.md's "The
 # two-instance stack" section.
 #
-#   ./run_docker_tests_two_instance.sh
+#   ./scripts/run_docker_tests_two_instance.sh
 #
 # Heavier and slower than run_docker_tests.sh's suite — two Radarrs, two
 # qBittorrents, two sharerr instances, and a real Radarr automatic search
@@ -20,7 +20,9 @@
 
 set -euo pipefail
 
-cd "$(dirname "$(readlink -f "$0")")"
+# One level up from this script's own `scripts/` directory — see
+# run_docker_tests.sh's comment on the same line for why `readlink -f` matters.
+cd "$(dirname "$(readlink -f "$0")")/.."
 
 COMPOSE=(docker compose -f docker/compose.two-instance.yml)
 STATE=docker/state-two-instance

@@ -486,12 +486,11 @@ fn parse(raw: &[u8]) -> Result<([u8; SALT_LEN], BTreeMap<String, Record>)> {
         return Err(VaultError::UnsupportedVersion { found: raw[0] });
     }
 
-    // codeql[rust/hard-coded-cryptographic-value] -- zero-filled only as a
-    // buffer to decode into; overwritten on the next line with the salt
-    // actually stored in this vault file, which was random when it was
-    // generated. Nothing here is a fixed cryptographic value.
-    let mut salt = [0u8; SALT_LEN];
-    salt.copy_from_slice(&raw[1..1 + SALT_LEN]);
+    // The salt actually stored in this vault file; it was random when generated.
+    // The length is already guaranteed by the header check above.
+    let salt: [u8; SALT_LEN] = raw[1..1 + SALT_LEN]
+        .try_into()
+        .map_err(|_| VaultError::Corrupt("salt header is the wrong length"))?;
 
     let mut records = BTreeMap::new();
     let mut cursor = 1 + SALT_LEN;

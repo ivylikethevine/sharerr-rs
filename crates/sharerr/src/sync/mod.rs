@@ -556,45 +556,52 @@ impl Syncer {
                 match self.seeder.refresh_announce(hash, announce).await {
                     // Either branch means the live torrent now genuinely
                     // matches `announce.primary` — a no-op refresh is still a
-                    // confirmation, not merely "nothing to do".
+                    // confirmation, not merely "nothing to do". Confirmed
+                    // fingerprint and reported ratio land in the one write
+                    // `confirm_seeding` makes for them — this is the pass's
+                    // common case, so folding the two together here is what
+                    // actually saves the second UPDATE most passes would
+                    // otherwise pay.
                     Ok(AnnounceRefresh::Current | AnnounceRefresh::Updated) => {
                         let fp = token_fingerprint(announce);
                         if let Err(err) = self
                             .store
-                            .set_announce_token_fp(item.source, item.file_id, fp.as_deref())
+                            .confirm_seeding(
+                                item.source,
+                                item.file_id,
+                                fp.as_deref(),
+                                ratio,
+                                ratio_limit,
+                            )
                             .await
                         {
                             tracing::warn!(
                                 item = %item.spec,
                                 error = %err,
-                                "could not record the confirmed announce token"
+                                "could not record the confirmed announce token and ratio"
                             );
                         }
                     }
                     // Nothing was compared, so nothing is confirmed: leave
                     // the stored fingerprint alone and the items page keeps
                     // showing this one as not-yet-current rather than Valid.
-                    Ok(AnnounceRefresh::NoCachedTorrent) => tracing::debug!(
-                        item = %item.spec,
-                        info_hash = %hash,
-                        "no cached .torrent to confirm the announce URL against"
-                    ),
-                    Err(err) => tracing::warn!(
-                        item = %item.spec,
-                        error = format!("{err:#}"),
-                        "could not refresh announce URLs"
-                    ),
-                }
-                if let Err(err) = self
-                    .store
-                    .set_ratio(item.source, item.file_id, ratio, ratio_limit)
-                    .await
-                {
-                    tracing::warn!(
-                        item = %item.spec,
-                        error = %err,
-                        "could not record the reported ratio"
-                    );
+                    // The ratio is still worth recording on its own.
+                    Ok(AnnounceRefresh::NoCachedTorrent) => {
+                        tracing::debug!(
+                            item = %item.spec,
+                            info_hash = %hash,
+                            "no cached .torrent to confirm the announce URL against"
+                        );
+                        self.record_ratio(item, ratio, ratio_limit).await;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            item = %item.spec,
+                            error = format!("{err:#}"),
+                            "could not refresh announce URLs"
+                        );
+                        self.record_ratio(item, ratio, ratio_limit).await;
+                    }
                 }
             }
             return Ok(Step::Unchanged);
@@ -723,6 +730,24 @@ impl Syncer {
             SeedOutcome::Added { .. } => Step::Added,
             SeedOutcome::Reused { .. } => Step::Reused,
         })
+    }
+
+    /// Record the client-reported ratio alone, for a fast-path pass whose
+    /// announce comparison confirmed nothing to fold it into via
+    /// `Store::confirm_seeding` — see [`Self::share`]. A write failure is a
+    /// warning, not a failed item: the torrent is still seeding either way.
+    async fn record_ratio(&self, item: &Discovered, ratio: Option<f64>, ratio_limit: Option<f64>) {
+        if let Err(err) = self
+            .store
+            .set_ratio(item.source, item.file_id, ratio, ratio_limit)
+            .await
+        {
+            tracing::warn!(
+                item = %item.spec,
+                error = %err,
+                "could not record the reported ratio"
+            );
+        }
     }
 
     /// Withdraw items whose tag was removed upstream.

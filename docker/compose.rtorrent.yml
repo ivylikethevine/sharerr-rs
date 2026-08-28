@@ -1,6 +1,6 @@
 # The same stack, seeding through rTorrent instead of qBittorrent.
 #
-#   ./run_docker_tests.sh --rtorrent
+#   ./scripts/run_docker_tests.sh --rtorrent
 #
 # rTorrent is the third torrent client sharerr supports, and the reason it is
 # worth its own stack rather than trusting the hand-mocked XML-RPC server in
@@ -92,7 +92,7 @@ services:
   sharerr:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: sharerr-rt-test-sharerr
     depends_on: [sonarr, radarr, rtorrent]
     environment:

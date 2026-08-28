@@ -41,40 +41,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     tracing::info!(bind = %cli.bind, "lighthouse listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(sharerr_lighthouse::shutdown_signal())
         .await?;
     Ok(())
-}
-
-/// Resolves on SIGINT or SIGTERM. The binary is PID 1 in its container, and
-/// PID 1 without an installed handler ignores SIGTERM — `docker stop` would
-/// wait out its grace period and SIGKILL.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(err) = tokio::signal::ctrl_c().await {
-            tracing::warn!(error = %err, "could not listen for ctrl-c");
-            std::future::pending::<()>().await;
-        }
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "could not listen for SIGTERM");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
-    tracing::info!("shutdown signal received");
 }
 
 /// Load the decoy secret from disk, minting one on first run.

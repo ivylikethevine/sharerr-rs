@@ -272,8 +272,11 @@ impl AdvertisedEndpoint {
 pub const MAX_FUTURE_SKEW_SECS: i64 = 5 * 60;
 
 /// Current Unix time in seconds, saturating to `0` if the clock is somehow
-/// before the epoch. The one place this is computed; reused wherever a
-/// timestamp is stamped onto a row or a record.
+/// before the epoch. Reused wherever a timestamp is stamped onto a row or a
+/// record — the one place this is computed within the workspace, aside from
+/// `sharerr-lighthouse`'s intentional standalone twin (that crate does not
+/// depend on this one; see its own `now_epoch`), which must stay identical
+/// at the `i64` boundary.
 pub fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

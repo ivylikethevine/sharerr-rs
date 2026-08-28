@@ -10,8 +10,18 @@
 
 #![allow(clippy::print_stdout)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use sharerr_testkit::Library;
+
+type Builder = fn(&Path) -> std::io::Result<Library>;
+
+const BUILDERS: [(&str, Builder); 3] = [
+    ("tv", sharerr_testkit::tv_library),
+    ("movie", sharerr_testkit::movie_library),
+    ("music", sharerr_testkit::music_library),
+];
 
 fn main() -> ExitCode {
     let Some(root) = std::env::args().nth(1).map(PathBuf::from) else {
@@ -20,36 +30,23 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let tv = match sharerr_testkit::tv_library(&root) {
-        Ok(library) => library,
-        Err(err) => {
-            eprintln!("could not write the tv library: {err}");
-            return ExitCode::FAILURE;
+    let mut libraries = Vec::with_capacity(BUILDERS.len());
+    for (name, build) in BUILDERS {
+        match build(&root) {
+            Ok(library) => libraries.push(library),
+            Err(err) => {
+                eprintln!("could not write the {name} library: {err}");
+                return ExitCode::FAILURE;
+            }
         }
-    };
-
-    let movies = match sharerr_testkit::movie_library(&root) {
-        Ok(library) => library,
-        Err(err) => {
-            eprintln!("could not write the movie library: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let music = match sharerr_testkit::music_library(&root) {
-        Ok(library) => library,
-        Err(err) => {
-            eprintln!("could not write the music library: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    }
 
     println!(
         "wrote {} synthetic file(s) under {}",
-        tv.files.len() + movies.files.len() + music.files.len(),
+        libraries.iter().map(|l| l.files.len()).sum::<usize>(),
         root.display()
     );
-    for file in tv.files.iter().chain(&movies.files).chain(&music.files) {
+    for file in libraries.iter().flat_map(|l| &l.files) {
         println!("  {} ({} bytes)", file.disk_path.display(), file.size);
     }
     println!();

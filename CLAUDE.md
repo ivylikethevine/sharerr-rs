@@ -47,10 +47,10 @@ already produced one confidently wrong conclusion here.
 ## MSRV
 
 `rust-version` is 1.98, and the Dockerfile pins the same toolchain, which makes
-`docker build .` the **de-facto MSRV check** — a local toolchain is invariably
-newer and will not catch a breach. Two have shipped unnoticed this way
-(`str::split_at_checked` in a const context, then let-chains). Build the image
-before claiming the declared MSRV holds.
+`docker build -f docker/Dockerfile .` the **de-facto MSRV check** — a local
+toolchain is invariably newer and will not catch a breach. Two have shipped
+unnoticed this way (`str::split_at_checked` in a const context, then
+let-chains). Build the image before claiming the declared MSRV holds.
 
 ## Dependencies
 
@@ -65,7 +65,7 @@ no database. Service clients run against wiremock on loopback, sqlx against
 `sqlite::memory:`, migrations are embedded by `sqlx::migrate!`. Keep it that way —
 it is what makes CI fast and reliable.
 
-**Tier 2** is `./run_docker_tests.sh`, opt-in and local only, behind the `e2e`
+**Tier 2** is `./scripts/run_docker_tests.sh`, opt-in and local only, behind the `e2e`
 feature and `#[ignore]`. It drives a real Sonarr + Radarr + qBittorrent stack. CI
 compiles it with `--all-features` so it cannot rot, but never runs it — do not add
 `--include-ignored`.
@@ -95,6 +95,21 @@ When a test genuinely needs the vault open, the one sanctioned way is
 because `Jail` scopes the variable and serialises against every other Jail test
 in the binary. A bare `std::env::set_var` does neither and races the parallel
 runner.
+
+**A test that needs the master key _absent_ is just as exposed as one that needs
+it present, and just as easy to reach for `fixtures::unconfigured()` alone and
+call it done.** `master_key_from_env` reads the real process environment with no
+injection point, and this binary's `Jail` tests genuinely mutate it — `Jail`
+only serialises against _other Jail closures_, so a bare `#[tokio::test]`
+asserting a rejection that depends on the vault failing to open (`BAD_REQUEST`
+from a secret-writing handler, say) can flip to success mid-run if one of those
+Jail tests happens to be live on another thread at that moment. Seven tests
+shipped this way before the race was ever noticed, and it reproduced
+deterministically once enough Jail tests existed to make the window wide
+enough — it did not show up as one-off flakiness. Wrap this class of test in
+`Jail` too, with `jail.clear_env()` and nothing else, exactly as if it needed a
+var _set_; see `secrets.rs`'s `opening_a_vault_without_a_master_key_fails_with_no_side_effects`
+or `web/settings.rs`'s `save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config`.
 
 ## Traps
 
@@ -147,9 +162,10 @@ architectures — that build is load-bearing as the MSRV check — but ships not
 so no branch tag (`:main` included) ever exists on GHCR; only `latest`, the semver
 tags, and a `sha-*` tag do.
 
-**Two images ship, from two workflows.** `docker.yml` builds `Dockerfile` into
-`ghcr.io/<repo>`; `docker-lighthouse.yml` builds `Dockerfile.lighthouse` into
-`ghcr.io/<owner>/sharerr-lighthouse`. They are separate so a break in one cannot
+**Two images ship, from two workflows.** `docker.yml` builds `docker/Dockerfile`
+into `ghcr.io/<repo>`; `docker-lighthouse.yml` builds
+`docker/Dockerfile.lighthouse` into `ghcr.io/<owner>/sharerr-lighthouse`. They
+are separate so a break in one cannot
 hold the other's release, and so each is approved on its own. Both Dockerfiles
 pin the toolchain to `rust-version`, and **both pins have to move together** —
 the lighthouse one silently sat three minors behind for a while, which meant that
@@ -175,6 +191,21 @@ three tunnelled stacks `extends` it by that path. A new file holding an image
 pin must satisfy that regex, and must sit in a directory `dependabot.yml` lists
 — `/docker/deploy/*` matches the directories _under_ `deploy`, not `deploy`
 itself, which is why `/docker/deploy` is listed separately.
+
+**CodeQL (`.github/workflows/codeql.yml`) has no in-source suppression
+mechanism.** A `// codeql[rule-id]` or `// lgtm[rule-id]` comment above a flagged
+line does nothing — GitHub code scanning only recognizes a dismissal made in the
+Security tab (or the equivalent REST/`gh api` call), never a source comment. Nine
+such dead comments sat in the tree for a while before this was noticed, none of
+them suppressing anything. There are exactly two real options for a finding: fix
+the code so the value it flags no longer exists (see `sharerr_testkit::mock::rpc_credentials`,
+which replaced hard-coded Basic Auth literals across the rTorrent and
+Transmission test suites), or dismiss it in the Security tab with a reason and
+record *why* somewhere durable — `docs/SECURITY.md`'s "What is out of scope" for
+the `rust/path-injection` alerts is the model. A dismissal is also
+fingerprint-bound to the flagged line, not the underlying pattern: moving a
+literal to a new file (a crate split, a rename) resets the fingerprint and the
+same finding reappears as "new" even though nothing about it changed.
 
 **Three scheduled workflows notify by keeping one issue current**, rather than by
 turning a run red: `image-scan.yml`'s `pins` job, `tool-versions.yml`, and

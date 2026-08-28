@@ -77,7 +77,7 @@ since 2013), so `set_trackers` there can only insert a fresh tier ahead of
 whatever is already on the torrent, not replace it — see the crate's module
 docs for the full reasoning.
 
-`run_docker_tests.sh --rtorrent` drives a real rTorrent + ruTorrent container
+`scripts/run_docker_tests.sh --rtorrent` drives a real rTorrent + ruTorrent container
 (`crazymax/rtorrent-rutorrent`) through the same tier-2 suite the plain,
 `--transmission` and `--vpn` stacks use — confirming the requests and responses a real
 rTorrent actually sends, not just the ones the crate's hand-mocked unit
@@ -89,7 +89,7 @@ result with a self-closing `<data/>` rather than `<data></data>`.
 ## Indexers (what consumes the feed)
 
 **Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
-**Sonarr/Radarr/Lidarr direct**. The tier-2 script (`run_docker_tests.sh`)
+**Sonarr/Radarr/Lidarr direct**. The tier-2 script (`scripts/run_docker_tests.sh`)
 adds sharerr as an indexer to a real Sonarr, and to a real Lidarr on the plain
 stack, and drives its own Jackett-shaped routes and Torznab caps by hand;
 Prowlarr is an opt-in container in that compose file for the manual exercise

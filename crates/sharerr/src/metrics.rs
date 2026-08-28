@@ -93,19 +93,18 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
     let (items_by_state_vec, seeding, last_run, peers_total, peers_recent) =
         match state.store().await {
             Ok(store) => {
-                let items = store.all_items().await.unwrap_or_default();
-                let seeding = store
-                    .seeding_summary(sharerr_store::PeerScope::All)
-                    .await
-                    .unwrap_or_default();
-                let last_run = store
-                    .recent_runs(1)
-                    .await
+                let (counts, seeding_summary, runs, peers) = tokio::join!(
+                    store.counts_by_state(),
+                    store.seeding_summary(sharerr_store::PeerScope::All),
+                    store.recent_runs(1),
+                    store.list_peers(),
+                );
+                let last_run = runs
                     .unwrap_or_default()
                     .into_iter()
                     .next()
                     .filter(|run| run.finished_at.is_some());
-                let peers = store.list_peers().await.unwrap_or_default();
+                let peers = peers.unwrap_or_default();
                 let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
                 let now = sharerr_core::endpoint::now_epoch();
                 let recent = active
@@ -113,8 +112,8 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
                     .filter(|p| p.last_seen_at.is_some_and(|at| now - at < 3600))
                     .count();
                 (
-                    items_by_state(&items),
-                    seeding,
+                    counts.unwrap_or_else(|_| items_by_state(&[])),
+                    seeding_summary.unwrap_or_default(),
                     last_run,
                     active.len(),
                     recent,

@@ -31,7 +31,7 @@ mod error;
 mod models;
 mod torrents;
 
-pub use client::{API_KEY_LEN, API_KEY_PREFIX, QbitClient, looks_like_api_key};
+pub use client::{QbitClient, looks_like_api_key};
 pub use error::{QbitError, Result};
 pub use models::{TorrentFile, TorrentInfo, TrackerEntry};
 // Re-exported because [`QbitClient::add_torrent`] takes it directly.

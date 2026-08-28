@@ -97,6 +97,12 @@ pub async fn revoke(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
     let result = store.revoke_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "revoked a friend's key");
+        crate::notify::send(
+            &state.serve,
+            sharerr_core::config::NotificationTrigger::PeerRevoked,
+            &format!("revoked friend #{id}'s key"),
+        )
+        .await;
     }
     applied(&state, result, "revoke that key").await
 }
@@ -290,34 +296,35 @@ async fn build(
     let (peers, endpoints, list_error) = match state.serve.store().await {
         Ok(store) => match store.list_peers().await {
             Ok(peers) => {
-                // One extra query per friend; the list is people, not rows —
-                // but run concurrently rather than one round trip at a time.
-                // The seeding count per scope rides alongside, once per
-                // distinct scope rather than once per friend: it is the
-                // concrete answer to what "Can see: TV only" means.
+                // Every friend's endpoint history in one round trip rather
+                // than one per friend. The seeding count per scope rides
+                // alongside, once per distinct scope rather than once per
+                // friend: it is the concrete answer to what "Can see: TV
+                // only" means.
                 let mut scopes: Vec<PeerScope> = Vec::new();
                 for peer in &peers {
                     if !scopes.contains(&peer.scope) {
                         scopes.push(peer.scope);
                     }
                 }
-                let (endpoints, counts) =
+                let peer_ids: Vec<i64> = peers.iter().map(|peer| peer.id).collect();
+                let (endpoints_by_peer, counts) =
                     tokio::join!(
-                        futures::future::join_all(peers.iter().map(|peer| async {
-                            store.peer_endpoints(peer.id).await.unwrap_or_default()
-                        })),
+                        store.peer_endpoints_for(&peer_ids),
                         futures::future::join_all(scopes.iter().map(|scope| async {
                             (*scope, store.seeding_summary(*scope).await.ok())
                         })),
                     );
+                let endpoints_by_peer = endpoints_by_peer.unwrap_or_default();
                 let endpoints = peers
                     .iter()
-                    .zip(endpoints)
-                    .map(|(peer, endpoints)| {
+                    .map(|peer| {
                         let sharing = counts
                             .iter()
                             .find(|(scope, _)| *scope == peer.scope)
                             .and_then(|(_, sharing)| *sharing);
+                        let endpoints =
+                            endpoints_by_peer.get(&peer.id).cloned().unwrap_or_default();
                         (endpoints, sharing)
                     })
                     .collect::<Vec<_>>();
@@ -490,7 +497,7 @@ pub(crate) fn took(started_at: i64, finished_at: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
 
@@ -938,31 +945,45 @@ mod tests {
     /// A non-blank key routes through the vault, which cannot open with no
     /// master key set — the exact condition this suite is limited to for
     /// anything vault-shaped, per CLAUDE.md.
-    #[tokio::test]
-    async fn set_gossip_with_a_key_fails_cleanly_when_the_vault_will_not_open() {
-        let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
-        let state = web_state(serve);
+    ///
+    /// `master_key_from_env` reads the real process environment, which
+    /// several tests elsewhere in this binary legitimately mutate via
+    /// `figment::Jail`. Wrapped in `Jail` too (with `clear_env`) so this is
+    /// guaranteed to run with no other Jail closure's env mutation active,
+    /// rather than racing the parallel runner for a var it needs absent.
+    #[test]
+    fn set_gossip_with_a_key_fails_cleanly_when_the_vault_will_not_open() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
 
-        let response = set_gossip(
-            State(state),
-            Path(sam.id),
-            Form(GossipForm {
-                url: String::new(),
-                key: "a-key-alex-issued-us".to_owned(),
-                clear_key: None,
-            }),
-        )
-        .await;
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .await
+                    .unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        // The URL write must not have happened either — a rejected secret
-        // write must not leave a half-applied change behind.
-        assert!(store.list_peers().await.unwrap()[0].gossip_url.is_none());
+                let response = set_gossip(
+                    State(state),
+                    Path(sam.id),
+                    Form(GossipForm {
+                        url: String::new(),
+                        key: "a-key-alex-issued-us".to_owned(),
+                        clear_key: None,
+                    }),
+                )
+                .await;
+
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                // The URL write must not have happened either — a rejected secret
+                // write must not leave a half-applied change behind.
+                assert!(store.list_peers().await.unwrap()[0].gossip_url.is_none());
+            });
+            Ok(())
+        });
     }
 
     #[tokio::test]

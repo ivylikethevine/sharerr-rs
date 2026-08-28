@@ -269,16 +269,21 @@ async fn gather(state: &WebState) -> TopologyPage {
         swarm_rows(state, &titles),
     );
 
-    let (nodes, edges, width, height) = layout(
-        &sources,
-        &instance_lines,
+    let Layout {
+        nodes,
+        edges,
+        width,
+        height,
+    } = layout(LayoutInput {
+        sources: &sources,
+        instance_lines: &instance_lines,
         instance_status,
-        &client_label,
-        &client_lines,
+        client_label: &client_label,
+        client_lines: &client_lines,
         client_status,
-        &path_edge_label,
-        &friends,
-    );
+        path_edge_label: &path_edge_label,
+        friends: &friends,
+    });
 
     TopologyPage {
         signed_in: true,
@@ -742,18 +747,21 @@ async fn friend_nodes(state: &WebState) -> Vec<FriendNode> {
         .filter(|peer| !peer.is_revoked())
         .collect();
 
-    let endpoints = futures::future::join_all(
-        active
-            .iter()
-            .map(|peer| async { store.peer_endpoints(peer.id).await.unwrap_or_default() }),
-    )
-    .await;
+    // Every active friend's endpoint history in one round trip rather than
+    // one per friend.
+    let peer_ids: Vec<i64> = active.iter().map(|peer| peer.id).collect();
+    let endpoints_by_peer = store
+        .peer_endpoints_for(&peer_ids)
+        .await
+        .unwrap_or_default();
 
     active
         .into_iter()
-        .zip(endpoints)
         .enumerate()
-        .map(|(i, (peer, endpoints))| friend_node(&peer.label, &endpoints, peer_color(i)))
+        .map(|(i, peer)| {
+            let endpoints = endpoints_by_peer.get(&peer.id).cloned().unwrap_or_default();
+            friend_node(&peer.label, &endpoints, peer_color(i))
+        })
         .collect()
 }
 
@@ -901,6 +909,29 @@ fn tokenize(text: &str) -> Vec<Tok> {
     toks
 }
 
+/// What [`layout`] needs to place every box and edge in the diagram — named
+/// fields rather than eight positional arguments a caller has to remember
+/// the order of.
+pub(crate) struct LayoutInput<'a> {
+    pub sources: &'a [SourceNode],
+    pub instance_lines: &'a [NodeLine],
+    pub instance_status: NodeStatus,
+    pub client_label: &'a str,
+    pub client_lines: &'a [NodeLine],
+    pub client_status: NodeStatus,
+    pub path_edge_label: &'a str,
+    pub friends: &'a [FriendNode],
+}
+
+/// The placed diagram [`layout`] produces: every box and edge, and the
+/// canvas size they need.
+pub(crate) struct Layout {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub width: i32,
+    pub height: i32,
+}
+
 /// Lays out three fixed swimlanes — sources, this instance (sharerr +
 /// torrent client, stacked), friends — left to right. Not a general
 /// graph-layout algorithm: the shape of this diagram is always these three
@@ -910,17 +941,17 @@ fn tokenize(text: &str) -> Vec<Tok> {
 /// [`node_height`]), so lanes are stacked from real heights rather than one
 /// fixed row pitch. The tallest lane sets the diagram's content height and
 /// the other two center within it.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn layout(
-    sources: &[SourceNode],
-    instance_lines: &[NodeLine],
-    instance_status: NodeStatus,
-    client_label: &str,
-    client_lines: &[NodeLine],
-    client_status: NodeStatus,
-    path_edge_label: &str,
-    friends: &[FriendNode],
-) -> (Vec<Node>, Vec<Edge>, i32, i32) {
+pub(crate) fn layout(input: LayoutInput<'_>) -> Layout {
+    let LayoutInput {
+        sources,
+        instance_lines,
+        instance_status,
+        client_label,
+        client_lines,
+        client_status,
+        path_edge_label,
+        friends,
+    } = input;
     let sources_x = MARGIN;
     let instance_x = sources_x + COL_W + COL_GAP;
     let friends_x = instance_x + COL_W + COL_GAP;
@@ -1074,7 +1105,12 @@ pub(crate) fn layout(
         y += h + ROW_GAP;
     }
 
-    (nodes, edges, width, height)
+    Layout {
+        nodes,
+        edges,
+        width,
+        height,
+    }
 }
 
 /// Stamp each detail row with its baseline, now that the node's own position
@@ -1252,16 +1288,21 @@ mod tests {
     /// a diagram, not an empty page.
     #[test]
     fn layout_with_nothing_configured_still_draws_the_instance_and_client() {
-        let (nodes, edges, width, height) = layout(
-            &[],
-            &[line("address", "not advertised yet")],
-            NodeStatus::Error,
-            "qBittorrent",
-            &[line("version", "no credential stored")],
-            NodeStatus::Error,
-            "",
-            &[],
-        );
+        let Layout {
+            nodes,
+            edges,
+            width,
+            height,
+        } = layout(LayoutInput {
+            sources: &[],
+            instance_lines: &[line("address", "not advertised yet")],
+            instance_status: NodeStatus::Error,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "no credential stored")],
+            client_status: NodeStatus::Error,
+            path_edge_label: "",
+            friends: &[],
+        });
 
         assert_eq!(nodes.len(), 2);
         assert_eq!(edges.len(), 1, "just the sharerr-client edge");
@@ -1274,16 +1315,16 @@ mod tests {
             node("Sonarr", NodeStatus::Ok),
             node("Radarr", NodeStatus::Error),
         ];
-        let (nodes, edges, ..) = layout(
-            &sources,
-            &[line("address", "")],
-            NodeStatus::Unknown,
-            "qBittorrent",
-            &[line("version", "")],
-            NodeStatus::Unknown,
-            "",
-            &[],
-        );
+        let Layout { nodes, edges, .. } = layout(LayoutInput {
+            sources: &sources,
+            instance_lines: &[line("address", "")],
+            instance_status: NodeStatus::Unknown,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "")],
+            client_status: NodeStatus::Unknown,
+            path_edge_label: "",
+            friends: &[],
+        });
 
         // 2 sources + sharerr + client.
         assert_eq!(nodes.len(), 4);
@@ -1297,16 +1338,16 @@ mod tests {
     #[test]
     fn a_friend_with_no_endpoints_gets_no_edges() {
         let friends = vec![unseen_friend("Sam")];
-        let (nodes, edges, ..) = layout(
-            &[],
-            &[line("address", "")],
-            NodeStatus::Unknown,
-            "qBittorrent",
-            &[line("version", "")],
-            NodeStatus::Unknown,
-            "",
-            &friends,
-        );
+        let Layout { nodes, edges, .. } = layout(LayoutInput {
+            sources: &[],
+            instance_lines: &[line("address", "")],
+            instance_status: NodeStatus::Unknown,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "")],
+            client_status: NodeStatus::Unknown,
+            path_edge_label: "",
+            friends: &friends,
+        });
 
         assert_eq!(nodes.len(), 3, "sharerr + client + the one friend");
         assert_eq!(edges.len(), 1, "only the sharerr-client edge");
@@ -1328,16 +1369,16 @@ mod tests {
             },
             client: Channel::unseen(),
         }];
-        let (_, edges, ..) = layout(
-            &[],
-            &[line("address", "")],
-            NodeStatus::Unknown,
-            "qBittorrent",
-            &[line("version", "")],
-            NodeStatus::Unknown,
-            "",
-            &friends,
-        );
+        let Layout { edges, .. } = layout(LayoutInput {
+            sources: &[],
+            instance_lines: &[line("address", "")],
+            instance_status: NodeStatus::Unknown,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "")],
+            client_status: NodeStatus::Unknown,
+            path_edge_label: "",
+            friends: &friends,
+        });
 
         assert_eq!(edges.len(), 2, "the sharerr-client edge plus one channel");
     }
@@ -1361,16 +1402,16 @@ mod tests {
             client: same(),
         }];
 
-        let (_, edges, ..) = layout(
-            &[],
-            &[line("address", "")],
-            NodeStatus::Unknown,
-            "qBittorrent",
-            &[line("version", "")],
-            NodeStatus::Unknown,
-            "",
-            &friends,
-        );
+        let Layout { edges, .. } = layout(LayoutInput {
+            sources: &[],
+            instance_lines: &[line("address", "")],
+            instance_status: NodeStatus::Unknown,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "")],
+            client_status: NodeStatus::Unknown,
+            path_edge_label: "",
+            friends: &friends,
+        });
 
         let labelled = edges.iter().filter(|e| e.label == "gossip 2h").count();
         assert_eq!(labelled, 1, "the duplicate label must be drawn once");
@@ -1393,26 +1434,26 @@ mod tests {
             .map(|i| unseen_friend(&format!("friend{i}")))
             .collect();
 
-        let (_, _, _, short) = layout(
-            &few_sources,
-            &[line("address", "")],
-            NodeStatus::Unknown,
-            "qBittorrent",
-            &[line("version", "")],
-            NodeStatus::Unknown,
-            "",
-            &[],
-        );
-        let (_, _, _, tall) = layout(
-            &few_sources,
-            &[line("address", "")],
-            NodeStatus::Unknown,
-            "qBittorrent",
-            &[line("version", "")],
-            NodeStatus::Unknown,
-            "",
-            &many_friends,
-        );
+        let Layout { height: short, .. } = layout(LayoutInput {
+            sources: &few_sources,
+            instance_lines: &[line("address", "")],
+            instance_status: NodeStatus::Unknown,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "")],
+            client_status: NodeStatus::Unknown,
+            path_edge_label: "",
+            friends: &[],
+        });
+        let Layout { height: tall, .. } = layout(LayoutInput {
+            sources: &few_sources,
+            instance_lines: &[line("address", "")],
+            instance_status: NodeStatus::Unknown,
+            client_label: "qBittorrent",
+            client_lines: &[line("version", "")],
+            client_status: NodeStatus::Unknown,
+            path_edge_label: "",
+            friends: &many_friends,
+        });
 
         assert!(tall > short, "5 friends must need more height than 0");
     }

@@ -84,9 +84,9 @@ updates:
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
 
-  # Dockerfile and Dockerfile.lighthouse, both at the repo root.
+  # Dockerfile and Dockerfile.lighthouse, both under /docker.
   - package-ecosystem: docker
-    directory: /
+    directory: /docker
     schedule:
       interval: weekly
       day: monday
@@ -121,7 +121,7 @@ updates:
   # maintain by hand.
   #
   # These are pinned by digest for the same reason the Dockerfiles are, but the
-  # stakes differ by directory. /docker is what `run_docker_tests.sh` drives, so
+  # stakes differ by directory. /docker is what `scripts/run_docker_tests.sh` drives, so
   # a moving tag there means a tier-2 failure that reproduces on nobody else's
   # machine. /docker/deploy is copy-pasted by users, so a bump there is a
   # published recommendation and wants the same review a release does.

@@ -3,10 +3,10 @@
 # Bring up the compose test stack, seed it with tagged content, and run the
 # opt-in tier-2 suite against it. See docker/README.md for what each piece is.
 #
-#   ./run_docker_tests.sh                the plain stack
-#   ./run_docker_tests.sh --vpn          qBittorrent behind gluetun
-#   ./run_docker_tests.sh --transmission Transmission instead of qBittorrent
-#   ./run_docker_tests.sh --rtorrent     rTorrent instead of qBittorrent
+#   ./scripts/run_docker_tests.sh                the plain stack
+#   ./scripts/run_docker_tests.sh --vpn          qBittorrent behind gluetun
+#   ./scripts/run_docker_tests.sh --transmission Transmission instead of qBittorrent
+#   ./scripts/run_docker_tests.sh --rtorrent     rTorrent instead of qBittorrent
 #
 # The --vpn variant is the same suite against a genuinely different topology: the
 # torrent client has no address of its own, its ports belong to the VPN container,
@@ -19,9 +19,10 @@
 set -euo pipefail
 
 # `readlink -f` rather than a bare `dirname $0`: everything below is relative to
-# the repo root, so an invocation through a symlink would otherwise land in the
-# symlink's directory and fail on paths that look fine in the source.
-cd "$(dirname "$(readlink -f "$0")")"
+# the repo root, one level up from this script's own `scripts/` directory, so an
+# invocation through a symlink would otherwise land somewhere else entirely and
+# fail on paths that look fine in the source.
+cd "$(dirname "$(readlink -f "$0")")/.."
 
 # Which stack, and everything that differs between them. Ports are offset in the
 # VPN stack so both can be up at once.

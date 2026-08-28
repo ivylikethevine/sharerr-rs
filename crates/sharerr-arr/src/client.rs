@@ -50,14 +50,15 @@ pub struct ArrClient {
 /// debug level, so this is a real hazard rather than a theoretical one.
 impl std::fmt::Debug for ArrClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ArrClient")
-            .field("kind", &self.kind)
-            .field("api_base", &self.api_base.as_str())
-            .field("api_key", &"<redacted>")
-            // `finish_non_exhaustive` rather than `finish`: the omission is
-            // deliberate, and rendering `..` says so to whoever reads the log
-            // instead of implying this is the whole struct.
-            .finish_non_exhaustive()
+        sharerr_client::debug_redacted(
+            f,
+            "ArrClient",
+            &[
+                ("kind", &self.kind as &dyn std::fmt::Debug),
+                ("api_base", &self.api_base.as_str() as &dyn std::fmt::Debug),
+            ],
+            &["api_key"],
+        )
     }
 }
 
@@ -68,10 +69,8 @@ impl ArrClient {
         if !MediaSource::ARRS.contains(&kind) {
             return Err(ArrError::NotAnApp { service: kind });
         }
-        let http = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .map_err(ArrError::Client)?;
+        let http =
+            sharerr_client::http_client_with_timeout(DEFAULT_TIMEOUT).map_err(ArrError::Client)?;
         let api_base = sharerr_client::normalise_base(base)
             .join(api_prefix(kind))
             .map_err(|source| ArrError::Url {

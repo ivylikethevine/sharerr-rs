@@ -35,16 +35,12 @@ const API_PREFIX: &str = "api/v2/";
 
 /// The prefix every qBittorrent-issued API key carries. Keys are `qbt_` followed
 /// by 28 alphanumeric characters, 32 in total.
-pub const API_KEY_PREFIX: &str = "qbt_";
+const API_KEY_PREFIX: &str = "qbt_";
 
 /// The full length of a qBittorrent API key, prefix included.
-pub const API_KEY_LEN: usize = 32;
+const API_KEY_LEN: usize = 32;
 
 pub(crate) use sharerr_client::clamp_body;
-
-/// Builds the per-request body. A closure rather than a prepared builder because
-/// `multipart::Form` cannot be cloned, and a retry needs a fresh one.
-pub(crate) type BuildRequest<'a> = &'a (dyn Fn(RequestBuilder) -> RequestBuilder + Send + Sync);
 
 /// A qBittorrent WebUI client, authenticated by API key.
 pub struct QbitClient {
@@ -66,13 +62,12 @@ pub struct QbitClient {
 
 impl std::fmt::Debug for QbitClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QbitClient")
-            .field("base", &self.base.as_str())
-            .field("api_key", &"<redacted>")
-            // `finish_non_exhaustive` rather than `finish`: the omission is
-            // deliberate, and rendering `..` says so to whoever reads the log
-            // instead of implying this is the whole struct.
-            .finish_non_exhaustive()
+        sharerr_client::debug_redacted(
+            f,
+            "QbitClient",
+            &[("base", &self.base.as_str() as &dyn std::fmt::Debug)],
+            &["api_key"],
+        )
     }
 }
 
@@ -95,12 +90,11 @@ impl QbitClient {
             .map_err(|_| QbitError::MalformedApiKey)?;
         bearer.set_sensitive(true);
 
-        // The shared torrent-client timeout; built here rather than through
-        // `sharerr_client::http_client` only so the failure keeps its
-        // `reqwest::Error` source in `QbitError::Client`.
-        let http = reqwest::Client::builder()
-            .timeout(sharerr_client::DEFAULT_TIMEOUT)
-            .build()
+        // The shared torrent-client timeout, built through
+        // `http_client_with_timeout` rather than `sharerr_client::http_client`
+        // so the failure keeps its `reqwest::Error` source in
+        // `QbitError::Client` instead of `sharerr_client::ClientError::Config`.
+        let http = sharerr_client::http_client_with_timeout(sharerr_client::DEFAULT_TIMEOUT)
             .map_err(QbitError::Client)?;
         let base = sharerr_client::normalise_base(base);
         let api_base = base
@@ -152,7 +146,12 @@ impl QbitClient {
 
     // ------------------------------------------------------------ transport
 
-    fn dispatch(&self, method: Method, url: Url, build: BuildRequest<'_>) -> RequestBuilder {
+    fn dispatch(
+        &self,
+        method: Method,
+        url: Url,
+        build: impl FnOnce(RequestBuilder) -> RequestBuilder,
+    ) -> RequestBuilder {
         // The one place `Referer` is attached. Do not set it anywhere else.
         // Attached per request rather than as a default header on the
         // `reqwest::Client`, so the secret lives in one place and `Debug` on the
@@ -170,7 +169,7 @@ impl QbitClient {
         &self,
         method: Method,
         path: &str,
-        build: BuildRequest<'_>,
+        build: impl FnOnce(RequestBuilder) -> RequestBuilder + Send,
     ) -> Result<Response> {
         let url = self.endpoint(path)?;
 
@@ -200,7 +199,7 @@ impl QbitClient {
         &self,
         method: Method,
         path: &str,
-        build: BuildRequest<'_>,
+        build: impl FnOnce(RequestBuilder) -> RequestBuilder + Send,
     ) -> Result<Response> {
         let response = self.send(method, path, build).await?;
         let status = response.status();
@@ -221,7 +220,7 @@ impl QbitClient {
         &self,
         method: Method,
         path: &str,
-        build: BuildRequest<'_>,
+        build: impl FnOnce(RequestBuilder) -> RequestBuilder + Send,
     ) -> Result<String> {
         let response = self.send_checked(method, path, build).await?;
         Ok(response.text().await.unwrap_or_default())
@@ -232,7 +231,7 @@ impl QbitClient {
         &self,
         method: Method,
         path: &str,
-        build: BuildRequest<'_>,
+        build: impl FnOnce(RequestBuilder) -> RequestBuilder + Send,
     ) -> Result<T> {
         let body = self.send_ok(method, path, build).await?;
         serde_json::from_str(&body).map_err(|source| QbitError::Decode {
@@ -245,7 +244,7 @@ impl QbitClient {
     ///
     /// Also the proof that the key works, since key auth has no login step.
     pub async fn version(&self) -> Result<String> {
-        let body = self.send_ok(Method::GET, "app/version", &|rb| rb).await?;
+        let body = self.send_ok(Method::GET, "app/version", |rb| rb).await?;
         Ok(body.trim().to_owned())
     }
 }
@@ -272,7 +271,7 @@ mod tests {
     #[test]
     fn a_generated_key_is_recognised() {
         // The shape qBittorrent documents: `qbt_` plus 28 alphanumerics.
-        assert!(looks_like_api_key("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"));
+        assert!(looks_like_api_key(sharerr_testkit::mock::QBIT_API_KEY));
     }
 
     #[test]
@@ -289,7 +288,7 @@ mod tests {
 
         let key = QbitClient::with_api_key(
             &base,
-            SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+            SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
         )
         .expect("builds");
         let rendered = format!("{key:?}");

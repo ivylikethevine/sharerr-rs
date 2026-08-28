@@ -86,6 +86,47 @@ where
     Ok(tagged.into_iter().zip(fetched).collect())
 }
 
+/// [`fetch_tagged`]'s counterpart for the second half a discovery walk needs
+/// once it has its files: index `containers` by id once, then join each file
+/// to its container in O(1) rather than a linear scan — a 400-track
+/// discography was ~160k comparisons per artist without this. A file whose
+/// container id names nothing in `containers` is warned about (under
+/// `entity`, naming the tagged parent — the artist, author, or similar — and
+/// `what`, naming the kind of container it could not find) and dropped: it
+/// exists on disk with a record the *arr app itself no longer lists a parent
+/// for, and sharing it would produce a release named after nothing.
+///
+/// Shared by every walk except Sonarr's: its files join to episode
+/// *numbering*, which can point several episodes at one file and has to pick
+/// among them, not a single owning container this shape assumes.
+pub(crate) fn join_by_parent<'a, C, F>(
+    containers: &'a [C],
+    files: Vec<F>,
+    container_id: impl Fn(&C) -> i64,
+    file_parent: impl Fn(&F) -> i64,
+    file_id: impl Fn(&F) -> i64,
+    entity: &str,
+    what: &'static str,
+) -> Vec<(&'a C, F)> {
+    let by_id: std::collections::HashMap<i64, &'a C> =
+        containers.iter().map(|c| (container_id(c), c)).collect();
+
+    files
+        .into_iter()
+        .filter_map(|file| match by_id.get(&file_parent(&file)).copied() {
+            Some(container) => Some((container, file)),
+            None => {
+                tracing::warn!(
+                    entity,
+                    file_id = file_id(&file),
+                    "file belongs to no listed {what}; skipping"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 pub use client::ArrClient;
 pub use error::{ArrError, Result};
 pub use models::SystemStatus;

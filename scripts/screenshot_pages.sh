@@ -6,9 +6,9 @@
 # and refreshing the images after a layout change is one command instead of
 # a manual screenshot-and-crop pass.
 #
-#   ./screenshot_pages.sh                 headless Chrome, 1920px wide
-#   ./screenshot_pages.sh --width 1440    a different width
-#   ./screenshot_pages.sh --out some/dir  a different output directory
+#   ./scripts/screenshot_pages.sh                 headless Chrome, 1920px wide
+#   ./scripts/screenshot_pages.sh --width 1440    a different width
+#   ./scripts/screenshot_pages.sh --out some/dir  a different output directory
 #
 # Requires google-chrome-stable (or CHROME=/path/to/chrome) and ImageMagick's
 # `magick`. Full-page: each page is rendered in a window far taller than any
@@ -36,9 +36,10 @@
 set -euo pipefail
 
 # `readlink -f` rather than a bare `dirname $0`: everything below is relative
-# to the repo root, so an invocation through a symlink would otherwise land
-# in the symlink's directory and fail on paths that look fine in the source.
-cd "$(dirname "$(readlink -f "$0")")"
+# to the repo root, one level up from this script's own `scripts/` directory,
+# so an invocation through a symlink would otherwise land somewhere else
+# entirely and fail on paths that look fine in the source.
+cd "$(dirname "$(readlink -f "$0")")/.."
 
 WIDTH=1920
 OUT_DIR="docs/screenshots"

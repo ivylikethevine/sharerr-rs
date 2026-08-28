@@ -18,35 +18,15 @@ the decision does not get re-litigated.
 - [Functionality](#functionality)
 - [Open work, by scope](#open-work-by-scope)
 - [Transfer accounting](#transfer-accounting)
-- [Closed: the per-item detail page and manual per-item actions](#closed-the-per-item-detail-page-and-manual-per-item-actions)
-- [Closed: the two-instance end-to-end test's last mile](#closed-the-two-instance-end-to-end-tests-last-mile)
-- [The lighthouse](#the-lighthouse)
 
 ### What's left
 
-One feature-sized item — **[request flow](#functionality)**. The metadata
-cluster closed on 2026-08-26: Lidarr and Readarr now carry the `mediaInfo`
-they had already computed, `MediaMeta` holds sample rate and bit depth, and a
-synthesised music title names the format the file actually is rather than
-always claiming FLAC. The same day closed its last two pieces: an audio
-backend for `sharerr-probe` (`symphonia`, metadata-only like its MKV and
-ISO-BMFF siblings) now covers the directory-sourced music the *arr-managed
-path never needed to reach, and achieved ratio gives the items page what each
-torrent client itself reports for a torrent's ratio and per-torrent limit,
-rather than only ever showing what sharerr asked for at add time. The
-two-instance end-to-end test closed on 2026-08-27
-(`./run_docker_tests_two_instance.sh`, see `docker/README.md`'s "The
-two-instance stack") — the byte-for-byte transfer assertion now passes
-end to end; see the item's own history below for what the last-mile stall
-actually was, since "environment quirk" turned out to be the wrong
-diagnosis. The same day also closed the per-item detail page and its three
-manual actions — retry, force rebuild, unshare — see that item's own history
-below too. The 2026-08-21 code review is otherwise closed out: what is left
-of it is a single entry kept only so its documented behaviour reads as a
-decision rather than an oversight. Past those, the rest of
-[Open work, by scope](#open-work-by-scope) below is ideas that have been
-thought through but not all committed to — appearing here means the
-reasoning is written down, not that it is scheduled.
+One feature-sized item — **[request flow](#functionality)**. Past that, the
+rest of [Open work, by scope](#open-work-by-scope) below is ideas that have
+been thought through but not all committed to — appearing here means the
+reasoning is written down, not that it is scheduled. Design rationale for
+work that has already shipped lives beside the feature itself rather than
+here: see [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the rendezvous service.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
 and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
@@ -64,18 +44,8 @@ Everything still ahead, in one list, smallest first — by how much each item
 touches, not how long it would take to get right. The review items come from
 a whole-codebase pass on 2026-08-21 (8 finder angles, every candidate
 independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
-= depends on ordering/config); nineteen batches of fixes landed on 2026-08-24
-(the nineteenth: the lighthouse's `report` now pins a key hash to the first
-keypair that claims it, so a leaked key hash can no longer be used to displace
-the genuine record — and a refused report is logged by the reporting instance
-instead of vanishing), a twentieth on 2026-08-26 closed the media-metadata
-cluster along with two candidates promoted out of the ideas list — the
-library-composition roll-up and the polled status tiles — a twenty-first
-on 2026-08-27 closed three more candidates outright: the dashboard-widget
-JSON endpoint, swarm history, and a metrics endpoint, plus the two-instance
-end-to-end test's last mile below — and a twenty-second the same day closed
-the per-item detail page and manual per-item actions. File references are as
-of the review commit and may have drifted.
+= depends on ordering/config). File references are as of the review commit
+and may have drifted.
 
 ### Small — one function or one file
 
@@ -84,174 +54,54 @@ of the review commit and may have drifted.
    Stale while the tracker admits it. The doc comment frames that as
    intended; listed so the decision is a decision.
 
+2. **Parallel tracker announces in the rTorrent adapter** —
+   `sharerr-rtorrent`'s `set_trackers` awaits one full HTTP round trip per
+   URL, sequentially, across the whole seeded set after every VPN
+   reconnect. `system.multicall` — the adapter already parses arrays of
+   arrays through `call_multi` — or a `buffered(N)` the way
+   `sharerr-arr/src/lib.rs` already does for its own concurrent calls would
+   collapse it to one round trip. Left sequential for now: the module's own
+   doc comment says insertion order at group 0 decides the new trackers'
+   relative tier priority, and no test guards that order, so this needs a
+   test pinning tier order before it is safe to parallelise.
+
 ### Medium — a subsystem, or one shape repeated across several files
 
-2. **More notification triggers** — `crates/sharerr/src/notify.rs` fires on
-   two things: a sync that failed, and a friend gone quiet. Everything routes
-   through a single `send()`, so adding triggers is cheap — the cost is not
-   plumbing, it is restraint. The ones that seem worth having, on the test of
-   _would an operator want to be told without having to look_: an item newly
-   shared (digested, not one message per file), an item that failed and why,
-   a new friend's first contact, a friend revoked, the tracker becoming
-   unreachable, and a `[[library]]` path that has stopped being readable. The
-   strongest of them is **the advertised endpoint rotating**. When gluetun
-   hands over a new IP or forwarded port, every announce URL sharerr publishes
-   moves with it — that is the single event most likely to break a friend's
-   downloads while everything on this end still looks healthy. Anything added
-   here needs a per-trigger enable set under `[notifications]`; without one
-   this becomes noise and the operator mutes the whole channel, including the
-   two triggers that were worth having in the first place. Also worth
-   recording so it is not mistaken for separate work: an Uptime-Kuma-style
-   heartbeat push is one more trigger through the same `send()`, not a
-   feature of its own.
+3. **The remaining notification triggers** — `[notifications]` now has a
+   per-trigger enable set and fires on six events: a sync failing outright, a
+   friend going quiet, the advertised endpoint rotating, items newly shared,
+   items failing to share, and a friend's key being revoked. Four candidates
+   from the original review are still open, each needing more than a
+   `notify::send()` call beside code that already runs: **a new friend's
+   first contact** (needs a check for "is this the very first sighting"
+   before `touch_peer`'s own throttle-window logic, which today conflates the
+   two); **the tracker becoming unreachable** and **a `[[library]]` path
+   going unreadable** (both need a new periodic polling loop, modelled on the
+   existing `quiet_peers_loop`, that diffs against last-known state so a
+   persistently-broken thing does not notify every cycle); and an
+   **Uptime-Kuma-style heartbeat push** (needs a trigger built from scratch,
+   with no existing detection to hang off of).
 
-3. **Config backup and restore** — master-key loss is unrecoverable by
-   design, and the vault is doing exactly what it should. What is missing is
-   the _other_ half: a way to capture the configuration — sources, mappings,
-   peers, scopes — so that rebuilding an instance does not mean retyping
-   everything from screenshots. Secrets stay out of any export, and that is
-   the point rather than a limitation: an export containing recoverable
-   credentials would be a plaintext copy of the vault, which is the thing the
-   vault exists to prevent. A restore path therefore ends with re-entering
-   secrets, and the documentation should say so plainly instead of leaving
-   it to be discovered.
+4. **Peer and scope backup** — the settings page's "Backup and restore"
+   section now covers `sharerr.toml` — the effective config, including
+   anything set via `SHARERR_*` environment variables, which the raw file on
+   disk never contains. What it does not cover: the peers table, entirely in
+   SQLite. A friend's key itself can never be exported regardless of what
+   backs it up — it is stored as a one-way hash, by design — so a restore
+   already ends with re-issuing keys; what is still missing is exporting the
+   rest of a friend's row (label, scope) so re-adding them after a full
+   data-directory loss is not typed from memory.
 
 ### Large — a protocol, a data model, or a release process
 
-4. **Transfer accounting** — the largest gap between what sharerr _knows_
+5. **Transfer accounting** — the largest gap between what sharerr _knows_
    and what it _keeps_; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-5. **Request flow** — a new inbound request queue and approve step, touching
+6. **Request flow** — a new inbound request queue and approve step, touching
    the sync engine and the web UI on both sides of a friendship; see
    [Functionality](#functionality).
-
----
-
-## Closed: the per-item detail page and manual per-item actions
-
-Closed on 2026-08-27. `/items` was a wide table with no drill-down and no
-way to act on a row beyond editing tags in the source app; both gaps are
-closed together since the detail page is where the three actions live.
-
-**The detail page** (`/items/{source}/{file_id}`, linked from every row's
-title) answers what the table's column width couldn't: **release title
-against the file's actual on-disk name, side by side** — conflating the two
-is the first trap `CLAUDE.md` lists, and there was previously no view
-anywhere that showed both at once. The torrent's own name always describes
-the file where it sits, so the file name doubles as "what the torrent is
-named" without needing to read the cached `.torrent` bytes back off disk.
-Alongside that: media metadata, which friends' scopes admit it, the full
-`last_error` unconstrained by a table cell, the live swarm (reusing
-`topology::SwarmRow`'s masked-address convention), and the `[[path_map]]`
-resolution for this one file with a live existence check.
-
-**The three actions** — Retry, Force rebuild, Unshare — all route through
-existing, already-tested machinery rather than a bespoke single-item share:
-
-- **Retry** and **Force rebuild** both call `Syncer::run(false)` directly,
-  the same thing `sharerr sync` does, run synchronously in the request
-  rather than merely nudging the background loop. That distinction mattered:
-  `ServeState::request_sync` only wakes the *periodic* loop, which itself
-  takes no action at all while `[sync] enabled = false` — a bare nudge would
-  have silently done nothing for anyone who syncs manually or on a cron
-  outside sharerr. A bespoke single-item share was considered and rejected:
-  `Syncer::share` needs a freshly `Discovered` item straight from the
-  source, which a stored `SharedItem` cannot honestly stand in for (it
-  carries neither `scene_name` nor `original_path`, both of which feed
-  release-title synthesis) — so "retry" is a full pass, honestly labelled as
-  one in the UI, exactly matching `ShareState::Failed`'s own doc ("retried
-  on the next sync").
-- **Force rebuild** additionally removes the current torrent from the
-  client first (only if this instance added it) and clears the item's
-  torrent identity in the store (`Store::reset_for_rebuild`, new), so the
-  pass that follows cannot take the `Seeding` fast path and is forced to
-  rebuild from the file as it exists on disk right now.
-- **Unshare** is the tag-diff withdrawal path's own per-item body,
-  extracted into `Syncer::unshare_one` and called by both — not a copy of
-  it. Runs immediately, no sync pass needed.
-
-None of the three ever move, rename, re-link, or delete the underlying
-file — `TorrentClient::remove` has no delete-data path on any backend to
-begin with.
-
-One test-fixture correction fell out of building this: `state::fixtures::ready`
-and `ready_with_source` gave their `Syncer` an isolated in-memory store,
-separate from whatever `ServeState::store()` would open — harmless for the
-tests they were built for, but it meant no test could exercise a handler
-that looks an item up one way and mutates it through the syncer the other
-way, which is exactly what these three actions do. Fixed to open the
-syncer's store from `config.database_path()`, the same path
-`ServeState::store` itself lazily opens — two independent `Store`/pool
-handles sharing one file, matching what `Syncer::build` and `ServeState::store`
-already do in production.
-
----
-
-## Closed: the two-instance end-to-end test's last mile
-
-Closed on 2026-08-27, and written out at length because the diagnosis
-changed twice before landing on the real defect — worth keeping so the same
-wrong turn is not taken again.
-
-`docker/compose.two-instance.yml`, `run_docker_tests_two_instance.sh`, and
-`crates/sharerr/tests/e2e_two_instance.rs` had the whole chain up to the
-actual file transfer independently verified against a real stack: sharerr's
-tracker returns a byte-correct bencoded peer list, a hand-fed `.torrent`
-transfers between the two containers' qBittorrents instantly and
-byte-perfectly, and Radarr-B's real automatic search finds, grabs, and hands
-the release to its download client. What did not complete was the BitTorrent
-transfer itself: qBittorrent-B connected to qBittorrent-A (confirmed via
-packet capture — a real TCP handshake, BT handshake, and extended handshake
-all completed), but the `ut_metadata` (BEP9) exchange that would hand it the
-actual torrent metadata never finished — qBittorrent-A's only reply was a
-bare 5-byte control message, never a metadata piece.
-
-That was first suspected to be an environment-specific quirk of the
-sandboxed build environment, since every other explanation had been ruled
-out by direct testing: not the tracker, not plain connectivity, not
-encryption, protocol, DHT/PEX/LSD, or upload-slot configuration. It was not
-an environment quirk, and re-running on a plain Docker host would have
-reproduced it identically — the real cause was structural. Every torrent
-sharerr builds is private (`sharerr-torrent/src/factory.rs`'s
-`set_privacy(true)`, correctly — that is the whole reason the tracker
-exists), and libtorrent does not run `ut_metadata` for a private torrent.
-Radarr-B's own qBittorrent record proved which path it had taken:
-`has_metadata: false`, and a `magnet_uri` whose `dn=` was the release title
-rather than the torrent's real internal filename — meaning Radarr-B added
-the release by magnet, not by the `.torrent` enclosure sharerr also
-advertises and which fetched perfectly the whole time. A magnet can never
-complete against a private torrent, in any environment: nothing in the
-swarm will ever answer its metadata request.
-
-Radarr's own direct Torznab client has no setting to prefer the `.torrent`
-over the magnet. The one place that preference is actually configurable is
-Prowlarr's per-indexer "Prefer Magnet URL" — `false`, i.e. prefer the
-`.torrent`, by default. The fix was to put a Prowlarr in front of
-instance B's Radarr, the way a real friend's setup should look when their
-automation supports it: the two-instance stack gained a third container,
-`run_docker_tests_two_instance.sh` now creates the Torznab indexer on
-Prowlarr with `torrentBaseSettings.preferMagnetUrl` explicitly pinned to
-`false` and confirms the pin took, adds Radarr-B to Prowlarr as a `fullSync`
-application, and waits for the indexer to sync down before triggering the
-search. Both schemas (indexer and application) are fetched from Prowlarr's
-own `/api/v1/*/schema` endpoints rather than hand-typed, so a Prowlarr
-upgrade that renames or reorders fields cannot silently stop this from
-pinning the one setting it exists to pin. With that in place, the byte-for-byte
-transfer assertion in `e2e_two_instance.rs` passes end to end.
-
-What this does not change: sharerr's own Torznab feed still advertises a
-`magneturl` alongside the `.torrent` enclosure, for the indexers and clients
-where a magnet is the only thing that ever mattered. A friend connecting
-Radarr or Sonarr _directly_ to a sharerr feed, with no Prowlarr in front,
-still has no lever over this — their app decides magnet-or-`.torrent` on its
-own, and evidence from this investigation is that at least one popular one
-decides wrong for a private torrent. That is a real gap for a direct
-connection, tracked in [`UNSUPPORTED.md`](UNSUPPORTED.md) rather than left
-implicit, since it was weighed and not acted on here: removing the magnet
-entirely would close it for every consumer at the cost of the convenience
-Prowlarr-routed and DHT-capable consumers get from it today.
 
 ---
 
@@ -310,57 +160,9 @@ half.
 A "served" column on the friends table, so a friend who was added and never
 actually used the feed is visible as such. A bytes-out figure on the status
 page that means something. A per-item panel answering who pulled this, which
-pairs naturally with the [per-item detail page](#open-work-by-scope) above.
-And, with the [metrics endpoint](#open-work-by-scope) above, per-peer counters
-for anyone who would rather graph it elsewhere.
+pairs naturally with the existing per-item detail page. And, alongside the
+existing metrics endpoint, per-peer counters for anyone who would rather
+graph it elsewhere.
 
 This needs a migration, a change to the announce parser in `sharerr-torrent`,
 an accumulator and flush loop, and the UI on top.
-
----
-
-## The lighthouse
-
-Shipped — see [the README](../README.md#the-lighthouse) for how to use it. The
-design rationale below is kept here because it explains _why_ the rendezvous
-works the way it does, which the README's usage-focused section does not
-restate.
-
-Gossip only helps peers who can still reach _somebody_; two friends whose
-addresses both rotated while neither was watching have no path back to each
-other. The lighthouse is the rendezvous for that case: a tiny separate service,
-deliberately knowing nothing but `key hash → latest IP and port`, that a sharerr
-instance reports its endpoint to and a friend queries with the API key that peer
-issued them. The privacy property is the point and shapes the whole design: a
-request without a valid key gets a _plausible fabricated_ IP and port rather
-than an error, so an unauthenticated probe cannot be distinguished from a valid
-lookup — the lighthouse never confirms that an instance exists, and scraping it
-yields only noise. That makes semi-anonymous tracking of sharerr instances
-possible without any instance exposing its IP publicly. It ships as its own
-docker image on its own port — not another route on sharerr's listener — so it
-can be self-hosted by anyone, placed on neutral ground away from any particular
-library, and carries no database worth stealing: key hashes and last-seen
-addresses only. A sharerr instance treats it as one more observation source
-feeding peer endpoint memory, ranked below a direct sighting of the same peer.
-
-The fabricated answers create the opposite problem for the _legitimate_ caller:
-a friend holding a valid key must be able to tell a real record from a decoy, or
-the noise defeats them too. So a genuine record is verifiable — the natural shape
-is the same signed endpoint record gossip uses, signed by the peer it describes
-when that peer reported in, so the lighthouse relays proof it could not forge
-and a JWT-style signature check separates record from decoy. A decoy carries
-random bytes where the signature would be: identical on the wire to an observer
-without the peer's public key, and never verifying for anyone. The deterministic
-fallback where signing is unavailable: derive the decoy from a keyed hash of the
-queried key hash, so decoys are at least stable across probes rather than fresh
-noise that flags itself by changing.
-
-A verifiable record answers "is this really them?" but not "does this keypair
-belong under this key hash?" — and a key hash is a URL path segment, so it is
-visible in every proxy log along the way. So a key hash is claimed by the first
-keypair to report under it and holds that claim until the record ages out,
-which is the same trust-on-first-use gossip binds a peer's identity with. That
-keeps the rendezvous working under a leaked key hash, where before an attacker
-could mint a record of their own and displace the real one. What it cannot do
-is protect a key hash nobody has claimed yet: whoever reports first wins, and
-if that is an attacker the pair needs a new key rather than a new lighthouse.

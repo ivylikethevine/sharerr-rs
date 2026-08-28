@@ -10,27 +10,15 @@
 use secrecy::SecretString;
 use serde_json::json;
 use sharerr_qbit::{AddRequest, QbitClient, QbitError};
-use sharerr_testkit::mock::{QBIT_API_KEY as API_KEY, base_url, mount_ok, multipart_field};
+use sharerr_testkit::mock::{
+    QBIT_API_KEY as API_KEY, base_url, body_text, mount_ok, multipart_field, requests_to,
+};
 use url::Url;
 use wiremock::matchers::{body_string_contains, method, path, query_param};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client(server: &MockServer) -> QbitClient {
     QbitClient::with_api_key(&base_url(server), SecretString::from(API_KEY)).expect("client builds")
-}
-
-async fn requests_to(server: &MockServer, suffix: &str) -> Vec<Request> {
-    server
-        .received_requests()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| r.url.path().ends_with(suffix))
-        .collect()
-}
-
-fn body_text(request: &Request) -> String {
-    String::from_utf8_lossy(&request.body).into_owned()
 }
 
 // --------------------------------------------------------------- auth
@@ -427,8 +415,9 @@ async fn remove_torrent_never_deletes_files() {
 
 // ---------------------------------------------------------------- categories
 
-/// `categories()` decodes the name-keyed map qBittorrent actually returns —
-/// this is what `sharerr doctor --fix` checks membership against.
+/// `categories()` decodes the name-keyed map qBittorrent actually returns
+/// down to just the names — this is what `sharerr doctor --fix` checks
+/// membership against.
 #[tokio::test]
 async fn categories_decodes_the_name_keyed_map() {
     let server = MockServer::start().await;
@@ -443,8 +432,8 @@ async fn categories_decodes_the_name_keyed_map() {
 
     let categories = client(&server).categories().await.unwrap();
 
-    assert!(categories.contains_key("sharerr"));
-    assert!(categories.contains_key("Movies"));
+    assert!(categories.contains("sharerr"));
+    assert!(categories.contains("Movies"));
     assert_eq!(categories.len(), 2);
 }
 

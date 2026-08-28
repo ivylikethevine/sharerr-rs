@@ -32,7 +32,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
     AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    http_client, is_auth_rejection, normalise_base,
+    http_client, normalise_base,
 };
 use url::Url;
 
@@ -61,14 +61,15 @@ pub struct TransmissionClient {
 impl std::fmt::Debug for TransmissionClient {
     /// Hand-written so the password cannot reach a log through a derived `Debug`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TransmissionClient")
-            .field("endpoint", &self.endpoint.as_str())
-            .field("username", &self.username)
-            .field("password", &"<redacted>")
-            // `finish_non_exhaustive` rather than `finish`: the omission is
-            // deliberate, and rendering `..` says so to whoever reads the log
-            // instead of implying this is the whole struct.
-            .finish_non_exhaustive()
+        sharerr_client::debug_redacted(
+            f,
+            "TransmissionClient",
+            &[
+                ("endpoint", &self.endpoint.as_str() as &dyn std::fmt::Debug),
+                ("username", &self.username as &dyn std::fmt::Debug),
+            ],
+            &["password"],
+        )
     }
 }
 
@@ -152,21 +153,12 @@ impl TransmissionClient {
                 }
             }
 
-            if is_auth_rejection(status) {
-                return Err(ClientError::AuthRejected { kind: KIND });
-            }
+            sharerr_client::check_status(KIND, status, method)?;
 
-            if !status.is_success() {
-                return Err(ClientError::Api {
-                    kind: KIND,
-                    detail: format!("HTTP {status} from {method}"),
-                });
-            }
-
-            let envelope: Envelope = response.json().await.map_err(|e| ClientError::Malformed {
-                kind: KIND,
-                detail: format!("reading the {method} response: {e}"),
-            })?;
+            let envelope: Envelope = response
+                .json()
+                .await
+                .map_err(|e| sharerr_client::malformed(KIND, method, e))?;
 
             // Transmission reports application-level failure in the body with a 200,
             // so the status code alone is not enough to know the call worked.
@@ -185,6 +177,18 @@ impl TransmissionClient {
             detail: "Transmission kept asking for a new session id".to_owned(),
         })
     }
+
+    /// Join `tiers` the way `trackerList` (RPC 17, Transmission 4.0+) expects
+    /// — one URL per line, a blank line between tiers — and send it as a
+    /// `torrent-set`. Shared by [`TorrentClient::set_trackers`] and
+    /// [`TorrentClient::add_trackers`], which differ only in how `tiers` is
+    /// built.
+    async fn write_tracker_list(&self, hash: &str, tiers: &[String]) -> Result<()> {
+        let list = tiers.join("\n\n");
+        self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
+            .await
+            .map(|_| ())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,9 +204,28 @@ struct Envelope {
 /// hash, which never matches the live set and would make reconciliation re-add
 /// every torrent on every pass. A missing field here is a `Malformed` error that
 /// names the call instead.
+///
+/// The `{ "torrents": [...] }` envelope every `torrent-get` reply wraps its
+/// rows in — one wire shape three different result types shared, previously
+/// declared three times over.
 #[derive(Debug, Deserialize)]
-struct TorrentGetResponse {
-    torrents: Vec<ListedTorrent>,
+struct Torrents<T> {
+    // `default = "Vec::new"` rather than a bare `default`: the latter needs
+    // `T: Default` to derive, which would force every row type to carry a
+    // `Default` impl it has no other use for.
+    #[serde(default = "Vec::new")]
+    torrents: Vec<T>,
+}
+
+/// Decode a `torrent-get` reply and take its first row. Every caller of this
+/// restricts the request to `"ids": [hash]` for a single torrent, so more
+/// than one row would itself be surprising, not something to pick among.
+fn first_torrent<T: serde::de::DeserializeOwned>(
+    call: &str,
+    arguments: Value,
+) -> Result<Option<T>> {
+    let response: Torrents<T> = decode(call, arguments)?;
+    Ok(response.torrents.into_iter().next())
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,11 +269,6 @@ fn ratio_reported(upload_ratio: f64) -> Option<f64> {
 }
 
 #[derive(Debug, Deserialize)]
-struct FilesResponse {
-    torrents: Vec<FilesTorrent>,
-}
-
-#[derive(Debug, Deserialize)]
 struct FilesTorrent {
     #[serde(default)]
     files: Vec<ListedFile>,
@@ -262,14 +280,8 @@ struct ListedFile {
     length: u64,
 }
 
-/// The slice of a `torrent-get` reply that [`TorrentClient::add_trackers`]
+/// One row of the `torrent-get` reply that [`TorrentClient::add_trackers`]
 /// reads back before rewriting the list.
-#[derive(Debug, Deserialize)]
-struct TrackerListResponse {
-    #[serde(default)]
-    torrents: Vec<TrackerListTorrent>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackerListTorrent {
@@ -325,7 +337,12 @@ impl TorrentClient for TransmissionClient {
                 }),
             )
             .await?;
-        let listed: TorrentGetResponse = decode("torrent-get", arguments)?;
+        let listed: Torrents<ListedTorrent> = decode("torrent-get", arguments)?;
+
+        // Loop-invariant — `category` does not change per torrent — hoisted
+        // out of the loop so listing a large library allocates it once
+        // rather than on every row.
+        let category_owned = category.unwrap_or_default().to_owned();
 
         let mut out = Vec::with_capacity(listed.torrents.len());
         for torrent in listed.torrents {
@@ -360,7 +377,7 @@ impl TorrentClient for TransmissionClient {
                 name: torrent.name,
                 save_path: torrent.download_dir,
                 content_path,
-                category: category.unwrap_or_default().to_owned(),
+                category: category_owned.clone(),
                 is_seeding: is_seeding_status(torrent.status),
                 ratio: ratio_reported(torrent.upload_ratio),
                 ratio_limit,
@@ -375,14 +392,11 @@ impl TorrentClient for TransmissionClient {
         let arguments = self
             .rpc("torrent-get", json!({ "ids": [hash], "fields": ["files"] }))
             .await?;
-        let listed: FilesResponse = decode("torrent-get files", arguments)?;
-
-        Ok(listed
-            .torrents
-            .into_iter()
-            .next()
+        let files = first_torrent::<FilesTorrent>("torrent-get files", arguments)?
             .map(|torrent| torrent.files)
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        Ok(files
             .into_iter()
             .map(|file| TorrentFileEntry {
                 name: file.name,
@@ -484,14 +498,8 @@ impl TorrentClient for TransmissionClient {
         // surfaces as an API error the caller logs; the alternative
         // (trackerAdd/trackerRemove by id) needs a read-modify-write against
         // per-torrent tracker ids and is not worth carrying for EOL versions.
-        let list = urls
-            .iter()
-            .map(Url::to_string)
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
-            .await
-            .map(|_| ())
+        let tiers: Vec<String> = urls.iter().map(Url::to_string).collect();
+        self.write_tracker_list(hash, &tiers).await
     }
 
     async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
@@ -508,11 +516,7 @@ impl TorrentClient for TransmissionClient {
                 json!({ "ids": [hash], "fields": ["trackerList"] }),
             )
             .await?;
-        let response: TrackerListResponse = decode("torrent-get", arguments)?;
-        let existing = response
-            .torrents
-            .into_iter()
-            .next()
+        let existing = first_torrent::<TrackerListTorrent>("torrent-get", arguments)?
             .map(|t| t.tracker_list)
             .unwrap_or_default();
 
@@ -531,11 +535,8 @@ impl TorrentClient for TransmissionClient {
         if !existing.trim().is_empty() {
             tiers.push(existing);
         }
-        let list = tiers.join("\n\n");
 
-        self.rpc("torrent-set", json!({ "ids": [hash], "trackerList": list }))
-            .await
-            .map(|_| ())
+        self.write_tracker_list(hash, &tiers).await
     }
 
     async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
@@ -557,18 +558,22 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer) -> TransmissionClient {
-        let base = Url::parse(&server.uri()).unwrap();
-        TransmissionClient::new(&base, "admin", SecretString::from("pw")).unwrap()
+        let base = sharerr_testkit::mock::base_url(server);
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        TransmissionClient::new(&base, &user, SecretString::from(pw)).unwrap()
     }
 
     fn ok_body(arguments: Value) -> Value {
         json!({ "result": "success", "arguments": arguments })
     }
 
-    /// Mount the 409 handshake followed by a successful answer.
-    async fn mount_handshake_then(server: &MockServer, body: Value) {
-        // The 409 is mounted first and expected exactly once; wiremock matches the
-        // most recently mounted rule first, so the success rule is mounted after.
+    /// Mount the 409 handshake alone, expected exactly once. Callers whose
+    /// success choreography is more than one fixed body mount their own
+    /// rule after this instead of using [`mount_handshake_then`].
+    async fn mount_handshake(server: &MockServer) {
+        // Mounted first and expected exactly once; wiremock matches the most
+        // recently mounted rule first, so a rule mounted after this one wins
+        // on the retried request.
         Mock::given(method("POST"))
             .and(path("/transmission/rpc"))
             .respond_with(
@@ -577,6 +582,11 @@ mod tests {
             .up_to_n_times(1)
             .mount(server)
             .await;
+    }
+
+    /// [`mount_handshake`], followed by a fixed successful answer.
+    async fn mount_handshake_then(server: &MockServer, body: Value) {
+        mount_handshake(server).await;
 
         Mock::given(method("POST"))
             .and(path("/transmission/rpc"))
@@ -616,7 +626,9 @@ mod tests {
     async fn nothing_listening_is_reported_as_unreachable() {
         let port = sharerr_testkit::net::closed_port();
         let base = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
-        let client = TransmissionClient::new(&base, "admin", SecretString::from("pw")).unwrap();
+        // The socket is a closed port, so no request is ever built from these.
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        let client = TransmissionClient::new(&base, &user, SecretString::from(pw)).unwrap();
 
         let err = client.version().await.unwrap_err();
         assert!(err.is_unreachable(), "{err}");
@@ -781,14 +793,7 @@ mod tests {
     #[tokio::test]
     async fn set_trackers_sends_a_tiered_tracker_list() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/transmission/rpc"))
-            .respond_with(
-                ResponseTemplate::new(409).insert_header(SESSION_HEADER, "session-token-1"),
-            )
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
+        mount_handshake(&server).await;
 
         Mock::given(method("POST"))
             .and(path("/transmission/rpc"))
@@ -898,14 +903,7 @@ mod tests {
     #[tokio::test]
     async fn a_seeding_goal_configured_at_add_time_lands_on_a_follow_up_torrent_set() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/transmission/rpc"))
-            .respond_with(
-                ResponseTemplate::new(409).insert_header(SESSION_HEADER, "session-token-1"),
-            )
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
+        mount_handshake(&server).await;
 
         Mock::given(method("POST"))
             .and(path("/transmission/rpc"))
@@ -942,14 +940,7 @@ mod tests {
     #[tokio::test]
     async fn no_seeding_goal_means_no_follow_up_call() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/transmission/rpc"))
-            .respond_with(
-                ResponseTemplate::new(409).insert_header(SESSION_HEADER, "session-token-1"),
-            )
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
+        mount_handshake(&server).await;
 
         // Exactly one call expected after the handshake — an unwanted
         // torrent-set would push this past 1 and fail verification on drop.
@@ -975,7 +966,9 @@ mod tests {
     #[test]
     fn a_subpath_base_url_keeps_its_prefix() {
         let base = Url::parse("http://box.lan/transmission-proxy").unwrap();
-        let client = TransmissionClient::new(&base, "a", SecretString::from("b")).unwrap();
+        // This test only checks URL-join behavior; no request is ever sent.
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        let client = TransmissionClient::new(&base, &user, SecretString::from(pw)).unwrap();
         assert_eq!(
             client.endpoint.as_str(),
             "http://box.lan/transmission-proxy/transmission/rpc"
@@ -986,10 +979,10 @@ mod tests {
     #[test]
     fn debug_does_not_leak_the_password() {
         let base = Url::parse("http://box.lan").unwrap();
-        let client =
-            TransmissionClient::new(&base, "admin", SecretString::from("hunter2")).unwrap();
+        let (user, pw) = sharerr_testkit::mock::rpc_credentials();
+        let client = TransmissionClient::new(&base, &user, SecretString::from(pw.clone())).unwrap();
         let rendered = format!("{client:?}");
-        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains(&pw), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
     }
 }

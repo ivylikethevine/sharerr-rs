@@ -206,33 +206,48 @@ impl Seeder {
         // A cache hit is the common case and not really an adoption at all:
         // sharerr built this torrent on an earlier run and is only rediscovering
         // it, which is also why it must not be exported over.
-        let data = match cached {
+        let (rewritten, actual) = match cached {
             Some(data) => {
-                let current = sharerr_torrent::read_announce(&data)
-                    .with_context(|| format!("parsing {}", path.display()))?;
-                if current.as_deref() == Some(announce.primary.as_str()) {
-                    return Ok(());
+                match sharerr_torrent::retarget_announce(&data, announce)
+                    .with_context(|| format!("parsing {}", path.display()))?
+                {
+                    // Already correct — a prior `adopt` already verified and
+                    // wrote this cache entry, so there is nothing left to do.
+                    sharerr_torrent::Retargeted::Current { .. } => return Ok(()),
+                    sharerr_torrent::Retargeted::Updated {
+                        data, info_hash, ..
+                    } => (data, info_hash),
                 }
-                data
             }
-            None => self
-                .qbit
-                .export(info_hash)
-                .await
-                .with_context(|| format!("exporting {info_hash} from {}", self.qbit.kind()))?
-                .with_context(|| {
-                    format!(
-                        "{} already has a torrent covering this file ({info_hash}) but cannot \
-                         hand back its .torrent, and sharerr has none cached — so there would \
-                         be nothing to serve a friend who asked for it. Remove that torrent, \
-                         or let sharerr add its own",
-                        self.qbit.kind()
-                    )
-                })?,
+            None => {
+                let exported = self
+                    .qbit
+                    .export(info_hash)
+                    .await
+                    .with_context(|| format!("exporting {info_hash} from {}", self.qbit.kind()))?
+                    .with_context(|| {
+                        format!(
+                            "{} already has a torrent covering this file ({info_hash}) but cannot \
+                             hand back its .torrent, and sharerr has none cached — so there would \
+                             be nothing to serve a friend who asked for it. Remove that torrent, \
+                             or let sharerr add its own",
+                            self.qbit.kind()
+                        )
+                    })?;
+                // Unlike the cache-hit path, this one is reached regardless of
+                // whether the exported announce already matches: sharerr has
+                // never cached this torrent before, so it still needs
+                // verifying and writing either way.
+                match sharerr_torrent::retarget_announce(&exported, announce)
+                    .with_context(|| format!("rewriting the announce URLs of {info_hash}"))?
+                {
+                    sharerr_torrent::Retargeted::Current { info_hash } => (exported, info_hash),
+                    sharerr_torrent::Retargeted::Updated {
+                        data, info_hash, ..
+                    } => (data, info_hash),
+                }
+            }
         };
-
-        let rewritten = sharerr_torrent::rewrite_announce(&data, announce)
-            .with_context(|| format!("rewriting the announce URLs of {info_hash}"))?;
 
         // What is about to be filed under `info_hash` must actually *be*
         // `info_hash`. These bytes came from the client, not from
@@ -240,8 +255,6 @@ impl Seeder {
         // mismatch would hand every friend a torrent for a different swarm than
         // the feed pointed them at, which fails in a much more confusing place
         // than here.
-        let actual = sharerr_torrent::read_info_hash(&rewritten)
-            .with_context(|| format!("reading the info hash of the .torrent for {info_hash}"))?;
         anyhow::ensure!(
             actual.eq_ignore_ascii_case(info_hash),
             "{} handed back a .torrent for {actual}, not {info_hash}",
@@ -295,34 +308,21 @@ impl Seeder {
             }
         };
 
-        let current = match sharerr_torrent::read_announce(&data) {
-            Ok(current) => current,
+        let (previous, rewritten) = match sharerr_torrent::retarget_announce(&data, announce) {
+            Ok(sharerr_torrent::Retargeted::Current { .. }) => {
+                tracing::info!(
+                    info_hash = hash,
+                    "reusing the cached .torrent for a vanished torrent — skipping the rebuild"
+                );
+                return Some((hash.to_owned(), data));
+            }
+            Ok(sharerr_torrent::Retargeted::Updated { previous, data, .. }) => (previous, data),
             Err(err) => {
                 tracing::warn!(
                     info_hash = hash,
                     path = %path.display(),
                     %err,
                     "cached .torrent could not be parsed — rebuilding instead"
-                );
-                return None;
-            }
-        };
-        if current.as_deref() == Some(announce.primary.as_str()) {
-            tracing::info!(
-                info_hash = hash,
-                "reusing the cached .torrent for a vanished torrent — skipping the rebuild"
-            );
-            return Some((hash.to_owned(), data));
-        }
-
-        let rewritten = match sharerr_torrent::rewrite_announce(&data, announce) {
-            Ok(rewritten) => rewritten,
-            Err(err) => {
-                tracing::warn!(
-                    info_hash = hash,
-                    path = %path.display(),
-                    %err,
-                    "could not rewrite the cached .torrent's announce — rebuilding instead"
                 );
                 return None;
             }
@@ -341,7 +341,7 @@ impl Seeder {
 
         tracing::info!(
             info_hash = hash,
-            from = current.as_deref().unwrap_or("(none)"),
+            from = previous.as_deref().unwrap_or("(none)"),
             to = %announce.primary,
             "reusing the cached .torrent for a vanished torrent, with its announce refreshed"
         );
@@ -376,26 +376,25 @@ impl Seeder {
             }
         };
 
-        let current = sharerr_torrent::read_announce(&data)
-            .with_context(|| format!("parsing {}", path.display()))?;
-        if current.as_deref() == Some(announce.primary.as_str()) {
-            return Ok(AnnounceRefresh::Current);
-        }
+        let (previous, rewritten) = match sharerr_torrent::retarget_announce(&data, announce)
+            .with_context(|| format!("parsing {}", path.display()))?
+        {
+            sharerr_torrent::Retargeted::Current { .. } => return Ok(AnnounceRefresh::Current),
+            sharerr_torrent::Retargeted::Updated { previous, data, .. } => (previous, data),
+        };
 
         self.qbit
             .set_trackers(info_hash, &announce.tiers)
             .await
             .with_context(|| format!("updating trackers in {}", self.qbit.kind()))?;
 
-        let rewritten = sharerr_torrent::rewrite_announce(&data, announce)
-            .with_context(|| format!("rewriting {}", path.display()))?;
         tokio::fs::write(&path, &rewritten)
             .await
             .with_context(|| format!("writing {}", path.display()))?;
 
         tracing::info!(
             info_hash,
-            from = current.as_deref().unwrap_or("(none)"),
+            from = previous.as_deref().unwrap_or("(none)"),
             to = %announce.primary,
             "announce URLs refreshed"
         );

@@ -5,7 +5,7 @@ and everything else follows from that.
 
 These are deployment recipes. `docker/*.yml` one directory up are the
 **tier-2 test stacks**: they build the image from source, seed synthetic
-fixtures, and are driven by `run_docker_tests.sh`. Do not deploy from those.
+fixtures, and are driven by `scripts/run_docker_tests.sh`. Do not deploy from those.
 
 ## Table of contents
 

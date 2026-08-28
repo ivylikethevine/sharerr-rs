@@ -15,6 +15,7 @@ without being either committed to or declined, see
 - [qBittorrent's embedded tracker as a second backend](#qbittorrents-embedded-tracker-as-a-second-backend)
 - [Removing the feed's magnet link entirely](#removing-the-feeds-magnet-link-entirely)
 - [Publishing to crates.io](#publishing-to-cratesio)
+- [Internal refactors weighed and left alone](#internal-refactors-weighed-and-left-alone)
 
 ## Media-server library sources (Jellyfin, Emby, Plex)
 
@@ -59,13 +60,13 @@ fuller reasoning.
 Considered and left in, for now. Every torrent sharerr builds is private
 (the whole reason its own tracker exists), and a magnet can never actually
 complete against one — nothing in the swarm will ever answer a
-`ut_metadata` request. That was confirmed the hard way: see
-[`ROADMAP.md`](ROADMAP.md)'s closed two-instance-test entry for the
-investigation, where Radarr's own direct Torznab client picked the magnet
-over the working `.torrent` enclosure and stalled forever. The fix chosen
-there was a Prowlarr in front of the requesting Radarr, with its
-`preferMagnetUrl` pinned to `false` — the one place that preference is
-actually configurable.
+`ut_metadata` request. That was confirmed the hard way, in the two-instance
+end-to-end test: Radarr's own direct Torznab client picked the magnet over
+the working `.torrent` enclosure and stalled forever. The fix there was a
+Prowlarr in front of the requesting Radarr, with its `preferMagnetUrl`
+pinned to `false` — the one place that preference is actually
+configurable; see `docker/README.md`'s "The two-instance stack" for how
+`scripts/run_docker_tests_two_instance.sh` exercises this.
 
 That fix does nothing for a friend who points Radarr or Sonarr *directly*
 at a sharerr feed, no Prowlarr in between: their app decides magnet-or-`.torrent`
@@ -88,3 +89,41 @@ dependency-ordered release process for a distribution path this project
 doesn't intend to support. Nothing in the manifests enforces this (only
 `sharerr-testkit` carries `publish = false`); it is a decision, not a guard.
 The Docker image remains the only supported way to run sharerr.
+
+## Internal refactors weighed and left alone
+
+Candidates from a whole-codebase simplify pass, checked and rejected —
+kept here so the same shape isn't re-proposed by a later pass over the same
+code. Unlike the rest of this file these are implementation details with no
+user-facing effect either way; listed for the same reason as everything
+else here, not because they belong beside a feature decision.
+
+- **The three `poll_loop`s** (`system_stats.rs`, `gluetun.rs`,
+  `swarm_history.rs`) share only a three-line `loop { work; sleep }` over
+  genuinely different bodies and intervals. Over-abstraction to unify.
+- **`tracker.rs`'s `#[allow(dead_code)]`** on `AnnounceParams`/`ScrapeParams`
+  are documentation-only utoipa shapes with a stated reason. Correct as
+  written.
+- **`doctor.rs` vs `checks.rs`.** The parallel `check_arr`/`check_library`/
+  `check_qbit`/`check_paths` names look like duplication. They are not:
+  `doctor.rs` delegates into `checks::` and its own functions are thin
+  reporting wrappers.
+- **`sharerr-transmission` as one file.** At ~550 production lines it is
+  under the threshold where a `sharerr-qbit`-style module split pays for
+  itself.
+- **`sharerr-probe`'s two metadata loops** (Matroska, ISO-BMFF) look
+  similar, but track types, codec accessors, and the `und`-language case
+  differ enough that sharing costs more than the few lines saved.
+- **`sharerr-probe` vs `MediaMeta::scene_*`.** The probe deliberately does
+  not duplicate core's scene-token mapping; the split and the tests that
+  verify it holds are documented in `sharerr-probe` itself.
+- **`sharerr-arr`'s `api_prefix`** restates `MediaSource::api_version`, but
+  both sides carry comments arguing for the split deliberately.
+- **A shared trait across the three torrent-client backends** already
+  exists (`sharerr-client`'s `TorrentClient`) at the right altitude — there
+  is no further trait to invent.
+- **Collapsing `Config::torrent_client_for`'s three match arms.** Only 2 of
+  its 10 `TorrentClientConfig` fields are genuinely backend-agnostic; the
+  other 8 correctly vary per arm. Every extraction shape tried — a helper
+  struct, placeholder-then-mutate — cost more in indirection than the
+  handful of duplicated lines it would have removed.

@@ -1,6 +1,6 @@
 # The same stack, with qBittorrent behind a VPN container.
 #
-#   ./run_docker_tests.sh --vpn
+#   ./scripts/run_docker_tests.sh --vpn
 #
 # ## Why this exists as a second stack
 #
@@ -157,7 +157,7 @@ services:
   sharerr:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: sharerr-vpn-test-sharerr
     networks: [vpn]
     depends_on: [sonarr, radarr, qbittorrent]

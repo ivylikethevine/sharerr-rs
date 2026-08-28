@@ -204,7 +204,7 @@ pub fn synthesize(spec: &MediaSpec, media: Option<&MediaMeta>) -> String {
 /// year for movies — but it is the part every parser agrees on, so a title this
 /// accepts is one the real implementations accept too.
 pub fn parse(title: &str) -> ParsedTitle {
-    let normalised = title.replace(['.', '_'], " ");
+    let normalised = humanize(title);
     let tokens: Vec<&str> = normalised.split_whitespace().collect();
 
     for (index, token) in tokens.iter().enumerate() {
@@ -268,8 +268,21 @@ fn release_year(token: &str) -> Option<u16> {
     (1900..=2099).contains(&year).then_some(year)
 }
 
-fn join_title(tokens: &[&str]) -> String {
+/// Join `tokens` back into a display title, trimming a leading or trailing
+/// `-` or space a token boundary can leave behind.
+///
+/// `pub` rather than crate-private: `sharerr::library`'s directory-source
+/// scan needs to cut a token list down to a display title the same way a
+/// parsed release does, just from a differently-filtered token list (see
+/// [`humanize`], shared for the same reason).
+pub fn join_title(tokens: &[&str]) -> String {
     tokens.join(" ").trim_matches(['-', ' ']).to_owned()
+}
+
+/// Dots and underscores back to spaces — release names use them where a
+/// display title uses a space. `pub` for the same reason [`join_title`] is.
+pub fn humanize(stem: &str) -> String {
+    stem.replace(['.', '_'], " ").trim().to_owned()
 }
 
 /// Decompose accented and other compatibility characters into a base letter

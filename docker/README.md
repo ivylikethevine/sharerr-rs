@@ -33,7 +33,7 @@ pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhe
 ## Running it
 
 ```bash
-./run_docker_tests.sh
+./scripts/run_docker_tests.sh
 ```
 
 That is the whole runbook, and it is the supported path: generate the fixtures,
@@ -69,7 +69,7 @@ LIDARR_KEY=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' docker/state/lidarr/con
 # password is only good for logging in to mint the WebUI *API key* sharerr's
 # client actually authenticates with (Options → Web UI → API key in the WebUI at
 # http://127.0.0.1:18080/, or `rotateAPIKey` over the API the way the script
-# does it — see `qbittorrent_api_key` in run_docker_tests.sh).
+# does it — see `qbittorrent_api_key` in scripts/run_docker_tests.sh).
 docker compose -f docker/compose.test.yml logs qbittorrent | grep -i password
 QBIT_KEY=qbt_...   # the key the WebUI (or rotateAPIKey) handed back
 
@@ -104,7 +104,7 @@ With the stack up and something tagged and synced:
 The Torznab endpoint authenticates against a *friend's* key, not a shared
 instance secret — there is no vault entry for it. Create the operator account on
 first visit (`/setup`), then add a friend on the Friends page (`/peers`); the key
-is shown exactly once. `run_docker_tests.sh` does both over HTTP, since neither
+is shown exactly once. `scripts/run_docker_tests.sh` does both over HTTP, since neither
 has a CLI shortcut and `sharerr-data` is a named volume `seed-arr` cannot reach.
 
 ```bash
@@ -176,7 +176,7 @@ container, so their invocations omit it and seed only Sonarr and Radarr.
 Three things about it:
 
 - **Every named app must be stopped.** Each holds its database open and will not
-  observe an external write while running. `run_docker_tests.sh` stops and starts
+  observe an external write while running. `scripts/run_docker_tests.sh` stops and starts
   them around the seed.
 - **They keep their config in `./docker/state`**, bind-mounted rather than in a
   named volume, so a host-side seeder can open those files at all. `down -v` does
@@ -249,7 +249,7 @@ the docker network.
 ## The Transmission stack
 
 ```bash
-./run_docker_tests.sh --transmission
+./scripts/run_docker_tests.sh --transmission
 ```
 
 The same services and the same assertions, seeding through Transmission instead of
@@ -274,7 +274,7 @@ once.
 ## The rTorrent stack
 
 ```bash
-./run_docker_tests.sh --rtorrent
+./scripts/run_docker_tests.sh --rtorrent
 ```
 
 The same services and the same assertions, seeding through rTorrent instead of
@@ -305,7 +305,7 @@ Ports are offset again (48989, 47878, 48477, plus 48000 for the XML-RPC endpoint
 ## The VPN stack
 
 ```bash
-./run_docker_tests.sh --vpn
+./scripts/run_docker_tests.sh --vpn
 ```
 
 The same services and the same assertions, with qBittorrent inside a VPN
@@ -358,10 +358,10 @@ docker compose -f docker/compose.vpn.yml down -v && rm -rf docker/state-vpn
 ## The two-instance stack
 
 ```bash
-./run_docker_tests_two_instance.sh
+./scripts/run_docker_tests_two_instance.sh
 ```
 
-Its own script, not another `run_docker_tests.sh` flag — every stack above is
+Its own script, not another `scripts/run_docker_tests.sh` flag — every stack above is
 one sharerr against one *arr stack, and this is fundamentally a different
 shape: **two** independent sharerr+Radarr+qBittorrent stacks, wired together
 as friends. Nothing above proves the actual friend-to-friend loop; each of
@@ -455,7 +455,7 @@ Both halves are needed. `-v` drops the named volumes, which is what you want
 between runs — the API keys are regenerated on every fresh start, and qBittorrent
 only logs its temporary password when it has no stored one. It does *not* touch
 `docker/state`, where Sonarr, Radarr, and Lidarr keep theirs, so that goes separately.
-`run_docker_tests.sh` does both from a trap.
+`scripts/run_docker_tests.sh` does both from a trap.
 
 If `rm -rf docker/state` fails with a permission error, Docker auto-created that
 directory as root before the script could. Delete it as root instead:

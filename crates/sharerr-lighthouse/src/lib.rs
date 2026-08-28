@@ -54,8 +54,7 @@
 //! refusal comes from.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -65,7 +64,6 @@ use axum::response::{IntoResponse, Response};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -75,11 +73,11 @@ use utoipa_axum::routes;
 
 /// One address inside a record.
 ///
-/// Field-for-field the same shape as gossip's `RecordEndpoint` (see
-/// `crates/sharerr/src/gossip.rs`) — the lighthouse relays the identical
-/// wire format rather than inventing a second one, per the design brief. The
-/// type is duplicated rather than shared because gossip's lives in the
-/// `sharerr` binary crate, which this crate deliberately does not depend on.
+/// The lighthouse relays the identical wire format gossip uses rather than
+/// inventing a second one, per the design brief — `gossip` (the `sharerr`
+/// binary crate) re-exports this type rather than declaring its own, since
+/// the dependency runs the other way: `sharerr` already depends on this
+/// crate, not the reverse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = LighthouseRecordEndpoint)]
 pub struct RecordEndpoint {
@@ -108,10 +106,11 @@ pub struct EndpointRecord {
     pub signature: String,
 }
 
-/// The bytes a record's signature covers — identical construction to
-/// gossip's `signable_bytes`, so a record signed for gossip verifies here
-/// unchanged and vice versa.
-fn signable_bytes(
+/// The bytes a record's signature covers. `gossip` (the `sharerr` binary
+/// crate) re-exports this rather than re-deriving it, so a record signed
+/// for gossip verifies here unchanged and vice versa by construction, not
+/// by two implementations staying in sync.
+pub fn signable_bytes(
     pubkey: &str,
     endpoints: &[RecordEndpoint],
     signed_at: i64,
@@ -158,24 +157,44 @@ pub fn hash_key(raw_key: &str) -> String {
     hex::encode(Sha256::digest(raw_key.as_bytes()))
 }
 
+/// Current Unix time in seconds, saturating to `0` if the clock is somehow
+/// before the epoch. An intentional twin of
+/// [`sharerr_core::endpoint::now_epoch`] — this crate deliberately does not
+/// depend on `sharerr-core` (see the module doc), so the computation is
+/// duplicated rather than shared; the two must stay in lockstep at the
+/// `i64` boundary.
 fn now_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs()) as i64
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
+/// The map of key hash to latest record, plus the bookkeeping the capacity
+/// sweep needs — one lock for both, since they are only ever read or written
+/// together (see [`LighthouseState::report`]).
+struct Records {
+    map: HashMap<String, EndpointRecord>,
+    /// Epoch seconds of the last expiry sweep of a full table — see
+    /// [`SWEEP_INTERVAL_SECS`].
+    last_sweep_at: i64,
+}
+
 /// The whole lighthouse: a map of key hash to latest record, plus the secret
 /// that makes decoys deterministic.
+///
+/// A blocking [`std::sync::RwLock`] rather than `tokio::sync::RwLock`: no
+/// `.await` is ever reached while either guard is held — every access is a
+/// hash-map read, write, or sweep, never a call across it — so there is
+/// nothing here for an async lock to buy over the cheaper blocking one. See
+/// `TransmissionClient::session` (`sharerr-transmission`) for the same
+/// reasoning applied to a `Mutex`.
 pub struct LighthouseState {
-    records: RwLock<HashMap<String, EndpointRecord>>,
+    records: RwLock<Records>,
     decoy_secret: [u8; 32],
-    /// Epoch seconds of the last expiry sweep of a full table — see
-    /// [`SWEEP_INTERVAL_SECS`]. Only touched under the `records` write lock.
-    last_sweep_at: AtomicI64,
 }
 
 impl std::fmt::Debug for LighthouseState {
@@ -236,9 +255,11 @@ pub const SWEEP_INTERVAL_SECS: i64 = 60;
 impl LighthouseState {
     pub fn new(decoy_secret: [u8; 32]) -> Self {
         Self {
-            records: RwLock::new(HashMap::new()),
+            records: RwLock::new(Records {
+                map: HashMap::new(),
+                last_sweep_at: 0,
+            }),
             decoy_secret,
-            last_sweep_at: AtomicI64::new(0),
         }
     }
 
@@ -280,6 +301,13 @@ impl LighthouseState {
     ///   key, which is a new key hash. Trust-on-first-use has no better answer
     ///   than that, and the window is the gap between issuing a key and the
     ///   instance's next report.
+    #[allow(
+        clippy::unused_async,
+        reason = "public API called with .await from two route handlers and \
+                  both crates' tests; the L1 lock-model change made the body \
+                  synchronous, but changing the signature to match is a \
+                  wider ripple than that refactor calls for"
+    )]
     pub async fn report(
         &self,
         key_hash: &str,
@@ -298,8 +326,11 @@ impl LighthouseState {
             return Err(ReportError::FutureTimestamp);
         }
 
-        let mut records = self.records.write().await;
-        if let Some(existing) = records.get(&key_hash) {
+        let mut records = self.records.write().unwrap_or_else(PoisonError::into_inner);
+        // A single lookup does double duty: the `else` branch below only runs
+        // when this already reported "not present", so there is no separate
+        // `contains_key` call to repeat it.
+        if let Some(existing) = records.map.get(&key_hash) {
             // An expired record no longer holds its pubkey — see the rotation
             // path in the doc comment. Decided here rather than left to the
             // capacity sweep below, which only runs when the table is full and
@@ -319,21 +350,21 @@ impl LighthouseState {
             if existing.signed_at >= record.signed_at {
                 return Ok(ReportOutcome::Stale);
             }
-        }
-        if !records.contains_key(&key_hash) && records.len() >= MAX_RECORDS {
+        } else if records.map.len() >= MAX_RECORDS {
             // Throttled: a sweep that found nothing to free a moment ago will
             // not find anything now, and the table only needs one per interval.
-            let last_sweep = self.last_sweep_at.load(Ordering::Relaxed);
-            if now.saturating_sub(last_sweep) < SWEEP_INTERVAL_SECS {
+            if now.saturating_sub(records.last_sweep_at) < SWEEP_INTERVAL_SECS {
                 return Err(ReportError::Full);
             }
-            self.last_sweep_at.store(now, Ordering::Relaxed);
-            records.retain(|_, stored| now.saturating_sub(stored.signed_at) < RECORD_TTL_SECS);
-            if records.len() >= MAX_RECORDS {
+            records.last_sweep_at = now;
+            records
+                .map
+                .retain(|_, stored| now.saturating_sub(stored.signed_at) < RECORD_TTL_SECS);
+            if records.map.len() >= MAX_RECORDS {
                 return Err(ReportError::Full);
             }
         }
-        records.insert(key_hash, record);
+        records.map.insert(key_hash, record);
         Ok(ReportOutcome::Accepted)
     }
 
@@ -341,10 +372,17 @@ impl LighthouseState {
     /// otherwise a fabricated one of the same shape, stable across repeated
     /// probes of the same key hash. Never fails and never distinguishes the
     /// two cases in its return type — that is the entire privacy property.
+    #[allow(
+        clippy::unused_async,
+        reason = "public API called with .await from a route handler and \
+                  both crates' tests, matching report()'s reasoning above"
+    )]
     pub async fn lookup(&self, key_hash: &str) -> EndpointRecord {
-        if let Some(stored) = self.records.read().await.get(key_hash) {
+        let records = self.records.read().unwrap_or_else(PoisonError::into_inner);
+        if let Some(stored) = records.map.get(key_hash) {
             return stored.clone();
         }
+        drop(records);
         self.decoy(key_hash)
     }
 
@@ -563,6 +601,41 @@ fn api_router() -> OpenApiRouter<Arc<LighthouseState>> {
 /// The OpenAPI half alone.
 pub fn api_spec() -> utoipa::openapi::OpenApi {
     api_router().split_for_parts().1
+}
+
+/// Resolves on SIGINT or SIGTERM; never resolves if neither can be listened
+/// for, so the server simply runs as before.
+///
+/// Shared between the standalone lighthouse binary — where PID 1 without an
+/// installed handler ignores SIGTERM, so `docker stop` would wait out its
+/// grace period and SIGKILL — and `sharerr serve`, which was building this
+/// identically.
+pub async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %err, "could not listen for ctrl-c");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "could not listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
+    tracing::info!("shutdown signal received");
 }
 
 #[cfg(test)]

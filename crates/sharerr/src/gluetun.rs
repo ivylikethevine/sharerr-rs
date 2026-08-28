@@ -51,7 +51,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sharerr_client::error_chain;
 use sharerr_core::Config;
-use sharerr_core::config::{GluetunConfig, secret_keys};
+use sharerr_core::config::{GluetunConfig, config_paths, secret_keys};
 use sharerr_core::endpoint::{AdvertisedEndpoint, now_epoch};
 use url::Url;
 
@@ -98,6 +98,26 @@ impl GluetunTarget {
         match self {
             Self::Tracker => secret_keys::GLUETUN_API_KEY,
             Self::Client => secret_keys::GLUETUN_CLIENT_API_KEY,
+        }
+    }
+
+    /// The three `sharerr.toml` dotted paths this poller's section writes
+    /// to — `(enabled, control_url, poll_secs)`. The settings-page handlers
+    /// for both sections are otherwise identical (`web::settings::
+    /// save_gluetun_section`); this is what lets them share that one body
+    /// instead of each hand-listing its own three constants.
+    pub(crate) fn config_paths(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Tracker => (
+                config_paths::GLUETUN_ENABLED,
+                config_paths::GLUETUN_CONTROL_URL,
+                config_paths::GLUETUN_POLL_SECS,
+            ),
+            Self::Client => (
+                config_paths::GLUETUN_CLIENT_ENABLED,
+                config_paths::GLUETUN_CLIENT_CONTROL_URL,
+                config_paths::GLUETUN_CLIENT_POLL_SECS,
+            ),
         }
     }
 }
@@ -434,6 +454,12 @@ async fn poll_once(
                 if target == GluetunTarget::Tracker {
                     tracing::info!("waking the sync loop to re-announce and rewrite torrents");
                     state.request_sync();
+                    crate::notify::send(
+                        state,
+                        sharerr_core::config::NotificationTrigger::EndpointRotated,
+                        &format!("advertised endpoint is now {base}"),
+                    )
+                    .await;
                 }
             }
         }
@@ -744,6 +770,12 @@ mod tests {
             GluetunTarget::Tracker.api_key_secret(),
             GluetunTarget::Client.api_key_secret()
         );
+
+        let (tracker_enabled, tracker_url, tracker_poll) = GluetunTarget::Tracker.config_paths();
+        let (client_enabled, client_url, client_poll) = GluetunTarget::Client.config_paths();
+        assert_ne!(tracker_enabled, client_enabled);
+        assert_ne!(tracker_url, client_url);
+        assert_ne!(tracker_poll, client_poll);
     }
 
     #[tokio::test]
@@ -854,6 +886,16 @@ mod tests {
                 )
                 .await;
 
+                // A separate server from the gluetun control server above — this
+                // one stands in for the notification webhook, so an endpoint
+                // change can be asserted to have fired one.
+                let webhook = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&webhook)
+                    .await;
+
                 let config = Config {
                     data_dir: jail.directory().to_path_buf(),
                     gluetun: GluetunConfig {
@@ -871,6 +913,12 @@ mod tests {
                 .unwrap();
                 vault
                     .put(target.api_key_secret(), &SecretString::from("a-key"))
+                    .unwrap();
+                vault
+                    .put(
+                        sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &SecretString::from(webhook.uri()),
+                    )
                     .unwrap();
                 drop(vault);
 
@@ -894,6 +942,8 @@ mod tests {
                     Some("http://203.0.113.9:41234/"),
                     "a successful resolve must advertise the new endpoint"
                 );
+                // The webhook mock's own `expect(1)` is checked on drop, proving
+                // the EndpointRotated notification actually fired.
             });
             Ok(())
         });

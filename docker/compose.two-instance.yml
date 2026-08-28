@@ -1,8 +1,8 @@
 # Two independent friend-to-friend stacks, `a` and `b`, on one network — the
 # tier-2 test that proves the actual friend-to-friend loop rather than a
-# local add. See `run_docker_tests_two_instance.sh` and docker/README.md's
+# local add. See `scripts/run_docker_tests_two_instance.sh` and docker/README.md's
 # "The two-instance stack" section for what each piece is and why it exists
-# as its own script rather than another `run_docker_tests.sh` flag.
+# as its own script rather than another `scripts/run_docker_tests.sh` flag.
 #
 # ## Why `advertised_host` here is a service name, not `localhost`
 #
@@ -94,7 +94,7 @@ services:
   prowlarr:
     # Sits between sharerr-a and radarr-b so the test exercises the same
     # `preferMagnetUrl: false` indexer setting a real friend would rely on —
-    # see `run_docker_tests_two_instance.sh`'s `prowlarr_add_indexer` for why:
+    # see `scripts/run_docker_tests_two_instance.sh`'s `prowlarr_add_indexer` for why:
     # sharerr's torrents are private, so a magnet-preferring consumer can
     # never actually complete the transfer, and Radarr/Sonarr's own direct
     # Torznab client has no equivalent knob at all. Radarr-a needs no such
@@ -113,7 +113,7 @@ services:
   sharerr-a:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: sharerr-two-instance-sharerr-a
     depends_on: [radarr-a, qbittorrent-a]
     environment:
@@ -129,7 +129,7 @@ services:
   sharerr-b:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: sharerr-two-instance-sharerr-b
     depends_on: [radarr-b, qbittorrent-b]
     environment:

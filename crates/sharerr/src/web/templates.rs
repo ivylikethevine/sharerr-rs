@@ -460,25 +460,11 @@ pub struct SettingsPage {
     /// template cannot count them itself.
     pub lighthouse_url_count: usize,
 
-    /// gluetun's control server URL, or empty when endpoint resolution is off.
-    pub gluetun_control_url: String,
-    pub gluetun_enabled: bool,
-    pub gluetun_api_key_set: bool,
-    pub gluetun_poll_secs: u64,
-    /// What the tracker-facing poller last saw and last failed with, rendered
-    /// for the settings page's own small status line — the fuller version
-    /// lives on Diagnostics.
-    pub gluetun_last_observed: Option<String>,
-    pub gluetun_last_error: Option<String>,
-
+    /// The tracker-facing poller's own section on the settings page.
+    pub gluetun: GluetunSection,
     /// The second poller — the torrent client's own tunnel. See
     /// `docs/ROADMAP.md`'s "a peer with two addresses".
-    pub gluetun_client_control_url: String,
-    pub gluetun_client_enabled: bool,
-    pub gluetun_client_api_key_set: bool,
-    pub gluetun_client_poll_secs: u64,
-    pub gluetun_client_last_observed: Option<String>,
-    pub gluetun_client_last_error: Option<String>,
+    pub gluetun_client: GluetunSection,
     /// Whether the client poller has ever been pointed at anything — the
     /// disclosure it lives in starts open once it has, same reasoning as
     /// `secondary_arr_configured`.
@@ -500,6 +486,12 @@ pub struct SettingsPage {
     pub notifications_webhook_set: bool,
     pub notifications_kind: &'static str,
     pub notifications_peer_quiet_secs: u64,
+    pub notifications_trigger_sync_failed: bool,
+    pub notifications_trigger_peer_quiet: bool,
+    pub notifications_trigger_endpoint_rotated: bool,
+    pub notifications_trigger_items_shared: bool,
+    pub notifications_trigger_item_failed: bool,
+    pub notifications_trigger_peer_revoked: bool,
 
     /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
     /// see [`sharerr_core::config::MetricsConfig`].
@@ -563,6 +555,61 @@ pub struct ArrSection {
     /// Radarr are what most instances run; the rest fold into a disclosure so
     /// the page is not a wall of identical forms.
     pub primary: bool,
+}
+
+/// One gluetun poller's section on the settings page — the tracker poller and
+/// the torrent client's own poller share this shape and one form macro,
+/// distinguished by `target`.
+#[derive(Debug)]
+pub struct GluetunSection {
+    /// Which poller this is — resolves the form action, config paths, and
+    /// vault key on the Rust side, and the copy that differs between the two
+    /// sections in the template.
+    pub target: crate::gluetun::GluetunTarget,
+    /// The configured control server URL, or empty when off.
+    pub control_url: String,
+    pub enabled: bool,
+    pub api_key_set: bool,
+    pub poll_secs: u64,
+    /// The three config paths for this target's fields, for the template's
+    /// shared lock macros — precomputed rather than derived in the template,
+    /// same reasoning as `ArrSection::url_path`.
+    pub enabled_path: &'static str,
+    pub control_url_path: &'static str,
+    pub poll_secs_path: &'static str,
+    /// What this poller last saw and last failed with, rendered for the
+    /// settings page's own small status line — the fuller version lives on
+    /// Diagnostics.
+    pub last_observed: Option<String>,
+    pub last_error: Option<String>,
+}
+
+impl GluetunSection {
+    /// The three path fields are derived from `target`, so a caller only
+    /// supplies what actually varies per poller.
+    pub fn new(
+        target: crate::gluetun::GluetunTarget,
+        control_url: String,
+        enabled: bool,
+        api_key_set: bool,
+        poll_secs: u64,
+        last_observed: Option<String>,
+        last_error: Option<String>,
+    ) -> Self {
+        let (enabled_path, control_url_path, poll_secs_path) = target.config_paths();
+        Self {
+            target,
+            control_url,
+            enabled,
+            api_key_set,
+            poll_secs,
+            enabled_path,
+            control_url_path,
+            poll_secs_path,
+            last_observed,
+            last_error,
+        }
+    }
 }
 
 /// One service's contribution to the scan behind the diagnostics page.

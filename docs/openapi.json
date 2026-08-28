@@ -1641,37 +1641,6 @@
           }
         }
       },
-      "GossipEndpointRecord": {
-        "type": "object",
-        "description": "One peer's self-described endpoints, signed by them.",
-        "required": [
-          "pubkey",
-          "endpoints",
-          "signed_at",
-          "signature"
-        ],
-        "properties": {
-          "pubkey": {
-            "type": "string",
-            "description": "Hex Ed25519 public key — the subject's identity."
-          },
-          "endpoints": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/GossipRecordEndpoint"
-            }
-          },
-          "signed_at": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Unix seconds. A record never replaces a stored one with a newer\n`signed_at`, which is what stops replays rewinding an address."
-          },
-          "signature": {
-            "type": "string",
-            "description": "Hex Ed25519 signature over [`signable_bytes`]."
-          }
-        }
-      },
       "GossipIngestSummary": {
         "type": "object",
         "description": "What one batch of records amounted to, for logging and the POST response.",
@@ -1713,30 +1682,8 @@
           "records": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/GossipEndpointRecord"
+              "$ref": "#/components/schemas/LighthouseEndpointRecord"
             }
-          }
-        }
-      },
-      "GossipRecordEndpoint": {
-        "type": "object",
-        "description": "One address inside a record.",
-        "required": [
-          "kind",
-          "addr",
-          "observed_at"
-        ],
-        "properties": {
-          "kind": {
-            "type": "string",
-            "description": "One of [`EndpointKind`]'s names. Unknown kinds are skipped on ingest, so\na newer sharerr can add kinds without breaking older friends."
-          },
-          "addr": {
-            "type": "string"
-          },
-          "observed_at": {
-            "type": "integer",
-            "format": "int64"
           }
         }
       },
@@ -2118,7 +2065,7 @@
       },
       "LighthouseRecordEndpoint": {
         "type": "object",
-        "description": "One address inside a record.\n\nField-for-field the same shape as gossip's `RecordEndpoint` (see\n`crates/sharerr/src/gossip.rs`) — the lighthouse relays the identical\nwire format rather than inventing a second one, per the design brief. The\ntype is duplicated rather than shared because gossip's lives in the\n`sharerr` binary crate, which this crate deliberately does not depend on.",
+        "description": "One address inside a record.\n\nThe lighthouse relays the identical wire format gossip uses rather than\ninventing a second one, per the design brief — `gossip` (the `sharerr`\nbinary crate) re-exports this type rather than declaring its own, since\nthe dependency runs the other way: `sharerr` already depends on this\ncrate, not the reverse.",
         "required": [
           "kind",
           "addr",

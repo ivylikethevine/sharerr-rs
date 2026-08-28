@@ -352,13 +352,21 @@ fn leading_number(stem: &str) -> Option<u32> {
 
 /// Dots and underscores back to spaces — the inverse of scene-style naming,
 /// for stems that are about to become display titles.
+///
+/// `sharerr_torrent::humanize` rather than a second copy of the same
+/// substitution: that crate already owns "what a release name looks like".
 fn humanize(stem: &str) -> String {
-    stem.replace(['.', '_'], " ").trim().to_owned()
+    sharerr_torrent::humanize(stem)
 }
 
 /// Tokens that mark where a filename stops being a title and starts being
 /// release metadata. Compared case-insensitively, and against the part before
 /// a `-` so `x264-GROUP` matches `x264`.
+///
+/// A distinct vocabulary from [`sharerr_core::MediaMeta::scene_video_codec`]'s
+/// codec tokens on purpose: this list also has to catch source/resolution
+/// tokens (`bluray`, `1080p`) that a video-codec lookup never needs to know,
+/// so the two are not the same list wearing two names.
 const RELEASE_TOKENS: &[&str] = &[
     "480p", "720p", "1080p", "2160p", "4k", "bluray", "blu-ray", "webrip", "web-dl", "webdl",
     "hdtv", "dvdrip", "bdrip", "remux", "x264", "x265", "h264", "h265", "hevc", "av1", "xvid",
@@ -368,7 +376,7 @@ const RELEASE_TOKENS: &[&str] = &[
 /// The humanized stem, cut at the first release-cruft token — for movie names
 /// with no year, where the whole stem would otherwise become the title.
 fn display_title(stem: &str) -> String {
-    let normalised = stem.replace(['.', '_'], " ");
+    let normalised = humanize(stem);
     let is_cruft = |word: &str| {
         let lowered = word.to_ascii_lowercase();
         let head = lowered.split('-').next().unwrap_or(&lowered);
@@ -376,13 +384,11 @@ fn display_title(stem: &str) -> String {
             .iter()
             .any(|t| *t == lowered.as_str() || *t == head)
     };
-    normalised
+    let words: Vec<&str> = normalised
         .split_whitespace()
         .take_while(|word| !is_cruft(word))
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_matches(['-', ' '])
-        .to_owned()
+        .collect();
+    sharerr_torrent::join_title(&words)
 }
 
 /// A stable 63-bit id for a path, standing in for the file id an *arr app

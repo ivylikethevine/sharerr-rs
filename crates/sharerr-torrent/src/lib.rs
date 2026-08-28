@@ -24,10 +24,10 @@ pub use announce::{
 };
 pub use error::{Result, TorrentError};
 pub use factory::{
-    BuiltTorrent, LavaTorrentFactory, TorrentRequest, piece_length_for, read_announce,
-    read_info_hash, rewrite_announce, torrent_file_path,
+    BuiltTorrent, LavaTorrentFactory, Retargeted, TorrentRequest, piece_length_for, read_announce,
+    read_info_hash, retarget_announce, rewrite_announce, torrent_file_path,
 };
-pub use title::{ParsedTitle, parse, resolve, synthesize};
+pub use title::{ParsedTitle, humanize, join_title, parse, resolve, synthesize};
 pub use tracker::{
     ANNOUNCE_PATH, AnnounceSet, BuiltinTracker, SCRAPE_PATH, TrackerProvider, announce_set_for,
     announce_url, token_from_announce_url,
