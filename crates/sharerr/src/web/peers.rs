@@ -16,7 +16,7 @@
 //! issuing another, which is the correct behaviour for a bearer credential.
 
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::{ExposeSecret, SecretString};
@@ -263,6 +263,18 @@ pub async fn feed_preview(State(state): State<WebState>, Path(id): Path<i64>) ->
     crate::torznab::xml(crate::torznab::render_feed(&matched))
 }
 
+/// The most recently observed sighting of one [`EndpointKind`], relying on
+/// [`sharerr_store::Store::peer_endpoints_for`]'s own
+/// `observed_at DESC, id DESC` ordering — so the *first* match here is
+/// already the newest, and re-deriving that with `max_by_key` would in fact
+/// pick the *oldest* of a tied `observed_at`.
+fn latest_endpoint(
+    endpoints: &[sharerr_store::PeerEndpoint],
+    kind: EndpointKind,
+) -> Option<&sharerr_store::PeerEndpoint> {
+    endpoints.iter().find(|endpoint| endpoint.kind == kind)
+}
+
 /// Download every active friend as a one-time `[[peers]]` restore block —
 /// the export half of `sharerr_core::config::PeerImport`; see
 /// `CONFIGURATION.md`'s "Restoring friends after a full data-directory
@@ -297,27 +309,34 @@ pub async fn export(State(state): State<WebState>) -> Response {
         .await
         .unwrap_or_default();
 
-    // Only opened when there is at least one friend to look a gossip key up
-    // for — the common case (nobody has an outbound gossip relationship
-    // configured yet) costs nothing extra. A failure here degrades the
-    // export rather than failing it outright: every other field is still
-    // useful on its own, and the missing keys are called out in the file.
-    let vault = if active.is_empty() {
-        None
+    // Only opened when at least one active friend actually has a gossip key
+    // stored — `Vault::key_names` (via `secrets_present`, the same call the
+    // settings page's "stored"/"not set" badges use) answers that without
+    // deriving the master key, so the common case — nobody has an outbound
+    // gossip relationship configured yet — costs nothing beyond a file read.
+    // A failure to then open the vault degrades the export rather than
+    // failing it outright: every other field is still useful on its own,
+    // and the missing keys are called out in the file.
+    let stored_secrets = super::settings::secrets_present(&state.serve.config().await).await;
+    let any_gossip_key = active
+        .iter()
+        .any(|peer| stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id)));
+    let (vault, vault_unavailable) = if !any_gossip_key {
+        (None, false)
     } else {
-        state.serve.open_vault().await.ok()
+        match state.serve.open_vault().await {
+            Ok(vault) => (Some(vault), false),
+            Err(_) => (None, true),
+        }
     };
-    let vault_unavailable = vault.is_none() && !active.is_empty();
 
     let imports: Vec<sharerr_core::config::PeerImport> = active
         .iter()
         .map(|peer| {
             let last_addr = endpoints_by_peer
                 .get(&peer.id)
-                .into_iter()
-                .flatten()
-                .filter(|endpoint| endpoint.kind == EndpointKind::Api)
-                .max_by_key(|endpoint| endpoint.observed_at)
+                .map(Vec::as_slice)
+                .and_then(|endpoints| latest_endpoint(endpoints, EndpointKind::Api))
                 .map(|endpoint| endpoint.addr.clone());
             let gossip_key = vault.as_ref().and_then(|vault| {
                 vault
@@ -355,17 +374,7 @@ pub async fn export(State(state): State<WebState>) -> Response {
 
     tracing::info!(count = active.len(), "exported a [[peers]] restore block");
 
-    (
-        [
-            (header::CONTENT_TYPE, "application/toml".to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"sharerr-peers-export.toml\"".to_owned(),
-            ),
-        ],
-        text,
-    )
-        .into_response()
+    super::toml_download("sharerr-peers-export.toml", text)
 }
 
 fn rejected_response(message: &str) -> Response {
@@ -604,6 +613,8 @@ pub(crate) fn took(started_at: i64, finished_at: i64) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
+    use axum::http::header;
+
     use super::*;
 
     #[test]
@@ -684,21 +695,12 @@ mod tests {
     // only ever exercising the "vault would not open" path, never a real
     // open one.
 
-    use super::super::web_state;
+    use super::super::{body_of, web_state};
 
-    /// A config whose database path is a directory rather than a file, so
-    /// `Store::open` fails deterministically — the hermetic way to reach the
-    /// `store_or_503`/`build`'s "store unavailable" branches without touching
-    /// the filesystem in a way that depends on real permissions.
+    /// The `store_or_503`/`build`'s "store unavailable" branches, reached
+    /// hermetically — see `state::fixtures::store_unopenable`.
     fn web_state_with_unopenable_store() -> (tempfile::TempDir, WebState) {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("sharerr.db")).unwrap();
-        let config = sharerr_core::Config {
-            data_dir: dir.path().to_path_buf(),
-            ..sharerr_core::Config::default()
-        };
-        let path = dir.path().join("sharerr.toml");
-        let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+        let (dir, serve) = crate::state::fixtures::store_unopenable();
         (dir, web_state(serve))
     }
 
@@ -1118,23 +1120,24 @@ mod tests {
 
     // -------------------------------------------------------------- export()
 
-    async fn body_of(response: Response) -> String {
-        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
-    }
+    use sharerr_testkit::mock::fresh_password;
 
     #[tokio::test]
     async fn export_excludes_revoked_peers_and_never_carries_a_peer_key() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
+        let sam_key = fresh_password();
+        let alex_key = fresh_password();
         store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::Tv)
+            .create_peer("Sam", &SecretString::from(sam_key.clone()), PeerScope::Tv)
             .await
             .unwrap();
         let alex = store
-            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+            .create_peer(
+                "Alex",
+                &SecretString::from(alex_key.clone()),
+                PeerScope::All,
+            )
             .await
             .unwrap();
         store.revoke_peer(alex.id).await.unwrap();
@@ -1157,7 +1160,7 @@ mod tests {
             "a revoked friend must not be exported: {body}"
         );
         assert!(
-            !body.contains("sam-key") && !body.contains("alex-key"),
+            !body.contains(&sam_key) && !body.contains(&alex_key),
             "a friend's own key into this instance must never be exported: {body}"
         );
     }
@@ -1170,7 +1173,7 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
         let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .create_peer("Sam", &SecretString::from(fresh_password()), PeerScope::All)
             .await
             .unwrap();
         store
@@ -1221,32 +1224,51 @@ mod tests {
     /// all — the export must still deliver everything else rather than
     /// failing outright, and say plainly what it left out.
     ///
+    /// The realistic shape of this — a key genuinely exists but the master
+    /// key is not available *right now* — needs two phases: create the
+    /// friend and store the key with the vault reachable, then take the
+    /// master key away before exporting. Exporting into an *empty* vault (no
+    /// key ever stored) is deliberately not this test: `export` only opens
+    /// the vault when `Vault::key_names` — which needs no master key — shows
+    /// an active friend actually has one stored, so a friend with nothing to
+    /// look up must not trigger this banner at all; that is covered by
+    /// `export_picks_only_the_most_recent_api_endpoint`, which has a
+    /// gossip URL but no key and asserts no such banner.
+    ///
     /// `master_key_from_env` reads the real process environment with no
     /// injection point, so — per this repo's testing rule for a
-    /// vault-closed outcome — this runs inside `Jail` with `clear_env()`,
+    /// vault-closed outcome — this runs inside `Jail`, `clear_env()` and all,
     /// exactly as if it needed a var *set*.
     #[test]
     fn export_degrades_gracefully_without_an_openable_vault() {
         figment::Jail::expect_with(|jail| {
-            jail.clear_env();
-            let config = sharerr_core::Config {
-                data_dir: jail.directory().to_path_buf(),
-                ..sharerr_core::Config::default()
-            };
-            let path = jail.directory().join("sharerr.toml");
-            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let store = serve.store().await.unwrap();
                 let sam = store
-                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .create_peer("Sam", &SecretString::from(fresh_password()), PeerScope::All)
                     .await
                     .unwrap();
                 store
                     .set_peer_gossip_url(sam.id, Some("https://sam.example/sharerr"))
                     .await
                     .unwrap();
+                let mut vault = serve.open_vault().await.unwrap();
+                vault
+                    .put(
+                        &secret_keys::peer_gossip_key(sam.id),
+                        &SecretString::from("sam-issued-us-this"),
+                    )
+                    .unwrap();
+            });
+
+            // The vault is unreachable for the export itself, even though it
+            // genuinely holds a key for Sam.
+            jail.clear_env();
+            runtime.block_on(async {
                 let state = web_state(serve);
 
                 let body = body_of(export(State(state)).await).await;
@@ -1268,18 +1290,13 @@ mod tests {
     fn export_includes_a_gossip_key_when_the_vault_is_reachable() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
-            let config = sharerr_core::Config {
-                data_dir: jail.directory().to_path_buf(),
-                ..sharerr_core::Config::default()
-            };
-            let path = jail.directory().join("sharerr.toml");
-            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let store = serve.store().await.unwrap();
                 let sam = store
-                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .create_peer("Sam", &SecretString::from(fresh_password()), PeerScope::All)
                     .await
                     .unwrap();
                 let mut vault = serve.open_vault().await.unwrap();

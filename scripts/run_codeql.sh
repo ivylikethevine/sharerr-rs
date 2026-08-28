@@ -69,37 +69,18 @@ for lang in "${LANGUAGES[@]}"; do
     echo "==> analyzing $lang against the default code-scanning suite"
     "$CODEQL" database analyze "$WORKDIR/$lang-db" \
         "codeql/$lang-queries:codeql-suites/$lang-code-scanning.qls" \
-        --format=sarifv2.1.0 \
-        --output="$WORKDIR/$lang.sarif" \
-        --sarif-category="/language:$lang" \
+        --format=csv \
+        --output="$WORKDIR/$lang.csv" \
         --quiet
 
-    FINDINGS="$(
-        python3 - "$WORKDIR/$lang.sarif" "$lang" <<'PYEOF'
-import json, sys
-
-path, lang = sys.argv[1], sys.argv[2]
-with open(path, encoding="utf-8") as f:
-    sarif = json.load(f)
-
-for run in sarif.get("runs", []):
-    rules = {
-        rule["id"]: rule.get("shortDescription", {}).get("text", rule["id"])
-        for rule in run.get("tool", {}).get("driver", {}).get("rules", [])
-    }
-    for result in run.get("results", []):
-        rule = rules.get(result.get("ruleId"), result.get("ruleId", "?"))
-        message = result.get("message", {}).get("text", "").split("\n")[0]
-        for loc in result.get("locations", []):
-            phys = loc.get("physicalLocation", {})
-            uri = phys.get("artifactLocation", {}).get("uri", "?")
-            line = phys.get("region", {}).get("startLine", "?")
-            print(f"{uri}:{line}: [{lang}] {rule} — {message}")
-PYEOF
-    )"
-    if [ -n "$FINDINGS" ]; then
-        echo "$FINDINGS"
-        echo "==> $lang: $(echo "$FINDINGS" | wc -l) finding(s) — see above"
+    # No `--sarif-category`/SARIF here: nothing uploads this locally the way
+    # CI's `upload-sarif` step does, so the CLI's own CSV (name, description,
+    # severity, message, path, line, ...) is the whole finding with nothing
+    # to parse back out of it — no SARIF write, no JSON walk, no extra
+    # interpreter dependency for a file this script deletes seconds later.
+    if [ -s "$WORKDIR/$lang.csv" ]; then
+        cat "$WORKDIR/$lang.csv"
+        echo "==> $lang: $(wc -l <"$WORKDIR/$lang.csv") finding(s) — see above"
         STATUS=1
     else
         echo "==> $lang: clean"

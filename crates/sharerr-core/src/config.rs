@@ -337,6 +337,14 @@ pub struct Config {
     /// backup. Normally empty — see [`PeerImport`] for why this is the one
     /// field allowed to carry a secret through `sharerr.toml`, and
     /// `sharerr::commands::serve` for where it is drained and stripped.
+    ///
+    /// `skip_serializing`: a pending block can carry a real credential (see
+    /// [`PeerImport::gossip_key`]), and the "export the effective config"
+    /// settings page serializes a live `Config` verbatim — this has to be
+    /// safe by construction rather than by that handler remembering to carve
+    /// this one field out. (A `Debug` print of `Config` is the other generic
+    /// consumer; [`PeerImport`]'s own hand-written `Debug` covers that half.)
+    #[serde(skip_serializing)]
     pub peers: Vec<PeerImport>,
 }
 
@@ -385,6 +393,16 @@ impl Config {
     /// Directory for the .torrent files handed to qBittorrent.
     pub fn torrent_dir(&self) -> PathBuf {
         self.data_dir.join("torrents")
+    }
+
+    /// Take the pending `[[peers]]` bootstrap block, leaving `Config::peers`
+    /// empty behind it — see `sharerr::commands::serve::import_peers`, the
+    /// one caller. A method rather than reading the field directly so the
+    /// drain and the clearing happen in one step: nothing else should be able
+    /// to see this `Config` in the state between "peers were read" and
+    /// "peers were cleared".
+    pub fn take_peers(&mut self) -> Vec<PeerImport> {
+        std::mem::take(&mut self.peers)
     }
 
     /// The configuration for one *arr app, or `None` if it is not set up.
@@ -1110,10 +1128,14 @@ pub struct PathMapping {
 /// here; the drain always mints a fresh one, exactly like adding a friend
 /// through the web UI, and the operator re-sends it.
 ///
-/// Read exactly once, by `sharerr::commands::serve::run`, and stripped from
-/// the file in the same write that records the result — never round-tripped
-/// back out through [`Config`]'s own `Serialize` impl once populated.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+/// Read exactly once, by `sharerr::commands::serve::import_peers`, and
+/// stripped from the file — and from the live `Config`, see
+/// [`Config::take_peers`] — in the same pass that records the result.
+/// `Config::peers` is `skip_serializing`, so [`Self::gossip_key`] never
+/// round-trips back out through `Config`'s own `Serialize` impl once
+/// populated; [`Self`]'s own hand-written [`std::fmt::Debug`] below is what
+/// keeps it out of a `Debug` print of the whole `Config` the same way.
+#[derive(Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PeerImport {
     /// This friend's name, as it will appear on the Friends page.
@@ -1136,6 +1158,29 @@ pub struct PeerImport {
     /// struct's own docs for why this is the one credential a restore can
     /// carry.
     pub gossip_key: Option<String>,
+}
+
+impl std::fmt::Debug for PeerImport {
+    /// Every field the derive would have printed, except [`Self::gossip_key`]
+    /// — redacted rather than omitted, so its presence is still visible (a
+    /// restore with no key configured for this friend looks different from
+    /// one that does) without ever printing the credential itself. This is
+    /// what keeps `tracing::debug!(config = ?config, ..)` in `main.rs` — a
+    /// generic `Debug` print of the whole [`Config`], run on every start —
+    /// safe by construction rather than by that call site remembering to
+    /// carve this field out.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerImport")
+            .field("label", &self.label)
+            .field("scope", &self.scope)
+            .field("last_addr", &self.last_addr)
+            .field("gossip_url", &self.gossip_url)
+            .field(
+                "gossip_key",
+                &self.gossip_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -1376,5 +1421,65 @@ mod tests {
             NotificationsConfig::default().triggers,
             NotificationTrigger::ALL.to_vec()
         );
+    }
+
+    /// The one field this struct exists to carry a real credential in must
+    /// never appear verbatim in a `Debug` print — its presence still has to
+    /// be visible, so `None` and `Some` render differently, just not the
+    /// value inside `Some`.
+    #[test]
+    fn peer_import_debug_never_prints_the_gossip_key() {
+        let with_key = PeerImport {
+            label: "Sam".to_owned(),
+            gossip_key: Some("sam-issued-us-this".to_owned()),
+            ..Default::default()
+        };
+        let printed = format!("{with_key:?}");
+        assert!(!printed.contains("sam-issued-us-this"), "{printed}");
+        assert!(
+            printed.contains("Some"),
+            "presence must still show: {printed}"
+        );
+
+        let without_key = PeerImport::default();
+        assert!(format!("{without_key:?}").contains("None"));
+    }
+
+    /// `Config::peers` must never round-trip back out through `Config`'s own
+    /// `Serialize` impl once populated — see the field's own doc comment.
+    /// `export_config` and any future generic `Config` consumer rely on this.
+    #[test]
+    fn config_peers_never_serializes_even_when_populated() {
+        let config = Config {
+            peers: vec![PeerImport {
+                label: "Sam".to_owned(),
+                gossip_key: Some("sam-issued-us-this".to_owned()),
+                ..Default::default()
+            }],
+            ..Config::default()
+        };
+        let document = serde_json::to_value(&config).unwrap();
+        assert!(document.get("peers").is_none(), "{document:#}");
+    }
+
+    /// [`Config::take_peers`] both returns and clears — the two are meant to
+    /// happen as one step, not read-then-clear as two calls a future editor
+    /// could reorder or split.
+    #[test]
+    fn take_peers_empties_the_field_it_returns() {
+        let mut config = Config {
+            peers: vec![peer_import("Sam")],
+            ..Config::default()
+        };
+        let taken = config.take_peers();
+        assert_eq!(taken.len(), 1);
+        assert!(config.peers.is_empty());
+    }
+
+    fn peer_import(label: &str) -> PeerImport {
+        PeerImport {
+            label: label.to_owned(),
+            ..Default::default()
+        }
     }
 }

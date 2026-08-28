@@ -190,12 +190,11 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use sharerr_testkit::mock::fresh_password;
 
     fn secret(s: &str) -> SecretString {
         SecretString::from(s.to_owned())
     }
-
-    use sharerr_testkit::mock::fresh_password;
 
     async fn store() -> Store {
         Store::open_in_memory().await.expect("in-memory store")

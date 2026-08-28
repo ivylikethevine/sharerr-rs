@@ -63,7 +63,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // A one-time restore, before anything else touches the store — see
     // `sharerr_core::config::PeerImport`. Almost always a no-op: the field is
     // empty unless an operator hand-restored a `[[peers]]` block.
-    import_peers(&state, config_path, &config.peers).await;
+    import_peers(&state).await;
 
     // One tracker state for however many listeners carry it — two swarm maps
     // would keep peers arriving on different listeners from meeting.
@@ -192,9 +192,18 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
 
 /// Drain a one-time `[[peers]]` bootstrap block (see
 /// [`sharerr_core::config::PeerImport`]) into the real peer store, then strip
-/// it from `sharerr.toml` in the same write that recorded the result.
-/// Logs and returns rather than propagating a failure: a bad restore file
-/// must not stop the instance from serving everything else.
+/// it from `sharerr.toml` — and from the live `Config` this instance is
+/// already running on — in the same pass that recorded the result. Logs and
+/// returns rather than propagating a failure: a bad restore file must not
+/// stop the instance from serving everything else.
+///
+/// Clearing the live `Config` too (not just the file) matters because
+/// `Config` can also be replaced at runtime — a `[[peers]]` block pasted
+/// through Settings → Backup and restore is adopted into memory the moment
+/// it saves, before any restart would otherwise trigger this drain. Reading
+/// `peers` fresh from `state.config()` rather than taking a parameter is
+/// what lets this same function serve both entry points, at startup and
+/// after a config import — see `web::settings::import_config`.
 ///
 /// All-or-nothing on the parts a partial attempt could not safely undo — with
 /// no store there is nowhere to write a peer at all, and with no vault a
@@ -205,11 +214,9 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
 /// this same block already created it) is logged and skipped rather than
 /// aborting the rest, and the block is still stripped afterward — leaving it
 /// in place would only repeat the same skips on every future start.
-async fn import_peers(
-    state: &ServeState,
-    config_path: &Path,
-    peers: &[sharerr_core::config::PeerImport],
-) {
+pub(crate) async fn import_peers(state: &ServeState) {
+    let mut config = state.config().await;
+    let peers = config.take_peers();
     if peers.is_empty() {
         return;
     }
@@ -246,7 +253,7 @@ async fn import_peers(
     };
 
     let mut imported = 0usize;
-    for peer in peers {
+    for peer in &peers {
         match import_one_peer(&store, vault.as_mut(), peer).await {
             Ok(()) => imported += 1,
             Err(reason) => {
@@ -264,12 +271,16 @@ async fn import_peers(
         total = peers.len(),
         "drained the [[peers]] bootstrap block; removing it from sharerr.toml"
     );
-    if let Err(err) = strip_peers_block(config_path) {
-        tracing::error!(
+    match strip_peers_block(state.config_path()) {
+        // `config` already has `peers` taken out — install it so the live
+        // instance's view matches the file it was just stripped from, not
+        // just at the next restart. See this function's own doc comment.
+        Ok(()) => state.replace_config(config).await,
+        Err(err) => tracing::error!(
             error = %err,
             "imported [[peers]] but could not remove the block from sharerr.toml — it will \
              be re-imported (and every already-created label skipped) on the next start"
-        );
+        ),
     }
 }
 
@@ -289,11 +300,11 @@ async fn import_one_peer(
         .create_peer(&peer.label, &secrecy::SecretString::from(key), scope)
         .await?;
 
-    if let Some(url) = peer.gossip_url.as_deref().filter(|url| !url.is_empty()) {
+    if let Some(url) = present(&peer.gossip_url) {
         store.set_peer_gossip_url(created.id, Some(url)).await?;
     }
 
-    if let Some(key) = peer.gossip_key.as_deref().filter(|key| !key.is_empty()) {
+    if let Some(key) = present(&peer.gossip_key) {
         let vault =
             vault.ok_or_else(|| anyhow::anyhow!("no vault handle available for a gossip key"))?;
         vault.put(
@@ -302,7 +313,7 @@ async fn import_one_peer(
         )?;
     }
 
-    if let Some(addr) = peer.last_addr.as_deref().filter(|addr| !addr.is_empty()) {
+    if let Some(addr) = present(&peer.last_addr) {
         store
             .record_peer_endpoint(
                 created.id,
@@ -315,6 +326,14 @@ async fn import_one_peer(
     }
 
     Ok(())
+}
+
+/// `Some(&str)` for a field that is set and not blank — an operator hand-editing
+/// TOML can leave `gossip_url = ""` as easily as omitting the key, and both mean
+/// "not supplied" the same way an empty text input does on every web settings
+/// form.
+fn present(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|s| !s.is_empty())
 }
 
 fn strip_peers_block(config_path: &Path) -> anyhow::Result<()> {
@@ -1031,12 +1050,35 @@ mod tests {
         path
     }
 
+    /// A `ServeState` carrying a pending `[[peers]]` block, both on disk (for
+    /// `strip_peers_block` to open and rewrite) and in the `Config` `state`
+    /// was built from (what `import_peers` actually reads) — the same shape
+    /// `serve::run` sees once `settings::load_or_recover` has parsed a real
+    /// `sharerr.toml` containing the same block. Keep the returned `TempDir`
+    /// alive for as long as `state` is in use, same as every other fixture
+    /// here.
+    fn state_with_pending_peers(
+        peers: Vec<sharerr_core::config::PeerImport>,
+    ) -> (tempfile::TempDir, ServeState) {
+        let dir = tempfile::tempdir().unwrap();
+        // Content is a placeholder for `strip_peers_block` to find and
+        // remove; the peers that actually get processed are `config.peers`.
+        let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            peers,
+            ..Config::default()
+        };
+        let state = ServeState::new(config, path, None);
+        (dir, state)
+    }
+
     #[tokio::test]
     async fn an_empty_peers_slice_touches_nothing() {
         let (_dir, state) = unconfigured();
         // No `[[peers]]` at all — must not even try to open the store, let
         // alone write a file that was never created.
-        import_peers(&state, state.config_path(), &[]).await;
+        import_peers(&state).await;
         assert!(!state.config_path().exists());
     }
 
@@ -1044,18 +1086,15 @@ mod tests {
     /// gossip URL — nothing that needs the vault.
     #[tokio::test]
     async fn peers_with_no_gossip_key_import_without_touching_the_vault() {
-        let (dir, state) = unconfigured();
-        let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
-
-        let peers = vec![sharerr_core::config::PeerImport {
+        let (_dir, state) = state_with_pending_peers(vec![sharerr_core::config::PeerImport {
             label: "Sam".to_owned(),
             scope: "tv".to_owned(),
             last_addr: Some("203.0.113.5:51413".to_owned()),
             gossip_url: Some("https://sam.example/sharerr".to_owned()),
             gossip_key: None,
-        }];
+        }]);
 
-        import_peers(&state, &path, &peers).await;
+        import_peers(&state).await;
 
         let store = state.store().await.unwrap();
         let listed = store.list_peers().await.unwrap();
@@ -1076,10 +1115,14 @@ mod tests {
             "seeded from a bootstrap block, not an actual sighting"
         );
 
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = std::fs::read_to_string(state.config_path()).unwrap();
         assert!(
             !text.contains("[[peers]]"),
-            "block must be stripped: {text}"
+            "block must be stripped from the file: {text}"
+        );
+        assert!(
+            state.config().await.peers.is_empty(),
+            "and from the live config this instance is already running on"
         );
     }
 
@@ -1098,8 +1141,14 @@ mod tests {
     fn a_gossip_key_with_no_openable_vault_imports_nothing_and_keeps_the_block() {
         figment::Jail::expect_with(|jail| {
             jail.clear_env();
+            let peers = vec![sharerr_core::config::PeerImport {
+                label: "Sam".to_owned(),
+                gossip_key: Some("sam-issued-us-this".to_owned()),
+                ..Default::default()
+            }];
             let config = Config {
                 data_dir: jail.directory().to_path_buf(),
+                peers,
                 ..Config::default()
             };
             let path = jail.directory().join("sharerr.toml");
@@ -1112,17 +1161,16 @@ mod tests {
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
-                let peers = vec![sharerr_core::config::PeerImport {
-                    label: "Sam".to_owned(),
-                    gossip_key: Some("sam-issued-us-this".to_owned()),
-                    ..Default::default()
-                }];
-                import_peers(&state, &path, &peers).await;
+                import_peers(&state).await;
 
                 let store = state.store().await.unwrap();
                 assert!(
                     store.list_peers().await.unwrap().is_empty(),
                     "no vault, no import — nothing must be half-created"
+                );
+                assert!(
+                    !state.config().await.peers.is_empty(),
+                    "the live config must still carry the block too, to retry from"
                 );
             });
 
@@ -1141,12 +1189,13 @@ mod tests {
     /// since leaving it in place would only repeat the same skip forever.
     #[tokio::test]
     async fn a_duplicate_label_is_skipped_but_the_rest_still_import() {
-        let (dir, state) = unconfigured();
-        let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
+        let (_dir, state) = state_with_pending_peers(vec![
+            peer_import("Sam"),
+            peer_import("Sam"),
+            peer_import("Alex"),
+        ]);
 
-        let peers = vec![peer_import("Sam"), peer_import("Sam"), peer_import("Alex")];
-
-        import_peers(&state, &path, &peers).await;
+        import_peers(&state).await;
 
         let store = state.store().await.unwrap();
         let listed = store.list_peers().await.unwrap();
@@ -1160,7 +1209,7 @@ mod tests {
         assert!(labels.contains("Sam"));
         assert!(labels.contains("Alex"));
 
-        let text = std::fs::read_to_string(&path).unwrap();
+        let text = std::fs::read_to_string(state.config_path()).unwrap();
         assert!(
             !text.contains("[[peers]]"),
             "block must still be stripped: {text}"
@@ -1172,18 +1221,20 @@ mod tests {
     #[tokio::test]
     async fn a_store_that_cannot_open_leaves_the_block_untouched() {
         let dir = tempfile::tempdir().unwrap();
-        // A regular file where `data_dir` is expected to be a directory:
-        // `create_dir_all` fails on this shape reliably and portably.
-        let blocked = dir.path().join("not-a-directory");
-        std::fs::write(&blocked, b"").unwrap();
+        // A directory where `Store::open` expects to open a file — the same
+        // trick `state::fixtures::store_unopenable` uses, kept local here
+        // rather than that fixture itself because this test also needs
+        // `peers` populated, which the shared fixture does not parameterize.
+        std::fs::create_dir(dir.path().join("sharerr.db")).unwrap();
         let config = Config {
-            data_dir: blocked,
+            data_dir: dir.path().to_path_buf(),
+            peers: vec![peer_import("Sam")],
             ..Config::default()
         };
         let path = write_peers_toml(&dir, "data_dir = \"/data\"\n\n[[peers]]\nlabel = \"Sam\"\n");
         let state = ServeState::new(config, path.clone(), None);
 
-        import_peers(&state, &path, &[peer_import("Sam")]).await;
+        import_peers(&state).await;
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -1198,8 +1249,14 @@ mod tests {
     fn a_gossip_key_is_written_to_the_vault_and_the_block_is_stripped() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let peers = vec![sharerr_core::config::PeerImport {
+                label: "Sam".to_owned(),
+                gossip_key: Some("sam-issued-us-this".to_owned()),
+                ..Default::default()
+            }];
             let config = Config {
                 data_dir: jail.directory().to_path_buf(),
+                peers,
                 ..Config::default()
             };
             let path = jail.directory().join("sharerr.toml");
@@ -1212,12 +1269,7 @@ mod tests {
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
-                let peers = vec![sharerr_core::config::PeerImport {
-                    label: "Sam".to_owned(),
-                    gossip_key: Some("sam-issued-us-this".to_owned()),
-                    ..Default::default()
-                }];
-                import_peers(&state, &path, &peers).await;
+                import_peers(&state).await;
 
                 let store = state.store().await.unwrap();
                 let listed = store.list_peers().await.unwrap();
@@ -1234,6 +1286,10 @@ mod tests {
                         secret.expose_secret().to_owned()
                     }),
                     Some("sam-issued-us-this".to_owned())
+                );
+                assert!(
+                    state.config().await.peers.is_empty(),
+                    "drained peers must be cleared from the live config too"
                 );
             });
 

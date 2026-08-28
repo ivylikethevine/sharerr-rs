@@ -117,9 +117,9 @@ impl RtorrentClient {
                 // The multicall extension wraps each successful return value
                 // in a one-element array.
                 XmlValue::Array(mut values) if values.len() == 1 => Ok(values.remove(0)),
-                XmlValue::Struct(members) => Err(ClientError::Api {
+                fault @ XmlValue::Struct(_) => Err(ClientError::Api {
                     kind: KIND,
-                    detail: format!("{method}: {}", fault_message(&XmlValue::Struct(members))),
+                    detail: format!("{method}: {}", fault_message(&fault)),
                 }),
                 other => Err(malformed_shape(
                     "system.multicall",

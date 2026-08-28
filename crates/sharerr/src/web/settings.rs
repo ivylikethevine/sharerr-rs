@@ -872,8 +872,11 @@ pub async fn save_metrics(
 /// env-overridden field is never written to `sharerr.toml` in the first
 /// place (see `config_io::env_overrides`), so exporting the file bytes would
 /// silently drop anything an operator pinned via environment. `Config` is
-/// `deny_unknown_fields` with no secret field on it at all, so this cannot
-/// leak a credential no matter what is in the vault.
+/// `deny_unknown_fields` with no field an operator can set to a secret value
+/// through this page — the one exception, a pending `[[peers]]` bootstrap
+/// block's `gossip_key`, is `skip_serializing` on `Config::peers` itself
+/// (see that field's doc comment), so this cannot leak one no matter what is
+/// in the vault or sitting in an unconsumed restore block.
 pub async fn export_config(State(state): State<WebState>) -> Response {
     let config = state.serve.config().await;
     let text = match toml_edit::ser::to_string_pretty(&config) {
@@ -912,6 +915,13 @@ pub struct ImportConfigForm {
 /// config that failed to load. Only `sharerr.toml` is touched: this does not
 /// (and cannot) restore the vault or the peers table, both of which live
 /// entirely outside this file.
+///
+/// The one exception is a pasted document that itself carries a `[[peers]]`
+/// bootstrap block (see `sharerr_core::config::PeerImport`): draining that is
+/// what `commands::serve::import_peers` exists for, and it has to run here
+/// too, not only at the next `sharerr serve` start — otherwise a block
+/// restored through this page would sit adopted in memory (and still on
+/// disk) until an operator happened to restart the process.
 pub async fn import_config(
     State(state): State<WebState>,
     Form(form): Form<ImportConfigForm>,
@@ -939,6 +949,9 @@ pub async fn import_config(
     match written {
         Ok(()) => {
             state.serve.replace_config(config).await;
+            // A no-op unless the pasted document itself carried a pending
+            // `[[peers]]` block — see this function's own doc comment.
+            crate::commands::serve::import_peers(&state.serve).await;
             tracing::info!(path = %write_path.display(), "config imported through the web ui");
             Redirect::to("/settings?saved=config").into_response()
         }

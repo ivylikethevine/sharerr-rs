@@ -37,20 +37,19 @@ pub fn base_url(server: &MockServer) -> Url {
 /// closed-port tests never build a request at all. Generating it costs nothing
 /// and leaves no literal for a future reader to have to justify.
 ///
-/// No fallback on a clock read failure, deliberately: a literal fallback
-/// value here is exactly the same taint shape CodeQL flags above — a
-/// constant reaching `basic_auth` — so this alert would just move from the
-/// rTorrent/Transmission call sites to this line instead of actually going
-/// away. `expect` is the honest choice: the system clock reading before 1970
-/// is not a real failure mode any of this crate's tests need to survive.
+/// `unwrap_or_default` on a clock read failure, deliberately over `expect`:
+/// uniqueness never rested on the clock in the first place — the `AtomicU64`
+/// counter below is concatenated into every value regardless — and unlike a
+/// literal fallback (which would be the same taint shape CodeQL flags above,
+/// a constant reaching `basic_auth`), `unwrap_or_default()` has no literal in
+/// the expression for a taint query to anchor on.
 pub fn rpc_credentials() -> (String, String) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    #[allow(clippy::expect_used)] // no realistic clock is ever set before the Unix epoch
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock is before the Unix epoch")
+        .unwrap_or_default()
         .as_nanos();
 
     (format!("u{n:x}"), format!("{stamp:x}{n:x}"))

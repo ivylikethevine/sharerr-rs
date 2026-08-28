@@ -98,12 +98,16 @@ happen — see [the README](../README.md#quickstart) before reporting:
   other rule in this file about secrets never sitting outside the vault.**
   This is a one-time, self-deleting restore path (see
   [`CONFIGURATION.md`](CONFIGURATION.md#restoring-friends-after-a-full-data-directory-loss)):
-  an operator hand-writes it after a full data-directory loss, `sharerr
-  serve` drains it into the real store and vault on its next start, and
-  removes the block from the file in the same write. Nothing else in
-  sharerr ever writes a secret to `sharerr.toml`, and the field is never
-  written back out through it once populated. The exposure window is
-  exactly "on disk, unencrypted, until the next `serve` start" — treat a
+  an operator hand-writes it after a full data-directory loss, and it is
+  drained into the real store and vault — and stripped from the file, and
+  from the running instance's own in-memory configuration — the moment
+  anything adopts it: the next `sharerr serve` start, or immediately if it
+  is instead pasted into a running instance through Settings → Backup and
+  restore. Nothing else in sharerr ever writes a secret to `sharerr.toml`,
+  and the field is `skip_serializing` on `Config` itself, so it can never be
+  written back out through it once populated, including by a debug log of
+  the running configuration. The exposure window is exactly "on disk,
+  unencrypted, until the next thing reads this instance's config" — treat a
   `sharerr.toml` carrying an unconsumed `[[peers]]` block the same as you
   would a raw vault secret sitting in a text file, because that is what it
   is.
