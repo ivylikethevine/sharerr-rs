@@ -62,7 +62,7 @@ pub fn probe(path: &Path) -> Option<MediaMeta> {
     let meta = match extension.as_str() {
         "mkv" | "webm" => matroska_meta(path),
         "mp4" | "m4v" | "mov" => isobmff_meta(path),
-        "flac" | "mp3" | "opus" => symphonia_meta(path),
+        "flac" | "mp3" | "opus" => symphonia_meta(path, &extension),
         _ => {
             tracing::trace!(file = %path.display(), extension, "no probe backend for this container");
             return None;
@@ -136,15 +136,26 @@ fn matroska_meta(path: &Path) -> Option<MediaMeta> {
     Some(meta)
 }
 
-/// MP4, M4V and MOV, via ISO base media file format boxes.
-fn isobmff_meta(path: &Path) -> Option<MediaMeta> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
+/// Open `path`, or `None` with a debug log if it cannot be read.
+///
+/// Shared by [`isobmff_meta`] and [`symphonia_meta`], the two backends that
+/// open the file themselves before handing it to their container reader.
+/// [`matroska_meta`] does not use this: `matroska::open` combines the open
+/// and the parse into one fallible step, so there is no separate open to
+/// share.
+fn open_logged(path: &Path) -> Option<std::fs::File> {
+    match std::fs::File::open(path) {
+        Ok(file) => Some(file),
         Err(err) => {
             tracing::debug!(file = %path.display(), %err, "not readable");
-            return None;
+            None
         }
-    };
+    }
+}
+
+/// MP4, M4V and MOV, via ISO base media file format boxes.
+fn isobmff_meta(path: &Path) -> Option<MediaMeta> {
+    let file = open_logged(path)?;
     let reader = match mp4::read_mp4(file) {
         Ok(reader) => reader,
         Err(err) => {
@@ -201,20 +212,12 @@ fn isobmff_meta(path: &Path) -> Option<MediaMeta> {
 /// Unlike the two container backends above, this never opens a video track —
 /// there isn't one — so there is no `resolution`/`video_codec` to fill in, and
 /// no per-track language the way MKV/MP4 carry it.
-fn symphonia_meta(path: &Path) -> Option<MediaMeta> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) => {
-            tracing::debug!(file = %path.display(), %err, "not readable");
-            return None;
-        }
-    };
+fn symphonia_meta(path: &Path, extension: &str) -> Option<MediaMeta> {
+    let file = open_logged(path)?;
     let mss = symphonia::core::io::MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = symphonia::core::formats::probe::Hint::new();
-    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(extension);
-    }
+    hint.with_extension(extension);
 
     let format = match symphonia::default::get_probe().probe(
         &hint,

@@ -156,7 +156,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
                 }
                 let service = router.into_make_service_with_connect_info::<SocketAddr>();
                 axum::serve(listener, service)
-                    .with_graceful_shutdown(shutdown_signal())
+                    .with_graceful_shutdown(sharerr_lighthouse::shutdown_signal())
                     .await
                     .context("tracker listener failed")
             }
@@ -172,7 +172,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // synchronous. Without a handler the binary, as PID 1 in its container,
     // ignored SIGTERM and every `docker stop` ended in a SIGKILL.
     tokio::select! {
-        result = axum::serve(listener, service).with_graceful_shutdown(shutdown_signal()) => result.context("http server failed"),
+        result = axum::serve(listener, service).with_graceful_shutdown(sharerr_lighthouse::shutdown_signal()) => result.context("http server failed"),
         result = tracker_serve => result,
         () = background(Arc::clone(&state)) => Ok(()),
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Tracker) => Ok(()),
@@ -183,36 +183,6 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = crate::swarm_history::poll_loop(Arc::clone(&state)) => Ok(()),
         () = crate::lighthouse_client::sync_loop(state) => Ok(()),
     }
-}
-
-/// Resolves on SIGINT or SIGTERM; never resolves if neither can be listened
-/// for, so the servers simply run as before.
-pub(crate) async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(err) = tokio::signal::ctrl_c().await {
-            tracing::warn!(error = %err, "could not listen for ctrl-c");
-            std::future::pending::<()>().await;
-        }
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sig) => {
-                sig.recv().await;
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "could not listen for SIGTERM");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        () = ctrl_c => {}
-        () = terminate => {}
-    }
-    tracing::info!("shutdown signal received; stopping the listeners");
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]

@@ -26,7 +26,7 @@ use crate::web::templates::{
     NodeStatus, PathRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer, RunRow, SampleRow,
     ScopeOption, SettingsPage, SortLink, StateCount, StatusPage, TokenStatus, TopologyPage,
 };
-use crate::web::topology::{Channel, FriendNode, SourceNode, layout};
+use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, SourceNode, layout};
 
 /// Serve the mock pages on `bind` until the process is killed.
 ///
@@ -77,7 +77,7 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
     // command tells the operator "Ctrl+C to stop", and without it that is a
     // SIGINT killing the process by default disposition rather than a stop.
     axum::serve(listener, router.into_make_service())
-        .with_graceful_shutdown(super::serve::shutdown_signal())
+        .with_graceful_shutdown(sharerr_lighthouse::shutdown_signal())
         .await
         .context("preview server failed")
 }
@@ -432,22 +432,27 @@ fn topology_page() -> TopologyPage {
         },
     ];
 
-    let (nodes, edges, width, height) = layout(
-        &sources,
-        &[
+    let Layout {
+        nodes,
+        edges,
+        width,
+        height,
+    } = layout(LayoutInput {
+        sources: &sources,
+        instance_lines: &[
             address_line("address", "http://seed.example.com:51413/"),
             line("swarm", "3 peer(s), 2 seeding"),
         ],
-        NodeStatus::Ok,
-        "qBittorrent",
-        &[
+        instance_status: NodeStatus::Ok,
+        client_label: "qBittorrent",
+        client_lines: &[
             address_line("url", "http://qbittorrent.example:8080"),
             line("version", "qBittorrent v5.2.0"),
         ],
-        NodeStatus::Ok,
-        "2 of 20 missing",
-        &friends,
-    );
+        client_status: NodeStatus::Ok,
+        path_edge_label: "2 of 20 missing",
+        friends: &friends,
+    });
 
     let address = |full: &str| crate::web::templates::AddressCell {
         masked: crate::web::topology::mask_address(full),
@@ -1102,7 +1107,7 @@ fn items_page() -> ItemsPage {
                 label: "Failed".to_owned(),
             },
         ],
-        kind_options: crate::web::items::KINDS
+        kind_options: sharerr_core::MediaSpec::KIND_TAGS
             .iter()
             .map(|k| FilterOption {
                 value: k,

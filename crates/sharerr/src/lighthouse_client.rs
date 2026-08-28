@@ -42,7 +42,6 @@ use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::{join_path, now_epoch};
 use sharerr_lighthouse::EndpointRecord as LighthouseRecord;
-use sharerr_lighthouse::RecordEndpoint as LighthouseRecordEndpoint;
 use sharerr_store::{EndpointKind, ObservedVia, Peer, Store, Vault};
 use url::Url;
 
@@ -213,7 +212,6 @@ async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
     };
 
     let own = gossip::self_record(state).await;
-    let own = own.as_ref().map(to_lighthouse_record);
     let status = state.lighthouse_status();
     // Publishing this instance's record and looking up quiet friends touch
     // disjoint state (own record vs. friends' pubkeys) — independent, so run
@@ -225,26 +223,6 @@ async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
     // Stamped after both halves finish, so "last pass" means a completed one
     // rather than one that started and is still in flight.
     status.record_pass().await;
-}
-
-/// Convert gossip's `EndpointRecord` to the lighthouse crate's field-for-field
-/// duplicate of the same shape — two types by design, see
-/// `sharerr-lighthouse`'s module docs on why it stands alone.
-fn to_lighthouse_record(record: &gossip::EndpointRecord) -> LighthouseRecord {
-    LighthouseRecord {
-        pubkey: record.pubkey.clone(),
-        endpoints: record
-            .endpoints
-            .iter()
-            .map(|e| LighthouseRecordEndpoint {
-                kind: e.kind.clone(),
-                addr: e.addr.clone(),
-                observed_at: e.observed_at,
-            })
-            .collect(),
-        signed_at: record.signed_at,
-        signature: record.signature.clone(),
-    }
 }
 
 /// Publish this instance's own signed record to every configured lighthouse,
@@ -476,9 +454,11 @@ mod tests {
 
     use ed25519_dalek::{Signer, SigningKey};
     use secrecy::SecretString;
+    use sharerr_lighthouse::RecordEndpoint as LighthouseRecordEndpoint;
     use sharerr_store::PeerScope;
 
     use super::*;
+    use crate::test_support::vault_in;
 
     fn a_url(raw: &str) -> Url {
         Url::parse(raw).unwrap()
@@ -587,19 +567,10 @@ mod tests {
         assert!(is_quiet(&peer, now));
     }
 
-    /// Sign a record the same way `sharerr_lighthouse`'s own private
-    /// `signable_bytes` would — that function is not reachable from outside
-    /// its crate, so this is a deliberate, small duplication rather than a
-    /// shared helper; `sharerr_lighthouse`'s test suite carries the same
-    /// duplication against `gossip`'s signing for the identical reason.
+    /// Sign a record via `sharerr_lighthouse::signable_bytes` directly —
+    /// the same construction the lighthouse itself verifies against, since
+    /// `gossip`'s signing goes through the identical, now-shared function.
     fn signed_lighthouse_record(seed: u8, addr: &str, signed_at: i64) -> LighthouseRecord {
-        #[derive(serde::Serialize)]
-        struct Signable<'a> {
-            pubkey: &'a str,
-            endpoints: &'a [LighthouseRecordEndpoint],
-            signed_at: i64,
-        }
-
         let signing = SigningKey::from_bytes(&test_key_bytes(seed));
         let pubkey = hex::encode(signing.verifying_key().to_bytes());
         let endpoints = vec![LighthouseRecordEndpoint {
@@ -607,12 +578,7 @@ mod tests {
             addr: addr.to_owned(),
             observed_at: signed_at,
         }];
-        let bytes = serde_json::to_vec(&Signable {
-            pubkey: &pubkey,
-            endpoints: &endpoints,
-            signed_at,
-        })
-        .unwrap();
+        let bytes = sharerr_lighthouse::signable_bytes(&pubkey, &endpoints, signed_at).unwrap();
         let signature = hex::encode(signing.sign(&bytes).to_bytes());
         LighthouseRecord {
             pubkey,
@@ -647,31 +613,6 @@ mod tests {
             .await
             .unwrap();
         (store, peer)
-    }
-
-    fn vault_in(dir: &tempfile::TempDir) -> Vault {
-        Vault::open(dir.path().join("vault.bin"), &SecretString::from("master")).unwrap()
-    }
-
-    #[tokio::test]
-    async fn to_lighthouse_record_copies_every_field() {
-        let record = gossip::EndpointRecord {
-            pubkey: "abcd".to_owned(),
-            endpoints: vec![gossip::RecordEndpoint {
-                kind: "api".to_owned(),
-                addr: "203.0.113.5:1".to_owned(),
-                observed_at: 42,
-            }],
-            signed_at: 42,
-            signature: "ef01".to_owned(),
-        };
-
-        let converted = to_lighthouse_record(&record);
-        assert_eq!(converted.pubkey, "abcd");
-        assert_eq!(converted.signed_at, 42);
-        assert_eq!(converted.signature, "ef01");
-        assert_eq!(converted.endpoints[0].kind, "api");
-        assert_eq!(converted.endpoints[0].addr, "203.0.113.5:1");
     }
 
     #[tokio::test]

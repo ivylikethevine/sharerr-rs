@@ -668,16 +668,7 @@ pub async fn save_gluetun(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
 ) -> Response {
-    save_gluetun_section(
-        state,
-        form,
-        "gluetun",
-        config_paths::GLUETUN_ENABLED,
-        config_paths::GLUETUN_CONTROL_URL,
-        config_paths::GLUETUN_POLL_SECS,
-        secret_keys::GLUETUN_API_KEY,
-    )
-    .await
+    save_gluetun_section(state, form, "gluetun", GluetunTarget::Tracker).await
 }
 
 /// The second poller — the torrent client's own tunnel, when it is a separate
@@ -686,29 +677,20 @@ pub async fn save_gluetun_client(
     State(state): State<WebState>,
     Form(form): Form<GluetunForm>,
 ) -> Response {
-    save_gluetun_section(
-        state,
-        form,
-        "gluetun_client",
-        config_paths::GLUETUN_CLIENT_ENABLED,
-        config_paths::GLUETUN_CLIENT_CONTROL_URL,
-        config_paths::GLUETUN_CLIENT_POLL_SECS,
-        secret_keys::GLUETUN_CLIENT_API_KEY,
-    )
-    .await
+    save_gluetun_section(state, form, "gluetun_client", GluetunTarget::Client).await
 }
 
-/// The save logic both gluetun sections share — only the paths and vault key
-/// differ between the tracker's poller and the client's.
+/// The save logic both gluetun sections share — `target` is the only thing
+/// that differs between the tracker's poller and the client's, and it
+/// already carries both the paths and the vault key
+/// ([`GluetunTarget::config_paths`], [`GluetunTarget::api_key_secret`]).
 async fn save_gluetun_section(
     state: WebState,
     form: GluetunForm,
     section: &'static str,
-    enabled_path: &'static str,
-    control_url_path: &'static str,
-    poll_secs_path: &'static str,
-    api_key_secret: &'static str,
+    target: GluetunTarget,
 ) -> Response {
+    let (enabled_path, control_url_path, poll_secs_path) = target.config_paths();
     write_config_and_secret(
         &state,
         section,
@@ -738,7 +720,7 @@ async fn save_gluetun_section(
             }
             Ok(())
         },
-        api_key_secret,
+        target.api_key_secret(),
         &form.api_key,
         form.clear_api_key.is_some(),
     )
@@ -1156,24 +1138,41 @@ fn rotate_tracker_token_in(vault: &mut Vault, new_value: &str) -> Result<(), Str
         .map_err(|err| format!("storing the announce token: {err}"))
 }
 
-/// [`rotate_tracker_token_in`], plus the live-process bookkeeping a rotation
-/// through the running instance needs: dropping the cached syncer and the
-/// cached token values (both would otherwise keep enforcing what was true
-/// before this call), and resetting the previous-token usage status — a
-/// fresh rotation means "unknown again" for whether the newly-demoted token
-/// is still in use, since the prior answer described a different token.
+/// The tail every tracker-token mutation shares: open the vault, apply `f`
+/// to it, log `log_msg`, then the live-process bookkeeping a change through
+/// the running instance needs — dropping the cached syncer and the cached
+/// token values (both would otherwise keep enforcing what was true before
+/// this call, tagged with `invalidate_reason`), and resetting the
+/// previous-token usage status, since whatever `f` just did makes the prior
+/// answer describe a token that may no longer be the one in question.
+async fn mutate_tracker_token(
+    state: &WebState,
+    log_msg: &str,
+    invalidate_reason: &str,
+    f: impl FnOnce(&mut Vault) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut vault = state.serve.open_vault().await?;
+    f(&mut vault)?;
+    tracing::info!("{log_msg}");
+
+    state.serve.invalidate(invalidate_reason).await;
+    state.serve.legacy_token_status().reset().await;
+    Ok(())
+}
+
+/// [`rotate_tracker_token_in`], via [`mutate_tracker_token`].
 ///
 /// The one place both [`save_tracker`]'s hand-typed path and
 /// [`generate_secret`]'s minted path meet, so a rotation behaves identically
 /// either way.
 async fn rotate_tracker_token(state: &WebState, new_value: &str) -> Result<(), String> {
-    let mut vault = state.serve.open_vault().await?;
-    rotate_tracker_token_in(&mut vault, new_value)?;
-    tracing::info!("tracker token rotated through the web ui");
-
-    state.serve.invalidate("the tracker token rotated").await;
-    state.serve.legacy_token_status().reset().await;
-    Ok(())
+    mutate_tracker_token(
+        state,
+        "tracker token rotated through the web ui",
+        "the tracker token rotated",
+        |vault| rotate_tracker_token_in(vault, new_value),
+    )
+    .await
 }
 
 /// Turn the announce-token requirement off entirely: removes both the
@@ -1192,16 +1191,13 @@ fn clear_tracker_token_in(vault: &mut Vault) -> Result<(), String> {
 }
 
 async fn clear_tracker_token(state: &WebState) -> Result<(), String> {
-    let mut vault = state.serve.open_vault().await?;
-    clear_tracker_token_in(&mut vault)?;
-    tracing::info!("tracker token cleared through the web ui");
-
-    state
-        .serve
-        .invalidate("the tracker token was cleared")
-        .await;
-    state.serve.legacy_token_status().reset().await;
-    Ok(())
+    mutate_tracker_token(
+        state,
+        "tracker token cleared through the web ui",
+        "the tracker token was cleared",
+        clear_tracker_token_in,
+    )
+    .await
 }
 
 /// Finish a rotation: stop accepting the previous token, leaving the current
@@ -1216,16 +1212,13 @@ fn finalize_tracker_token_in(vault: &mut Vault) -> Result<(), String> {
 }
 
 async fn finalize_tracker_token(state: &WebState) -> Result<(), String> {
-    let mut vault = state.serve.open_vault().await?;
-    finalize_tracker_token_in(&mut vault)?;
-    tracing::info!("tracker token rotation finalized through the web ui");
-
-    state
-        .serve
-        .invalidate("the tracker rotation was finalized")
-        .await;
-    state.serve.legacy_token_status().reset().await;
-    Ok(())
+    mutate_tracker_token(
+        state,
+        "tracker token rotation finalized through the web ui",
+        "the tracker rotation was finalized",
+        finalize_tracker_token_in,
+    )
+    .await
 }
 
 /// Which vault keys currently hold a value.

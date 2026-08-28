@@ -21,19 +21,21 @@ pub enum MediaSource {
     Directory,
 }
 
-impl MediaSource {
-    /// The lowercase name used in the database and in log output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Sonarr => "sonarr",
-            Self::Radarr => "radarr",
-            Self::Lidarr => "lidarr",
-            Self::Readarr => "readarr",
-            Self::Whisparr => "whisparr",
-            Self::Directory => "directory",
-        }
-    }
+crate::str_enum!(
+    MediaSource {
+        Sonarr => "sonarr",
+        Radarr => "radarr",
+        Lidarr => "lidarr",
+        Readarr => "readarr",
+        Whisparr => "whisparr",
+        Directory => "directory",
+    },
+    "This is *the* decoder for stored and URL-borne source names; a local \
+     string match at a call site is how a database loses every Lidarr row \
+     to an \"unknown source\" error."
+);
 
+impl MediaSource {
     /// Which version of the *arr HTTP API this app speaks.
     ///
     /// Not cosmetic: Sonarr, Radarr and Whisparr are on `v3` while Lidarr and
@@ -53,16 +55,6 @@ impl MediaSource {
             Self::Directory => "none",
         }
     }
-
-    /// Every source sharerr can discover from.
-    pub const ALL: &'static [Self] = &[
-        Self::Sonarr,
-        Self::Radarr,
-        Self::Lidarr,
-        Self::Readarr,
-        Self::Whisparr,
-        Self::Directory,
-    ];
 
     /// The sources whose items are admitted to a narrow peer scope by the
     /// declared kind in their spec rather than by which app produced them —
@@ -93,15 +85,6 @@ impl MediaSource {
             self,
             Self::Sonarr | Self::Whisparr | Self::Lidarr | Self::Readarr
         )
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    ///
-    /// This is *the* decoder for stored and URL-borne source names; a local
-    /// string match at a call site is how a database loses every Lidarr row to
-    /// an "unknown source" error.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|s| s.as_str() == value)
     }
 }
 
@@ -481,25 +464,12 @@ pub enum ShareState {
     Failed,
 }
 
-impl ShareState {
-    /// Every lifecycle state, for iteration and round-trip tests.
-    pub const ALL: &'static [Self] = &[Self::Pending, Self::Seeding, Self::Unshared, Self::Failed];
-
-    /// The lowercase name used in the database and in log output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Seeding => "seeding",
-            Self::Unshared => "unshared",
-            Self::Failed => "failed",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|s| s.as_str() == value)
-    }
-}
+crate::str_enum!(ShareState {
+    Pending => "pending",
+    Seeding => "seeding",
+    Unshared => "unshared",
+    Failed => "failed",
+});
 
 /// One file that has been (or is being) shared.
 #[derive(Debug, Clone, PartialEq)]

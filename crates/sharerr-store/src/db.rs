@@ -5,12 +5,17 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 
 use sharerr_core::endpoint::now_epoch;
 use sharerr_core::model::{ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareState, SharedItem};
+
+/// A bound, not-yet-executed SQLite query — what [`Store::update_item`]
+/// takes, spelled out once rather than at every call site.
+type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -133,6 +138,36 @@ impl Store {
         rows.iter().map(row_to_item).collect()
     }
 
+    /// Every [`ShareState`] paired with its count, in declaration order — a
+    /// missing state reads as zero rather than an absent series, same
+    /// contract as `/metrics`'s own `items_by_state`. One `GROUP BY` instead
+    /// of decoding every row's JSON columns just to tally which state each
+    /// is in.
+    pub async fn counts_by_state(&self) -> Result<Vec<(ShareState, i64)>> {
+        let rows = sqlx::query("SELECT state, COUNT(*) AS count FROM shared_items GROUP BY state")
+            .fetch_all(&self.pool)
+            .await?;
+        let raw = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("state")?,
+                    row.try_get::<i64, _>("count")?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ShareState::ALL
+            .iter()
+            .map(|&state| {
+                let count = raw
+                    .iter()
+                    .find(|(s, _)| s == state.as_str())
+                    .map_or(0, |(_, c)| *c);
+                (state, count)
+            })
+            .collect())
+    }
+
     /// Whether this instance is currently seeding the torrent with this hash.
     ///
     /// The builtin tracker's admission check: it answers only for torrents sharerr
@@ -165,7 +200,7 @@ impl Store {
     /// their two JSON columns are decoded, which is most of a feed request's work
     /// for a narrowly-scoped friend.
     pub async fn seeding_items(&self, scope: crate::PeerScope) -> Result<Vec<SharedItem>> {
-        let filter = ScopeFilter::new(scope);
+        let filter = scope_filter(scope);
         let sql = format!(
             "{SELECT_COLUMNS} WHERE {} ORDER BY created_at DESC, id DESC",
             filter.clause
@@ -184,7 +219,7 @@ impl Store {
     /// scope on every load, and the status page asks it for
     /// [`crate::PeerScope::All`]; neither needs the rows themselves.
     pub async fn seeding_summary(&self, scope: crate::PeerScope) -> Result<SeedingSummary> {
-        let filter = ScopeFilter::new(scope);
+        let filter = scope_filter(scope);
         let sql = format!(
             "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM shared_items WHERE {}",
             filter.clause
@@ -197,19 +232,6 @@ impl Store {
         Ok(SeedingSummary { count, size })
     }
 
-    /// How many items are currently seeding — the "n items shared" number, as a
-    /// COUNT rather than a full decode of every row, because the status page
-    /// asks on every load.
-    pub async fn count_seeding(&self) -> Result<i64> {
-        let count = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM shared_items WHERE state = ?1 AND info_hash IS NOT NULL",
-        )
-        .bind(ShareState::Seeding.as_str())
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(count)
-    }
-
     /// One item by its stable identity. The pair is the key — `file_id` alone is not
     /// unique across the two *arr apps.
     pub async fn get(&self, source: MediaSource, file_id: i64) -> Result<Option<SharedItem>> {
@@ -220,17 +242,6 @@ impl Store {
         .bind(file_id)
         .fetch_optional(&self.pool)
         .await?;
-        row.as_ref().map(row_to_item).transpose()
-    }
-
-    /// One item by its info hash — the tracker's live swarms are keyed by
-    /// hash, not `(source, file_id)`, so a topology view naming which torrent
-    /// a swarm belongs to needs this instead of [`Self::get`].
-    pub async fn item_by_info_hash(&self, info_hash: &str) -> Result<Option<SharedItem>> {
-        let row = sqlx::query(&format!("{SELECT_COLUMNS} WHERE info_hash = ?1"))
-            .bind(info_hash)
-            .fetch_optional(&self.pool)
-            .await?;
         row.as_ref().map(row_to_item).transpose()
     }
 
@@ -269,7 +280,7 @@ impl Store {
                 -- records it, and `set_state(Unshared)` retires it.
                 info_hash     = COALESCE(excluded.info_hash, shared_items.info_hash),
                 -- Same reasoning as info_hash: a rediscovery must not blank out a
-                -- fingerprint that only `set_seeding`/`set_announce_token_fp` know.
+                -- fingerprint that only `set_seeding`/`confirm_seeding` know.
                 announce_token_fp = COALESCE(excluded.announce_token_fp, shared_items.announce_token_fp),
                 -- Deliberately absent from this clause. A rediscovery describes
                 -- a file, not a torrent, so it always arrives with `false` and
@@ -284,8 +295,9 @@ impl Store {
                 -- that later reports better metadata still overwrites.
                 media_json    = COALESCE(excluded.media_json, shared_items.media_json),
                 -- A rediscovery describes a file, not a torrent, so it never
-                -- carries these — only `set_ratio` does, on the sync pass's
-                -- fast (Unchanged) path. Same reasoning as media_json.
+                -- carries these — only `set_ratio`/`confirm_seeding` do, on
+                -- the sync pass's fast (Unchanged) path. Same reasoning as
+                -- media_json.
                 achieved_ratio = COALESCE(excluded.achieved_ratio, shared_items.achieved_ratio),
                 ratio_limit_reported =
                     COALESCE(excluded.ratio_limit_reported, shared_items.ratio_limit_reported),
@@ -318,6 +330,32 @@ impl Store {
         Ok(row.try_get::<i64, _>("id")?)
     }
 
+    /// Bind the standard trailing three — `updated_at`, `source`, `file_id`
+    /// — and execute. The tail every single-row updater in this file
+    /// shares: [`Self::set_state`], [`Self::set_seeding`],
+    /// [`Self::confirm_seeding`], [`Self::set_ratio`],
+    /// [`Self::set_info_hash`], [`Self::reset_for_rebuild`] each built this
+    /// identically by hand, so changing the natural key or its `WHERE`
+    /// clause was six edits instead of one.
+    ///
+    /// `query` is the caller's own `UPDATE shared_items SET ...` text, SET
+    /// clause values already bound, ending in exactly `, updated_at = ?
+    /// WHERE source = ? AND file_id = ?` for this to bind correctly.
+    async fn update_item<'q>(
+        &self,
+        query: SqliteQuery<'q>,
+        source: MediaSource,
+        file_id: i64,
+    ) -> Result<()> {
+        query
+            .bind(now_epoch())
+            .bind(source.as_str())
+            .bind(file_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Record a state transition, clearing or setting the error message with it.
     pub async fn set_state(
         &self,
@@ -326,18 +364,17 @@ impl Store {
         state: ShareState,
         last_error: Option<&str>,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE shared_items SET state = ?1, last_error = ?2, updated_at = ?3 \
-             WHERE source = ?4 AND file_id = ?5",
+        self.update_item(
+            sqlx::query(
+                "UPDATE shared_items SET state = ?, last_error = ?, updated_at = ? \
+                 WHERE source = ? AND file_id = ?",
+            )
+            .bind(state.as_str())
+            .bind(last_error),
+            source,
+            file_id,
         )
-        .bind(state.as_str())
-        .bind(last_error)
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Mark an item seeding under `info_hash`, in one write.
@@ -350,7 +387,7 @@ impl Store {
     ///
     /// `announce_token_fp` is the fingerprint of the token embedded in the
     /// torrent just built, so the items page can show whether it is still the
-    /// currently configured one — see [`Self::set_announce_token_fp`] for the
+    /// currently configured one — see [`Self::confirm_seeding`] for the
     /// case where the torrent already existed and only this needed confirming.
     ///
     /// `created_by_sharerr` says whether this call is recording a torrent
@@ -365,52 +402,64 @@ impl Store {
         announce_token_fp: Option<&str>,
         created_by_sharerr: bool,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE shared_items SET info_hash = ?1, announce_token_fp = ?2, \
-             created_by_sharerr = ?3, state = ?4, last_error = NULL, updated_at = ?5 \
-             WHERE source = ?6 AND file_id = ?7",
+        self.update_item(
+            sqlx::query(
+                "UPDATE shared_items SET info_hash = ?, announce_token_fp = ?, \
+                 created_by_sharerr = ?, state = ?, last_error = NULL, updated_at = ? \
+                 WHERE source = ? AND file_id = ?",
+            )
+            .bind(info_hash)
+            .bind(announce_token_fp)
+            .bind(i64::from(created_by_sharerr))
+            .bind(ShareState::Seeding.as_str()),
+            source,
+            file_id,
         )
-        .bind(info_hash)
-        .bind(announce_token_fp)
-        .bind(i64::from(created_by_sharerr))
-        .bind(ShareState::Seeding.as_str())
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
-    /// Record which token an already-seeding item's torrent was just confirmed
-    /// (or fixed) to be announcing with. Called from the sync pass's fast path,
-    /// which only touches the tracker list — never [`Self::set_seeding`], which
-    /// would also mean re-deriving the info hash for a torrent that has not
-    /// changed.
-    pub async fn set_announce_token_fp(
+    /// [`Self::set_ratio`], plus recording which token an already-seeding
+    /// item's torrent was just confirmed (or fixed) to be announcing with —
+    /// both in one `UPDATE` instead of two, for the sync pass's fast path,
+    /// which reaches this on every already-seeding item on every pass.
+    /// Two writes to the same row there was twice the WAL traffic a steady
+    /// state library — nothing changing, every item confirmed — needed to
+    /// pay.
+    ///
+    /// Only reached when the announce comparison actually confirmed
+    /// something; the pass's other outcomes (no cached `.torrent`, a
+    /// refresh error) call [`Self::set_ratio`] alone and leave the stored
+    /// fingerprint untouched — seeing the confirmation as still pending is
+    /// correct in that case, not a value to overwrite.
+    pub async fn confirm_seeding(
         &self,
         source: MediaSource,
         file_id: i64,
         announce_token_fp: Option<&str>,
+        ratio: Option<f64>,
+        ratio_limit: Option<f64>,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE shared_items SET announce_token_fp = ?1, updated_at = ?2 \
-             WHERE source = ?3 AND file_id = ?4",
+        self.update_item(
+            sqlx::query(
+                "UPDATE shared_items SET announce_token_fp = ?, achieved_ratio = ?, \
+                 ratio_limit_reported = ?, updated_at = ? WHERE source = ? AND file_id = ?",
+            )
+            .bind(announce_token_fp)
+            .bind(ratio)
+            .bind(ratio_limit),
+            source,
+            file_id,
         )
-        .bind(announce_token_fp)
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Record what the torrent client itself reports for an already-seeding
-    /// item's achieved ratio and per-torrent limit. Called from the sync pass's
-    /// fast path alongside [`Self::set_announce_token_fp`], for the same
-    /// reason: touching only these columns is one write instead of a full
-    /// [`Self::upsert`] for every unchanged item on every pass.
+    /// item's achieved ratio and per-torrent limit — the sync pass's fast
+    /// path calls this alone when the announce comparison confirmed
+    /// nothing to fold it into (see [`Self::confirm_seeding`]), for the
+    /// same reason either way: touching only these columns is one write
+    /// instead of a full [`Self::upsert`] for every unchanged item on every
+    /// pass.
     pub async fn set_ratio(
         &self,
         source: MediaSource,
@@ -418,18 +467,17 @@ impl Store {
         ratio: Option<f64>,
         ratio_limit: Option<f64>,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE shared_items SET achieved_ratio = ?1, ratio_limit_reported = ?2, \
-             updated_at = ?3 WHERE source = ?4 AND file_id = ?5",
+        self.update_item(
+            sqlx::query(
+                "UPDATE shared_items SET achieved_ratio = ?, ratio_limit_reported = ?, \
+                 updated_at = ? WHERE source = ? AND file_id = ?",
+            )
+            .bind(ratio)
+            .bind(ratio_limit),
+            source,
+            file_id,
         )
-        .bind(ratio)
-        .bind(ratio_limit)
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Record the info hash of the torrent built for an item.
@@ -442,17 +490,13 @@ impl Store {
         file_id: i64,
         info_hash: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "UPDATE shared_items SET info_hash = ?1, updated_at = ?2 \
-             WHERE source = ?3 AND file_id = ?4",
+        self.update_item(
+            sqlx::query("UPDATE shared_items SET info_hash = ?, updated_at = ? WHERE source = ? AND file_id = ?")
+                .bind(info_hash),
+            source,
+            file_id,
         )
-        .bind(info_hash)
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Clear an item's torrent identity back to "never shared", so a fresh
@@ -463,18 +507,17 @@ impl Store {
     /// current torrent from the client first, if this instance owns it (see
     /// `Syncer::prepare_rebuild`), since this call only touches the row.
     pub async fn reset_for_rebuild(&self, source: MediaSource, file_id: i64) -> Result<()> {
-        sqlx::query(
-            "UPDATE shared_items SET info_hash = NULL, announce_token_fp = NULL, \
-             created_by_sharerr = 0, state = ?1, last_error = NULL, updated_at = ?2 \
-             WHERE source = ?3 AND file_id = ?4",
+        self.update_item(
+            sqlx::query(
+                "UPDATE shared_items SET info_hash = NULL, announce_token_fp = NULL, \
+                 created_by_sharerr = 0, state = ?, last_error = NULL, updated_at = ? \
+                 WHERE source = ? AND file_id = ?",
+            )
+            .bind(ShareState::Pending.as_str()),
+            source,
+            file_id,
         )
-        .bind(ShareState::Pending.as_str())
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Open a reconciliation run, returning its id for [`Self::finish_run`].
@@ -553,6 +596,32 @@ struct ScopeFilter {
     clause: String,
     allowed: Vec<&'static str>,
     directory_kind: Option<&'static str>,
+}
+
+/// The cached [`ScopeFilter`] for `scope`, built once on first use rather
+/// than once per request. `ScopeFilter::new` is a pure function of a
+/// five-variant enum — every field it computes is identical on every call
+/// for a given scope — and [`Store::seeding_items`] is the Torznab feed's
+/// hot path: every Prowlarr RSS poll from every friend rebuilt the same
+/// handful of SQL fragments and bind lists from scratch before this cached
+/// them.
+fn scope_filter(scope: crate::PeerScope) -> &'static ScopeFilter {
+    static FILTERS: LazyLock<[ScopeFilter; 5]> =
+        LazyLock::new(|| std::array::from_fn(|i| ScopeFilter::new(crate::PeerScope::ALL[i])));
+
+    // `ALL` is exhaustive over every `PeerScope` variant by construction
+    // (it is `str_enum!`'s generated list, built directly from the enum's
+    // own variants), so every `scope` a caller can construct is in it —
+    // this cannot fail.
+    #[allow(
+        clippy::expect_used,
+        reason = "ALL is exhaustive by construction; see comment above"
+    )]
+    let index = crate::PeerScope::ALL
+        .iter()
+        .position(|&s| s == scope)
+        .expect("PeerScope::ALL is exhaustive over every variant");
+    &FILTERS[index]
 }
 
 impl ScopeFilter {
@@ -1134,11 +1203,12 @@ mod tests {
             .unwrap();
     }
 
-    /// The fast path for an item that already exists: only the fingerprint
-    /// moves, nothing else — proving `set_announce_token_fp` cannot be
-    /// confused with `set_seeding` at the SQL layer.
+    /// The fast path's confirmed-refresh write: fingerprint and ratio move
+    /// together, in one `UPDATE`, and nothing else does — proving
+    /// `confirm_seeding` cannot be confused with `set_seeding` at the SQL
+    /// layer.
     #[tokio::test]
-    async fn set_announce_token_fp_touches_only_the_fingerprint() {
+    async fn confirm_seeding_touches_the_fingerprint_and_ratio_together() {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
@@ -1147,7 +1217,13 @@ mod tests {
             .unwrap();
 
         store
-            .set_announce_token_fp(MediaSource::Sonarr, 1001, Some("fp2"))
+            .confirm_seeding(
+                MediaSource::Sonarr,
+                1001,
+                Some("fp2"),
+                Some(1.85),
+                Some(2.0),
+            )
             .await
             .unwrap();
 
@@ -1155,10 +1231,12 @@ mod tests {
         assert_eq!(got.info_hash.as_deref(), Some("abc123"), "must not change");
         assert_eq!(got.state, ShareState::Seeding, "must not change");
         assert_eq!(got.announce_token_fp.as_deref(), Some("fp2"));
+        assert_eq!(got.achieved_ratio, Some(1.85));
+        assert_eq!(got.ratio_limit_reported, Some(2.0));
     }
 
     /// A rediscovery (`upsert` with `announce_token_fp: None`) must not blank
-    /// out a fingerprint only `set_seeding`/`set_announce_token_fp` know —
+    /// out a fingerprint only `set_seeding`/`confirm_seeding` know —
     /// same COALESCE reasoning as `info_hash`.
     #[tokio::test]
     async fn upsert_never_blanks_an_existing_fingerprint() {
@@ -1176,9 +1254,9 @@ mod tests {
         assert_eq!(got.announce_token_fp.as_deref(), Some("fp1"));
     }
 
-    /// The fast path's other write, alongside `set_announce_token_fp` — proving
-    /// `set_ratio` cannot be confused with `set_seeding` or `upsert` at the SQL
-    /// layer either.
+    /// The write the fast path makes alone when nothing else confirmed —
+    /// proving `set_ratio` cannot be confused with `set_seeding` or `upsert`
+    /// at the SQL layer either.
     #[tokio::test]
     async fn set_ratio_touches_only_the_ratio_columns() {
         let store = Store::open_in_memory().await.unwrap();
@@ -1416,6 +1494,41 @@ mod tests {
             empty.seeding_summary(crate::PeerScope::All).await.unwrap(),
             SeedingSummary::default(),
             "an empty table must sum to zero, not NULL"
+        );
+    }
+
+    /// Every declared state is present even at zero, and the total across
+    /// them matches the row count — the same contract `items_by_state`
+    /// promises `/metrics` callers.
+    #[tokio::test]
+    async fn counts_by_state_zero_fills_every_declared_state() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        let mut failed = episode(1);
+        failed.state = ShareState::Failed;
+        store.upsert(&episode(2)).await.unwrap(); // pending
+        store.upsert(&failed).await.unwrap();
+
+        let counts = store.counts_by_state().await.unwrap();
+        assert_eq!(
+            counts,
+            vec![
+                (ShareState::Pending, 1),
+                (ShareState::Seeding, 0),
+                (ShareState::Unshared, 0),
+                (ShareState::Failed, 1),
+            ]
+        );
+
+        let empty = Store::open_in_memory().await.unwrap();
+        assert_eq!(
+            empty.counts_by_state().await.unwrap(),
+            vec![
+                (ShareState::Pending, 0),
+                (ShareState::Seeding, 0),
+                (ShareState::Unshared, 0),
+                (ShareState::Failed, 0),
+            ]
         );
     }
 

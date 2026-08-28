@@ -7,7 +7,7 @@
 
 use url::Url;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 /// The qBittorrent API key every hermetic test hands its client. Shaped like a
 /// real `qbt_` key so the client's up-front format check accepts it.
@@ -54,6 +54,29 @@ pub async fn mount_text(server: &MockServer, verb: &str, route: &str, body: &str
 /// mutating WebUI call.
 pub async fn mount_ok(server: &MockServer, route: &str) {
     mount_text(server, "POST", route, "Ok.").await;
+}
+
+/// Every request the server has received whose path ends in `suffix`.
+///
+/// A client that composes its endpoint with a fixed base plus a per-call
+/// path — qBittorrent's WebUI, one route per action — narrows an assertion
+/// down to the call under test this way rather than assuming the last
+/// request received is the right one.
+pub async fn requests_to(server: &MockServer, suffix: &str) -> Vec<Request> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.url.path().ends_with(suffix))
+        .collect()
+}
+
+/// A received request's body as text, lossily. Test bodies are always ASCII
+/// or UTF-8 by construction; lossy decoding means a stray byte fails the
+/// assertion that reads the text instead of panicking here first.
+pub fn body_text(request: &Request) -> String {
+    String::from_utf8_lossy(&request.body).into_owned()
 }
 
 /// Pull `name="key"\r\n\r\nvalue` out of a multipart body.

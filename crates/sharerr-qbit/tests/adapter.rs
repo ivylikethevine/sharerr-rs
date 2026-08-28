@@ -181,3 +181,296 @@ async fn any_other_failure_translates_to_a_generic_api_error() {
     assert!(!err.is_auth_failure());
     assert!(!err.is_unreachable());
 }
+
+// -------------------------------------------------------- moved from src/adapter.rs
+//
+// These used to live in an in-crate `mod tests` alongside `adapter.rs`'s
+// production code. Consolidated here because both files were driving the
+// same mocked-server-plus-trait-call pattern through two parallel helpers
+// (`mocked_client`/`make_client` there, `client` here) for no reason —
+// nothing any of these touch is private to `adapter.rs`. Five tests that
+// duplicated coverage already present here (and, in three cases, more
+// thorough — checking the response path, the URL content, or the error
+// detail as well) were dropped rather than moved; everything below tests
+// something this file did not already cover.
+
+fn make_client(base: &str) -> QbitClient {
+    QbitClient::with_api_key(&Url::parse(base).unwrap(), SecretString::from(API_KEY)).unwrap()
+}
+
+/// `login` costs zero requests — proven by never starting a mock server at
+/// all, not just by asserting `Ok`.
+#[tokio::test]
+async fn login_always_succeeds_there_is_no_session_to_establish() {
+    let client = make_client("http://127.0.0.1:8080");
+    TorrentClient::login(&client).await.unwrap();
+}
+
+#[tokio::test]
+async fn version_is_trimmed_and_passed_through() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v4.6.0\n"))
+        .mount(&server)
+        .await;
+
+    let version = TorrentClient::version(&client(&server)).await.unwrap();
+    assert_eq!(version, "v4.6.0");
+}
+
+#[tokio::test]
+async fn list_maps_hash_tags_paths_and_seeding_state() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "hash": "abc123",
+                "name": "one",
+                "save_path": "/downloads",
+                "content_path": "/downloads/one",
+                "state": "uploading",
+                "category": "sharerr",
+                "tags": "a,b",
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let list = TorrentClient::list(&client(&server), None).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].hash, "abc123");
+    assert_eq!(list[0].save_path, "/downloads");
+    assert_eq!(list[0].content_path, "/downloads/one");
+    assert_eq!(list[0].category, "sharerr");
+    assert_eq!(list[0].tags, vec!["a".to_owned(), "b".to_owned()]);
+    assert!(list[0].is_seeding, "state=uploading is seeding");
+}
+
+/// qBittorrent's `-2` ("use the global default") and `-1` ("unlimited")
+/// ratio_limit sentinels both resolve to `None` — neither is a fixed
+/// number this specific torrent is held to. A genuine positive value
+/// passes through unchanged.
+#[tokio::test]
+async fn list_maps_ratio_and_resolves_qbittorrents_sentinels() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "hash": "fixed", "ratio": 1.85, "ratio_limit": 2.0 },
+            { "hash": "unlimited", "ratio": 0.5, "ratio_limit": -1.0 },
+            { "hash": "global", "ratio": 0.1, "ratio_limit": -2.0 },
+        ])))
+        .mount(&server)
+        .await;
+
+    let list = TorrentClient::list(&client(&server), None).await.unwrap();
+    assert_eq!(list.len(), 3);
+    assert_eq!(list[0].ratio, Some(1.85));
+    assert_eq!(list[0].ratio_limit, Some(2.0));
+    assert_eq!(list[1].ratio, Some(0.5));
+    assert_eq!(list[1].ratio_limit, None, "unlimited is not a fixed number");
+    assert_eq!(list[2].ratio, Some(0.1));
+    assert_eq!(
+        list[2].ratio_limit, None,
+        "using the global default is not a fixed number"
+    );
+}
+
+#[tokio::test]
+async fn add_forwards_the_request_to_the_underlying_client() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let data = b"d8:announce0:e";
+    let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
+    let qbit = client(&server);
+    TorrentClient::add(&qbit, &request).await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn add_translates_a_rejected_torrent_into_an_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/add"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("Fails."))
+        .mount(&server)
+        .await;
+
+    let data = b"not really a torrent";
+    let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
+    let err = TorrentClient::add(&client(&server), &request)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ClientError::Api {
+                kind: ClientKind::QBittorrent,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn remove_never_asks_to_delete_files() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/delete"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let qbit = client(&server);
+    TorrentClient::remove(&qbit, "abc123").await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let body = sharerr_testkit::mock::body_text(requests.last().unwrap());
+    assert!(body.contains("deleteFiles=false"), "{body}");
+    assert!(body.contains("hashes=abc123"), "{body}");
+}
+
+#[tokio::test]
+async fn set_trackers_stringifies_urls_before_forwarding_them() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/trackers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/addTrackers"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let urls = [Url::parse("http://tracker.example/announce").unwrap()];
+    let qbit = client(&server);
+    TorrentClient::set_trackers(&qbit, "abc123", &urls)
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let add = requests
+        .iter()
+        .find(|r| r.url.path() == "/api/v2/torrents/addTrackers")
+        .expect("an addTrackers call was made");
+    let body = sharerr_testkit::mock::body_text(add);
+    assert!(body.contains("tracker.example"), "{body}");
+}
+
+/// The additive form must never reach `removeTrackers`. It is pointed at
+/// torrents sharerr did not create, whose tracker list is the operator's.
+#[tokio::test]
+async fn add_trackers_adds_without_removing_what_is_already_there() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/trackers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "url": "http://theirs.example/announce", "status": 2 },
+            { "url": "** [DHT] **", "status": 0 },
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/addTrackers"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
+    let qbit = client(&server);
+    TorrentClient::add_trackers(&qbit, "abc123", &urls)
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    let add = requests
+        .iter()
+        .find(|r| r.url.path() == "/api/v2/torrents/addTrackers")
+        .expect("an addTrackers call was made");
+    assert!(sharerr_testkit::mock::body_text(add).contains("sharerr.example"));
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.url.path() == "/api/v2/torrents/removeTrackers"),
+        "add_trackers must not remove anything"
+    );
+}
+
+/// A URL the torrent already carries costs no request at all — this runs
+/// again every time an adopted item is re-seeded.
+#[tokio::test]
+async fn add_trackers_is_silent_when_the_url_is_already_present() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/trackers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "url": "http://sharerr.example/announce", "status": 2 },
+        ])))
+        .mount(&server)
+        .await;
+
+    let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
+    let qbit = client(&server);
+    TorrentClient::add_trackers(&qbit, "abc123", &urls)
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.url.path() == "/api/v2/torrents/addTrackers"),
+        "nothing to add means nothing sent"
+    );
+}
+
+/// `torrents/export` is bencode. Read as bytes and returned untouched — a
+/// `String` round trip would mangle the binary `pieces` field, and with it
+/// the infohash of every torrent sharerr adopts.
+#[tokio::test]
+async fn export_returns_the_torrent_bytes_verbatim() {
+    // Not valid UTF-8, deliberately: 0x80..0x9f is what a `pieces` field
+    // looks like and what a lossy decode would replace.
+    let bytes: Vec<u8> = (0u8..=255).collect();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/export"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+        .mount(&server)
+        .await;
+
+    let result = TorrentClient::export(&client(&server), "abc123")
+        .await
+        .unwrap();
+    assert_eq!(result, Some(bytes));
+}
+
+/// An unknown hash is a real error, not `Ok(None)` — `None` is reserved for
+/// a client that has no export call at all, which is a different fix.
+#[tokio::test]
+async fn export_of_an_unknown_torrent_is_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/export"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    assert!(
+        TorrentClient::export(&client(&server), "abc123")
+            .await
+            .is_err()
+    );
+}

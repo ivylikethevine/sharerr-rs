@@ -15,7 +15,7 @@ use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
 use crate::client::ArrClient;
 use crate::error::Result;
 use crate::models::{MediaInfo, non_empty};
-use crate::{Discovered, Tagged, fetch_tagged};
+use crate::{Discovered, Tagged, fetch_tagged, join_by_parent};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,20 +102,17 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             continue;
         }
 
-        // Indexed once, then each file's lookup is O(1).
-        let book_by_id: std::collections::HashMap<i64, &Book> =
-            books.iter().map(|b| (b.id, b)).collect();
+        let joined = join_by_parent(
+            &books,
+            files,
+            |b| b.id,
+            |f| f.book_id,
+            |f| f.id,
+            &author.author_name,
+            "book",
+        );
 
-        for file in files {
-            let Some(book) = book_by_id.get(&file.book_id).copied() else {
-                tracing::warn!(
-                    author = %author.author_name,
-                    file_id = file.id,
-                    "book file belongs to no listed book; skipping"
-                );
-                continue;
-            };
-
+        for (book, file) in joined {
             let isbn = pick_isbn(&book.editions);
 
             discovered.push(Discovered {

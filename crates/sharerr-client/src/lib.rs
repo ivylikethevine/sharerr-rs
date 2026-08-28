@@ -74,6 +74,37 @@ pub fn split_tags(raw: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Check an HTTP response's status, returning [`ClientError::AuthRejected`]
+/// or [`ClientError::Api`] as appropriate. `Ok(())` means the response is a
+/// success and the caller may go on to read its body.
+///
+/// Lifted out of `sharerr-transmission` and `sharerr-rtorrent`, which checked
+/// this identically apart from `kind`. `what` names the call for the `Api`
+/// message — typically the RPC method name.
+pub fn check_status(kind: ClientKind, status: reqwest::StatusCode, what: &str) -> Result<()> {
+    if is_auth_rejection(status) {
+        return Err(ClientError::AuthRejected { kind });
+    }
+    if !status.is_success() {
+        return Err(ClientError::Api {
+            kind,
+            detail: format!("HTTP {status} from {what}"),
+        });
+    }
+    Ok(())
+}
+
+/// Wrap a response-body decode failure as [`ClientError::Malformed`].
+///
+/// Lifted out of `sharerr-transmission` and `sharerr-rtorrent`, which built
+/// the same message identically apart from `kind`.
+pub fn malformed(kind: ClientKind, what: &str, err: impl std::fmt::Display) -> ClientError {
+    ClientError::Malformed {
+        kind,
+        detail: format!("reading the {what} response: {err}"),
+    }
+}
+
 /// Whether a status means "the credential was not accepted".
 ///
 /// Both, and not one: a rejected key or password can come back as either 401 or
@@ -97,15 +128,21 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// timeout — two of the three already had.
 pub fn http_client() -> Result<reqwest::Client> {
     http_client_with_timeout(DEFAULT_TIMEOUT)
+        .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))
 }
 
 /// [`http_client`] with an explicit timeout, for callers whose round trips are
 /// bounded differently from a torrent client's (gossip, gluetun, notifications).
-pub fn http_client_with_timeout(timeout: Duration) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|e| ClientError::Config(format!("building the HTTP client: {e}")))
+///
+/// Returns the raw `reqwest::Error` rather than [`ClientError`] — unlike
+/// [`http_client`], this is also the primitive qBittorrent's and the *arr
+/// client's own constructors call directly, so each can map the failure into
+/// its own error type and keep its typed `reqwest::Error` source rather than
+/// flattening it through `ClientError::Config` first.
+pub fn http_client_with_timeout(
+    timeout: Duration,
+) -> std::result::Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder().timeout(timeout).build()
 }
 
 /// Wrap a transport-level failure as [`ClientError::Unreachable`], with the
@@ -118,6 +155,33 @@ pub fn unreachable(kind: ClientKind, url: &str, err: &reqwest::Error) -> ClientE
         url: url.to_owned(),
         detail: error_chain(err),
     }
+}
+
+/// Render a client struct's `Debug` impl with its secret fields redacted.
+///
+/// `fields` print as given, in order; `redacted` print as `"<redacted>"`,
+/// after them. Lifted out of four backends' hand-written `Debug` impls
+/// (qBittorrent, Transmission, rTorrent, the *arr client), which built this
+/// identically apart from field names — including the
+/// `finish_non_exhaustive` justification comment, previously copy-pasted
+/// four times over.
+pub fn debug_redacted(
+    f: &mut std::fmt::Formatter<'_>,
+    name: &str,
+    fields: &[(&str, &dyn Debug)],
+    redacted: &[&str],
+) -> std::fmt::Result {
+    let mut out = f.debug_struct(name);
+    for (field_name, value) in fields {
+        out.field(field_name, value);
+    }
+    for field_name in redacted {
+        out.field(field_name, &"<redacted>");
+    }
+    // `finish_non_exhaustive` rather than `finish`: the omission is
+    // deliberate, and rendering `..` says so to whoever reads the log
+    // instead of implying this is the whole struct.
+    out.finish_non_exhaustive()
 }
 
 /// A copy of `base` whose path ends in `/`, so `Url::join` appends rather than

@@ -31,23 +31,11 @@ pub enum EndpointKind {
     Tracker,
 }
 
-impl EndpointKind {
-    pub const ALL: &'static [Self] = &[Self::Api, Self::Client, Self::Tracker];
-
-    /// The value stored in the `kind` column.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Api => "api",
-            Self::Client => "client",
-            Self::Tracker => "tracker",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|k| k.as_str() == value)
-    }
-}
+sharerr_core::str_enum!(EndpointKind {
+    Api => "api",
+    Client => "client",
+    Tracker => "tracker",
+});
 
 /// How an observation arrived.
 ///
@@ -67,30 +55,16 @@ pub enum ObservedVia {
     Lighthouse,
 }
 
-impl ObservedVia {
-    pub const ALL: &'static [Self] = &[Self::Direct, Self::Gossip, Self::Lighthouse];
-
-    /// The value stored in the `via` column.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Direct => "direct",
-            Self::Gossip => "gossip",
-            Self::Lighthouse => "lighthouse",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    ///
-    /// Anything unrecognised reads as gossip — the *less* trusted rank, which
-    /// is the safe direction for a value a newer version may have written.
-    pub fn parse(value: &str) -> Self {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|via| via.as_str() == value)
-            .unwrap_or(Self::Gossip)
-    }
-}
+sharerr_core::str_enum!(
+    ObservedVia {
+        Direct => "direct",
+        Gossip => "gossip",
+        Lighthouse => "lighthouse",
+    },
+    lenient = Gossip,
+    "Anything unrecognised reads as gossip — the *less* trusted rank, which \
+     is the safe direction for a value a newer version may have written."
+);
 
 /// One sighting of one of a friend's addresses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +76,19 @@ pub struct PeerEndpoint {
     /// Unix seconds of the most recent observation.
     pub observed_at: i64,
     pub via: ObservedVia,
+}
+
+/// Decode one `peer_endpoints` row into a [`PeerEndpoint`] — shared by
+/// [`Store::peer_endpoints`] and [`Store::peer_endpoints_for`], which read
+/// the same four columns and skip a row the same way on a decode failure.
+fn row_to_endpoint(row: &sqlx::sqlite::SqliteRow) -> Option<PeerEndpoint> {
+    Some(PeerEndpoint {
+        // A kind written by a newer version is skipped, not an error.
+        kind: EndpointKind::parse(row.try_get::<&str, _>("kind").ok()?)?,
+        addr: row.try_get("addr").ok()?,
+        observed_at: row.try_get("observed_at").ok()?,
+        via: ObservedVia::parse(row.try_get::<&str, _>("via").ok()?),
+    })
 }
 
 impl Store {
@@ -173,18 +160,48 @@ impl Store {
         .fetch_all(self.pool())
         .await?;
 
-        Ok(rows
-            .iter()
-            .filter_map(|row| {
-                Some(PeerEndpoint {
-                    // A kind written by a newer version is skipped, not an error.
-                    kind: EndpointKind::parse(row.try_get::<&str, _>("kind").ok()?)?,
-                    addr: row.try_get("addr").ok()?,
-                    observed_at: row.try_get("observed_at").ok()?,
-                    via: ObservedVia::parse(row.try_get::<&str, _>("via").ok()?),
-                })
-            })
-            .collect())
+        Ok(rows.iter().filter_map(row_to_endpoint).collect())
+    }
+
+    /// [`Self::peer_endpoints`] for every id in `peer_ids`, one round trip
+    /// instead of one per friend.
+    ///
+    /// The Friends page and the topology view both render every friend's
+    /// history on one load, and both used to `join_all` a `peer_endpoints`
+    /// call per friend — concurrent, but still one connection and one query
+    /// plan checked out per row of a page that is people, not rows. A peer
+    /// with no recorded sighting is simply absent from the returned map
+    /// rather than present with an empty `Vec`; callers already reach for
+    /// this with `.unwrap_or_default()` either way.
+    pub async fn peer_endpoints_for(
+        &self,
+        peer_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<PeerEndpoint>>> {
+        if peer_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; peer_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT peer_id, kind, addr, observed_at, via FROM peer_endpoints \
+             WHERE peer_id IN ({placeholders}) ORDER BY peer_id, kind, observed_at DESC, id DESC"
+        );
+        let mut query = sqlx::query(&sql);
+        for id in peer_ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(self.pool()).await?;
+
+        let mut by_peer: std::collections::HashMap<i64, Vec<PeerEndpoint>> =
+            std::collections::HashMap::new();
+        for row in &rows {
+            let Ok(peer_id) = row.try_get::<i64, _>("peer_id") else {
+                continue;
+            };
+            if let Some(endpoint) = row_to_endpoint(row) {
+                by_peer.entry(peer_id).or_default().push(endpoint);
+            }
+        }
+        Ok(by_peer)
     }
 
     /// Bind a peer to their gossip identity, trust-on-first-use.
@@ -234,6 +251,41 @@ impl Store {
             .fetch_optional(self.pool())
             .await?;
         Ok(row.and_then(|row| row.try_get("gossip_record").ok()))
+    }
+
+    /// [`Self::peer_gossip_record`] for every id in `peer_ids`, one round
+    /// trip instead of one per matched peer. The gossip relay endpoint used
+    /// to await this sequentially inside a `for` loop over every peer the
+    /// caller named — worse than the friends-list pages' at least-concurrent
+    /// `join_all`, since it paid each round trip one after another.
+    /// A peer with no stored record (or an id absent from `peer_ids`) is
+    /// simply absent from the returned map.
+    pub async fn peer_gossip_records(
+        &self,
+        peer_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, String>> {
+        if peer_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let placeholders = vec!["?"; peer_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT id, gossip_record FROM peers \
+             WHERE id IN ({placeholders}) AND gossip_record IS NOT NULL"
+        );
+        let mut query = sqlx::query(&sql);
+        for id in peer_ids {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(self.pool()).await?;
+
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let id: i64 = row.try_get("id").ok()?;
+                let record: String = row.try_get("gossip_record").ok()?;
+                Some((id, record))
+            })
+            .collect())
     }
 }
 
@@ -464,5 +516,123 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(orphans, 0, "endpoint rows must not outlive their peer");
+    }
+
+    /// The bulk form must group strictly by peer — one friend's sightings
+    /// must never leak into another's entry, a peer with no sightings must
+    /// be simply absent (not present with an empty `Vec`), and the result
+    /// must match calling the single-peer form for each id.
+    #[tokio::test]
+    async fn peer_endpoints_for_groups_strictly_by_peer() {
+        let store = Store::open_in_memory().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let alex = store
+            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
+        // Blair is created but never sighted — must not appear in the map.
+        let blair = store
+            .create_peer("Blair", &SecretString::from("blair-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        store
+            .record_peer_endpoint(
+                sam.id,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                100,
+                ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+        store
+            .record_peer_endpoint(
+                alex.id,
+                EndpointKind::Client,
+                "203.0.113.9:2",
+                200,
+                ObservedVia::Gossip,
+            )
+            .await
+            .unwrap();
+
+        let bulk = store
+            .peer_endpoints_for(&[sam.id, alex.id, blair.id])
+            .await
+            .unwrap();
+
+        assert_eq!(bulk.len(), 2, "blair has no sightings and must be absent");
+        assert_eq!(
+            bulk[&sam.id],
+            store.peer_endpoints(sam.id).await.unwrap(),
+            "must match the single-peer form"
+        );
+        assert_eq!(
+            bulk[&alex.id],
+            store.peer_endpoints(alex.id).await.unwrap(),
+            "must match the single-peer form"
+        );
+        assert!(!bulk.contains_key(&blair.id));
+    }
+
+    #[tokio::test]
+    async fn peer_endpoints_for_an_empty_list_is_an_empty_map_not_every_peer() {
+        let (store, peer) = store_with_peer().await;
+        store
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                100,
+                ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+
+        let bulk = store.peer_endpoints_for(&[]).await.unwrap();
+        assert!(bulk.is_empty());
+    }
+
+    /// Same grouping guarantee as `peer_endpoints_for`, for gossip records:
+    /// strictly by peer, a peer with no stored record simply absent.
+    #[tokio::test]
+    async fn peer_gossip_records_groups_strictly_by_peer() {
+        let store = Store::open_in_memory().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let alex = store
+            .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
+        // Blair has no gossip record — must not appear in the map.
+        let blair = store
+            .create_peer("Blair", &SecretString::from("blair-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        store
+            .set_peer_gossip_record(sam.id, "sam-record")
+            .await
+            .unwrap();
+        store
+            .set_peer_gossip_record(alex.id, "alex-record")
+            .await
+            .unwrap();
+
+        let bulk = store
+            .peer_gossip_records(&[sam.id, alex.id, blair.id])
+            .await
+            .unwrap();
+
+        assert_eq!(bulk.len(), 2, "blair has no record and must be absent");
+        assert_eq!(bulk[&sam.id], "sam-record");
+        assert_eq!(bulk[&alex.id], "alex-record");
+        assert!(!bulk.contains_key(&blair.id));
     }
 }

@@ -4,6 +4,8 @@
 //! works with, not how it talks to anything. Service clients live in
 //! `sharerr-arr` / `sharerr-qbit`, persistence in `sharerr-store`.
 
+mod macros;
+
 pub mod config;
 pub mod endpoint;
 pub mod model;

@@ -16,6 +16,8 @@ mod state;
 mod swarm_history;
 mod sync;
 mod system_stats;
+#[cfg(test)]
+mod test_support;
 mod torznab;
 mod tracker;
 mod web;

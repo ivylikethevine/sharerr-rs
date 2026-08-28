@@ -29,7 +29,7 @@ pub const ARR_MUSIC_PREFIX: &str = "/music";
 
 /// The tagged series, as the *arr apps record it.
 ///
-/// Constants rather than literals inside [`TvLibrary::series_json`] because the
+/// Constants rather than literals inside [`Library::series_json`] because the
 /// compose stack seeds these same values into Sonarr's own database, and the two
 /// descriptions of one series drifting apart is exactly the failure this module
 /// exists to prevent.
@@ -103,20 +103,13 @@ pub struct MediaFile {
     pub scene_name: Option<String>,
 }
 
+/// A written-to-disk fixture library: TV, movie, or music, all the same
+/// shape — a root directory and the files under it. Which kind it is lives
+/// in which of [`tv_library`]/[`movie_library`]/[`music_library`] built it,
+/// not in the type; the `*_json` methods below are grouped by the kind of
+/// fixture they describe, not enforced apart by the type system.
 #[derive(Debug, Clone)]
-pub struct TvLibrary {
-    pub root: PathBuf,
-    pub files: Vec<MediaFile>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MovieLibrary {
-    pub root: PathBuf,
-    pub files: Vec<MediaFile>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MusicLibrary {
+pub struct Library {
     pub root: PathBuf,
     pub files: Vec<MediaFile>,
 }
@@ -201,45 +194,38 @@ pub fn music_files(root: &Path) -> Vec<MediaFile> {
         .collect()
 }
 
-/// Two tagged episodes of one series, plus an untagged series that must never
-/// appear in discovery. Writes the files.
-pub fn tv_library(root: &Path) -> std::io::Result<TvLibrary> {
-    let files = tv_files(root);
+/// Write `files` to disk and wrap them as a [`Library`] rooted at `root`.
+///
+/// `base_seed` is the deterministic-content seed the first file gets; every
+/// later file gets `base_seed` plus its index, so the three library kinds —
+/// seeded from 1000/2000/3000 respectively — can never produce the same
+/// bytes for two different files even if a library kind grows past one file.
+fn write_library(root: &Path, files: Vec<MediaFile>, base_seed: u64) -> std::io::Result<Library> {
     for (index, file) in files.iter().enumerate() {
-        write_media_file(&file.disk_path, FILE_SIZE, 1000 + index as u64)?;
+        write_media_file(&file.disk_path, FILE_SIZE, base_seed + index as u64)?;
     }
 
-    Ok(TvLibrary {
+    Ok(Library {
         root: root.to_path_buf(),
         files,
     })
+}
+
+/// Two tagged episodes of one series, plus an untagged series that must never
+/// appear in discovery. Writes the files.
+pub fn tv_library(root: &Path) -> std::io::Result<Library> {
+    write_library(root, tv_files(root), 1000)
 }
 
 /// One tagged movie with a file, one untagged movie, and one tagged movie that has
 /// not been downloaded yet. Writes the files.
-pub fn movie_library(root: &Path) -> std::io::Result<MovieLibrary> {
-    let files = movie_files(root);
-    for file in &files {
-        write_media_file(&file.disk_path, FILE_SIZE, 2000)?;
-    }
-
-    Ok(MovieLibrary {
-        root: root.to_path_buf(),
-        files,
-    })
+pub fn movie_library(root: &Path) -> std::io::Result<Library> {
+    write_library(root, movie_files(root), 2000)
 }
 
 /// One tagged artist with two track files on one album. Writes the files.
-pub fn music_library(root: &Path) -> std::io::Result<MusicLibrary> {
-    let files = music_files(root);
-    for (index, file) in files.iter().enumerate() {
-        write_media_file(&file.disk_path, FILE_SIZE, 3000 + index as u64)?;
-    }
-
-    Ok(MusicLibrary {
-        root: root.to_path_buf(),
-        files,
-    })
+pub fn music_library(root: &Path) -> std::io::Result<Library> {
+    write_library(root, music_files(root), 3000)
 }
 
 /// `GET /api/v3/tag`, shared by both apps. Includes a decoy.
@@ -254,7 +240,7 @@ pub fn system_status_json(app: &str) -> Value {
     json!({ "appName": app, "version": "4.0.15.2941", "instanceName": app })
 }
 
-impl TvLibrary {
+impl Library {
     /// `GET /api/v3/series`: the tagged series plus an untagged decoy.
     pub fn series_json(&self) -> Value {
         json!([
@@ -317,9 +303,7 @@ impl TvLibrary {
             .find(|f| f.file_id == file_id)
             .unwrap_or_else(|| panic!("no fixture with file_id {file_id}"))
     }
-}
 
-impl MovieLibrary {
     pub fn movie_json(&self) -> Value {
         let file = &self.files[0];
         json!([

@@ -360,7 +360,11 @@ async fn handle_scrape(
         return bencode(failure_bencode(&err.to_string()));
     }
 
-    let params = announce::parse_query(query.unwrap_or_default().as_bytes());
+    // Bound to a local first: `parse_query`'s result borrows from this
+    // buffer, and a temporary dropped at the end of the `let` statement it
+    // was created in would leave that borrow dangling.
+    let query = query.unwrap_or_default();
+    let params = announce::parse_query(query.as_bytes());
 
     // A scrape with no info_hash means "tell me about everything you have", which
     // this tracker deliberately does not answer — it would enumerate the whole
@@ -370,7 +374,7 @@ async fn handle_scrape(
             "this tracker only scrapes specific torrents",
         ));
     };
-    let Ok(info_hash) = InfoHash::try_from(raw.as_slice()) else {
+    let Ok(info_hash) = InfoHash::try_from(raw.as_ref()) else {
         return bencode(failure_bencode("info_hash must be exactly 20 bytes"));
     };
 

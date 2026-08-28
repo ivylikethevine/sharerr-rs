@@ -29,12 +29,19 @@ use std::time::Duration;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
+// `RecordEndpoint`, `EndpointRecord`, `verify`, and `signable_bytes` are
+// `sharerr_lighthouse`'s, re-exported rather than redeclared — the
+// lighthouse relays the identical wire format gossip uses, per the design
+// brief, and `sharerr` already depends on `sharerr-lighthouse`, so nothing
+// stops the two sharing one definition. A record signed for gossip must
+// verify unchanged against a lighthouse, and vice versa.
+pub use sharerr_lighthouse::{EndpointRecord, RecordEndpoint, signable_bytes, verify};
 use sharerr_store::{EndpointKind, ObservedVia, Store};
 
 use crate::state::ServeState;
@@ -51,84 +58,11 @@ const MAX_RECORDS: usize = 64;
 // Records
 // ---------------------------------------------------------------------------
 
-/// One address inside a record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = GossipRecordEndpoint)]
-pub struct RecordEndpoint {
-    /// One of [`EndpointKind`]'s names. Unknown kinds are skipped on ingest, so
-    /// a newer sharerr can add kinds without breaking older friends.
-    pub kind: String,
-    pub addr: String,
-    pub observed_at: i64,
-}
-
-/// One peer's self-described endpoints, signed by them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
-#[schema(as = GossipEndpointRecord)]
-pub struct EndpointRecord {
-    /// Hex Ed25519 public key — the subject's identity.
-    pub pubkey: String,
-    pub endpoints: Vec<RecordEndpoint>,
-    /// Unix seconds. A record never replaces a stored one with a newer
-    /// `signed_at`, which is what stops replays rewinding an address.
-    pub signed_at: i64,
-    /// Hex Ed25519 signature over [`signable_bytes`].
-    pub signature: String,
-}
-
 /// The wire shape of both gossip endpoints' bodies.
 #[derive(Debug, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[schema(as = GossipRecordBatch)]
 pub struct RecordBatch {
     pub records: Vec<EndpointRecord>,
-}
-
-/// The bytes a record's signature covers: the JSON of everything except the
-/// signature itself, field order fixed by this struct.
-///
-/// Canonicalised by construction rather than by a canonical-JSON scheme: both
-/// ends are sharerr serialising the same struct with the same serde, and the
-/// verifier re-derives the bytes from the parsed fields rather than trusting
-/// any bytes off the wire.
-fn signable_bytes(
-    pubkey: &str,
-    endpoints: &[RecordEndpoint],
-    signed_at: i64,
-) -> Result<Vec<u8>, serde_json::Error> {
-    #[derive(Serialize)]
-    struct Signable<'a> {
-        pubkey: &'a str,
-        endpoints: &'a [RecordEndpoint],
-        signed_at: i64,
-    }
-    serde_json::to_vec(&Signable {
-        pubkey,
-        endpoints,
-        signed_at,
-    })
-}
-
-/// Check a record's signature against the key it names.
-///
-/// This proves the record was produced by whoever holds the *private* half of
-/// `record.pubkey` — whether that pubkey belongs to anyone we know is the
-/// caller's question, answered against the peers table.
-pub fn verify(record: &EndpointRecord) -> Result<(), &'static str> {
-    let mut key_bytes = [0u8; 32];
-    hex::decode_to_slice(&record.pubkey, &mut key_bytes)
-        .map_err(|_| "pubkey is not 32 hex bytes")?;
-    let key =
-        VerifyingKey::from_bytes(&key_bytes).map_err(|_| "pubkey is not a valid Ed25519 key")?;
-
-    let mut sig_bytes = [0u8; 64];
-    hex::decode_to_slice(&record.signature, &mut sig_bytes)
-        .map_err(|_| "signature is not 64 hex bytes")?;
-    let signature = Signature::from_bytes(&sig_bytes);
-
-    let bytes = signable_bytes(&record.pubkey, &record.endpoints, record.signed_at)
-        .map_err(|_| "record could not be serialised")?;
-    key.verify(&bytes, &signature)
-        .map_err(|_| "signature does not verify")
 }
 
 // ---------------------------------------------------------------------------
@@ -444,19 +378,26 @@ pub async fn pull(
     if !wanted.is_empty()
         && let Ok(peers) = store.list_peers().await
     {
-        for peer in peers.iter().filter(|p| !p.is_revoked()) {
-            let Some(pubkey) = peer.pubkey.as_deref() else {
-                continue;
-            };
-            // The intersection rule: only relay records for peers the caller
-            // proved they already know by naming the pubkey.
-            if !wanted.contains(pubkey) {
-                continue;
-            }
-            if let Ok(Some(raw)) = store.peer_gossip_record(peer.id).await
-                && let Ok(record) = serde_json::from_str::<EndpointRecord>(&raw)
-            {
-                batch.records.push(record);
+        // The intersection rule: only relay records for peers the caller
+        // proved they already know by naming the pubkey.
+        let matched_ids: Vec<i64> = peers
+            .iter()
+            .filter(|p| !p.is_revoked())
+            .filter_map(|peer| {
+                let pubkey = peer.pubkey.as_deref()?;
+                wanted.contains(pubkey).then_some(peer.id)
+            })
+            .collect();
+
+        // One round trip for every matched peer's record, rather than
+        // awaiting `peer_gossip_record` once per peer inside this loop.
+        if let Ok(records) = store.peer_gossip_records(&matched_ids).await {
+            for id in &matched_ids {
+                if let Some(raw) = records.get(id)
+                    && let Ok(record) = serde_json::from_str::<EndpointRecord>(raw)
+                {
+                    batch.records.push(record);
+                }
             }
         }
     }
@@ -641,6 +582,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
+    use crate::test_support::vault_in;
     use secrecy::SecretString;
     use sharerr_store::PeerScope;
 
@@ -697,11 +639,6 @@ mod tests {
             ids.push(peer.id);
         }
         (store, ids)
-    }
-
-    fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
-        sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master"))
-            .unwrap()
     }
 
     #[test]

@@ -18,10 +18,12 @@ use sharerr_core::config::{PathMapping, SeedingConfig, ServiceConfig};
 use sharerr_core::{Config, MediaSource, ShareState};
 use sharerr_qbit::QbitClient;
 use sharerr_store::Store;
-use sharerr_testkit::library::{self, TvLibrary};
+use sharerr_testkit::library::{self, Library};
 use sharerr_testkit::mock::{self, QBIT_API_KEY, multipart_field};
 use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, TrackerProvider};
 use url::Url;
+
+use crate::test_support::vault_in;
 use wiremock::matchers::{method, path as route};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -389,7 +391,7 @@ impl TrackerProvider for StubTracker {
 struct Harness {
     syncer: Syncer,
     qbit: FakeQbit,
-    library: TvLibrary,
+    library: Library,
     /// A handle on the syncer's tracker, so a test can rotate its endpoint.
     tracker: Arc<StubTracker>,
     _media: tempfile::TempDir,
@@ -1743,14 +1745,6 @@ async fn a_run_is_recorded_in_history() {
 }
 
 // --------------------------------------------------------- building from config
-
-/// `build_arr`/`build_client`/`build_tracker` take a plain `&Vault` rather than
-/// going through `ServeState`, so — per this repo's testing conventions — they can
-/// be exercised directly with a vault opened in a tempdir, no `SHARERR_MASTER_KEY`
-/// required.
-fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
-    sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master")).unwrap()
-}
 
 /// Store the qBittorrent credential `build_client` needs for the default backend.
 fn seed_qbit_key(vault: &mut sharerr_store::Vault) {

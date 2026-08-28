@@ -63,14 +63,6 @@ pub struct TorrentFile {
     pub size: u64,
 }
 
-/// One entry from `torrents/categories`, keyed by category name in the map that
-/// endpoint returns.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Category {
-    #[serde(default)]
-    pub name: String,
-}
-
 /// One entry from `torrents/trackers`.
 ///
 /// qBittorrent lists its DHT/PEX/LSD sources here too, as pseudo-entries whose

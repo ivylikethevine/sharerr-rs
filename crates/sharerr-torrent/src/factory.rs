@@ -208,6 +208,61 @@ pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Ve
         .map_err(|source| TorrentError::Reencode { source })
 }
 
+/// The outcome of [`retarget_announce`]: either the `.torrent` already
+/// pointed at `announce.primary`, or it now does.
+#[derive(Debug)]
+pub enum Retargeted {
+    /// The parsed announce already matched `announce.primary`. Nothing was
+    /// re-encoded — a caller with nothing further to do can skip a write
+    /// entirely, and one that still needs the bytes for another reason
+    /// (adopting a torrent sharerr did not cache before) already has its own
+    /// input buffer in scope to reuse.
+    Current { info_hash: String },
+    /// The announce did not match; here is the rewritten, re-encoded
+    /// `.torrent` and the announce it carried before.
+    Updated {
+        previous: Option<String>,
+        info_hash: String,
+        data: Vec<u8>,
+    },
+}
+
+/// [`read_announce`] plus [`rewrite_announce`], as one parse instead of two.
+///
+/// Every caller that needs "is this stale, and if so what should replace
+/// it" was paying to bencode-parse the same `.torrent` twice — once to read
+/// the current announce, once inside `rewrite_announce` to write the new
+/// one — which for a large file means walking its whole piece-hash list a
+/// second time just to compare one URL. This reads it once: the info hash
+/// comes off the same parsed structure `rewrite_announce` would have handed
+/// back after a second parse of its own (announce fields live outside the
+/// info dictionary, so rewriting them never moves it — see
+/// `sharerr::sync::seed::Seeder::adopt`, which used this to fold what were
+/// three parses into one), and the rewrite itself only happens when the
+/// comparison actually calls for it.
+pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Retargeted> {
+    let mut torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
+        .map_err(|source| TorrentError::Reparse { source })?;
+    let info_hash = torrent.info_hash();
+    let previous = torrent.announce.clone();
+
+    if previous.as_deref() == Some(announce.primary.as_str()) {
+        return Ok(Retargeted::Current { info_hash });
+    }
+
+    torrent.announce = Some(announce.primary.to_string());
+    torrent.announce_list = announce.tier_list();
+    let data = torrent
+        .encode()
+        .map_err(|source| TorrentError::Reencode { source })?;
+
+    Ok(Retargeted::Updated {
+        previous,
+        info_hash,
+        data,
+    })
+}
+
 /// One human-readable line describing the file, for the torrent's `comment`.
 ///
 /// Space-separated rather than dotted: this is read by a person opening the
@@ -453,6 +508,61 @@ mod tests {
             read_announce(&after).unwrap().as_deref(),
             Some("http://new.example:6881/announce/b"),
             "the rewrite did not move the announce URL"
+        );
+    }
+
+    /// The single-parse fast path: an already-current announce reports
+    /// `Current` and does no rewriting.
+    #[test]
+    fn retargeting_an_already_current_announce_reports_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let torrent = built(&dir, &set);
+
+        let outcome = retarget_announce(&torrent.data, &set).unwrap();
+        match outcome {
+            Retargeted::Current { info_hash } => {
+                assert_eq!(info_hash, torrent.info_hash);
+            }
+            Retargeted::Updated { .. } => panic!("an unchanged announce must report Current"),
+        }
+    }
+
+    /// The single-parse replacement for [`read_announce`] plus
+    /// [`rewrite_announce`]: a stale announce reports `Updated` with the
+    /// same previous URL, the same rewritten bytes, and the same untouched
+    /// info hash those two calls would have produced separately.
+    #[test]
+    fn retargeting_a_stale_announce_reports_updated_and_matches_the_two_call_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = built(
+            &dir,
+            &announce_set("http://old.example:51413/announce/a", &[]),
+        );
+        let moved = announce_set("http://new.example:6881/announce/b", &[]);
+
+        let outcome = retarget_announce(&before.data, &moved).unwrap();
+        let Retargeted::Updated {
+            previous,
+            info_hash,
+            data,
+        } = outcome
+        else {
+            panic!("a changed announce must report Updated");
+        };
+
+        assert_eq!(
+            previous.as_deref(),
+            Some("http://old.example:51413/announce/a")
+        );
+        assert_eq!(
+            info_hash, before.info_hash,
+            "the rewrite moved the identity"
+        );
+        assert_eq!(
+            data,
+            rewrite_announce(&before.data, &moved).unwrap(),
+            "single-parse and two-call rewrites must produce identical bytes"
         );
     }
 

@@ -27,6 +27,11 @@ static STARTUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A port nothing is listening on, by binding one and letting it go. Only safe
 /// under [`STARTUP`].
+///
+/// Duplicates `sharerr_testkit::net::closed_port`'s one-liner rather than
+/// pulling in a dev-dependency on it: the lighthouse crate's whole point is
+/// standing apart from the rest of the workspace's dependency graph, and that
+/// is worth six duplicated lines here.
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()

@@ -45,40 +45,25 @@ pub enum PeerScope {
     Books,
 }
 
+sharerr_core::str_enum!(
+    PeerScope {
+        All => "all",
+        Tv => "tv",
+        Movies => "movies",
+        Music => "music",
+        Books => "books",
+    },
+    lenient = All,
+    "Parses a **stored** value; form input goes through the strict \
+     `Deserialize` impl instead — see the type docs.\n\n\
+     Anything unrecognised is [`Self::All`], deliberately. The alternative \
+     — an error — would mean a row written by a newer version, or a \
+     hand-edited database, silently cutting a friend off with no way to \
+     tell why. Widening on confusion is the safer failure here because the \
+     feed still requires a valid key to reach at all."
+);
+
 impl PeerScope {
-    /// Every scope, in the order the UI offers them.
-    pub const ALL: &'static [Self] = &[Self::All, Self::Tv, Self::Movies, Self::Music, Self::Books];
-
-    /// The value stored in the `scope` column and echoed in the UI's `<select>`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Tv => "tv",
-            Self::Movies => "movies",
-            Self::Music => "music",
-            Self::Books => "books",
-        }
-    }
-
-    /// Parse a **stored** value. Form input goes through the strict `Deserialize`
-    /// impl instead — see the type docs.
-    ///
-    /// Anything unrecognised is [`Self::All`], deliberately. The alternative — an
-    /// error — would mean a row written by a newer version, or a hand-edited
-    /// database, silently cutting a friend off with no way to tell why. Widening on
-    /// confusion is the safer failure here because the feed still requires a valid
-    /// key to reach at all.
-    pub fn parse(value: &str) -> Self {
-        // Derived from `as_str` over `ALL` so the two cannot drift — a scope
-        // added to one and forgotten in a hand-written match here would widen
-        // to `All`, which is an access-control grant.
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|scope| scope.as_str() == value)
-            .unwrap_or(Self::All)
-    }
-
     /// Whether content from `source` is visible under this scope.
     pub fn allows(self, source: MediaSource) -> bool {
         match self {

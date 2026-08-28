@@ -674,7 +674,7 @@ async fn check_qbit_category(
         }
     };
 
-    if categories.contains_key(label) {
+    if categories.contains(label) {
         report.ok(format!("category {label:?} exists"));
         return;
     }
@@ -1053,13 +1053,13 @@ fn print_config_summary(config: &Config) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
-    use secrecy::SecretString;
     use sharerr_core::config::{LibraryKind, TorrentBackend};
     use url::Url;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::test_support::vault_in;
 
     // `check_vault` (and therefore `run`) resolve the master key from the real
     // process env var — see CLAUDE.md's "no tier-1 fixture opens a real vault".
@@ -1067,10 +1067,6 @@ mod tests {
     // deriving it internally, is tested against a vault built the way
     // `gossip.rs`'s and `sync/tests.rs`'s tests do: a local key that never
     // touches the process env.
-    fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
-        sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master"))
-            .expect("opening a fresh vault file cannot fail")
-    }
 
     // --------------------------------------------------------- report_capped
 

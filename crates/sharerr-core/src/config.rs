@@ -9,13 +9,113 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+/// `(source, config path, vault key)` for every *arr app sharerr reads
+/// config for — the one table [`secret_keys::api_key_for`] and
+/// [`config_paths::url_for`] both index.
+///
+/// Previously two independent five-arm matches answering the same
+/// question, each promising "a sixth app means editing one function" —
+/// which meant editing *two* functions, and nothing failed to compile if
+/// only one was updated. [`Config::service`] keeps its own match rather
+/// than joining this table: it returns a reference to one of `Config`'s own
+/// fields, which a `(source, &str, &str)` row cannot express.
+const ARR_WIRING: &[(crate::MediaSource, &str, &str)] = &[
+    (
+        crate::MediaSource::Sonarr,
+        config_paths::SONARR_URL,
+        secret_keys::SONARR_API_KEY,
+    ),
+    (
+        crate::MediaSource::Radarr,
+        config_paths::RADARR_URL,
+        secret_keys::RADARR_API_KEY,
+    ),
+    (
+        crate::MediaSource::Lidarr,
+        config_paths::LIDARR_URL,
+        secret_keys::LIDARR_API_KEY,
+    ),
+    (
+        crate::MediaSource::Readarr,
+        config_paths::READARR_URL,
+        secret_keys::READARR_API_KEY,
+    ),
+    (
+        crate::MediaSource::Whisparr,
+        config_paths::WHISPARR_URL,
+        secret_keys::WHISPARR_API_KEY,
+    ),
+];
+
 /// Vault lookup keys for the credentials that back the configured services.
 pub mod secret_keys {
-    pub const SONARR_API_KEY: &str = "sonarr.api_key";
-    pub const RADARR_API_KEY: &str = "radarr.api_key";
-    pub const LIDARR_API_KEY: &str = "lidarr.api_key";
-    pub const READARR_API_KEY: &str = "readarr.api_key";
-    pub const WHISPARR_API_KEY: &str = "whisparr.api_key";
+    crate::secret_keys! {
+        editable {
+            SONARR_API_KEY = "sonarr.api_key";
+            RADARR_API_KEY = "radarr.api_key";
+            LIDARR_API_KEY = "lidarr.api_key";
+            READARR_API_KEY = "readarr.api_key";
+            WHISPARR_API_KEY = "whisparr.api_key";
+            /// The sole qBittorrent credential: a WebUI API key (5.2+), sent as a bearer
+            /// token. qBittorrent has no username/password support here — nothing has
+            /// shipped against an older build, so there is no legacy setup to preserve.
+            QBITTORRENT_API_KEY = "qbittorrent.api_key";
+            /// The Transmission RPC password, when Transmission is the selected backend.
+            TRANSMISSION_PASSWORD = "transmission.password";
+            /// rTorrent's Basic Auth password, when rTorrent is the selected backend.
+            /// rTorrent's own XML-RPC has no credential of its own; this authenticates
+            /// against whatever reverse proxy fronts it — see `sharerr_rtorrent`.
+            RTORRENT_PASSWORD = "rtorrent.password";
+            /// Shared secret embedded in builtin-tracker announce URLs.
+            TRACKER_TOKEN = "tracker.token";
+            /// gluetun's control server API key, sent as `X-Api-Key`. Required since
+            /// gluetun v3.40 made `apikey` the default auth type for the control
+            /// server; without it every request comes back `401`.
+            GLUETUN_API_KEY = "gluetun.api_key";
+            /// The API key for the *second* gluetun poller — the torrent client's own
+            /// tunnel, when it is a separate one from the tracker's. See
+            /// [`super::GluetunConfig`] and `[gluetun_client]`.
+            GLUETUN_CLIENT_API_KEY = "gluetun_client.api_key";
+            /// Where a sync-failure or peer-quiet notification is POSTed.
+            ///
+            /// In the vault, not `[notifications]` in `sharerr.toml`, even though it is
+            /// not credential-shaped at a glance: a Discord webhook URL embeds its own
+            /// bearer token in the path, so this is exactly the kind of value this
+            /// project treats as a secret everywhere else.
+            NOTIFICATIONS_WEBHOOK_URL = "notifications.webhook_url";
+            /// The bearer token `/metrics` and the dashboard-widget endpoint require,
+            /// when `[metrics] enabled = true`. Operator-typed like [`TRACKER_TOKEN`]
+            /// — unlike the generated keys below, nothing generates this on its own,
+            /// so it belongs in [`ALL`].
+            METRICS_TOKEN = "metrics.token";
+        }
+        generated {
+            /// The previous value of [`TRACKER_TOKEN`], kept valid alongside the
+            /// current one during a rotation so nothing already relying on it breaks
+            /// mid-flight.
+            ///
+            /// Never typed into a field of its own, only populated as a side effect
+            /// of rotating [`TRACKER_TOKEN`] — see `rotate_tracker_token` in
+            /// `sharerr::web::settings`. `vault list` still shows it if present, since
+            /// that reads the vault file directly rather than filtering by `ALL`.
+            TRACKER_TOKEN_PREVIOUS = "tracker.token_previous";
+            /// This instance's Ed25519 signing key for gossip records, hex-encoded.
+            ///
+            /// A signing key is not a credential an operator types — it is generated
+            /// on first use, and "editing" it would silently break every friendship
+            /// whose peers pinned the old public key. Rotation, when it is ever
+            /// needed, deserves an explicit re-pair flow rather than a text box.
+            IDENTITY_SIGNING_KEY = "identity.signing_key";
+            /// The seed the embedded lighthouse derives its fabricated decoy answers
+            /// from, hex-encoded.
+            ///
+            /// Same reasoning as [`IDENTITY_SIGNING_KEY`]: generated on first use by
+            /// [`super::LighthouseConfig`]'s embedding path, not typed by an
+            /// operator. Only present when `[lighthouse] enabled = true` has
+            /// actually been used at least once.
+            LIGHTHOUSE_DECOY_SEED = "lighthouse.decoy_seed";
+        }
+    }
 
     /// The vault key holding one *arr app's API key.
     ///
@@ -23,77 +123,11 @@ pub mod secret_keys {
     /// asks the same question, and a sixth app should mean editing one place.
     /// `None` for the directory source, which has no credential at all.
     pub fn api_key_for(source: crate::MediaSource) -> Option<&'static str> {
-        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
-        match source {
-            Sonarr => Some(SONARR_API_KEY),
-            Radarr => Some(RADARR_API_KEY),
-            Lidarr => Some(LIDARR_API_KEY),
-            Readarr => Some(READARR_API_KEY),
-            Whisparr => Some(WHISPARR_API_KEY),
-            Directory => None,
-        }
+        super::ARR_WIRING
+            .iter()
+            .find(|(s, ..)| *s == source)
+            .map(|(_, _, key)| *key)
     }
-    /// The sole qBittorrent credential: a WebUI API key (5.2+), sent as a bearer
-    /// token. qBittorrent has no username/password support here — nothing has
-    /// shipped against an older build, so there is no legacy setup to preserve.
-    pub const QBITTORRENT_API_KEY: &str = "qbittorrent.api_key";
-    /// The Transmission RPC password, when Transmission is the selected backend.
-    pub const TRANSMISSION_PASSWORD: &str = "transmission.password";
-    /// rTorrent's Basic Auth password, when rTorrent is the selected backend.
-    /// rTorrent's own XML-RPC has no credential of its own; this authenticates
-    /// against whatever reverse proxy fronts it — see `sharerr_rtorrent`.
-    pub const RTORRENT_PASSWORD: &str = "rtorrent.password";
-    /// Shared secret embedded in builtin-tracker announce URLs.
-    pub const TRACKER_TOKEN: &str = "tracker.token";
-    /// The previous value of [`TRACKER_TOKEN`], kept valid alongside the
-    /// current one during a rotation so nothing already relying on it breaks
-    /// mid-flight.
-    ///
-    /// Same reasoning as [`IDENTITY_SIGNING_KEY`] for staying out of [`ALL`]:
-    /// this is never typed into a field of its own, only populated as a side
-    /// effect of rotating [`TRACKER_TOKEN`] — see `rotate_tracker_token` in
-    /// `sharerr::web::settings`. `vault list` still shows it if present, since
-    /// that reads the vault file directly rather than filtering by `ALL`.
-    pub const TRACKER_TOKEN_PREVIOUS: &str = "tracker.token_previous";
-    /// gluetun's control server API key, sent as `X-Api-Key`. Required since
-    /// gluetun v3.40 made `apikey` the default auth type for the control
-    /// server; without it every request comes back `401`.
-    pub const GLUETUN_API_KEY: &str = "gluetun.api_key";
-    /// The API key for the *second* gluetun poller — the torrent client's own
-    /// tunnel, when it is a separate one from the tracker's. See
-    /// [`super::GluetunConfig`] and `[gluetun_client]`.
-    pub const GLUETUN_CLIENT_API_KEY: &str = "gluetun_client.api_key";
-
-    /// Where a sync-failure or peer-quiet notification is POSTed.
-    ///
-    /// In the vault, not `[notifications]` in `sharerr.toml`, even though it is
-    /// not credential-shaped at a glance: a Discord webhook URL embeds its own
-    /// bearer token in the path, so this is exactly the kind of value this
-    /// project treats as a secret everywhere else.
-    pub const NOTIFICATIONS_WEBHOOK_URL: &str = "notifications.webhook_url";
-    /// The bearer token `/metrics` and the dashboard-widget endpoint require,
-    /// when `[metrics] enabled = true`. Operator-typed like [`TRACKER_TOKEN`]
-    /// — unlike [`IDENTITY_SIGNING_KEY`] or [`LIGHTHOUSE_DECOY_SEED`] below,
-    /// nothing generates this on its own, so it belongs in [`ALL`].
-    pub const METRICS_TOKEN: &str = "metrics.token";
-
-    /// This instance's Ed25519 signing key for gossip records, hex-encoded.
-    ///
-    /// Deliberately **not** in [`ALL`]: that list is what the web UI offers as
-    /// editable fields, and a signing key is not a credential an operator types —
-    /// it is generated on first use, and "editing" it would silently break every
-    /// friendship whose peers pinned the old public key. Rotation, when it is
-    /// ever needed, deserves an explicit re-pair flow rather than a text box.
-    pub const IDENTITY_SIGNING_KEY: &str = "identity.signing_key";
-
-    /// The seed the embedded lighthouse derives its fabricated decoy answers
-    /// from, hex-encoded.
-    ///
-    /// Same reasoning as [`IDENTITY_SIGNING_KEY`], deliberately **not** in
-    /// [`ALL`]: generated on first use by [`super::LighthouseConfig`]'s
-    /// embedding path, not typed by an operator. Only present when
-    /// `[lighthouse] enabled = true` has actually been used at least once.
-    pub const LIGHTHOUSE_DECOY_SEED: &str = "lighthouse.decoy_seed";
 
     /// The vault key holding the API key a friend issued *us*, for pulling
     /// gossip from their sharerr. Per-peer and minted by them, so it cannot be a
@@ -102,28 +136,6 @@ pub mod secret_keys {
     pub fn peer_gossip_key(peer_id: i64) -> String {
         format!("peer.gossip.{peer_id}")
     }
-
-    /// Every key sharerr actually reads.
-    ///
-    /// One list: both consumers ask the same question — the CLI warns when
-    /// `vault set` is given something outside it, and the web UI offers exactly
-    /// these as editable fields. A fifth secret added to only one of those
-    /// copies is a field the UI silently will not manage — so the list lives
-    /// beside the constants that define it.
-    pub const ALL: &[&str] = &[
-        SONARR_API_KEY,
-        RADARR_API_KEY,
-        LIDARR_API_KEY,
-        READARR_API_KEY,
-        WHISPARR_API_KEY,
-        QBITTORRENT_API_KEY,
-        TRANSMISSION_PASSWORD,
-        RTORRENT_PASSWORD,
-        TRACKER_TOKEN,
-        GLUETUN_API_KEY,
-        GLUETUN_CLIENT_API_KEY,
-        NOTIFICATIONS_WEBHOOK_URL,
-    ];
 
     /// Whether `value` is a usable value for `key` — the checks every path
     /// that stores a secret (the web UI and `sharerr vault set`) must agree
@@ -162,93 +174,90 @@ pub mod secret_keys {
 /// field that silently renders editable while the environment has it pinned — a
 /// mismatch nothing else in the build would catch.
 pub mod config_paths {
-    pub const TAG: &str = "tag";
-    pub const DATA_DIR: &str = "data_dir";
-    pub const SERVER_BIND: &str = "server.bind";
+    crate::config_paths! {
+        TAG = "tag";
+        DATA_DIR = "data_dir";
+        SERVER_BIND = "server.bind";
 
-    pub const SONARR_URL: &str = "sonarr.url";
-    pub const RADARR_URL: &str = "radarr.url";
-    pub const LIDARR_URL: &str = "lidarr.url";
-    pub const READARR_URL: &str = "readarr.url";
-    pub const WHISPARR_URL: &str = "whisparr.url";
+        SONARR_URL = "sonarr.url";
+        RADARR_URL = "radarr.url";
+        LIDARR_URL = "lidarr.url";
+        READARR_URL = "readarr.url";
+        WHISPARR_URL = "whisparr.url";
+
+        QBITTORRENT_URL = "qbittorrent.url";
+        QBITTORRENT_CATEGORY = "qbittorrent.category";
+        QBITTORRENT_TAG = "qbittorrent.tag";
+        QBITTORRENT_SKIP_CHECKING = "qbittorrent.skip_checking";
+
+        TORRENT_BACKEND = "torrent_backend";
+        TRANSMISSION_URL = "transmission.url";
+        TRANSMISSION_USERNAME = "transmission.username";
+        TRANSMISSION_LABEL = "transmission.label";
+        RTORRENT_URL = "rtorrent.url";
+        RTORRENT_USERNAME = "rtorrent.username";
+        RTORRENT_LABEL = "rtorrent.label";
+
+        TRACKER_ADVERTISED_HOST = "tracker.advertised_host";
+        TRACKER_ADVERTISED_URL = "tracker.advertised_url";
+        TRACKER_PORT = "tracker.port";
+
+        /// Per-torrent upload cap in KiB/s — see [`super::SeedingConfig::upload_limit_kib`].
+        SEEDING_UPLOAD_LIMIT_KIB = "seeding.upload_limit_kib";
+        /// Seed-ratio goal — see [`super::SeedingConfig::ratio_limit`].
+        SEEDING_RATIO_LIMIT = "seeding.ratio_limit";
+
+        /// Whether the lighthouse rendezvous service runs as extra routes on one
+        /// of this instance's own listeners — see [`super::LighthouseConfig`].
+        LIGHTHOUSE_ENABLED = "lighthouse.enabled";
+        /// Which listener: `"frontend"` or `"tracker"` — see
+        /// [`super::LighthouseMount`].
+        LIGHTHOUSE_MOUNT = "lighthouse.mount";
+        /// Lighthouse(s) this instance reports its own endpoint to and queries
+        /// for a quiet friend — independent of whether it also hosts one via
+        /// `LIGHTHOUSE_ENABLED`. See [`super::LighthouseConfig::urls`].
+        LIGHTHOUSE_URLS = "lighthouse.urls";
+
+        GLUETUN_ENABLED = "gluetun.enabled";
+        GLUETUN_CONTROL_URL = "gluetun.control_url";
+        GLUETUN_POLL_SECS = "gluetun.poll_secs";
+
+        /// The second gluetun poller, for the torrent client's own tunnel — see
+        /// `docker/deploy/dual-vpn/`. Independent of the tracker-facing `[gluetun]`
+        /// above: separate control server, separate enabled flag, separate poll
+        /// interval, because the two tunnels rotate on their own schedules.
+        GLUETUN_CLIENT_ENABLED = "gluetun_client.enabled";
+        GLUETUN_CLIENT_CONTROL_URL = "gluetun_client.control_url";
+        GLUETUN_CLIENT_POLL_SECS = "gluetun_client.poll_secs";
+
+        SYNC_ENABLED = "sync.enabled";
+        SYNC_INTERVAL_SECS = "sync.interval_secs";
+
+        /// Opt-in reachability probe — see [`super::ChecksConfig::reachability`].
+        CHECKS_REACHABILITY = "checks.reachability";
+
+        /// Which webhook shape to send — see [`super::NotifyKind`]. The URL itself
+        /// is a vault secret, [`super::secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
+        NOTIFICATIONS_KIND = "notifications.kind";
+        /// How long a peer must go unseen before "gone quiet" fires, in seconds.
+        NOTIFICATIONS_PEER_QUIET_SECS = "notifications.peer_quiet_secs";
+
+        /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
+        /// see [`super::MetricsConfig`]. The bearer token they require is a vault
+        /// secret, [`super::secret_keys::METRICS_TOKEN`].
+        METRICS_ENABLED = "metrics.enabled";
+    }
 
     /// The config path holding one *arr app's URL — the write-side counterpart
     /// of [`super::secret_keys::api_key_for`], for the same reason: every
     /// consumer asks the same question, and a sixth app should mean editing one
     /// function. `None` for the directory source, which has no URL.
     pub fn url_for(source: crate::MediaSource) -> Option<&'static str> {
-        use crate::MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
-        match source {
-            Sonarr => Some(SONARR_URL),
-            Radarr => Some(RADARR_URL),
-            Lidarr => Some(LIDARR_URL),
-            Readarr => Some(READARR_URL),
-            Whisparr => Some(WHISPARR_URL),
-            Directory => None,
-        }
+        super::ARR_WIRING
+            .iter()
+            .find(|(s, ..)| *s == source)
+            .map(|(_, url, _)| *url)
     }
-
-    pub const QBITTORRENT_URL: &str = "qbittorrent.url";
-    pub const QBITTORRENT_CATEGORY: &str = "qbittorrent.category";
-    pub const QBITTORRENT_TAG: &str = "qbittorrent.tag";
-    pub const QBITTORRENT_SKIP_CHECKING: &str = "qbittorrent.skip_checking";
-
-    pub const TORRENT_BACKEND: &str = "torrent_backend";
-    pub const TRANSMISSION_URL: &str = "transmission.url";
-    pub const TRANSMISSION_USERNAME: &str = "transmission.username";
-    pub const TRANSMISSION_LABEL: &str = "transmission.label";
-    pub const RTORRENT_URL: &str = "rtorrent.url";
-    pub const RTORRENT_USERNAME: &str = "rtorrent.username";
-    pub const RTORRENT_LABEL: &str = "rtorrent.label";
-
-    pub const TRACKER_ADVERTISED_HOST: &str = "tracker.advertised_host";
-    pub const TRACKER_ADVERTISED_URL: &str = "tracker.advertised_url";
-    pub const TRACKER_PORT: &str = "tracker.port";
-
-    /// Per-torrent upload cap in KiB/s — see [`super::SeedingConfig::upload_limit_kib`].
-    pub const SEEDING_UPLOAD_LIMIT_KIB: &str = "seeding.upload_limit_kib";
-    /// Seed-ratio goal — see [`super::SeedingConfig::ratio_limit`].
-    pub const SEEDING_RATIO_LIMIT: &str = "seeding.ratio_limit";
-
-    /// Whether the lighthouse rendezvous service runs as extra routes on one
-    /// of this instance's own listeners — see [`super::LighthouseConfig`].
-    pub const LIGHTHOUSE_ENABLED: &str = "lighthouse.enabled";
-    /// Which listener: `"frontend"` or `"tracker"` — see
-    /// [`super::LighthouseMount`].
-    pub const LIGHTHOUSE_MOUNT: &str = "lighthouse.mount";
-    /// Lighthouse(s) this instance reports its own endpoint to and queries
-    /// for a quiet friend — independent of whether it also hosts one via
-    /// `LIGHTHOUSE_ENABLED`. See [`super::LighthouseConfig::urls`].
-    pub const LIGHTHOUSE_URLS: &str = "lighthouse.urls";
-
-    pub const GLUETUN_ENABLED: &str = "gluetun.enabled";
-    pub const GLUETUN_CONTROL_URL: &str = "gluetun.control_url";
-    pub const GLUETUN_POLL_SECS: &str = "gluetun.poll_secs";
-
-    /// The second gluetun poller, for the torrent client's own tunnel — see
-    /// `docker/deploy/dual-vpn/`. Independent of the tracker-facing `[gluetun]`
-    /// above: separate control server, separate enabled flag, separate poll
-    /// interval, because the two tunnels rotate on their own schedules.
-    pub const GLUETUN_CLIENT_ENABLED: &str = "gluetun_client.enabled";
-    pub const GLUETUN_CLIENT_CONTROL_URL: &str = "gluetun_client.control_url";
-    pub const GLUETUN_CLIENT_POLL_SECS: &str = "gluetun_client.poll_secs";
-
-    pub const SYNC_ENABLED: &str = "sync.enabled";
-    pub const SYNC_INTERVAL_SECS: &str = "sync.interval_secs";
-
-    /// Opt-in reachability probe — see [`super::ChecksConfig::reachability`].
-    pub const CHECKS_REACHABILITY: &str = "checks.reachability";
-
-    /// Which webhook shape to send — see [`super::NotifyKind`]. The URL itself
-    /// is a vault secret, [`super::secret_keys::NOTIFICATIONS_WEBHOOK_URL`].
-    pub const NOTIFICATIONS_KIND: &str = "notifications.kind";
-    /// How long a peer must go unseen before "gone quiet" fires, in seconds.
-    pub const NOTIFICATIONS_PEER_QUIET_SECS: &str = "notifications.peer_quiet_secs";
-
-    /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
-    /// see [`super::MetricsConfig`]. The bearer token they require is a vault
-    /// secret, [`super::secret_keys::METRICS_TOKEN`].
-    pub const METRICS_ENABLED: &str = "metrics.enabled";
 
     /// The `SHARERR_*` variable that overrides a dotted config path — the inverse
     /// of the env scan's lowercase-and-`__`-to-`.` transform. Kept beside the
@@ -258,51 +267,6 @@ pub mod config_paths {
     pub fn env_var(path: &str) -> String {
         format!("SHARERR_{}", path.to_uppercase().replace('.', "__"))
     }
-
-    /// Every path the UI writes, for the test that proves each one names a real
-    /// field. Keep in step with the constants above — a path missing from here is
-    /// simply unverified, not broken.
-    pub const ALL: &[&str] = &[
-        TAG,
-        DATA_DIR,
-        SERVER_BIND,
-        SONARR_URL,
-        RADARR_URL,
-        LIDARR_URL,
-        READARR_URL,
-        WHISPARR_URL,
-        QBITTORRENT_URL,
-        QBITTORRENT_CATEGORY,
-        QBITTORRENT_TAG,
-        QBITTORRENT_SKIP_CHECKING,
-        TORRENT_BACKEND,
-        TRANSMISSION_URL,
-        TRANSMISSION_USERNAME,
-        TRANSMISSION_LABEL,
-        RTORRENT_URL,
-        RTORRENT_USERNAME,
-        RTORRENT_LABEL,
-        TRACKER_ADVERTISED_HOST,
-        TRACKER_ADVERTISED_URL,
-        TRACKER_PORT,
-        SEEDING_UPLOAD_LIMIT_KIB,
-        SEEDING_RATIO_LIMIT,
-        LIGHTHOUSE_ENABLED,
-        LIGHTHOUSE_MOUNT,
-        LIGHTHOUSE_URLS,
-        GLUETUN_ENABLED,
-        GLUETUN_CONTROL_URL,
-        GLUETUN_POLL_SECS,
-        GLUETUN_CLIENT_ENABLED,
-        GLUETUN_CLIENT_CONTROL_URL,
-        GLUETUN_CLIENT_POLL_SECS,
-        SYNC_ENABLED,
-        SYNC_INTERVAL_SECS,
-        CHECKS_REACHABILITY,
-        NOTIFICATIONS_KIND,
-        NOTIFICATIONS_PEER_QUIET_SECS,
-        METRICS_ENABLED,
-    ];
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -639,18 +603,13 @@ pub enum TorrentBackend {
     Rtorrent,
 }
 
+crate::str_enum!(TorrentBackend {
+    Qbittorrent => "qbittorrent",
+    Transmission => "transmission",
+    Rtorrent => "rtorrent",
+});
+
 impl TorrentBackend {
-    /// Every backend sharerr can drive.
-    pub const ALL: &'static [Self] = &[Self::Qbittorrent, Self::Transmission, Self::Rtorrent];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Qbittorrent => "qbittorrent",
-            Self::Transmission => "transmission",
-            Self::Rtorrent => "rtorrent",
-        }
-    }
-
     /// The name as an operator would write it. Unlike `as_str`, capitalizes
     /// mid-word where the brand does — `title_case`-ing `as_str` would give
     /// "Qbittorrent", not "qBittorrent".
@@ -660,11 +619,6 @@ impl TorrentBackend {
             Self::Transmission => "Transmission",
             Self::Rtorrent => "rTorrent",
         }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|b| b.as_str() == value)
     }
 }
 
@@ -774,25 +728,10 @@ pub enum LighthouseMount {
     Tracker,
 }
 
-impl LighthouseMount {
-    pub const ALL: &'static [Self] = &[Self::Frontend, Self::Tracker];
-
-    /// The value stored in `lighthouse.mount` and rendered by the settings
-    /// page's `<select>` — the same spelling serde's `rename_all = "snake_case"`
-    /// already produces, named explicitly so the web UI does not have to
-    /// round-trip through serde to render a `<select>` option.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Frontend => "frontend",
-            Self::Tracker => "tracker",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|m| m.as_str() == value)
-    }
-}
+crate::str_enum!(LighthouseMount {
+    Frontend => "frontend",
+    Tracker => "tracker",
+});
 
 /// Running the lighthouse rendezvous service (`sharerr_lighthouse` in the
 /// workspace) as extra routes on one of sharerr's own listeners, instead of
@@ -1032,22 +971,11 @@ pub enum NotifyKind {
     Apprise,
 }
 
-impl NotifyKind {
-    pub const ALL: &'static [Self] = &[Self::Generic, Self::Discord, Self::Apprise];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Generic => "generic",
-            Self::Discord => "discord",
-            Self::Apprise => "apprise",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|k| k.as_str() == value)
-    }
-}
+crate::str_enum!(NotifyKind {
+    Generic => "generic",
+    Discord => "discord",
+    Apprise => "apprise",
+});
 
 /// What a `[[library]]` directory holds, declared by the operator.
 ///
@@ -1064,25 +992,12 @@ pub enum LibraryKind {
     Book,
 }
 
-impl LibraryKind {
-    /// Every kind, in the order the UI offers them.
-    pub const ALL: &'static [Self] = &[Self::Tv, Self::Movie, Self::Music, Self::Book];
-
-    /// The lowercase name, matching both the serde form and `sharerr.toml`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Tv => "tv",
-            Self::Movie => "movie",
-            Self::Music => "music",
-            Self::Book => "book",
-        }
-    }
-
-    /// Inverse of [`Self::as_str`], derived from it so the two cannot drift.
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|k| k.as_str() == value)
-    }
-}
+crate::str_enum!(LibraryKind {
+    Tv => "tv",
+    Movie => "movie",
+    Music => "music",
+    Book => "book",
+});
 
 /// One plain directory shared without an *arr app.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1156,6 +1071,38 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// `Config::service` keeps its own match rather than joining
+    /// `ARR_WIRING` — it returns a field reference, which a `(source, &str,
+    /// &str)` row cannot express — so nothing but this test would catch a
+    /// sixth app added to the table and forgotten in that match.
+    #[test]
+    fn service_resolves_every_source_arr_wiring_lists() {
+        let populated = |url: &str| {
+            Some(ServiceConfig {
+                url: Url::parse(url).unwrap(),
+            })
+        };
+        let config = Config {
+            sonarr: populated("http://sonarr:8989"),
+            radarr: populated("http://radarr:7878"),
+            lidarr: populated("http://lidarr:8686"),
+            readarr: populated("http://readarr:8787"),
+            whisparr: populated("http://whisparr:6969"),
+            ..Config::default()
+        };
+
+        for (source, ..) in ARR_WIRING {
+            assert!(
+                config.service(*source).is_some(),
+                "{source:?} is in ARR_WIRING but Config::service has no arm for it"
+            );
+        }
+        assert!(
+            config.service(crate::MediaSource::Directory).is_none(),
+            "Directory has no service section and must not gain one"
+        );
     }
 
     /// The reachability probe dials this instance's own public address from
