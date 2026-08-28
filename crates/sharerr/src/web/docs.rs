@@ -71,8 +71,8 @@ pub const SECURITY: &str =
 pub const SECURITY_SCOPE: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-is-in-scope";
 pub const ROADMAP: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md";
-pub const ROADMAP_LIGHTHOUSE: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md#the-lighthouse";
+pub const LIGHTHOUSE: &str =
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/LIGHTHOUSE.md";
 
 // ---- Upstream documentation for the services sharerr talks to ---------
 //
@@ -193,7 +193,7 @@ mod tests {
             ("SECURITY", super::SECURITY),
             ("SECURITY_SCOPE", super::SECURITY_SCOPE),
             ("ROADMAP", super::ROADMAP),
-            ("ROADMAP_LIGHTHOUSE", super::ROADMAP_LIGHTHOUSE),
+            ("LIGHTHOUSE", super::LIGHTHOUSE),
         ]
     }
 

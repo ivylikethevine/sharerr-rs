@@ -763,12 +763,12 @@
   {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_LIGHTHOUSE, "Lighthouse configuration") %}{% endcall %}
-  {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "What a lighthouse is for") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::LIGHTHOUSE, "What a lighthouse is for") %}{% endcall %}
 </div>
 <form method="post" action="/settings/lighthouse" class="panel">
   <p class="hint">
     Rendezvous for a friend whose address rotated while yours did too, so
-    gossip alone has no path back — see {% call ui::doc(crate::web::docs::ROADMAP_LIGHTHOUSE, "the roadmap's \"The lighthouse\"") %}{% endcall %}.
+    gossip alone has no path back — see {% call ui::doc(crate::web::docs::LIGHTHOUSE, "\"The lighthouse\"") %}{% endcall %}.
   </p>
 
   <label class="hint">

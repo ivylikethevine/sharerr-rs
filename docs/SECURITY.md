@@ -36,7 +36,7 @@ authentication for any of those is in scope: vault or session handling, the
 auth guard in front of every UI page except `/setup`, `/login`, `/logout`
 and `/assets`, the per-peer key model behind the feed, gossip and tracker,
 and the lighthouse rendezvous service's privacy properties (see
-[the roadmap](ROADMAP.md#the-lighthouse) for what those are supposed to
+[`LIGHTHOUSE.md`](LIGHTHOUSE.md) for what those are supposed to
 guarantee).
 
 What is already there, so a report can say which layer it gets past:

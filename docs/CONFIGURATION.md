@@ -208,7 +208,7 @@ qbit = "/downloads/tv"
 ## `[lighthouse]`
 
 See the README's ["The lighthouse"](../README.md#the-lighthouse) and
-[the roadmap](ROADMAP.md#the-lighthouse) for the full design. `enabled`
+[`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the full design. `enabled`
 controls _hosting_ one on this instance's own listener; `lighthouse.urls`
 (below the _client_ half) is independent — consuming a friend's lighthouse
 needs nothing here, and hosting one for friends needs nothing set there.

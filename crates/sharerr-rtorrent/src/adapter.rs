@@ -289,6 +289,9 @@ mod tests {
 
     fn client(server: &MockServer) -> RtorrentClient {
         let endpoint = sharerr_testkit::mock::base_url(server);
+        // codeql[rust/hard-coded-cryptographic-value] -- endpoint is a
+        // wiremock::MockServer on loopback that answers every POST
+        // regardless of Authorization; no deployment accepts this password.
         RtorrentClient::new(&endpoint, "sharerr", SecretString::from("pw")).unwrap()
     }
 
@@ -369,6 +372,9 @@ mod tests {
     async fn nothing_listening_is_reported_as_unreachable() {
         let port = sharerr_testkit::net::closed_port();
         let endpoint = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        // codeql[rust/hard-coded-cryptographic-value] -- deliberately
+        // minimal placeholders: the socket is a closed port, so no request
+        // is ever built from them.
         let client = RtorrentClient::new(&endpoint, "a", SecretString::from("b")).unwrap();
 
         let err = client.version().await.unwrap_err();
@@ -631,6 +637,9 @@ mod tests {
     #[test]
     fn debug_does_not_leak_the_password() {
         let endpoint = Url::parse("http://box.lan/RPC2").unwrap();
+        // codeql[rust/hard-coded-cryptographic-value] -- the literal is the
+        // assertion: this test proves Debug redacts the password, so it has
+        // to be a known value.
         let client =
             RtorrentClient::new(&endpoint, "admin", SecretString::from("hunter2")).unwrap();
         let rendered = format!("{client:?}");
