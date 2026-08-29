@@ -29,7 +29,16 @@
 # reads the version back out of install.sh's `resolve`.
 zizmor|1.29.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor
 actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint
-cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|--version|github:taiki-e/cargo-llvm-cov
+# verify is "llvm-cov --version", not the bare flag every other row uses: the
+# binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."
+# works, by expecting its own subcommand name as the first argument even when
+# invoked directly (cargo does that prepending itself when it dispatches to
+# it; this smoke test has to do it by hand). A bare "cargo-llvm-cov --version"
+# fails with "expected subcommand 'llvm-cov', found argument '--version'" -
+# what every runner using this row hit before this comment existed. Downstream
+# usage in coverage.yml is unaffected either way: it always goes through
+# `cargo llvm-cov ...`, which cargo itself resolves the same correct way.
+cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov
 # lychee tags its releases "lychee-v<version>", not "v<version>" like every
 # other row here - the url column copes fine (the literal "lychee-v" prefix
 # just sits in front of %v), but the drift checker's comparison assumes a

@@ -1,12 +1,26 @@
+# Jekyll config for the GitHub Pages site (.github/workflows/pages.yml).
+# Nothing else in the repo reads this file, and no Ruby is a dependency here:
+# actions/jekyll-build-pages brings the github-pages gem, which is where the
+# theme and every plugin below come from.
+
 title: sharerr
 description: Share your media library with friends, over the tools you already run.
 theme: minima
 
-# No Gemfile, deliberately: .github/workflows/pages.yml builds with
-# actions/jekyll-build-pages, which always builds against its own pre-installed
-# github-pages gem — the same Jekyll and plugin set github.com's own Pages
-# service runs — and never actually installs from a Gemfile even if one is
-# present. Every plugin and theme below already ships in that bundle.
+# Each of these earns its place against how this repo's markdown is written:
+#
+#   readme-index         - README.md becomes the site index. It is the front
+#                          door on github.com and it should be the front door
+#                          here; there is no index.md and there should not be.
+#   relative-links       - rewrites in-repo links like docs/GLOSSARY.md to the
+#                          pages they render as. Without it every cross-link in
+#                          the docs 404s on the site while staying correct in
+#                          the repo, which is the worst of both.
+#   optional-front-matter - none of these files carry YAML front matter, and
+#                          they must not have to: they are read in the repo
+#                          first and on the site second.
+#   titles-from-headings - so each page's <title> is its own H1 rather than the
+#                          site title repeated.
 plugins:
   - jekyll-relative-links
   - jekyll-readme-index
@@ -17,7 +31,7 @@ plugins:
 # as bare content with no theme chrome (no <head>, no nav, no styling).
 defaults:
   - scope:
-      path: ""
+      path: ''
     values:
       layout: default
 
