@@ -17,9 +17,14 @@ the decision does not get re-litigated.
 - [What's left](#whats-left)
 - [Functionality](#functionality)
 - [Open work, by scope](#open-work-by-scope)
+  - [Medium — a subsystem, or one shape repeated across several files](#medium--a-subsystem-or-one-shape-repeated-across-several-files)
+  - [Large — a protocol, a data model, or a release process](#large--a-protocol-a-data-model-or-a-release-process)
 - [Transfer accounting](#transfer-accounting)
+  - [What the numbers are, and are not](#what-the-numbers-are-and-are-not)
+  - [What it would record](#what-it-would-record)
+  - [What it unlocks](#what-it-unlocks)
 
-### What's left
+## What's left
 
 One feature-sized item — **[request flow](#functionality)**. Past that, the
 rest of [Open work, by scope](#open-work-by-scope) below is ideas that have

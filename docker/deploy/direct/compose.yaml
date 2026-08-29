@@ -43,16 +43,18 @@
 #
 # There is one listener. The tracker, the Torznab feed, the gossip endpoints and
 # the web UI are all on 8477, so opening it to the internet opens the login page
-# to the internet. sharerr serves no TLS and does not mark its session cookie
-# secure, which means a password crossing that connection crosses it in the
-# clear.
+# to the internet. sharerr serves no TLS itself, so without a reverse proxy in
+# front, a password crossing that connection crosses it in the clear, and the
+# session cookie is sent without `Secure` (sharerr marks it `Secure`
+# automatically once it can see the request came through a TLS proxy).
 #
 # Do one of these before forwarding 8477:
 #
 #   * Put a TLS-terminating reverse proxy in front (Caddy, nginx, Traefik) and
 #     forward 443 to it instead of 8477 to the host. Set
 #     `tracker.advertised_url` in config/sharerr.toml to the https:// address so
-#     announce URLs match what friends can actually reach.
+#     announce URLs match what friends can actually reach, and have the proxy
+#     set `X-Forwarded-Proto` so sharerr marks the session cookie `Secure`.
 #   * Or bind a second listener with `tracker.bind` and forward only *that*
 #     port. It carries the tracker routes and .torrent downloads and not the UI —
 #     it adds a door rather than moving one, so keep 8477 on loopback.

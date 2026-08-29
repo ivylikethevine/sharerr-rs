@@ -65,8 +65,9 @@ See also: [the configuration reference](docs/CONFIGURATION.md), [supported
 services](docs/SUPPORTED.md), [what's deliberately not
 supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
 roadmap, including ideas considered but not all committed
-to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), and
-[the security policy](docs/SECURITY.md).
+to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), [the
+lighthouse's design rationale](docs/LIGHTHOUSE.md), [the security
+policy](docs/SECURITY.md), and [how to contribute](docs/CONTRIBUTING.md).
 
 ## What works today
 
@@ -116,7 +117,7 @@ Readarr as a direct indexer, and more), see
 ## Screenshots
 
 | | |
-|---|---|
+| --- | --- |
 | ![Status](docs/screenshots/status.webp) | ![Items](docs/screenshots/items.webp) |
 | ![Topology](docs/screenshots/topology.webp) | ![Topology, networking only](docs/screenshots/topology-networking.webp) |
 | ![Friends](docs/screenshots/peers.webp) | ![Debug](docs/screenshots/debug.webp) |
@@ -124,7 +125,7 @@ Readarr as a direct indexer, and more), see
 Settings is one long page; it is shown here in four parts, top to bottom.
 
 | | |
-|---|---|
+| --- | --- |
 | ![Settings: general and library sources](docs/screenshots/settings-1.webp) | ![Settings: torrent client](docs/screenshots/settings-2.webp) |
 | ![Settings: tracker and path mappings](docs/screenshots/settings-3.webp) | ![Settings: seeding limits, gluetun, lighthouse, sync and account](docs/screenshots/settings-4.webp) |
 
@@ -166,9 +167,11 @@ Two volumes matter. `/data` holds the vault, the database, and the generated
 `.torrent` files; `/config` holds `sharerr.toml`, which the UI rewrites in place
 (comments and all) when you save. Both must persist across restarts.
 
-Anyone on the network who can reach port 8477 can reach the login page, and the
-session cookie is not sent over TLS, because sharerr is normally run on a LAN. If
-that is not true of your network, put it behind a TLS-terminating proxy.
+Anyone on the network who can reach port 8477 can reach the login page. The
+session cookie is marked `Secure` only when sharerr can tell the request arrived
+over HTTPS, so on the LAN this is normally run on it travels in the clear — see
+[the security policy](docs/SECURITY.md#what-is-in-scope) for exactly how that
+works and what putting a TLS-terminating proxy in front changes.
 
 ## Sharing with a friend
 
@@ -235,7 +238,7 @@ already published. The token it replaces keeps working, unattributed, alongside
 the new one until you explicitly finish the rotation from Settings; the page
 shows whether (and when) anything has used the old token since the rotation, so
 you can wait until nothing has for a while before finishing. This is a safety
-net for the *shared* token specifically, not a substitute for per-friend
+net for the _shared_ token specifically, not a substitute for per-friend
 revocation above — a shared token can never single out one already-connected
 peer, only stop admitting it.
 
@@ -315,7 +318,7 @@ instances, and `tracker.bind` opens a second listener carrying only the tracker
 — for the topology where exactly one forwarded port exists and it has to be the
 tracker's, while the web UI stays on the LAN side.
 
-If the torrent client sits behind a *different* gluetun than sharerr does —
+If the torrent client sits behind a _different_ gluetun than sharerr does —
 the tracker on one tunnel, the seeding on another — a second, independent
 poller, `[gluetun_client]` (Settings → Gluetun, under "torrent client's own
 tunnel"), watches that tunnel's control server with the same fields and its
@@ -333,7 +336,7 @@ endpoint` service, deliberately independent of the rest of sharerr, that a
 peer reports its endpoint to and a friend looks up under the API key that
 peer issued them. A request without a valid key still gets a plausible
 fabricated answer rather than an error, so scraping it yields only noise —
-see `docs/ROADMAP.md`'s "The lighthouse" for the full design.
+see [`docs/LIGHTHOUSE.md`](docs/LIGHTHOUSE.md) for the full design.
 
 Using one is a Settings → Lighthouse field, `lighthouse.urls` — one or more
 lighthouse base URLs, self-hosted by a friend or by you:
@@ -502,7 +505,7 @@ Two separate things, because they answer different questions.
 Settings → Automatic checks has an opt-in **reachability** probe. With it on,
 the Topology page dials this instance's own advertised tracker and feed
 addresses and reports whether they answer. It is off by default, and a failure
-there says *could not confirm* rather than "your port is shut" — a host
+there says _could not confirm_ rather than "your port is shut" — a host
 dialling its own public address is exercising NAT hairpinning, which plenty of
 perfectly working routers refuse.
 
@@ -548,7 +551,7 @@ trade-offs to know:
 sharerr signs in with a qBittorrent 5.2+ WebUI API key — stateless, no session to
 expire, no re-login. Generate one under Options → Web UI → API key, then:
 
-```
+```bash
 printf %s "$KEY" | sharerr vault set qbittorrent.api_key
 ```
 
@@ -622,7 +625,7 @@ Transmission's above:
 - **No per-torrent seed-ratio limit.** rTorrent's ratio enforcement is a
   `.rtorrent.rc` schedule, not a setting exposed per torrent over XML-RPC — a
   configured `ratio_limit` is accepted and silently has nothing to attach to.
-  `upload_limit_kib` *is* honoured, through a per-torrent named throttle.
+  `upload_limit_kib` _is_ honoured, through a per-torrent named throttle.
 
 Replacing an already-seeding torrent's trackers — what keeps it announcing
 somewhere alive after your advertised endpoint rotates — is also incomplete
@@ -662,9 +665,12 @@ accepting a save that would be silently discarded.
 
 ## Building and testing
 
-Rust **1.98** or newer (the workspace sets `rust-version`; `docker build -f
-docker/Dockerfile .` is the de-facto MSRV check, since a local toolchain is
-invariably newer).
+Rust **1.98** or newer (the workspace sets `rust-version`; CI's `msrv (1.98)` job
+checks it on every push, and `docker build -f docker/Dockerfile .` is the
+equivalent check locally, since a local toolchain is invariably newer).
+
+See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the fuller version of this
+section — testing tiers, what CI runs, and how to submit a change.
 
 ```bash
 cargo build

@@ -26,6 +26,7 @@ default, and what sets it.
 - [`[notifications]`](#notifications)
 - [`[metrics]`](#metrics)
 - [Backup and restore](#backup-and-restore)
+  - [Restoring friends after a full data-directory loss](#restoring-friends-after-a-full-data-directory-loss)
 - [Vault secrets](#vault-secrets)
 - [Environment variable overrides](#environment-variable-overrides)
 
@@ -123,7 +124,7 @@ client can be filled in and tested before switching to it.
 | `qbittorrent.url`           | url    | `http://localhost:8080` |                                                                                                                                                                                                   |
 | `qbittorrent.category`      | string | `sharerr`               | Category applied to torrents sharerr creates.                                                                                                                                                     |
 | `qbittorrent.tag`           | string | `sharerr`               | Tag applied alongside the category.                                                                                                                                                               |
-| `qbittorrent.skip_checking` | bool   | `true`                  | Skip qBittorrent's hash check on add — see [the README](../README.md#authenticating-to-qbittorrent) and the trap in `CLAUDE.md` before turning this off partway through setting up path mappings. |
+| `qbittorrent.skip_checking` | bool   | `true`                  | Skip qBittorrent's hash check on add — see [the README](../README.md#authenticating-to-qbittorrent) and the trap in [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#traps) before turning this off partway through setting up path mappings. |
 
 Vault secret: `qbittorrent.api_key` (a qBittorrent 5.2+ WebUI API key — the
 sole credential; there is no username/password fallback).
@@ -311,7 +312,7 @@ as when `metrics.enabled` is `false`, so a probe cannot tell "off" from
 
 ## Backup and restore
 
-The settings page's "Backup and restore" section downloads the *effective*
+The settings page's "Backup and restore" section downloads the _effective_
 config — defaults, `sharerr.toml`, and any `SHARERR_*` overrides, merged —
 rather than the raw file, since an env-overridden field is never written to
 the file at all (see "How configuration is layered" above). Restoring
@@ -328,10 +329,10 @@ separate restore path — see below.
 
 ### Restoring friends after a full data-directory loss
 
-A friend's own key *into* this instance is stored as a one-way hash and can
+A friend's own key _into_ this instance is stored as a one-way hash and can
 never be recovered — that part always means reissuing a fresh key and
 re-sending it, no matter what. Everything else about a friendship — its
-label, scope, last-known address, and the gossip key *they* issued to *this*
+label, scope, last-known address, and the gossip key _they_ issued to _this_
 instance (a credential this instance genuinely does hold, in the vault) —
 can be restored.
 
@@ -341,7 +342,7 @@ can be restored.
 `[[peers]]` array — save that file somewhere outside sharerr, the same way
 you would any other credential (a password manager, an offline backup). A
 revoked friend is deliberately left out: importing this block always creates
-an *active* peer, and a revoked friend flowing back through it would silently
+an _active_ peer, and a revoked friend flowing back through it would silently
 un-revoke them. If the vault cannot be opened at export time, the file still
 downloads with everything except gossip keys, and says so in a leading
 comment.

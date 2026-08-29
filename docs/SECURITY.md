@@ -3,7 +3,8 @@
 sharerr is **experimental** — see [the README](../README.md) — and has not had a
 tagged release, so there is no `:latest` or versioned GHCR image to patch yet.
 Every push to `main` does publish a `sha-<commit>`-tagged image unattended
-(see `CLAUDE.md`'s Repository section) — those are commit-pinned CI artifacts
+(see [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#repository)'s
+Repository section) — those are commit-pinned CI artifacts
 rather than a supported release series, found only by someone who already has
 the commit sha, and nothing here treats them as something to patch in place.
 There is exactly one line of support: the `main` branch and `dev`, the branch
@@ -53,7 +54,8 @@ What is already there, so a report can say which layer it gets past:
 - The cookie is `HttpOnly` and `SameSite=Strict`, and a middleware over the
   whole router refuses any non-GET request whose `Origin` does not match
   `Host` — belt and braces against CSRF, including on `/login` and
-  `/setup`.
+  `/setup`. It also carries `Secure` when sharerr can tell the request
+  arrived over HTTPS — see below for exactly how that is decided.
 - The vault is XChaCha20-Poly1305 under a key derived from
   `SHARERR_MASTER_KEY` with Argon2id and a per-vault salt.
 - Peer keys are stored only as SHA-256; revocation is enforced in the query
@@ -72,9 +74,27 @@ What is already there, so a report can say which layer it gets past:
 A few things are **by design**, not a vulnerability report waiting to
 happen — see [the README](../README.md#quickstart) before reporting:
 
-- **The session cookie is not marked `Secure`**, so it travels over plain
-  HTTP. sharerr is meant to run on a LAN; put it behind a TLS-terminating
-  proxy if that does not describe your network.
+- **The session cookie's `Secure` flag is decided per request, not fixed
+  at compile time.** sharerr terminates no TLS of its own, so it has no
+  first-hand way to know whether a connection is encrypted; it infers the
+  answer from `X-Forwarded-Proto` (or RFC 7239 `Forwarded`), checked
+  first-hop-only, when either header is present, and treats the connection
+  as plain HTTP otherwise. On the plain-HTTP LAN sharerr is meant to run
+  on, the cookie travels without `Secure` — a `Secure` cookie on a
+  plain-HTTP origin is silently dropped by the browser, which presents as
+  "login does nothing". Behind a TLS-terminating proxy that sets one of
+  those headers, the cookie carries `Secure` automatically, no
+  configuration required. These headers are attacker-controllable by
+  anyone who can already reach the port, and that is deliberately
+  tolerated here: claiming `https` on a plain connection only costs the
+  spoofer their own sign-in (the browser discards the cookie it is
+  handed), and claiming `http` on a real TLS connection only reproduces
+  the cookie every sharerr before this shipped unconditionally, on the
+  response to the spoofer's own request. Nothing else in sharerr trusts
+  either header for anything — see `arrived_over_https` in
+  `crates/sharerr/src/web/auth.rs` for where that line is drawn. If your
+  network is not a trusted LAN and you are not behind a TLS-terminating
+  proxy, put one in front.
 - **There is no login rate limit or lockout, and no security response
   headers** (CSP, `X-Frame-Options`, and so on). Argon2's cost per attempt
   is the only brake on guessing, which is the trade a LAN tool with one
@@ -116,7 +136,7 @@ happen — see [the README](../README.md#quickstart) before reporting:
   is.
 - **The Friends page's "export as backup block" reads a gossip key back
   out of the vault and puts it in a downloadable file — the one place in
-  sharerr's web UI that shows a *previously stored* secret again**, rather
+  sharerr's web UI that shows a _previously stored_ secret again**, rather
   than only ever revealing one once at creation (every other secret in this
   instance, including a friend's own key into it, is write-only from the
   moment it is first set). This exists to produce the `[[peers]]` block
@@ -142,7 +162,8 @@ text and field values, never a path (`web/settings.rs`'s `import_config` and
 the process, so there is no privilege boundary here to enforce; these alerts
 are dismissed as won't-fix rather than coded around, since a containment check
 would only break legitimate `--config` values pointing outside a fixed
-directory. See `CLAUDE.md`'s CodeQL note for how alert dismissal is tracked.
+directory. See [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#codeql)'s
+CodeQL note for how alert dismissal is tracked.
 
 **`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack timing side-channel),
 as reported by OpenSSF Scorecard's `Vulnerabilities` check.** `rsa` reaches

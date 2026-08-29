@@ -18,7 +18,7 @@ fixtures, and are driven by `scripts/run_docker_tests.sh`. Do not deploy from th
 ## Which one
 
 | | Layout | Use it when |
-|---|---|---|
+| --- | --- | --- |
 | **[`direct/`](direct/)** | One bridge network. sharerr, qBittorrent, Sonarr, Radarr. | The exit address is already yours — a VPS, a seedbox, a static IP or dynamic-DNS name at home. Start here if unsure. |
 | **[`vpn/`](vpn/)** | gluetun owns a namespace; qBittorrent and sharerr ride in it. | You want one commercial tunnel in front of everything, and one public address for both the swarm traffic and the tracker. |
 | **[`dual-vpn/`](dual-vpn/)** | Two gluetuns, two compose projects. | qBittorrent on one subscription, sharerr's tracker/feed on another, each rotating independently. |
@@ -43,11 +43,11 @@ all of them; there is no recovery and sharerr will not fall back to plaintext.
 
 **Two volumes that must persist.** `/config` holds `sharerr.toml` and is
 rewritten in place by the web UI when you save — comments and all — so it has to
-be *writable* by uid 1000, which is what the image runs as. `/data` holds the
+be _writable_ by uid 1000, which is what the image runs as. `/data` holds the
 vault, the database and the generated `.torrent` files.
 
 **Nothing else in `environment:`.** Every sharerr setting is reachable as a
-`SHARERR_*` variable, and setting one *pins* it: env layers over the file, so the
+`SHARERR_*` variable, and setting one _pins_ it: env layers over the file, so the
 Settings page renders that field disabled and a save through the UI is discarded.
 Worse, a `SHARERR_*` name that is not a real config path is a startup error, not
 a typo you find later. Configure in `config/sharerr.toml` or the UI.
@@ -70,13 +70,16 @@ the mapping instead of trusting it.
 sharerr serves the web UI, the tracker's announce/scrape, the Torznab feed and
 the gossip endpoints from a single listener on **8477**. Friends need to reach it
 and so does your browser, which means opening it to the internet opens the login
-page to the internet — over a connection sharerr does not encrypt, with a session
-cookie it cannot mark secure.
+page to the internet — and sharerr encrypts nothing itself, so without a TLS
+proxy in front the session cookie travels in the clear too (it detects a proxy
+and marks the cookie `Secure` automatically; see
+[the security policy](../../docs/SECURITY.md#what-is-in-scope) for how).
 
 Three ways to handle that, in rough order of how much they buy you:
 
 1. **A TLS reverse proxy** in front, with `tracker.advertised_url` set to the
-   `https://` address so announce URLs match what friends can reach.
+   `https://` address so announce URLs match what friends can reach, and
+   `X-Forwarded-Proto` set so sharerr marks the session cookie `Secure`.
 2. **A second, tracker-only listener** via `tracker.bind`. It carries the tracker
    routes and `.torrent` downloads and not the UI, so you can forward that port
    and leave 8477 on loopback. It adds a door rather than moving one.

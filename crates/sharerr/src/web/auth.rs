@@ -11,12 +11,22 @@
 //! # What it does and does not defend
 //!
 //! The session cookie is `HttpOnly` and `SameSite=Strict`, which shuts out both
-//! script access and cross-site form submission. It is deliberately **not**
-//! `Secure`: sharerr is normally reached over plain HTTP on a LAN, and a `Secure`
-//! cookie there is silently dropped by the browser, which presents as "login does
-//! nothing". Anyone able to read traffic on that LAN can read the session cookie.
-//! That is the same ceiling the vault's own threat model states — put sharerr
-//! behind a TLS-terminating proxy if the network is not trusted.
+//! script access and cross-site form submission. Whether it is also `Secure` is
+//! decided per request, from what a reverse proxy says the browser used: sharerr
+//! terminates no TLS itself, so on the plain-HTTP LAN it normally lives on, the
+//! flag is left off — a `Secure` cookie there is silently dropped by the browser
+//! and presents as "login does nothing" — and behind a TLS-terminating proxy it
+//! is set, which is the deployment where it is worth having. Setting it from the
+//! request rather than from a config key means an operator who puts a proxy in
+//! front gets the protection without knowing there was a knob to turn. See
+//! [`arrived_over_https`] for why headers nobody authenticated are good enough
+//! evidence for this one decision, and for the line past which they are not.
+//!
+//! Over plain HTTP, anyone able to read traffic on that LAN can still read the
+//! session cookie; `Secure` protects a cookie in flight, not one that was never
+//! encrypted in the first place. That is the same ceiling the vault's own threat
+//! model states — put sharerr behind a TLS-terminating proxy if the network is
+//! not trusted.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -220,6 +230,7 @@ pub async fn setup_page(State(state): State<WebState>) -> Response {
 pub async fn setup_submit(
     State(state): State<WebState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Form(form): Form<SetupForm>,
 ) -> Response {
     let reject = |message: &str| render(&SetupPage::rejected(&form.username, message));
@@ -253,7 +264,7 @@ pub async fn setup_submit(
     tracing::info!(username = %form.username, "operator account created");
     // A fresh instance has nothing configured yet — the wizard, not the
     // status page, is the useful first thing to see.
-    sign_in(&state, jar, &form.username, "/wizard").await
+    sign_in(&state, jar, &headers, &form.username, "/wizard").await
 }
 
 pub async fn login_page(State(state): State<WebState>, jar: CookieJar) -> Response {
@@ -273,6 +284,7 @@ pub async fn login_page(State(state): State<WebState>, jar: CookieJar) -> Respon
 pub async fn login_submit(
     State(state): State<WebState>,
     jar: CookieJar,
+    headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let store = match state.store_or_503().await {
@@ -282,7 +294,7 @@ pub async fn login_submit(
 
     let password = SecretString::from(form.password.clone());
     match store.verify_password(&form.username, &password).await {
-        Ok(true) => sign_in(&state, jar, &form.username, "/").await,
+        Ok(true) => sign_in(&state, jar, &headers, &form.username, "/").await,
         Ok(false) => {
             // Deliberately one message for both a wrong password and an unknown
             // username. `Store::verify_password` already equalises the timing;
@@ -301,7 +313,7 @@ pub async fn login_submit(
     }
 }
 
-pub async fn logout(State(state): State<WebState>, jar: CookieJar) -> Response {
+pub async fn logout(State(state): State<WebState>, jar: CookieJar, headers: HeaderMap) -> Response {
     if let Some(cookie) = jar.get(COOKIE_NAME) {
         state.sessions.remove(cookie.value()).await;
     }
@@ -309,7 +321,17 @@ pub async fn logout(State(state): State<WebState>, jar: CookieJar) -> Response {
     // Removing the cookie as well as the server-side session: leaving a stale token
     // in the browser means every later request carries a credential that no longer
     // works, which reads as a bug on the next sign-in.
-    let jar = jar.remove(Cookie::from(COOKIE_NAME));
+    //
+    // Built by the same builder that set it, because a browser only honours a
+    // removal whose Path (and Secure, if set) match the original's — a bare
+    // `Cookie::from(name)` carries no Path at all and only worked here by luck,
+    // since a browser defaults an absent Path to the request URI's directory and
+    // `/logout`'s directory happens to be `/`. `CookieJar::remove` blanks the
+    // value and back-dates the expiry; every other attribute survives from what
+    // is built here, which is why the scheme is re-detected rather than assumed
+    // plain: a Secure cookie set over a TLS proxy cannot be overwritten by a
+    // removal that arrives without it.
+    let jar = jar.remove(session_cookie(String::new(), arrived_over_https(&headers)));
     (jar, Redirect::to("/login")).into_response()
 }
 
@@ -387,14 +409,24 @@ pub async fn change_password(
     Redirect::to("/settings?saved=account").into_response()
 }
 
-async fn sign_in(state: &WebState, jar: CookieJar, username: &str, destination: &str) -> Response {
+async fn sign_in(
+    state: &WebState,
+    jar: CookieJar,
+    headers: &HeaderMap,
+    username: &str,
+    destination: &str,
+) -> Response {
     match state.sessions.create(username).await {
-        Ok(token) => (jar.add(session_cookie(token)), Redirect::to(destination)).into_response(),
+        Ok(token) => (
+            jar.add(session_cookie(token, arrived_over_https(headers))),
+            Redirect::to(destination),
+        )
+            .into_response(),
         Err(reason) => internal(&reason),
     }
 }
 
-fn session_cookie(token: String) -> Cookie<'static> {
+fn session_cookie(token: String, secure: bool) -> Cookie<'static> {
     Cookie::build((COOKIE_NAME, token))
         .path("/")
         .http_only(true)
@@ -403,9 +435,12 @@ fn session_cookie(token: String) -> Cookie<'static> {
         // Nothing links into sharerr from elsewhere, so the usual cost of Strict —
         // arriving from an external link and appearing signed out — does not apply.
         .same_site(SameSite::Strict)
-        // No `.secure(true)`: see the module header. A Secure cookie over plain
-        // HTTP is silently discarded, which would break sign-in on the LAN
-        // deployments this is built for.
+        // Set from the request rather than pinned either way: see
+        // `arrived_over_https`. Always-on would make a browser silently discard
+        // the cookie on the plain-HTTP LAN this is built for, which presents as
+        // "login does nothing"; always-off throws the flag away on the TLS proxy
+        // the docs recommend, which is the deployment that most needs it.
+        .secure(secure)
         .build()
 }
 
@@ -446,6 +481,77 @@ fn cross_origin_refusal(headers: &HeaderMap) -> Option<Response> {
         )
             .into_response(),
     )
+}
+
+/// Whether the request reached sharerr over HTTPS, so the session cookie can
+/// carry `Secure` exactly when a browser will accept it.
+///
+/// sharerr terminates no TLS of its own — it always serves over a plain TCP
+/// listener — so the only evidence available is what a reverse proxy in front
+/// says it did. `X-Forwarded-Proto` is checked first because it is what every
+/// proxy in the deployment guide emits by default; RFC 7239's `Forwarded` is the
+/// fallback for the ones configured to speak the standardised header instead.
+/// Whichever is present decides, including when it says `http` — a proxy that
+/// states the scheme is better evidence than a second opinion from the other
+/// header.
+///
+/// Both headers can carry a comma-separated chain when a request crosses more
+/// than one hop, written left to right. The leftmost entry is the hop nearest
+/// the browser, which is the only hop that saw the scheme the browser actually
+/// used, so that is the one read here.
+///
+/// # These headers are spoofable, and that is fine for this one use
+///
+/// Anyone who can reach the port can send `X-Forwarded-Proto: https`, and there
+/// is no list of trusted proxies to check it against — sharerr does not know
+/// what is in front of it. Neither lie buys anything. Claiming `https` on a
+/// plain-HTTP connection makes the browser discard the `Secure` cookie it is
+/// handed, so the spoofer denies their own sign-in. Claiming `http` on a TLS
+/// connection produces a cookie without `Secure`, which is precisely what every
+/// sharerr before this one shipped unconditionally — and the flag rides on the
+/// response to the spoofer's own request, so it is a downgrade they can inflict
+/// only on themselves, never on somebody else's live session.
+///
+/// That reasoning is specific to a cookie flag, and it does not generalise. This
+/// must never become the input to anything a spoofed value would *grant* —
+/// an authentication bypass for "internal" traffic, a redirect target, a
+/// rate-limit exemption. Each of those turns a free header into a free
+/// privilege.
+fn arrived_over_https(headers: &HeaderMap) -> bool {
+    if let Some(value) = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+    {
+        return first_hop(value).eq_ignore_ascii_case("https");
+    }
+
+    headers
+        .get("forwarded")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| forwarded_proto(first_hop(value)))
+        .is_some_and(|proto| proto.eq_ignore_ascii_case("https"))
+}
+
+/// The leftmost entry of a comma-separated proxy chain, trimmed.
+fn first_hop(value: &str) -> &str {
+    value.split(',').next().unwrap_or(value).trim()
+}
+
+/// The `proto` parameter of one RFC 7239 forwarded-element, with any quotes
+/// stripped.
+///
+/// An element is a `;`-separated list of `name=value` pairs in any order, whose
+/// names are case-insensitive and whose values may be quoted (`proto="https"`).
+/// Splitting on `;` without tracking quoting would mis-parse a quoted value
+/// containing a semicolon; no proxy writes one, and the only parameter read here
+/// is a four-letter scheme.
+fn forwarded_proto(element: &str) -> Option<&str> {
+    element.split(';').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        name.trim()
+            .eq_ignore_ascii_case("proto")
+            .then_some(value.trim().trim_matches('"'))
+    })
 }
 
 pub fn internal(message: &str) -> Response {
@@ -555,6 +661,85 @@ mod tests {
     }
 
     #[test]
+    fn a_request_with_no_proxy_headers_is_treated_as_plain_http() {
+        assert!(!arrived_over_https(&headers(&[("host", "box.lan:8477")])));
+    }
+
+    #[test]
+    fn an_x_forwarded_proto_of_https_means_the_browser_spoke_tls() {
+        assert!(arrived_over_https(&headers(&[
+            ("host", "sharerr.example"),
+            ("x-forwarded-proto", "https"),
+        ])));
+    }
+
+    #[test]
+    fn an_x_forwarded_proto_of_http_keeps_the_cookie_insecure() {
+        assert!(!arrived_over_https(&headers(&[(
+            "x-forwarded-proto",
+            "http",
+        )])));
+    }
+
+    #[test]
+    fn a_proxy_chain_is_read_from_the_hop_nearest_the_browser() {
+        // Two hops: the outer one terminated TLS and spoke plain HTTP inward. The
+        // browser still used HTTPS, so the cookie may carry Secure.
+        assert!(arrived_over_https(&headers(&[(
+            "x-forwarded-proto",
+            "https, http",
+        )])));
+        // The mirror image is not the same claim: TLS on an inner hop only says
+        // two proxies encrypted a link the browser never touched.
+        assert!(!arrived_over_https(&headers(&[(
+            "x-forwarded-proto",
+            "http, https",
+        )])));
+    }
+
+    #[test]
+    fn a_forwarded_scheme_is_matched_regardless_of_case_or_padding() {
+        assert!(arrived_over_https(&headers(&[(
+            "x-forwarded-proto",
+            "  HTTPS  ",
+        )])));
+    }
+
+    #[test]
+    fn an_rfc_7239_forwarded_header_is_read_when_there_is_no_x_forwarded_proto() {
+        assert!(arrived_over_https(&headers(&[(
+            "forwarded",
+            "for=192.0.2.60;proto=https;by=203.0.113.43",
+        )])));
+        // Parameter names are case-insensitive and values may be quoted.
+        assert!(arrived_over_https(&headers(&[(
+            "forwarded",
+            "Proto=\"HTTPS\"",
+        )])));
+        assert!(!arrived_over_https(&headers(&[(
+            "forwarded",
+            "for=192.0.2.60;proto=http",
+        )])));
+        // A `Forwarded` carrying no `proto` says nothing about the scheme, which
+        // is not the same as saying it was HTTPS.
+        assert!(!arrived_over_https(&headers(&[(
+            "forwarded",
+            "for=192.0.2.60"
+        )])));
+    }
+
+    #[test]
+    fn x_forwarded_proto_decides_when_a_proxy_sends_both_headers() {
+        // Not a vote between them: a proxy that spells out `http` is stating a
+        // fact, and a second header must not promote the connection behind its
+        // back.
+        assert!(!arrived_over_https(&headers(&[
+            ("x-forwarded-proto", "http"),
+            ("forwarded", "proto=https"),
+        ])));
+    }
+
+    #[test]
     fn password_rejection_flags_mismatch_before_length() {
         assert_eq!(
             password_rejection(&fresh_password(), &fresh_password()),
@@ -629,6 +814,7 @@ mod tests {
         let response = setup_submit(
             State(state),
             CookieJar::new(),
+            HeaderMap::new(),
             Form(SetupForm {
                 username: "ivy".to_owned(),
                 password: fresh_password(),
@@ -652,6 +838,7 @@ mod tests {
         let response = setup_submit(
             State(state),
             CookieJar::new(),
+            HeaderMap::new(),
             Form(SetupForm {
                 username: "ivy".to_owned(),
                 password: password.clone(),
@@ -693,6 +880,7 @@ mod tests {
         let response = setup_submit(
             State(state),
             CookieJar::new(),
+            HeaderMap::new(),
             Form(SetupForm {
                 username: "second".to_owned(),
                 password: password.clone(),
@@ -743,6 +931,7 @@ mod tests {
         let response = login_submit(
             State(web_state(serve)),
             CookieJar::new(),
+            HeaderMap::new(),
             Form(LoginForm {
                 username: "ivy".to_owned(),
                 password,
@@ -768,6 +957,7 @@ mod tests {
         let response = login_submit(
             State(web_state(serve)),
             CookieJar::new(),
+            HeaderMap::new(),
             Form(LoginForm {
                 username: "ivy".to_owned(),
                 password: fresh_password(),
@@ -779,14 +969,150 @@ mod tests {
         assert!(body_of(response).await.contains("do not match"));
     }
 
+    /// The `Set-Cookie` line this response writes for the session, if any.
+    ///
+    /// Borrowed from the response rather than owned: every assertion below is a
+    /// substring check, and the error messages read better with the whole line.
+    fn session_set_cookie(response: &Response) -> Option<&str> {
+        response
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|value| value.starts_with(COOKIE_NAME))
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_over_plain_http_leaves_the_cookie_without_secure() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let password = seeded_user(&serve).await;
+
+        let response = login_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            headers(&[("host", "box.lan:8477")]),
+            Form(LoginForm {
+                username: "ivy".to_owned(),
+                password,
+            }),
+        )
+        .await;
+
+        let cookie = session_set_cookie(&response).expect("a sign-in must set the session cookie");
+        assert!(
+            !cookie.contains("Secure"),
+            "a Secure cookie on the plain-HTTP LAN is dropped by the browser, which \
+             presents as a login that does nothing: {cookie}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_behind_a_tls_proxy_marks_the_cookie_secure() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let password = seeded_user(&serve).await;
+
+        let response = login_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            headers(&[("host", "sharerr.example"), ("x-forwarded-proto", "https")]),
+            Form(LoginForm {
+                username: "ivy".to_owned(),
+                password,
+            }),
+        )
+        .await;
+
+        let cookie = session_set_cookie(&response).expect("a sign-in must set the session cookie");
+        assert!(cookie.contains("; Secure"), "{cookie}");
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+    }
+
+    #[tokio::test]
+    async fn a_first_run_setup_behind_a_tls_proxy_marks_the_cookie_secure() {
+        // The other route into `sign_in`. A first run through a proxy is how most
+        // operators first meet this cookie, and it is the one sign-in that cannot
+        // be repeated to correct a bad flag.
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let password = fresh_password();
+        let response = setup_submit(
+            State(state),
+            CookieJar::new(),
+            headers(&[("forwarded", "proto=https")]),
+            Form(SetupForm {
+                username: "ivy".to_owned(),
+                password: password.clone(),
+                confirm: password,
+            }),
+        )
+        .await;
+
+        let cookie = session_set_cookie(&response).expect("setup must sign the operator in");
+        assert!(cookie.contains("; Secure"), "{cookie}");
+    }
+
+    #[tokio::test]
+    async fn logout_expires_the_cookie_on_the_path_it_was_set_on() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let token = state.sessions.create("ivy").await.unwrap();
+
+        // Assembled from a request header rather than with `.add`, because
+        // `CookieJar::remove` only emits a removal for a cookie the request
+        // actually carried — a jar the handler built itself would produce no
+        // `Set-Cookie` at all and this test would assert on nothing.
+        let sent = format!("{COOKIE_NAME}={token}");
+        let jar = CookieJar::from_headers(&headers(&[("cookie", &sent)]));
+
+        let response = logout(
+            State(state.clone()),
+            jar,
+            headers(&[("host", "box.lan:8477")]),
+        )
+        .await;
+
+        let cookie = session_set_cookie(&response).expect("logout must expire the cookie");
+        assert!(
+            cookie.contains("Path=/"),
+            "a removal is only honoured when its Path matches the original's: {cookie}"
+        );
+        assert!(cookie.contains("Max-Age=0"), "{cookie}");
+        assert!(!cookie.contains("Secure"), "{cookie}");
+        assert!(state.sessions.touch(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_behind_a_tls_proxy_expires_a_secure_cookie() {
+        // A removal missing `Secure` cannot overwrite a cookie that has it, so the
+        // scheme has to be worked out again here rather than assumed to be plain.
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let token = state.sessions.create("ivy").await.unwrap();
+        let sent = format!("{COOKIE_NAME}={token}");
+        let jar = CookieJar::from_headers(&headers(&[("cookie", &sent)]));
+
+        let response = logout(
+            State(state),
+            jar,
+            headers(&[("x-forwarded-proto", "https")]),
+        )
+        .await;
+
+        let cookie = session_set_cookie(&response).expect("logout must expire the cookie");
+        assert!(cookie.contains("; Secure"), "{cookie}");
+        assert!(cookie.contains("Path=/"), "{cookie}");
+    }
+
     #[tokio::test]
     async fn logout_clears_both_the_session_and_the_cookie() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let state = web_state(serve);
         let token = state.sessions.create("ivy").await.unwrap();
-        let jar = CookieJar::new().add(session_cookie(token.clone()));
+        let jar = CookieJar::new().add(session_cookie(token.clone(), false));
 
-        let response = logout(State(state.clone()), jar).await;
+        let response = logout(State(state.clone()), jar, HeaderMap::new()).await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
@@ -829,7 +1155,7 @@ mod tests {
         seeded_user(&serve).await;
         let state = web_state(serve);
         let token = state.sessions.create("ivy").await.unwrap();
-        let jar = CookieJar::new().add(session_cookie(token));
+        let jar = CookieJar::new().add(session_cookie(token, false));
 
         let new_password = fresh_password();
         let response = change_password(
@@ -859,7 +1185,7 @@ mod tests {
         let state = web_state(serve);
         let current = state.sessions.create("ivy").await.unwrap();
         let other = state.sessions.create("ivy").await.unwrap();
-        let jar = CookieJar::new().add(session_cookie(current.clone()));
+        let jar = CookieJar::new().add(session_cookie(current.clone(), false));
 
         let new_password = fresh_password();
         let response = change_password(

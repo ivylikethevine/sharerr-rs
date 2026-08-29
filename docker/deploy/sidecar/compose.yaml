@@ -82,14 +82,15 @@ services:
     ports:
       # One listener carries the web UI, the tracker, the Torznab feed and the
       # gossip endpoints. Friends need to reach it, so it has to be forwarded on
-      # your router — and that puts the login page on the internet, over a
-      # connection sharerr does not encrypt and a session cookie it cannot mark
-      # secure.
+      # your router — and that puts the login page on the internet. sharerr
+      # encrypts nothing itself, so without a TLS proxy in front the session
+      # cookie travels in the clear too.
       #
       # Put a TLS reverse proxy in front and set `tracker.advertised_url` to the
-      # https:// address, or bind a second tracker-only listener with
-      # `tracker.bind` and forward that instead. Both are set up in
-      # config/sharerr.toml.
+      # https:// address (this also gets the session cookie marked Secure
+      # automatically, via X-Forwarded-Proto), or bind a second tracker-only
+      # listener with `tracker.bind` and forward that instead. Both are set up
+      # in config/sharerr.toml.
       - "8477:8477"
     restart: unless-stopped
 
