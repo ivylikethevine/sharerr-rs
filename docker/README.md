@@ -27,6 +27,8 @@ pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhe
   - [There is a WireGuard server in the stack](#there-is-a-wireguard-server-in-the-stack)
   - [Ports](#ports-1)
 - [The two-instance stack](#the-two-instance-stack)
+  - [Why Prowlarr sits in front of instance B's Radarr](#why-prowlarr-sits-in-front-of-instance-bs-radarr)
+  - [Why `tracker.advertised_host` is a service name here, not `localhost`](#why-trackeradvertised_host-is-a-service-name-here-not-localhost)
   - [Ports](#ports-2)
 - [Tearing down](#tearing-down)
 
@@ -95,13 +97,13 @@ docker compose -f docker/compose.test.yml exec sharerr sharerr sync
 
 The stack sets `SHARERR_MASTER_KEY`, without which the vault cannot be opened and
 neither the UI nor the CLI can store a credential. A real deployment must set it
-too — see the root `README.md`.
+too — see [the root README](../README.md).
 
 ## Exercising the indexer and the tracker
 
 With the stack up and something tagged and synced:
 
-The Torznab endpoint authenticates against a *friend's* key, not a shared
+The Torznab endpoint authenticates against a _friend's_ key, not a shared
 instance secret — there is no vault entry for it. Create the operator account on
 first visit (`/setup`), then add a friend on the Friends page (`/peers`); the key
 is shown exactly once. `scripts/run_docker_tests.sh` does both over HTTP, since neither
@@ -126,7 +128,7 @@ Prowlarr is in the stack behind an opt-in profile, since nothing automated uses 
 docker compose -f docker/compose.test.yml --profile indexer up -d prowlarr
 ```
 
-Then add a *Generic Torznab* indexer pointing at `http://sharerr:8477/api` with
+Then add a _Generic Torznab_ indexer pointing at `http://sharerr:8477/api` with
 that key.
 
 sharerr's own tracker is the only one — there used to be a `[tracker] backend`
@@ -155,7 +157,7 @@ tagged content exercises nothing: `doctor` fails with `TagNotFound`, and `sync`
 bails with "no library source could be scanned". Getting content in is the one part of
 this stack that cannot go through the *arr APIs, and it is worth knowing why.
 
-> **Adding a series, movie, or artist through the *arr API triggers a metadata
+> **Adding a series, movie, or artist through the \*arr API triggers a metadata
 > lookup** against `services.sonarr.tv` / `api.radarr.video` / MusicBrainz. Every
 > fixture title is invented, so the lookup finds nothing and the add fails.
 
@@ -189,24 +191,24 @@ Three things about it:
   both an artist and an album into their own tables (`ArtistMetadata`,
   `AlbumReleases`), the same way Radarr 5 splits `MovieMetadata` from `Movies` —
   and unlike Sonarr/Radarr's `EpisodeFiles`/`MovieFiles`, Lidarr's `TrackFiles`
-  stores the file's *full* path rather than a path relative to the artist's own
+  stores the file's _full_ path rather than a path relative to the artist's own
   folder. Confirmed against a live container rather than assumed, the same way the
   original Sonarr/Radarr schema was.
 
 ### The network used to be `internal: true`
 
 It is not any more. An internal bridge severs the host→container path that
-*published ports* travel, and this stack's whole control plane runs over those
+_published ports_ travel, and this stack's whole control plane runs over those
 ports: the readiness probes curl `127.0.0.1`, the API keys are scraped from a bind
 mount, `seed-arr` runs on the host, and the browser URLs above are host-side. With
 the network isolated, those probes hung for their full timeout against containers
 that were perfectly healthy.
 
-The trade is explicit: the stack no longer *proves* sharerr makes no outbound
+The trade is explicit: the stack no longer _proves_ sharerr makes no outbound
 requests. That property now rests on the code and the hermetic test suite rather
 than on the kernel refusing to route.
 
-The tag id is left to SQLite. sharerr resolves the *label*, case-insensitively, so
+The tag id is left to SQLite. sharerr resolves the _label_, case-insensitively, so
 `sharerr_testkit::TAG_ID` — a mock-server detail — deliberately does not apply here.
 
 Everything else sharerr does stays inside the stack anyway: tag lookup, file
@@ -281,7 +283,7 @@ The same services and the same assertions, seeding through rTorrent instead of
 qBittorrent. Unlike the Transmission stack, the point here is not a difference in
 behaviour an operator would notice — it is that `sharerr-rtorrent`'s unit tests run
 against a hand-mocked XML-RPC server, which proves the crate parses the requests
-and responses it *expects*, not the ones a real rTorrent sends. The XML-RPC parser
+and responses it _expects_, not the ones a real rTorrent sends. The XML-RPC parser
 and throttle-method bugs fixed on 2026-08-24 were exactly the kind that server
 could not have caught.
 
@@ -377,7 +379,7 @@ Radarr can find, grab, and correctly receive what was shared.
 
 Instance A is seeded exactly like the plain stack's Radarr — one tagged movie,
 written straight into its database for the reason `seed-arr`'s own module doc
-gives. Instance B's Radarr gets the *same* movie by TMDB id, seeded via
+gives. Instance B's Radarr gets the _same_ movie by TMDB id, seeded via
 `seed-arr --radarr-wanted` — untagged and with no file, so it is a genuine
 "wanted" entry its own automatic search can match against instance A's shared
 release. The script then does by API exactly what an operator would do by
@@ -399,12 +401,14 @@ enclosure over a `magnet` link when a feed offers both, and the first live run
 of this stack showed it choosing the magnet — confirmed after the fact from
 qBittorrent-B's own torrent record (`has_metadata: false`, and a `magnet_uri`
 whose `dn=` was the release title rather than the torrent's real internal
-filename). Every torrent sharerr builds is private (see `CLAUDE.md`'s
+filename). Every torrent sharerr builds is private (see
+[`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#traps)'s
 "Torrent name vs release title" trap and `sharerr-torrent`'s `factory.rs`), so
 a magnet can never complete against it in any environment — nothing in the
 swarm will ever answer its `ut_metadata` request. This is not the
-sandboxed-build-environment quirk `docs/ROADMAP.md` once suspected; it
-reproduces identically on a plain Docker host.
+sandboxed-build-environment quirk
+[`docs/UNSUPPORTED.md`](../docs/UNSUPPORTED.md#removing-the-feeds-magnet-link-entirely)
+once suspected; it reproduces identically on a plain Docker host.
 
 Prowlarr's per-indexer "Prefer Magnet URL" — `false` by default — is the one
 place this preference is actually configurable, so the script pins it
@@ -453,7 +457,7 @@ docker compose -f docker/compose.test.yml --profile indexer down -v && rm -rf do
 
 Both halves are needed. `-v` drops the named volumes, which is what you want
 between runs — the API keys are regenerated on every fresh start, and qBittorrent
-only logs its temporary password when it has no stored one. It does *not* touch
+only logs its temporary password when it has no stored one. It does _not_ touch
 `docker/state`, where Sonarr, Radarr, and Lidarr keep theirs, so that goes separately.
 `scripts/run_docker_tests.sh` does both from a trap.
 
