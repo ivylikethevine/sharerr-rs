@@ -13,11 +13,14 @@ rules:
       - image-scan.yml:89
       - image-scan.yml:142
 
-  # coverage.yml's checkout is the one place in this repo with a real reason
-  # to push (the coverage badge endpoint, see that job's own comments) —
-  # every other `actions/checkout` sets `persist-credentials: false`
-  # specifically so there is no lingering credential for a job that never
-  # pushes. This is the job that does.
-  artipacked:
+  # pages.yml's `workflow_run` trigger is the usual dangerous shape in name
+  # only: the flagged risk is a privileged run checking out the head SHA of
+  # whatever triggered it and building from attacker-controlled content. This
+  # one does not. `build`'s checkout carries no `ref:`, so it always builds the
+  # default branch; the coverage figure comes from an API query for the newest
+  # green coverage.yml run on `main` rather than from the triggering run's own
+  # payload; and coverage.yml itself never runs on `pull_request` — so there is
+  # no attacker-controlled byte anywhere in the path.
+  dangerous-triggers:
     ignore:
-      - coverage.yml:45
+      - pages.yml:12
