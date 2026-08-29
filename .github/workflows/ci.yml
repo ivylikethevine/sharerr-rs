@@ -49,6 +49,14 @@ jobs:
   changes:
     name: detect changes
     if: github.event_name == 'push' || github.event_name == 'pull_request'
+    # changes.yml's own job asks for `pull-requests: read` (dorny/paths-filter
+    # lists a PR's files through the API). A reusable workflow's job cannot
+    # request a scope the calling job does not hold, so granting it here is
+    # what makes the call valid at all — without it GitHub rejects this file
+    # outright rather than failing the run.
+    permissions:
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/changes.yml
     with:
       filters: |

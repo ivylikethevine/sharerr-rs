@@ -280,3 +280,19 @@ The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
 weighed but not all committed to as well as firm intentions — an idea belongs
 there or in `docs/UNSUPPORTED.md`, never in both. The original design brief and
 the two premises the implementation disproved are in `docs/DESIGN.md`.
+
+**`main` carries a ruleset (PR required, protected ref, verified signatures) that
+no Actions `git push` can satisfy** — a `GITHUB_TOKEN`-authored commit has no
+signature and can't open a PR against itself. A workflow that generates
+something meant to be published (the coverage badge is the current example)
+therefore cannot commit it to `main` at all; it has to reach the world some
+other way. The pattern here is `coverage.yml` uploading the figure as a build
+artifact, and `pages.yml` — on a `workflow_run` trigger watching for
+`coverage.yml` to finish — looking up the newest successful run via `gh api
+.../actions/workflows/coverage.yml/runs`, downloading that run's artifact with
+`actions/download-artifact`, and writing it straight into `_site/` after Jekyll
+has already built it, so it ships as part of the same Pages deploy. Copy that
+shape for the next generated-artifact-on-`main` case rather than reaching for a
+bot commit; see `.github/zizmor.yml`'s `dangerous-triggers` entry for why the
+`workflow_run` trigger this depends on is safe here despite zizmor's default
+suspicion of it (no attacker-controlled ref is ever checked out or read).
