@@ -1,4 +1,5 @@
-# Builds `docker/Dockerfile.lighthouse`, and publishes it to GHCR on a `v*` tag only.
+# Builds `docker/Dockerfile.lighthouse`, and publishes it to GHCR on every push
+# to `main` (unattended, sha-only tag) and on a `v*` tag (approval-gated).
 #
 # Deliberately its own workflow rather than a second job in docker.yml. The
 # lighthouse is a separate product: a standalone rendezvous service meant to be
@@ -8,12 +9,13 @@
 # silently, publishing a lighthouse — and so a break in one build cannot hold
 # the other's release.
 #
-# The shape mirrors docker.yml exactly, and for the same reasons: branch pushes
-# and pull requests build both architectures and ship nothing, a `v*` tag pushes
-# the real multi-arch image to a provisional tag nobody would browse to, and a
-# `publish` job behind a required reviewer retags that exact digest onto the
-# tags an operator would pull. Read docker.yml for the reasoning behind each of
-# those choices; only the differences are commented here.
+# The shape mirrors docker.yml exactly, and for the same reasons: pull requests
+# build both architectures and ship nothing, every push to `main` ships
+# unattended under a sha-only tag, a `v*` tag pushes the real multi-arch image
+# to a provisional tag nobody would browse to, and a `publish` job behind a
+# required reviewer retags that exact digest onto the tags an operator would
+# pull. Read docker.yml for the reasoning behind each of those choices; only
+# the differences are commented here.
 
 name: Docker (lighthouse)
 
@@ -109,7 +111,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - if: startsWith(github.ref, 'refs/tags/v')
+      - if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.ref == 'refs/heads/main' && github.event_name == 'push')
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -141,14 +145,25 @@ jobs:
           SHA: ${{ github.sha }}
         run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
 
+      # See docker.yml's own `sha-tag` step — identical reasoning and format.
+      - id: sha-tag
+        env:
+          SHA: ${{ github.sha }}
+        run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
+
       - id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/Dockerfile.lighthouse
           platforms: linux/amd64,linux/arm64
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          tags: ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref || steps.meta.outputs.tags }}
+          push: >-
+            ${{ startsWith(github.ref, 'refs/tags/v') ||
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+          tags: >-
+            ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref ||
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
+                steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # A distinct cache scope. Without one, this build and docker.yml's
           # share the default scope and evict each other's layers every run,

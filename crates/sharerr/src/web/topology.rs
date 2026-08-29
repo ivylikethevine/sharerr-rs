@@ -1825,7 +1825,7 @@ mod tests {
                 sam.id,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                1,
+                Some(1),
                 ObservedVia::Direct,
             )
             .await

@@ -271,7 +271,7 @@ pub(crate) async fn import_peers(state: &ServeState) {
         total = peers.len(),
         "drained the [[peers]] bootstrap block; removing it from sharerr.toml"
     );
-    match strip_peers_block(state.config_path()) {
+    match strip_peers_block(state).await {
         // `config` already has `peers` taken out — install it so the live
         // instance's view matches the file it was just stripped from, not
         // just at the next restart. See this function's own doc comment.
@@ -314,12 +314,17 @@ async fn import_one_peer(
     }
 
     if let Some(addr) = present(&peer.last_addr) {
+        // `None`, not `now_epoch()`: `ObservedVia::Restored`'s whole point is
+        // that there is no real timestamp for this sighting, and claiming
+        // "now" would let it out-rank a genuine sighting of the same address
+        // recorded before the restore. See `Store::record_peer_endpoint`'s
+        // own doc comment for what `None` does instead.
         store
             .record_peer_endpoint(
                 created.id,
                 sharerr_store::EndpointKind::Api,
                 addr,
-                sharerr_core::endpoint::now_epoch(),
+                None,
                 sharerr_store::ObservedVia::Restored,
             )
             .await?;
@@ -336,10 +341,18 @@ fn present(value: &Option<String>) -> Option<&str> {
     value.as_deref().filter(|s| !s.is_empty())
 }
 
-fn strip_peers_block(config_path: &Path) -> anyhow::Result<()> {
-    let mut file = crate::web::config_io::ConfigFile::open(config_path)?;
+/// Holds the same config-write lock every UI-driven save takes
+/// (`ServeState::lock_config_write`), so a settings save racing this cannot
+/// interleave with it, and validates the edited document exactly as
+/// `web/settings.rs`'s `prepare_config` does before calling
+/// `write_validated` — this runs before any listener binds, but that
+/// ordering precondition lived nowhere in the function itself until now.
+async fn strip_peers_block(state: &ServeState) -> anyhow::Result<()> {
+    let _guard = state.lock_config_write().await;
+    let mut file = crate::web::config_io::ConfigFile::open(state.config_path())?;
     file.clear_peers();
     let text = file.to_toml();
+    crate::settings::validate(&text)?;
     file.write_validated(&text)?;
     Ok(())
 }
@@ -1123,6 +1136,54 @@ mod tests {
         assert!(
             state.config().await.peers.is_empty(),
             "and from the live config this instance is already running on"
+        );
+    }
+
+    /// `import_one_peer` no longer parses (or fails to parse) a gossip URL
+    /// itself — it delegates to `Store::set_peer_gossip_url`, the same
+    /// validation `web::peers::set_gossip` uses. A hand-typed `[[peers]]`
+    /// block with a malformed URL must be rejected the same way a bad value
+    /// in the settings form is, not stored raw.
+    #[tokio::test]
+    async fn a_malformed_gossip_url_is_rejected_rather_than_stored_raw() {
+        let (_dir, state) = state_with_pending_peers(vec![sharerr_core::config::PeerImport {
+            gossip_url: Some("not a url".to_owned()),
+            ..peer_import("Sam")
+        }]);
+
+        import_peers(&state).await;
+
+        let store = state.store().await.unwrap();
+        let listed = store.list_peers().await.unwrap();
+        assert_eq!(listed.len(), 1, "the peer itself is still created");
+        assert_eq!(listed[0].gossip_url, None, "but the bad URL is not stored");
+    }
+
+    /// `strip_peers_block` must validate the document it is about to write,
+    /// not just parse it as TOML — `clear_peers` never touches a field
+    /// elsewhere in the file, so a `sharerr.toml` `Config` would reject on
+    /// its own (`deny_unknown_fields`, here) must still block the strip
+    /// rather than being written unchecked.
+    #[tokio::test]
+    async fn strip_peers_block_refuses_to_write_a_document_config_would_reject() {
+        let (_dir, state) = state_with_pending_peers(vec![peer_import("Sam")]);
+        // `bogus_field` has to land *before* `[[peers]]` — TOML would
+        // otherwise read it as a field of the peers table itself, and
+        // `clear_peers` would carry it away along with everything else in
+        // that array, proving nothing about top-level validation.
+        std::fs::write(
+            state.config_path(),
+            "data_dir = \"/data\"\nbogus_field = true\n\n[[peers]]\nlabel = \"Sam\"\n",
+        )
+        .unwrap();
+
+        import_peers(&state).await;
+
+        let stored_text = std::fs::read_to_string(state.config_path()).unwrap();
+        assert!(
+            stored_text.contains("[[peers]]"),
+            "an invalid document must not be written, even just to remove the peers \
+             block: {stored_text}"
         );
     }
 

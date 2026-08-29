@@ -422,7 +422,7 @@ async fn apply_lookup(store: &Store, peer_id: i64, record: &LighthouseRecord) {
                 peer_id,
                 kind,
                 &endpoint.addr,
-                endpoint.observed_at,
+                Some(endpoint.observed_at),
                 ObservedVia::Lighthouse,
             )
             .await

@@ -149,24 +149,15 @@ pub async fn set_gossip(
         Err(response) => return *response,
     };
 
-    let url = form.url.trim();
-    let url = if url.is_empty() {
-        None
-    } else {
-        match url::Url::parse(url) {
-            Ok(parsed) => Some(parsed.to_string()),
-            Err(err) => {
-                return rejected(&state, &format!("{url:?} is not a valid URL: {err}")).await;
-            }
-        }
-    };
-
     // The URL is written first, and only then the key: `set_peer_gossip_url`
     // answers whether the peer exists at all, and a `POST` for a peer that
     // was deleted from another tab used to store an orphan `peer.gossip.{id}`
     // in the vault that nothing could ever remove. The URL half is what the
     // vault half is *for*, so a peer that cannot take the URL takes no key.
-    let result = store.set_peer_gossip_url(id, url.as_deref()).await;
+    // Parsing and normalizing both live in `set_peer_gossip_url` itself now,
+    // so a bad URL and a nonexistent peer both surface here rather than one
+    // of them being caught earlier by a second copy of the same check.
+    let result = store.set_peer_gossip_url(id, Some(&form.url)).await;
     match result {
         Ok(true) => {}
         Ok(false) => return rejected(&state, "there is no friend with that id any more").await,
@@ -356,11 +347,7 @@ pub async fn export(State(state): State<WebState>) -> Response {
         })
         .collect();
 
-    #[derive(serde::Serialize)]
-    struct ExportDocument {
-        peers: Vec<sharerr_core::config::PeerImport>,
-    }
-    let mut text = match toml_edit::ser::to_string_pretty(&ExportDocument { peers: imports }) {
+    let mut text = match (sharerr_core::config::PeerImportDocument { peers: imports }).to_toml() {
         Ok(text) => text,
         Err(err) => return rejected(&state, &format!("could not export friends: {err}")).await,
     };
@@ -864,7 +851,7 @@ mod tests {
                 peer.id,
                 sharerr_store::EndpointKind::Client,
                 "10.0.0.5:51413",
-                now_epoch(),
+                Some(now_epoch()),
                 sharerr_store::ObservedVia::Direct,
             )
             .await
@@ -1120,7 +1107,7 @@ mod tests {
 
     // -------------------------------------------------------------- export()
 
-    use sharerr_testkit::mock::fresh_password;
+    use sharerr_testkit::secrets::fresh_password;
 
     #[tokio::test]
     async fn export_excludes_revoked_peers_and_never_carries_a_peer_key() {
@@ -1181,7 +1168,7 @@ mod tests {
                 sam.id,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                100,
+                Some(100),
                 sharerr_store::ObservedVia::Direct,
             )
             .await
@@ -1191,7 +1178,7 @@ mod tests {
                 sam.id,
                 EndpointKind::Api,
                 "203.0.113.9:2",
-                200,
+                Some(200),
                 sharerr_store::ObservedVia::Direct,
             )
             .await
@@ -1201,7 +1188,7 @@ mod tests {
                 sam.id,
                 EndpointKind::Client,
                 "198.51.100.7:6881",
-                300,
+                Some(300),
                 sharerr_store::ObservedVia::Gossip,
             )
             .await

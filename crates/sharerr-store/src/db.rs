@@ -63,6 +63,19 @@ pub enum StoreError {
     /// one of these is a fixed message safe to render straight back to the form.
     #[error("{0}")]
     InvalidUser(&'static str),
+
+    /// A gossip URL that failed to parse. Carries the offending value because,
+    /// unlike [`Self::InvalidUser`], the message isn't a fixed string —
+    /// [`Store::set_peer_gossip_url`](crate::Store::set_peer_gossip_url) is
+    /// the one place that validates a friend's advertised URL, so both
+    /// `web::peers::set_gossip` and the `[[peers]]` bootstrap importer get
+    /// the same rejection instead of each parsing (or not) on their own.
+    #[error("{value:?} is not a valid URL: {source}")]
+    InvalidGossipUrl {
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
 }
 
 type Result<T> = std::result::Result<T, StoreError>;

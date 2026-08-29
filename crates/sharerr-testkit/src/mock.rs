@@ -55,19 +55,6 @@ pub fn rpc_credentials() -> (String, String) {
     (format!("u{n:x}"), format!("{stamp:x}{n:x}"))
 }
 
-/// A throwaway account password, fresh per call — the same reasoning as
-/// [`rpc_credentials`], for the login/account test suites in `sharerr-store`
-/// and the `sharerr` app crate: a literal handed to `create_user`/
-/// `verify_password` reaches Argon2 and is a
-/// `rust/hard-coded-cryptographic-value` finding, same as a Basic Auth
-/// literal reaching `basic_auth`. Always well over any real minimum-length
-/// check — a hex-encoded nanosecond timestamp is never under 8 characters
-/// in this era — but that is a property of the current epoch, not a
-/// compile-time guarantee.
-pub fn fresh_password() -> String {
-    rpc_credentials().1
-}
-
 /// Mount `GET route` returning `200` with a JSON body.
 pub async fn mount_json(server: &MockServer, route: &str, body: serde_json::Value) {
     mount_json_status(server, route, 200, body).await;

@@ -195,10 +195,13 @@ added later inherits the tolerance instead of needing to remember it.
 
 ## Repository
 
-Publishing to GHCR happens on a `v*` tag only. A push to `main` builds both
-architectures — that build is load-bearing as the MSRV check — but ships nothing,
-so no branch tag (`:main` included) ever exists on GHCR; only `latest`, the semver
-tags, and a `sha-*` tag do.
+Publishing to GHCR happens two ways. Every push to `main` builds both
+architectures — that build is load-bearing as the MSRV check — and ships
+unattended under a `sha-<7-char-sha>` tag and nothing else: no `latest`, no
+`:main`, no branch tag of any kind, so an image only turns up for someone who
+already has the commit sha that produced it. A `v*` tag goes through the
+slower, approval-gated path (`build` then `publish`, see each workflow's own
+comments) and is what actually moves `latest` and the semver tags.
 
 **Two images ship, from two workflows.** `docker.yml` builds `docker/Dockerfile`
 into `ghcr.io/<repo>`; `docker-lighthouse.yml` builds

@@ -1,10 +1,13 @@
 # Security policy
 
 sharerr is **experimental** — see [the README](../README.md) — and has not had a
-tagged release, and the GHCR image is only published on a `v*` tag, so there
-is no image to patch yet either. There is exactly one line of support: the
-`main` branch and `dev`, the branch active development happens on. There are
-no older versions to patch.
+tagged release, so there is no `:latest` or versioned GHCR image to patch yet.
+Every push to `main` does publish a `sha-<commit>`-tagged image unattended
+(see `CLAUDE.md`'s Repository section) — those are commit-pinned CI artifacts
+rather than a supported release series, found only by someone who already has
+the commit sha, and nothing here treats them as something to patch in place.
+There is exactly one line of support: the `main` branch and `dev`, the branch
+active development happens on. There are no older versions to patch.
 
 ## Table of contents
 

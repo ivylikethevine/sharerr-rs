@@ -297,7 +297,13 @@ pub async fn ingest(
                 continue;
             };
             if let Err(err) = store
-                .record_peer_endpoint(subject_id, kind, &endpoint.addr, endpoint.observed_at, via)
+                .record_peer_endpoint(
+                    subject_id,
+                    kind,
+                    &endpoint.addr,
+                    Some(endpoint.observed_at),
+                    via,
+                )
                 .await
             {
                 tracing::warn!(error = %err, "could not record a gossiped endpoint");

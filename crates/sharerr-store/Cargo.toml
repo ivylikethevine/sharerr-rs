@@ -26,6 +26,7 @@ sharerr-core = { workspace = true }
 sqlx = { workspace = true, features = ["migrate", "macros", "time"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "fs"] }
+url = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

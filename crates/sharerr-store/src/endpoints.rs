@@ -68,9 +68,10 @@ sharerr_core::str_enum!(
         Lighthouse => "lighthouse",
         Restored => "restored",
     },
-    lenient = Gossip,
-    "Anything unrecognised reads as gossip — the *less* trusted rank, which \
-     is the safe direction for a value a newer version may have written."
+    lenient = Restored,
+    "Anything unrecognised reads as restored — the *least* trusted rank, \
+     which is the safe direction for a value a newer version may have \
+     written."
 );
 
 /// One sighting of one of a friend's addresses.
@@ -105,36 +106,65 @@ impl Store {
     /// An observation older than what is already recorded for the same address
     /// is ignored — that is the property that stops a replayed or slow-travelled
     /// gossip record from rewinding what a fresher one established.
+    ///
+    /// `observed_at` is `None` for a sighting with no real timestamp attached
+    /// — [`ObservedVia::Restored`]'s own doc comment is explicit that "no
+    /// idea how stale this already was" is the whole point of the variant, so
+    /// a caller with nothing real to report cannot honestly claim "now" just
+    /// to have something to pass. `None` therefore only ever *fills a gap*:
+    /// it inserts a first sighting of an address this method has never seen,
+    /// but never touches a row that already exists, since there is no
+    /// timestamp here to compare against whatever produced that row. Without
+    /// this, a restored peer's fabricated "now" could out-rank — and
+    /// silently downgrade the recorded `via` of — a genuine `Direct` sighting
+    /// of the same address.
     pub async fn record_peer_endpoint(
         &self,
         peer_id: i64,
         kind: EndpointKind,
         addr: &str,
-        observed_at: i64,
+        observed_at: Option<i64>,
         via: ObservedVia,
     ) -> Result<()> {
-        // Clamped, not rejected: an observation is still worth keeping even
-        // from a peer whose clock runs fast, but an unclamped future
-        // timestamp would win every `excluded.observed_at > …` comparison
-        // below forever, past the point the sender's clock is fixed — see
-        // `MAX_FUTURE_SKEW_SECS`.
-        let observed_at = observed_at.min(now_epoch().saturating_add(MAX_FUTURE_SKEW_SECS));
         let mut tx = self.pool().begin().await?;
-        let written = sqlx::query(
-            "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT (peer_id, kind, addr) DO UPDATE \
-             SET observed_at = excluded.observed_at, via = excluded.via \
-             WHERE excluded.observed_at > peer_endpoints.observed_at",
-        )
-        .bind(peer_id)
-        .bind(kind.as_str())
-        .bind(addr)
-        .bind(observed_at)
-        .bind(via.as_str())
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        let written = match observed_at {
+            Some(observed_at) => {
+                // Clamped, not rejected: an observation is still worth keeping
+                // even from a peer whose clock runs fast, but an unclamped
+                // future timestamp would win every `excluded.observed_at > …`
+                // comparison below forever, past the point the sender's clock
+                // is fixed — see `MAX_FUTURE_SKEW_SECS`.
+                let observed_at = observed_at.min(now_epoch().saturating_add(MAX_FUTURE_SKEW_SECS));
+                sqlx::query(
+                    "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT (peer_id, kind, addr) DO UPDATE \
+                     SET observed_at = excluded.observed_at, via = excluded.via \
+                     WHERE excluded.observed_at > peer_endpoints.observed_at",
+                )
+                .bind(peer_id)
+                .bind(kind.as_str())
+                .bind(addr)
+                .bind(observed_at)
+                .bind(via.as_str())
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+            }
+            None => sqlx::query(
+                "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
+                     VALUES (?1, ?2, ?3, ?4, ?5) \
+                     ON CONFLICT (peer_id, kind, addr) DO NOTHING",
+            )
+            .bind(peer_id)
+            .bind(kind.as_str())
+            .bind(addr)
+            .bind(now_epoch())
+            .bind(via.as_str())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+        };
 
         // Prune beyond the newest MAX_HISTORY. Done here rather than on a timer:
         // inserts are the only thing that grows the table — so an upsert that
@@ -229,8 +259,25 @@ impl Store {
         Ok(affected > 0)
     }
 
-    /// Set or clear where this friend's own sharerr can be pulled from.
+    /// Set or clear where this friend's own sharerr can be pulled from. Blank
+    /// or absent clears it; anything else must parse as a URL, and the
+    /// *normalized* form (`url::Url`'s own `Display`) is what gets stored,
+    /// not the caller's raw text. This is the one place that validates and
+    /// normalizes a gossip URL — `web::peers::set_gossip` and the
+    /// `[[peers]]` bootstrap importer both go through it rather than each
+    /// carrying their own copy of the same `url::Url::parse` call.
     pub async fn set_peer_gossip_url(&self, peer_id: i64, url: Option<&str>) -> Result<bool> {
+        let url = match url.map(str::trim) {
+            None | Some("") => None,
+            Some(raw) => Some(
+                url::Url::parse(raw)
+                    .map_err(|source| StoreError::InvalidGossipUrl {
+                        value: raw.to_owned(),
+                        source,
+                    })?
+                    .to_string(),
+            ),
+        };
         let affected = sqlx::query("UPDATE peers SET gossip_url = ?2 WHERE id = ?1")
             .bind(peer_id)
             .bind(url)
@@ -322,7 +369,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:51413",
-                100,
+                Some(100),
                 ObservedVia::Direct,
             )
             .await
@@ -332,7 +379,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.9:51413",
-                200,
+                Some(200),
                 ObservedVia::Direct,
             )
             .await
@@ -343,7 +390,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:51413",
-                300,
+                Some(300),
                 ObservedVia::Direct,
             )
             .await
@@ -369,7 +416,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                500,
+                Some(500),
                 ObservedVia::Direct,
             )
             .await
@@ -379,7 +426,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                100,
+                Some(100),
                 ObservedVia::Gossip,
             )
             .await
@@ -388,6 +435,69 @@ mod tests {
         let endpoints = store.peer_endpoints(peer).await.unwrap();
         assert_eq!(endpoints[0].observed_at, 500);
         assert_eq!(endpoints[0].via, ObservedVia::Direct);
+    }
+
+    /// `None` — a restored sighting with no real timestamp — must never
+    /// overwrite a row that already exists, since it has nothing to compare
+    /// against. Before this, the caller had to fabricate `now_epoch()` to
+    /// call this method at all, which could out-rank (and silently
+    /// downgrade the `via` of) a genuine, older `Direct` sighting of the
+    /// same address.
+    #[tokio::test]
+    async fn a_restored_sighting_with_no_timestamp_never_overwrites_an_existing_row() {
+        let (store, peer) = store_with_peer().await;
+
+        store
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                Some(100),
+                ObservedVia::Direct,
+            )
+            .await
+            .unwrap();
+        store
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                None,
+                ObservedVia::Restored,
+            )
+            .await
+            .unwrap();
+
+        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        assert_eq!(endpoints[0].observed_at, 100);
+        assert_eq!(
+            endpoints[0].via,
+            ObservedVia::Direct,
+            "a restored sighting with no timestamp must not downgrade a genuine one"
+        );
+    }
+
+    /// The other half: `None` still inserts a first sighting of an address
+    /// this method has never seen — it only refuses to *overwrite*.
+    #[tokio::test]
+    async fn a_restored_sighting_with_no_timestamp_still_records_a_new_address() {
+        let (store, peer) = store_with_peer().await;
+
+        store
+            .record_peer_endpoint(
+                peer,
+                EndpointKind::Api,
+                "203.0.113.5:1",
+                None,
+                ObservedVia::Restored,
+            )
+            .await
+            .unwrap();
+
+        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].addr, "203.0.113.5:1");
+        assert_eq!(endpoints[0].via, ObservedVia::Restored);
     }
 
     /// A wildly future `observed_at` — a sender's clock set wrong — is
@@ -403,7 +513,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                far_future,
+                Some(far_future),
                 ObservedVia::Direct,
             )
             .await
@@ -429,7 +539,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:8477",
-                100,
+                Some(100),
                 ObservedVia::Direct,
             )
             .await
@@ -439,7 +549,7 @@ mod tests {
                 peer,
                 EndpointKind::Client,
                 "198.51.100.7:6881",
-                100,
+                Some(100),
                 ObservedVia::Gossip,
             )
             .await
@@ -461,7 +571,7 @@ mod tests {
                     peer,
                     EndpointKind::Api,
                     &format!("203.0.113.5:{}", 1000 + i),
-                    i,
+                    Some(i),
                     ObservedVia::Direct,
                 )
                 .await
@@ -491,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn every_observed_via_round_trips_and_unknown_values_default_to_gossip() {
+    fn every_observed_via_round_trips_and_unknown_values_default_to_restored() {
         for via in [
             ObservedVia::Direct,
             ObservedVia::Gossip,
@@ -500,7 +610,7 @@ mod tests {
         ] {
             assert_eq!(ObservedVia::parse(via.as_str()), via);
         }
-        assert_eq!(ObservedVia::parse("carrier-pigeon"), ObservedVia::Gossip);
+        assert_eq!(ObservedVia::parse("carrier-pigeon"), ObservedVia::Restored);
     }
 
     #[tokio::test]
@@ -511,7 +621,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                100,
+                Some(100),
                 ObservedVia::Direct,
             )
             .await
@@ -552,7 +662,7 @@ mod tests {
                 sam.id,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                100,
+                Some(100),
                 ObservedVia::Direct,
             )
             .await
@@ -562,7 +672,7 @@ mod tests {
                 alex.id,
                 EndpointKind::Client,
                 "203.0.113.9:2",
-                200,
+                Some(200),
                 ObservedVia::Gossip,
             )
             .await
@@ -595,7 +705,7 @@ mod tests {
                 peer,
                 EndpointKind::Api,
                 "203.0.113.5:1",
-                100,
+                Some(100),
                 ObservedVia::Direct,
             )
             .await
