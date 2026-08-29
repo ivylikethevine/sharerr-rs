@@ -101,17 +101,15 @@ jobs:
           exit "$status"
 
       - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '1'
-        name: Say so, without failing
-        run: |
-          set -euo pipefail
-          echo "::warning title=trivy::Fixable HIGH/CRITICAL vulnerabilities in ${IMAGE}:latest - advisory, not blocking"
-          {
-            echo "### Trivy found fixable HIGH/CRITICAL vulnerabilities"
-            echo
-            echo "In \`${IMAGE}:latest\` — see the step above for the full report."
-            echo "Rebuilding and re-tagging \`:latest\` (no code change required) picks up"
-            echo "patched base-image packages; this job never blocks a merge either way."
-          } >>"$GITHUB_STEP_SUMMARY"
+        uses: ./.github/actions/advisory-note
+        with:
+          title: trivy
+          warning-body: Fixable HIGH/CRITICAL vulnerabilities in ${{ env.IMAGE }}:latest - advisory, not blocking
+          heading: Trivy found fixable HIGH/CRITICAL vulnerabilities
+          body: >-
+            In `${{ env.IMAGE }}:latest` — see the step above for the full report.
+            Rebuilding and re-tagging `:latest` (no code change required) picks up
+            patched base-image packages; this job never blocks a merge either way.
 
       - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '0'
         name: Say so
@@ -181,14 +179,14 @@ jobs:
         uses: ./.github/actions/upsert-tracking-issue
         with:
           label: image-scan
-          color: D93F0B
+          label-color: D93F0B
           label-description: A pinned base image can be repinned to fix a CVE
           title: Base image repin would close known vulnerabilities
-          actionable: ${{ steps.scan.outputs.verdict == '2' }}
-          clean-comment: >-
+          resolved: ${{ steps.scan.outputs.verdict != '2' }}
+          close-comment: >-
             The pins no longer have a fixable finding a repin would clear.
             [Latest run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          report-file: ${{ runner.temp }}/image-scan-report.md
+          body-file: ${{ runner.temp }}/image-scan-report.md
 
       - if: steps.scan.outputs.verdict == '2'
         run: echo "::warning title=trivy::A pinned base image can be repinned to close known vulnerabilities - see the issue"

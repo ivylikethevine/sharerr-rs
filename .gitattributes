@@ -1,0 +1,8 @@
+# Everything text checks out LF everywhere. Ported from say-hi's identical
+# file, which needed this to stop Git for Windows' core.autocrlf=true from
+# handing a Windows checkout CRLF shell scripts; this repo has no Windows CI
+# leg, but the same default would still hand a Windows *contributor's* local
+# checkout CRLF versions of scripts/*.sh and docker/*, which shellcheck and
+# hadolint both run against unmodified in CI - cheap correctness either way.
+* text=auto eol=lf
+*.webp binary

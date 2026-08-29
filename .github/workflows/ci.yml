@@ -213,7 +213,15 @@ jobs:
           persist-credentials: false
 
       # Would have caught the secret spliced into a remote `sh -c` string.
-      - run: shellcheck scripts/run_docker_tests.sh scripts/run_docker_tests_two_instance.sh scripts/screenshot_pages.sh scripts/run_codeql.sh
+      # The .github/ half was added alongside ./setup-tool: a `run:` block
+      # inside a composite action is exactly the kind of shell nothing here
+      # would otherwise lint, and check_tool_versions.sh/scan_pinned_images.sh
+      # were sitting unchecked next to it.
+      - run: >
+          shellcheck scripts/run_docker_tests.sh scripts/run_docker_tests_two_instance.sh
+          scripts/screenshot_pages.sh scripts/run_codeql.sh
+          .github/scripts/check_tool_versions.sh .github/scripts/scan_pinned_images.sh
+          .github/actions/setup-tool/install.sh .github/actions/setup-tool/lib.sh
 
       # Schema-validates the compose file without needing the images or a daemon.
       - run: docker compose -f docker/compose.test.yml config -q
@@ -271,15 +279,19 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # Pinned to a known-good version rather than the newest on every run —
-      # zizmor's own findings should change because the workflows changed, not
-      # because the linter did.
-      - run: pip install --user zizmor==1.29.0
+      # Cached and pinned to a known-good version rather than the newest on
+      # every run — zizmor's own findings should change because the workflows
+      # changed, not because the linter did. Used to be `pip install` on every
+      # run; ./setup-tool downloads the same pinned release once per version
+      # and caches the binary after that.
+      - uses: ./.github/actions/setup-tool
+        with:
+          tool: zizmor
 
       - name: Audit the workflows
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ~/.local/bin/zizmor --no-progress .github/
+        run: zizmor --no-progress .github/
 
   # Bad `needs`, invalid contexts, a step referencing an undefined output — the
   # workflows are code too, and nothing before this checked their syntax
@@ -294,10 +306,14 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      # Was `go install` on every run; ./setup-tool caches the pinned release
+      # binary instead of resolving and building the module each time.
+      - uses: ./.github/actions/setup-tool
+        with:
+          tool: actionlint
 
       - name: Lint the workflows
-        run: ~/go/bin/actionlint -color
+        run: actionlint -color
 
   # Advisory, not a gate: DL3008 (pin every apt package) and its neighbours are
   # about a Debian mirror's churn, not a defect in this Dockerfile — worth
@@ -345,21 +361,20 @@ jobs:
           exit "$status"
         continue-on-error: true
 
-      - name: Say so, without failing
+      - name: Truncate the findings before they go in the summary
         if: steps.lint.outputs.found == '1'
-        run: |
-          set -euo pipefail
-          echo "::warning title=hadolint::Dockerfile lint findings above - advisory, not blocking"
-          {
-            echo "### hadolint found something"
-            echo
-            echo "Advisory only: this job never blocks a merge. \`.hadolint.yaml\` carries a"
-            echo "reason per silenced rule; anything reaching here is deliberately left visible."
-            echo
-            echo '```'
-            sed -n '1,80p' "$RUNNER_TEMP/hadolint.out"
-            echo '```'
-          } >>"$GITHUB_STEP_SUMMARY"
+        run: sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
+
+      - if: steps.lint.outputs.found == '1'
+        uses: ./.github/actions/advisory-note
+        with:
+          title: hadolint
+          warning-body: Dockerfile lint findings above - advisory, not blocking
+          heading: hadolint found something
+          body: >-
+            Advisory only: this job never blocks a merge. `.hadolint.yaml` carries a
+            reason per silenced rule; anything reaching here is deliberately left visible.
+          report-file: ${{ runner.temp }}/hadolint-summary.out
 
   # Advisory, same reasoning as hadolint above: a heading level or a stray
   # long line in a doc is worth seeing and has never shipped a bug.
@@ -383,14 +398,49 @@ jobs:
             **/*.md
           config: ".markdownlint.yaml"
 
-      - name: Say so, without failing
-        if: steps.lint.outcome == 'failure'
-        run: |
-          set -euo pipefail
-          echo "::warning title=markdownlint::Markdown lint findings above - advisory, not blocking"
-          {
-            echo "### markdownlint found something"
-            echo
-            echo "Advisory only: this job never blocks a merge. See the step above for the"
-            echo "findings, or run \`markdownlint-cli2 '**/*.md'\` locally."
-          } >>"$GITHUB_STEP_SUMMARY"
+      - if: steps.lint.outcome == 'failure'
+        uses: ./.github/actions/advisory-note
+        with:
+          title: markdownlint
+          warning-body: Markdown lint findings above - advisory, not blocking
+          heading: markdownlint found something
+          body: >-
+            Advisory only: this job never blocks a merge. See the step above for the
+            findings, or run `markdownlint-cli2 '**/*.md'` locally.
+
+  # Advisory, and deliberately so for now, unlike say-hi's identical tool -
+  # that repo's _typos.toml roster was built up over a real gating run; this
+  # is the first run of `typos` against this tree at all, and _typos.toml's
+  # own header says why it starts with no entries. Promote this to a gate
+  # (same shape as `fmt`/`test`/`msrv` above, no `continue-on-error`) once a
+  # run or two has come back clean or the allowlist has caught up with what's
+  # left. Not gated on `changes`: a typo can live in Rust source as easily as
+  # in a doc, so this runs on every push and PR like workflow-lint does.
+  typos:
+    name: typos (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-tool
+        with:
+          tool: typos
+
+      - id: lint
+        name: Check for typos
+        continue-on-error: true
+        run: typos
+
+      - if: steps.lint.outcome == 'failure'
+        uses: ./.github/actions/advisory-note
+        with:
+          title: typos
+          warning-body: Possible typo(s) found above - advisory, not blocking
+          heading: typos found something
+          body: >-
+            Advisory only: this job never blocks a merge. A real misspelling should
+            be fixed; a false positive belongs in `_typos.toml` with a comment saying
+            what the word is - see that file's own header. Reproduce with `typos`
+            locally.

@@ -272,12 +272,16 @@ stays quiet unless the second is strictly better. `--ignore-unfixed` is
 load-bearing there, not a flag: without it the permanent won't-fix pile makes
 every comparison noise against noise.
 
-**Pinned tool versions that dependabot cannot see** are zizmor and actionlint,
-installed by `pip` and `go install` in `ci.yml`. `check_tool_versions.sh`
-extracts each pin _out of `ci.yml` by regex_ rather than duplicating it, so the
-roster cannot drift from what CI runs — a row whose regex stops matching is
-reported as an error, not skipped. hadolint and trivy are deliberately
-unpinned (newest release, always), so they have no row.
+**Pinned tool versions that dependabot cannot see** are zizmor, actionlint,
+cargo-llvm-cov, lychee and typos, each installed from a cached, pinned GitHub
+release asset by `.github/actions/setup-tool` (ported from say-hi's
+identically-named action, which solved this the same way there first) rather
+than a fresh `pip install`/`go install`/`cargo install` on every run.
+`.github/actions/setup-tool/tools.txt` is the one roster — version, download
+URL, archive shape, verify flag — read both by that action and by
+`check_tool_versions.sh`, so a pin cannot go undrift-checked; bumping one is a
+hand edit to that file and nothing else. hadolint and trivy are deliberately
+unpinned (newest release, always), so neither has a row.
 
 The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
 weighed but not all committed to as well as firm intentions — an idea belongs

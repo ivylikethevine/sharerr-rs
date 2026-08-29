@@ -97,18 +97,20 @@ jobs:
 
       # See .github/actions/upsert-tracking-issue for the shape this, tool-
       # versions.yml, and image-scan.yml's `pins` job all share.
+      # warning-title/warning-body fold in what used to be a separate trailing
+      # step here - the action emits the ::warning itself once the issue is
+      # upserted, rather than this workflow doing it a second time after.
       - name: Keep the tracking issue current
         uses: ./.github/actions/upsert-tracking-issue
         with:
           label: advisories
-          color: B60205
+          label-color: B60205
           label-description: cargo-deny reports an advisory against the locked dependency tree
           title: A RUSTSEC advisory affects a dependency in Cargo.lock
-          actionable: ${{ steps.check.outputs.found != '0' }}
-          clean-comment: >-
+          resolved: ${{ steps.check.outputs.found == '0' }}
+          close-comment: >-
             cargo-deny reports no advisories against the current `Cargo.lock`.
             [Latest run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          report-file: ${{ runner.temp }}/report.md
-
-      - if: steps.check.outputs.found != '0'
-        run: echo "::warning title=cargo-deny::A RUSTSEC advisory affects Cargo.lock - see the issue"
+          body-file: ${{ runner.temp }}/report.md
+          warning-title: cargo-deny
+          warning-body: A RUSTSEC advisory affects Cargo.lock - see the issue

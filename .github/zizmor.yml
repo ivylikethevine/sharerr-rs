@@ -11,7 +11,7 @@ rules:
   unpinned-tools:
     ignore:
       - image-scan.yml:89
-      - image-scan.yml:142
+      - image-scan.yml:140
 
   # pages.yml's `workflow_run` trigger is the usual dangerous shape in name
   # only: the flagged risk is a privileged run checking out the head SHA of

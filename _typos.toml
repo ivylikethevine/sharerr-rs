@@ -1,0 +1,19 @@
+# The allowlist for the `typos (advisory)` job in ci.yml. Ported from say-hi's
+# identically-named file, which established the format and the rule this
+# follows: each entry says what it is, so a real typo cannot hide behind a
+# stale exception.
+#
+# Starts empty of entries on purpose. say-hi's roster was built up against a
+# real, gating `typos` run over years of that tree; this repo's first run
+# under ci.yml's new advisory job is what will actually say which of
+# sharerr's own proper nouns (crate names, protocol terms, crypto primitives)
+# the tool misreads as a misspelling. Add rows here as that run finds them,
+# each with a comment saying what the word is - not preemptively, which would
+# just be guessing at findings nobody has seen yet. See the header note on
+# .scorecard.yml for the same argument made about a different kind of guess.
+[default]
+extend-ignore-re = []
+
+[default.extend-words]
+
+[default.extend-identifiers]

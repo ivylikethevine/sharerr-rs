@@ -1,0 +1,75 @@
+name: Setup tool
+# One action for every CI tool this repo pins to a fixed version and installs
+# from a GitHub release asset — ported from say-hi's identically-named action,
+# which solved the same problem there first. Before this, ci.yml installed
+# zizmor with `pip`, actionlint with `go install`, coverage.yml built
+# cargo-llvm-cov from source with `cargo install`, and link-check.yml built
+# lychee from source the same way — four mechanisms, no caching, and each one
+# recompiling or re-resolving on every single run.
+#
+# The roster — version, download URL, archive shape, verify flag — lives in
+# ./tools.txt rather than in one near-identical action.yml per tool, and
+# .github/scripts/check_tool_versions.sh reads the same rows, so a pin cannot
+# go undrift-checked. This inverts this repo's previous position (recorded in
+# check_tool_versions.sh's old header) that a pin should live in the `run:`
+# line that uses it — tools.txt is the new home, and workflows read it back.
+# The trade is worth it: one cached install path, and drift coverage for
+# `lychee` and `cargo-llvm-cov`, which the old regex-over-workflow-files
+# roster never listed at all.
+#
+# Deliberately NOT ported here: hadolint and trivy. Both float on
+# `releases/latest` in this repo on purpose (ci.yml's hadolint job and
+# image-scan.yml's trivy job each say why — a pinned scanner is a scanner
+# that stops finding anything new), and this action's model is a fixed pin
+# resolved once and cached by it. Bolting a "resolve latest, then cache under
+# that" mode on for two tools would be new complexity for a small win — both
+# already avoid the recompile cost this action targets (hadolint ships a raw
+# binary off `curl`, trivy already goes through the maintained
+# `aquasecurity/setup-trivy` action).
+description: Install one of the pinned CI tools listed in ./tools.txt, with caching
+
+inputs:
+  tool:
+    description: which tool to install - the first column of a ./tools.txt row
+    required: true
+  version:
+    description: override that row's pin (normally left empty)
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: the version that was installed
+    value: ${{ steps.resolve.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    # actions/cache needs the version as an expression, and the pin lives in
+    # tools.txt rather than in this file - so resolve it in a prior step and
+    # read it back as an output. That is what keeps the roster out of YAML.
+    - name: Resolve the pin for ${{ inputs.tool }}
+      id: resolve
+      shell: bash
+      env:
+        SR_TOOL: ${{ inputs.tool }}
+        SR_TOOL_VERSION: ${{ inputs.version }}
+      run: '"$GITHUB_ACTION_PATH/install.sh" resolve'
+
+    # runner.os/runner.arch on every tool, even though every current row is
+    # Linux-only (this repo has no macOS jobs) - one key shape beats adding a
+    # per-tool column the day that stops being true.
+    - name: Cache ${{ inputs.tool }}
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: /usr/local/bin/${{ inputs.tool }}
+        key: ${{ inputs.tool }}-${{ steps.resolve.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install ${{ inputs.tool }}
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        SR_TOOL: ${{ inputs.tool }}
+        SR_TOOL_VERSION: ${{ steps.resolve.outputs.version }}
+      run: '"$GITHUB_ACTION_PATH/install.sh" install'

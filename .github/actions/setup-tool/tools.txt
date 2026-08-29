@@ -1,0 +1,40 @@
+# The pinned CI tools, one row per tool - read by ./install.sh (which installs
+# one) and by ../../scripts/check_tool_versions.sh (which reports drift against
+# each upstream's latest release). Both reach it through ./lib.sh, so this file
+# is the single roster: a tool pinned here cannot go undrift-checked. Ported
+# from say-hi's identically-shaped tools.txt.
+#
+#   name|pin|kind|url|verify|check
+#
+# name    the first column an `uses: ./.github/actions/setup-tool` names, and
+#         the executable's name - install.sh saves a `raw` download under it,
+#         and finds it inside an archive with `find -name <name>`.
+# pin     the version, WITHOUT a leading "v" even where upstream's tag has one:
+#         some projects tag v1.2.3 but name the asset 1.2.3, and only one
+#         placeholder is substituted. The url column carries the literal "v"
+#         (or, for lychee, "lychee-v") where the tag needs it.
+# kind    raw (a bare executable) or tar.gz (an archive to search inside).
+#         say-hi's tools.txt also has cmake/make kinds for tools this repo
+#         does not need (kcov, mandoc) - copy that shape here if a future tool
+#         ships only as source.
+# url     %v is the pin. %a would be the asset slug for this runner
+#         (linux.x86_64 / darwin.aarch64 / darwin.x86_64), resolved first so a
+#         version can never be mistaken for one - unused below because every
+#         job that installs one of these runs on Linux.
+# verify  the flag install.sh runs the installed tool with as a smoke test.
+# check   where to look for the latest release: github:<owner>/<repo>, or "-"
+#         to opt out of the drift report entirely.
+#
+# Bumping a pin is a hand edit here, and nothing else - the caching action.yml
+# reads the version back out of install.sh's `resolve`.
+zizmor|1.29.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor
+actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint
+cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|--version|github:taiki-e/cargo-llvm-cov
+# lychee tags its releases "lychee-v<version>", not "v<version>" like every
+# other row here - the url column copes fine (the literal "lychee-v" prefix
+# just sits in front of %v), but the drift checker's comparison assumes a
+# bare "v<version>" tag and would misread "lychee-v0.24.2" as newer than any
+# pin forever. Opted out (check = "-") rather than special-cased for one row;
+# bump this by hand against https://github.com/lycheeverse/lychee/releases.
+lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|-
+typos|1.49.0|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos

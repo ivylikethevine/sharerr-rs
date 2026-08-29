@@ -1,0 +1,111 @@
+name: Bug report
+description: Something sharerr did that it should not have, or did not do that it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Nothing exploitable here, please — [docs/SECURITY.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#reporting-a-vulnerability)
+        has the private advisory route for that.
+
+        sharerr sits between an *arr app, a torrent client, and a deployment
+        layout that can involve a VPN sidecar — the useful bug report says
+        which of those three is in play. `sharerr doctor` answers most of the
+        "is this even configured right" half on its own.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >-
+        The command or UI action, and anything about the library or the
+        request that matters.
+      placeholder: |
+        sharerr sync
+        # a Sonarr series tagged `sharerr`, path mapped through /data/media
+      render: shell
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arr
+    attributes:
+      label: Which *arr app
+      options:
+        - Sonarr
+        - Radarr
+        - Lidarr
+        - Readarr
+        - none (a plain directory, no *arr app)
+        - something else / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Which torrent client
+      options:
+        - qBittorrent
+        - Transmission
+        - rTorrent / ruTorrent
+        - something else / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layout
+    attributes:
+      label: Deployment layout
+      description: See docs/CONFIGURATION.md and docker/deploy/ for what each name covers.
+      options:
+        - direct (no VPN)
+        - vpn (gluetun sidecar, one instance)
+        - sidecar
+        - dual-vpn (two independent stacks)
+        - not using the compose deployment examples at all
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`sharerr doctor` output"
+      description: >-
+        Redact hostnames, API keys and paths freely — what matters is which
+        check failed and why. Paste the plain text output.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: How you're running it
+      description: The image tag or build (a `sha-*`/`v*` GHCR tag, or built from source), and the OS/architecture of the host.
+      placeholder: ghcr.io/ivylikethevine/sharerr-rs:v0.3.0, Debian 12, x86_64
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before you send it
+      options:
+        - label: >-
+            This is not an exploitable security issue (those go to
+            docs/SECURITY.md's private advisory route instead).
+          required: true
+        - label: >-
+            If this is about something sharerr doesn't do, I checked
+            docs/UNSUPPORTED.md — it may already carry a verdict and a reason.
+          required: false

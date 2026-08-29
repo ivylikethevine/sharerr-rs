@@ -50,11 +50,15 @@ jobs:
           # sharing a key with ci.yml's `test` job would thrash both caches.
           key: coverage
 
-      # Pinned like every action above it: `--locked` only honours the tool's
-      # own lockfile, so without `--version` this still installs whatever
-      # published most recently and a coverage run can change under a commit
-      # that touched no code.
-      - run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+      # Pinned like every action above it: without a fixed version this could
+      # install whatever published most recently, and a coverage run could
+      # change under a commit that touched no code. Used to be `cargo install
+      # --version 0.9.0 --locked`, a fresh source build every run; ./setup-tool
+      # downloads the same pin as a release binary once per version and caches
+      # it after that.
+      - uses: ./.github/actions/setup-tool
+        with:
+          tool: cargo-llvm-cov
 
       # Collects profile data once; `report` below reads it twice (HTML, then
       # a plain-text summary) without re-running the suite either time.

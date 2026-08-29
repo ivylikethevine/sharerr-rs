@@ -29,6 +29,29 @@
 # for a second, unaudited build to happen. The `main`-push sha tag skips this
 # entirely — see the header paragraph above for why that is safe to leave
 # unattended.
+#
+# `workflow_dispatch` is this workflow's rehearsal: `build` now pushes to the
+# same provisional `pending-<sha>` tag on a manual dispatch as it does on a real
+# `v*` push (see the `login`/`push`/`tags` conditions below, each with a
+# `github.event_name == 'workflow_dispatch'` branch added), and gets a real
+# provenance attestation against that tag too — so the whole build-push-attest
+# path can be exercised any day, not only discovered broken the day a tag is
+# actually pushed. `publish` cannot be reached this way: it now hard-requires
+# `github.event_name == 'push'` in addition to the tag-ref check, closing a real
+# gap this file had before — dispatching against an *existing* `v*` tag ref
+# already satisfied `startsWith(github.ref, 'refs/tags/v')` on its own, which
+# meant a manual dispatch aimed at a released tag could already reach `publish`
+# and retag `latest`, contingent only on the `release` environment's reviewer
+# setting actually being configured (which, per the comment below, it might not
+# be). The event check makes that impossible regardless of environment config.
+#
+# No separate "fake version" input, unlike say-hi's release.yml rehearsal this
+# is modeled on: say-hi's package manifests need an embedded version string to
+# build at all, where this workflow's tags are git-ref-derived and the fake
+# provisional destination (`pending-<sha>`) needs no version to be meaningful -
+# the sha it is keyed on is real either way. `needs.build.outputs.tags` (the
+# human-facing `latest`/semver tags `meta` would compute) is simply never read
+# on a dispatch, because `publish` never runs on one.
 
 name: Docker
 
@@ -135,11 +158,12 @@ jobs:
       # Only when something is actually going to be pushed. A PR from a fork gets a
       # read-only GITHUB_TOKEN, so logging in would fail for exactly the
       # contributors least equipped to diagnose it — there is nothing to log in for
-      # on a PR or manual-dispatch build either. Keep this condition identical to
-      # `push:` below.
+      # on a PR. `workflow_dispatch` now logs in too: see the header comment's
+      # rehearsal paragraph. Keep this condition identical to `push:` below.
       - if: >-
           startsWith(github.ref, 'refs/tags/v') ||
-          (github.ref == 'refs/heads/main' && github.event_name == 'push')
+          (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+          github.event_name == 'workflow_dispatch'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -191,15 +215,18 @@ jobs:
           # A `v*` tag pushes to the provisional ref above — the real tags
           # computed by `meta` reach GHCR only once `publish` is approved. A
           # `main` push ships straight to its own sha-only tag with no
-          # approval gate — see that step's own comment for why. Every other
-          # event keeps pushing nothing at all: PR and manual-dispatch builds
-          # still exist solely to compile, which is what makes this job
-          # double as the MSRV gate.
+          # approval gate — see that step's own comment for why. A manual
+          # `workflow_dispatch` also pushes now, to the same provisional ref a
+          # tag push would use — the rehearsal path; see the header comment.
+          # Every other event (a PR) keeps pushing nothing at all: those
+          # builds still exist solely to compile, which is what makes this
+          # job double as the MSRV gate.
           push: >-
             ${{ startsWith(github.ref, 'refs/tags/v') ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+                github.event_name == 'workflow_dispatch' }}
           tags: >-
-            ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref ||
+            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.pending.outputs.ref ||
                 (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
                 steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -217,8 +244,11 @@ jobs:
       # <owner>/<repo>` against whichever tag `publish` eventually points at it.
       # `push-to-registry` attaches it to the image in GHCR as an OCI referrer,
       # so it travels with the digest through the retag `publish` does below
-      # rather than needing to be regenerated against the final tags.
-      - if: startsWith(github.ref, 'refs/tags/v')
+      # rather than needing to be regenerated against the final tags. Also runs
+      # on a rehearsal dispatch, against the same provisional tag a real tag
+      # push would attest — the rehearsal is meant to exercise this step too,
+      # not skip it and discover it broken on the day it matters.
+      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
@@ -237,10 +267,34 @@ jobs:
   publish:
     name: publish to GHCR (manual approval)
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # `github.event_name == 'push'`, not just the ref check: a workflow_dispatch
+    # run against an *existing* `v*` tag's ref would otherwise satisfy
+    # `startsWith(github.ref, 'refs/tags/v')` on its own and reach this job too
+    # - a real gap `build`'s rehearsal branch (see the header comment) would
+    # otherwise open, unattended, contingent only on whether the `release`
+    # environment's reviewer setting has actually been configured. This makes
+    # the rehearsal path structurally unable to publish regardless of that.
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release
+    # Serialized, never cancelled, independent of the workflow-level
+    # `docker-${{ github.ref }}` group above: two close `v*` tags each carry a
+    # distinct ref (so the workflow-level group would let them run side by
+    # side), but only one retag onto the shared `latest` tag should ever be in
+    # flight at a time. A branch/PR build cancelling a superseded run is still
+    # correct and unaffected - this concurrency block only scopes the one job
+    # that touches the human-facing tags.
+    #
+    # `release-docker`, not the bare `release` docker-lighthouse.yml's own
+    # `publish` job also uses - deliberately a different group. The header
+    # comment's "a break in one build cannot hold the other's release" would
+    # stop being true if the two shared a queue: a stuck sharerr publish would
+    # then also block every lighthouse publish behind it, and neither image
+    # is a dependency of the other's release.
+    concurrency:
+      group: release-docker
+      cancel-in-progress: false
     permissions:
       packages: write
     steps:

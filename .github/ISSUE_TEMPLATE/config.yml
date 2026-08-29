@@ -1,0 +1,12 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability
+    url: https://github.com/ivylikethevine/sharerr-rs/security/advisories/new
+    about: >-
+      Anything exploitable goes here privately, never in a public issue.
+      docs/SECURITY.md also lists what's in and out of scope.
+  - name: Security policy
+    url: https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md
+    about: >-
+      What's in scope, what's out of scope, and how reports are handled —
+      worth reading before deciding something is a bug.

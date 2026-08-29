@@ -26,16 +26,16 @@ jobs:
         with:
           persist-credentials: false
 
-      # Intentionally the newest lychee, not a pin: this is a link checker, not
-      # a style linter, and the freshness that matters is the crawler's own
-      # (redirect handling, retry behaviour), same reasoning as Trivy in
-      # image-scan.yml.
-      - name: Install lychee
-        # Version-pinned for the same reason the actions above are SHA-pinned:
-        # `--locked` alone still floats to the newest release, and a link
-        # checker that changes its own rules mid-week fails a PR that changed
-        # no links.
-        run: cargo install lychee --version 0.24.2 --locked
+      # Version-pinned, unlike Trivy in image-scan.yml: a link checker that
+      # changes its own crawling rules mid-week would fail a PR that changed
+      # no links, where a stale vulnerability scanner just stops finding
+      # things - the two advisory checks want opposite freshness. Used to be
+      # `cargo install --version 0.24.2 --locked`, a fresh source build every
+      # run; ./setup-tool downloads the same pin as a release binary once per
+      # version and caches it after that.
+      - uses: ./.github/actions/setup-tool
+        with:
+          tool: lychee
 
       # 200/204/206 are ordinary success; 429 is a server saying "you are
       # checking too fast", not "the link is dead" — treating it as a failure
@@ -46,7 +46,7 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          ~/.cargo/bin/lychee --accept 200,204,206,429 \
+          lychee --accept 200,204,206,429 \
             --format markdown --output "$RUNNER_TEMP/lychee.md" \
             '**/*.md' crates/sharerr/src/web/docs.rs
           status=$?
@@ -54,15 +54,12 @@ jobs:
           exit "$status"
 
       - if: steps.check.outputs.found == '1'
-        name: Say so, without failing
-        run: |
-          set -euo pipefail
-          echo "::warning title=lychee::Broken link(s) found in the docs - advisory, not blocking"
-          {
-            echo "### lychee found a broken link"
-            echo
-            cat "$RUNNER_TEMP/lychee.md"
-            echo
-            echo "Advisory only: this job never blocks a merge. Reproduce with"
-            echo "\`lychee '**/*.md' crates/sharerr/src/web/docs.rs\`."
-          } >>"$GITHUB_STEP_SUMMARY"
+        uses: ./.github/actions/advisory-note
+        with:
+          title: lychee
+          warning-body: Broken link(s) found in the docs - advisory, not blocking
+          heading: lychee found a broken link
+          body: >-
+            Advisory only: this job never blocks a merge. Reproduce with
+            `lychee '**/*.md' crates/sharerr/src/web/docs.rs`.
+          report-file: ${{ runner.temp }}/lychee.md

@@ -1,17 +1,18 @@
 name: Tool versions
 
-# Weekly drift check over the tools CI installs by pip and `go install` — the
-# one class of pin dependabot cannot see (.github/dependabot.yml's header says
-# so). Everything under `uses:` is dependabot's; hadolint and trivy are
-# deliberately unpinned; what is left is zizmor and actionlint, whose versions
-# live in a `run:` line and move only when somebody edits them.
+# Weekly drift check over the tools ./setup-tool installs from a pinned
+# release asset — the one class of pin dependabot cannot see
+# (.github/dependabot.yml's header says so). Everything under `uses:` is
+# dependabot's; hadolint and trivy are deliberately unpinned; what is left is
+# zizmor, actionlint, cargo-llvm-cov, lychee and typos, whose versions live in
+# .github/actions/setup-tool/tools.txt and move only when somebody edits them.
 #
 # The signal is one tracking issue, kept current: opened when a pin is behind,
 # rewritten with the current table on every later run, closed by the run that
 # finds everything current. A stale pin is a standing state, not an event, and
 # a ::warning in a scheduled run that nobody opens is a signal only in the sense
 # that a tree falling in a forest is. The annotations stay too, for whoever does
-# open the run. The bump itself stays a one-line edit to ci.yml.
+# open the run. The bump itself stays a one-line edit to tools.txt.
 
 on:
   schedule:
@@ -50,7 +51,7 @@ jobs:
         run: |
           set -uo pipefail
           rc=0
-          .github/scripts/check_tool_versions.sh | tee "$RUNNER_TEMP/tools.txt" || rc=$?
+          .github/scripts/check_tool_versions.sh | tee "$RUNNER_TEMP/drift-table.txt" || rc=$?
           echo "outdated=$rc" >>"$GITHUB_OUTPUT"
 
       - name: Build the report
@@ -62,10 +63,10 @@ jobs:
           set -euo pipefail
           {
             echo "$OUTDATED pinned tool(s) are behind upstream."
-            echo "Bump each one where it is installed; the drift check reads the same line."
+            echo "Bump each one in .github/actions/setup-tool/tools.txt; the drift check reads the same file."
             echo
             echo '```'
-            cat "$RUNNER_TEMP/tools.txt"
+            cat "$RUNNER_TEMP/drift-table.txt"
             echo '```'
             echo
             echo "Found by [\`tool-versions\`]($RUN_URL). Closed automatically once every pin is current."
@@ -78,11 +79,11 @@ jobs:
         uses: ./.github/actions/upsert-tracking-issue
         with:
           label: tool-versions
-          color: 0E8A16
+          label-color: 0E8A16
           label-description: A tool version pinned in a workflow is behind upstream
           title: Pinned CI tools are behind their upstream releases
-          actionable: ${{ steps.check.outputs.outdated != '0' }}
-          clean-comment: >-
+          resolved: ${{ steps.check.outputs.outdated == '0' }}
+          close-comment: >-
             Every pin is current again.
             [Latest run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          report-file: ${{ runner.temp }}/report.md
+          body-file: ${{ runner.temp }}/report.md

@@ -69,35 +69,18 @@ jobs:
       # the build untouched. Looked up by API query for the newest successful
       # coverage.yml run on `main`, rather than off the triggering event's own
       # payload — that serves `push` and `workflow_dispatch` runs the same way
-      # it serves `workflow_run`, with one code path.
-      - name: Find the last coverage run
+      # it serves `workflow_run`, with one code path. Ported from say-hi's
+      # ./fetch-latest-artifact action, which this repo had the same
+      # find-then-download pair hand-written for, once.
+      - name: Fetch the last coverage run's badge endpoint
         id: cov-run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          run_id="$(gh api \
-            "repos/$REPO/actions/workflows/coverage.yml/runs?branch=main&status=success&per_page=1" \
-            --jq '.workflow_runs[0].id // empty')"
-          echo "run_id=$run_id" >>"$GITHUB_OUTPUT"
-          if [ -n "$run_id" ]; then
-            echo "coverage figure from run $run_id"
-          else
-            echo "no successful coverage run on main yet - the badge stays 'not measured'"
-          fi
-
-      # continue-on-error, not a gate: an expired or missing artifact is a grey
-      # badge, not a failed site deploy.
-      - name: Fetch that run's badge endpoint
-        if: steps.cov-run.outputs.run_id != ''
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: ./.github/actions/fetch-latest-artifact
         with:
-          name: coverage-badge
-          path: ${{ runner.temp }}/cov
-          run-id: ${{ steps.cov-run.outputs.run_id }}
-          github-token: ${{ github.token }}
+          workflow: coverage.yml
+          artifact-name: coverage-badge
+          dest-subdir: cov
+          found-message: coverage figure from run
+          missing-message: no successful coverage run on main yet - the badge stays 'not measured'
 
       # jekyll-build-pages is a *container* action - it runs as root inside
       # docker, so _site comes back root-owned and a plain mkdir under it is

@@ -100,6 +100,10 @@ change.
 All fixtures are synthetic — invented titles, seeded pseudo-random bytes. No
 real content is involved anywhere.
 
+See [`docs/TESTING.md`](TESTING.md) for the fuller reference: every
+`run_docker_tests.sh` flag, the compose stacks each one drives, and the
+coverage caveat.
+
 ## MSRV
 
 CI's `msrv (1.98)` job runs `cargo check --workspace --all-targets

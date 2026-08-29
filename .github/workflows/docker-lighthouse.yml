@@ -15,7 +15,10 @@
 # to a provisional tag nobody would browse to, and a `publish` job behind a
 # required reviewer retags that exact digest onto the tags an operator would
 # pull. Read docker.yml for the reasoning behind each of those choices; only
-# the differences are commented here.
+# the differences are commented here. That includes the `workflow_dispatch`
+# rehearsal path (`build` pushes to `pending-<sha>` and attests it on a manual
+# dispatch too) and `publish`'s `github.event_name == 'push'` gate - both
+# ported here verbatim for the identical reason docker.yml has them.
 
 name: Docker (lighthouse)
 
@@ -113,7 +116,8 @@ jobs:
 
       - if: >-
           startsWith(github.ref, 'refs/tags/v') ||
-          (github.ref == 'refs/heads/main' && github.event_name == 'push')
+          (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+          github.event_name == 'workflow_dispatch'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -159,9 +163,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: >-
             ${{ startsWith(github.ref, 'refs/tags/v') ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+                github.event_name == 'workflow_dispatch' }}
           tags: >-
-            ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref ||
+            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.pending.outputs.ref ||
                 (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
                 steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -171,7 +176,9 @@ jobs:
           cache-from: type=gha,scope=lighthouse
           cache-to: type=gha,mode=min,scope=lighthouse
 
-      - if: startsWith(github.ref, 'refs/tags/v')
+      # Also runs on a rehearsal dispatch - see docker.yml's own attestation
+      # step comment.
+      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
@@ -186,10 +193,20 @@ jobs:
   publish:
     name: publish lighthouse to GHCR (manual approval)
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # See docker.yml's own `publish` job comment: `github.event_name == 'push'`
+    # closes the same gap here - a dispatch against an existing `v*` ref would
+    # otherwise satisfy the bare ref check on its own.
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release
+    # A distinct group from docker.yml's own `publish` job (`release-docker`) -
+    # see that job's comment. `release-lighthouse`, not the bare `release`,
+    # for the same reason: a stuck sharerr publish must never queue behind, or
+    # block, a lighthouse one.
+    concurrency:
+      group: release-lighthouse
+      cancel-in-progress: false
     permissions:
       packages: write
     steps:

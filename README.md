@@ -67,7 +67,8 @@ supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
 roadmap, including ideas considered but not all committed
 to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), [the
 lighthouse's design rationale](docs/LIGHTHOUSE.md), [the security
-policy](docs/SECURITY.md), and [how to contribute](docs/CONTRIBUTING.md).
+policy](docs/SECURITY.md), [testing](docs/TESTING.md), [releasing a
+version](docs/RELEASING.md), and [how to contribute](docs/CONTRIBUTING.md).
 
 ## What works today
 
