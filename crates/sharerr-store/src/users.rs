@@ -190,7 +190,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use sharerr_testkit::mock::fresh_password;
+    use sharerr_testkit::secrets::fresh_password;
 
     fn secret(s: &str) -> SecretString {
         SecretString::from(s.to_owned())

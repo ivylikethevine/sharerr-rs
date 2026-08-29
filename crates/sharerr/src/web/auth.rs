@@ -459,7 +459,7 @@ mod tests {
 
     use super::*;
     use axum::http::HeaderValue;
-    use sharerr_testkit::mock::fresh_password;
+    use sharerr_testkit::secrets::fresh_password;
 
     #[tokio::test]
     async fn a_session_round_trips_and_can_be_revoked() {

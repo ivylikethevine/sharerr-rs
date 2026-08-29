@@ -137,9 +137,15 @@ pub mod secret_keys {
         format!("peer.gossip.{peer_id}")
     }
 
-    /// Whether `value` is a usable value for `key` — the checks every path
-    /// that stores a secret (the web UI and `sharerr vault set`) must agree
-    /// on, so a value one accepts cannot be one the other would have refused.
+    /// Whether `value` is a usable value for `key`.
+    ///
+    /// `sharerr_store::Vault::put` calls this itself before sealing anything,
+    /// so every secret-writing path enforces the same shape whether or not
+    /// its own caller remembers to check first — `commands/vault.rs` and
+    /// `web/settings.rs` both call it early anyway, for a cheaper rejection
+    /// that skips the vault's file I/O and locking, but `Vault::put` is what
+    /// actually makes a value one caller accepts impossible for another to
+    /// have stored regardless.
     ///
     /// Only [`TRACKER_TOKEN`] has a shape today: it becomes one path segment
     /// of every announce URL, unencoded, and the tracker route matches one
@@ -1183,6 +1189,30 @@ impl std::fmt::Debug for PeerImport {
     }
 }
 
+/// The `[[peers]]` bootstrap block as its own document: what
+/// `web::peers::export` writes to a downloadable file, and what an operator
+/// pastes (or restores wholesale) back into `sharerr.toml`.
+///
+/// A dedicated type rather than each of the three places that touch this
+/// key's name re-wrapping a bare `Vec<PeerImport>` on its own: [`Config::peers`]
+/// itself, `ConfigFile::clear_peers`'s `Edit::unset("peers")`, and — until
+/// this type existed — a struct defined locally inside `web::peers::export`.
+/// Nothing tied those three spellings together but convention; a
+/// `#[serde(rename)]` on any one of them would have silently desynced the
+/// others.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct PeerImportDocument {
+    pub peers: Vec<PeerImport>,
+}
+
+impl PeerImportDocument {
+    /// Rendered exactly as `web::peers::export` writes it to disk: pretty
+    /// TOML, one `[[peers]]` table per friend.
+    pub fn to_toml(&self) -> Result<String, toml_edit::ser::Error> {
+        toml_edit::ser::to_string_pretty(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1460,6 +1490,32 @@ mod tests {
         };
         let document = serde_json::to_value(&config).unwrap();
         assert!(document.get("peers").is_none(), "{document:#}");
+    }
+
+    /// `PeerImportDocument` exists so the write side (this) and the read side
+    /// (`Config::peers`, `ConfigFile::clear_peers`'s `Edit::unset("peers")`)
+    /// can never spell the `[[peers]]` key differently — proven here by
+    /// parsing what it actually writes back with the same `toml_edit` layer
+    /// `ConfigFile` uses, rather than trusting the two sides by inspection.
+    #[test]
+    fn peer_import_document_writes_the_key_every_other_reader_expects() {
+        let document = PeerImportDocument {
+            peers: vec![peer_import("Sam")],
+        };
+        let text = document.to_toml().unwrap();
+
+        let parsed: toml_edit::DocumentMut = text.parse().unwrap();
+        let peers = parsed
+            .get("peers")
+            .expect("must round-trip under exactly the key ConfigFile::clear_peers unsets");
+        assert_eq!(
+            peers
+                .as_array_of_tables()
+                .and_then(|tables| tables.get(0))
+                .and_then(|table| table.get("label"))
+                .and_then(|v| v.as_str()),
+            Some("Sam")
+        );
     }
 
     /// [`Config::take_peers`] both returns and clears — the two are meant to

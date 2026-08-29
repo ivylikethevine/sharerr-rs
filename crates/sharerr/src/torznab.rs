@@ -954,7 +954,7 @@ pub(crate) async fn record_sighting(
                         peer_id,
                         kind,
                         addr,
-                        now_epoch(),
+                        Some(now_epoch()),
                         sharerr_store::ObservedVia::Direct,
                     )
                     .await

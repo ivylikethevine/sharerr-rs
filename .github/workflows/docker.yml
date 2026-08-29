@@ -1,8 +1,18 @@
-# Builds the image, and publishes it to GHCR on a `v*` tag only.
+# Builds the image, and publishes it to GHCR two ways.
 #
-# Branch pushes and pull requests build both architectures but ship nothing. That
-# split is deliberate: the build is load-bearing as the MSRV check (below), while
-# publishing should be something you choose to do, not a side effect of merging.
+# Every push to `main` ships unattended, under a tag that carries nothing but
+# the commit sha — no `latest`, no branch name, nothing a human would stumble
+# across browsing GHCR's tag list. See the `sha-tag` step below for the exact
+# format. A `v*` tag goes through the slower, approval-gated path described
+# below instead. Pull requests build both architectures but ship nothing
+# either way.
+#
+# That split is deliberate: the build is load-bearing as the MSRV check
+# (below), while publishing the tags an operator would actually reach for —
+# `latest`, a semver — should be something you choose to do, not a side
+# effect of merging. The sha-only tag is a lower-stakes middle ground: it
+# publishes unattended because nobody can pull it without already knowing the
+# exact commit that produced it.
 #
 # This also doubles as the MSRV check for the whole project. The Dockerfile's
 # builder stage is pinned to the workspace's declared rust-version (1.98) while a
@@ -16,7 +26,9 @@
 # the `environment: release` comment below — retags exactly that digest onto the
 # tags an operator would actually pull. Nothing rebuilds between the two; a
 # reviewer is approving the bytes that were already built and attested, not asking
-# for a second, unaudited build to happen.
+# for a second, unaudited build to happen. The `main`-push sha tag skips this
+# entirely — see the header paragraph above for why that is safe to leave
+# unattended.
 
 name: Docker
 
@@ -122,10 +134,12 @@ jobs:
 
       # Only when something is actually going to be pushed. A PR from a fork gets a
       # read-only GITHUB_TOKEN, so logging in would fail for exactly the
-      # contributors least equipped to diagnose it — and there is nothing to log in
-      # for on a branch build either, now that only tags publish. Keep this
-      # condition identical to `push:` below.
-      - if: startsWith(github.ref, 'refs/tags/v')
+      # contributors least equipped to diagnose it — there is nothing to log in for
+      # on a PR or manual-dispatch build either. Keep this condition identical to
+      # `push:` below.
+      - if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.ref == 'refs/heads/main' && github.event_name == 'push')
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -157,19 +171,37 @@ jobs:
           SHA: ${{ github.sha }}
         run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
 
+      # The unattended publish path: every push to `main` ships straight to
+      # this tag and nothing else — no `latest`, no branch name — findable
+      # only by someone who already has the commit sha that produced it.
+      # Matches `type=sha`'s own default naming (`meta` above, and
+      # CLAUDE.md's Repository section) so there is one sha-tag format to
+      # know, not two.
+      - id: sha-tag
+        env:
+          SHA: ${{ github.sha }}
+        run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
+
       - id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
-          # A `v*` tag pushes to the provisional ref above and nowhere else —
-          # the real tags computed by `meta` reach GHCR only once `publish` is
-          # approved. Every other event keeps pushing nothing at all, exactly
-          # as before: PR and branch builds still exist solely to compile,
-          # which is what makes this job double as the MSRV gate.
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          tags: ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref || steps.meta.outputs.tags }}
+          # A `v*` tag pushes to the provisional ref above — the real tags
+          # computed by `meta` reach GHCR only once `publish` is approved. A
+          # `main` push ships straight to its own sha-only tag with no
+          # approval gate — see that step's own comment for why. Every other
+          # event keeps pushing nothing at all: PR and manual-dispatch builds
+          # still exist solely to compile, which is what makes this job
+          # double as the MSRV gate.
+          push: >-
+            ${{ startsWith(github.ref, 'refs/tags/v') ||
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
+          tags: >-
+            ${{ startsWith(github.ref, 'refs/tags/v') && steps.pending.outputs.ref ||
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
+                steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # `mode=min`, not `max`. Exporting the intermediate builder stage would
           # push a multi-GB release target/ tree per architecture into a cache that

@@ -87,6 +87,9 @@ pub enum VaultError {
 
     #[error("value for {key:?} is not valid UTF-8")]
     NotUtf8 { key: String },
+
+    #[error("{reason}")]
+    InvalidValue { key: String, reason: String },
 }
 
 type Result<T> = std::result::Result<T, VaultError>;
@@ -234,7 +237,22 @@ impl Vault {
     }
 
     /// Store a value, replacing any existing one, and persist immediately.
+    ///
+    /// Checks the value against `secret_keys::validate_value` before sealing
+    /// anything — the one place every secret-writing path goes through
+    /// regardless of which of them remembers to call that function
+    /// themselves. `commands/vault.rs` and `web/settings.rs` both already
+    /// validate before reaching here (for a cheaper, no-I/O rejection path),
+    /// so this is a no-op for them; it is what actually closes the gap for a
+    /// caller that does not, such as the `[[peers]]` bootstrap importer's
+    /// gossip-key write.
     pub fn put(&mut self, key: &str, value: &SecretString) -> Result<()> {
+        sharerr_core::config::secret_keys::validate_value(key, value.expose_secret()).map_err(
+            |reason| VaultError::InvalidValue {
+                key: key.to_owned(),
+                reason,
+            },
+        )?;
         let record = self.seal(key, value.expose_secret().as_bytes())?;
         let _guard = write_lock();
         let mut file_lock = cross_process_lock(&self.path)?;
@@ -590,6 +608,32 @@ mod tests {
         assert_eq!(
             vault.keys().collect::<Vec<_>>(),
             vec!["qbittorrent.password", "sonarr.api_key"]
+        );
+    }
+
+    /// `Vault::put` must reject an invalid value itself, not rely on every
+    /// caller to check first — a caller that skips
+    /// `secret_keys::validate_value` (unlike `commands/vault.rs` and
+    /// `web/settings.rs`, which both call it before ever reaching here) must
+    /// still be unable to store something the shape check would refuse.
+    #[test]
+    fn put_rejects_an_invalid_value_even_when_the_caller_never_checked() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = vault_in(&dir, "master");
+
+        let err = vault
+            .put(
+                sharerr_core::config::secret_keys::TRACKER_TOKEN,
+                &secret("has a / in it"),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("may only contain"), "{err}");
+        assert!(
+            vault
+                .get(sharerr_core::config::secret_keys::TRACKER_TOKEN)
+                .unwrap()
+                .is_none(),
+            "a rejected value must not be stored"
         );
     }
 

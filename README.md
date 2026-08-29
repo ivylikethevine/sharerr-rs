@@ -140,10 +140,12 @@ docker run -d --name sharerr \
   ghcr.io/ivylikethevine/sharerr-rs:latest
 ```
 
-> Images are only published from a `v*` tag, and there are none yet — no `:latest`
-> and no branch tag exists on GHCR. Until the first release, build the image
-> yourself (`docker build -f docker/Dockerfile -t sharerr-rs .` at the repository
-> root) and use that name in place of the `ghcr.io/…` reference.
+> `:latest` and any version tag don't exist yet — there has been no tagged
+> release. Every push to `main` does publish a `ghcr.io/…:sha-<commit>` image
+> unattended, if you want to track development before the first release;
+> otherwise build the image yourself (`docker build -f docker/Dockerfile -t
+> sharerr-rs .` at the repository root) and use that name in place of the
+> `ghcr.io/…` reference.
 
 Then open `http://localhost:8477/`. The first visit asks you to create an account —
 whoever gets there first claims the instance, so do it now rather than leaving it
@@ -367,7 +369,10 @@ fabricated answers after a restart, not a credential.
 
 It is published to GHCR as its own package, on its own `v*` tag series and
 behind its own approval — a sharerr release is not silently also a lighthouse
-release. To build it yourself instead:
+release. `:latest` and any version tag don't exist yet for the same reason as
+sharerr's own image above; every push to `main` does publish a
+`ghcr.io/…/sharerr-lighthouse:sha-<commit>` image unattended, if you want to
+track development before the first release. To build it yourself instead:
 
 ```bash
 docker build -f docker/Dockerfile.lighthouse -t sharerr-lighthouse .
