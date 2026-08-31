@@ -62,7 +62,7 @@ services:
     # Pinned like the rest. Actively maintained (unlike the abandoned
     # `linuxserver/rutorrent`, last published in 2021) — see the image's own
     # GitHub, crazy-max/docker-rtorrent-rutorrent.
-    image: crazymax/rtorrent-rutorrent:5.3.12-0.16.20@sha256:7b5223b232b784b6a3306bece718cd331269f67bcb4afe500abe85669d2e41d0
+    image: crazymax/rtorrent-rutorrent:5.3.12-0.16.21@sha256:2ea0aadaa8f09d86d6b12a4b10bdeb1c58be42bf86dbc3c9775e9d412e6a6fdf
     container_name: sharerr-rt-test-rtorrent
     ulimits:
       nproc: 65535
