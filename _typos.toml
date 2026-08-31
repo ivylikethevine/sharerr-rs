@@ -17,3 +17,6 @@ extend-ignore-re = []
 [default.extend-words]
 
 [default.extend-identifiers]
+# The port-mapping protocol (Universal Plug and Play); its inner `Pn` reads
+# as a typo of `On` once the tokenizer splits the mixed case.
+UPnP = "UPnP"

@@ -1559,7 +1559,7 @@ mod tests {
 
     #[test]
     fn an_error_message_is_escaped_too() {
-        let page = SetupPage::rejected("ivy", "<b>bad</b>");
+        let page = SetupPage::rejected("operator", "<b>bad</b>");
         let html = page.render().unwrap();
         assert!(!html.contains("<b>bad</b>"), "{html}");
     }

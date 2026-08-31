@@ -130,13 +130,13 @@ pub(crate) fn parse_response(body: &str) -> std::result::Result<XmlValue, String
 
     loop {
         match next_structural(&mut reader)? {
-            Event::Start(e) if e.name().as_ref() == b"fault" => {
-                expect_start(&mut reader, b"value")?;
+            Event::Start(e) if e.name().as_ref() == "fault" => {
+                expect_start(&mut reader, "value")?;
                 let value = parse_value(&mut reader)?;
                 return Err(fault_message(&value));
             }
-            Event::Start(e) if e.name().as_ref() == b"param" => {
-                expect_start(&mut reader, b"value")?;
+            Event::Start(e) if e.name().as_ref() == "param" => {
+                expect_start(&mut reader, "value")?;
                 return parse_value(&mut reader);
             }
             Event::Eof => return Err("methodResponse had no <param> or <fault>".to_owned()),
@@ -169,55 +169,52 @@ pub(crate) fn fault_message(value: &XmlValue) -> String {
 /// just consumed by the caller.
 fn parse_value(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
     let tag = match next_structural(reader)? {
-        Event::End(e) if e.name().as_ref() == b"value" => return Ok(XmlValue::Str(String::new())),
+        Event::End(e) if e.name().as_ref() == "value" => return Ok(XmlValue::Str(String::new())),
         // A bare `<value>text</value>` is an implicit string; its text may be
         // split across several events by entity references, exactly like an
         // explicit `<string>`.
         Event::Text(t) => {
-            let mut text = t.decode().map_err(|e| e.to_string())?.into_owned();
-            read_text_until_end(reader, b"value", &mut text)?;
+            let mut text = (*t).to_owned();
+            read_text_until_end(reader, "value", &mut text)?;
             return Ok(XmlValue::Str(text));
         }
         Event::GeneralRef(r) => {
             let mut text = String::new();
             push_general_ref(&r, &mut text)?;
-            read_text_until_end(reader, b"value", &mut text)?;
+            read_text_until_end(reader, "value", &mut text)?;
             return Ok(XmlValue::Str(text));
         }
-        Event::Start(e) => e.name().as_ref().to_vec(),
+        Event::Start(e) => e.name().as_ref().to_owned(),
         other => return Err(format!("unexpected event inside <value>: {other:?}")),
     };
 
-    let result = match tag.as_slice() {
-        b"array" => parse_array(reader),
-        b"struct" => parse_struct(reader),
-        b"string" => read_element_text(reader, b"string").map(XmlValue::Str),
-        b"i4" | b"int" | b"i8" => {
+    let result = match tag.as_str() {
+        "array" => parse_array(reader),
+        "struct" => parse_struct(reader),
+        "string" => read_element_text(reader, "string").map(XmlValue::Str),
+        "i4" | "int" | "i8" => {
             let text = read_element_text(reader, &tag)?;
             text.trim()
                 .parse::<i64>()
                 .map(XmlValue::Int)
                 .map_err(|e| format!("{e} parsing {text:?} as an integer"))
         }
-        other => Err(format!(
-            "unsupported XML-RPC value type <{}>",
-            String::from_utf8_lossy(other)
-        )),
+        other => Err(format!("unsupported XML-RPC value type <{other}>")),
     }?;
 
-    expect_end(reader, b"value")?;
+    expect_end(reader, "value")?;
     Ok(result)
 }
 
 fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, String> {
     let mut items = Vec::new();
     match next_structural(reader)? {
-        Event::Start(e) if e.name().as_ref() == b"data" => loop {
+        Event::Start(e) if e.name().as_ref() == "data" => loop {
             match next_structural(reader)? {
-                Event::Start(e) if e.name().as_ref() == b"value" => {
+                Event::Start(e) if e.name().as_ref() == "value" => {
                     items.push(parse_value(reader)?);
                 }
-                Event::End(e) if e.name().as_ref() == b"data" => break,
+                Event::End(e) if e.name().as_ref() == "data" => break,
                 other => return Err(format!("unexpected event inside <data>: {other:?}")),
             }
         },
@@ -227,10 +224,10 @@ fn parse_array(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Stri
         // shape, since nothing wrote it that way by hand. `Event::Empty` is
         // the whole element in one event, with no matching `End` to break a
         // loop on, so it has to be handled before entering one.
-        Event::Empty(e) if e.name().as_ref() == b"data" => {}
+        Event::Empty(e) if e.name().as_ref() == "data" => {}
         other => return Err(format!("expected <data>, got {other:?}")),
     }
-    expect_end(reader, b"array")?;
+    expect_end(reader, "array")?;
     Ok(XmlValue::Array(items))
 }
 
@@ -238,15 +235,15 @@ fn parse_struct(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Str
     let mut members = Vec::new();
     loop {
         match next_structural(reader)? {
-            Event::Start(e) if e.name().as_ref() == b"member" => {
-                expect_start(reader, b"name")?;
-                let name = read_element_text(reader, b"name")?;
-                expect_start(reader, b"value")?;
+            Event::Start(e) if e.name().as_ref() == "member" => {
+                expect_start(reader, "name")?;
+                let name = read_element_text(reader, "name")?;
+                expect_start(reader, "value")?;
                 let value = parse_value(reader)?;
-                expect_end(reader, b"member")?;
+                expect_end(reader, "member")?;
                 members.push((name, value));
             }
-            Event::End(e) if e.name().as_ref() == b"struct" => break,
+            Event::End(e) if e.name().as_ref() == "struct" => break,
             other => return Err(format!("unexpected event inside <struct>: {other:?}")),
         }
     }
@@ -261,10 +258,7 @@ fn parse_struct(reader: &mut Reader<&[u8]>) -> std::result::Result<XmlValue, Str
 /// or path holding `&`, `<`, or `>` — which rTorrent escapes on the way out —
 /// is several events, not one. Anything less than a loop here broke every
 /// `list()`/`files()` call the moment one such name existed.
-fn read_element_text(
-    reader: &mut Reader<&[u8]>,
-    tag: &[u8],
-) -> std::result::Result<String, String> {
+fn read_element_text(reader: &mut Reader<&[u8]>, tag: &str) -> std::result::Result<String, String> {
     let mut text = String::new();
     read_text_until_end(reader, tag, &mut text)?;
     Ok(text)
@@ -273,20 +267,17 @@ fn read_element_text(
 /// Append every text and entity event up to `</tag>` onto `text`.
 fn read_text_until_end(
     reader: &mut Reader<&[u8]>,
-    tag: &[u8],
+    tag: &str,
     text: &mut String,
 ) -> std::result::Result<(), String> {
     loop {
         match reader.read_event().map_err(|e| e.to_string())? {
             Event::End(e) if e.name().as_ref() == tag => return Ok(()),
-            Event::Text(t) => text.push_str(&t.decode().map_err(|e| e.to_string())?),
-            Event::CData(c) => text.push_str(&String::from_utf8_lossy(&c)),
+            Event::Text(t) => text.push_str(&t),
+            Event::CData(c) => text.push_str(&c),
             Event::GeneralRef(r) => push_general_ref(&r, text)?,
             other => {
-                return Err(format!(
-                    "unexpected event reading <{}>: {other:?}",
-                    String::from_utf8_lossy(tag)
-                ));
+                return Err(format!("unexpected event reading <{tag}>: {other:?}"));
             }
         }
     }
@@ -303,8 +294,8 @@ fn push_general_ref(
         text.push(ch);
         return Ok(());
     }
-    let name = r.decode().map_err(|e| e.to_string())?;
-    match quick_xml::escape::resolve_xml_entity(&name) {
+    let name = &**r;
+    match quick_xml::escape::resolve_xml_entity(name) {
         Some(resolved) => {
             text.push_str(resolved);
             Ok(())
@@ -319,29 +310,23 @@ fn push_general_ref(
 fn next_structural<'a>(reader: &mut Reader<&'a [u8]>) -> std::result::Result<Event<'a>, String> {
     loop {
         match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Text(t) if t.iter().all(u8::is_ascii_whitespace) => continue,
+            Event::Text(t) if t.chars().all(|c| c.is_ascii_whitespace()) => continue,
             other => return Ok(other),
         }
     }
 }
 
-fn expect_start(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(), String> {
+fn expect_start(reader: &mut Reader<&[u8]>, tag: &str) -> std::result::Result<(), String> {
     match next_structural(reader)? {
         Event::Start(e) if e.name().as_ref() == tag => Ok(()),
-        other => Err(format!(
-            "expected <{}>, got {other:?}",
-            String::from_utf8_lossy(tag)
-        )),
+        other => Err(format!("expected <{tag}>, got {other:?}")),
     }
 }
 
-fn expect_end(reader: &mut Reader<&[u8]>, tag: &[u8]) -> std::result::Result<(), String> {
+fn expect_end(reader: &mut Reader<&[u8]>, tag: &str) -> std::result::Result<(), String> {
     match next_structural(reader)? {
         Event::End(e) if e.name().as_ref() == tag => Ok(()),
-        other => Err(format!(
-            "expected </{}>, got {other:?}",
-            String::from_utf8_lossy(tag)
-        )),
+        other => Err(format!("expected </{tag}>, got {other:?}")),
     }
 }
 
@@ -496,7 +481,7 @@ mod tests {
     #[test]
     fn read_element_text_rejects_an_unexpected_event() {
         let mut reader = Reader::from_str("<oops/>");
-        let err = read_element_text(&mut reader, b"name").unwrap_err();
+        let err = read_element_text(&mut reader, "name").unwrap_err();
         assert!(err.contains("unexpected event reading <name>"), "{err}");
     }
 
@@ -533,7 +518,7 @@ mod tests {
     #[test]
     fn expect_start_rejects_the_wrong_tag() {
         let mut reader = Reader::from_str("<wrong/>");
-        let err = expect_start(&mut reader, b"value").unwrap_err();
+        let err = expect_start(&mut reader, "value").unwrap_err();
         assert!(err.contains("expected <value>"), "{err}");
     }
 
@@ -543,7 +528,7 @@ mod tests {
         // to hit expect_end's "other" branch without quick_xml's own
         // open/close-tag validation getting in the way first.
         let mut reader = Reader::from_str("<other/>");
-        let err = expect_end(&mut reader, b"value").unwrap_err();
+        let err = expect_end(&mut reader, "value").unwrap_err();
         assert!(err.contains("</value>"), "{err}");
     }
 }

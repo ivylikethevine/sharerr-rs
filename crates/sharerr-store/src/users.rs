@@ -11,7 +11,7 @@
 use std::sync::LazyLock;
 
 use argon2::Argon2;
-use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::Row;
 use zeroize::Zeroizing;
@@ -109,10 +109,11 @@ impl Store {
 /// same as verifying against a real one, which is the entire point.
 static DECOY_HASH: LazyLock<String> = LazyLock::new(|| {
     // A failure here would only degrade the timing defence, never break login, so
-    // it falls back to a string `PasswordHash::new` rejects rather than panicking.
-    // Deliberately not a real hash: this string is chosen specifically because
-    // `PasswordHash::new` rejects it, so nothing can ever verify against it. It is
-    // reached only when hashing the decoy password above already failed.
+    // it falls back to a string the PHC parser inside `verify_password` rejects
+    // rather than panicking. Deliberately not a real hash: this string is chosen
+    // specifically because that parser rejects it, so nothing can ever verify
+    // against it. It is reached only when hashing the decoy password above
+    // already failed.
     blocking_hash("decoy — matches nothing").unwrap_or_else(|_| "$argon2id$invalid".to_owned())
 });
 
@@ -161,11 +162,9 @@ fn clone_secret(password: &SecretString) -> Zeroizing<String> {
 fn blocking_hash(password: &str) -> Result<String> {
     let raw = crate::random_array::<SALT_LEN>()
         .map_err(|e| StoreError::PasswordHash(format!("salt generation failed: {e}")))?;
-    let salt = SaltString::encode_b64(&raw)
-        .map_err(|e| StoreError::PasswordHash(format!("salt encoding failed: {e}")))?;
 
     Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password_with_salt(password.as_bytes(), &raw)
         .map(|hash| hash.to_string())
         .map_err(|e| StoreError::PasswordHash(e.to_string()))
 }
@@ -176,12 +175,10 @@ fn blocking_hash(password: &str) -> Result<String> {
 /// neither should hand out a session. A `Result` here would invite a caller to
 /// treat an unparsable hash as something to retry or surface.
 fn blocking_verify(password: &str, stored: &str) -> bool {
-    let Ok(parsed) = PasswordHash::new(stored) else {
-        return false;
-    };
-
+    // `verify_password` parses the PHC string itself and returns `Err` for one
+    // it cannot parse, which folds into the same "no" as a wrong password.
     Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
+        .verify_password(password.as_bytes(), stored)
         .is_ok()
 }
 
@@ -210,18 +207,21 @@ mod tests {
     async fn an_account_round_trips_and_only_the_right_password_verifies() {
         let store = store().await;
         let password = fresh_password();
-        store.create_user("ivy", &secret(&password)).await.unwrap();
+        store
+            .create_user("operator", &secret(&password))
+            .await
+            .unwrap();
 
         assert_eq!(store.user_count().await.unwrap(), 1);
         assert!(
             store
-                .verify_password("ivy", &secret(&password))
+                .verify_password("operator", &secret(&password))
                 .await
                 .unwrap()
         );
         assert!(
             !store
-                .verify_password("ivy", &secret(&fresh_password()))
+                .verify_password("operator", &secret(&fresh_password()))
                 .await
                 .unwrap()
         );
@@ -229,14 +229,22 @@ mod tests {
         // exercise the empty-password path specifically, which `fresh_password`
         // can never produce. CodeQL's hard-coded-cryptographic-value query
         // cannot tell that from a real credential reaching this parameter.
-        assert!(!store.verify_password("ivy", &secret("")).await.unwrap());
+        assert!(
+            !store
+                .verify_password("operator", &secret(""))
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
     async fn an_unknown_user_is_rejected_without_erroring() {
         let store = store().await;
         let password = fresh_password();
-        store.create_user("ivy", &secret(&password)).await.unwrap();
+        store
+            .create_user("operator", &secret(&password))
+            .await
+            .unwrap();
 
         // Must be a plain `false`, not an error — the login handler renders the
         // same message either way, and an error would leak the difference.
@@ -252,7 +260,10 @@ mod tests {
     async fn the_hash_is_not_the_password() {
         let store = store().await;
         let password = fresh_password();
-        store.create_user("ivy", &secret(&password)).await.unwrap();
+        store
+            .create_user("operator", &secret(&password))
+            .await
+            .unwrap();
 
         let stored: String = sqlx::query("SELECT password_hash FROM users")
             .fetch_one(store.pool())
@@ -289,16 +300,16 @@ mod tests {
     async fn a_duplicate_username_is_named_rather_than_a_raw_sql_error() {
         let store = store().await;
         store
-            .create_user("ivy", &secret(&fresh_password()))
+            .create_user("operator", &secret(&fresh_password()))
             .await
             .unwrap();
 
         let err = store
-            .create_user("ivy", &secret(&fresh_password()))
+            .create_user("operator", &secret(&fresh_password()))
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, StoreError::UserExists { username } if username == "ivy"),
+            matches!(&err, StoreError::UserExists { username } if username == "operator"),
             "got {err:?}"
         );
     }
@@ -308,12 +319,12 @@ mod tests {
         let store = store().await;
         let password = fresh_password();
         store
-            .create_user("  ivy  ", &secret(&password))
+            .create_user("  operator  ", &secret(&password))
             .await
             .unwrap();
         assert!(
             store
-                .verify_password("ivy", &secret(&password))
+                .verify_password("operator", &secret(&password))
                 .await
                 .unwrap()
         );
@@ -340,11 +351,21 @@ mod tests {
         let store = store().await;
         let old = fresh_password();
         let new = fresh_password();
-        store.create_user("ivy", &secret(&old)).await.unwrap();
+        store.create_user("operator", &secret(&old)).await.unwrap();
 
-        assert!(store.set_password("ivy", &secret(&new)).await.unwrap());
-        assert!(!store.verify_password("ivy", &secret(&old)).await.unwrap());
-        assert!(store.verify_password("ivy", &secret(&new)).await.unwrap());
+        assert!(store.set_password("operator", &secret(&new)).await.unwrap());
+        assert!(
+            !store
+                .verify_password("operator", &secret(&old))
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .verify_password("operator", &secret(&new))
+                .await
+                .unwrap()
+        );
 
         assert!(
             !store

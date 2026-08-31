@@ -8,7 +8,7 @@
 //! returns an old exit is remembered rather than trusted.
 
 use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::db::{Store, StoreError};
 
@@ -222,7 +222,9 @@ impl Store {
             "SELECT peer_id, kind, addr, observed_at, via FROM peer_endpoints \
              WHERE peer_id IN ({placeholders}) ORDER BY peer_id, kind, observed_at DESC, id DESC"
         );
-        let mut query = sqlx::query(&sql);
+        // `AssertSqlSafe`: `placeholders` is a generated `?N` list; the ids
+        // themselves travel through `.bind()`.
+        let mut query = sqlx::query(AssertSqlSafe(sql));
         for id in peer_ids {
             query = query.bind(id);
         }
@@ -326,7 +328,7 @@ impl Store {
             "SELECT id, gossip_record FROM peers \
              WHERE id IN ({placeholders}) AND gossip_record IS NOT NULL"
         );
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(AssertSqlSafe(sql));
         for id in peer_ids {
             query = query.bind(id);
         }

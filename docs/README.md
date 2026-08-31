@@ -15,5 +15,6 @@ this page is deliberately just a map, not a summary.
 | [Design brief](DESIGN.md) | The original statement of intent, kept verbatim, and where the implementation disproved it. |
 | [Testing](TESTING.md) | The two test tiers, the compose stacks tier 2 drives, coverage, and what's not there yet (benchmarks, fuzzing). |
 | [Releasing](RELEASING.md) | What a `v*` tag triggers, the two GHCR images, the approval gate, and how to rehearse it. |
+| [Shippability](SHIPPABILITY.md) | A point-in-time assessment of what stands between the tree and a first tagged release. |
 | [Security policy](SECURITY.md) | How to report a vulnerability, and what's in and out of scope. |
 | [Contributing](CONTRIBUTING.md) | How to build, test, and submit a change. |
