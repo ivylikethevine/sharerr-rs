@@ -164,7 +164,7 @@ services:
   # password — stateless, no session to expire. Generate one under
   # Options -> Web UI -> API key once the stack is up.
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:a00b6a597a3832a1814cde0ef60abc55c94644f3f80902c3432f6af6de8d4a96
     container_name: qbittorrent
     # No `networks:` and no `ports:`. Both belong to gluetun now.
     network_mode: "service:gluetun"
