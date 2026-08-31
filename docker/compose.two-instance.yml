@@ -60,7 +60,7 @@ services:
       - "127.0.0.1:59878:7878"
 
   qbittorrent-a:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:a00b6a597a3832a1814cde0ef60abc55c94644f3f80902c3432f6af6de8d4a96
     container_name: sharerr-two-instance-qbittorrent-a
     environment:
       PUID: *puid
@@ -74,7 +74,7 @@ services:
       - "127.0.0.1:58080:8080"
 
   qbittorrent-b:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:304b19cf94bf4fda534e0b086cab9c5f1a9e139a8180c05c0ad7d2ba1526fa99
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:a00b6a597a3832a1814cde0ef60abc55c94644f3f80902c3432f6af6de8d4a96
     container_name: sharerr-two-instance-qbittorrent-b
     environment:
       PUID: *puid
