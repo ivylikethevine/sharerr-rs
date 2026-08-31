@@ -63,7 +63,7 @@ rpassword = "7.5.4"
 # `<value>` tree a multicall response nests, hand-rolled rather than pulled from
 # an XML-RPC crate because none on crates.io is both async-transport-agnostic
 # and free of a copyleft or unreviewed licence — see `sharerr-rtorrent`.
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
