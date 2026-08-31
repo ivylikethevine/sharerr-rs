@@ -165,18 +165,13 @@ would only break legitimate `--config` values pointing outside a fixed
 directory. See [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#codeql)'s
 CodeQL note for how alert dismissal is tracked.
 
-**`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack timing side-channel),
-as reported by OpenSSF Scorecard's `Vulnerabilities` check.** `rsa` reaches
-`Cargo.lock` only via `sqlx-mysql`, and `sqlx-mysql` is a lock entry `sqlx`'s
-own manifest hands out for every optional backend it has regardless of which
-ones are actually turned on — this workspace enables none of them beyond
-`sqlite` (see the `sqlx` entry in the root `Cargo.toml`). `cargo tree -i rsa`
-and `cargo metadata`'s resolved feature list for the `sqlx` node confirm it is
-never compiled in, even under `--all-features`; `cargo deny check advisories`
-already treats it as unreachable without needing an entry in `deny.toml`'s
-`ignore` list (adding one produces cargo-deny's own `advisory-not-detected`
-warning instead, so `deny.toml` deliberately has none — see the comment
-there). Scorecard's scanner has no such feature-reachability analysis; it
-reads `Cargo.lock` the same flat way `cargo generate-lockfile` populates it,
-so it will keep reporting this one. Revisit if `sqlx-mysql` genuinely becomes
-reachable, or if `rsa` ships a fix.
+**`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack timing side-channel)
+used to sit in this list**, back when Scorecard's `Vulnerabilities` check
+reported it: `rsa` rode into `Cargo.lock` via `sqlx-mysql` — a lock entry
+`sqlx`'s manifest handed out for every optional backend regardless of
+activation — never compiled in, but visible to any scanner that reads the
+lockfile flat. The `sqlx` 0.9 upgrade removed the dependency upstream, so
+`rsa` is out of `Cargo.lock` altogether and there is no longer anything for
+any scanner to misread. Recorded here rather than deleted because the old
+entry was the model for how a lockfile-only finding gets documented, and
+because a reader chasing a stale Scorecard report should find the answer.

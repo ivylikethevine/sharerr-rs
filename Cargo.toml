@@ -30,12 +30,12 @@ repository = "https://github.com/ivylikethevine/sharerr-rs"
 # version and `default-features` are settled here.
 [workspace.dependencies]
 anyhow = "1.0.104"
-argon2 = "0.5.3"
+argon2 = "0.6.0"
 askama = "0.16.0"
 async-trait = "0.1.92"
 # Transmission's RPC takes the .torrent as base64 in a JSON body, unlike
 # qBittorrent's multipart upload.
-base64 = "0.22.1"
+base64 = "0.23.1"
 axum = "0.8.9"
 axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
@@ -44,7 +44,7 @@ clap = "4.6.6"
 # and signatures are small enough to travel in JSON and the verify cost is
 # nothing next to the HTTP request carrying it. `rand_core` stays off — key
 # material comes from the same `getrandom` path as every other secret.
-ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "3.0.0", default-features = false, features = ["alloc"] }
 # Cross-process advisory `flock` on the vault's lock file. `std::fs::File::lock`
 # does the same job but landed in Rust 1.89, one past this workspace's MSRV.
 fd-lock = "4.0.4"
@@ -63,7 +63,7 @@ rpassword = "7.5.4"
 # `<value>` tree a multicall response nests, hand-rolled rather than pulled from
 # an XML-RPC crate because none on crates.io is both async-transport-agnostic
 # and free of a copyleft or unreviewed licence — see `sharerr-rtorrent`.
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -85,11 +85,11 @@ sha1 = "0.11.0"
 matroska = "0.30"
 mp4 = "0.14"
 symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "ogg"] }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
-sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
 # CPU/memory/disk usage for the status page's stat tiles. `default-features =
 # false` drops network/user/component support this project never reads.
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "system"] }
@@ -97,7 +97,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.20"
 time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
 tokio = "1.53.1"
-toml_edit = "0.22.27"
+toml_edit = "0.25.13"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
 #-process, so the handler tests exercise the real middleware stack — the auth
 # guard and the cross-origin layer — rather than the handlers in isolation.

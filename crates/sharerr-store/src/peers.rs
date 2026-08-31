@@ -13,7 +13,7 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
 use sharerr_core::MediaSource;
 use sharerr_core::endpoint::now_epoch;
-use sqlx::Row;
+use sqlx::{AssertSqlSafe, Row};
 
 use crate::db::{Store, StoreError};
 
@@ -215,10 +215,12 @@ impl Store {
 
         // The UNIQUE constraint decides this, not a prior SELECT — two submissions
         // racing would both pass a check-then-insert.
-        let row = sqlx::query(&format!(
+        // `AssertSqlSafe` (here and below): the only interpolation is this
+        // module's own `PEER_COLUMNS` constant.
+        let row = sqlx::query(AssertSqlSafe(format!(
             "INSERT INTO peers (label, key_hash, created_at, scope) VALUES (?1, ?2, ?3, ?4) \
              RETURNING {PEER_COLUMNS}"
-        ))
+        )))
         .bind(&label)
         .bind(hash_key(key))
         .bind(now)
@@ -241,9 +243,9 @@ impl Store {
     /// something an operator needs to be able to see, and a row that vanishes looks
     /// like a bug.
     pub async fn list_peers(&self) -> Result<Vec<Peer>> {
-        let rows = sqlx::query(&format!(
+        let rows = sqlx::query(AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS} FROM peers ORDER BY created_at DESC, id DESC"
-        ))
+        )))
         .fetch_all(self.pool())
         .await?;
 
@@ -267,9 +269,9 @@ impl Store {
     /// here. Revoked is `None`, same as `peer_by_key`: the row is kept for the
     /// operator's benefit, not to keep letting its access in.
     pub async fn peer_by_key_hash(&self, key_hash: &str) -> Result<Option<Peer>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "SELECT {PEER_COLUMNS} FROM peers WHERE key_hash = ?1 AND revoked_at IS NULL"
-        ))
+        )))
         .bind(key_hash)
         .fetch_optional(self.pool())
         .await?;

@@ -570,9 +570,9 @@ mod tests {
     #[tokio::test]
     async fn a_session_round_trips_and_can_be_revoked() {
         let sessions = Sessions::default();
-        let token = sessions.create("ivy").await.unwrap();
+        let token = sessions.create("operator").await.unwrap();
 
-        assert_eq!(sessions.touch(&token).await.as_deref(), Some("ivy"));
+        assert_eq!(sessions.touch(&token).await.as_deref(), Some("operator"));
         sessions.remove(&token).await;
         assert!(sessions.touch(&token).await.is_none());
     }
@@ -580,15 +580,15 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_token_is_not_a_session() {
         let sessions = Sessions::default();
-        sessions.create("ivy").await.unwrap();
+        sessions.create("operator").await.unwrap();
         assert!(sessions.touch("not-a-real-token").await.is_none());
     }
 
     #[tokio::test]
     async fn tokens_are_unguessable_and_never_repeat() {
         let sessions = Sessions::default();
-        let a = sessions.create("ivy").await.unwrap();
-        let b = sessions.create("ivy").await.unwrap();
+        let a = sessions.create("operator").await.unwrap();
+        let b = sessions.create("operator").await.unwrap();
 
         assert_ne!(a, b, "two sessions must not share a token");
         assert_eq!(a.len(), 64, "256 bits, hex encoded");
@@ -598,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn an_idle_session_expires() {
         let sessions = Sessions::default();
-        let token = sessions.create("ivy").await.unwrap();
+        let token = sessions.create("operator").await.unwrap();
 
         // Reach in and age the entry rather than sleeping for a fortnight.
         if let Some(session) = sessions.inner.write().await.get_mut(&token) {
@@ -767,7 +767,7 @@ mod tests {
     // creation, login, and password change all exercise the genuine store queries.
     use crate::web::{body_of, web_state};
 
-    /// Create `ivy` with a generated password on `serve`'s store, and hand the
+    /// Create `operator` with a generated password on `serve`'s store, and hand the
     /// password back for whichever form field needs it — the shape underneath
     /// most of this module's tests.
     async fn seeded_user(serve: &crate::state::ServeState) -> String {
@@ -776,7 +776,7 @@ mod tests {
             .store()
             .await
             .unwrap()
-            .create_user("ivy", &SecretString::from(password.clone()))
+            .create_user("operator", &SecretString::from(password.clone()))
             .await
             .unwrap();
         password
@@ -816,7 +816,7 @@ mod tests {
             CookieJar::new(),
             HeaderMap::new(),
             Form(SetupForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password: fresh_password(),
                 confirm: fresh_password(),
             }),
@@ -840,7 +840,7 @@ mod tests {
             CookieJar::new(),
             HeaderMap::new(),
             Form(SetupForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password: password.clone(),
                 confirm: password,
             }),
@@ -933,7 +933,7 @@ mod tests {
             CookieJar::new(),
             HeaderMap::new(),
             Form(LoginForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password,
             }),
         )
@@ -959,7 +959,7 @@ mod tests {
             CookieJar::new(),
             HeaderMap::new(),
             Form(LoginForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password: fresh_password(),
             }),
         )
@@ -992,7 +992,7 @@ mod tests {
             CookieJar::new(),
             headers(&[("host", "box.lan:8477")]),
             Form(LoginForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password,
             }),
         )
@@ -1016,7 +1016,7 @@ mod tests {
             CookieJar::new(),
             headers(&[("host", "sharerr.example"), ("x-forwarded-proto", "https")]),
             Form(LoginForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password,
             }),
         )
@@ -1042,7 +1042,7 @@ mod tests {
             CookieJar::new(),
             headers(&[("forwarded", "proto=https")]),
             Form(SetupForm {
-                username: "ivy".to_owned(),
+                username: "operator".to_owned(),
                 password: password.clone(),
                 confirm: password,
             }),
@@ -1057,7 +1057,7 @@ mod tests {
     async fn logout_expires_the_cookie_on_the_path_it_was_set_on() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let state = web_state(serve);
-        let token = state.sessions.create("ivy").await.unwrap();
+        let token = state.sessions.create("operator").await.unwrap();
 
         // Assembled from a request header rather than with `.add`, because
         // `CookieJar::remove` only emits a removal for a cookie the request
@@ -1089,7 +1089,7 @@ mod tests {
         // scheme has to be worked out again here rather than assumed to be plain.
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let state = web_state(serve);
-        let token = state.sessions.create("ivy").await.unwrap();
+        let token = state.sessions.create("operator").await.unwrap();
         let sent = format!("{COOKIE_NAME}={token}");
         let jar = CookieJar::from_headers(&headers(&[("cookie", &sent)]));
 
@@ -1109,7 +1109,7 @@ mod tests {
     async fn logout_clears_both_the_session_and_the_cookie() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let state = web_state(serve);
-        let token = state.sessions.create("ivy").await.unwrap();
+        let token = state.sessions.create("operator").await.unwrap();
         let jar = CookieJar::new().add(session_cookie(token.clone(), false));
 
         let response = logout(State(state.clone()), jar, HeaderMap::new()).await;
@@ -1154,7 +1154,7 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         seeded_user(&serve).await;
         let state = web_state(serve);
-        let token = state.sessions.create("ivy").await.unwrap();
+        let token = state.sessions.create("operator").await.unwrap();
         let jar = CookieJar::new().add(session_cookie(token, false));
 
         let new_password = fresh_password();
@@ -1183,8 +1183,8 @@ mod tests {
         let current_password = seeded_user(&serve).await;
         let store = serve.store().await.unwrap();
         let state = web_state(serve);
-        let current = state.sessions.create("ivy").await.unwrap();
-        let other = state.sessions.create("ivy").await.unwrap();
+        let current = state.sessions.create("operator").await.unwrap();
+        let other = state.sessions.create("operator").await.unwrap();
         let jar = CookieJar::new().add(session_cookie(current.clone(), false));
 
         let new_password = fresh_password();
@@ -1209,7 +1209,7 @@ mod tests {
         );
         assert!(
             store
-                .verify_password("ivy", &SecretString::from(new_password))
+                .verify_password("operator", &SecretString::from(new_password))
                 .await
                 .unwrap()
         );

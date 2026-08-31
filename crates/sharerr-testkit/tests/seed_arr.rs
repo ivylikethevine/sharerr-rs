@@ -86,7 +86,7 @@ async fn create_schema(path: &std::path::Path) {
     .await
     .unwrap();
     for statement in SCHEMA {
-        sqlx::query(statement).execute(&pool).await.unwrap();
+        sqlx::query(*statement).execute(&pool).await.unwrap();
     }
     pool.close().await;
 }
@@ -98,11 +98,13 @@ async fn open(path: &std::path::Path) -> SqlitePool {
 }
 
 async fn count(pool: &SqlitePool, table: &str) -> i64 {
-    sqlx::query(&format!("SELECT COUNT(*) AS n FROM {table}"))
-        .fetch_one(pool)
-        .await
-        .unwrap()
-        .get::<i64, _>("n")
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT COUNT(*) AS n FROM {table}"
+    )))
+    .fetch_one(pool)
+    .await
+    .unwrap()
+    .get::<i64, _>("n")
 }
 
 struct Stack {

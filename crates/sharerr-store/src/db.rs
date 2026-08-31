@@ -8,14 +8,14 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{Row, SqlitePool};
+use sqlx::{AssertSqlSafe, Row, SqlitePool};
 
 use sharerr_core::endpoint::now_epoch;
 use sharerr_core::model::{ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareState, SharedItem};
 
 /// A bound, not-yet-executed SQLite query — what [`Store::update_item`]
 /// takes, spelled out once rather than at every call site.
-type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>;
+type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -218,7 +218,10 @@ impl Store {
             "{SELECT_COLUMNS} WHERE {} ORDER BY created_at DESC, id DESC",
             filter.clause
         );
-        let mut query = sqlx::query(&sql);
+        // `AssertSqlSafe`: everything interpolated is this module's own
+        // constants — `SELECT_COLUMNS` and `scope_filter`'s clause; the peer
+        // scope itself travels through `.bind()`.
+        let mut query = sqlx::query(AssertSqlSafe(sql));
         for value in filter.binds() {
             query = query.bind(value);
         }
@@ -237,7 +240,7 @@ impl Store {
             "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM shared_items WHERE {}",
             filter.clause
         );
-        let mut query = sqlx::query_as(&sql);
+        let mut query = sqlx::query_as(AssertSqlSafe(sql));
         for value in filter.binds() {
             query = query.bind(value);
         }
@@ -248,9 +251,9 @@ impl Store {
     /// One item by its stable identity. The pair is the key — `file_id` alone is not
     /// unique across the two *arr apps.
     pub async fn get(&self, source: MediaSource, file_id: i64) -> Result<Option<SharedItem>> {
-        let row = sqlx::query(&format!(
+        let row = sqlx::query(AssertSqlSafe(format!(
             "{SELECT_COLUMNS} WHERE source = ?1 AND file_id = ?2"
-        ))
+        )))
         .bind(source.as_str())
         .bind(file_id)
         .fetch_optional(&self.pool)
