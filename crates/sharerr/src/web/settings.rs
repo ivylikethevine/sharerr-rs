@@ -638,7 +638,7 @@ fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
 
 /// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
 /// hands a torrent to the client — see [`sharerr_core::config::SeedingConfig`]
-/// and `docs/CONFIGURATION.md`'s `[seeding]` section.
+/// and `docs/SETTINGS.md`'s `[seeding]` section.
 pub async fn save_seeding(
     State(state): State<WebState>,
     Form(form): Form<SeedingForm>,

@@ -268,7 +268,7 @@ fn latest_endpoint(
 
 /// Download every active friend as a one-time `[[peers]]` restore block —
 /// the export half of `sharerr_core::config::PeerImport`; see
-/// `CONFIGURATION.md`'s "Restoring friends after a full data-directory
+/// `SETTINGS.md`'s "Restoring friends after a full data-directory
 /// loss". Meant to be saved somewhere outside sharerr (a password manager,
 /// an offline backup) and hand-pasted back into `sharerr.toml` only if the
 /// data directory is ever lost — this does not write anywhere itself.

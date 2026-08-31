@@ -407,7 +407,7 @@ filename). Every torrent sharerr builds is private (see
 a magnet can never complete against it in any environment — nothing in the
 swarm will ever answer its `ut_metadata` request. This is not the
 sandboxed-build-environment quirk
-[`docs/UNSUPPORTED.md`](../docs/UNSUPPORTED.md#removing-the-feeds-magnet-link-entirely)
+[`docs/SUPPORT.md`](../docs/SUPPORT.md#removing-the-feeds-magnet-link-entirely)
 once suspected; it reproduces identically on a plain Docker host.
 
 Prowlarr's per-indexer "Prefer Magnet URL" — `false` by default — is the one

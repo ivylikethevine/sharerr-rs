@@ -31,7 +31,7 @@
 #     media-file parsing are all real untrusted-input surfaces cargo-fuzz
 #     could target. Leave this one unannotated on purpose until it's either
 #     fixed or a considered decision not to, recorded here or in
-#     docs/UNSUPPORTED.md.
+#     docs/SUPPORT.md.
 annotations:
   - checks:
       - contributors

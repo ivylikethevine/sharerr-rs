@@ -1,0 +1,17 @@
+# markdown-oxide (LSP) settings for this repo. The linter of record for the
+# docs is markdownlint (.markdownlint.yaml); this file only keeps oxide from
+# disagreeing with it.
+#
+# oxide resolves `[text](path)` against the vault root, never the containing
+# file, and matches `#fragments` by lowercasing the heading and swapping
+# spaces for dashes - punctuation kept (src/vault/mod.rs, heading_to_slug).
+# Neither is configurable. GitHub and markdownlint's MD051 strip punctuation
+unresolved_diagnostics = false
+
+excluded_folders = ["target"]
+
+# Completions write links the way the docs already spell them: with the .md
+# extension, and headings as slugs rather than raw text.
+include_md_extension_md_link = true
+include_md_extension_wikilink = true
+heading_slug = true

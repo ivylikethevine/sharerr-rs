@@ -9,13 +9,14 @@ next to each is honest about how much is still open. What has already shipped
 lives in [the README](../README.md#what-works-today), not here — this page
 tracks what is still ahead, from feature-sized commitments down to
 not-yet-committed ideas. An idea that gets declined instead moves to
-[`UNSUPPORTED.md`](UNSUPPORTED.md), each entry there carrying its reason so
+[`SUPPORT.md`](SUPPORT.md#not-supported), each entry there carrying its reason so
 the decision does not get re-litigated.
 
 ## Table of contents
 
 - [What's left](#whats-left)
 - [Functionality](#functionality)
+- [Before v1](#before-v1)
 - [Open work, by scope](#open-work-by-scope)
   - [Medium — a subsystem, or one shape repeated across several files](#medium--a-subsystem-or-one-shape-repeated-across-several-files)
   - [Large — a protocol, a data model, or a release process](#large--a-protocol-a-data-model-or-a-release-process)
@@ -34,14 +35,64 @@ work that has already shipped lives beside the feature itself rather than
 here: see [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the rendezvous service.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
-and the extension seam each sits behind is [`SUPPORTED.md`](SUPPORTED.md);
-what was tried and deliberately left out is [`UNSUPPORTED.md`](UNSUPPORTED.md).
+and the extension seam each sits behind, along with what was tried and
+deliberately left out, is [`SUPPORT.md`](SUPPORT.md).
 
 ## Functionality
 
 **Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
 _request_ content. Today discovery is one-way: they find what you already share.
 An inbound request queue with an approve step is the other half of that idea.
+
+## Before v1
+
+Operational, not architectural — carried over from a point-in-time
+shippability assessment done on 2026-08-31 against the state of `main` at
+that date, since retired in favour of tracking these as roadmap items rather
+than a separate standing document. None of these are features; each is
+something that has to actually happen, once, before a `v1` tag:
+
+1. **Rehearse the release pipeline end to end** — both images,
+   `docker.yml` and `docker-lighthouse.yml` — since neither has ever
+   executed for real: no tag has been cut, `latest` does not exist. See
+   [`RELEASING.md`](RELEASING.md). Also verify, in the repository settings
+   rather than any workflow file, that the `release` environment actually
+   has a required reviewer configured — that gate is a GitHub Settings fact
+   no workflow can assert, and without it the publish step runs unattended.
+2. **Rehearse one real upgrade across a migration.** Eleven forward-only
+   sqlx migrations exist and every one has only ever run against a fresh
+   database. Before v1: an older image, a populated `/data`, then the new
+   image over it. Forward-only with no downgrade path is a fine policy, but
+   it has never been a *tested* policy.
+3. **Decide the magnet-link question deliberately, not by default.** Every
+   torrent sharerr builds is private, so a magnet can never resolve, and the
+   two-instance end-to-end test already confirmed Radarr's own direct
+   Torznab client picks the magnet over the working `.torrent` and stalls
+   forever — see [`SUPPORT.md`](SUPPORT.md#removing-the-feeds-magnet-link-entirely).
+   The current position is to keep `magneturl` in the feed and pull it "the
+   moment a real report shows it biting". For v1 the target user is a friend
+   pointing an *arr app directly at the feed, the failure mode is a silent
+   hang rather than an error, and the first report costs a debugging session
+   on both sides of the friendship — reconsider before tagging, not after.
+4. **Write the backup runbook.** Config export covers the effective
+   `sharerr.toml` and nothing in the vault or the peers table; the
+   `[[peers]]` export block (see [`SETTINGS.md`](SETTINGS.md#restoring-friends-after-a-full-data-directory-loss))
+   must be downloaded *before* the loss it protects against, losing `/data`
+   means re-keying every friendship, and losing `SHARERR_MASTER_KEY` is
+   unrecoverable by design. All defensible, but undocumented: a short
+   runbook (a volume snapshot or `sqlite3 .backup`, plus "export your peers
+   block now, not later") would close most of the practical gap for the cost
+   of a documentation page.
+5. **Resolve the login-rate-limiting tension before it is a support ticket.**
+   [`SECURITY.md`](SECURITY.md) lists the absence of login rate limiting as
+   by-design, while the deploy docs separately present "just forward 8477 as
+   it is" as a workable option. Individually defensible, jointly
+   uncomfortable — one of the two positions should move.
+6. **Add the query-string caveat to `SECURITY.md`'s by-design list.** Peer
+   API keys travel in query strings, which is consistent with the stated
+   threat model but means they land in any reverse-proxy access log in front
+   of an instance. Worth a line where the rest of the by-design tradeoffs
+   already live; it currently is not there.
 
 ## Open work, by scope
 
@@ -76,16 +127,44 @@ handling, `strip_peers_block`'s missing validation and lock, the
    **Uptime-Kuma-style heartbeat push** (needs a trigger built from scratch,
    with no existing detection to hang off of).
 
+2. **An easier lighthouse.** The rendezvous-of-last-resort requires the
+   friend group to stand up a third box on a stable address, which
+   undermines the "friend whose IP rotated while unwatched" story at exactly
+   the scale sharerr targets. A public instance, or a one-liner deploy,
+   would change the adoption math; see [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for
+   the existing design rationale this would build on.
+
+3. **Seeding limits that apply retroactively.** The upload cap and ratio
+   goal bind at add time only, through whatever native mechanism each
+   client offers for it — see
+   [`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds). A user
+   who discovers their link saturated changes the setting and watches
+   nothing happen; applying a changed limit to an already-seeding torrent
+   is the same one-shape-per-client problem the initial add already solved,
+   done a second time on update.
+
+4. **Stale cached `.torrent` detection.** `reuse_cached` in
+   `crates/sharerr/src/sync/seed.rs` reuses a cached `.torrent` by info hash
+   with no size or mtime check against the file currently on disk, so an
+   in-place upgrade under the same `file_id` seeds a stale hash until
+   someone notices and clicks Force rebuild. The one library-divergence case
+   with no automatic detection today.
+
 ### Large — a protocol, a data model, or a release process
 
-2. **Transfer accounting** — the largest gap between what sharerr _knows_
+5. **Transfer accounting** — the largest gap between what sharerr _knows_
    and what it _keeps_; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-3. **Request flow** — a new inbound request queue and approve step, touching
+6. **Request flow** — a new inbound request queue and approve step, touching
    the sync engine and the web UI on both sides of a friendship; see
    [Functionality](#functionality).
+
+7. **Multi-user.** The `users` table already exists; only the first-run
+   claim ever writes to it. A second user means deciding what a friendship,
+   a library, and a torrent client belong to — per instance, as today, or
+   per user — before any access-control surface can be built on top.
 
 ---
 

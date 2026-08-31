@@ -167,7 +167,7 @@ data-directory loss. `gossip_key` genuinely is a credential sitting in
 vault on the next `sharerr serve` start and strips the block from the file
 in the same write, so it exists on disk only until that first start. Not a
 precedent for anything else; see the struct's own doc comment,
-`docs/CONFIGURATION.md`'s "Restoring friends" section, and `SECURITY.md`'s
+`docs/SETTINGS.md`'s "Restoring friends" section, and `SECURITY.md`'s
 by-design list before reaching for this pattern a second time.
 
 **The config file is rewritten in place by the web UI**, comments and all, via
@@ -285,7 +285,7 @@ unpinned (newest release, always), so neither has a row.
 
 The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
 weighed but not all committed to as well as firm intentions — an idea belongs
-there or in `docs/UNSUPPORTED.md`, never in both. The original design brief and
+there or in `docs/SUPPORT.md`'s "Not supported" section, never in both. The original design brief and
 the two premises the implementation disproved are in `docs/DESIGN.md`.
 
 **`main` carries a ruleset (PR required, protected ref, verified signatures) that

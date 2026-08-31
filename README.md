@@ -61,9 +61,8 @@ design is built around.
 - [AI usage](#ai-usage)
 - [Licence](#licence)
 
-See also: [the configuration reference](docs/CONFIGURATION.md), [supported
-services](docs/SUPPORTED.md), [what's deliberately not
-supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
+See also: [the settings reference](docs/SETTINGS.md), [what's
+supported and what's deliberately not](docs/SUPPORT.md), [the API](docs/API.md), [the
 roadmap, including ideas considered but not all committed
 to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), [the
 lighthouse's design rationale](docs/LIGHTHOUSE.md), [the security
@@ -110,10 +109,9 @@ version](docs/RELEASING.md), and [how to contribute](docs/CONTRIBUTING.md).
 | OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)              | ✅ |
 
 Full detail on which *arr apps, torrent clients, and indexers are supported —
-and the trait/seam each plugs into — is [`docs/SUPPORTED.md`](docs/SUPPORTED.md).
-For things tried and deliberately left out (a media-server library source,
-Readarr as a direct indexer, and more), see
-[`docs/UNSUPPORTED.md`](docs/UNSUPPORTED.md).
+and the trait/seam each plugs into — along with things tried and deliberately
+left out (a media-server library source, Readarr as a direct indexer, and
+more), is [`docs/SUPPORT.md`](docs/SUPPORT.md).
 
 ## Screenshots
 
@@ -634,7 +632,7 @@ for rTorrent specifically: its XML-RPC API has never grown a way to remove a
 tracker, so sharerr can only add the new endpoint as a fresh tier ahead of the
 stale one, not replace it outright. Harmless — the stale tier just goes on
 being tried and failing — but see
-[`docs/SUPPORTED.md`](docs/SUPPORTED.md)'s "Torrent clients" for the full
+[`docs/SUPPORT.md`](docs/SUPPORT.md)'s "Torrent clients" for the full
 reasoning.
 
 ## The CLI

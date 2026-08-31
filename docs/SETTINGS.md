@@ -1,4 +1,4 @@
-# Configuration reference
+# Settings reference
 
 Every `sharerr.toml` field, environment variable, and vault secret sharerr
 reads, in one place. [The README](../README.md) is where to go for
@@ -153,7 +153,7 @@ fronts the RPC endpoint (the standard way ruTorrent's `httprpc` plugin is
 secured). Any placeholder values work if your proxy has no such gate.
 
 rTorrent cannot skip its hash check, and has no per-torrent seed-ratio limit
-— see [`SUPPORTED.md`](SUPPORTED.md#torrent-clients-what-actually-seeds) for
+— see [`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds) for
 both gaps and the tracker-replacement limitation.
 
 ## `[seeding]`

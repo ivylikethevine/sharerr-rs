@@ -120,7 +120,7 @@ happen — see [the README](../README.md#quickstart) before reporting:
   friend's gossip key — in plaintext, deliberately, contradicting every
   other rule in this file about secrets never sitting outside the vault.**
   This is a one-time, self-deleting restore path (see
-  [`CONFIGURATION.md`](CONFIGURATION.md#restoring-friends-after-a-full-data-directory-loss)):
+  [`SETTINGS.md`](SETTINGS.md#restoring-friends-after-a-full-data-directory-loss)):
   an operator hand-writes it after a full data-directory loss, and it is
   drained into the real store and vault — and stripped from the file, and
   from the running instance's own in-memory configuration — the moment

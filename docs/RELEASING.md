@@ -26,7 +26,7 @@ Two container images, from two workflows, each approved separately:
 | `ghcr.io/ivylikethevine/sharerr-lighthouse` | `docker-lighthouse.yml` | `docker/Dockerfile.lighthouse` |
 
 Nothing else is published anywhere — no crates.io (see
-[`docs/UNSUPPORTED.md`](UNSUPPORTED.md)), no npm, no PyPI, no GitHub Release
+[`docs/SUPPORT.md`](SUPPORT.md#publishing-to-cratesio)), no npm, no PyPI, no GitHub Release
 page with attached binaries. The container image is the distribution channel.
 
 ## Cutting a release
