@@ -2,8 +2,8 @@ name: Advisory note
 # The tail every advisory (never-blocking) check in this tree ends with: a
 # ::warning annotation plus a $GITHUB_STEP_SUMMARY section restating that it
 # never blocks a merge. ci.yml's hadolint and markdownlint jobs, and
-# link-check.yml, each had this written out by hand. Ported from say-hi's
-# identically-named action, which solved the same duplication there first.
+# link-check.yml, each had this written out by hand; this action collapses
+# the duplication into one call site.
 # What stays at the call site: the tool-specific `if:` that decides whether
 # this even runs, and any truncation of the report before it's handed here.
 description: Emit a ::warning annotation and a step-summary section for a non-blocking finding

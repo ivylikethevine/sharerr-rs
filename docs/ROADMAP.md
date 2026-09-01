@@ -15,9 +15,9 @@ the decision does not get re-litigated.
 ## Table of contents
 
 - [What's left](#whats-left)
-- [Functionality](#functionality)
 - [Before v1](#before-v1)
 - [Open work, by scope](#open-work-by-scope)
+  - [Small — a single function or file](#small--a-single-function-or-file)
   - [Medium — a subsystem, or one shape repeated across several files](#medium--a-subsystem-or-one-shape-repeated-across-several-files)
   - [Large — a protocol, a data model, or a release process](#large--a-protocol-a-data-model-or-a-release-process)
 - [Transfer accounting](#transfer-accounting)
@@ -27,38 +27,36 @@ the decision does not get re-litigated.
 
 ## What's left
 
-One feature-sized item — **[request flow](#functionality)**. Past that, the
-rest of [Open work, by scope](#open-work-by-scope) below is ideas that have
-been thought through but not all committed to — appearing here means the
-reasoning is written down, not that it is scheduled. Design rationale for
-work that has already shipped lives beside the feature itself rather than
-here: see [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the rendezvous service.
+The [Open work, by scope](#open-work-by-scope) list below is every idea that
+has been thought through but not all committed to — appearing here means the
+reasoning is written down, not that it is scheduled. [Before v1](#before-v1)
+is a separate list: operational tasks that block a first tagged release, not
+features. Design rationale for work that has already shipped lives beside the
+feature itself rather than here: see [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the
+rendezvous service.
 
 What sharerr already talks to — library sources, torrent clients, indexers —
-and the extension seam each sits behind, along with what was tried and
-deliberately left out, is [`SUPPORT.md`](SUPPORT.md).
-
-## Functionality
-
-**Request flow.** The original design brief wanted a friend's Sonarr/Radarr to
-_request_ content. Today discovery is one-way: they find what you already share.
-An inbound request queue with an approve step is the other half of that idea.
+and the extension seam each sits behind, along with what is deliberately left
+out and why, is [`SUPPORT.md`](SUPPORT.md).
 
 ## Before v1
 
-Operational, not architectural — carried over from a point-in-time
-shippability assessment done on 2026-08-31 against the state of `main` at
-that date, since retired in favour of tracking these as roadmap items rather
-than a separate standing document. None of these are features; each is
-something that has to actually happen, once, before a `v1` tag:
+Operational, not architectural. None of these are features; each is something
+that has to actually happen, once, before a `v1` tag:
 
-1. **Rehearse the release pipeline end to end** — both images,
-   `docker.yml` and `docker-lighthouse.yml` — since neither has ever
-   executed for real: no tag has been cut, `latest` does not exist. See
-   [`RELEASING.md`](RELEASING.md). Also verify, in the repository settings
-   rather than any workflow file, that the `release` environment actually
-   has a required reviewer configured — that gate is a GitHub Settings fact
-   no workflow can assert, and without it the publish step runs unattended.
+1. **Rehearse the release pipeline's build half; the publish half necessarily
+   executes for real on the first tag.** Both images, `docker.yml` and
+   `docker-lighthouse.yml`, accept a manual `workflow_dispatch` that rehearses
+   `build` — the same push-a-provisional-tag-and-attest path a `v*` push would
+   take (see [`RELEASING.md`](RELEASING.md#rehearsing-it)). `publish` cannot
+   be reached this way: it requires `github.event_name == 'push'` in addition
+   to the tag-ref check, so a dispatch can never satisfy it — the first real
+   `v*` tag is necessarily also the first time `publish` runs. What can and
+   should be rehearsed now: run both `build`s, and verify in the repository
+   settings — not any workflow file — that the `release` environment actually
+   has a required reviewer configured. That gate is a GitHub Settings fact no
+   workflow can assert; without it, `publish` runs unattended the moment
+   `build` finishes.
 2. **Rehearse one real upgrade across a migration.** Eleven forward-only
    sqlx migrations exist and every one has only ever run against a fresh
    database. Before v1: an older image, a populated `/data`, then the new
@@ -74,67 +72,74 @@ something that has to actually happen, once, before a `v1` tag:
    pointing an *arr app directly at the feed, the failure mode is a silent
    hang rather than an error, and the first report costs a debugging session
    on both sides of the friendship — reconsider before tagging, not after.
-4. **Write the backup runbook.** Config export covers the effective
-   `sharerr.toml` and nothing in the vault or the peers table; the
-   `[[peers]]` export block (see [`SETTINGS.md`](SETTINGS.md#restoring-friends-after-a-full-data-directory-loss))
-   must be downloaded *before* the loss it protects against, losing `/data`
-   means re-keying every friendship, and losing `SHARERR_MASTER_KEY` is
-   unrecoverable by design. All defensible, but undocumented: a short
-   runbook (a volume snapshot or `sqlite3 .backup`, plus "export your peers
-   block now, not later") would close most of the practical gap for the cost
-   of a documentation page.
+4. **Add snapshot guidance and the master-key warning to `SETTINGS.md`'s
+   backup section.** [`SETTINGS.md`](SETTINGS.md#backup-and-restore) already
+   documents what config export covers (the effective `sharerr.toml`, nothing
+   in the vault or the peers table) and that the `[[peers]]` export block must
+   be downloaded before the loss it protects against. Still missing there: a
+   volume-snapshot-or-`sqlite3 .backup` line, and the statement — currently
+   only in [`SECURITY.md`](SECURITY.md) — that losing `SHARERR_MASTER_KEY` is
+   unrecoverable by design.
 5. **Resolve the login-rate-limiting tension before it is a support ticket.**
    [`SECURITY.md`](SECURITY.md) lists the absence of login rate limiting as
    by-design, while the deploy docs separately present "just forward 8477 as
    it is" as a workable option. Individually defensible, jointly
    uncomfortable — one of the two positions should move.
-6. **Add the query-string caveat to `SECURITY.md`'s by-design list.** Peer
-   API keys travel in query strings, which is consistent with the stated
-   threat model but means they land in any reverse-proxy access log in front
-   of an instance. Worth a line where the rest of the by-design tradeoffs
-   already live; it currently is not there.
+6. **Add the query-string caveat to `SECURITY.md`'s by-design list.** The feed
+   API key, the `.torrent` download token, and the tracker's scrape token all
+   travel in query strings — consistent with the stated threat model, but
+   landing in any reverse-proxy access log in front of an instance. (The
+   announce token itself is a path segment, not a query parameter.) Worth a
+   line where the rest of the by-design tradeoffs already live; it currently
+   is not there.
 
 ## Open work, by scope
 
 Everything still ahead, in one list, smallest first — by how much each item
-touches, not how long it would take to get right. The review items come from
-a whole-codebase pass on 2026-08-21 (8 finder angles, every candidate
-independently verified: **CONFIRMED** = reproduced from the code, **PLAUSIBLE**
-= depends on ordering/config). File references are as of the review commit
-and may have drifted.
+touches, not how long it would take to get right.
 
-One batch of seven small fixes — everything an altitude review of the
-`[[peers]]` import/export commit had flagged — landed on 2026-08-28: the
-`ObservedVia` lenient-parse fallback, `import_one_peer`'s URL and endpoint
-handling, `strip_peers_block`'s missing validation and lock, the
-`PeerImportDocument` type, `Vault::put`'s own enforcement of
-`secret_keys::validate_value`, and `fresh_password`'s move out of `mock`.
+### Small — a single function or file
+
+1. **Stale cached `.torrent` detection.** `reuse_cached` in
+   `crates/sharerr/src/sync/seed.rs` is reached only when a torrent has
+   vanished from the client; it reuses whatever `.torrent` is cached for the
+   info hash with no size or mtime check against the file now on disk, so an
+   in-place upgrade under the same `file_id` seeds a stale hash until someone
+   notices and clicks Force rebuild. A cache that fails to parse already
+   triggers a rebuild — the gap is specifically a cache that parses fine but
+   describes different bytes.
 
 ### Medium — a subsystem, or one shape repeated across several files
 
-1. **The remaining notification triggers** — `[notifications]` now has a
+2. **The remaining notification triggers** — `[notifications]` has a
    per-trigger enable set and fires on six events: a sync failing outright, a
    friend going quiet, the advertised endpoint rotating, items newly shared,
-   items failing to share, and a friend's key being revoked. Four candidates
-   from the original review are still open, each needing more than a
-   `notify::send()` call beside code that already runs: **a new friend's
-   first contact** (needs a check for "is this the very first sighting"
-   before `touch_peer`'s own throttle-window logic, which today conflates the
-   two); **the tracker becoming unreachable** and **a `[[library]]` path
-   going unreadable** (both need a new periodic polling loop, modelled on the
-   existing `quiet_peers_loop`, that diffs against last-known state so a
-   persistently-broken thing does not notify every cycle); and an
+   items failing to share, and a friend's key being revoked. Four more
+   triggers would each need more than a `notify::send()` call beside code
+   that already runs: **a new friend's first contact** (needs a check for "is
+   this the very first sighting" ahead of `touch_peer`'s own throttle-window
+   logic, which today conflates the two); **the tracker becoming
+   unreachable** (needs a new periodic polling loop, modelled on the existing
+   `quiet_peers_loop`, that diffs against last-known state so a
+   persistently-broken thing does not notify every cycle); **a `[[library]]`
+   path going unreadable** (no new loop needed — `SourceScan.complete`
+   already detects this during a normal sync pass and feeds `sources_failed`;
+   only the trigger and the `notify::send()` call are missing); and an
    **Uptime-Kuma-style heartbeat push** (needs a trigger built from scratch,
    with no existing detection to hang off of).
 
-2. **An easier lighthouse.** The rendezvous-of-last-resort requires the
-   friend group to stand up a third box on a stable address, which
-   undermines the "friend whose IP rotated while unwatched" story at exactly
-   the scale sharerr targets. A public instance, or a one-liner deploy,
-   would change the adoption math; see [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for
-   the existing design rationale this would build on.
+3. **An easier lighthouse.** A one-liner Docker deploy already exists, and a
+   single operator can run the lighthouse embedded in one of sharerr's own
+   listeners instead of standing up a third container
+   (`[lighthouse] mount = "tracker"` or `"frontend"`) — see the README's
+   lighthouse section. What is still open: no public instance exists for a
+   friend group that would rather not run any lighthouse of its own, and no
+   compose file in `docker/` runs the lighthouse at all, so a group that does
+   want a standalone one has to write that compose file by hand. See
+   [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the design rationale a public
+   instance would build on.
 
-3. **Seeding limits that apply retroactively.** The upload cap and ratio
+4. **Seeding limits that apply retroactively.** The upload cap and ratio
    goal bind at add time only, through whatever native mechanism each
    client offers for it — see
    [`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds). A user
@@ -143,13 +148,6 @@ handling, `strip_peers_block`'s missing validation and lock, the
    is the same one-shape-per-client problem the initial add already solved,
    done a second time on update.
 
-4. **Stale cached `.torrent` detection.** `reuse_cached` in
-   `crates/sharerr/src/sync/seed.rs` reuses a cached `.torrent` by info hash
-   with no size or mtime check against the file currently on disk, so an
-   in-place upgrade under the same `file_id` seeds a stale hash until
-   someone notices and clicks Force rebuild. The one library-divergence case
-   with no automatic detection today.
-
 ### Large — a protocol, a data model, or a release process
 
 5. **Transfer accounting** — the largest gap between what sharerr _knows_
@@ -157,14 +155,18 @@ handling, `strip_peers_block`'s missing validation and lock, the
    for the full write-up, including the caveats that matter before building
    it.
 
-6. **Request flow** — a new inbound request queue and approve step, touching
-   the sync engine and the web UI on both sides of a friendship; see
-   [Functionality](#functionality).
+6. **Request flow.** The original design brief wanted a friend's Sonarr/Radarr
+   to _request_ content; today discovery is one-way, they find what you
+   already share. An inbound request queue with an approve step is the other
+   half of that idea, touching the sync engine and the web UI on both sides
+   of a friendship.
 
-7. **Multi-user.** The `users` table already exists; only the first-run
-   claim ever writes to it. A second user means deciding what a friendship,
-   a library, and a torrent client belong to — per instance, as today, or
-   per user — before any access-control surface can be built on top.
+7. **Multi-user.** The `users` table already exists; only the first-run claim
+   ever creates a row in it (an already-claimed instance's own password
+   change updates that one row rather than adding another). A second user
+   means deciding what a friendship, a library, and a torrent client belong
+   to — per instance, as today, or per user — before any access-control
+   surface can be built on top.
 
 ---
 
@@ -204,8 +206,10 @@ because each of these is a property to accept rather than a bug to fix later:
   durable key is (peer, info hash) with the peer id as a session discriminator
   underneath it.
 - **The announce path is hot.** A database write per announce is the wrong
-  shape. Accumulate in memory beside `Swarms` and flush on a timer — the same
-  arrangement `Swarms` already has, for the same reason.
+  shape. Accumulate in memory beside `Swarms` and flush on a timer, in the
+  manner of `swarm_history::poll_loop` — though that sampler flushes
+  aggregate totals rather than per-key deltas, so it is a starting shape to
+  adapt, not a drop-in one.
 - **Not every announce has a friend attached.** The shared instance token is
   deliberately unattributed, so those rows need somewhere to go that is not a
   peer.

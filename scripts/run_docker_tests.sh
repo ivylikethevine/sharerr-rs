@@ -104,8 +104,8 @@ remove_state() {
 # Every command is made non-fatal and the entry status is restored on the way out.
 # This runs as an EXIT trap under `set -e`, so a single failure in here would
 # otherwise replace the script's exit status — turning a fully passing run into a
-# non-zero exit, which is exactly what used to happen when `rm -rf` hit the
-# root-owned directory above.
+# non-zero exit, which is what `rm -rf` hitting the root-owned directory above
+# would otherwise do.
 teardown() {
     local status=$?
     "${COMPOSE[@]}" --profile indexer down -v --remove-orphans || true
@@ -171,10 +171,10 @@ api_key() {
 
 # Pipe a secret into the vault on stdin.
 #
-# The value is never interpolated into the remote shell command. It used to be
-# spliced into a single-quoted `sh -c` string, so a qBittorrent temporary password
-# containing an apostrophe broke the quoting — and could run arbitrary text inside
-# the container.
+# The value is never interpolated into the remote shell command. Splicing it
+# into a single-quoted `sh -c` string breaks on a qBittorrent temporary
+# password containing an apostrophe — and can run arbitrary text inside the
+# container.
 vault_set() {
     local key=$1 value=$2
     if [[ -z $value ]]; then
@@ -259,9 +259,9 @@ fi
 wait_for sonarr "$SONARR_PORT" /ping
 wait_for radarr "$RADARR_PORT" /ping
 ((LIDARR)) && wait_for lidarr "$LIDARR_PORT" /ping
-# Waited on too, though nothing used to: step 5 execs into sharerr and the step
-# below greps qBittorrent's log, so both have to be up. Their absence from the
-# original wait list is what the fixed sleeps were quietly compensating for.
+# Waited on too: step 5 execs into sharerr and the step below greps
+# qBittorrent's log, so both have to be up. Omitting them here just pushes
+# the problem onto fixed sleeps.
 #
 # qBittorrent answers 401 rather than 200 — see `wait_for` on why that counts.
 wait_for "$QBIT_SERVICE" "$QBIT_PORT" / '^(2[0-9][0-9]|401)$'

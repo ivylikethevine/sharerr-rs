@@ -21,9 +21,9 @@
 //! own [`Peer::key_hash`](sharerr_store::Peer::key_hash) instead, so a real
 //! announce using it can be traced back to them — and revoking that friend
 //! (which already zeroes their `key_hash` out of the active peers) reaches
-//! the tracker too, not just the feed. The instance-wide shared token still
-//! works forever alongside this, unattributed, so nothing seeded before this
-//! existed ever breaks. See [`authenticate_token`]. A `.torrent` fetched
+//! the tracker too, not just the feed. The instance-wide shared token also
+//! works, unattributed, so a magnet or `.torrent` carrying it stays valid
+//! whether or not attribution is in play. See [`authenticate_token`]. A `.torrent` fetched
 //! directly gets the same treatment: [`torrent_file`] rewrites the announce
 //! URLs it serves per requester, in memory, rather than caching a variant per
 //! peer on disk — see that function's docs.
@@ -1012,10 +1012,10 @@ mod tests {
     /// The master key is set to the empty string rather than left alone: empty
     /// counts as unset (see `sharerr_store::vault::master_key_from`), so this
     /// pins "no master key" deterministically instead of inheriting whatever a
-    /// concurrently-running Jail test happens to have set. Five tests in this
-    /// module used to depend on that accident in the opposite direction — they
-    /// asserted post-admission behaviour and passed only while some other test
-    /// held a master key in the environment.
+    /// concurrently-running Jail test happens to have set. Without this pin, a
+    /// test asserting post-admission behaviour would pass only while some
+    /// other, concurrently-running Jail test happened to hold a master key in
+    /// the environment.
     #[test]
     fn an_announce_is_refused_when_the_vault_cannot_be_opened() {
         figment::Jail::expect_with(|jail| {
@@ -1135,8 +1135,8 @@ mod tests {
     /// A token that does not resolve to any currently active peer — unknown,
     /// or belonging to someone since revoked — must not break the download; it
     /// falls back to serving the file exactly as cached, same as no token at
-    /// all. This is what keeps every download link from before this feature
-    /// existed working unchanged.
+    /// all. This is what keeps a download link carrying no resolvable token
+    /// working unchanged.
     #[tokio::test]
     async fn an_unresolvable_token_falls_back_to_the_cached_file_unchanged() {
         let (dir, state) = with_advertised_host();

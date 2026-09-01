@@ -507,8 +507,7 @@ fn cross_origin_refusal(headers: &HeaderMap) -> Option<Response> {
 /// what is in front of it. Neither lie buys anything. Claiming `https` on a
 /// plain-HTTP connection makes the browser discard the `Secure` cookie it is
 /// handed, so the spoofer denies their own sign-in. Claiming `http` on a TLS
-/// connection produces a cookie without `Secure`, which is precisely what every
-/// sharerr before this one shipped unconditionally — and the flag rides on the
+/// connection produces a cookie without `Secure`, and the flag rides on the
 /// response to the spoofer's own request, so it is a downgrade they can inflict
 /// only on themselves, never on somebody else's live session.
 ///

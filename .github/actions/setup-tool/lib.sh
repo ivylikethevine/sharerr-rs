@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reading ./tools.txt, shared by this action's install.sh and by
 # ../../scripts/check_tool_versions.sh - the two consumers of the roster,
-# so neither keeps a copy of it. Ported from say-hi's identically-named file.
+# so neither keeps a copy of it.
 
 # tools.txt sits beside this file, so both consumers find it the same way:
 # install.sh is sourced from $GITHUB_ACTION_PATH, check_tool_versions.sh from

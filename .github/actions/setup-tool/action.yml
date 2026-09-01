@@ -1,21 +1,17 @@
 name: Setup tool
 # One action for every CI tool this repo pins to a fixed version and installs
-# from a GitHub release asset — ported from say-hi's identically-named action,
-# which solved the same problem there first. Before this, ci.yml installed
-# zizmor with `pip`, actionlint with `go install`, coverage.yml built
-# cargo-llvm-cov from source with `cargo install`, and link-check.yml built
-# lychee from source the same way — four mechanisms, no caching, and each one
-# recompiling or re-resolving on every single run.
+# from a GitHub release asset. Without it, each workflow would install its own
+# tool its own way — `pip` for zizmor, `go install` for actionlint, a source
+# `cargo install` for cargo-llvm-cov and lychee — four mechanisms, no caching,
+# and a recompile or re-resolve on every run.
 #
 # The roster — version, download URL, archive shape, verify flag — lives in
-# ./tools.txt rather than in one near-identical action.yml per tool, and
-# .github/scripts/check_tool_versions.sh reads the same rows, so a pin cannot
-# go undrift-checked. This inverts this repo's previous position (recorded in
-# check_tool_versions.sh's old header) that a pin should live in the `run:`
-# line that uses it — tools.txt is the new home, and workflows read it back.
-# The trade is worth it: one cached install path, and drift coverage for
-# `lychee` and `cargo-llvm-cov`, which the old regex-over-workflow-files
-# roster never listed at all.
+# ./tools.txt rather than in one near-identical action.yml per tool, or in the
+# `run:` line that uses each tool. .github/scripts/check_tool_versions.sh
+# reads the same rows, so a pin cannot go undrift-checked — including `lychee`
+# and `cargo-llvm-cov`, which a regex over workflow files would not find at
+# all. The trade is worth it: one cached install path, and drift coverage for
+# every pinned tool.
 #
 # Deliberately NOT ported here: hadolint and trivy. Both float on
 # `releases/latest` in this repo on purpose (ci.yml's hadolint job and

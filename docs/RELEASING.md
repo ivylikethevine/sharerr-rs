@@ -1,11 +1,8 @@
 # Releasing
 
 What a `v*` tag actually does, the one-time setup it depends on, and how to
-rehearse the whole path without it reaching anyone. Ported from say-hi's
-`docs/PACKAGING.md` — "Cutting a release" and "Verifying a release download"
-sections in particular — this repo had no release runbook at all before this,
-which is part of why the path described here had never executed even once as
-of this writing.
+rehearse the whole path without it reaching anyone. No tag has yet driven this
+path end to end, so rehearse it (below) rather than trusting it.
 
 ## Contents
 
@@ -79,10 +76,9 @@ otherwise have been enough on its own — this is the gap that check closes; see
 real thing and publishes nothing, whatever the environment's reviewer setting
 says.
 
-Unlike say-hi's rehearsal, there's no fake-version input to pass: say-hi's
-package manifests need an embedded version string to build at all, where this
-workflow's tags are git-ref-derived and the provisional destination needs no
-version to be meaningful — the commit sha it's keyed on is real either way.
+There's no fake-version input to pass: this workflow's tags are git-ref-derived
+and the provisional destination needs no version to be meaningful — the
+commit sha it's keyed on is real either way.
 
 Run it from the Actions tab, or:
 
@@ -109,12 +105,10 @@ for the lighthouse image.
 Every push to `main` — not just a tagged release — ships its own image
 unattended, under `ghcr.io/.../image:sha-<7-char-sha>` and nothing else: no
 `latest`, no branch tag, nothing a human would stumble across browsing GHCR's
-tag list. This is deliberately not the same thing as say-hi's rolling
-`snapshot` prerelease, and no equivalent of that mechanism is planned here:
-say-hi needs a rolling release because its artifacts are downloadable
-packages people fetch by URL; a sha-tagged image already serves the same
-purpose for anyone who has the commit — findable only by someone who already
-knows the exact sha that produced it, and pullable the moment it lands. See
+tag list. No rolling prerelease mechanism is planned here: a sha-tagged image
+already serves that purpose for anyone who has the commit — findable only by
+someone who already knows the exact sha that produced it, and pullable the
+moment it lands. See
 CLAUDE.md's "Repository" section for why this half stays unattended while the
 tagged path does not: the risk of an sha-only tag reaching someone who did not
 already choose it is close to zero, where `latest` moving unattended is not.

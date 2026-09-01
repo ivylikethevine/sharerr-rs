@@ -88,9 +88,9 @@ happen — see [the README](../README.md#quickstart) before reporting:
   anyone who can already reach the port, and that is deliberately
   tolerated here: claiming `https` on a plain connection only costs the
   spoofer their own sign-in (the browser discards the cookie it is
-  handed), and claiming `http` on a real TLS connection only reproduces
-  the cookie every sharerr before this shipped unconditionally, on the
-  response to the spoofer's own request. Nothing else in sharerr trusts
+  handed), and claiming `http` on a real TLS connection only drops
+  `Secure` from a cookie on the response to the spoofer's own request.
+  Nothing else in sharerr trusts
   either header for anything — see `arrived_over_https` in
   `crates/sharerr/src/web/auth.rs` for where that line is drawn. If your
   network is not a trusted LAN and you are not behind a TLS-terminating
@@ -166,12 +166,11 @@ directory. See [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/m
 CodeQL note for how alert dismissal is tracked.
 
 **`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack timing side-channel)
-used to sit in this list**, back when Scorecard's `Vulnerabilities` check
-reported it: `rsa` rode into `Cargo.lock` via `sqlx-mysql` — a lock entry
-`sqlx`'s manifest handed out for every optional backend regardless of
-activation — never compiled in, but visible to any scanner that reads the
-lockfile flat. The `sqlx` 0.9 upgrade removed the dependency upstream, so
-`rsa` is out of `Cargo.lock` altogether and there is no longer anything for
-any scanner to misread. Recorded here rather than deleted because the old
-entry was the model for how a lockfile-only finding gets documented, and
-because a reader chasing a stale Scorecard report should find the answer.
+is not in this list**, though a stale OpenSSF Scorecard report may claim it
+should be. `rsa` reaches `Cargo.lock` only via `sqlx-mysql` — a lock entry
+`sqlx`'s manifest hands out for every optional backend regardless of
+activation — and `sqlx` 0.9 does not depend on it, so `rsa` is absent from
+the lockfile (`cargo tree -i rsa` matches nothing, and neither does a grep of
+`Cargo.lock`) and there is nothing for a scanner to misread. Kept here as the
+worked example of how a lockfile-only finding gets documented; see
+`deny.toml`'s matching note for the `cargo deny` side of the same answer.

@@ -182,17 +182,9 @@ async fn any_other_failure_translates_to_a_generic_api_error() {
     assert!(!err.is_unreachable());
 }
 
-// -------------------------------------------------------- moved from src/adapter.rs
-//
-// These used to live in an in-crate `mod tests` alongside `adapter.rs`'s
-// production code. Consolidated here because both files were driving the
-// same mocked-server-plus-trait-call pattern through two parallel helpers
-// (`mocked_client`/`make_client` there, `client` here) for no reason —
-// nothing any of these touch is private to `adapter.rs`. Five tests that
-// duplicated coverage already present here (and, in three cases, more
-// thorough — checking the response path, the URL content, or the error
-// detail as well) were dropped rather than moved; everything below tests
-// something this file did not already cover.
+// Nothing below is private to `adapter.rs`, so these tests live here against
+// the public API and share the one `client` helper rather than a second
+// mocked-server harness in-crate.
 
 fn make_client(base: &str) -> QbitClient {
     QbitClient::with_api_key(&Url::parse(base).unwrap(), SecretString::from(API_KEY)).unwrap()

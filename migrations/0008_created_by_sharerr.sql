@@ -2,9 +2,9 @@
 --
 -- `Seeder::seed` reuses any torrent already covering a file rather than adding
 -- a second one, so a row can end up Seeding under an infohash sharerr never
--- created -- an operator's own torrent, or a cross-seed. Withdrawing that item
--- used to `remove()` it from the client all the same, which is the one thing
--- the "preserve any existing torrents" rule forbids: sharerr tearing down a
+-- created -- an operator's own torrent, or a cross-seed. Withdrawing such an
+-- item must not `remove()` it from the client -- that is the one thing the
+-- "preserve any existing torrents" rule forbids: sharerr tearing down a
 -- torrent it did not put there.
 --
 -- Set by `set_seeding`, which knows which branch of `seed` it is recording.

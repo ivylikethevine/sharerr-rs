@@ -488,8 +488,8 @@ mod tests {
     #[test]
     fn parse_response_expands_entity_references_in_strings_and_bare_values() {
         // rTorrent escapes `&`, `<` and `>` in names and paths; quick-xml hands
-        // those back as separate `GeneralRef` events, which used to abort the
-        // whole reply as malformed.
+        // those back as separate `GeneralRef` events, which must be folded
+        // into the surrounding text rather than treated as malformed.
         let body = "<?xml version=\"1.0\"?><methodResponse><params><param><value>\
                     <array><data>\
                     <value><string>Tom &amp; Jerry &lt;1940&gt; &#x263A; &#9731;</string></value>\

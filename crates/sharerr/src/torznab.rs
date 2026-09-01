@@ -1298,7 +1298,7 @@ mod tests {
         assert_eq!(
             untokened.download_url(&item),
             format!("http://seed.example:8477/torrents/{hash}.torrent"),
-            "no token configured must leave the link exactly as before this feature"
+            "no token configured must leave the link untokened"
         );
 
         let tokened = Matched {

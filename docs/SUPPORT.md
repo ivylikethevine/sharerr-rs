@@ -195,25 +195,19 @@ The Docker image remains the only supported way to run sharerr.
 
 ### A maintained CHANGELOG.md
 
-Decided against, on say-hi's reasoning for the same choice there
-(`docs/ROADMAP.md`'s "Workflow" section, and its `CLAUDE.md`): git history is
-already the ledger, and a hand-maintained file recording the same information
-a second time only ever drifts from it. `docs/ROADMAP.md` holds what's still
-ahead and stays a to-do list, not a running log — an entry is deleted once it
-ships, not dated and kept.
+Decided against: git history is already the ledger, and a hand-maintained
+file recording the same information a second time only ever drifts from it.
+`docs/ROADMAP.md` holds what's still ahead and stays a to-do list, not a
+running log — an entry is deleted once it ships, not dated and kept.
 
-This repo's shape makes the case a little differently than say-hi's own,
-worth recording since it isn't a straight copy: say-hi publishes GitHub
-Releases with attached packages, and generates that release's notes from
-merged PR titles at publish time (`gh api POST
-repos/.../releases/generate-notes`) rather than transcribing a `CHANGELOG.md`
-by hand. Sharerr's `publish` job never creates a GitHub Release object at all
-— see [`docs/RELEASING.md`](RELEASING.md) — it only retags container images,
-so there is no release page a `CHANGELOG.md` or generated notes would even
+Sharerr's `publish` job never creates a GitHub Release object at all — see
+[`docs/RELEASING.md`](RELEASING.md) — it only retags container images, so
+there is no release page a `CHANGELOG.md` or generated notes would even
 attach to. What a `v*` tag changed is visible the same way any commit range
 is: `git log v1.2.2..v1.2.3` or GitHub's own tag-compare view. Revisit if a
 GitHub Release (or an equivalent changelog surface) ever gets added for a
-different reason — say-hi's `generate-notes` call is the model to reach for
+different reason — `gh api POST repos/.../releases/generate-notes`, generating
+notes from merged PR titles at publish time, is the model to reach for
 then, not a `CHANGELOG.md` written by hand.
 
 ### Internal refactors weighed and left alone

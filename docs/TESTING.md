@@ -3,9 +3,8 @@
 The runner, the two tiers, the compose stacks tier 2 drives, and what CI does
 and does not run. [`docs/CONTRIBUTING.md`](CONTRIBUTING.md) has the loop to
 run before opening a pull request; this page is the fuller reference behind
-it. Ported from say-hi's identically-named doc, which keeps this material out
-of its own `CLAUDE.md` for the same reason: a contributor who never opens an
-agent-facing file should still be able to read this.
+it, kept out of `CLAUDE.md` so a contributor who never opens an agent-facing
+file should still be able to read this.
 
 ## Contents
 

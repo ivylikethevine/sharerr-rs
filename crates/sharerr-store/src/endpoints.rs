@@ -204,9 +204,9 @@ impl Store {
     /// instead of one per friend.
     ///
     /// The Friends page and the topology view both render every friend's
-    /// history on one load, and both used to `join_all` a `peer_endpoints`
-    /// call per friend — concurrent, but still one connection and one query
-    /// plan checked out per row of a page that is people, not rows. A peer
+    /// history on one load. Fanning out a `peer_endpoints` call per friend via
+    /// `join_all` would be concurrent, but still check out one connection and
+    /// one query plan per row of a page that is people, not rows. A peer
     /// with no recorded sighting is simply absent from the returned map
     /// rather than present with an empty `Vec`; callers already reach for
     /// this with `.unwrap_or_default()` either way.
@@ -441,10 +441,10 @@ mod tests {
 
     /// `None` — a restored sighting with no real timestamp — must never
     /// overwrite a row that already exists, since it has nothing to compare
-    /// against. Before this, the caller had to fabricate `now_epoch()` to
-    /// call this method at all, which could out-rank (and silently
-    /// downgrade the `via` of) a genuine, older `Direct` sighting of the
-    /// same address.
+    /// against. Accepting `None` here is what lets the caller avoid
+    /// fabricating a `now_epoch()` timestamp, which would out-rank (and
+    /// silently downgrade the `via` of) a genuine, older `Direct` sighting of
+    /// the same address.
     #[tokio::test]
     async fn a_restored_sighting_with_no_timestamp_never_overwrites_an_existing_row() {
         let (store, peer) = store_with_peer().await;
