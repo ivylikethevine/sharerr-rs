@@ -42,7 +42,7 @@ skip_checking = true
 
 # Running Transmission or rTorrent instead? Set
 #   torrent_backend = "transmission"   (or "rtorrent")
-# at the top level and configure the matching section. See docs/CONFIGURATION.md.
+# at the top level and configure the matching section. See docs/SETTINGS.md.
 
 [tracker]
 # What *friends* resolve this instance as — not the container's address and not

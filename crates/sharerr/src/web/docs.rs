@@ -22,48 +22,49 @@ pub const REPO: &str = "https://github.com/ivylikethevine/sharerr-rs";
 
 pub const README: &str = "https://github.com/ivylikethevine/sharerr-rs#readme";
 pub const CONFIGURATION: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md";
-pub const CONFIG_LAYERING: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#how-configuration-is-layered";
-pub const CONFIG_TOP_LEVEL: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#top-level-settings";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md";
+pub const CONFIG_LAYERING: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#how-configuration-is-layered";
+pub const CONFIG_TOP_LEVEL: &str =
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#top-level-settings";
 pub const CONFIG_ARR: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#arr-apps";
-pub const CONFIG_LIBRARY: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#library--plain-directories";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#arr-apps";
+pub const CONFIG_LIBRARY: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#library--plain-directories";
 pub const CONFIG_TORRENT_CLIENT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#torrent-client";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#torrent-client";
 pub const CONFIG_QBITTORRENT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#qbittorrent";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#qbittorrent";
 pub const CONFIG_TRANSMISSION: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#transmission";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#transmission";
 pub const CONFIG_RTORRENT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#rtorrent";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#rtorrent";
 pub const CONFIG_SEEDING: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#seeding";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#seeding";
 pub const CONFIG_TRACKER: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#tracker";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#tracker";
 pub const CONFIG_PATH_MAP: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#path_map";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#path_map";
 pub const CONFIG_LIGHTHOUSE: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#lighthouse";
-pub const CONFIG_GLUETUN: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#gluetun-and-gluetun_client";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#lighthouse";
+pub const CONFIG_GLUETUN: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#gluetun-and-gluetun_client";
 pub const CONFIG_SYNC: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#sync";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#sync";
 pub const CONFIG_CHECKS: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#checks";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#checks";
 pub const CONFIG_NOTIFICATIONS: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#notifications";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#notifications";
 pub const CONFIG_METRICS: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#metrics";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#metrics";
 pub const CONFIG_VAULT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#vault-secrets";
-pub const CONFIG_ENV: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONFIGURATION.md#environment-variable-overrides";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#vault-secrets";
+pub const CONFIG_ENV: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#environment-variable-overrides";
 
 pub const SUPPORTED: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORTED.md";
-pub const SUPPORTED_SOURCES: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORTED.md#library-sources-where-tagged-content-comes-from";
-pub const SUPPORTED_CLIENTS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORTED.md#torrent-clients-what-actually-seeds";
-pub const SUPPORTED_INDEXERS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORTED.md#indexers-what-consumes-the-feed";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#supported-services";
+pub const SUPPORTED_SOURCES: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#library-sources-where-tagged-content-comes-from";
+pub const SUPPORTED_CLIENTS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#torrent-clients-what-actually-seeds";
+pub const SUPPORTED_INDEXERS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#indexers-what-consumes-the-feed";
 pub const UNSUPPORTED: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/UNSUPPORTED.md";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#not-supported";
 
 pub const API: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/API.md";
 pub const SECURITY: &str =

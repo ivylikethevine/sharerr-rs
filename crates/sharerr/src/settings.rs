@@ -53,7 +53,7 @@ pub fn load(path: &Path) -> Result<Config> {
 
 /// Load, or recover enough of a configuration to keep serving.
 ///
-/// A malformed `sharerr.toml` used to abort startup, which under Docker is a
+/// Aborting startup on a malformed `sharerr.toml` would, under Docker, be a
 /// restart loop with no HTTP surface — and the web UI is the tool an operator
 /// would use to fix it. So the error is returned alongside a usable `Config`
 /// instead of replacing it; the caller decides how loudly to say so.

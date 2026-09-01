@@ -7,25 +7,24 @@
 #
 # ## Why there is no `internal: true` network
 #
-# There used to be one, on the grounds that giving the containers no route off the
-# host enforced the no-egress requirement rather than merely stating it. It had to
-# go: an internal bridge severs the host->container path that *published ports*
-# travel, and this stack's entire control plane runs over those ports. The host
-# waits on `127.0.0.1:18989/ping`, scrapes API keys from a bind mount, runs
-# `seed-arr` against the *arr SQLite databases directly, and docker/README.md tells
-# you to open the web UI in a browser. Isolating the network breaks all of that, so
-# the readiness probes hung for their full 180s timeout against containers that
-# were perfectly healthy.
+# There is none. An internal bridge would enforce the no-egress requirement
+# rather than merely stating it, but it also severs the host->container path
+# that *published ports* travel, and this stack's entire control plane runs
+# over those ports. The host waits on `127.0.0.1:18989/ping`, scrapes API keys
+# from a bind mount, runs `seed-arr` against the *arr SQLite databases
+# directly, and docker/README.md tells you to open the web UI in a browser.
+# Isolating the network breaks all of that: the readiness probes hang for
+# their full 180s timeout against containers that are perfectly healthy.
 #
-# Losing it costs less than it looks. The reason the tagged content is written
-# straight into Sonarr's and Radarr's databases — rather than added through their
-# APIs — was never only the network: every fixture title is invented, so the
-# metadata lookup against services.sonarr.tv would find nothing even with egress.
-# `seed-arr` is therefore still the right approach, and nothing in the test path
-# depends on reaching the internet.
+# Doing without it costs less than it looks. The reason the tagged content is
+# written straight into Sonarr's and Radarr's databases — rather than added
+# through their APIs — was never only the network: every fixture title is
+# invented, so the metadata lookup against services.sonarr.tv would find
+# nothing even with egress. `seed-arr` is therefore still the right approach,
+# and nothing in the test path depends on reaching the internet.
 #
-# What this does mean: the stack no longer *proves* sharerr makes no outbound
-# requests. That property now rests on the code and its hermetic tests.
+# What this does mean: the stack does not *prove* sharerr makes no outbound
+# requests. That property rests on the code and its hermetic tests.
 #
 # ## Sonarr, Radarr, and Lidarr keep their config in `./state`, not a named volume
 #

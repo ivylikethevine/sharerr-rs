@@ -738,10 +738,9 @@ fn check_tracker(config: &Config, vault: Option<&Vault>, report: &mut Report) {
 /// `target` picks `[gluetun]` (the tracker's) or `[gluetun_client]` (the
 /// torrent client's own, independent of the tracker's) — the same
 /// [`crate::gluetun::GluetunTarget`] the live poller in `serve` and
-/// `web/diagnostics.rs` already distinguish between. Before this took a
-/// target, only the tracker's tunnel was ever checked, so a broken
-/// `[gluetun_client]` key produced a clean `doctor` report despite the live
-/// poller for it failing continuously.
+/// `web/diagnostics.rs` already distinguish between. Taking a target is what
+/// keeps a broken `[gluetun_client]` key from producing a clean `doctor`
+/// report while the live poller for it fails continuously.
 async fn check_gluetun(
     config: &Config,
     vault: Option<&Vault>,
@@ -1942,9 +1941,9 @@ mod tests {
         assert_eq!(report.warnings, 1);
     }
 
-    /// The bug this parameterisation fixes: a dual-VPN operator's
-    /// `[gluetun_client]` tunnel used to never be checked by `doctor` at all,
-    /// so a broken client-tunnel key produced a clean report.
+    /// What this parameterisation covers: a dual-VPN operator's
+    /// `[gluetun_client]` tunnel must be checked by `doctor` too — otherwise a
+    /// broken client-tunnel key produces a clean report.
     #[tokio::test]
     async fn check_gluetun_checks_the_client_tunnel_when_asked() {
         let server = MockServer::start().await;

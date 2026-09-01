@@ -61,8 +61,8 @@ pub struct ScanOutcome {
 ///
 /// Typed so callers that classify the root — `checks::check_library` — can
 /// match on the condition instead of re-statting the directory to rediscover
-/// it. Every variant names the root, so the `Display` text reads the same as
-/// the prose `scan` used to return.
+/// it. Every variant names the root, so the `Display` text is a complete,
+/// self-contained message.
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
     #[error("library {} is not an absolute path", .0.display())]

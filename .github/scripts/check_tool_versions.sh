@@ -11,13 +11,12 @@
 #
 # The roster is ../actions/setup-tool/tools.txt, read here through
 # ../actions/setup-tool/lib.sh rather than copied, so a tool cannot be pinned
-# and go unchecked. This used to extract each pin by regex straight out of the
-# `run:` line that installed it — ci.yml no longer has one of those for
-# zizmor/actionlint/cargo-llvm-cov/lychee, now that ./setup-tool installs them
-# from a cached, versioned pin instead of a fresh `pip`/`go install`/`cargo
-# install` every run. The roster moved with it: tools.txt is now the one place
-# a pin lives, and this script and setup-tool both read it rather than either
-# copying the other.
+# and go unchecked. tools.txt is the one place a pin lives; this script and
+# setup-tool both read it rather than either copying the other, or extracting
+# a pin by regex out of the `run:` line that installs it — there are no such
+# `run:` lines for zizmor/actionlint/cargo-llvm-cov/lychee, which ./setup-tool
+# installs from a cached, versioned pin instead of a fresh `pip`/`go
+# install`/`cargo install` every run.
 #
 # Deliberately absent from tools.txt, and so from here: hadolint and trivy.
 # Both are installed from `releases/latest` on purpose (ci.yml and

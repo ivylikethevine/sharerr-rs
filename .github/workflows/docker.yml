@@ -36,20 +36,18 @@
 # `github.event_name == 'workflow_dispatch'` branch added), and gets a real
 # provenance attestation against that tag too — so the whole build-push-attest
 # path can be exercised any day, not only discovered broken the day a tag is
-# actually pushed. `publish` cannot be reached this way: it now hard-requires
-# `github.event_name == 'push'` in addition to the tag-ref check, closing a real
-# gap this file had before — dispatching against an *existing* `v*` tag ref
-# already satisfied `startsWith(github.ref, 'refs/tags/v')` on its own, which
-# meant a manual dispatch aimed at a released tag could already reach `publish`
-# and retag `latest`, contingent only on the `release` environment's reviewer
-# setting actually being configured (which, per the comment below, it might not
-# be). The event check makes that impossible regardless of environment config.
+# actually pushed. `publish` cannot be reached this way: it hard-requires
+# `github.event_name == 'push'` in addition to the tag-ref check — without
+# that, dispatching against an *existing* `v*` tag ref alone satisfies
+# `startsWith(github.ref, 'refs/tags/v')`, so a manual dispatch aimed at a
+# released tag could reach `publish` and retag `latest`, contingent only on
+# the `release` environment's reviewer setting actually being configured
+# (which, per the comment below, it might not be). The event check makes
+# that impossible regardless of environment config.
 #
-# No separate "fake version" input, unlike say-hi's release.yml rehearsal this
-# is modeled on: say-hi's package manifests need an embedded version string to
-# build at all, where this workflow's tags are git-ref-derived and the fake
-# provisional destination (`pending-<sha>`) needs no version to be meaningful -
-# the sha it is keyed on is real either way. `needs.build.outputs.tags` (the
+# No separate "fake version" input: this workflow's tags are git-ref-derived
+# and the fake provisional destination (`pending-<sha>`) needs no version to
+# be meaningful - the sha it is keyed on is real either way. `needs.build.outputs.tags` (the
 # human-facing `latest`/semver tags `meta` would compute) is simply never read
 # on a dispatch, because `publish` never runs on one.
 

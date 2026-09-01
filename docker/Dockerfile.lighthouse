@@ -1,5 +1,5 @@
 # sharerr-lighthouse — the standalone rendezvous service, its own image, its
-# own port. See docs/ROADMAP.md's "The lighthouse" for what it is and why it
+# own port. See docs/LIGHTHOUSE.md for what it is and why it
 # is deliberately not built into the main sharerr image: it is meant to be
 # self-hosted by anyone, on neutral ground away from any particular library.
 #

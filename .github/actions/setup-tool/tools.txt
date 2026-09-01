@@ -1,8 +1,7 @@
 # The pinned CI tools, one row per tool - read by ./install.sh (which installs
 # one) and by ../../scripts/check_tool_versions.sh (which reports drift against
 # each upstream's latest release). Both reach it through ./lib.sh, so this file
-# is the single roster: a tool pinned here cannot go undrift-checked. Ported
-# from say-hi's identically-shaped tools.txt.
+# is the single roster: a tool pinned here cannot go undrift-checked.
 #
 #   name|pin|kind|url|verify|check
 #
@@ -14,9 +13,8 @@
 #         placeholder is substituted. The url column carries the literal "v"
 #         (or, for lychee, "lychee-v") where the tag needs it.
 # kind    raw (a bare executable) or tar.gz (an archive to search inside).
-#         say-hi's tools.txt also has cmake/make kinds for tools this repo
-#         does not need (kcov, mandoc) - copy that shape here if a future tool
-#         ships only as source.
+#         cmake/make kinds could be added here for a tool that ships only as
+#         source, if one is ever needed.
 # url     %v is the pin. %a would be the asset slug for this runner
 #         (linux.x86_64 / darwin.aarch64 / darwin.x86_64), resolved first so a
 #         version can never be mistaken for one - unused below because every
@@ -34,9 +32,8 @@ actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v
 # works, by expecting its own subcommand name as the first argument even when
 # invoked directly (cargo does that prepending itself when it dispatches to
 # it; this smoke test has to do it by hand). A bare "cargo-llvm-cov --version"
-# fails with "expected subcommand 'llvm-cov', found argument '--version'" -
-# what every runner using this row hit before this comment existed. Downstream
-# usage in coverage.yml is unaffected either way: it always goes through
+# fails with "expected subcommand 'llvm-cov', found argument '--version'".
+# Downstream usage in coverage.yml is unaffected either way: it always goes through
 # `cargo llvm-cov ...`, which cargo itself resolves the same correct way.
 cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov
 # lychee tags its releases "lychee-v<version>", not "v<version>" like every

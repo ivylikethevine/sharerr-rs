@@ -268,12 +268,11 @@ pub struct Snapshot {
 /// `web::topology::gather` need before they can render their own view of
 /// "is this instance healthy".
 ///
-/// Before this existed, each page ran its own copy of this sequence, and the
-/// copies had already drifted: a panicked library scan produced a synthetic
-/// "did not complete" line on the diagnostics page and silently vanished
-/// from the topology page. One function used by both closes that gap the
-/// same way [`resolve_torrent_credential`] closed the credential-resolution
-/// one.
+/// One function used by both is what keeps the two pages from drifting: a
+/// panicked library scan reads the same on the diagnostics page and the
+/// topology page, rather than producing a synthetic "did not complete" line
+/// on one and silently vanishing from the other. Same shape as
+/// [`resolve_torrent_credential`] for credential resolution.
 ///
 /// The arr probes (network) and the library scan (filesystem) touch
 /// disjoint state, so they run concurrently rather than one after the
@@ -596,11 +595,11 @@ impl TorrentCredential {
 /// Read whichever of `client`'s vault keys are configured and resolve them to a
 /// credential, via `secret` — the one place this decision is made.
 ///
-/// Before this existed, `sync::build_client`, `web::probe::torrent_client_badge`,
-/// and `web::topology::client_node` each read both keys and called
-/// [`TorrentCredential::choose`] themselves, and `commands::doctor::check_qbit`
-/// picked a variant by hand without calling `choose` at all — four places that
-/// could each drift on what "resolve the configured credential" means. `secret`
+/// `sync::build_client`, `web::probe::torrent_client_badge`,
+/// `web::topology::client_node` and `commands::doctor::check_qbit` all route
+/// through here rather than each reading both keys and calling
+/// [`TorrentCredential::choose`] themselves — four places that would
+/// otherwise drift on what "resolve the configured credential" means. `secret`
 /// stays generic over the error type each caller already reports failures as
 /// (an owned `String` describing what went wrong), rather than forcing every
 /// caller through one concrete vault or reporting type.
@@ -823,10 +822,10 @@ mod tests {
         }
     }
 
-    /// The point of `snapshot`: what `diagnostics` and `topology` used to
-    /// gather separately — an arr probe and a library scan — merges into one
-    /// path check, and a library that scanned cleanly comes back as
-    /// `LibraryScan::Scanned` rather than lost or misreported.
+    /// The point of `snapshot`: what `diagnostics` and `topology` each need —
+    /// an arr probe and a library scan — merges into one path check, and a
+    /// library that scanned cleanly comes back as `LibraryScan::Scanned`
+    /// rather than lost or misreported.
     #[tokio::test]
     async fn snapshot_merges_arr_and_library_discoveries_into_the_path_check() {
         use sharerr_core::config::{LibraryConfig, LibraryKind};

@@ -1,10 +1,9 @@
 name: Fetch latest artifact
 # pages.yml looks up the newest successful run of coverage.yml, then downloads
-# its coverage-badge artifact - the exact shape say-hi's pages.yml needed five
-# times over (CI totals, package sizes, two coverage figures, demo GIFs).
-# Ported from say-hi's identically-named action so this repo's one call site
-# reads the same way, and so a second one (say, a package-size figure) is a
-# `uses:` line instead of a second hand-written lookup.
+# its coverage-badge artifact. One action keeps this repo's one call site
+# reading the same way a second one would, so a future one (say, a
+# package-size figure) is a `uses:` line instead of a second hand-written
+# lookup.
 description: Find the newest successful run of a workflow and download one artifact from it
 
 inputs:

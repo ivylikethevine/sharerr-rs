@@ -187,8 +187,8 @@ jobs:
           persist-credentials: false
 
       # Advisories, licences, and duplicate/banned crates. The tree includes
-      # argon2, chacha20poly1305, rustls and an HTTP server, none of which had any
-      # advisory gate before this job existed.
+      # argon2, chacha20poly1305, rustls and an HTTP server; this job is the
+      # advisory gate for all of them.
       #
       # Its own job because it is the one check that can start failing without
       # anybody touching the repository — which is also why this workflow has a
@@ -281,9 +281,9 @@ jobs:
 
       # Cached and pinned to a known-good version rather than the newest on
       # every run — zizmor's own findings should change because the workflows
-      # changed, not because the linter did. Used to be `pip install` on every
-      # run; ./setup-tool downloads the same pinned release once per version
-      # and caches the binary after that.
+      # changed, not because the linter did. ./setup-tool downloads the pinned
+      # release once per version and caches the binary, instead of a
+      # `pip install` on every run.
       - uses: ./.github/actions/setup-tool
         with:
           tool: zizmor
@@ -294,8 +294,8 @@ jobs:
         run: zizmor --no-progress .github/
 
   # Bad `needs`, invalid contexts, a step referencing an undefined output — the
-  # workflows are code too, and nothing before this checked their syntax
-  # beyond "does the YAML parse".
+  # workflows are code too, and nothing else checks their syntax beyond
+  # "does the YAML parse".
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
@@ -408,10 +408,9 @@ jobs:
             Advisory only: this job never blocks a merge. See the step above for the
             findings, or run `markdownlint-cli2 '**/*.md'` locally.
 
-  # Advisory, and deliberately so for now, unlike say-hi's identical tool -
-  # that repo's _typos.toml roster was built up over a real gating run; this
-  # is the first run of `typos` against this tree at all, and _typos.toml's
-  # own header says why it starts with no entries. Promote this to a gate
+  # Advisory, and deliberately so for now: this is the first run of `typos`
+  # against this tree at all, and _typos.toml's own header says why it starts
+  # with no entries. Promote this to a gate
   # (same shape as `fmt`/`test`/`msrv` above, no `continue-on-error`) once a
   # run or two has come back clean or the allowlist has caught up with what's
   # left. Not gated on `changes`: a typo can live in Rust source as easily as

@@ -97,9 +97,9 @@ jobs:
 
       # See .github/actions/upsert-tracking-issue for the shape this, tool-
       # versions.yml, and image-scan.yml's `pins` job all share.
-      # warning-title/warning-body fold in what used to be a separate trailing
-      # step here - the action emits the ::warning itself once the issue is
-      # upserted, rather than this workflow doing it a second time after.
+      # warning-title/warning-body let the action emit the ::warning itself
+      # once the issue is upserted, so no separate trailing step here has to
+      # do it a second time.
       - name: Keep the tracking issue current
         uses: ./.github/actions/upsert-tracking-issue
         with:

@@ -53,17 +53,15 @@ ignore = [
     "RUSTSEC-2024-0436",
 ]
 
-# `RUSTSEC-2023-0071` (the `rsa` Marvin Attack) used to be documented here as
-# unreachable-but-present: `sqlx-mysql` was a lock entry `sqlx`'s manifest
-# handed out regardless of activation, and `rsa` rode in through it, never
-# compiled but visible to any scanner that reads `Cargo.lock` flat (OpenSSF
-# Scorecard did, and reported it). The `sqlx` 0.9 upgrade ended that — its
-# mysql backend no longer depends on `rsa` at all, so the crate left the
-# lockfile entirely (`cargo tree -i rsa` matches nothing, and neither does a
-# grep of `Cargo.lock`). Nothing to ignore, nothing left for Scorecard to
-# misread. This note stays because the old state was also documented in
-# `docs/SECURITY.md`'s "What is out of scope" list, and a reader chasing a
-# stale scanner report should find the same answer in both places.
+# `RUSTSEC-2023-0071` (the `rsa` Marvin Attack) needs no `ignore` entry:
+# `sqlx-mysql` is a lock entry `sqlx`'s manifest hands out regardless of
+# activation, and `rsa` would ride in through it, but `sqlx`'s mysql backend
+# does not depend on `rsa`, so the crate is absent from the lockfile entirely
+# (`cargo tree -i rsa` matches nothing, and neither does a grep of
+# `Cargo.lock`). Nothing to ignore, nothing for Scorecard to misread. This
+# note stays because the same fact is also documented in `docs/SECURITY.md`'s
+# "What is out of scope" list, and a reader chasing a stale scanner report
+# should find the same answer in both places.
 
 [licenses]
 version = 2

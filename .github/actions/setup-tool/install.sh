@@ -2,7 +2,7 @@
 # The install half of ./action.yml, in a real file so the repo's own
 # `shellcheck` step (ci.yml's `scripts` job) reads it - a `run:` block inside
 # a composite action is code nothing here would otherwise lint, and this one
-# curls, untars and sudo mvs. Ported from say-hi's identically-named script.
+# curls, untars and sudo mvs.
 #
 # Two subcommands, because actions/cache needs the version as an expression
 # before the install step runs:
@@ -11,9 +11,8 @@
 set -euo pipefail
 
 # SC1091: this repo's shellcheck step (ci.yml's `scripts` job) runs without
-# -x, so `source=` alone (say-hi's own install.sh uses it, under a shellcheck
-# invocation that does pass -x) does not resolve this - disabled explicitly
-# instead of adding -x repo-wide for one file.
+# -x, so `source=` alone does not resolve this - disabled explicitly instead
+# of adding -x repo-wide for one file.
 # shellcheck disable=SC1091
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -45,9 +44,8 @@ esac
 
 # %a: no current row needs more than one asset (this repo's jobs are all
 # Linux), but the substitution is kept so a future macOS job costs a tools.txt
-# row, not a rewrite of this script - see say-hi's setup-tool, which does need
-# it, for the shellcheck row this was copied from. Resolved before %v so a
-# version can never look like an asset slug.
+# row, not a rewrite of this script. Resolved before %v so a version can
+# never look like an asset slug.
 case "$_sr_url" in
 *%a*)
   case "$(uname -s).$(uname -m)" in

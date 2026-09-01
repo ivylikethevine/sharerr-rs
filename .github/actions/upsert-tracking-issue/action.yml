@@ -10,13 +10,10 @@ name: Upsert tracking issue
 # table are nothing alike) and deciding `resolved` from its own tool's
 # verdict.
 #
-# Inputs converged with say-hi's identically-named action, which carries the
-# same three callers' shape: `resolved`/`close-comment`/`body-file` replace
-# this repo's former `actionable`/`clean-comment`/`report-file` - note the
-# **inverted polarity** (`resolved: true` now means "nothing to report",
-# where `actionable: true` used to mean the opposite) - so a caller ported
-# from either repo to the other behaves the same way instead of silently
-# flipping its own meaning.
+# Field names: `resolved`/`close-comment`/`body-file`. Note the **inverted
+# polarity** - `resolved: true` means "nothing to report" - so a caller
+# composing the `resolved` input does not accidentally write it as if it were
+# an `actionable`-style true-means-report flag.
 description: Create, update, or close one labeled GitHub issue tracking a standing finding
 
 inputs:

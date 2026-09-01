@@ -29,10 +29,10 @@ jobs:
       # Version-pinned, unlike Trivy in image-scan.yml: a link checker that
       # changes its own crawling rules mid-week would fail a PR that changed
       # no links, where a stale vulnerability scanner just stops finding
-      # things - the two advisory checks want opposite freshness. Used to be
-      # `cargo install --version 0.24.2 --locked`, a fresh source build every
-      # run; ./setup-tool downloads the same pin as a release binary once per
-      # version and caches it after that.
+      # things - the two advisory checks want opposite freshness. ./setup-tool
+      # downloads the pin as a release binary once per version and caches it,
+      # instead of a fresh `cargo install --version 0.24.2 --locked` source
+      # build every run.
       - uses: ./.github/actions/setup-tool
         with:
           tool: lychee

@@ -255,8 +255,8 @@ async fn report(
 /// Publish one record, and — unlike a fire-and-forget POST — say something
 /// when the lighthouse refuses it.
 ///
-/// A refusal used to be invisible here: only a transport error was logged, so
-/// a 403 or a 503 looked exactly like a successful report. Both of the answers
+/// A refusal is easy to lose here: logging only transport errors would make
+/// a 403 or a 503 look exactly like a successful report. Both of the answers
 /// that mean "your endpoint is not being published" need an operator, and an
 /// instance that believes it is reachable and is not is the worst shape this
 /// can fail in:

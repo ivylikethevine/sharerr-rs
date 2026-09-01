@@ -33,8 +33,9 @@ Nothing is copied, renamed, re-linked, or moved. That is the constraint the whol
 design is built around.
 
 > **Status: experimental.** This is a personal project and has not had a tagged
-> release. See [the roadmap](docs/ROADMAP.md) for what works and what does not.
-> Large parts were written with generative AI — see [AI usage](#ai-usage).
+> release. See [what's supported](docs/SUPPORT.md) and [the roadmap](docs/ROADMAP.md)
+> for what's still ahead. Large parts were written with generative AI — see
+> [AI usage](#ai-usage).
 
 ## Table of contents
 
@@ -61,9 +62,8 @@ design is built around.
 - [AI usage](#ai-usage)
 - [Licence](#licence)
 
-See also: [the configuration reference](docs/CONFIGURATION.md), [supported
-services](docs/SUPPORTED.md), [what's deliberately not
-supported](docs/UNSUPPORTED.md), [the API](docs/API.md), [the
+See also: [the settings reference](docs/SETTINGS.md), [what's
+supported and what's deliberately not](docs/SUPPORT.md), [the API](docs/API.md), [the
 roadmap, including ideas considered but not all committed
 to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), [the
 lighthouse's design rationale](docs/LIGHTHOUSE.md), [the security
@@ -110,10 +110,9 @@ version](docs/RELEASING.md), and [how to contribute](docs/CONTRIBUTING.md).
 | OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)              | ✅ |
 
 Full detail on which *arr apps, torrent clients, and indexers are supported —
-and the trait/seam each plugs into — is [`docs/SUPPORTED.md`](docs/SUPPORTED.md).
-For things tried and deliberately left out (a media-server library source,
-Readarr as a direct indexer, and more), see
-[`docs/UNSUPPORTED.md`](docs/UNSUPPORTED.md).
+and the trait/seam each plugs into — along with things tried and deliberately
+left out (a media-server library source, Readarr as a direct indexer, and
+more), is [`docs/SUPPORT.md`](docs/SUPPORT.md).
 
 ## Screenshots
 
@@ -195,10 +194,10 @@ books. That applies to the feed itself, not just the display — content outside
 friend's scope is never listed and never offered, and they cannot search their
 way around it.
 
-> There is no shared feed key any more. The old `torznab.api_key`, which let one
-> key open the feed for everybody and so made revoking a single friend
-> meaningless, has been removed — a `sharerr.toml` still carrying a `[torznab]`
-> section fails to load; delete it and issue each friend their own key.
+> There is no shared feed key. A single `torznab.api_key` would open the feed
+> for everybody and make revoking one friend meaningless; a `sharerr.toml`
+> carrying a `[torznab]` section fails to load — delete it and issue each
+> friend their own key.
 
 If your friend has a client set up for **Jackett** rather than Prowlarr, it works
 unmodified. sharerr answers Jackett's URL shape
@@ -243,11 +242,10 @@ net for the _shared_ token specifically, not a substitute for per-friend
 revocation above — a shared token can never single out one already-connected
 peer, only stop admitting it.
 
-(There used to be a second option here — qBittorrent's embedded tracker — and it
-was removed: two tracker backends meant two independently built announce URLs,
-and every improvement to endpoint handling had to be made twice. A `sharerr.toml`
-still naming `tracker.backend` fails to load with an error saying exactly this;
-delete the line.)
+(sharerr's own tracker is the only tracker backend. Two backends would mean
+two independently built announce URLs and every improvement to endpoint
+handling made twice. A `sharerr.toml` naming `tracker.backend` fails to load
+with an error saying exactly this; delete the line.)
 
 One caveat: the announce endpoint is part of `sharerr serve`, so a one-shot
 `sharerr sync` produces correct torrents whose announces fail until `serve` is
@@ -430,7 +428,7 @@ Notes that are easy to trip over:
 
 ## Friends finding each other
 
-A peer used to be only a credential; sharerr now also remembers _where_ each
+A peer is an identity, not just a credential: sharerr also remembers _where_ each
 friend was recently seen — the last few addresses, timestamped, with their feed
 traffic and their torrent client recorded separately (a dual-VPN friend has the
 two behind different exits). Sightings come from authenticated feed pulls, from
@@ -634,7 +632,7 @@ for rTorrent specifically: its XML-RPC API has never grown a way to remove a
 tracker, so sharerr can only add the new endpoint as a fresh tier ahead of the
 stale one, not replace it outright. Harmless — the stale tier just goes on
 being tried and failing — but see
-[`docs/SUPPORTED.md`](docs/SUPPORTED.md)'s "Torrent clients" for the full
+[`docs/SUPPORT.md`](docs/SUPPORT.md)'s "Torrent clients" for the full
 reasoning.
 
 ## The CLI

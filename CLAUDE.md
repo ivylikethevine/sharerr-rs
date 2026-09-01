@@ -131,10 +131,11 @@ injection point, and this binary's `Jail` tests genuinely mutate it — `Jail`
 only serialises against _other Jail closures_, so a bare `#[tokio::test]`
 asserting a rejection that depends on the vault failing to open (`BAD_REQUEST`
 from a secret-writing handler, say) can flip to success mid-run if one of those
-Jail tests happens to be live on another thread at that moment. Seven tests
-shipped this way before the race was ever noticed, and it reproduced
-deterministically once enough Jail tests existed to make the window wide
-enough — it did not show up as one-off flakiness. Wrap this class of test in
+Jail tests happens to be live on another thread at that moment. A test written
+this way passes indefinitely until enough Jail tests exist to widen the
+window, at which point it reproduces deterministically rather than as
+one-off flakiness — so a green suite is not evidence the race is absent.
+Wrap this class of test in
 `Jail` too, with `jail.clear_env()` and nothing else, exactly as if it needed a
 var _set_; see `secrets.rs`'s `opening_a_vault_without_a_master_key_fails_with_no_side_effects`
 or `web/settings.rs`'s `save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config`.
@@ -167,7 +168,7 @@ data-directory loss. `gossip_key` genuinely is a credential sitting in
 vault on the next `sharerr serve` start and strips the block from the file
 in the same write, so it exists on disk only until that first start. Not a
 precedent for anything else; see the struct's own doc comment,
-`docs/CONFIGURATION.md`'s "Restoring friends" section, and `SECURITY.md`'s
+`docs/SETTINGS.md`'s "Restoring friends" section, and `SECURITY.md`'s
 by-design list before reaching for this pattern a second time.
 
 **The config file is rewritten in place by the web UI**, comments and all, via
@@ -209,8 +210,8 @@ into `ghcr.io/<repo>`; `docker-lighthouse.yml` builds
 are separate so a break in one cannot
 hold the other's release, and so each is approved on its own. Both Dockerfiles
 pin the toolchain to `rust-version`, and **both pins have to move together** —
-the lighthouse one silently sat three minors behind for a while, which meant that
-image had no working MSRV check at all.
+a lighthouse pin that silently drifts behind `rust-version` leaves that image
+with no working MSRV check at all, and nothing reports it.
 
 **Every container image is pinned by digest, not just by tag.** Both Dockerfiles
 and all nine compose files under `docker/` carry `name:tag@sha256:...`. The tag
@@ -225,20 +226,21 @@ invisible to it, so an unpinned image is silently unscanned), and dependabot's
 
 **A compose file's _name_ decides whether dependabot manages it.** The
 `docker-compose` ecosystem matches filenames against
-`(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`. The gluetun service fragment was
-`gluetun.reference.yaml` — no "compose" in it, so dependabot never fetched it
-and its pin moved by hand; it is `compose.gluetun.reference.yaml` now, and the
-three tunnelled stacks `extends` it by that path. A new file holding an image
-pin must satisfy that regex, and must sit in a directory `dependabot.yml` lists
+`(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`. The gluetun service fragment is
+named `compose.gluetun.reference.yaml` precisely so it matches — a name like
+`gluetun.reference.yaml` has no "compose" in it, so dependabot would never
+fetch it and its pin would move by hand. The three tunnelled stacks `extends`
+it by that path. A new file holding an image pin must satisfy that regex, and
+must sit in a directory `dependabot.yml` lists
 — `/docker/deploy/*` matches the directories _under_ `deploy`, not `deploy`
 itself, which is why `/docker/deploy` is listed separately.
 
 **CodeQL (`.github/workflows/codeql.yml`) has no in-source suppression
 mechanism.** A `// codeql[rule-id]` or `// lgtm[rule-id]` comment above a flagged
 line does nothing — GitHub code scanning only recognizes a dismissal made in the
-Security tab (or the equivalent REST/`gh api` call), never a source comment. Nine
-such dead comments sat in the tree for a while before this was noticed, none of
-them suppressing anything. There are exactly two real options for a finding: fix
+Security tab (or the equivalent REST/`gh api` call), never a source comment. Such
+a comment suppresses nothing and is easy to mistake for a working suppression.
+There are exactly two real options for a finding: fix
 the code so the value it flags no longer exists (see `sharerr_testkit::mock::rpc_credentials`,
 which replaced hard-coded Basic Auth literals across the rTorrent and
 Transmission test suites), or dismiss it in the Security tab with a reason and
@@ -274,9 +276,8 @@ every comparison noise against noise.
 
 **Pinned tool versions that dependabot cannot see** are zizmor, actionlint,
 cargo-llvm-cov, lychee and typos, each installed from a cached, pinned GitHub
-release asset by `.github/actions/setup-tool` (ported from say-hi's
-identically-named action, which solved this the same way there first) rather
-than a fresh `pip install`/`go install`/`cargo install` on every run.
+release asset by `.github/actions/setup-tool` rather than a fresh
+`pip install`/`go install`/`cargo install` on every run.
 `.github/actions/setup-tool/tools.txt` is the one roster — version, download
 URL, archive shape, verify flag — read both by that action and by
 `check_tool_versions.sh`, so a pin cannot go undrift-checked; bumping one is a
@@ -285,7 +286,7 @@ unpinned (newest release, always), so neither has a row.
 
 The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
 weighed but not all committed to as well as firm intentions — an idea belongs
-there or in `docs/UNSUPPORTED.md`, never in both. The original design brief and
+there or in `docs/SUPPORT.md`'s "Not supported" section, never in both. The original design brief and
 the two premises the implementation disproved are in `docs/DESIGN.md`.
 
 **`main` carries a ruleset (PR required, protected ref, verified signatures) that

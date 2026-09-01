@@ -19,12 +19,12 @@
 #     just a digest. `image-scan.yml` answers that with trivy by measuring both
 #     the pinned digest and what the tag points at now.
 #
-# Every compose file in the tree is in scope, which took a rename to be true.
-# The docker-compose ecosystem matches files by the regex
-# `(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`, and the gluetun service
-# fragment used to be `gluetun.reference.yaml` — a name with no "compose" in it,
-# which dependabot would never fetch. It is `compose.gluetun.reference.yaml`
-# now. A new file that holds an image pin has to satisfy that regex, or it goes
+# Every compose file in the tree is in scope, which is a constraint on
+# filenames. The docker-compose ecosystem matches files by the regex
+# `(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`; the gluetun service fragment is
+# named `compose.gluetun.reference.yaml` so it matches — a name like
+# `gluetun.reference.yaml`, with no "compose" in it, would never be fetched.
+# A new file that holds an image pin has to satisfy that regex, or it goes
 # unmanaged in a way nothing here will complain about.
 
 version: 2

@@ -618,9 +618,8 @@ struct ScopeFilter {
 /// than once per request. `ScopeFilter::new` is a pure function of a
 /// five-variant enum — every field it computes is identical on every call
 /// for a given scope — and [`Store::seeding_items`] is the Torznab feed's
-/// hot path: every Prowlarr RSS poll from every friend rebuilt the same
-/// handful of SQL fragments and bind lists from scratch before this cached
-/// them.
+/// hot path: without the cache, every Prowlarr RSS poll from every friend
+/// rebuilds the same handful of SQL fragments and bind lists from scratch.
 fn scope_filter(scope: crate::PeerScope) -> &'static ScopeFilter {
     static FILTERS: LazyLock<[ScopeFilter; 5]> =
         LazyLock::new(|| std::array::from_fn(|i| ScopeFilter::new(crate::PeerScope::ALL[i])));

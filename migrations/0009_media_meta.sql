@@ -4,7 +4,7 @@
 -- publishes it as attributes, which is what lets a friend's Sonarr filter on
 -- quality instead of parsing it back out of the title; and `title::synthesize`
 -- folds the resolution and codec into the release name it invents for a file
--- that had no real one, replacing tokens that used to be a flat guess.
+-- that had no real one, rather than filling those tokens with a flat guess.
 --
 -- JSON rather than columns for the same reason `ids_json` is: the shape follows
 -- what the *arr apps report, the fields are sparse, and nothing queries an

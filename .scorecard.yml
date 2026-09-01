@@ -4,34 +4,30 @@
 # These do not change the score - Scorecard's five reason codes are display
 # only, surfaced on the scorecard.dev viewer under --show-annotations. They
 # exist so a finding this repo isn't going to fix reads as "seen and decided"
-# rather than "unnoticed". Ported from say-hi's identically-named file, which
-# established the pattern here first.
+# rather than "unnoticed".
 #
-# Only `contributors` is annotated below. say-hi's own version also carries
-# `pinned-dependencies` and `fuzzing` entries, and this file deliberately does
-# not copy them: say-hi's were each written against a real scorecard.dev run's
-# actual findings for that repo, and this repo's scorecard.yml has not
-# produced one to check against yet. `contributors` is the one exception
-# because it needs no run to verify - the git history settles it on its own.
-# Add the others here once a real run names something worth deciding, not
-# before; an annotation that doesn't match an actual finding is worse than no
-# annotation, for the same reason a stale allowlist entry is worse than none -
-# see _typos.toml's own header for that argument made the first time.
+# Only `contributors` is annotated below. An annotation should be written
+# against a real scorecard.dev run's actual findings, and this repo's
+# scorecard.yml has not produced one to check against yet. `contributors` is
+# the one exception because it needs no run to verify - the git history
+# settles it on its own. Add others here once a real run names something
+# worth deciding, not before; an annotation that doesn't match an actual
+# finding is worse than no annotation, for the same reason a stale allowlist
+# entry is worse than none - see _typos.toml's own header for that argument
+# made the first time.
 #
 # Two checks worth a second look once a run exists, so whoever adds their
 # entries here has a head start rather than re-deriving the question:
 #   - pinned-dependencies: .github/actions/setup-tool/install.sh downloads
 #     zizmor/actionlint/cargo-llvm-cov/lychee by a pinned *version*, not a
 #     pinned *hash* - Scorecard's downloadThenRun probe has no "pinned to a
-#     version" state, only pinned-by-hash or not, same trap say-hi's own
-#     entry for tests/dockerfiles/frameworks/*.sh documents.
-#   - fuzzing: unlike say-hi (bash, nothing Scorecard's fuzzing detectors
-#     recognize), this is a genuine gap, not a not-applicable one -
+#     version" state, only pinned-by-hash or not.
+#   - fuzzing: this is a genuine gap, not a not-applicable one -
 #     sharerr-torrent, sharerr-rtorrent's XML-RPC parsing and sharerr-probe's
 #     media-file parsing are all real untrusted-input surfaces cargo-fuzz
 #     could target. Leave this one unannotated on purpose until it's either
 #     fixed or a considered decision not to, recorded here or in
-#     docs/UNSUPPORTED.md.
+#     docs/SUPPORT.md.
 annotations:
   - checks:
       - contributors

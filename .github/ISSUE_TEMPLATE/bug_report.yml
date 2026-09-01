@@ -65,7 +65,7 @@ body:
     id: layout
     attributes:
       label: Deployment layout
-      description: See docs/CONFIGURATION.md and docker/deploy/ for what each name covers.
+      description: See docs/SETTINGS.md and docker/deploy/ for what each name covers.
       options:
         - direct (no VPN)
         - vpn (gluetun sidecar, one instance)
@@ -107,5 +107,5 @@ body:
           required: true
         - label: >-
             If this is about something sharerr doesn't do, I checked
-            docs/UNSUPPORTED.md — it may already carry a verdict and a reason.
+            docs/SUPPORT.md — it may already carry a verdict and a reason.
           required: false

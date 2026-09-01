@@ -18,7 +18,7 @@ pseudo-random bytes, `FAKEGRP` release names. No real content is involved anywhe
 - [Exercising the indexer and the tracker](#exercising-the-indexer-and-the-tracker)
 - [The opt-in test suite](#the-opt-in-test-suite)
 - [Seeding tagged content](#seeding-tagged-content)
-  - [The network used to be `internal: true`](#the-network-used-to-be-internal-true)
+  - [Why the network is not `internal: true`](#why-the-network-is-not-internal-true)
 - [Views of one library](#views-of-one-library)
 - [Ports](#ports)
 - [The Transmission stack](#the-transmission-stack)
@@ -131,9 +131,8 @@ docker compose -f docker/compose.test.yml --profile indexer up -d prowlarr
 Then add a _Generic Torznab_ indexer pointing at `http://sharerr:8477/api` with
 that key.
 
-sharerr's own tracker is the only one — there used to be a `[tracker] backend`
-choice between it and qBittorrent's embedded tracker, and it was removed; a
-`sharerr.toml` still naming `backend` now fails to load. `/announce` refuses
+sharerr's own tracker is the only one; there is no `[tracker] backend`
+choice. A `sharerr.toml` naming `backend` fails to load. `/announce` refuses
 any info hash the instance is not sharing, so a `d14:failure reason...`
 response to a made-up hash is the expected result, not a fault.
 
@@ -195,17 +194,18 @@ Three things about it:
   folder. Confirmed against a live container rather than assumed, the same way the
   original Sonarr/Radarr schema was.
 
-### The network used to be `internal: true`
+### Why the network is not `internal: true`
 
-It is not any more. An internal bridge severs the host→container path that
-_published ports_ travel, and this stack's whole control plane runs over those
-ports: the readiness probes curl `127.0.0.1`, the API keys are scraped from a bind
-mount, `seed-arr` runs on the host, and the browser URLs above are host-side. With
-the network isolated, those probes hung for their full timeout against containers
-that were perfectly healthy.
+An internal bridge would enforce the no-egress requirement rather than merely
+stating it, but it also severs the host→container path that _published ports_
+travel, and this stack's whole control plane runs over those ports: the
+readiness probes curl `127.0.0.1`, the API keys are scraped from a bind mount,
+`seed-arr` runs on the host, and the browser URLs above are host-side. With
+the network isolated, those probes hang for their full timeout against
+containers that are perfectly healthy.
 
-The trade is explicit: the stack no longer _proves_ sharerr makes no outbound
-requests. That property now rests on the code and the hermetic test suite rather
+The trade is explicit: the stack does not _prove_ sharerr makes no outbound
+requests. That property rests on the code and the hermetic test suite rather
 than on the kernel refusing to route.
 
 The tag id is left to SQLite. sharerr resolves the _label_, case-insensitively, so
@@ -407,8 +407,8 @@ filename). Every torrent sharerr builds is private (see
 a magnet can never complete against it in any environment — nothing in the
 swarm will ever answer its `ut_metadata` request. This is not the
 sandboxed-build-environment quirk
-[`docs/UNSUPPORTED.md`](../docs/UNSUPPORTED.md#removing-the-feeds-magnet-link-entirely)
-once suspected; it reproduces identically on a plain Docker host.
+[`docs/SUPPORT.md`](../docs/SUPPORT.md#removing-the-feeds-magnet-link-entirely)
+describes; it reproduces identically on a plain Docker host.
 
 Prowlarr's per-indexer "Prefer Magnet URL" — `false` by default — is the one
 place this preference is actually configurable, so the script pins it

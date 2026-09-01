@@ -18,12 +18,11 @@ repository = "https://github.com/ivylikethevine/sharerr-rs"
 
 # One version pin per dependency, for the whole workspace.
 #
-# These used to live in each crate: `serde_json` was written out in seven
-# manifests, `tracing` in six, `tokio` in five with five different feature sets. The
-# drift that produced was already visible — `getrandom` was pinned to "0.4" in one
-# crate and "0.4.3" in another — and sharerr-testkit carried a hand-written comment
-# reminding the reader to keep its `sqlx` in step with sharerr-store's, which is
-# exactly the job this table does automatically.
+# Per-crate pins drift: the same dependency written out across seven manifests
+# ends up at seven versions (`getrandom` at "0.4" in one crate and "0.4.3" in
+# another is the shape of it), and keeping sharerr-testkit's `sqlx` in step
+# with sharerr-store's becomes a hand-written comment instead of a fact. This
+# table does that job automatically.
 #
 # Features stay per-crate, since they are genuinely per-crate: a crate writes
 # `tokio = { workspace = true, features = [...] }` and cargo unions them. Only the

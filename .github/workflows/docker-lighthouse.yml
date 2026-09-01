@@ -4,7 +4,7 @@
 # Deliberately its own workflow rather than a second job in docker.yml. The
 # lighthouse is a separate product: a standalone rendezvous service meant to be
 # self-hosted by anyone, on neutral ground away from any particular library
-# (see docs/ROADMAP.md's "The lighthouse"). It gets its own image, its own tag
+# (see docs/LIGHTHOUSE.md). It gets its own image, its own tag
 # series and its own approval, so publishing a sharerr release is not also,
 # silently, publishing a lighthouse — and so a break in one build cannot hold
 # the other's release.

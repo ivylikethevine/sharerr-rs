@@ -150,13 +150,13 @@ pub async fn set_gossip(
     };
 
     // The URL is written first, and only then the key: `set_peer_gossip_url`
-    // answers whether the peer exists at all, and a `POST` for a peer that
-    // was deleted from another tab used to store an orphan `peer.gossip.{id}`
-    // in the vault that nothing could ever remove. The URL half is what the
-    // vault half is *for*, so a peer that cannot take the URL takes no key.
-    // Parsing and normalizing both live in `set_peer_gossip_url` itself now,
-    // so a bad URL and a nonexistent peer both surface here rather than one
-    // of them being caught earlier by a second copy of the same check.
+    // answers whether the peer exists at all, so a `POST` for a peer deleted
+    // from another tab cannot leave an orphan `peer.gossip.{id}` in the vault
+    // that nothing could ever remove. The URL half is what the vault half is
+    // *for*, so a peer that cannot take the URL takes no key. Parsing and
+    // normalizing both live in `set_peer_gossip_url`, so a bad URL and a
+    // nonexistent peer both surface here rather than one being caught earlier
+    // by a second copy of the same check.
     let result = store.set_peer_gossip_url(id, Some(&form.url)).await;
     match result {
         Ok(true) => {}
@@ -268,7 +268,7 @@ fn latest_endpoint(
 
 /// Download every active friend as a one-time `[[peers]]` restore block —
 /// the export half of `sharerr_core::config::PeerImport`; see
-/// `CONFIGURATION.md`'s "Restoring friends after a full data-directory
+/// `SETTINGS.md`'s "Restoring friends after a full data-directory
 /// loss". Meant to be saved somewhere outside sharerr (a password manager,
 /// an offline backup) and hand-pasted back into `sharerr.toml` only if the
 /// data directory is ever lost — this does not write anywhere itself.

@@ -133,17 +133,15 @@ impl PathResolver {
 /// The single most specific configured mapping whose prefix (as picked by
 /// `prefix_of`) matches `path`, and the path remaining after stripping it.
 ///
-/// "Most specific" means the longest prefix by component count, not by
-/// configuration order — [`PathResolver::resolve`] and
-/// [`PathResolver::resolve_sharerr`] used to each implement their own version
-/// of this, and disagreed on what "most specific" meant when a matching rule
-/// didn't define the field the caller needed: `resolve` already let its most
-/// specific *arr* match win even without a `qbit` override, but
-/// `resolve_sharerr` skipped a specific match lacking `qbit` and fell through
-/// to a less specific rule that had one — producing two different
-/// qBittorrent paths for the same file depending on whether it was reached
-/// via an *arr report or a library scan. One function, used by both, removes
-/// the chance of that drifting apart again.
+/// "Most specific" means the longest prefix by component count, not
+/// configuration order. Both [`PathResolver::resolve`] and
+/// [`PathResolver::resolve_sharerr`] route through here so they cannot
+/// disagree on what "most specific" means when a matching rule doesn't
+/// define the field the caller needs: a specific *arr* match wins even
+/// without a `qbit` override, rather than falling through to a less specific
+/// rule that has one — which would produce two different qBittorrent paths
+/// for the same file depending on whether it was reached via an *arr* report
+/// or a library scan.
 fn most_specific_match<'m>(
     maps: &'m [PathMapping],
     prefix_of: impl Fn(&PathMapping) -> &Path,
@@ -279,13 +277,11 @@ mod tests {
         assert!(!out.mapping_applied);
     }
 
-    /// The bug `resolve` and `resolve_sharerr` used to disagree on: a specific
+    /// The case `resolve` and `resolve_sharerr` must agree on: a specific
     /// rule with no `qbit` override sits ahead of a general rule that has one.
-    /// `resolve` already let the specific arr-side match win outright, with no
-    /// fallback to the general rule's `qbit`; `resolve_sharerr` used to skip
-    /// the specific match (it has no `qbit`) and fall through to the general
-    /// one instead, producing a second, different qBittorrent path for the
-    /// same file. Both entry points must now agree.
+    /// The specific arr-side match wins outright, with no fallback to the
+    /// general rule's `qbit` — skipping it would produce a second, different
+    /// qBittorrent path for the same file.
     #[test]
     fn a_specific_rule_without_qbit_wins_over_a_general_rule_with_one() {
         let r = PathResolver::new(vec![
