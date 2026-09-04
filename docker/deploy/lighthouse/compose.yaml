@@ -1,0 +1,41 @@
+# A standalone lighthouse — the rendezvous service, not sharerr itself.
+#
+#   cd docker/deploy/lighthouse && cp .env.example .env
+#   docker compose up -d
+#
+# This is for anyone willing to self-host a lighthouse on neutral ground for a
+# friend group that would rather not run one of their own — see
+# `docs/LIGHTHOUSE.md` for why it exists and README.md's "The lighthouse"
+# section for how a peer points at one. It shares nothing with the other three
+# layouts in `docker/deploy/`: no library mount, no torrent client, no *arr
+# apps, no path mappings, no master key. The lighthouse knows nothing but
+# `key hash -> latest endpoint` and carries no credential worth losing.
+#
+# No `config/sharerr.toml` here either — there is nothing to configure beyond
+# the two variables below. `/data` holds exactly one file, a decoy secret
+# minted on first run: losing it just reshuffles fabricated answers after a
+# restart, not a credential.
+
+name: sharerr-lighthouse
+
+services:
+  lighthouse:
+    image: ghcr.io/ivylikethevine/sharerr-lighthouse:latest
+    container_name: sharerr-lighthouse
+    environment:
+      TZ: ${TZ:-Etc/UTC}
+      RUST_LOG: ${RUST_LOG:-sharerr_lighthouse=info,warn}
+    volumes:
+      - lighthouse-data:/data
+    ports:
+      # Friends' sharerr instances need to reach this directly — unlike
+      # sharerr's own 8477, there is no login page or session cookie behind
+      # it to worry about putting a TLS proxy in front of, but the lookup
+      # response is only as trustworthy as the transport it travels over: put
+      # this behind TLS the same way you would any other service you expose,
+      # and update `lighthouse.urls` on the client side to the https:// URL.
+      - "7878:7878"
+    restart: unless-stopped
+
+volumes:
+  lighthouse-data:

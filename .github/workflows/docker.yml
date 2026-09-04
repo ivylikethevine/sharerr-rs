@@ -22,6 +22,16 @@ concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
+# A job-level `permissions:` block fully replaces this default for that job
+# — it doesn't intersect with it — and both jobs below already declare their
+# own, so this has no effect on either today. It exists so a future job added
+# without its own block defaults to least-privilege rather than the runner's
+# permissive default, and because Scorecard's Token-Permissions check looks
+# for a top-level declaration specifically, independent of whether any job
+# actually relies on it.
+permissions:
+  contents: read
+
 jobs:
   # A called workflow's jobs cannot request a permission this job does not
   # hold — every scope any job inside docker-image.yml needs (including the

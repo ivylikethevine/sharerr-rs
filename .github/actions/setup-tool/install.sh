@@ -22,7 +22,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # failing command substitution inside `read <<<` is not the read's status, so
 # an unknown tool would print its error and still exit 0
 _sr_row="$(_sr_tool_row "$SR_TOOL")" || exit 1
-IFS='|' read -r _ _sr_pin _sr_kind _sr_url _sr_verify _ <<<"$_sr_row"
+IFS='|' read -r _ _sr_pin _sr_kind _sr_url _sr_verify _ _ _sr_sha256 <<<"$_sr_row"
+: "${_sr_sha256:?tools.txt row for $SR_TOOL has no sha256 column - see the tools.txt header}"
 
 # an explicit `version:` input wins over the manifest's pin; empty means "use
 # the pin", which is what every call site passes
@@ -65,14 +66,32 @@ _sr_url="${_sr_url//%v/$_sr_version}"
 _sr_tmp="$(mktemp -d)"
 trap 'rm -rf "$_sr_tmp"' EXIT
 
+# tools.txt's sha256 column is only known-correct for the pinned version - an
+# explicit `version:` override (no call site passes one today, but the input
+# exists) downloads a different asset than the one that hash was computed
+# against, so verification is skipped rather than failing on a mismatch that
+# would tell an operator nothing about whether the download is trustworthy.
+_sr_verify_download() {
+  if [ "$_sr_version" != "$_sr_pin" ]; then
+    echo "setup-tool: $SR_TOOL version overridden to $_sr_version (pin is $_sr_pin) - skipping checksum verification, tools.txt's sha256 only covers the pin" >&2
+    return 0
+  fi
+  printf '%s  %s\n' "$_sr_sha256" "$1" | sha256sum -c - >/dev/null || {
+    echo "setup-tool: $SR_TOOL@$_sr_version checksum mismatch - expected $_sr_sha256, got $(sha256sum "$1" | cut -d' ' -f1)" >&2
+    exit 1
+  }
+}
+
 case "$_sr_kind" in
 raw)
   curl -sSfL -o "$_sr_tmp/$SR_TOOL" "$_sr_url"
+  _sr_verify_download "$_sr_tmp/$SR_TOOL"
   chmod +x "$_sr_tmp/$SR_TOOL"
   _sr_bin="$_sr_tmp/$SR_TOOL"
   ;;
 tar.gz | tar.xz)
   curl -sSfL -o "$_sr_tmp/archive" "$_sr_url"
+  _sr_verify_download "$_sr_tmp/archive"
   # extract whole and then look, rather than naming a member: the layouts here
   # are flat, versioned-dir and arch-subdir, and a stale member path fails hard
   # on a version bump where a search does not

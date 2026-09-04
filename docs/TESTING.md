@@ -109,6 +109,12 @@ workflow's own comments for the exact column it reads out of
 `cargo-llvm-cov`'s summary and why (Lines, not Regions — the two are easy to
 transpose and only one of them is what the badge claims to show).
 
+Last measured locally at **95.55% line coverage** (2026-09-04, tier 1 only —
+94.51% region, 93.93% function). The [live badge](../README.md) is the
+current figure; this number is recorded here only so it doesn't have to be
+re-derived from nothing when a question — the OpenSSF Best Practices Badge's
+`test_statement_coverage80` among them — asks for one.
+
 ## Benchmarks and fuzzing
 
 Neither exists in this tree today. `unsafe_code = "forbid"` at the workspace

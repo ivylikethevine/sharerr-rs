@@ -34,11 +34,21 @@ channel; the Release page is a human-readable pointer at it, not a second one.
 
 ## Cutting a release
 
-The local ceremony is one command:
+The local ceremony is one command — **use a signed tag**, `-s`, not a bare
+one: `main`'s ruleset already requires verified commit signatures, so the
+same key that signs commits signs the tag, and `git tag -v` gives anyone
+checking out the release something to verify beyond "GitHub says this ref
+exists".
 
 ```bash
-git tag v1.2.3
+git tag -s v1.2.3
 git push origin v1.2.3
+```
+
+Verify a tag's signature the same way you'd verify a commit's:
+
+```bash
+git tag -v v1.2.3
 ```
 
 From there, each workflow runs its own `build` job unattended: checks out the

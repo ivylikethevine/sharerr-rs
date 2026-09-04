@@ -40,6 +40,36 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 
+/// Argon2id cost parameters for deriving the vault's cipher key from
+/// `SHARERR_MASTER_KEY`. Spelled out explicitly rather than left as
+/// `Params::default()`: these currently *equal* the argon2 crate 0.6's
+/// default (OWASP's own recommended minimum — 19 MiB, 2 iterations, 1 degree
+/// of parallelism), but a default is implicit and could move on a future
+/// crate bump without this file changing at all.
+///
+/// **Do not change these values without a vault migration plan.** They feed
+/// directly into the key derived from an operator's `SHARERR_MASTER_KEY`;
+/// changing them means that same master key derives a different cipher key,
+/// and every vault written under the old parameters becomes unopenable.
+const ARGON2_M_COST_KIB: u32 = 19 * 1024;
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+
+/// `output_len: None` matches `Params::default()`'s own choice — the actual
+/// output length is whatever buffer `hash_password_into` is given (`KEY_LEN`,
+/// 32 bytes) below, not this field, so leaving it unset keeps that behaviour
+/// bit-for-bit identical to before these parameters were spelled out.
+///
+/// Built once, at compile time: `Params::new` only fails outside its own
+/// MIN/MAX bounds, which the fixed constants above never approach, so a
+/// bound violation here is a compile error rather than something that could
+/// ever surface at runtime.
+const ARGON2_PARAMS: argon2::Params =
+    match argon2::Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None) {
+        Ok(params) => params,
+        Err(_) => panic!("hard-coded Argon2 params must satisfy argon2's own bounds"),
+    };
+
 /// Environment variable holding the master key directly.
 pub const ENV_MASTER_KEY: &str = "SHARERR_MASTER_KEY";
 /// Environment variable pointing at a file holding the master key (Docker secret).
@@ -479,10 +509,9 @@ fn restrict_permissions(_path: &Path) -> Result<()> {
 }
 
 fn derive_cipher(master: &SecretString, salt: &[u8; SALT_LEN]) -> Result<XChaCha20Poly1305> {
-    use argon2::{Algorithm, Argon2, Params, Version};
+    use argon2::{Algorithm, Argon2, Version};
 
-    let params = Params::default();
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, ARGON2_PARAMS.clone());
 
     let mut key = SecretBox::new(Box::new([0u8; KEY_LEN]));
     argon

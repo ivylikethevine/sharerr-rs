@@ -13,7 +13,10 @@ active development happens on. There are no older versions to patch.
 ## Table of contents
 
 - [Reporting a vulnerability](#reporting-a-vulnerability)
+- [What happens after a report](#what-happens-after-a-report)
+- [Supported versions](#supported-versions)
 - [What is in scope](#what-is-in-scope)
+- [Why the existing controls are enough](#why-the-existing-controls-are-enough)
 - [What is out of scope](#what-is-out-of-scope)
 
 ## Reporting a vulnerability
@@ -21,12 +24,45 @@ active development happens on. There are no older versions to patch.
 Please report it privately through
 [GitHub's security advisories](https://github.com/ivylikethevine/sharerr-rs/security/advisories/new)
 for this repository, rather than a public issue — that gives us a private
-channel to work out a fix before any detail is public.
+channel to work out a fix before any detail is public. Private vulnerability
+reporting is enabled on this repository, so that link works without needing
+to be a collaborator first.
 
 Include what you'd include for any bug report: what you found, how to
 reproduce it, and what you think the impact is. There is no bug bounty; this
 is a personal project maintained by one person, and turnaround depends on
 that person's spare time.
+
+## What happens after a report
+
+- **Acknowledgement**: within 14 days of the advisory being filed. That is a
+  target, not a contractual SLA — see "maintained by one person" above — but
+  it is the number a report should be able to expect a response by.
+- **Triage**: the report is read, reproduced if possible, and given a
+  severity. You'll hear which of "confirmed, working on a fix", "confirmed,
+  won't fix" (with the reason — see [What is out of scope](#what-is-out-of-scope)
+  for what that already looks like), or "not reproducible, need more detail"
+  applies.
+- **Fix and disclosure**: a confirmed vulnerability is fixed in the private
+  advisory's own fork first, not in a public PR, so the fix doesn't itself
+  announce the bug before a release carries it. The advisory stays private
+  until a patched `sha-<commit>` image (or, once one exists, a tagged
+  release) is available, at which point it's published and, where the
+  severity warrants it, a CVE is requested through GitHub's own advisory
+  flow.
+- **Credit**: reporters are credited by name (or handle) in the published
+  advisory and in the release notes that ship the fix, unless you ask to
+  stay anonymous — say so in the report if that's what you want.
+
+## Supported versions
+
+There is exactly one supported line: the `main` branch, and by extension the
+`sha-<commit>` image built from whatever commit is newest on it. There is no
+older version to patch, because there has been no tagged release yet — see
+the note at the top of this file. Once `v0.1.0` ships, this section will name
+which tagged line(s) get fixes and for how long; until then, "upgrade" means
+"pull the newest `sha-<commit>` image", which is also the only upgrade path
+that exists.
 
 ## What is in scope
 
@@ -144,6 +180,52 @@ happen — see [the README](../README.md#quickstart) before reporting:
   separately saved every gossip key by hand. The download is behind the
   same signed-in session guard as every other page here; nothing about it
   is reachable without already being able to read the Friends page.
+
+## Why the existing controls are enough
+
+sharerr is designed to run on a trusted LAN, for one operator and the friends
+they explicitly grant a key to — not as a service exposed to the open
+internet. The assurance case follows from that threat model, not in spite of
+it:
+
+- **Secrets at rest** are behind Argon2id-derived XChaCha20-Poly1305
+  (`sharerr-store`'s vault) keyed by an operator-supplied `SHARERR_MASTER_KEY`
+  that never touches disk in plaintext form. Losing that key loses the vault
+  — deliberately; there is no secondary key an attacker could instead target.
+- **Every credential class uses a hash or cipher shaped for what it protects**,
+  not one uniform choice: Argon2id (iterated, salted) for the one class of
+  secret a human chose — login passwords — where offline guessing is the
+  real risk; SHA-256 for machine-generated 160-bit peer tokens, where the
+  attack that iteration defends against (offline dictionary guessing of a
+  human-chosen secret) does not apply, and an indexed equality lookup on
+  every Torznab request does. Both choices are stated, not implicit — see
+  the two bullets above and `sharerr-store/src/peers.rs`'s own header
+  comment.
+- **Every network-facing entry point either authenticates or narrows to a
+  private-address allowlist** — the web UI and Torznab feed require a
+  session or a peer key, the tracker fails closed on any vault or database
+  failure rather than admitting, and the gluetun webhook (which by
+  construction cannot itself authenticate, since gluetun's hooks are bare
+  `wget`s) is reachable only from private source addresses. There is no
+  endpoint that trusts unauthenticated input from the public internet.
+- **The gossip layer's integrity does not depend on transport security**:
+  every record is Ed25519-signed by the peer it describes and carries a
+  signed timestamp, so a compromised or malicious relay can at worst refuse
+  to forward a record, never forge or replay an older one.
+- **Zero `unsafe` code** (`unsafe_code = "forbid"` at the workspace level,
+  enforced by every crate, verified by `cargo clippy -D warnings` in CI)
+  removes the memory-safety class of bug entirely, and static analysis
+  (CodeQL, clippy, cargo-deny) runs on every push and weekly against the
+  dependency graph, so a newly disclosed advisory in a dependency is caught
+  without a maintainer having to go looking for it.
+- **What this does not cover, by design**: no login rate limit, no security
+  response headers, no recovery from a lost master key — all three are
+  named explicitly above rather than left as silent gaps, because the
+  threat model this project accepts is a trusted LAN with one operator, not
+  a multi-tenant service on the open internet. Anyone deploying outside that
+  model (a public-facing instance, an untrusted network) should treat this
+  section as the boundary of what sharerr itself defends against, and add a
+  reverse proxy with its own rate limiting and headers in front.
 
 ## What is out of scope
 

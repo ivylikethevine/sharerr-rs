@@ -352,9 +352,21 @@ jobs:
         if: needs.prepare.outputs.code == 'true'
         run: |
           set -euo pipefail
-          curl -sL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
-            -o /usr/local/bin/hadolint
-          chmod +x /usr/local/bin/hadolint
+          # Floating on `latest` (see the comment above this step for why)
+          # means there is no pin to check a checksum against in advance, but
+          # the binary and its checksums are still fetched from the same
+          # release and verified against each other before anything runs it -
+          # a compromised or MITM'd download is rejected rather than silently
+          # executed as part of CI.
+          tmp="$(mktemp -d)"
+          curl -sSfL -o "$tmp/hadolint" \
+            https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
+          curl -sSfL -o "$tmp/checksums.sha256" \
+            https://github.com/hadolint/hadolint/releases/latest/download/checksums.sha256
+          ( cd "$tmp" && sha256sum -c --ignore-missing <(sed 's/hadolint-linux-x86_64/hadolint/' checksums.sha256) )
+          chmod +x "$tmp/hadolint"
+          sudo mv "$tmp/hadolint" /usr/local/bin/hadolint
+          rm -rf "$tmp"
 
       - id: hadolint
         name: Lint the Dockerfile

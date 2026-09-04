@@ -217,13 +217,24 @@ pub enum Retargeted {
     /// entirely, and one that still needs the bytes for another reason
     /// (adopting a torrent sharerr did not cache before) already has its own
     /// input buffer in scope to reuse.
-    Current { info_hash: String },
+    Current {
+        info_hash: String,
+        /// The torrent's recorded content length — the file's size at the
+        /// moment this torrent was built. A caller can compare it against
+        /// `fs::metadata` on the file as it stands now to detect an
+        /// in-place upgrade under the same path, with no second parse and
+        /// no re-hash.
+        length: u64,
+    },
     /// The announce did not match; here is the rewritten, re-encoded
     /// `.torrent` and the announce it carried before.
     Updated {
         previous: Option<String>,
         info_hash: String,
         data: Vec<u8>,
+        /// The torrent's recorded content length — see the `Current`
+        /// variant's `length` field.
+        length: u64,
     },
 }
 
@@ -245,9 +256,16 @@ pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<R
         .map_err(|source| TorrentError::Reparse { source })?;
     let info_hash = torrent.info_hash();
     let previous = torrent.announce.clone();
+    // sharerr only ever builds single-file v1 torrents (see `TorrentRequest`'s
+    // doc comment), so this is exactly the file's size when the torrent was
+    // built. A negative value is not producible by anything sharerr writes;
+    // `unwrap_or(0)` just means a corrupt/hand-edited torrent reads as size
+    // zero, which never matches a real file and so still triggers the rebuild
+    // its caller falls back to on a mismatch.
+    let length = u64::try_from(torrent.length).unwrap_or(0);
 
     if previous.as_deref() == Some(announce.primary.as_str()) {
-        return Ok(Retargeted::Current { info_hash });
+        return Ok(Retargeted::Current { info_hash, length });
     }
 
     torrent.announce = Some(announce.primary.to_string());
@@ -260,6 +278,7 @@ pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<R
         previous,
         info_hash,
         data,
+        length,
     })
 }
 
@@ -521,8 +540,9 @@ mod tests {
 
         let outcome = retarget_announce(&torrent.data, &set).unwrap();
         match outcome {
-            Retargeted::Current { info_hash } => {
+            Retargeted::Current { info_hash, length } => {
                 assert_eq!(info_hash, torrent.info_hash);
+                assert_eq!(length, torrent.size);
             }
             Retargeted::Updated { .. } => panic!("an unchanged announce must report Current"),
         }
@@ -546,10 +566,12 @@ mod tests {
             previous,
             info_hash,
             data,
+            length,
         } = outcome
         else {
             panic!("a changed announce must report Updated");
         };
+        assert_eq!(length, before.size);
 
         assert_eq!(
             previous.as_deref(),

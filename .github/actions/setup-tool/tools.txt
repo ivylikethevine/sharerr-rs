@@ -27,11 +27,21 @@
 #         (default "v") off the upstream tag before comparing to `pin`, which
 #         never carries a prefix of its own. Blank for every row except
 #         lychee, whose tags read "lychee-v<version>".
+# sha256  8th column: the expected sha256 of the downloaded file (the raw
+#         binary, or the tar.gz archive before it's extracted) at this exact
+#         pin. install.sh verifies it after download and refuses to install a
+#         mismatch, so a compromised release asset or a MITM'd download is
+#         rejected instead of silently landing on PATH and running as part of
+#         CI. Computed once, when the pin is set, with
+#         `curl -sSL <url> | sha256sum` (substitute the real %v/%a first) -
+#         this is *not* re-fetched from upstream on every run, so it changes
+#         only in the same commit that bumps `pin`, and a bumped pin with an
+#         unchanged sha256 is itself a red flag worth double-checking by hand.
 #
 # Bumping a pin is a hand edit here, and nothing else - the caching action.yml
 # reads the version back out of install.sh's `resolve`.
-zizmor|1.30.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor
-actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint
+zizmor|1.30.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed
+actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint||8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 # verify is "llvm-cov --version", not the bare flag every other row uses: the
 # binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."
 # works, by expecting its own subcommand name as the first argument even when
@@ -40,12 +50,12 @@ actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v
 # fails with "expected subcommand 'llvm-cov', found argument '--version'".
 # Downstream usage in coverage.yml is unaffected either way: it always goes through
 # `cargo llvm-cov ...`, which cargo itself resolves the same correct way.
-cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov
+cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov||b068f7c98841aacb9c4f382b4a0c184ae82f49b56a32d442b429b2961c73be15
 # lychee tags its releases "lychee-v<version>", not "v<version>" like every
 # other row here - the url column copes fine (the literal "lychee-v" prefix
 # just sits in front of %v). The trailing "lychee-v" column is what lets
 # check_tool_versions.sh compare correctly instead of misreading
 # "lychee-v0.24.2" as newer than any pin forever, which is why this row no
 # longer needs `check = "-"` to opt out of drift checking entirely.
-lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v
-typos|1.50.0|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos
+lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v|1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
+typos|1.50.0|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||a1497c9626ba0bab731b3e37c12ac9051bbfa2a253463d4d574c28f190b5497b
