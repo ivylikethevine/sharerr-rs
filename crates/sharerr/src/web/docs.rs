@@ -71,7 +71,8 @@ pub const SECURITY: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md";
 pub const SECURITY_SCOPE: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-is-in-scope";
-pub const ROADMAP: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md";
+pub const ROADMAP: &str =
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#roadmap";
 pub const LIGHTHOUSE: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/LIGHTHOUSE.md";
 
@@ -131,7 +132,7 @@ mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
-    const INTERNAL_PREFIX: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/";
+    const INTERNAL_PREFIX: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/";
 
     fn repo_root() -> PathBuf {
         // `CARGO_MANIFEST_DIR` is `crates/sharerr`.
@@ -204,23 +205,20 @@ mod tests {
         for (name, url) in internal_links() {
             let tail = url
                 .strip_prefix(INTERNAL_PREFIX)
-                .unwrap_or_else(|| panic!("{name} is not under docs/: {url}"));
+                .unwrap_or_else(|| panic!("{name} is not a repo-relative link: {url}"));
             let (file, anchor) = match tail.split_once('#') {
                 Some((file, anchor)) => (file, Some(anchor)),
                 None => (tail, None),
             };
 
-            let path = root.join("docs").join(file);
-            assert!(
-                path.is_file(),
-                "{name} points at a missing file: docs/{file}"
-            );
+            let path = root.join(file);
+            assert!(path.is_file(), "{name} points at a missing file: {file}");
 
             if let Some(anchor) = anchor {
                 let body = std::fs::read_to_string(&path).unwrap();
                 assert!(
                     anchors_in(&body).contains(anchor),
-                    "{name} points at docs/{file}#{anchor}, which has no such heading"
+                    "{name} points at {file}#{anchor}, which has no such heading"
                 );
             }
         }

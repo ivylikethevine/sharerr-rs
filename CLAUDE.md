@@ -304,10 +304,11 @@ URL, archive shape, verify flag — read both by that action and by
 hand edit to that file and nothing else. hadolint and trivy are deliberately
 unpinned (newest release, always), so neither has a row.
 
-The roadmap is `docs/ROADMAP.md`, and it holds candidates that have been
-weighed but not all committed to as well as firm intentions — an idea belongs
-there or in `docs/SUPPORT.md`'s "Not supported" section, never in both. The original design brief and
-the two premises the implementation disproved are in `docs/DESIGN.md`.
+The roadmap is `README.md`'s own "Roadmap" section, and it holds candidates
+that have been weighed but not all committed to as well as firm intentions —
+an idea belongs there or in `docs/SUPPORT.md`'s "Not supported" section, never
+in both. The original design brief and the two premises the implementation
+disproved are in `docs/DESIGN.md`.
 
 **`main` carries a ruleset (PR required, protected ref, verified signatures) that
 no Actions `git push` can satisfy** — a `GITHUB_TOKEN`-authored commit has no

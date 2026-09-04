@@ -48,6 +48,9 @@ design is built around.
 - [The CLI](#the-cli)
 - [Building and testing](#building-and-testing)
 - [Layout](#layout)
+- [Roadmap](#roadmap)
+  - [Before v1](#before-v1)
+  - [Open work](#open-work)
 - [Getting help and contributing](#getting-help-and-contributing)
 - [AI usage](#ai-usage)
 - [Licence](#licence)
@@ -57,7 +60,6 @@ design is built around.
 - [the settings reference](docs/SETTINGS.md), [what's supported and what's deliberately not](docs/SUPPORT.md)
 - [the API](docs/API.md)
 - [the architecture](docs/ARCHITECTURE.md)
-- [the roadmap, including ideas considered but not all committed to](docs/ROADMAP.md)
 - [the original design brief](docs/DESIGN.md)
 - [the lighthouse's design rationale](docs/LIGHTHOUSE.md)
 - [the security policy](docs/SECURITY.md)
@@ -370,10 +372,9 @@ the same one-liner lives at
 
 It is published to GHCR as its own package, on its own `v*` tag series and
 behind its own approval — a sharerr release is not silently also a lighthouse
-release. `:latest` and any version tag don't exist yet for the same reason as
-sharerr's own image above; every push to `main` does publish a
-`ghcr.io/…/sharerr-lighthouse:sha-<commit>` image unattended, if you want to
-track development before the first release. To build it yourself instead:
+release. Same `:latest`/tag caveat as sharerr's own image above (no release
+yet; `ghcr.io/…/sharerr-lighthouse:sha-<commit>` tracks `main` instead). To
+build it yourself instead:
 
 ```bash
 docker build -f docker/Dockerfile --target runtime-lighthouse -t sharerr-lighthouse .
@@ -715,11 +716,77 @@ bytes. No real content is involved anywhere.
 The original design brief, and the two corrections the implementation forced on
 it, are in [docs/DESIGN.md](docs/DESIGN.md).
 
+## Roadmap
+
+Where sharerr is going next. Nothing below is a release commitment — the
+ordering is a judgement about value, not a schedule. What has already shipped
+lives in [What works today](#what-works-today) above, not here: an item is
+removed from this list the moment it ships, not dated and kept. An idea that
+gets declined instead moves to [docs/SUPPORT.md](docs/SUPPORT.md#not-supported),
+with the reason attached so the decision doesn't get re-litigated.
+
+### Before v1
+
+Operational tasks that block a first tagged release, not features:
+
+- **Rehearse the release pipeline's build half.** `docker.yml` and
+  `docker-lighthouse.yml` rehearse `build` via `workflow_dispatch`, but
+  `publish` and the Release-creating `release` job both need a real `push`,
+  so the first `v*` tag is the first time either actually runs. Confirm the
+  `release` environment's required reviewer is configured in repo settings
+  first — no workflow file can assert that on its own.
+- **Rehearse one real upgrade across a migration.** Eleven forward-only sqlx
+  migrations exist, all only ever run against a fresh database. Forward-only
+  with no downgrade path is a fine policy; it has never been a _tested_ one.
+- **Decide the magnet-link question deliberately.** Every torrent sharerr
+  builds is private, so a magnet link can never resolve — and Radarr's own
+  Torznab client has been observed picking it anyway and hanging. Kept in
+  the feed until a real report shows it biting; reconsider before tagging,
+  not after. See
+  [docs/SUPPORT.md](docs/SUPPORT.md#removing-the-feeds-magnet-link-entirely).
+- **Resolve the login-rate-limiting tension.** docs/SECURITY.md lists no
+  rate limiting as by-design; the deploy docs separately call "just forward
+  8477 as it is" workable. Individually defensible, jointly uncomfortable —
+  one should move.
+
+### Open work
+
+Smallest first, by how much each item touches rather than how long it takes:
+
+- **The remaining notification triggers.** `[notifications]` fires on six
+  events; four more (a friend's first contact, the tracker going
+  unreachable, an unreadable `[[library]]` path, an Uptime-Kuma-style
+  heartbeat push) each need a trigger wired onto detection that's either
+  already there or still to build.
+- **A public lighthouse.** The software is done — a one-liner deploy, a
+  compose recipe, and an embedded-in-sharerr option all exist (see
+  [The lighthouse](#the-lighthouse)) — what's missing is a public instance
+  for a friend group that would rather not run their own.
+- **Seeding limits that apply retroactively.** The upload cap and ratio
+  goal bind at add time only; changing the setting later does nothing to an
+  already-seeding torrent.
+- **Transfer accounting.** The tracker already resolves which friend an
+  announce belongs to but throws away the `uploaded`/`downloaded` totals it
+  carries — the largest gap between what sharerr _knows_ and what it
+  _keeps_. The numbers would be advisory (a client can report anything) and
+  session-scoped (a restart means a new session, not negative traffic);
+  building it touches a migration, the announce parser, an in-memory
+  accumulator with a flush loop, and the UI. Unlocks a per-friend "served"
+  indicator, a real bytes-out figure on the status page, and per-peer
+  counters alongside the existing metrics endpoint.
+- **Request flow.** Discovery is one-way today. An inbound request queue
+  with an approve step, touching the sync engine and the web UI on both
+  sides of a friendship, is the other half of the original idea.
+- **Multi-user.** The `users` table exists but only the first-run claim
+  ever creates a row. A second user means deciding what a friendship, a
+  library, and a torrent client belong to — per instance, as today, or per
+  user — before any access-control surface can be built on it.
+
 ## Getting help and contributing
 
 - **Found a bug or want a feature?** [Open an issue](https://github.com/ivylikethevine/sharerr-rs/issues) —
   see [docs/SUPPORT.md](docs/SUPPORT.md) for what's supported today, and
-  [docs/ROADMAP.md](docs/ROADMAP.md) for what's already planned or considered.
+  [the roadmap](#roadmap) above for what's already planned or considered.
 - **Have a question, or want to show off your setup?** [Start a discussion](https://github.com/ivylikethevine/sharerr-rs/discussions).
 - **Found a security issue?** Do not open a public issue — see
   [docs/SECURITY.md](docs/SECURITY.md#reporting-a-vulnerability) for the
@@ -727,12 +794,10 @@ it, are in [docs/DESIGN.md](docs/DESIGN.md).
 - **Want to contribute a change?** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
   covers building, testing, and submitting a pull request; participating in
   any project space means abiding by the
-  [code of conduct](docs/CODE_OF_CONDUCT.md). [docs/GOVERNANCE.md](docs/GOVERNANCE.md)
-  covers who decides what, and what continuity looks like for a
-  single-maintainer project.
-
-This is a personal project maintained by one person in their spare time —
-see [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for exactly what that means.
+  [code of conduct](docs/CODE_OF_CONDUCT.md).
+- **Wondering who's behind this?** [docs/GOVERNANCE.md](docs/GOVERNANCE.md) —
+  a personal project, maintained by one person in their spare time; it covers
+  who decides what and what continuity looks like for that.
 
 ## AI usage
 

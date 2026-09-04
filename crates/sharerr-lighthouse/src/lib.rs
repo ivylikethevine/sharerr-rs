@@ -1,6 +1,6 @@
 //! The lighthouse: semi-anonymous `key hash -> latest endpoint` rendezvous.
 //!
-//! See `docs/ROADMAP.md`'s "The lighthouse" for the design brief this
+//! See `docs/LIGHTHOUSE.md` for the design brief this
 //! implements. In short: two friends whose addresses both rotated while
 //! neither was watching have no path back to each other through gossip alone.
 //! The lighthouse is the fallback — a peer reports its current endpoint under

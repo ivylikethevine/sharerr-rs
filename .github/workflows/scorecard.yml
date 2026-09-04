@@ -1,8 +1,10 @@
 name: Scorecard
 
-# OpenSSF Scorecard. A supply-chain score is only useful as a trend, and the
-# checks it grades move when dependabot bumps an action, not when anyone
-# remembers to press a button — hence a schedule rather than dispatch-only.
+# OpenSSF Scorecard. Runs on every push to main, so the badge reflects the
+# state of the default branch the same day it changes, plus a weekly schedule
+# as a backstop for score movement this repo didn't cause directly — an
+# upstream Scorecard check definition changing, or a quiet week with no pushes
+# at all.
 #
 # Most of what it grades this repo already does: every `uses:` is SHA-pinned,
 # dependabot covers four ecosystems, workflow permissions are least-privilege
@@ -20,14 +22,26 @@ name: Scorecard
 # downloads. Publicly, publish_results puts the score on the OpenSSF API that a
 # README badge can read.
 #
-# publish_results only takes effect on a scheduled run against the default
-# branch — a workflow_dispatch will not publish, by the action's own design, so
-# the cron above is what keeps a badge current rather than a convenience.
+# publish_results only takes effect on `push` and `schedule` against the
+# default branch — the action's own README lists those as the two supported
+# publishing triggers; `workflow_dispatch` runs the analysis but is not
+# guaranteed to publish, which is why it stays as a manual, unpublished
+# rehearsal rather than the thing keeping the badge current.
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "41 7 * * 2"
   workflow_dispatch:
+
+# Only push can realistically overlap with itself — two quick pushes to main
+# — so cancelling the superseded run is safe: Scorecard grades the current
+# state of the branch, not a history of every push, and the newer run already
+# covers whatever the older one would have found.
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
 
 # read-all is the floor; the analysis job takes the three write scopes it needs
 # below. Job-level permissions replace the workflow-level block rather than

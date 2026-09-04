@@ -462,8 +462,8 @@ pub struct SettingsPage {
 
     /// The tracker-facing poller's own section on the settings page.
     pub gluetun: GluetunSection,
-    /// The second poller — the torrent client's own tunnel. See
-    /// `docs/ROADMAP.md`'s "a peer with two addresses".
+    /// The second poller — the torrent client's own tunnel, for a peer
+    /// reachable at two different addresses depending on which one answers.
     pub gluetun_client: GluetunSection,
     /// Whether the client poller has ever been pointed at anything — the
     /// disclosure it lives in starts open once it has, same reasoning as
@@ -1430,7 +1430,7 @@ pub struct StateCount {
 }
 
 /// Every file sharerr has discovered, sortable and filterable — the page
-/// `docs/ROADMAP.md` names as what an operator wants right after setup.
+/// an operator wants right after setup.
 #[derive(Debug, Template)]
 #[template(path = "items.html")]
 pub struct ItemsPage {
@@ -1463,10 +1463,10 @@ pub struct ItemsPage {
     pub composition: Option<Composition>,
 }
 
-/// Everything about one item, reached from a row on [`ItemsPage`] — the page
-/// `docs/ROADMAP.md`'s per-item detail entry names, with **release title
-/// against the file's actual name, side by side** as the reason worth
-/// building a whole page for: conflating the two is the first trap
+/// Everything about one item, reached from a row on [`ItemsPage`] — built
+/// specifically to put **release title against the file's actual name,
+/// side by side**, the reason worth building a whole page for: conflating
+/// the two is the first trap
 /// `CLAUDE.md` lists, and there was previously no view anywhere that showed
 /// both at once. Also carries the manual actions an operator otherwise has
 /// no way to trigger without editing tags in the source app.

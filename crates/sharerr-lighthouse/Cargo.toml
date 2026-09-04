@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The lighthouse: semi-anonymous key-hash to endpoint rendezvous. Deliberately independent of the rest of the workspace — see docs/ROADMAP.md's \"The lighthouse\"."
+description = "The lighthouse: semi-anonymous key-hash to endpoint rendezvous. Deliberately independent of the rest of the workspace — see docs/LIGHTHOUSE.md."
 
 [lints]
 workspace = true

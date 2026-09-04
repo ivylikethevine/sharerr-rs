@@ -595,7 +595,7 @@ async fn a_rotated_endpoint_rewrites_torrents_and_repoints_the_client() {
 
 /// The Unchanged fast path — an already-seeding item whose torrent is still
 /// live — is what carries the achieved ratio into the store on every later
-/// pass, not just the add. See `docs/ROADMAP.md`'s "Achieved ratio" entry.
+/// pass, not just the add.
 #[tokio::test]
 async fn the_unchanged_fast_path_records_the_reported_ratio() {
     let h = tagged_harness().await;

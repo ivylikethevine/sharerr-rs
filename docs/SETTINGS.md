@@ -26,6 +26,7 @@ default, and what sets it.
 - [`[notifications]`](#notifications)
 - [`[metrics]`](#metrics)
 - [Backup and restore](#backup-and-restore)
+  - [Backing up `/data`](#backing-up-data)
   - [Restoring friends after a full data-directory loss](#restoring-friends-after-a-full-data-directory-loss)
 - [Vault secrets](#vault-secrets)
 - [Environment variable overrides](#environment-variable-overrides)
@@ -326,6 +327,31 @@ tracker token, this instance's Ed25519 signing key) or the peers table
 import/export — both live outside `sharerr.toml` entirely, and neither
 survives losing the data directory on their own. The peers table has its own,
 separate restore path — see below.
+
+### Backing up `/data`
+
+The section above only covers `sharerr.toml`, in `/config`. The vault
+(`vault.bin`), the database (`sharerr.db`), and the generated `.torrent`
+files — all of `/data` — have no equivalent button, because there is
+nothing web-safe to build: this is a volume-level backup, the same as any
+other stateful container.
+
+`vault.bin` is written tmp-then-rename, so a plain filesystem copy is
+always either the old file or the new one, never a torn write. `sharerr.db`
+runs in WAL mode, so it is **not** safe to copy live with a plain `cp` —
+either stop the container first and copy `/data`, or take a consistent copy
+of the database while sharerr keeps running with
+`sqlite3 /data/sharerr.db ".backup /somewhere/sharerr.db.bak"`. A
+volume-level snapshot (LVM, ZFS, Btrfs, or your storage driver's own
+snapshot feature) covers the whole directory atomically and is the simplest
+option where it's available.
+
+**Losing `SHARERR_MASTER_KEY` loses every credential in the vault, with no
+recovery path** — a `/data` backup restores nothing without the same key
+that encrypted it, so back the key up too, the same way you would any other
+credential (a password manager, not a note left beside the backup). See
+[`SECURITY.md`](SECURITY.md#what-is-in-scope) for why there is deliberately
+no recovery path.
 
 ### Restoring friends after a full data-directory loss
 
