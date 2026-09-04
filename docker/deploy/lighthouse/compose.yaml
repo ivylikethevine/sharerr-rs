@@ -5,9 +5,9 @@
 #
 # This is for anyone willing to self-host a lighthouse on neutral ground for a
 # friend group that would rather not run one of their own — see
-# `docs/LIGHTHOUSE.md` for why it exists and README.md's "The lighthouse"
-# section for how a peer points at one. It shares nothing with the other three
-# layouts in `docker/deploy/`: no library mount, no torrent client, no *arr
+# `docs/LIGHTHOUSE.md` for why it exists, how a peer points at one, and the
+# embedded alternative. It shares nothing with the other four layouts in
+# `docker/deploy/`: no library mount, no torrent client, no *arr
 # apps, no path mappings, no master key. The lighthouse knows nothing but
 # `key hash -> latest endpoint` and carries no credential worth losing.
 #

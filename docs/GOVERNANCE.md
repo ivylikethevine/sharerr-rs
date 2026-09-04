@@ -16,7 +16,7 @@ about who decides and why, for the parts neither of those documents.
 ## Decision-making model
 
 sharerr is a **single-maintainer project**. There is no steering committee,
-no vote, and no second person to appeal a decision to — [`docs/CODEOWNERS`](CODEOWNERS)
+no vote, and no second person to appeal a decision to — [`docs/CODEOWNERS`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CODEOWNERS)
 names one owner for the whole tree because there is nobody yet to split
 ownership between. This is stated here plainly rather than implied by an
 empty page, because a governance document that pretends otherwise would be
@@ -34,7 +34,7 @@ committee vote.
 
 | Role | Who | What they can do |
 | --- | --- | --- |
-| Maintainer | `@ivylikethevine`, per [`docs/CODEOWNERS`](CODEOWNERS) | Reviews and merges PRs, cuts releases, holds repo admin access, sets the project's direction in [the README's roadmap](../README.md#roadmap), triages security reports. |
+| Maintainer | `@ivylikethevine`, per [`docs/CODEOWNERS`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CODEOWNERS) | Reviews and merges PRs, cuts releases, holds repo admin access, sets the project's direction in [the README's roadmap](../README.md#roadmap), triages security reports. |
 | Contributor | Anyone who opens a PR | Proposes a change. No merge rights; every PR is reviewed by the maintainer before it lands, per the CI table in [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs). |
 | Reporter | Anyone who opens an issue, a discussion, or a private security advisory | Raises a bug, a feature request, or a vulnerability report. See [`docs/SUPPORT.md`](SUPPORT.md) and [`docs/SECURITY.md`](SECURITY.md#reporting-a-vulnerability) for the right channel for each. |
 
@@ -49,10 +49,8 @@ informally.
    [`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-start). A small, obviously
    correct fix doesn't need that step.
 2. A PR branches from `dev`, the active development branch.
-3. CI has to pass — the blocking jobs are listed in
-   [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs): `rustfmt`,
-   `clippy + tests`, `msrv`, `cargo-deny`, `shell + compose`, and workflow
-   lint. Three more (hadolint, markdownlint, typos) report but don't block.
+3. CI has to pass; which checks block is listed in
+   [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs).
 4. The maintainer reviews and merges into `dev`.
 5. `main` carries a GitHub ruleset — pull request required, protected ref,
    verified commit signatures — so nothing reaches `main`, including from
@@ -61,27 +59,15 @@ informally.
 
 ## Continuity
 
-**What access exists**: GitHub repository admin (the source of everything
-else — branch rulesets, environments, Actions secrets), the `release`
-deployment environment's approval gate, and the GHCR packages the release
-workflows publish to. All of it currently sits with the one maintainer
-account.
-
-**The honest continuity argument, not an overstated one**: sharerr holds no
-user data of its own — no hosted accounts, no telemetry, nothing collected
-from any instance other than the maintainer's own. Every secret an instance
-holds (vault contents, session tokens, gossip keys) lives on that operator's
-own machine, encrypted with a key only they hold; losing the maintainer does
-not expose or endanger anyone else's data, because there isn't a shared
-store of it to lose. The project is MIT-licensed
-([`LICENSE.md`](../LICENSE.md)) and the full source, history, and CI
-configuration are public, so a fork by anyone willing to pick it up is
-possible today without asking permission — that is the actual continuity
-plan for a single-maintainer project this shape, rather than a promise of
-a bus-factor this project does not have.
-
-This is a **should**, not a **must**, in the OpenSSF Best Practices Badge's
-own silver criteria (`bus_factor`) precisely because a solo project cannot
-truthfully claim otherwise — see [`docs/SECURITY.md`](SECURITY.md) for the
-same candor applied to what the project's security controls do and do not
-cover.
+All access (GitHub repository admin, the `release` environment's approval
+gate, the GHCR packages) sits with the one maintainer account. The honest
+continuity argument is that sharerr holds no user data of its own: no hosted
+accounts, no telemetry, nothing collected from any instance but the
+maintainer's. Every secret an instance holds lives on that operator's own
+machine, encrypted with a key only they hold, so losing the maintainer
+exposes nobody. The project is MIT-licensed ([`LICENSE.md`](../LICENSE.md))
+with its full source, history, and CI configuration public, so a fork by
+anyone willing to pick it up needs no permission. That is the continuity
+plan, rather than a promise of a bus factor this project does not have;
+the OpenSSF badge's `bus_factor` criterion is recorded as unmet for the same
+reason in [`OPENSSF-IMPROVEMENTS.md`](OPENSSF-IMPROVEMENTS.md).

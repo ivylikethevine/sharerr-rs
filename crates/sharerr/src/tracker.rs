@@ -1092,7 +1092,7 @@ mod tests {
         let media = dir.join("movie.mkv");
         sharerr_testkit::media::write_media_file(&media, 4096, 1).unwrap();
         let announce = sharerr_torrent::AnnounceSet::single(url::Url::parse(announce_url).unwrap());
-        sharerr_torrent::LavaTorrentFactory
+        sharerr_torrent::TorrentFactory
             .create(&sharerr_torrent::TorrentRequest {
                 path: &media,
                 announce: &announce,

@@ -37,7 +37,8 @@ re-derive the reasoning from scratch.
 Every row is `criterion_id` — bestpractices.dev's own short name for it —
 the requirement level (**MUST** blocks the badge if left Unmet; **SHOULD**
 and **SUGGESTED** don't), the answer, and the evidence. Links point at
-`main` as of the pass that produced this document (2026-09-04).
+`main`; where a row cites work from the pass that produced this document,
+the link resolves once that work is merged.
 
 Four release-shaped criteria (`version_unique`, `version_tags`,
 `release_notes`, `release_notes_vulns`) are marked **Pending** — the
@@ -58,7 +59,7 @@ argued around. Every other silver row here already stands on its own.
 
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
-| `description_good` — Succinct, user-friendly description of what the project does. | MUST | Met | README opens with a one-line tagline and a short "what it does and the constraint it's built around" paragraph. [README.md:1-24](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#L1-L24). |
+| `description_good` — Succinct, user-friendly description of what the project does. | MUST | Met | README opens with a one-line tagline and a short "what it does and the constraint it's built around" paragraph. [README.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md). |
 | `interact` — Info on how to get help, give feedback, and contribute. | MUST | Met | A dedicated "Getting help and contributing" section links Issues, Discussions, the private security route, and CONTRIBUTING.md. [README.md#getting-help-and-contributing](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#getting-help-and-contributing). |
 | `contribution` — The contribution process is explained. | MUST | Met | [docs/CONTRIBUTING.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md) covers branching, the verification loop, CI gates, and PR review. |
 | `contribution_requirements` — Acceptable-contribution requirements are documented. | SHOULD | Met | Same doc: sign commits (main's ruleset), pass CI, and — as of this pass — add a test for a new feature or bug fix. [docs/CONTRIBUTING.md#test-policy](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#test-policy). |
@@ -70,7 +71,7 @@ argued around. Every other silver row here already stands on its own.
 | `sites_https` — Project sites support HTTPS. | MUST | Met | GitHub, GitHub Pages ([_config.yml](https://github.com/ivylikethevine/sharerr-rs/blob/main/_config.yml) → github.io), and GHCR are all HTTPS-only; nothing in the project's own web UI is a "project site" in this criterion's sense. |
 | `discussion` — A searchable mechanism exists for discussion/questions. | MUST | Met | GitHub Discussions is enabled, alongside Issues — both are publicly searchable. |
 | `english` — Documentation and reports are in English. | SHOULD | Met | All docs and templates are English-only. |
-| `maintained` — The project is actively maintained. | MUST | Met | 220+ commits since first commit (2026-08-11); [README.md's Roadmap section](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#roadmap) states current direction. |
+| `maintained` — The project is actively maintained. | MUST | Met | Continuous commits since the first on 2026-08-11 ([history](https://github.com/ivylikethevine/sharerr-rs/commits/main)); [README.md's Roadmap section](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#roadmap) states current direction. |
 
 ### Change control
 
@@ -106,16 +107,16 @@ argued around. Every other silver row here already stands on its own.
 | `build` — A working build process exists. | MUST | Met | `cargo build`; documented in [docs/CONTRIBUTING.md#getting-set-up](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#getting-set-up). |
 | `build_common_tools` — Build uses commonly-used tools. | SUGGESTED | Met | Cargo — the standard Rust build tool. |
 | `build_floss_tools` — Can be built using only FLOSS tools. | SHOULD | Met | Cargo, rustc, and every dependency are FLOSS; no proprietary toolchain step. |
-| `test` — An automated test suite covers most of the codebase and is run before releases. | MUST | Met | `cargo test --workspace` runs in CI on every push/PR; 751+ tests, 95.55% line coverage as of 2026-09-04 (measured locally with cargo-llvm-cov). |
+| `test` — An automated test suite covers most of the codebase and is run before releases. | MUST | Met | `cargo test --workspace --all-features` runs in CI on every push/PR; the [coverage badge](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml) carries the current line-coverage figure (tier 1 only), well above 80%. |
 | `test_invocation` — Tests are invocable in a standard way for the language. | SHOULD | Met | Plain `cargo test`. |
-| `test_most` — Test suite covers most branches, input fields, and functionality. | SUGGESTED | Met | 95.55% lines / 94.51% regions / 93.93% functions, tier-1 only. |
+| `test_most` — Test suite covers most branches, input fields, and functionality. | SUGGESTED | Met | See the live coverage badge on the README; `cargo llvm-cov` line, region and function figures all sit above 90%, tier 1 only. |
 | `test_continuous_integration` — CI is used; tests run on every commit or daily. | SUGGESTED | Met | [.github/workflows/ci.yml](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/workflows/ci.yml) runs the full suite on every push and PR. |
 | `test_policy` — A policy requires tests for major new functionality. | MUST | Met | Now stated explicitly. [docs/CONTRIBUTING.md#test-policy](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#test-policy). |
-| `tests_are_added` — Evidence the test policy is generally followed. | MUST | Met | 751+ tests across the workspace, added continuously alongside features — not a percentage claim, just a demonstrated practice. |
+| `tests_are_added` — Evidence the test policy is generally followed. | MUST | Met | Over a thousand `#[test]`/`#[tokio::test]` functions across the workspace (`grep -rc '#\[test\]\|#\[tokio::test\]' crates/`), added continuously alongside features — a demonstrated practice, not a percentage claim. |
 | `tests_documented_added` — Test-addition requirements are documented for contributors. | SUGGESTED | Met | [docs/CONTRIBUTING.md#test-policy](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#test-policy). |
 | `warnings` — Compiler warnings / static analysis is enabled. | MUST | Met | `cargo clippy --workspace --all-targets --all-features -- -D warnings`, gating in CI. |
 | `warnings_fixed` — Warnings are addressed, not just enabled. | MUST | Met | Zero warnings in the current tree (verified today) — CI fails otherwise. |
-| `warnings_strict` — Warning flags are as strict as practical. | SUGGESTED | Met | `-D warnings` plus workspace-level `unwrap_used`/`expect_used`/`missing_debug_implementations` lints and `unsafe_code = "forbid"`. [Cargo.toml#L137-L144](https://github.com/ivylikethevine/sharerr-rs/blob/main/Cargo.toml#L137-L144). |
+| `warnings_strict` — Warning flags are as strict as practical. | SUGGESTED | Met | `-D warnings` plus workspace-level `unwrap_used`/`expect_used`/`missing_debug_implementations` lints and `unsafe_code = "forbid"`. [Cargo.toml](https://github.com/ivylikethevine/sharerr-rs/blob/main/Cargo.toml) (`[workspace.lints]`). |
 
 ### Security
 
@@ -127,11 +128,11 @@ argued around. Every other silver row here already stands on its own.
 | `crypto_call` — Cryptographic calls go through dedicated libraries, not hand-rolled. | SHOULD | Met | Zero hand-rolled crypto in production code — verified by review of every crypto call site. |
 | `crypto_floss` — Crypto functionality is usable with FLOSS. | MUST | Met | All crypto crates are FLOSS (MIT/Apache-2.0), pure Rust. |
 | `crypto_keylength` — Meets current NIST minimum key-length guidance. | MUST | Met | 256-bit vault keys, Ed25519 (128-bit security level), 256-bit session tokens — all at or above NIST minimums. |
-| `crypto_working` — Does not depend on broken crypto (MD5, SHA-1 for security, RC4...). | MUST | Met | SHA-1 appears only as BitTorrent's protocol-mandated info-hash (via `lava_torrent`), never for a security decision. |
+| `crypto_working` — Does not depend on broken crypto (MD5, SHA-1 for security, RC4...). | MUST | Met | SHA-1 appears only as BitTorrent's protocol-mandated info-hash (`sharerr-torrent`'s `metainfo` module), never for a security decision. |
 | `crypto_weaknesses` — Avoids cryptographic modes with known serious weaknesses. | SHOULD | Met | AEAD (XChaCha20-Poly1305) throughout, no ECB, no unauthenticated encryption. |
 | `crypto_pfs` — Supports perfect forward secrecy where session keys are negotiated. | SHOULD | Met | Outbound HTTPS calls go through rustls, which defaults to TLS 1.3 / ECDHE — both PFS. sharerr terminates no TLS of its own for inbound traffic; that's delegated to an operator's reverse proxy, documented in [docs/SECURITY.md#why-the-existing-controls-are-enough](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#why-the-existing-controls-are-enough). |
-| `crypto_password_storage` — Passwords are stored as iterated hashes with a per-user salt. | MUST | Met | Login passwords: Argon2id, per-user salt ([crates/sharerr-store/src/users.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-store/src/users.rs)). Note: peer API keys are SHA-256, unsalted, single-round — deliberate, since they're 160-bit CSPRNG tokens rather than human passwords, needing an indexed-equality lookup. See [crates/sharerr-store/src/peers.rs#L3-L6](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-store/src/peers.rs#L3-L6). |
-| `crypto_random` — Cryptographic randomness comes from a CSPRNG. | MUST | Met | Every random value in the tree goes through one `getrandom` funnel. [crates/sharerr-store/src/lib.rs#L22-L26](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-store/src/lib.rs#L22-L26). |
+| `crypto_password_storage` — Passwords are stored as iterated hashes with a per-user salt. | MUST | Met | Login passwords: Argon2id, per-user salt ([crates/sharerr-store/src/users.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-store/src/users.rs)). Note: peer API keys are SHA-256, unsalted, single-round — deliberate, since they're 160-bit CSPRNG tokens rather than human passwords, needing an indexed-equality lookup. See [crates/sharerr-store/src/peers.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-store/src/peers.rs)'s header comment. |
+| `crypto_random` — Cryptographic randomness comes from a CSPRNG. | MUST | Met | Every random value in the tree goes through one `getrandom` funnel. [crates/sharerr-store/src/lib.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-store/src/lib.rs). |
 | `delivery_mitm` — Delivery uses HTTPS/SSH, resisting MITM. | MUST | Met | Git over SSH/HTTPS, GHCR pulls over HTTPS, GitHub Pages over HTTPS. |
 | `delivery_unsigned` — No unsigned hash is fetched over plain HTTP and trusted. | MUST | Met | Every checksum this project relies on is HTTPS-fetched; CI tool downloads (zizmor, actionlint, cargo-llvm-cov, lychee, typos, hadolint) are now verified against a recorded/published sha256 after download — hardened as part of this pass. [.github/actions/setup-tool/tools.txt](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/actions/setup-tool/tools.txt). |
 | `vulnerabilities_fixed_60_days` — Medium+ severity vulnerabilities are fixed within 60 days of disclosure. | MUST | Met | No vulnerability has been disclosed yet to measure against; the process (docs/SECURITY.md) commits to prompt triage and fix. Revisit with real data once one exists. |
@@ -161,10 +162,10 @@ Everything passing requires, plus the sections below.
 | --- | --- | --- | --- |
 | `dco` — A Developer Certificate of Origin or CLA is in place. | SHOULD | Unmet | Not adopted — CONTRIBUTING.md already states an inbound=outbound licensing agreement (contributions are MIT by submission), which was judged sufficient without adding a sign-off requirement. [docs/CONTRIBUTING.md#licence](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#licence). |
 | `code_of_conduct` — A code of conduct is adopted and posted in a standard location. | MUST | Met | [docs/CODE_OF_CONDUCT.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CODE_OF_CONDUCT.md) — Contributor-Covenant-shaped, GitHub-recognized location. |
-| `governance` — The project's governance model is documented. | MUST | Met | New: [docs/GOVERNANCE.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/GOVERNANCE.md) — states plainly that this is a single-maintainer project and how decisions get made. |
+| `governance` — The project's governance model is documented. | MUST | Met | [docs/GOVERNANCE.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/GOVERNANCE.md) — states plainly that this is a single-maintainer project and how decisions get made. |
 | `roles_responsibilities` — Key roles and who holds them are documented. | MUST | Met | [docs/GOVERNANCE.md#roles](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/GOVERNANCE.md#roles) — maintainer, contributor, reporter, and what each can do. |
 | `documentation_roadmap` — Direction for at least the next year is documented. | MUST | Met | [README.md's Roadmap section](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#roadmap). |
-| `documentation_architecture` — Software architecture/design is documented. | MUST | Met | New: [docs/ARCHITECTURE.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ARCHITECTURE.md) — crate map, end-to-end data flow diagram, trust boundaries, where state lives. |
+| `documentation_architecture` — Software architecture/design is documented. | MUST | Met | [docs/ARCHITECTURE.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ARCHITECTURE.md) — crate map, end-to-end data flow diagram, trust boundaries, where state lives. |
 | `documentation_security` — Security requirements, expectations, and the assurance case are documented. | MUST | Met | New section: [docs/SECURITY.md#why-the-existing-controls-are-enough](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#why-the-existing-controls-are-enough) — argues why the existing controls are adequate against the stated threat model, not just lists them. |
 | `documentation_quick_start` — A quick-start guide exists for new users. | MUST | Met | [README.md#quickstart](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#quickstart). |
 | `documentation_current` — An effort is made to keep docs in sync with the current version. | MUST | Met | A test ([crates/sharerr/src/web/docs.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr/src/web/docs.rs)) resolves every UI doc link against a real heading in the tree, plus markdownlint + lychee CI jobs — a renamed heading fails `cargo test`, not just an advisory lint. |
@@ -190,7 +191,7 @@ Everything passing requires, plus the sections below.
 
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
-| `vulnerability_report_credit` — Vulnerability reporters are credited unless they ask otherwise. | MUST | Met | New: [docs/SECURITY.md#what-happens-after-a-report](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-happens-after-a-report) states reporters are credited in the advisory and release notes unless they ask to stay anonymous. |
+| `vulnerability_report_credit` — Vulnerability reporters are credited unless they ask otherwise. | MUST | Met | [docs/SECURITY.md#what-happens-after-a-report](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-happens-after-a-report) states reporters are credited in the advisory and release notes unless they ask to stay anonymous. |
 | `vulnerability_response_process` — A documented process exists for responding to vulnerability reports. | MUST | Met | Same new section — acknowledgement target, triage, fix, disclosure, credit, in order. |
 
 ### Quality & test
@@ -198,9 +199,9 @@ Everything passing requires, plus the sections below.
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
 | `automated_integration_testing` — The automated test suite runs on every check-in, for at least one branch. | MUST | Met | [.github/workflows/ci.yml](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/workflows/ci.yml) runs on every push to main and every PR. |
-| `test_policy_mandated` — A formal written policy requires tests for major new functionality. | MUST | Met | New: [docs/CONTRIBUTING.md#test-policy](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#test-policy) — explicit, not just implied by the verification loop. |
+| `test_policy_mandated` — A formal written policy requires tests for major new functionality. | MUST | Met | [docs/CONTRIBUTING.md#test-policy](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#test-policy) — explicit, not just implied by the verification loop. |
 | `regression_tests_added50` — Regression tests were added for at least 50% of bugs fixed in the last six months. | MUST | Unmet | Checked against real history: of the handful of non-CI "fix" commits in the tree's life so far, roughly one in five added a test in the same commit. Below the 50% bar — an honest reading, not a bar the new test policy alone retroactively clears. Should trend up now that the policy above is explicit. |
-| `test_statement_coverage80` — The automated test suite provides at least 80% statement coverage. | MUST | Met | 95.55% line coverage measured today with `cargo llvm-cov --workspace` (tier-1 only). [docs/TESTING.md#coverage](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/TESTING.md#coverage). |
+| `test_statement_coverage80` — The automated test suite provides at least 80% statement coverage. | MUST | Met | Above 80% by a wide margin per the live badge, measured by `cargo llvm-cov --workspace` in `coverage.yml` (tier-1 only). [docs/TESTING.md#coverage](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/TESTING.md#coverage). |
 | `coding_standards` — Coding style guides are identified and compliance is required. | MUST | Met | `rustfmt.toml`, `.editorconfig`, and CLAUDE.md's clippy/lint conventions. |
 | `coding_standards_enforced` — Compliance with the style guide(s) is automatically enforced. | MUST | Met | `cargo fmt --all --check` and `clippy -D warnings` both gate CI. |
 
@@ -234,14 +235,14 @@ Everything passing requires, plus the sections below.
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
 | `implement_secure_design` — Secure-design principles are implemented where applicable. | MUST | Met | Fail-closed auth, least-privilege CI tokens, defense in depth — see [docs/ARCHITECTURE.md#trust-boundaries](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ARCHITECTURE.md#trust-boundaries). |
-| `input_validation` — All externally-influenced inputs are validated with an allowlist approach. | MUST | Met | Allowlists at every untrusted edge: token character class, compile-time config paths, media-extension allowlist, private-IP allowlist on gluetun webhooks. See [crates/sharerr-core/src/config.rs#L155-L167](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-core/src/config.rs#L155-L167). |
+| `input_validation` — All externally-influenced inputs are validated with an allowlist approach. | MUST | Met | Allowlists at every untrusted edge: token character class, compile-time config paths, media-extension allowlist, private-IP allowlist on gluetun webhooks. See [crates/sharerr-core/src/config.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-core/src/config.rs). |
 | `hardening` — Hardening mechanisms reduce the likelihood of exploiting a vulnerability. | SHOULD | Unmet | Acknowledged gap: no login rate limit and no security response headers (CSP, X-Frame-Options). Stated openly in [docs/SECURITY.md#why-the-existing-controls-are-enough](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#why-the-existing-controls-are-enough) rather than hidden — deliberate for a trusted-LAN, single-operator tool, but genuinely Unmet against this criterion's letter. |
 | `crypto_weaknesses` — Does not depend on cryptography with known serious weaknesses. | MUST | Met | Same as passing — AEAD throughout, no broken primitives. |
 | `crypto_algorithm_agility` — Multiple cryptographic algorithms can be swapped in quickly. | SHOULD | Unmet | Deliberately not built — one fixed, modern algorithm per purpose (XChaCha20-Poly1305, Argon2id, Ed25519, SHA-256), no pluggable scheme. A simplicity trade-off, not an oversight. |
 | `crypto_credential_agility` — Credentials/keys are stored separately from other data. | MUST | Met | The vault is a separate encrypted store from `sharerr.toml`'s plain config, by design. |
 | `crypto_used_network` — Secure network protocols are supported; insecure ones disabled by default. | SHOULD | Met | Outbound clients are rustls-only — no native-tls, no OpenSSL — and there is no config surface to disable verification. |
 | `crypto_tls12` — TLS 1.2 or later is used if TLS is used. | SHOULD | Met | rustls 0.23 implements only TLS 1.2 and 1.3; there is no code path for anything older. |
-| `crypto_certificate_verification` — TLS certificate verification is on by default. | MUST | Met | Confirmed by review: `danger_accept_invalid_certs` appears nowhere in the tree, and the shared client constructor ([crates/sharerr-client/src/lib.rs#L129-L146](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-client/src/lib.rs#L129-L146)) exposes no way to disable it. |
+| `crypto_certificate_verification` — TLS certificate verification is on by default. | MUST | Met | Confirmed by review: `danger_accept_invalid_certs` appears nowhere in the tree, and the shared client constructor in [crates/sharerr-client/src/lib.rs](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-client/src/lib.rs) exposes no way to disable it. |
 | `crypto_verification_private` — Certificates are verified before sending sensitive data. | MUST | Met | Same client path — verification is not optional, so there's no route that could skip it before sending credentials. |
 
 ### Secure release
@@ -249,7 +250,7 @@ Everything passing requires, plus the sections below.
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
 | `signed_releases` — Releases are cryptographically signed with a documented verification process. | MUST | Met | Sigstore-backed build provenance via `actions/attest-build-provenance`, attached to the published image digest; verification documented as `gh attestation verify`. [docs/RELEASING.md#verifying-a-published-image](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#verifying-a-published-image). |
-| `version_tags_signed` — VCS tags for releases are cryptographically signed. | SUGGESTED | Met | New: the release ceremony now uses `git tag -s`, matching main's existing verified-signature requirement. [docs/RELEASING.md#cutting-a-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#cutting-a-release). |
+| `version_tags_signed` — VCS tags for releases are cryptographically signed. | SUGGESTED | Met | the release ceremony now uses `git tag -s`, matching main's existing verified-signature requirement. [docs/RELEASING.md#cutting-a-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#cutting-a-release). |
 
 ### Analysis
 
@@ -266,13 +267,14 @@ Everything passing requires, plus the sections below.
 
 Every "Met" answer above was checked against the live tree, not assumed:
 
-- `cargo test --workspace`, `cargo clippy --workspace --all-targets
-  --all-features -- -D warnings`, `cargo build`, and `cargo fmt --all
-  --check` all pass.
-- `docker build -f docker/Dockerfile .` — the de-facto MSRV check — succeeds
-  on the pinned 1.98 toolchain.
-- `cargo llvm-cov --workspace --summary-only` measured **95.55% line
-  coverage** (94.51% region, 93.93% function), tier-1 only, on 2026-09-04.
+- The verification loop in
+  [docs/CONTRIBUTING.md](CONTRIBUTING.md#the-verification-loop) passes.
+- `docker build -f docker/Dockerfile .`, the de-facto MSRV check, succeeds on
+  the pinned 1.98 toolchain.
+- `cargo llvm-cov --workspace --summary-only` puts line coverage well above
+  the 80% `test_statement_coverage80` asks for, tier-1 only; the
+  [coverage badge](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
+  is the live figure.
 - `zizmor`, `actionlint`, and `shellcheck` report zero findings against
   every workflow and script this pass touched.
 - The sha256 of every pinned CI tool release asset (zizmor, actionlint,

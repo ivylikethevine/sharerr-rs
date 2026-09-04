@@ -258,7 +258,7 @@ cat /tmp/sharerr-a-doctor.log
 #    the .torrent enclosure sharerr also advertises. Evidence: qBittorrent-B's
 #    own torrent record showed `has_metadata: false`, and its `magnet_uri`'s
 #    `dn=` was the release title, not the torrent's real internal filename
-#    (see docs/ROADMAP.md item 11's diagnosis). A magnet can never complete
+#    (see docs/SUPPORT.md's "Removing the feed's magnet link entirely"). A magnet can never complete
 #    against a private torrent — nothing in the swarm will ever answer its
 #    `ut_metadata` request, which is the whole reason the tracker exists —
 #    and Radarr's own direct Torznab client has no setting to prefer the

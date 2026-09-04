@@ -3,15 +3,28 @@
 #
 # A rotted URL in the docs is worth seeing and has never shipped a bug, so
 # this reports and never blocks — same reasoning as hadolint and markdownlint
-# in ci.yml. Weekly rather than on every push: a link a PR didn't touch does
-# not go stale because of that PR, so checking it on every commit would just
-# be the same round trip repeated for no new information.
+# in ci.yml. Weekly on its own, since a link a PR didn't touch does not go
+# stale because of that PR and re-checking it on every commit would be the
+# same round trip repeated for no new information — plus every push to main,
+# so a doc change checks its own new links right when they land rather than
+# waiting for Monday. Still not on `pull_request`: that would be the same
+# repeated round trip for anything the PR itself didn't touch, on every push
+# to the branch.
 name: Link check
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:
+
+# A superseded run has nothing worth finishing — unlike advisories.yml/
+# tool-versions.yml/image-scan.yml, this job upserts nothing, so cancelling
+# and re-running on the newer ref loses no state.
+concurrency:
+  group: link-check-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

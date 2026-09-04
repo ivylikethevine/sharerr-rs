@@ -399,7 +399,7 @@ async fn poll_once(
     };
 
     // gluetun's control server has required an API key by default since
-    // v3.40; sending an unkeyed request on every poll of an unfixed
+    // v3.39.1; sending an unkeyed request on every poll of an unfixed
     // deployment is a wasted round trip that can only 401. The config is
     // re-read every iteration, so saving a key through Settings resumes
     // polling on the next pass with no restart needed.

@@ -19,30 +19,17 @@ pub enum TorrentError {
     #[error("{path} has no filename component")]
     NoFileName { path: PathBuf },
 
-    #[error("building the torrent for {path} failed: {source}")]
+    #[error("hashing {path} to build a torrent failed: {source}")]
     Build {
         path: PathBuf,
         #[source]
-        source: lava_torrent::LavaTorrentError,
-    },
-
-    #[error("encoding the torrent for {path} failed: {source}")]
-    Encode {
-        path: PathBuf,
-        #[source]
-        source: lava_torrent::LavaTorrentError,
+        source: std::io::Error,
     },
 
     #[error("could not parse a stored .torrent: {source}")]
     Reparse {
         #[source]
-        source: lava_torrent::LavaTorrentError,
-    },
-
-    #[error("could not re-encode a stored .torrent: {source}")]
-    Reencode {
-        #[source]
-        source: lava_torrent::LavaTorrentError,
+        source: crate::metainfo::MetainfoError,
     },
 
     #[error(

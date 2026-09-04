@@ -120,11 +120,11 @@ client can be filled in and tested before switching to it.
 
 ### `[qbittorrent]`
 
-| TOML key                    | Type   | Default                 | Notes                                                                                                                                                                                             |
-| --------------------------- | ------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `qbittorrent.url`           | url    | `http://localhost:8080` |                                                                                                                                                                                                   |
-| `qbittorrent.category`      | string | `sharerr`               | Category applied to torrents sharerr creates.                                                                                                                                                     |
-| `qbittorrent.tag`           | string | `sharerr`               | Tag applied alongside the category.                                                                                                                                                               |
+| TOML key                    | Type   | Default                 | Notes                                                                                                                                                                                                                                                                       |
+| --------------------------- | ------ | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `qbittorrent.url`           | url    | `http://localhost:8080` |                                                                                                                                                                                                                                                                             |
+| `qbittorrent.category`      | string | `sharerr`               | Category applied to torrents sharerr creates.                                                                                                                                                                                                                               |
+| `qbittorrent.tag`           | string | `sharerr`               | Tag applied alongside the category.                                                                                                                                                                                                                                         |
 | `qbittorrent.skip_checking` | bool   | `true`                  | Skip qBittorrent's hash check on add — see [the README](../README.md#authenticating-to-qbittorrent) and the trap in [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md#traps) before turning this off partway through setting up path mappings. |
 
 Vault secret: `qbittorrent.api_key` (a qBittorrent 5.2+ WebUI API key — the
@@ -142,20 +142,20 @@ Vault secret: `transmission.password`.
 
 ### `[rtorrent]`
 
-| TOML key            | Type   | Default                 | Notes                                                                                                                                                                                |
-| ------------------- | ------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `rtorrent.url`      | url    | `http://localhost/RPC2` | The **exact** XML-RPC endpoint, not a base — rTorrent has no HTTP server or standard path of its own. See [`sharerr-rtorrent`](../crates/sharerr-rtorrent/src/lib.rs)'s module docs. |
-| `rtorrent.username` | string | `rtorrent`              | Sent as HTTP Basic Auth — see below.                                                                                                                                                 |
-| `rtorrent.label`    | string | `sharerr`               | Stands in for both category and tag, stored in rTorrent's `d.custom1`.                                                                                                               |
+| TOML key            | Type   | Default                 | Notes                                                                                                                                                                                                                                    |
+| ------------------- | ------ | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rtorrent.url`      | url    | `http://localhost/RPC2` | The **exact** XML-RPC endpoint, not a base — rTorrent has no HTTP server or standard path of its own. See [`sharerr-rtorrent`](https://github.com/ivylikethevine/sharerr-rs/blob/main/crates/sharerr-rtorrent/src/lib.rs)'s module docs. |
+| `rtorrent.username` | string | `rtorrent`              | Sent as HTTP Basic Auth — see below.                                                                                                                                                                                                     |
+| `rtorrent.label`    | string | `sharerr`               | Stands in for both category and tag, stored in rTorrent's `d.custom1`.                                                                                                                                                                   |
 
 Vault secret: `rtorrent.password`. rTorrent's own XML-RPC has no credential
 of its own; username/password authenticate against whatever reverse proxy
 fronts the RPC endpoint (the standard way ruTorrent's `httprpc` plugin is
 secured). Any placeholder values work if your proxy has no such gate.
 
-rTorrent cannot skip its hash check, and has no per-torrent seed-ratio limit
-— see [`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds) for
-both gaps and the tracker-replacement limitation.
+For what rTorrent cannot do (skip the hash check, honour a per-torrent ratio
+limit, remove a stale tracker) see
+[`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds).
 
 ## `[seeding]`
 
@@ -170,11 +170,11 @@ selected — never re-applied or enforced afterward. See the README's
 
 ## `[tracker]`
 
-| TOML key                  | Type        | Default              | Notes                                                                                     |
-| ------------------------- | ----------- | -------------------- | ----------------------------------------------------------------------------------------- |
-| `tracker.advertised_host` | string      | unset (required*)    | Hostname/IP friends reach the tracker on.                                                 |
-| `tracker.port`            | int         | `server.bind`'s port | Override when a published docker port differs from the internal one.                      |
-| `tracker.advertised_url`  | url         | unset                | Full base URL (scheme, path prefix, bracketed IPv6) — wins over `advertised_host`/`port`. |
+| TOML key                  | Type        | Default              | Notes                                                                                                                                                           |
+| ------------------------- | ----------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tracker.advertised_host` | string      | unset (required*)    | Hostname/IP friends reach the tracker on.                                                                                                                       |
+| `tracker.port`            | int         | `server.bind`'s port | Override when a published docker port differs from the internal one.                                                                                            |
+| `tracker.advertised_url`  | url         | unset                | Full base URL (scheme, path prefix, bracketed IPv6) — wins over `advertised_host`/`port`.                                                                       |
 | `tracker.bind`            | socket addr | unset                | A second listener carrying only the tracker and `.torrent` downloads, for a one-forwarded-port topology. File/env only — the settings page has no field for it. |
 
 \* Required unless `advertised_url` is set, or [`[gluetun]`](#gluetun-and-gluetun_client)
@@ -210,8 +210,7 @@ qbit = "/downloads/tv"
 
 ## `[lighthouse]`
 
-See the README's ["The lighthouse"](../README.md#the-lighthouse) and
-[`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the full design. `enabled`
+See [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the design and for running one. `enabled`
 controls _hosting_ one on this instance's own listener; `lighthouse.urls`
 (below the _client_ half) is independent — consuming a friend's lighthouse
 needs nothing here, and hosting one for friends needs nothing set there.
@@ -228,7 +227,7 @@ For a dynamic endpoint behind a VPN with provider port forwarding — see the
 README's ["A dynamic endpoint (gluetun)"](../README.md#a-dynamic-endpoint-gluetun).
 `[gluetun]` resolves the _tracker's_ endpoint; `[gluetun_client]` is an
 independent second poller for the torrent client's own tunnel, when it is a
-separate one — see `docker/deploy/dual-vpn/`.
+separate one — see [`docker/deploy/dual-vpn/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/dual-vpn).
 
 | TOML key                     | Type | Default | Notes                                                                                                       |
 | ---------------------------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------- |
@@ -240,20 +239,14 @@ separate one — see `docker/deploy/dual-vpn/`.
 | `gluetun_client.poll_secs`   | int  | `60`    |                                                                                                             |
 
 Vault secrets: `gluetun.api_key`, `gluetun_client.api_key`. **Not optional.**
-gluetun has made every control-server route private since v3.39.1, and sharerr
-skips the poll entirely rather than send a request that can only come back
-`401` — so a `control_url` with no matching key in the vault is inert, and
-looks identical to one that is working. `sharerr doctor` names the missing key;
-Diagnostics shows the poller's last success, which stays empty.
-
-On gluetun's side the key comes from `HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE`
-(one key, every route) or from a role in `/gluetun/auth/config.toml`. A
-per-route role needs three entries, not two: sharerr requests
-`GET /v1/openvpn/portforwarded`, gluetun answers with a 301 to
-`/v1/portforward`, and the redirect is authorised separately —
-`docker/deploy/gluetun-auth.example.toml` has the worked example.
-
-`docker/deploy/` wires all of this up for four deployment shapes.
+gluetun's control server has required a credential on every route since
+v3.39.1, and sharerr skips the poll rather than send a request that can only
+come back `401`, so a `control_url` with no matching key is inert and looks
+identical to one that is working. `sharerr doctor` names the missing key. How
+to mint the key on gluetun's side, and the three-route role a per-route
+config needs, is in
+[`docker/deploy/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md),
+which wires all of this up for four deployment shapes.
 
 ## `[sync]`
 
@@ -266,7 +259,7 @@ per-route role needs three entries, not two: sharerr requests
 
 | TOML key              | Type | Default | Notes                                                                                                                                                                                                                       |
 | --------------------- | ---- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `checks.reachability` | bool | `false` | Dial this instance's own advertised tracker and feed addresses and report whether they accept a TCP connection. Opt-in because many NAT setups refuse hairpinning, which would show a scary failure on a healthy instance. |
+| `checks.reachability` | bool | `false` | Dial this instance's own advertised tracker and feed addresses and report whether they accept a TCP connection. Opt-in because many NAT setups refuse hairpinning, which would show a scary failure on a healthy instance.  |
 
 See the README's
 ["Checking that you are actually reachable"](../README.md#checking-that-you-are-actually-reachable).
@@ -276,11 +269,11 @@ See the README's
 A webhook fired on whichever triggers below are enabled — see the README's
 mentions under ["Friends finding each other"](../README.md#friends-finding-each-other).
 
-| TOML key                        | Type                                | Default           | Notes                                                                           |
-| ------------------------------- | ----------------------------------- | ----------------- | ------------------------------------------------------------------------------- |
-| `notifications.kind`            | `generic` \| `discord` \| `apprise` | `generic`         | Which payload shape to send.                                                    |
-| `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.            |
-| `notifications.triggers`        | array of strings                    | all six, below     | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
+| TOML key                        | Type                                | Default           | Notes                                                                                                                                                          |
+| ------------------------------- | ----------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `notifications.kind`            | `generic` \| `discord` \| `apprise` | `generic`         | Which payload shape to send.                                                                                                                                   |
+| `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.                                                                                           |
+| `notifications.triggers`        | array of strings                    | all six, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
 The six triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
 `endpoint_rotated` (the gluetun-resolved advertised address changing —
@@ -294,14 +287,12 @@ Discord webhook URL embeds its own bearer token in the path.
 
 ## `[metrics]`
 
-`/metrics` (OpenMetrics, for Prometheus) and a JSON dashboard-widget endpoint
-(for Homepage, Homarr, or Glance). Both off by default and both require the
-bearer token below once enabled — unlike `/health` and `/ready`, they hand out
-how much this instance is sharing and to how many friends, which is exactly
-what the tracker's and the lighthouse's don't-confirm-existence posture exists
-to avoid leaking to a bare port scan.
+`/metrics` (OpenMetrics, for Prometheus) and `/dashboard` (JSON, for
+Homepage, Homarr, or Glance). Both off by default and both require the bearer
+token below once enabled: unlike `/health` and `/ready`, they reveal how much
+this instance is sharing and to how many friends.
 
-| TOML key           | Type | Default | Notes                                          |
+| TOML key           | Type | Default | Notes                                           |
 | ------------------ | ---- | ------- | ----------------------------------------------- |
 | `metrics.enabled`  | bool | `false` | Serve `/metrics` and the dashboard-widget JSON. |
 
@@ -408,20 +399,20 @@ sharerr vault list      # which keys are set, never their values
 sharerr vault remove <key>
 ```
 
-| Vault key                   | What it is                                                   |
-| --------------------------- | ------------------------------------------------------------ |
-| `sonarr.api_key`            | Sonarr API key                                               |
-| `radarr.api_key`            | Radarr API key                                               |
-| `lidarr.api_key`            | Lidarr API key                                               |
-| `readarr.api_key`           | Readarr API key                                              |
-| `whisparr.api_key`          | Whisparr API key                                             |
-| `qbittorrent.api_key`       | qBittorrent 5.2+ WebUI API key                               |
-| `transmission.password`     | Transmission RPC password                                    |
-| `rtorrent.password`         | rTorrent Basic Auth password (see [`[rtorrent]`](#rtorrent)) |
-| `tracker.token`             | Built-in tracker announce token                              |
-| `gluetun.api_key`           | Tracker-facing gluetun control server API key                |
-| `gluetun_client.api_key`    | Torrent-client-facing gluetun control server API key         |
-| `notifications.webhook_url` | Where a sync-failure/peer-quiet notification is POSTed       |
+| Vault key                   | What it is                                                                             |
+| --------------------------- | -------------------------------------------------------------------------------------- |
+| `sonarr.api_key`            | Sonarr API key                                                                         |
+| `radarr.api_key`            | Radarr API key                                                                         |
+| `lidarr.api_key`            | Lidarr API key                                                                         |
+| `readarr.api_key`           | Readarr API key                                                                        |
+| `whisparr.api_key`          | Whisparr API key                                                                       |
+| `qbittorrent.api_key`       | qBittorrent 5.2+ WebUI API key                                                         |
+| `transmission.password`     | Transmission RPC password                                                              |
+| `rtorrent.password`         | rTorrent Basic Auth password (see [`[rtorrent]`](#rtorrent))                           |
+| `tracker.token`             | Built-in tracker announce token                                                        |
+| `gluetun.api_key`           | Tracker-facing gluetun control server API key                                          |
+| `gluetun_client.api_key`    | Torrent-client-facing gluetun control server API key                                   |
+| `notifications.webhook_url` | Where a sync-failure/peer-quiet notification is POSTed                                 |
 | `metrics.token`             | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics)) |
 
 Those thirteen are the keys `sharerr vault set` accepts. `sharerr vault list`
@@ -454,3 +445,8 @@ need to unlock. It, `SHARERR_CONFIG`, and the tier-2 test suite's
 `SHARERR_E2E_*` variables are the only `SHARERR_*` names that are not config
 fields; any other unrecognised `SHARERR_*` variable is a startup error, same
 as an unknown key in the file.
+
+The `sharerr-lighthouse` binary reads no `sharerr.toml` and has two
+variables of its own: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`) and
+`LIGHTHOUSE_SECRET_FILE` (default `/data/lighthouse.secret`). See
+[`LIGHTHOUSE.md`](LIGHTHOUSE.md#running-one).

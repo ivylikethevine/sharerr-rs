@@ -2,8 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
+use std::io::Read;
+
+use crate::bencode::Value;
 use crate::error::{Result, TorrentError};
-use lava_torrent::torrent::v1::TorrentBuilder;
+use crate::metainfo::Torrent;
+use sha1::{Digest, Sha1};
 use sharerr_core::MediaMeta;
 
 /// What to build a torrent over.
@@ -41,13 +46,15 @@ pub struct BuiltTorrent {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-/// Creates torrents, backed by `lava_torrent`.
+/// Creates single-file v1 torrents over files exactly where they sit.
 ///
-/// `lava_torrent` is in maintenance mode; swapping it for hand-rolled bencoding
-/// and hashing should cost only this type's one method and no call sites.
-pub struct LavaTorrentFactory;
+/// Hashing and bencoding are done in this crate (see [`crate::bencode`] and
+/// [`crate::metainfo`]); the output is byte-identical to what the
+/// `lava_torrent` crate this used to wrap produced, which the
+/// `info_hashes_are_stable_across_implementations` test pins.
+pub struct TorrentFactory;
 
-impl LavaTorrentFactory {
+impl TorrentFactory {
     /// Build a torrent describing the file exactly where it already sits,
     /// without moving, renaming, or rewriting anything.
     ///
@@ -70,48 +77,58 @@ impl LavaTorrentFactory {
 
         // A path with no printable filename cannot name the file inside the
         // torrent, so it is rejected before any hashing starts.
-        if path.file_name().and_then(|n| n.to_str()).is_none() {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             return Err(TorrentError::NoFileName {
                 path: path.to_path_buf(),
             });
-        }
+        };
 
         let size = metadata.len();
         let piece_length = piece_length_for(size);
 
-        let mut builder = TorrentBuilder::new(path, piece_length as i64)
-            .set_announce(Some(request.announce.primary.to_string()))
-            // Friend-to-friend sharing must not leak into the public DHT or PEX.
-            // This is the whole reason the tracker exists.
-            .set_privacy(true);
-        // An announce *list* only when there is genuinely more than one endpoint:
-        // BEP 12 clients ignore `announce` the moment the list exists, so a
-        // one-entry list would only add bytes and change nothing.
-        if let Some(tiers) = request.announce.tier_list() {
-            builder = builder.set_announce_list(tiers);
-        }
-        // `add_extra_field`, never `add_extra_info_field`. The latter writes into
-        // the info dictionary, which would make the info hash a function of the
-        // metadata as well as of the file — two torrents over one unchanged file
-        // would stop matching, and the "reuse the torrent that already covers
-        // this file" path that keeps sharerr from re-adding media would break.
-        // `comment` belongs outside it by BEP 3 anyway.
+        let pieces = hash_pieces(path, piece_length)?;
+
+        // The info dictionary: exactly the fields BEP 3 needs for one file,
+        // plus BEP 27's private flag. Friend-to-friend sharing must not leak
+        // into the public DHT or PEX; that flag is the whole reason the
+        // tracker exists. Nothing else goes in here: the info hash is a
+        // function of the *file*, and adding metadata to this dictionary
+        // would make two torrents over one unchanged file stop matching,
+        // breaking the "reuse the torrent that already covers this file"
+        // path that keeps sharerr from re-adding media.
+        let mut info = BTreeMap::new();
+        info.insert(
+            b"length".to_vec(),
+            Value::Int(i64::try_from(size).unwrap_or(i64::MAX)),
+        );
+        info.insert(b"name".to_vec(), Value::string(name));
+        info.insert(
+            b"piece length".to_vec(),
+            Value::Int(i64::try_from(piece_length).unwrap_or(i64::MAX)),
+        );
+        info.insert(b"pieces".to_vec(), Value::Bytes(pieces));
+        info.insert(b"private".to_vec(), Value::Int(1));
+
+        let mut extra = BTreeMap::new();
+        // `comment` lives outside the info dictionary by BEP 3, which is also
+        // what keeps it from moving the info hash.
         if let Some(comment) = request.media.and_then(describe) {
-            builder = builder.add_extra_field(
-                "comment".to_owned(),
-                lava_torrent::bencode::BencodeElem::String(comment),
-            );
+            extra.insert(b"comment".to_vec(), Value::string(&comment));
         }
-        let torrent = builder.build().map_err(|source| TorrentError::Build {
-            path: path.to_path_buf(),
-            source,
-        })?;
+
+        let torrent = Torrent {
+            announce: Some(request.announce.primary.to_string()),
+            // An announce *list* only when there is genuinely more than one
+            // endpoint: BEP 12 clients ignore `announce` the moment the list
+            // exists, so a one-entry list would only add bytes and change
+            // nothing.
+            announce_list: request.announce.tier_list(),
+            info,
+            extra,
+        };
 
         let info_hash = torrent.info_hash();
-        let data = torrent.encode().map_err(|source| TorrentError::Encode {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let data = torrent.encode();
 
         tracing::debug!(
             file = %path.display(),
@@ -127,6 +144,43 @@ impl LavaTorrentFactory {
             size,
         })
     }
+}
+
+/// SHA-1 every piece of the file at `path`, concatenated, in order.
+///
+/// Read in piece-sized chunks rather than mapping the whole file: a media
+/// library's files are gigabytes, and this runs on a blocking thread whose
+/// memory footprint should not scale with the file.
+fn hash_pieces(path: &Path, piece_length: u64) -> Result<Vec<u8>> {
+    let io = |source| TorrentError::Build {
+        path: path.to_path_buf(),
+        source,
+    };
+    let file = std::fs::File::open(path).map_err(io)?;
+    let mut reader = std::io::BufReader::new(file);
+    let chunk = usize::try_from(piece_length).unwrap_or(usize::MAX);
+    let mut buf = vec![0u8; chunk];
+    let mut pieces = Vec::new();
+    loop {
+        // A piece is `piece_length` bytes except the last, so keep reading
+        // until the buffer is full or the file ends.
+        let mut filled = 0;
+        while filled < chunk {
+            let n = reader.read(&mut buf[filled..]).map_err(io)?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        if filled == 0 {
+            break;
+        }
+        pieces.extend_from_slice(&Sha1::digest(&buf[..filled]));
+        if filled < chunk {
+            break;
+        }
+    }
+    Ok(pieces)
 }
 
 /// Choose a piece length for a file of `size` bytes.
@@ -170,21 +224,21 @@ pub fn torrent_file_path(dir: &Path, info_hash: &str) -> PathBuf {
 /// This is what decides whether a rotation of the advertised endpoint has left a
 /// torrent pointing somewhere stale — see [`rewrite_announce`].
 pub fn read_announce(data: &[u8]) -> Result<Option<String>> {
-    let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
-        .map_err(|source| TorrentError::Reparse { source })?;
+    let torrent =
+        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
     Ok(torrent.announce)
 }
 
 /// The info hash of a `.torrent` held in memory, lowercase hex.
 ///
 /// The counterpart to [`torrent_file_path`], which names a cache entry by this
-/// value: bytes that arrived from somewhere other than [`LavaTorrentFactory`]
+/// value: bytes that arrived from somewhere other than [`TorrentFactory`]
 /// have to be asked what they actually describe before being filed under a
 /// hash. Caching the wrong file under the right name serves a friend a torrent
 /// for a different swarm than the one they were pointed at.
 pub fn read_info_hash(data: &[u8]) -> Result<String> {
-    let torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
-        .map_err(|source| TorrentError::Reparse { source })?;
+    let torrent =
+        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
     Ok(torrent.info_hash())
 }
 
@@ -197,15 +251,13 @@ pub fn read_info_hash(data: &[u8]) -> Result<String> {
 /// is what makes a rotated gluetun port survivable — the feed serves the
 /// rewritten file, and a friend who re-downloads it gets the live endpoint.
 pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Vec<u8>> {
-    let mut torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
-        .map_err(|source| TorrentError::Reparse { source })?;
+    let mut torrent =
+        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
 
     torrent.announce = Some(announce.primary.to_string());
     torrent.announce_list = announce.tier_list();
 
-    torrent
-        .encode()
-        .map_err(|source| TorrentError::Reencode { source })
+    Ok(torrent.encode())
 }
 
 /// The outcome of [`retarget_announce`]: either the `.torrent` already
@@ -252,17 +304,20 @@ pub enum Retargeted {
 /// three parses into one), and the rewrite itself only happens when the
 /// comparison actually calls for it.
 pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Retargeted> {
-    let mut torrent = lava_torrent::torrent::v1::Torrent::read_from_bytes(data)
-        .map_err(|source| TorrentError::Reparse { source })?;
+    let mut torrent =
+        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
     let info_hash = torrent.info_hash();
     let previous = torrent.announce.clone();
     // sharerr only ever builds single-file v1 torrents (see `TorrentRequest`'s
     // doc comment), so this is exactly the file's size when the torrent was
-    // built. A negative value is not producible by anything sharerr writes;
-    // `unwrap_or(0)` just means a corrupt/hand-edited torrent reads as size
-    // zero, which never matches a real file and so still triggers the rebuild
-    // its caller falls back to on a mismatch.
-    let length = u64::try_from(torrent.length).unwrap_or(0);
+    // built. A missing or negative value is not producible by anything sharerr
+    // writes; `0` just means a corrupt/hand-edited torrent reads as size zero,
+    // which never matches a real file and so still triggers the rebuild its
+    // caller falls back to on a mismatch.
+    let length = torrent
+        .length()
+        .and_then(|length| u64::try_from(length).ok())
+        .unwrap_or(0);
 
     if previous.as_deref() == Some(announce.primary.as_str()) {
         return Ok(Retargeted::Current { info_hash, length });
@@ -270,9 +325,7 @@ pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<R
 
     torrent.announce = Some(announce.primary.to_string());
     torrent.announce_list = announce.tier_list();
-    let data = torrent
-        .encode()
-        .map_err(|source| TorrentError::Reencode { source })?;
+    let data = torrent.encode();
 
     Ok(Retargeted::Updated {
         previous,
@@ -368,14 +421,14 @@ mod tests {
     }
 
     /// Build a real `.torrent` over a temp file, so the round-trip functions
-    /// are exercised against bytes `lava_torrent` actually produced rather
-    /// than a hand-written fixture that could drift from its encoder.
+    /// are exercised against bytes the factory actually produced rather than
+    /// a hand-written fixture that could drift from its encoder.
     fn built(dir: &tempfile::TempDir, announce: &crate::AnnounceSet) -> BuiltTorrent {
         let path = dir.path().join("Lanternwick Hollow S01E01.mkv");
         // Deterministic bytes: the info hash has to be stable across machines.
         std::fs::write(&path, vec![7u8; 512 * 1024]).unwrap();
 
-        LavaTorrentFactory
+        TorrentFactory
             .create(&TorrentRequest {
                 path: &path,
                 announce,
@@ -389,6 +442,27 @@ mod tests {
             primary: primary.parse().unwrap(),
             tiers: tiers.iter().map(|t| t.parse().unwrap()).collect(),
         }
+    }
+
+    /// The info hash is a torrent's identity in every client already seeding
+    /// it and the name of every cached `.torrent` on disk, so the bytes this
+    /// factory writes must never change between releases. These values were
+    /// recorded from the `lava_torrent`-backed implementation this replaced
+    /// and cross-checked against an independent encoder; a mismatch here
+    /// means every existing share would be re-added under a new identity.
+    #[test]
+    fn info_hashes_are_stable_across_implementations() {
+        let dir = tempfile::tempdir().unwrap();
+        let built = built(
+            &dir,
+            &announce_set("http://seed.example:51413/announce/tok", &[]),
+        );
+        assert_eq!(built.info_hash, "5eeab2c54e0d08a30dfc821c34d0d7f38ba14629");
+        assert_eq!(built.data.len(), 201);
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&built.data)),
+            "292dba8c8c72ced76d463d592ac6e2c1b12430f977c6403d2e76cf30fd12b54c"
+        );
     }
 
     /// The invariant the whole comment feature is subordinate to.
@@ -406,14 +480,14 @@ mod tests {
         std::fs::write(&path, vec![7u8; 512 * 1024]).unwrap();
         let set = announce_set("http://seed.example:51413/announce/tok", &[]);
 
-        let bare = LavaTorrentFactory
+        let bare = TorrentFactory
             .create(&TorrentRequest {
                 path: &path,
                 announce: &set,
                 media: None,
             })
             .unwrap();
-        let described = LavaTorrentFactory
+        let described = TorrentFactory
             .create(&TorrentRequest {
                 path: &path,
                 announce: &set,
@@ -603,7 +677,7 @@ mod tests {
             &["http://new.example:6881/announce/b"],
         );
         let rewritten = rewrite_announce(&before.data, &single).unwrap();
-        let parsed = lava_torrent::torrent::v1::Torrent::read_from_bytes(&rewritten).unwrap();
+        let parsed = Torrent::read_from_bytes(&rewritten).unwrap();
         assert!(
             parsed.announce_list.is_none(),
             "one tier should emit no list"
@@ -617,7 +691,7 @@ mod tests {
             ],
         );
         let rewritten = rewrite_announce(&before.data, &two).unwrap();
-        let parsed = lava_torrent::torrent::v1::Torrent::read_from_bytes(&rewritten).unwrap();
+        let parsed = Torrent::read_from_bytes(&rewritten).unwrap();
         assert_eq!(parsed.announce_list.unwrap().len(), 2);
     }
 

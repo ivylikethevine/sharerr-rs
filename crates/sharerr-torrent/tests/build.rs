@@ -4,11 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use lava_torrent::torrent::v1::Torrent;
 use sharerr_testkit::{deterministic_bytes, write_media_file};
 use sharerr_torrent::{
-    AnnounceSet, LavaTorrentFactory, TorrentError, TorrentRequest, piece_length_for, read_announce,
-    rewrite_announce,
+    AnnounceSet, Torrent, TorrentError, TorrentFactory, TorrentRequest, piece_length_for,
+    read_announce, rewrite_announce,
 };
 use url::Url;
 
@@ -18,7 +17,7 @@ fn announce() -> AnnounceSet {
 
 fn build(path: &Path) -> sharerr_torrent::BuiltTorrent {
     let announce = announce();
-    LavaTorrentFactory
+    TorrentFactory
         .create(&TorrentRequest {
             path,
             announce: &announce,
@@ -82,9 +81,9 @@ fn the_torrent_is_named_after_the_file_not_the_release() {
     let built = build(&path);
 
     let decoded = Torrent::read_from_bytes(&built.data).unwrap();
-    assert_eq!(decoded.name, "lanternwick.s02e01.mkv");
+    assert_eq!(decoded.name(), Some("lanternwick.s02e01.mkv"));
     assert!(
-        decoded.files.is_none(),
+        decoded.is_single_file(),
         "a single file must not become a multi-file torrent"
     );
 }
@@ -154,8 +153,8 @@ fn the_piece_count_matches_the_file_size() {
     let decoded = Torrent::read_from_bytes(&built.data).unwrap();
 
     let expected = (700 * 1024_u64).div_ceil(piece_length_for(built.size));
-    assert_eq!(decoded.pieces.len() as u64, expected);
-    assert_eq!(decoded.length as u64, built.size);
+    assert_eq!(decoded.piece_count() as u64, expected);
+    assert_eq!(decoded.length(), Some(i64::try_from(built.size).unwrap()));
 }
 
 #[test]
@@ -164,7 +163,7 @@ fn a_missing_file_is_reported_rather_than_panicking() {
     let announce = announce();
     let path = dir.path().join("does-not-exist.mkv");
 
-    let err = LavaTorrentFactory
+    let err = TorrentFactory
         .create(&TorrentRequest {
             path: &path,
             announce: &announce,
@@ -184,7 +183,7 @@ fn a_directory_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let announce = announce();
 
-    let err = LavaTorrentFactory
+    let err = TorrentFactory
         .create(&TorrentRequest {
             path: dir.path(),
             announce: &announce,
@@ -218,7 +217,7 @@ fn multiple_endpoints_become_ordered_announce_tiers() {
         "http://203.0.113.9:41234/announce",
         "http://static.example:8477/announce",
     ]);
-    let built = LavaTorrentFactory
+    let built = TorrentFactory
         .create(&TorrentRequest {
             path: &path,
             announce: &announce,

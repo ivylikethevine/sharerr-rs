@@ -20,7 +20,7 @@ use sharerr_qbit::QbitClient;
 use sharerr_store::Store;
 use sharerr_testkit::library::{self, Library};
 use sharerr_testkit::mock::{self, QBIT_API_KEY, multipart_field};
-use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, TrackerProvider};
+use sharerr_torrent::{AnnounceSet, TorrentFactory, TorrentRequest, TrackerProvider};
 use url::Url;
 
 use crate::test_support::vault_in;
@@ -113,7 +113,7 @@ impl AddedTorrent {
 fn a_real_torrent(dir: &Path, name: &str) -> Vec<u8> {
     let path = dir.join(name);
     std::fs::write(&path, format!("pretend media bytes for {name}")).unwrap();
-    LavaTorrentFactory
+    TorrentFactory
         .create(&TorrentRequest {
             path: &path,
             announce: &AnnounceSet::single(Url::parse(FOREIGN_ANNOUNCE).unwrap()),
