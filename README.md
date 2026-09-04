@@ -7,9 +7,9 @@ _Share your media library with friends, over the tools you already run._
 <!--TODO: Add a release badge for each of the docker images -->
 
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fivylikethevine.github.io%2Fsharerr-rs%2Fbadges%2Fcoverage.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/ID/badge)](https://www.bestpractices.dev/projects/ID)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14449/badge)](https://www.bestpractices.dev/projects/14449)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
-[![OpenSSF Baseline](https://www.bestpractices.dev/projects/ID/baseline)](https://www.bestpractices.dev/projects/ID)
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/14449/baseline)](https://www.bestpractices.dev/projects/14449)
 [![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg)](Cargo.toml)
 
 sharerr connects to your *arr apps — Sonarr, Radarr, Lidarr, Readarr, Whisparr —
@@ -23,8 +23,11 @@ from its filename.
 Nothing is copied, renamed, re-linked, or moved. That is the constraint the whole
 design is built around.
 
+> View these docs as a [website here](https://ivylikethevine.github.io/sharerr-rs/).
+
 ## Contents
 
+- [Additional Documentation](#additional-documentation)
 - [What works today](#what-works-today)
 - [Screenshots](#screenshots)
 - [Quickstart](#quickstart)
@@ -45,16 +48,24 @@ design is built around.
 - [The CLI](#the-cli)
 - [Building and testing](#building-and-testing)
 - [Layout](#layout)
+- [Getting help and contributing](#getting-help-and-contributing)
 - [AI usage](#ai-usage)
 - [Licence](#licence)
 
-See also: [the settings reference](docs/SETTINGS.md), [what's
-supported and what's deliberately not](docs/SUPPORT.md), [the API](docs/API.md), [the
-roadmap, including ideas considered but not all committed
-to](docs/ROADMAP.md), [the original design brief](docs/DESIGN.md), [the
-lighthouse's design rationale](docs/LIGHTHOUSE.md), [the security
-policy](docs/SECURITY.md), [testing](docs/TESTING.md), [releasing a
-version](docs/RELEASING.md), and [how to contribute](docs/CONTRIBUTING.md).
+### Additional Documentation
+
+- [the settings reference](docs/SETTINGS.md), [what's supported and what's deliberately not](docs/SUPPORT.md)
+- [the API](docs/API.md)
+- [the architecture](docs/ARCHITECTURE.md)
+- [the roadmap, including ideas considered but not all committed to](docs/ROADMAP.md)
+- [the original design brief](docs/DESIGN.md)
+- [the lighthouse's design rationale](docs/LIGHTHOUSE.md)
+- [the security policy](docs/SECURITY.md)
+- [testing](docs/TESTING.md)
+- [releasing a version](docs/RELEASING.md)
+- [governance](docs/GOVERNANCE.md)
+- [the code of conduct](docs/CODE_OF_CONDUCT.md)
+- [how to contribute](docs/CONTRIBUTING.md).
 
 ## What works today
 
@@ -703,6 +714,25 @@ bytes. No real content is involved anywhere.
 
 The original design brief, and the two corrections the implementation forced on
 it, are in [docs/DESIGN.md](docs/DESIGN.md).
+
+## Getting help and contributing
+
+- **Found a bug or want a feature?** [Open an issue](https://github.com/ivylikethevine/sharerr-rs/issues) —
+  see [docs/SUPPORT.md](docs/SUPPORT.md) for what's supported today, and
+  [docs/ROADMAP.md](docs/ROADMAP.md) for what's already planned or considered.
+- **Have a question, or want to show off your setup?** [Start a discussion](https://github.com/ivylikethevine/sharerr-rs/discussions).
+- **Found a security issue?** Do not open a public issue — see
+  [docs/SECURITY.md](docs/SECURITY.md#reporting-a-vulnerability) for the
+  private reporting route.
+- **Want to contribute a change?** [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)
+  covers building, testing, and submitting a pull request; participating in
+  any project space means abiding by the
+  [code of conduct](docs/CODE_OF_CONDUCT.md). [docs/GOVERNANCE.md](docs/GOVERNANCE.md)
+  covers who decides what, and what continuity looks like for a
+  single-maintainer project.
+
+This is a personal project maintained by one person in their spare time —
+see [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for exactly what that means.
 
 ## AI usage
 

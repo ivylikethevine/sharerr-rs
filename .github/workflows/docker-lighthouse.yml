@@ -24,6 +24,14 @@ concurrency:
   group: docker-lighthouse-${{ github.ref }}
   cancel-in-progress: true
 
+# See docker.yml's identical block: the `docker` job below already declares
+# its own `permissions:`, which fully replaces this default rather than being
+# intersected with it, so this has no effect on that job today. It exists for
+# a future job with no block of its own, and because Scorecard's
+# Token-Permissions check looks for a top-level declaration specifically.
+permissions:
+  contents: read
+
 jobs:
   docker:
     name: docker

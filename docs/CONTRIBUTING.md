@@ -12,6 +12,7 @@ one written for a person.
 - [Getting set up](#getting-set-up)
 - [The verification loop](#the-verification-loop)
 - [Clippy stays at zero warnings](#clippy-stays-at-zero-warnings)
+- [Test policy](#test-policy)
 - [Testing tiers](#testing-tiers)
 - [MSRV](#msrv)
 - [What CI runs](#what-ci-runs)
@@ -79,6 +80,17 @@ mod tests {
 Never weaken the workspace lint to make a test compile. A non-test `expect()`
 that genuinely cannot fail takes a targeted `#[allow]` plus a comment saying
 why.
+
+## Test policy
+
+**A PR adding a new feature, or fixing a bug, is expected to add or extend a
+tier-1 test that would have failed without the change.** This is a formal
+policy, not a suggestion — a reviewer can and should ask for a test before
+merging one of those two. A small, obviously-correct fix that changes no
+behavior (a typo, a doc link, a comment) doesn't need one. The PR
+template's checklist asks for this explicitly; if it genuinely doesn't
+apply, say why in the PR rather than leaving the box unchecked with no
+explanation.
 
 ## Testing tiers
 

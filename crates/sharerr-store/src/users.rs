@@ -10,8 +10,8 @@
 
 use std::sync::LazyLock;
 
-use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+use argon2::{Algorithm, Argon2, Params, Version};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::Row;
 use zeroize::Zeroizing;
@@ -25,6 +25,33 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// Length of the raw salt before base64 encoding. 16 bytes is the Argon2
 /// reference implementation's recommendation and matches the vault's salt.
 const SALT_LEN: usize = 16;
+
+/// Argon2id cost parameters for login password hashing. Spelled out
+/// explicitly for the same reason as `sharerr-store::vault`'s identical
+/// constants — these currently equal the argon2 crate's own default, but a
+/// crate-bump default is implicit where this is not. Unlike the vault's
+/// parameters, these are safe to change freely: a PHC string embeds the
+/// parameters it was hashed with, and verification reads that embedded
+/// value rather than trusting whatever `hasher()` below is configured with
+/// — see `blocking_verify`'s doc comment. A change only affects passwords
+/// hashed *after* it lands.
+const ARGON2_M_COST_KIB: u32 = 19 * 1024;
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+
+/// Built once, at compile time: `Params::new` only fails outside its own
+/// MIN/MAX bounds, which the fixed constants above never approach, so a
+/// bound violation here is a compile error rather than something that could
+/// ever surface at runtime.
+const ARGON2_PARAMS: Params =
+    match Params::new(ARGON2_M_COST_KIB, ARGON2_T_COST, ARGON2_P_COST, None) {
+        Ok(params) => params,
+        Err(_) => panic!("hard-coded Argon2 params must satisfy argon2's own bounds"),
+    };
+
+fn hasher() -> Argon2<'static> {
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, ARGON2_PARAMS.clone())
+}
 
 impl Store {
     /// How many accounts exist. Zero means the instance is unclaimed and the
@@ -163,7 +190,7 @@ fn blocking_hash(password: &str) -> Result<String> {
     let raw = crate::random_array::<SALT_LEN>()
         .map_err(|e| StoreError::PasswordHash(format!("salt generation failed: {e}")))?;
 
-    Argon2::default()
+    hasher()
         .hash_password_with_salt(password.as_bytes(), &raw)
         .map(|hash| hash.to_string())
         .map_err(|e| StoreError::PasswordHash(e.to_string()))
@@ -177,7 +204,11 @@ fn blocking_hash(password: &str) -> Result<String> {
 fn blocking_verify(password: &str, stored: &str) -> bool {
     // `verify_password` parses the PHC string itself and returns `Err` for one
     // it cannot parse, which folds into the same "no" as a wrong password.
-    Argon2::default()
+    // Verification is checked against the algorithm/version/params *encoded
+    // in `stored`*, not `hasher()`'s own — so this reads correctly against a
+    // hash produced under a since-changed `ARGON2_*` constant, same as it
+    // always has under `Argon2::default()`.
+    hasher()
         .verify_password(password.as_bytes(), stored)
         .is_ok()
 }

@@ -74,7 +74,7 @@ echo "## tools.txt (release-asset installs)"
 echo
 # Process substitution, not a pipe: a piped `while` runs in a subshell, so
 # $bad would be lost and this would always exit 0.
-while IFS='|' read -r tool pinned _ _ _ check tag_prefix; do
+while IFS='|' read -r tool pinned _ _ _ check tag_prefix _; do
   [ -n "$tool" ] || continue
 
   # "-" opts a row out of the drift report entirely - for a tool whose
