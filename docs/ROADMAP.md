@@ -44,19 +44,22 @@ out and why, is [`SUPPORT.md`](SUPPORT.md).
 Operational, not architectural. None of these are features; each is something
 that has to actually happen, once, before a `v1` tag:
 
-1. **Rehearse the release pipeline's build half; the publish half necessarily
-   executes for real on the first tag.** Both images, `docker.yml` and
-   `docker-lighthouse.yml`, accept a manual `workflow_dispatch` that rehearses
-   `build` — the same push-a-provisional-tag-and-attest path a `v*` push would
-   take (see [`RELEASING.md`](RELEASING.md#rehearsing-it)). `publish` cannot
-   be reached this way: it requires `github.event_name == 'push'` in addition
-   to the tag-ref check, so a dispatch can never satisfy it — the first real
-   `v*` tag is necessarily also the first time `publish` runs. What can and
+1. **Rehearse the release pipeline's build half; the publish half — and the
+   Release it now creates — necessarily execute for real on the first tag.**
+   Both images, `docker.yml` and `docker-lighthouse.yml`, accept a manual
+   `workflow_dispatch` that rehearses `build` — the same
+   push-a-provisional-tag-and-attest path a `v*` push would take (see
+   [`RELEASING.md`](RELEASING.md#rehearsing-it)). Neither `publish` nor
+   `docker.yml`'s `release` job (which creates the GitHub Release, see
+   [`RELEASING.md`](RELEASING.md#the-github-release)) can be reached this way:
+   both require `github.event_name == 'push'` in addition to the tag-ref
+   check, so a dispatch can never satisfy either — the first real `v*` tag is
+   necessarily also the first time `publish` and `release` run. What can and
    should be rehearsed now: run both `build`s, and verify in the repository
    settings — not any workflow file — that the `release` environment actually
    has a required reviewer configured. That gate is a GitHub Settings fact no
-   workflow can assert; without it, `publish` runs unattended the moment
-   `build` finishes.
+   workflow can assert; without it, `publish` (and, downstream of it,
+   `release`) runs unattended the moment `build` finishes.
 2. **Rehearse one real upgrade across a migration.** Eleven forward-only
    sqlx migrations exist and every one has only ever run against a fresh
    database. Before v1: an older image, a populated `/data`, then the new

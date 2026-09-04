@@ -20,6 +20,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Two merges in quick succession would otherwise run two full 20-minute
+# instrumented builds back to back, each triggering its own pages.yml deploy
+# via the workflow_run chain — the later one is what should ship.
+concurrency:
+  group: coverage
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -49,6 +56,10 @@ jobs:
           # Instrumented and ordinary builds produce different target/ trees;
           # sharing a key with ci.yml's `test` job would thrash both caches.
           key: coverage
+          # This workflow only runs on `main` (or a manual dispatch), so this
+          # is mostly documentation of intent rather than a behaviour change —
+          # see ci.yml's `test` job for the cache-budget reasoning it shares.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Pinned like every action above it: without a fixed version this could
       # install whatever published most recently, and a coverage run could

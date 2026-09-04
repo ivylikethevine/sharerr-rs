@@ -112,7 +112,7 @@ services:
   #   docker compose -f docker/compose.test.yml --profile indexer up -d
   prowlarr:
     profiles: [indexer]
-    image: lscr.io/linuxserver/prowlarr:2.5.2@sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92
+    image: lscr.io/linuxserver/prowlarr:2.5.2@sha256:91844fa2c927ad6ede5630127183cc7868b175f6223e83e6a5da1fffea2aa782
     container_name: sharerr-test-prowlarr
     environment:
       PUID: *puid

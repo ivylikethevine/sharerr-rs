@@ -109,9 +109,9 @@ coverage caveat.
 CI's `msrv (1.98)` job runs `cargo check --workspace --all-targets
 --all-features --locked` on a pinned 1.98 toolchain. Locally, `docker build -f
 docker/Dockerfile .` is the equivalent check — a local toolchain is invariably
-newer and will not catch a breach on its own. Both `docker/Dockerfile` and
-`docker/Dockerfile.lighthouse` pin the same toolchain as `rust-version`, and the
-two pins have to move together if either changes.
+newer and will not catch a breach on its own. `docker/Dockerfile` builds both
+the sharerr and lighthouse runtime images from one shared builder stage pinned
+to `rust-version`, so there is one toolchain pin to move if it changes, not two.
 
 ## What CI runs
 
@@ -122,10 +122,8 @@ two pins have to move together if either changes.
 | `msrv (1.98)` | Yes |
 | `cargo-deny` | Yes |
 | `shell + compose` | Yes |
-| `zizmor` | Yes |
-| `actionlint` | Yes |
-| `hadolint (advisory)` | No — reports only |
-| `markdownlint (advisory)` | No — reports only |
+| `workflow lint (zizmor + actionlint)` | Yes |
+| `advisory (hadolint + markdownlint + typos)` | No — reports only; each of the three still gets its own step summary |
 
 `./scripts/run_codeql.sh` runs the same analysis CI's CodeQL workflow runs,
 entirely locally — worth doing before pushing anything that touches

@@ -44,21 +44,59 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  analyze:
-    name: CodeQL (${{ matrix.language }})
+  # Per-language change detection, so a PR touching only Rust source does not
+  # also pay for the `actions` analysis leg, and vice versa. Deliberately not
+  # routed through prepare.yml: this workflow never touches
+  # `vars.RUNNER_LABEL` (both legs are pinned `ubuntu-latest` — CodeQL has
+  # nothing to gain from the self-hosted box either), so it only needs the
+  # paths-filter half, with two keys instead of prepare.yml's one.
+  #
+  # On schedule (the Tuesday baseline run) or workflow_dispatch, both languages
+  # run unconditionally — there is no diff to filter, and the scheduled run's
+  # whole purpose is establishing the baseline every PR gets diffed against.
+  context:
+    name: detect changes
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      actions: ${{ steps.filter.outputs.actions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'migrations/**'
+            actions:
+              - '.github/**'
+
+  # Two named jobs rather than one `matrix.language: [rust, actions]` job with
+  # a per-language `if:`, because job-level `if:` cannot read the `matrix`
+  # context at all — actionlint rejects it outright, since the condition is
+  # evaluated before the matrix is expanded. Splitting is also a better fit
+  # for "one language failing should not hide the other's findings": each is
+  # now its own job with its own visible pass/fail/skip, not a matrix cell.
+  analyze-rust:
+    name: CodeQL (rust)
+    needs: context
+    if: needs.context.result == 'skipped' || needs.context.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      # the SARIF upload, and the workflow definitions being analysed
       security-events: write
-      actions: read
-    strategy:
-      # One language failing should not hide the other's findings; they upload
-      # under separate categories and are read separately.
-      fail-fast: false
-      matrix:
-        language: [rust, actions]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,10 +107,37 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
-          languages: ${{ matrix.language }}
+          languages: rust
           build-mode: none
 
       - name: Analyze
         uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:rust"
+
+  analyze-actions:
+    name: CodeQL (actions)
+    needs: context
+    if: needs.context.result == 'skipped' || needs.context.outputs.actions == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # the SARIF upload, and the workflow definitions being analysed
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          languages: actions
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          category: "/language:actions"

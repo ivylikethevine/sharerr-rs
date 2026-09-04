@@ -350,8 +350,8 @@ friend's lighthouse needs nothing checked in Settings, and running one for
 friends needs nothing typed here.
 
 Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`,
-built from `docker/Dockerfile.lighthouse`) is meant to be self-hosted by anyone
-on neutral ground:
+built from `docker/Dockerfile`'s `runtime-lighthouse` target) is meant to be
+self-hosted by anyone on neutral ground:
 
 ```bash
 docker run -d --name sharerr-lighthouse -p 7878:7878 \
@@ -369,7 +369,7 @@ sharerr's own image above; every push to `main` does publish a
 track development before the first release. To build it yourself instead:
 
 ```bash
-docker build -f docker/Dockerfile.lighthouse -t sharerr-lighthouse .
+docker build -f docker/Dockerfile --target runtime-lighthouse -t sharerr-lighthouse .
 docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
 ```
 

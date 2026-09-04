@@ -8,6 +8,7 @@ path end to end, so rehearse it (below) rather than trusting it.
 
 - [What ships, and where](#what-ships-and-where)
 - [Cutting a release](#cutting-a-release)
+- [The GitHub Release](#the-github-release)
 - [The one-time setup this depends on](#the-one-time-setup-this-depends-on)
 - [Rehearsing it](#rehearsing-it)
 - [Verifying a published image](#verifying-a-published-image)
@@ -15,16 +16,21 @@ path end to end, so rehearse it (below) rather than trusting it.
 
 ## What ships, and where
 
-Two container images, from two workflows, each approved separately:
+Two container images, from two workflows, each approved separately, plus a
+GitHub Release page once both images have their tags:
 
-| Image | Workflow | Dockerfile |
+| Image | Workflow | `docker/Dockerfile` target |
 | --- | --- | --- |
-| `ghcr.io/ivylikethevine/sharerr-rs` | `docker.yml` | `docker/Dockerfile` |
-| `ghcr.io/ivylikethevine/sharerr-lighthouse` | `docker-lighthouse.yml` | `docker/Dockerfile.lighthouse` |
+| `ghcr.io/ivylikethevine/sharerr-rs` | `docker.yml` | `runtime-sharerr` |
+| `ghcr.io/ivylikethevine/sharerr-lighthouse` | `docker-lighthouse.yml` | `runtime-lighthouse` |
+
+Both workflows are thin callers of the shared `docker-image.yml` — see that
+file for the actual build/publish logic each of the two just parameterizes.
 
 Nothing else is published anywhere — no crates.io (see
-[`docs/SUPPORT.md`](SUPPORT.md#publishing-to-cratesio)), no npm, no PyPI, no GitHub Release
-page with attached binaries. The container image is the distribution channel.
+[`docs/SUPPORT.md`](SUPPORT.md#publishing-to-cratesio)), no npm, no PyPI, no
+binaries attached to the Release. The container image is the distribution
+channel; the Release page is a human-readable pointer at it, not a second one.
 
 ## Cutting a release
 
@@ -48,6 +54,34 @@ retags the exact digest `build` already produced and attested onto the tags an
 operator would actually pull — `latest`, `X.Y.Z`, `X.Y` — with `docker buildx
 imagetools create`. Approving a release means approving the bytes that already
 exist, not asking for a second, unaudited build to happen.
+
+`v1.2.3` has to actually be `1.2.3` — `docker.yml`'s `release` job (next
+section) reads `[workspace.package].version` out of `Cargo.toml` and fails
+loudly, before writing anything, if the tag disagrees with it. Bump the
+version in `Cargo.toml` first; the tag follows it, not the other way around.
+
+## The GitHub Release
+
+`docker.yml` carries one more job, `release`, that only reaches `publish`'s
+approval — it does not gate on its own. It creates the Releases-tab entry:
+
+- **Title and tag**: the pushed `v*` tag, verbatim.
+- **Notes**: GitHub's own generated notes (`gh release create --generate-notes`
+  — merged PR titles since the last tag), with a short preamble prepended
+  giving the exact `docker pull` and `gh attestation verify` commands for both
+  images, so the release page is self-contained. See
+  [`docs/SUPPORT.md`](SUPPORT.md#a-maintained-changelogmd) for why this is the
+  model instead of a hand-maintained `CHANGELOG.md`.
+- **Prerelease**: a tag with a `-` segment (`v1.0.0-rc1`) is marked as a
+  GitHub prerelease. It also never moves `:latest` — see `docker-image.yml`'s
+  `meta` step.
+
+It runs after `publish` (`needs: docker`, the job that calls `docker-image.yml`
+and therefore already carries the approval), and independently of
+`docker-lighthouse.yml`'s own build — a lighthouse build failure does not
+block it, for the same "a break in one build cannot hold the other's release"
+reason the two images are separate workflows at all. The release describes
+whichever images actually finished publishing for that tag.
 
 ## The one-time setup this depends on
 
@@ -74,7 +108,9 @@ dispatch can never satisfy (dispatching against an _existing_ tag's ref would
 otherwise have been enough on its own — this is the gap that check closes; see
 `docker.yml`'s own `publish` job comment). A rehearsal builds and attests the
 real thing and publishes nothing, whatever the environment's reviewer setting
-says.
+says. `release` carries the identical `github.event_name == 'push'` guard and
+is equally unreachable from a dispatch — a rehearsal creates no Releases-tab
+entry either.
 
 There's no fake-version input to pass: this workflow's tags are git-ref-derived
 and the provisional destination needs no version to be meaningful — the

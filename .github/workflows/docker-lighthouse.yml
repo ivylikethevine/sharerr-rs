@@ -1,24 +1,15 @@
-# Builds `docker/Dockerfile.lighthouse`, and publishes it to GHCR on every push
-# to `main` (unattended, sha-only tag) and on a `v*` tag (approval-gated).
+# Builds `docker/Dockerfile`'s `runtime-lighthouse` target and publishes it to
+# GHCR. Everything about how that happens lives in docker-image.yml, shared
+# with docker.yml — see that file for the reasoning. Only what is specific to
+# the lighthouse is here.
 #
-# Deliberately its own workflow rather than a second job in docker.yml. The
-# lighthouse is a separate product: a standalone rendezvous service meant to be
-# self-hosted by anyone, on neutral ground away from any particular library
-# (see docs/LIGHTHOUSE.md). It gets its own image, its own tag
-# series and its own approval, so publishing a sharerr release is not also,
-# silently, publishing a lighthouse — and so a break in one build cannot hold
-# the other's release.
-#
-# The shape mirrors docker.yml exactly, and for the same reasons: pull requests
-# build both architectures and ship nothing, every push to `main` ships
-# unattended under a sha-only tag, a `v*` tag pushes the real multi-arch image
-# to a provisional tag nobody would browse to, and a `publish` job behind a
-# required reviewer retags that exact digest onto the tags an operator would
-# pull. Read docker.yml for the reasoning behind each of those choices; only
-# the differences are commented here. That includes the `workflow_dispatch`
-# rehearsal path (`build` pushes to `pending-<sha>` and attests it on a manual
-# dispatch too) and `publish`'s `github.event_name == 'push'` gate - both
-# ported here verbatim for the identical reason docker.yml has them.
+# Deliberately its own workflow rather than a second `uses:` job sharing
+# docker.yml's file. The lighthouse is a separate product: a standalone
+# rendezvous service meant to be self-hosted by anyone, on neutral ground away
+# from any particular library (see docs/LIGHTHOUSE.md). It gets its own image,
+# its own tag series and its own approval, so publishing a sharerr release is
+# not also, silently, publishing a lighthouse — and so a break in one build
+# cannot hold the other's release.
 
 name: Docker (lighthouse)
 
@@ -33,203 +24,45 @@ concurrency:
   group: docker-lighthouse-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
-env:
-  # A second package in the owner's namespace rather than a suffix on this
-  # repo's — `sharerr-lighthouse` is the crate's name and the binary's name,
-  # and an operator looking for it should find it under that name. The
-  # `org.opencontainers.image.source` label emitted below is what links the
-  # package back to this repository and lets it inherit the repo's permissions,
-  # so the package does not have to be named after the repo to belong to it.
-  #
-  # Same caveat as docker.yml: GHCR rejects uppercase paths, and this owner
-  # happens to be all-lowercase today.
-  IMAGE: ghcr.io/${{ github.repository_owner }}/sharerr-lighthouse
-
 jobs:
-  # Narrower than docker.yml's equivalent: this image is built from one crate
-  # that depends on nothing else in the workspace, so a change confined to,
-  # say, crates/sharerr-qbit cannot alter what this workflow would produce.
-  # The lockfile and the root manifest are in the list because the build is
-  # `--locked` and resolves against both. Tag pushes bypass this entirely.
-  # See changes.yml. This filter has no `!` exclusion, unlike ci.yml's and
-  # docker.yml's — changes.yml's `some-with-excludes` quantifier is a no-op
-  # against a purely positive pattern list, so this narrower, lighthouse-only
-  # fileset behaves exactly as it did inlined here.
-  changes:
-    name: detect changes
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    # changes.yml's own job asks for `pull-requests: read` (dorny/paths-filter
-    # lists a PR's files through the API). A reusable workflow's job cannot
-    # request a scope the calling job does not hold, so granting it here is
-    # what makes the call valid at all — without it GitHub rejects this file
-    # outright rather than failing the run.
-    permissions:
-      contents: read
-      pull-requests: read
-    uses: ./.github/workflows/changes.yml
-    with:
-      filters: |
-        code:
-          - 'crates/sharerr-lighthouse/**'
-          - 'docker/Dockerfile.lighthouse'
-          - 'Cargo.toml'
-          - 'Cargo.lock'
-
-  runner:
-    name: pick the runner
-    uses: ./.github/workflows/runner.yml
-
-  build:
-    name: build
-    needs: [runner, changes]
-    if: >-
-      needs.runner.result == 'success' &&
-      (startsWith(github.ref, 'refs/tags/v') ||
-       needs.changes.result == 'skipped' ||
-       needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
-    # Half of docker.yml's: this image builds one crate with no *arr clients,
-    # no torrent clients and no sqlx, and its runtime stage installs the same
-    # two packages.
-    timeout-minutes: 15
+  docker:
+    name: docker
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
-    outputs:
-      tags: ${{ steps.meta.outputs.tags }}
-      pending-ref: ${{ steps.pending.outputs.ref }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: arm64
-
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - if: >-
-          startsWith(github.ref, 'refs/tags/v') ||
-          (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-          github.event_name == 'workflow_dispatch'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE }}
-          # The lighthouse ships from this repo and shares its version, so it
-          # shares the tag scheme too — `latest`, `X.Y.Z`, `X.Y`, `sha-*`.
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=sha
-          # docker.yml gets this label for free from `images:` pointing at
-          # `github.repository`. This image is named for the crate instead, so
-          # the link back to the repo has to be stated.
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.title=sharerr-lighthouse
-            org.opencontainers.image.description=The lighthouse — a standalone key-hash to endpoint rendezvous service for sharerr
-
-      - id: pending
-        env:
-          SHA: ${{ github.sha }}
-        run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
-
-      # See docker.yml's own `sha-tag` step — identical reasoning and format.
-      - id: sha-tag
-        env:
-          SHA: ${{ github.sha }}
-        run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
-
-      - id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile.lighthouse
-          platforms: linux/amd64,linux/arm64
-          push: >-
-            ${{ startsWith(github.ref, 'refs/tags/v') ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-                github.event_name == 'workflow_dispatch' }}
-          tags: >-
-            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.pending.outputs.ref ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
-                steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # A distinct cache scope. Without one, this build and docker.yml's
-          # share the default scope and evict each other's layers every run,
-          # for two images that have almost nothing in common past the base.
-          cache-from: type=gha,scope=lighthouse
-          cache-to: type=gha,mode=min,scope=lighthouse
-
-      # Also runs on a rehearsal dispatch - see docker.yml's own attestation
-      # step comment.
-      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-  # As in docker.yml: `environment: release` only holds this job for a reviewer
-  # once "Required reviewers" is configured on that environment in the repo's
-  # settings. Until then it runs unattended. The environment is shared with
-  # docker.yml deliberately — the same people approve both — but the approvals
-  # are separate, because these are two separate jobs.
-  publish:
-    name: publish lighthouse to GHCR (manual approval)
-    needs: build
-    # See docker.yml's own `publish` job comment: `github.event_name == 'push'`
-    # closes the same gap here - a dispatch against an existing `v*` ref would
-    # otherwise satisfy the bare ref check on its own.
-    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: release
-    # A distinct group from docker.yml's own `publish` job (`release-docker`) -
-    # see that job's comment. `release-lighthouse`, not the bare `release`,
-    # for the same reason: a stuck sharerr publish must never queue behind, or
-    # block, a lighthouse one.
-    concurrency:
-      group: release-lighthouse
-      cancel-in-progress: false
-    permissions:
-      packages: write
-    steps:
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Promote the approved image to its real tags
-        env:
-          TAGS: ${{ needs.build.outputs.tags }}
-          PENDING: ${{ needs.build.outputs.pending-ref }}
-        run: |
-          set -euo pipefail
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(--tag "$tag")
-          done <<<"$TAGS"
-          if [ "${#args[@]}" -eq 0 ]; then
-            echo "no tags computed by the build job — nothing to promote" >&2
-            exit 1
-          fi
-          docker buildx imagetools create "${args[@]}" "$PENDING"
+      pull-requests: read
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      # A second package in the owner's namespace rather than a suffix on this
+      # repo's — `sharerr-lighthouse` is the crate's name and the binary's
+      # name, and an operator looking for it should find it under that name.
+      image: ghcr.io/${{ github.repository_owner }}/sharerr-lighthouse
+      target: runtime-lighthouse
+      cache-scope: lighthouse
+      publish-concurrency-group: release-lighthouse
+      # Half of docker.yml's: this image builds one crate with no *arr
+      # clients, no torrent clients and no sqlx, and its runtime stage
+      # installs the same two packages.
+      build-timeout: 15
+      # docker.yml's image is named for the repository itself, so
+      # docker/metadata-action's default OCI labels already link the GHCR
+      # package back to it. This image is named for the crate instead, so the
+      # link back to the repo has to be stated.
+      extra-labels: |
+        org.opencontainers.image.source=https://github.com/${{ github.repository }}
+        org.opencontainers.image.title=sharerr-lighthouse
+        org.opencontainers.image.description=The lighthouse — a standalone key-hash to endpoint rendezvous service for sharerr
+      # Narrower than docker.yml's equivalent: this image is built from one
+      # crate that depends on nothing else in the workspace, so a change
+      # confined to, say, crates/sharerr-qbit cannot alter what this workflow
+      # would produce. The lockfile and the root manifest are in the list
+      # because the build is `--locked` and resolves against both. Tag pushes
+      # bypass this filter entirely (docker-image.yml's own `build` job `if:`).
+      filters: |
+        code:
+          - 'crates/sharerr-lighthouse/**'
+          - 'docker/Dockerfile'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
