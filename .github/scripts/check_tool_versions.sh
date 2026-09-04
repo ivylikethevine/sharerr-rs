@@ -132,9 +132,12 @@ echo
 # and this script both actually track releases against, and the dedup runs
 # *after* that fold so those three collapse into the one row that matters.
 #
-# A comment that is not `v<digits>...` (dtolnay/rust-toolchain's `# stable` is
-# the one example in this tree) names a moving alias, not a version - there is
-# nothing to compare it against, so it is skipped rather than misreported.
+# A comment that is not `v<digits>...` names a moving alias, not a version -
+# there is nothing to compare it against, so it is skipped rather than
+# misreported. Every `uses:` pin in this tree currently carries a `v<semver>`
+# comment (dtolnay/rust-toolchain's `# stable` was the one exception, and it
+# is gone - see ci.yml's `fmt` job for why), so this guard has nothing to
+# filter today; it stays as defence for the next tool pinned by a moving ref.
 while IFS='|' read -r repo comment pin; do
   [ -n "$repo" ] || continue
 
@@ -226,5 +229,35 @@ done < <(
   sed -n 's/^FROM \(--platform=[^ ]* \)\?\([^:@ ]*\):\([^@ ]*\)@sha256:\([0-9a-f]*\).*/\2|\3|\4/p' \
     docker/Dockerfile
 )
+
+echo
+echo "## MSRV (rust-version claimed in three places)"
+echo
+
+# Not a drift-against-upstream check like the three sections above - this one
+# compares the repo against itself. `docker/Dockerfile`'s `FROM` used to be the
+# only place a moving `dtolnay/rust-toolchain@<SHA>` pin's `toolchain: "1.98"`
+# input had a twin to fall out of sync with; now that ci.yml's `msrv` job
+# installs "1.98" via a bare `rustup` call instead (see that job's own
+# comment for why dtolnay/rust-toolchain doesn't stay pinnable), the same
+# claim lives in three places with nothing but this section comparing them.
+cargo_msrv="$(grep -oP 'rust-version\s*=\s*"\K[^"]+' Cargo.toml | head -1)"
+docker_msrv="$(sed -n 's/^FROM \(--platform=[^ ]* \)\?rust:\([0-9.]*\)-.*/\2/p' docker/Dockerfile | head -1)"
+ci_msrv="$(grep -oP 'rustup toolchain install \K[0-9.]+' .github/workflows/ci.yml | head -1)"
+
+if [ -z "$cargo_msrv" ] || [ -z "$docker_msrv" ] || [ -z "$ci_msrv" ]; then
+  printf 'Cargo.toml=%s docker/Dockerfile=%s ci.yml(msrv)=%s (could not read one of the three)\n' \
+    "${cargo_msrv:-?}" "${docker_msrv:-?}" "${ci_msrv:-?}"
+  bad=$((bad + 1))
+elif [ "$cargo_msrv" = "$docker_msrv" ] && [ "$cargo_msrv" = "$ci_msrv" ]; then
+  printf '%-45s current (%s)\n' "Cargo.toml / Dockerfile / ci.yml" "$cargo_msrv"
+else
+  printf 'MISMATCH: Cargo.toml=%s docker/Dockerfile=%s ci.yml(msrv)=%s\n' \
+    "$cargo_msrv" "$docker_msrv" "$ci_msrv"
+  [ -n "${GITHUB_ACTIONS:-}" ] &&
+    printf '::warning title=MSRV mismatch::Cargo.toml=%s docker/Dockerfile=%s ci.yml(msrv)=%s - these three must agree\n' \
+      "$cargo_msrv" "$docker_msrv" "$ci_msrv"
+  bad=$((bad + 1))
+fi
 
 exit "$bad"

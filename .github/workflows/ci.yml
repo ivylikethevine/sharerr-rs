@@ -82,13 +82,17 @@ jobs:
       # rustfmt.toml sets only stable options (edition 2024, max_width,
       # use_field_init_shorthand), so the stable toolchain is sufficient — this
       # does not need nightly rustfmt.
-      # Pinned by commit, so `toolchain:` is stated explicitly: this action
-      # normally infers the toolchain from the ref name (`@stable`), and a SHA has
-      # no name to infer from.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          components: rustfmt
+      #
+      # A direct `rustup` call, not dtolnay/rust-toolchain: that action force-pushes
+      # every branch and tag on each Rust release, so any SHA pin of it goes stale
+      # (zizmor's `impostor-commit`) within about six weeks — this repo hit that in
+      # practice, not hypothetically. zizmor's own `superfluous-actions` audit
+      # recommends this exact replacement. `--profile minimal --no-self-update`
+      # matches what the action itself passed to rustup.
+      - name: Install the stable toolchain (rustfmt)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --no-self-update
+          rustup default stable
 
       # Its own job rather than a step in `test`: it takes seconds, and a stray
       # blank line should not hide the test results behind a failed job.
@@ -107,11 +111,11 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # See the note in the `fmt` job about naming the toolchain explicitly.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          components: clippy
+      # See the note in the `fmt` job about installing via rustup directly.
+      - name: Install the stable toolchain (clippy)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup default stable
 
       # `cache-on-failure` because this job is *designed* to fail: it is the gate on
       # unwrap_used/expect_used. Without it, every lint failure throws away the
@@ -161,10 +165,13 @@ jobs:
           persist-credentials: false
 
       # Pinned to the workspace's declared rust-version. When that changes, this
-      # changes with it — they are the same claim in two places.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: "1.98"
+      # changes with it — they are the same claim in two places (three, counting
+      # docker/Dockerfile's identical FROM pin). See the `fmt` job's note about
+      # installing via rustup directly rather than dtolnay/rust-toolchain.
+      - name: Install the 1.98 toolchain
+        run: |
+          rustup toolchain install 1.98 --profile minimal --no-self-update
+          rustup default 1.98
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
