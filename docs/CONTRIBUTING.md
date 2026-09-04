@@ -31,6 +31,9 @@ off-by-one) doesn't need that step.
 Found a security issue? Do not open a public issue — use
 [the private advisory route](SECURITY.md#reporting-a-vulnerability) instead.
 
+Participating in issues, pull requests, or any other project space means
+abiding by the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Getting set up
 
 Rust **1.98** or newer (`rust-version` in the root `Cargo.toml`; see

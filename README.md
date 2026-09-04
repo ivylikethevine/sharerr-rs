@@ -4,9 +4,8 @@
 
 _Share your media library with friends, over the tools you already run._
 
-[![CI](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml)
-[![Docker](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml)
-[![Docker (lighthouse)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker-lighthouse.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker-lighthouse.yml)
+<!--TODO: Add a release badge for each of the docker images -->
+
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fivylikethevine.github.io%2Fsharerr-rs%2Fbadges%2Fcoverage.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/ID/badge)](https://www.bestpractices.dev/projects/ID)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
@@ -23,11 +22,6 @@ from its filename.
 
 Nothing is copied, renamed, re-linked, or moved. That is the constraint the whole
 design is built around.
-
-> **Status: experimental.** This is a personal project and has not had a tagged
-> release. See [what's supported](docs/SUPPORT.md) and [the roadmap](docs/ROADMAP.md)
-> for what's still ahead. Large parts were written with generative AI — see
-> [AI usage](#ai-usage).
 
 ## Contents
 
@@ -359,7 +353,9 @@ docker run -d --name sharerr-lighthouse -p 7878:7878 \
 ```
 
 `/data` holds nothing but the decoy secret — losing it just reshuffles
-fabricated answers after a restart, not a credential.
+fabricated answers after a restart, not a credential. A compose version of
+the same one-liner lives at
+[`docker/deploy/lighthouse/`](docker/deploy/lighthouse/).
 
 It is published to GHCR as its own package, on its own `v*` tag series and
 behind its own approval — a sharerr release is not silently also a lighthouse

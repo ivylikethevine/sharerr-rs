@@ -1,0 +1,9 @@
+# sharerr is maintained by one person — see docs/CONTRIBUTING.md's "Before you
+# start" for what that means for how a PR gets reviewed and merged. One rule
+# for the whole tree rather than a path-by-path breakdown, because there is
+# nobody to split ownership between yet.
+#
+# GitHub reads CODEOWNERS from the repo root, .github/, or docs/ — this one
+# lives here on purpose, alongside the rest of the project's non-code docs.
+
+* @ivylikethevine

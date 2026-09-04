@@ -124,7 +124,7 @@ impl Seeder {
             });
         }
 
-        let (info_hash, data) = match self.reuse_cached(known_info_hash, announce).await {
+        let (info_hash, data) = match self.reuse_cached(known_info_hash, announce, paths).await {
             Some(reused) => reused,
             None => {
                 let built = self.build(paths, announce, media).await?;
@@ -241,7 +241,7 @@ impl Seeder {
                 match sharerr_torrent::retarget_announce(&exported, announce)
                     .with_context(|| format!("rewriting the announce URLs of {info_hash}"))?
                 {
-                    sharerr_torrent::Retargeted::Current { info_hash } => (exported, info_hash),
+                    sharerr_torrent::Retargeted::Current { info_hash, .. } => (exported, info_hash),
                     sharerr_torrent::Retargeted::Updated {
                         data, info_hash, ..
                     } => (data, info_hash),
@@ -282,14 +282,15 @@ impl Seeder {
     /// rebuilding it from the media file (see [`Self::seed`]).
     ///
     /// `None` covers every reason to fall back to a full rebuild — no known
-    /// hash, nothing cached under it, or the cached file being unreadable —
-    /// uniformly and without failing the item: a corrupt or missing cache
-    /// entry is recoverable by rebuilding, so none of these are worth more
-    /// than a warning.
+    /// hash, nothing cached under it, the cached file being unreadable or
+    /// unparseable, or the cache describing a different size than the file
+    /// now has — uniformly and without failing the item: none of these are
+    /// worth more than a warning, since a rebuild recovers all of them.
     async fn reuse_cached(
         &self,
         known_info_hash: Option<&str>,
         announce: &AnnounceSet,
+        paths: &ResolvedPaths,
     ) -> Option<(String, Vec<u8>)> {
         let hash = known_info_hash?;
         let path = torrent_file_path(&self.torrent_dir, hash);
@@ -308,15 +309,8 @@ impl Seeder {
             }
         };
 
-        let (previous, rewritten) = match sharerr_torrent::retarget_announce(&data, announce) {
-            Ok(sharerr_torrent::Retargeted::Current { .. }) => {
-                tracing::info!(
-                    info_hash = hash,
-                    "reusing the cached .torrent for a vanished torrent — skipping the rebuild"
-                );
-                return Some((hash.to_owned(), data));
-            }
-            Ok(sharerr_torrent::Retargeted::Updated { previous, data, .. }) => (previous, data),
+        let outcome = match sharerr_torrent::retarget_announce(&data, announce) {
+            Ok(outcome) => outcome,
             Err(err) => {
                 tracing::warn!(
                     info_hash = hash,
@@ -327,25 +321,97 @@ impl Seeder {
                 return None;
             }
         };
-        if let Err(err) = tokio::fs::write(&path, &rewritten).await {
-            // The rewritten bytes are still handed to the client below; only
-            // the on-disk cache failed to update, and the next pass to touch
-            // this item will simply try the write again.
-            tracing::warn!(
-                info_hash = hash,
-                path = %path.display(),
-                %err,
-                "could not update the cached .torrent on disk"
-            );
+
+        // Checked before acting on either branch below: a cache that parses
+        // fine but describes different bytes is the in-place-upgrade case —
+        // same `file_id`, same recorded info hash, a torrent that would seed
+        // the wrong content. Catching it here means the next scheduled sync
+        // pass rebuilds it automatically, instead of the operator needing to
+        // notice and click Force rebuild.
+        let length = match &outcome {
+            sharerr_torrent::Retargeted::Current { length, .. }
+            | sharerr_torrent::Retargeted::Updated { length, .. } => *length,
+        };
+        if self
+            .cached_size_is_stale(&paths.sharerr, length, hash, &path)
+            .await
+        {
+            return None;
         }
 
-        tracing::info!(
+        match outcome {
+            sharerr_torrent::Retargeted::Current { .. } => {
+                tracing::info!(
+                    info_hash = hash,
+                    "reusing the cached .torrent for a vanished torrent — skipping the rebuild"
+                );
+                Some((hash.to_owned(), data))
+            }
+            sharerr_torrent::Retargeted::Updated {
+                previous,
+                data: rewritten,
+                ..
+            } => {
+                if let Err(err) = tokio::fs::write(&path, &rewritten).await {
+                    // The rewritten bytes are still handed to the client below; only
+                    // the on-disk cache failed to update, and the next pass to touch
+                    // this item will simply try the write again.
+                    tracing::warn!(
+                        info_hash = hash,
+                        path = %path.display(),
+                        %err,
+                        "could not update the cached .torrent on disk"
+                    );
+                }
+
+                tracing::info!(
+                    info_hash = hash,
+                    from = previous.as_deref().unwrap_or("(none)"),
+                    to = %announce.primary,
+                    "reusing the cached .torrent for a vanished torrent, with its announce refreshed"
+                );
+                Some((hash.to_owned(), rewritten))
+            }
+        }
+    }
+
+    /// `true` when the cached `.torrent`'s recorded size no longer matches
+    /// the file `sharerr_path` now points at — an in-place upgrade under the
+    /// same path, with the same info hash still recorded. A metadata read
+    /// failure is treated the same way: not proof of anything on its own,
+    /// but not worth trusting the cache over either, so it falls back to the
+    /// same rebuild that would hit the file's real state regardless.
+    async fn cached_size_is_stale(
+        &self,
+        sharerr_path: &Path,
+        cached_length: u64,
+        hash: &str,
+        cache_path: &Path,
+    ) -> bool {
+        let on_disk = match tokio::fs::metadata(sharerr_path).await {
+            Ok(meta) => meta.len(),
+            Err(err) => {
+                tracing::warn!(
+                    info_hash = hash,
+                    path = %sharerr_path.display(),
+                    %err,
+                    "could not read the on-disk file's size — rebuilding instead"
+                );
+                return true;
+            }
+        };
+        if on_disk == cached_length {
+            return false;
+        }
+        tracing::warn!(
             info_hash = hash,
-            from = previous.as_deref().unwrap_or("(none)"),
-            to = %announce.primary,
-            "reusing the cached .torrent for a vanished torrent, with its announce refreshed"
+            cache_path = %cache_path.display(),
+            media_path = %sharerr_path.display(),
+            cached_size = cached_length,
+            on_disk_size = on_disk,
+            "cached .torrent describes a different size than the file on disk — rebuilding instead"
         );
-        Some((hash.to_owned(), rewritten))
+        true
     }
 
     /// Bring one already-seeding torrent's announce URLs up to date, in both
@@ -771,15 +837,26 @@ mod tests {
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
     }
 
-    /// The behaviour item 3 of the roadmap's "Open work" existed to fix: a
-    /// torrent the client no longer has (a reinstall, a wiped session) must
+    /// A torrent the client no longer has (a reinstall, a wiped session) must
     /// not be re-hashed from the media file when sharerr's own cache under
     /// `torrent_dir` already has the very `.torrent` that was built for it.
-    /// The media file is deleted before `seed` runs — if it fell back to
-    /// `build`, hashing a now-missing file would fail the call, so success
-    /// here is itself proof the cache was used.
+    /// The new size check added alongside this test needs the file to still
+    /// exist (it stats it), so unlike before this test cannot prove reuse by
+    /// deleting the file out from under `seed` — instead it locks the file's
+    /// permissions to 0, the same technique
+    /// `web::probe::library_badge_reports_an_unreadable_directory` uses: a
+    /// fallback to `build` would fail trying to actually read the file to
+    /// hash it, while the new stat-only size check (which needs no read
+    /// permission on the file itself) still succeeds. Running as root
+    /// ignores permission bits and would let a rebuild through too — see
+    /// that same test's comment — but a rebuild over an unchanged file with
+    /// no `comment` field is deterministic, so the byte-for-byte assertion
+    /// below still holds either way.
+    #[cfg(unix)]
     #[tokio::test]
     async fn seed_reuses_a_cached_torrent_for_a_vanished_client_entry_with_a_current_announce() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
@@ -800,7 +877,7 @@ mod tests {
             &built.data,
         )
         .unwrap();
-        std::fs::remove_file(&media).unwrap();
+        std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
@@ -821,6 +898,7 @@ mod tests {
             )
             .await
             .unwrap();
+        std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
             outcome,
             SeedOutcome::Added {
@@ -838,9 +916,13 @@ mod tests {
     /// announce must be brought up to date, in the bytes handed to the
     /// client *and* in the on-disk cache — the same guarantee
     /// `refresh_announce` gives an already-seeding torrent — without ever
-    /// touching the (deleted) media file.
+    /// reading the (unreadable) media file. See the previous test's comment
+    /// for why permissions rather than deletion prove that now.
+    #[cfg(unix)]
     #[tokio::test]
     async fn seed_reuses_and_refreshes_a_stale_cached_torrent_for_a_vanished_client_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
@@ -861,7 +943,7 @@ mod tests {
             &built.data,
         )
         .unwrap();
-        std::fs::remove_file(&media).unwrap();
+        std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
@@ -883,6 +965,7 @@ mod tests {
             )
             .await
             .unwrap();
+        std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(
             outcome,
             SeedOutcome::Added {
@@ -904,6 +987,87 @@ mod tests {
             sharerr_torrent::read_announce(&cached).unwrap().as_deref(),
             Some("http://new.example/announce"),
             "the on-disk cache must be refreshed too, not just the bytes sent to the client"
+        );
+    }
+
+    /// The gap this covers: an in-place upgrade under the same `file_id`.
+    /// Unlike the two tests above, `media` is left in place — resized rather
+    /// than deleted — so the cached `.torrent` still parses and its info
+    /// hash still matches `known_info_hash`, but it now describes bytes that
+    /// no longer exist. `seed` must detect that and rebuild rather than
+    /// hand the client a torrent for the old content.
+    #[tokio::test]
+    async fn seed_rebuilds_a_cached_torrent_whose_size_no_longer_matches_the_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+        let stale = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &announce,
+                media: None,
+            })
+            .unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        std::fs::create_dir(&torrent_dir).unwrap();
+        std::fs::write(
+            torrent_file_path(&torrent_dir, &stale.info_hash),
+            &stale.data,
+        )
+        .unwrap();
+
+        // The upgrade: same path, different (and differently sized) bytes.
+        // No delete — proving this test's point requires the file to still
+        // be there for the new check to read.
+        std::fs::write(&media, b"a longer, different cut of the same episode").unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), torrent_dir.clone());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+
+        let outcome = seeder
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::default(),
+                Some(&stale.info_hash),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // A rebuild over the new bytes has a different info hash than the
+        // stale cache entry — that difference is itself the proof the stale
+        // cache was not reused.
+        let rebuilt = LavaTorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &announce,
+                media: None,
+            })
+            .unwrap();
+        assert_ne!(rebuilt.info_hash, stale.info_hash);
+        assert_eq!(
+            outcome,
+            SeedOutcome::Added {
+                info_hash: rebuilt.info_hash.clone()
+            }
+        );
+
+        let add_calls = client.add_calls.lock().unwrap();
+        assert_eq!(add_calls.len(), 1);
+        assert_eq!(add_calls[0].0, rebuilt.info_hash);
+        assert_eq!(
+            add_calls[0].1, rebuilt.data,
+            "the client must receive a fresh torrent over the file as it is now, not the stale cache"
         );
     }
 

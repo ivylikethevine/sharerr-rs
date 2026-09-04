@@ -1,7 +1,9 @@
 # Deploying sharerr
 
-Four layouts. They differ in one thing — where sharerr's traffic comes out —
-and everything else follows from that.
+Four layouts for sharerr itself. They differ in one thing — where sharerr's
+traffic comes out — and everything else follows from that. A fifth directory,
+[`lighthouse/`](lighthouse/), is not sharerr at all — see
+["A lighthouse of your own"](#a-lighthouse-of-your-own) below.
 
 These are deployment recipes. `docker/*.yml` one directory up are the
 **tier-2 test stacks**: they build the image from source, seed synthetic
@@ -14,6 +16,7 @@ fixtures, and are driven by `scripts/run_docker_tests.sh`. Do not deploy from th
 - [One port, several audiences](#one-port-several-audiences)
 - [gluetun, and the key that has two halves](#gluetun-and-the-key-that-has-two-halves)
 - [The thing that is invisible from inside](#the-thing-that-is-invisible-from-inside)
+- [A lighthouse of your own](#a-lighthouse-of-your-own)
 
 ## Which one
 
@@ -131,3 +134,18 @@ Commercial providers that forward ports give you **one**, of their choosing,
 often changing on reconnect. The tunnelled layouts as written want more than
 that, which is why they are drawn for a WireGuard endpoint you control. Each
 stack's header covers what to give up if yours is a subscription instead.
+
+## A lighthouse of your own
+
+[`lighthouse/`](lighthouse/) runs `sharerr-lighthouse`, the rendezvous
+service — see [`docs/LIGHTHOUSE.md`](../../docs/LIGHTHOUSE.md) for why it
+exists and the main README's "The lighthouse" section for how a peer points
+at one once it's running. It is not one of the four layouts above and shares
+none of their concerns: no library mount, no torrent client, no *arr apps, no
+path mappings, and no master key — the lighthouse persists exactly one file
+(a decoy secret) and has no UI or config file of its own, only the two
+environment variables its compose file sets.
+
+Run it if you'd rather host a rendezvous point for your friend group than have
+everyone rely on one particular friend's instance staying up. Anyone in the
+group can run one; friends only need its URL.

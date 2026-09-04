@@ -17,7 +17,6 @@ the decision does not get re-litigated.
 - [What's left](#whats-left)
 - [Before v1](#before-v1)
 - [Open work, by scope](#open-work-by-scope)
-  - [Small — a single function or file](#small--a-single-function-or-file)
   - [Medium — a subsystem, or one shape repeated across several files](#medium--a-subsystem-or-one-shape-repeated-across-several-files)
   - [Large — a protocol, a data model, or a release process](#large--a-protocol-a-data-model-or-a-release-process)
 - [Transfer accounting](#transfer-accounting)
@@ -101,20 +100,9 @@ that has to actually happen, once, before a `v1` tag:
 Everything still ahead, in one list, smallest first — by how much each item
 touches, not how long it would take to get right.
 
-### Small — a single function or file
-
-1. **Stale cached `.torrent` detection.** `reuse_cached` in
-   `crates/sharerr/src/sync/seed.rs` is reached only when a torrent has
-   vanished from the client; it reuses whatever `.torrent` is cached for the
-   info hash with no size or mtime check against the file now on disk, so an
-   in-place upgrade under the same `file_id` seeds a stale hash until someone
-   notices and clicks Force rebuild. A cache that fails to parse already
-   triggers a rebuild — the gap is specifically a cache that parses fine but
-   describes different bytes.
-
 ### Medium — a subsystem, or one shape repeated across several files
 
-2. **The remaining notification triggers** — `[notifications]` has a
+1. **The remaining notification triggers** — `[notifications]` has a
    per-trigger enable set and fires on six events: a sync failing outright, a
    friend going quiet, the advertised endpoint rotating, items newly shared,
    items failing to share, and a friend's key being revoked. Four more
@@ -131,18 +119,17 @@ touches, not how long it would take to get right.
    **Uptime-Kuma-style heartbeat push** (needs a trigger built from scratch,
    with no existing detection to hang off of).
 
-3. **An easier lighthouse.** A one-liner Docker deploy already exists, and a
-   single operator can run the lighthouse embedded in one of sharerr's own
-   listeners instead of standing up a third container
+2. **A public lighthouse.** A one-liner Docker deploy and a
+   [`docker/deploy/lighthouse/`](../docker/deploy/lighthouse/) compose recipe
+   both exist now, and a single operator can also run the lighthouse embedded
+   in one of sharerr's own listeners instead of standing up a third container
    (`[lighthouse] mount = "tracker"` or `"frontend"`) — see the README's
-   lighthouse section. What is still open: no public instance exists for a
-   friend group that would rather not run any lighthouse of its own, and no
-   compose file in `docker/` runs the lighthouse at all, so a group that does
-   want a standalone one has to write that compose file by hand. See
-   [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the design rationale a public
-   instance would build on.
+   lighthouse section. What is still open is no longer code: no public
+   instance exists yet for a friend group that would rather not run any
+   lighthouse of its own. See [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the design
+   rationale a public instance would build on.
 
-4. **Seeding limits that apply retroactively.** The upload cap and ratio
+3. **Seeding limits that apply retroactively.** The upload cap and ratio
    goal bind at add time only, through whatever native mechanism each
    client offers for it — see
    [`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds). A user
@@ -153,18 +140,18 @@ touches, not how long it would take to get right.
 
 ### Large — a protocol, a data model, or a release process
 
-5. **Transfer accounting** — the largest gap between what sharerr _knows_
+4. **Transfer accounting** — the largest gap between what sharerr _knows_
    and what it _keeps_; see [Transfer accounting](#transfer-accounting) below
    for the full write-up, including the caveats that matter before building
    it.
 
-6. **Request flow.** The original design brief wanted a friend's Sonarr/Radarr
+5. **Request flow.** The original design brief wanted a friend's Sonarr/Radarr
    to _request_ content; today discovery is one-way, they find what you
    already share. An inbound request queue with an approve step is the other
    half of that idea, touching the sync engine and the web UI on both sides
    of a friendship.
 
-7. **Multi-user.** The `users` table already exists; only the first-run claim
+6. **Multi-user.** The `users` table already exists; only the first-run claim
    ever creates a row in it (an already-claimed instance's own password
    change updates that one row rather than adding another). A second user
    means deciding what a friendship, a library, and a torrent client belong
