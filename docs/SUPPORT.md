@@ -6,7 +6,7 @@ in one place so a reader deciding whether something is usable only has to
 check one file, and so a decision already made isn't re-litigated by a later
 proposal. For usage and config snippets, see [the README](../README.md); for
 what has been considered without being either committed to or declined, see
-[`ROADMAP.md`](ROADMAP.md#open-work-by-scope).
+[the README's roadmap](../README.md#roadmap).
 
 ## Table of contents
 
@@ -202,9 +202,9 @@ Release on every `v*` tag, with notes generated from merged PR titles since
 the last tag (`gh release create --generate-notes`) — exactly the surface a
 hand-maintained file would duplicate, and duplicate worse, since a
 `CHANGELOG.md` only ever drifts from what actually shipped while the
-generated notes cannot. `docs/ROADMAP.md` still holds what's ahead and stays a
-to-do list, not a running log — an entry is deleted once it ships, not dated
-and kept.
+generated notes cannot. [The README's roadmap](../README.md#roadmap) still
+holds what's ahead and stays a to-do list, not a running log — an entry is
+removed once it ships, not dated and kept.
 
 What the Release does *not* do is attach binaries: no cross-compiled `sharerr`
 or `sharerr-lighthouse` executable, nothing beyond the tag, the title, and the

@@ -23,7 +23,7 @@ empty page, because a governance document that pretends otherwise would be
 less useful than one that says what is actually true.
 
 That does not mean decisions are made in private: direction lives in
-[`docs/ROADMAP.md`](ROADMAP.md), design tradeoffs are recorded in
+[the README's roadmap](../README.md#roadmap), design tradeoffs are recorded in
 [`docs/DESIGN.md`](DESIGN.md) and [`docs/LIGHTHOUSE.md`](LIGHTHOUSE.md), and
 anything feature-sized starts as a public issue before a PR, per
 [`CONTRIBUTING.md`](CONTRIBUTING.md#before-you-start) — so the reasoning
@@ -34,7 +34,7 @@ committee vote.
 
 | Role | Who | What they can do |
 | --- | --- | --- |
-| Maintainer | `@ivylikethevine`, per [`docs/CODEOWNERS`](CODEOWNERS) | Reviews and merges PRs, cuts releases, holds repo admin access, sets the project's direction in [`docs/ROADMAP.md`](ROADMAP.md), triages security reports. |
+| Maintainer | `@ivylikethevine`, per [`docs/CODEOWNERS`](CODEOWNERS) | Reviews and merges PRs, cuts releases, holds repo admin access, sets the project's direction in [the README's roadmap](../README.md#roadmap), triages security reports. |
 | Contributor | Anyone who opens a PR | Proposes a change. No merge rights; every PR is reviewed by the maintainer before it lands, per the CI table in [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs). |
 | Reporter | Anyone who opens an issue, a discussion, or a private security advisory | Raises a bug, a feature request, or a vulnerability report. See [`docs/SUPPORT.md`](SUPPORT.md) and [`docs/SECURITY.md`](SECURITY.md#reporting-a-vulnerability) for the right channel for each. |
 

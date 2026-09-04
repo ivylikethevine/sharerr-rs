@@ -1,7 +1,7 @@
 //! Reporting this instance's endpoint to configured lighthouses, and querying
 //! them for a friend gossip cannot currently reach.
 //!
-//! See `docs/ROADMAP.md`'s "The lighthouse" for the design brief. Gossip
+//! See `docs/LIGHTHOUSE.md` for the design brief. Gossip
 //! (`crate::gossip`) is the primary mechanism — friends relay each other's
 //! signed endpoint records directly — but two friends whose addresses both
 //! rotated while neither was watching have no path back to each other

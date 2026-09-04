@@ -415,8 +415,7 @@ impl Syncer {
         // live (key presence — a plain `HashSet` would otherwise sit beside
         // this and say nothing a lookup here doesn't), and what the client
         // itself reports for its ratio, read on the Unchanged fast path below
-        // and written to the store via `Store::set_ratio` — see
-        // `docs/ROADMAP.md`'s "Achieved ratio" entry.
+        // and written to the store via `Store::set_ratio`.
         let live: HashMap<String, (Option<f64>, Option<f64>)> = torrents
             .iter()
             .map(|t| (t.hash.to_ascii_lowercase(), (t.ratio, t.ratio_limit)))

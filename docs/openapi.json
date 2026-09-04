@@ -1531,7 +1531,7 @@
           "tracker"
         ],
         "summary": "`GET /torrents/{info_hash}.torrent` — the file itself.",
-        "description": "Serves out of `data_dir/torrents`, which is where the factory wrote it. The\nTorznab feed links here, so this is what a friend's Sonarr actually fetches.\n\nThe cached file on disk always carries the shared instance token (or none),\nbecause it is written once by the sync loop and reused for every requester.\nWhen the request carries a `token` that still resolves to an active peer,\nthe announce URLs are rewritten in memory — never on disk — to that peer's\nown token before the response goes out, the same attribution the feed's\nmagnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.",
+        "description": "Serves out of `data_dir/torrents`, which is where the factory wrote it. The\nTorznab feed links here, so this is what a friend's Sonarr actually fetches.\n\nThe cached file on disk always carries the shared instance token (or none),\nbecause it is written once by the sync loop and reused for every requester.\nWhen the request carries a `token` that still resolves to an active peer,\nthe announce URLs are rewritten in memory — never on disk — to that peer's\nown token before the response goes out, the same attribution the feed's\nmagnet links already carry.",
         "operationId": "torrentFile",
         "parameters": [
           {

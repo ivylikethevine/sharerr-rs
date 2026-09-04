@@ -578,8 +578,7 @@ pub struct DetailQuery {
     error: Option<String>,
 }
 
-/// Everything about one item — see `docs/ROADMAP.md`'s per-item detail page
-/// entry. Reached from a row on [`page`] above.
+/// Everything about one item. Reached from a row on [`page`] above.
 pub async fn detail(
     State(state): State<WebState>,
     Path((source, file_id)): Path<(MediaSource, i64)>,
@@ -1154,8 +1153,7 @@ mod tests {
     }
 
     /// No limit reported still shows the achieved ratio — the honest-blank
-    /// convention `ROADMAP.md`'s "Achieved ratio" entry asks for, not a row
-    /// that quietly shows nothing.
+    /// convention this page follows, not a row that quietly shows nothing.
     #[test]
     fn ratio_cell_explains_a_missing_limit_without_hiding_the_ratio() {
         let mut it = seeding_with_hash("aa".repeat(20).as_str());

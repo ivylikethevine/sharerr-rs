@@ -1,5 +1,5 @@
-//! The lighthouse's standalone binary: its own image, its own port, per
-//! `docs/ROADMAP.md`'s "The lighthouse". See [`sharerr_lighthouse`] for the
+//! The lighthouse's standalone binary: its own image, its own port, as
+//! `docs/LIGHTHOUSE.md` lays out. See [`sharerr_lighthouse`] for the
 //! protocol and the privacy property this serves.
 
 use std::net::SocketAddr;

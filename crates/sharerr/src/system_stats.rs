@@ -91,7 +91,7 @@ async fn sample(sys: &mut System, data_dir: &Path) -> SystemSnapshot {
 
 /// Pre-render a sample for the status page's stat tiles. The template does no
 /// arithmetic of its own — same convention as every other computed figure on
-/// that page (see `docs/ROADMAP.md`'s note on server-rendered SVG for why).
+/// that page.
 pub fn format(snapshot: SystemSnapshot) -> (String, String, Option<String>) {
     let cpu_percent = format!("{:.1}%", snapshot.cpu_percent);
     let memory_usage = format!(

@@ -1,6 +1,5 @@
 //! `/metrics` (OpenMetrics, for Prometheus) and the dashboard-widget JSON
-//! endpoint (for Homepage, Homarr, or Glance) — see `docs/ROADMAP.md`'s
-//! entries on both.
+//! endpoint (for Homepage, Homarr, or Glance).
 //!
 //! [`MetricsSnapshot`] is the one place that gathers raw numbers from the
 //! store, the live swarms, and the gluetun/lighthouse/system pollers; both
@@ -22,9 +21,7 @@
 //! "wrong token" from "this is not sharerr".
 //!
 //! No per-item labels, ever — see [`items_by_state`]. A large library would
-//! otherwise turn this endpoint into a metric-per-file liability, which is
-//! exactly the cardinality trap `docs/ROADMAP.md`'s `/metrics` entry warns
-//! against.
+//! otherwise turn this endpoint into a metric-per-file cardinality liability.
 
 use std::fmt::Write as _;
 use std::sync::Arc;

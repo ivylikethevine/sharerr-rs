@@ -548,7 +548,7 @@ pub struct TorrentFileQuery {
 /// When the request carries a `token` that still resolves to an active peer,
 /// the announce URLs are rewritten in memory — never on disk — to that peer's
 /// own token before the response goes out, the same attribution the feed's
-/// magnet links already carry. Roadmap Stage 2; see `docs/ROADMAP.md`.
+/// magnet links already carry.
 #[utoipa::path(
     get,
     path = "/torrents/{name}",

@@ -135,6 +135,14 @@ happen — see [the README](../README.md#quickstart) before reporting:
   headers** (CSP, `X-Frame-Options`, and so on). Argon2's cost per attempt
   is the only brake on guessing, which is the trade a LAN tool with one
   operator account makes.
+- **The feed API key and the `.torrent` download token both travel as
+  query-string parameters** — `?apikey=...` on the Torznab feed,
+  `?token=...` on `/torrents/{name}.torrent`. Consistent with the
+  trusted-LAN threat model, but worth knowing if a reverse proxy or browser
+  sits in front of an instance: query strings commonly end up in access
+  logs. The tracker's own announce and scrape tokens are **path segments**
+  instead (`/announce/{token}`, `/scrape/{token}`) — the same caveat, just a
+  different part of the URL.
 - **Losing `SHARERR_MASTER_KEY` loses every stored credential.** There is no
   recovery path — the vault is encrypted with it and nothing else.
 - **The lighthouse answers an invalid key with a plausible fabricated

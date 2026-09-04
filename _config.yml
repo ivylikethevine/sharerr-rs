@@ -36,7 +36,7 @@ defaults:
     values:
       layout: default
 
-# Rewrite relative links between docs (e.g. docs/ROADMAP.md -> ../README.md) to
+# Rewrite relative links between docs (e.g. docs/SUPPORT.md -> ../README.md) to
 # the .html permalinks Jekyll actually generates, instead of dead .md links.
 relative_links:
   enabled: true

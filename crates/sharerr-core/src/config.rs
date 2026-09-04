@@ -770,7 +770,7 @@ crate::str_enum!(LighthouseMount {
 /// workspace) as extra routes on one of sharerr's own listeners, instead of
 /// its own separate image and port.
 ///
-/// The design brief in `docs/ROADMAP.md` wants the lighthouse to be a
+/// The design brief in `docs/LIGHTHOUSE.md` wants the lighthouse to be a
 /// deliberately separate deployment — no shared process, no shared port — so
 /// that it can be self-hosted by anyone on neutral ground away from any
 /// particular library. This is the exception to that: a single operator
