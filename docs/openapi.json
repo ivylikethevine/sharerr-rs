@@ -4,7 +4,7 @@
     "title": "sharerr",
     "description": "The machine-facing HTTP API of a sharerr instance: the indexer feed a friend's Sonarr or Radarr queries, the BitTorrent tracker their client announces to, the gossip exchange that keeps addresses current, the lighthouse rendezvous, and the operational endpoints an orchestrator polls.\n\nThe server-rendered web UI is deliberately absent — see the `sharerr::openapi` module docs.\n\n**Authentication.** Every feed and gossip endpoint takes a peer's own API key as an `apikey` query parameter. Each friend holds a different one, so a single friend can be cut off without disturbing the others, and every request records who made it. There is no unauthenticated read path: a missing key is refused exactly the way a wrong one is, because saying \"this instance has no key configured\" would confirm the port belongs to sharerr.\n\n**Base URL.** None is listed. A sharerr instance is reached at whatever address its operator advertises — often behind a VPN with a rotating forwarded port, which is the whole reason the gossip and lighthouse endpoints exist.",
     "license": {
-      "name": "AGPL-3.0-or-later"
+      "name": "MIT"
     },
     "version": "0.1.0"
   },

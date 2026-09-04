@@ -23,8 +23,16 @@ name: Advisories
 # Only `advisories` here, not the full `licenses bans sources` set. Those three
 # fail on something the repo itself changed, which is ci.yml's job; advisories
 # is the only one that can start failing with nobody having touched anything.
+#
+# Also runs on every push to main, alongside the weekly cron: a merge is the
+# other moment worth checking, since a bumped Cargo.lock can introduce an
+# already-published advisory the same way a new one landing upstream can. The
+# cron stays because the common case above — nobody touched anything — needs
+# it regardless.
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "11 7 * * 1"
   workflow_dispatch:

@@ -19,39 +19,7 @@ targets = [
 version = 2
 # No blanket ignores. An advisory that cannot be acted on gets its id listed here
 # with a comment saying why — never a silent global downgrade.
-ignore = [
-    # `custom_derive` is unmaintained. It is three levels down and not reachable
-    # from anything sharerr calls:
-    #
-    #   custom_derive <- conv <- lava_torrent <- sharerr-torrent
-    #
-    # Unmaintained is not a vulnerability, and there is no fix to take: the only
-    # route off it is replacing `lava_torrent`, which is itself in maintenance mode
-    # and is already behind the `TorrentFactory` trait for exactly that reason. So
-    # this is a known, bounded exposure rather than something to fix today.
-    #
-    # Revisit when the factory grows a second implementation.
-    "RUSTSEC-2025-0058",
-
-    # `paste` is unmaintained (the author archived the repository). It reaches
-    # this workspace only as a proc-macro:
-    #
-    #   paste <- utoipa-axum <- sharerr, sharerr-lighthouse
-    #
-    # Two things bound the exposure. It is a *proc-macro*, so it runs at compile
-    # time on this machine and contributes no code to the shipped binary — the
-    # container carries nothing of it. And unmaintained is not a vulnerability:
-    # the advisory itself records "No safe upgrade is available".
-    #
-    # There is also no upgrade to take. `utoipa-axum 0.2.0` is the newest
-    # release, and dropping it would mean giving up generating the OpenAPI spec
-    # from the handlers themselves — the property that stops a route being
-    # documented into existence or quietly forgotten (see `sharerr::openapi`).
-    #
-    # Revisit when utoipa-axum publishes a release that drops `paste`, which the
-    # weekly `cargo deny` run will keep asking about until it does.
-    "RUSTSEC-2024-0436",
-]
+ignore = []
 
 # `RUSTSEC-2023-0071` (the `rsa` Marvin Attack) needs no `ignore` entry:
 # `sqlx-mysql` is a lock entry `sqlx`'s manifest hands out regardless of
@@ -92,3 +60,8 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The one git source: the three utoipa crates, pinned to a single upstream
+# commit by `[patch.crates-io]` in Cargo.toml until utoipa-axum publishes a
+# release that no longer depends on the unmaintained `paste` crate. See the
+# comment on that block for why all three move together.
+allow-git = ["https://github.com/juhaku/utoipa"]

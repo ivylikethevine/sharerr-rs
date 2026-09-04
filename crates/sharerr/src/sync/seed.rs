@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
 use sharerr_core::MediaMeta;
 use sharerr_core::paths::ResolvedPaths;
-use sharerr_torrent::{AnnounceSet, LavaTorrentFactory, TorrentRequest, torrent_file_path};
+use sharerr_torrent::{AnnounceSet, TorrentFactory, TorrentRequest, torrent_file_path};
 
 /// What [`Seeder::refresh_announce`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +251,7 @@ impl Seeder {
 
         // What is about to be filed under `info_hash` must actually *be*
         // `info_hash`. These bytes came from the client, not from
-        // `LavaTorrentFactory`, so nothing so far has checked that — and a
+        // `TorrentFactory`, so nothing so far has checked that — and a
         // mismatch would hand every friend a torrent for a different swarm than
         // the feed pointed them at, which fails in a much more confusing place
         // than here.
@@ -485,7 +485,7 @@ impl Seeder {
         // sit on. Both stay off the runtime; doing either inline would stall
         // every other task — /health and /announce included — for the duration.
         let built = tokio::task::spawn_blocking(move || {
-            let built = LavaTorrentFactory.create(&TorrentRequest {
+            let built = TorrentFactory.create(&TorrentRequest {
                 path: &path,
                 announce: &announce,
                 media: media.as_ref(),
@@ -797,7 +797,7 @@ mod tests {
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
         let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
-        let built = LavaTorrentFactory
+        let built = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &old_announce,
@@ -862,7 +862,7 @@ mod tests {
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
         let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let built = LavaTorrentFactory
+        let built = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &announce,
@@ -928,7 +928,7 @@ mod tests {
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
         let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
-        let built = LavaTorrentFactory
+        let built = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &old_announce,
@@ -1003,7 +1003,7 @@ mod tests {
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
         let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let stale = LavaTorrentFactory
+        let stale = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &announce,
@@ -1047,7 +1047,7 @@ mod tests {
         // A rebuild over the new bytes has a different info hash than the
         // stale cache entry — that difference is itself the proof the stale
         // cache was not reused.
-        let rebuilt = LavaTorrentFactory
+        let rebuilt = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &announce,
@@ -1116,7 +1116,7 @@ mod tests {
 
         // Stand in for the operator's own torrent: built against *their*
         // tracker, and never seen by sharerr.
-        let theirs = LavaTorrentFactory
+        let theirs = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &AnnounceSet::single(
@@ -1237,7 +1237,7 @@ mod tests {
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
         let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
-        let built = LavaTorrentFactory
+        let built = TorrentFactory
             .create(&TorrentRequest {
                 path: &media,
                 announce: &announce,

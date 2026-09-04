@@ -10,8 +10,8 @@ rules:
   # and trivy under "Pinned tool versions that dependabot cannot see".
   unpinned-tools:
     ignore:
-      - image-scan.yml:89
-      - image-scan.yml:140
+      - image-scan.yml:107
+      - image-scan.yml:158
 
   # zizmor 1.30.0 added this audit: it wants every workspace-relative
   # `uses: ./.github/...` rewritten to GitHub's July-2026 `$/` self-repository

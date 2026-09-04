@@ -56,7 +56,6 @@ figment = "0.10.19"
 futures = "0.3.31"
 getrandom = "0.4.3"
 hex = "0.4.3"
-lava_torrent = "0.11.1"
 # `default-features = false` on purpose: it drops the default TLS backend in favour
 # of rustls, so no build here needs OpenSSL on the host or in the image.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "http2", "charset"] }
@@ -86,6 +85,9 @@ serde_json = "1.0.151"
 matroska = "0.30"
 mp4 = "0.14"
 symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "ogg"] }
+# BitTorrent's info hash is SHA-1 by protocol (BEP 3); it is an identifier here,
+# never a security decision. See `sharerr-torrent`'s `metainfo` module.
+sha1 = "0.11.0"
 sha2 = "0.11.0"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
@@ -171,3 +173,17 @@ missing_fields_in_debug = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# `utoipa-axum 0.2.0`, the newest crates.io release, depends on the
+# unmaintained `paste` crate (RUSTSEC-2024-0436). Upstream replaced it with
+# `pastey` in June 2026 but has not cut a release, so all three utoipa crates
+# are taken from one pinned upstream commit instead. All three, not just
+# `utoipa-axum`: it depends on `utoipa` by path inside that repository, and
+# mixing a git `utoipa` with a registry one would give the workspace two
+# incompatible copies of every trait the derive macros implement. Drop this
+# block, and the matching `allow-git` entry in deny.toml, the day utoipa-axum
+# publishes a release without `paste`.
+[patch.crates-io]
+utoipa = { git = "https://github.com/juhaku/utoipa", rev = "fbe663958f6a5b834b1fb7c15bbc6fabe4722b40" }
+utoipa-gen = { git = "https://github.com/juhaku/utoipa", rev = "fbe663958f6a5b834b1fb7c15bbc6fabe4722b40" }
+utoipa-axum = { git = "https://github.com/juhaku/utoipa", rev = "fbe663958f6a5b834b1fb7c15bbc6fabe4722b40" }

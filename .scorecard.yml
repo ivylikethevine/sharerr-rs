@@ -19,9 +19,10 @@
 # Two checks worth a second look once a run exists, so whoever adds their
 # entries here has a head start rather than re-deriving the question:
 #   - pinned-dependencies: .github/actions/setup-tool/install.sh downloads
-#     zizmor/actionlint/cargo-llvm-cov/lychee by a pinned *version*, not a
-#     pinned *hash* - Scorecard's downloadThenRun probe has no "pinned to a
-#     version" state, only pinned-by-hash or not.
+#     zizmor/actionlint/cargo-llvm-cov/lychee/typos by a pinned version AND
+#     verifies each download against the sha256 recorded in tools.txt before
+#     it runs - but Scorecard's downloadThenRun probe reads the workflow
+#     text, not the script, so it may still not credit the hash check.
 #   - fuzzing: this is a genuine gap, not a not-applicable one -
 #     sharerr-torrent, sharerr-rtorrent's XML-RPC parsing and sharerr-probe's
 #     media-file parsing are all real untrusted-input surfaces cargo-fuzz

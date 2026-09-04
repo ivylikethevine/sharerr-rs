@@ -97,7 +97,7 @@ containers that were perfectly healthy.
 The requirement still stands as a property of the code, and the hermetic test suite
 covers it: the service clients are exercised against wiremock on loopback and reach
 nothing else. It is simply no longer *proved* by the kernel refusing to route. See
-[docker/README.md](../docker/README.md).
+[docker/README.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md).
 
 ## What the brief got right
 

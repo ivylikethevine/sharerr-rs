@@ -1,12 +1,14 @@
 # Releasing
 
-What a `v*` tag actually does, the one-time setup it depends on, and how to
-rehearse the whole path without it reaching anyone. No tag has yet driven this
-path end to end, so rehearse it (below) rather than trusting it.
+What a `v*` tag does, the tag scheme every image follows, the one-time setup
+it depends on, and how to rehearse the path without it reaching anyone. No
+tag has yet driven this path end to end, so rehearse it rather than trusting
+it.
 
-## Contents
+## Table of contents
 
 - [What ships, and where](#what-ships-and-where)
+- [The tag scheme](#the-tag-scheme)
 - [Cutting a release](#cutting-a-release)
 - [The GitHub Release](#the-github-release)
 - [The one-time setup this depends on](#the-one-time-setup-this-depends-on)
@@ -24,109 +26,85 @@ GitHub Release page once both images have their tags:
 | `ghcr.io/ivylikethevine/sharerr-rs` | `docker.yml` | `runtime-sharerr` |
 | `ghcr.io/ivylikethevine/sharerr-lighthouse` | `docker-lighthouse.yml` | `runtime-lighthouse` |
 
-Both workflows are thin callers of the shared `docker-image.yml` — see that
-file for the actual build/publish logic each of the two just parameterizes.
+Both workflows are thin callers of the shared `docker-image.yml`, which holds
+the build/publish logic. One Dockerfile, one builder stage, one MSRV pin; two
+packages behind two approvals, so a break in one build cannot hold the
+other's release.
 
-Nothing else is published anywhere — no crates.io (see
-[`docs/SUPPORT.md`](SUPPORT.md#publishing-to-cratesio)), no npm, no PyPI, no
-binaries attached to the Release. The container image is the distribution
-channel; the Release page is a human-readable pointer at it, not a second one.
+Nothing else is published anywhere: no crates.io (see
+[`docs/SUPPORT.md`](SUPPORT.md#publishing-to-cratesio)), no binaries attached
+to the Release. The container image is the distribution channel; the Release
+page is a pointer at it.
+
+## The tag scheme
+
+| Trigger | What is pushed | Architectures |
+| --- | --- | --- |
+| Pull request | Nothing. Build only, as a check | amd64 |
+| Push to `main` | `sha-<7-char-sha>`, unattended. No `latest`, no branch tag | amd64 + arm64 |
+| `workflow_dispatch` | `pending-<full-sha>`, a rehearsal nobody would find by browsing | amd64 + arm64 |
+| `v*` tag | `pending-<full-sha>` from `build`; then, after approval, `publish` retags that digest as `X.Y.Z`, `X.Y`, `latest` and `sha-<7>` | amd64 + arm64 |
+
+A prerelease tag (one with a `-` segment, `v1.0.0-rc1`) never moves `latest`.
+Until the first `v*` tag exists, `:latest` and every version tag are
+unpublished; anything that says `:latest` in a compose file will not pull.
 
 ## Cutting a release
 
-The local ceremony is one command — **use a signed tag**, `-s`, not a bare
-one: `main`'s ruleset already requires verified commit signatures, so the
-same key that signs commits signs the tag, and `git tag -v` gives anyone
-checking out the release something to verify beyond "GitHub says this ref
-exists".
+Bump `[workspace.package].version` in `Cargo.toml` first; the tag follows it.
+`docker.yml`'s `release` job fails loudly, before writing anything, if the tag
+disagrees with it. Then push a **signed** tag: `main`'s ruleset already
+requires verified commit signatures, and `git tag -v` gives anyone checking
+out the release something to verify beyond "GitHub says this ref exists".
 
 ```bash
 git tag -s v1.2.3
 git push origin v1.2.3
+git tag -v v1.2.3   # verify, the same as a commit
 ```
 
-Verify a tag's signature the same way you'd verify a commit's:
-
-```bash
-git tag -v v1.2.3
-```
-
-From there, each workflow runs its own `build` job unattended: checks out the
-tag, cross-compiles both architectures (`linux/amd64,linux/arm64`), and pushes
-the real, fully-built multi-arch image to a provisional tag nobody would
-discover by browsing GHCR (`ghcr.io/.../image:pending-<sha>`), with a signed
-build-provenance attestation attached to it. Nothing about that build is
-gated — a bad tag fails loudly before anyone is asked to approve anything.
-
-`publish` runs next, behind a required reviewer (see [the next
-section](#the-one-time-setup-this-depends-on)), and does not rebuild: it
-retags the exact digest `build` already produced and attested onto the tags an
-operator would actually pull — `latest`, `X.Y.Z`, `X.Y` — with `docker buildx
-imagetools create`. Approving a release means approving the bytes that already
-exist, not asking for a second, unaudited build to happen.
-
-`v1.2.3` has to actually be `1.2.3` — `docker.yml`'s `release` job (next
-section) reads `[workspace.package].version` out of `Cargo.toml` and fails
-loudly, before writing anything, if the tag disagrees with it. Bump the
-version in `Cargo.toml` first; the tag follows it, not the other way around.
+Each workflow's `build` job then runs unattended: checks out the tag,
+cross-compiles both architectures, pushes the multi-arch image to
+`pending-<sha>` with a signed build-provenance attestation. `publish` runs
+next, behind a required reviewer, and does not rebuild: it retags the exact
+digest `build` attested with `docker buildx imagetools create`. Approving a
+release means approving bytes that already exist. See `docker-image.yml`'s
+own comments for the job-by-job detail.
 
 ## The GitHub Release
 
-`docker.yml` carries one more job, `release`, that only reaches `publish`'s
-approval — it does not gate on its own. It creates the Releases-tab entry:
+`docker.yml` carries one more job, `release`, that runs after `publish` and
+creates the Releases-tab entry:
 
 - **Title and tag**: the pushed `v*` tag, verbatim.
-- **Notes**: GitHub's own generated notes (`gh release create --generate-notes`
-  — merged PR titles since the last tag), with a short preamble prepended
-  giving the exact `docker pull` and `gh attestation verify` commands for both
-  images, so the release page is self-contained. See
-  [`docs/SUPPORT.md`](SUPPORT.md#a-maintained-changelogmd) for why this is the
-  model instead of a hand-maintained `CHANGELOG.md`.
-- **Prerelease**: a tag with a `-` segment (`v1.0.0-rc1`) is marked as a
-  GitHub prerelease. It also never moves `:latest` — see `docker-image.yml`'s
-  `meta` step.
+- **Notes**: `gh release create --generate-notes`, so merged PR titles since
+  the last tag, with a short preamble giving the `docker pull` and
+  `gh attestation verify` commands for both images. The PR _title_ is the
+  release-notes line; write it for a user. See
+  [`docs/SUPPORT.md`](SUPPORT.md#a-maintained-changelogmd) for why this is
+  the model instead of a `CHANGELOG.md`.
+- **Prerelease**: a tag with a `-` segment is marked as one.
 
-It runs after `publish` (`needs: docker`, the job that calls `docker-image.yml`
-and therefore already carries the approval), and independently of
-`docker-lighthouse.yml`'s own build — a lighthouse build failure does not
-block it, for the same "a break in one build cannot hold the other's release"
-reason the two images are separate workflows at all. The release describes
-whichever images actually finished publishing for that tag.
+It runs independently of `docker-lighthouse.yml`; a lighthouse build failure
+does not block it, and the release describes whichever images actually
+finished publishing for that tag.
 
 ## The one-time setup this depends on
 
 **`environment: release` needs a required reviewer configured before it gates
-anything.** This is a repo setting, not something either workflow file can
-assert or enforce: Settings → Environments → `release` → tick "Required
-reviewers" and add whoever should be able to approve a publish. Until that
-setting exists, the environment imposes no gate at all and `publish` runs
-unattended the moment `build` finishes — both workflow files say so at the
-`publish` job, and it's worth confirming this is actually configured before
-trusting that a release needs a human in the loop.
+anything.** This is a repo setting (Settings → Environments → `release` →
+"Required reviewers"), not something a workflow file can assert. Until it
+exists, `publish` runs unattended the moment `build` finishes. Confirm it
+before trusting that a release needs a human in the loop.
 
 ## Rehearsing it
 
-Both workflows accept a manual `workflow_dispatch` as a rehearsal: `build`
-pushes to the same provisional `pending-<sha>` tag and gets the same
-provenance attestation a real `v*` tag push would produce, so the whole
-build-push-attest path can be exercised any day — not only discovered broken
-the day a tag is actually pushed.
-
-`publish` cannot be reached this way, structurally: it requires
-`github.event_name == 'push'` in addition to the tag-ref check, which a
-dispatch can never satisfy (dispatching against an _existing_ tag's ref would
-otherwise have been enough on its own — this is the gap that check closes; see
-`docker.yml`'s own `publish` job comment). A rehearsal builds and attests the
-real thing and publishes nothing, whatever the environment's reviewer setting
-says. `release` carries the identical `github.event_name == 'push'` guard and
-is equally unreachable from a dispatch — a rehearsal creates no Releases-tab
-entry either.
-
-There's no fake-version input to pass: this workflow's tags are git-ref-derived
-and the provisional destination needs no version to be meaningful — the
-commit sha it's keyed on is real either way.
-
-Run it from the Actions tab, or:
+Both workflows accept a manual `workflow_dispatch`: `build` pushes to the
+same `pending-<sha>` tag and produces the same attestation a real tag push
+would, so the whole build-push-attest path can be exercised any day.
+`publish` and `release` both require `github.event_name == 'push'`, which a
+dispatch can never satisfy, so a rehearsal publishes nothing and creates no
+Release whatever the environment's reviewer setting says.
 
 ```bash
 gh workflow run docker.yml
@@ -141,20 +119,17 @@ gh attestation verify oci://ghcr.io/ivylikethevine/sharerr-rs:latest \
 ```
 
 Checks the signed proof that the tag's digest was built by this repo's own
-workflow run, from the commit it claims — the attestation travels with the
-digest through the retag `publish` does, rather than needing to be regenerated
-against the final tags. Substitute `sharerr-lighthouse` and its own `--repo`
-for the lighthouse image.
+workflow run, from the commit it claims. The attestation travels with the
+digest through the retag, so it needs no regenerating against the final
+tags. Substitute `sharerr-lighthouse` for the lighthouse image.
 
 ## Between releases: the sha tag
 
-Every push to `main` — not just a tagged release — ships its own image
-unattended, under `ghcr.io/.../image:sha-<7-char-sha>` and nothing else: no
-`latest`, no branch tag, nothing a human would stumble across browsing GHCR's
-tag list. No rolling prerelease mechanism is planned here: a sha-tagged image
-already serves that purpose for anyone who has the commit — findable only by
-someone who already knows the exact sha that produced it, and pullable the
-moment it lands. See
-CLAUDE.md's "Repository" section for why this half stays unattended while the
-tagged path does not: the risk of an sha-only tag reaching someone who did not
-already choose it is close to zero, where `latest` moving unattended is not.
+Every push to `main` ships its own image unattended under `sha-<7-char-sha>`
+and nothing else. It is findable only by someone who already has the commit,
+which is why this half stays unattended while the tagged path does not: the
+risk of a sha-only tag reaching someone who did not choose it is close to
+zero, where `latest` moving unattended is not. No rolling prerelease is
+planned; the sha tag already serves that purpose. The push to `main` is also
+where the arm64 cross-compile path gets proven on every merge, since a pull
+request builds amd64 only.

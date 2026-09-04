@@ -13,11 +13,26 @@ name: Tool versions
 # a ::warning in a scheduled run that nobody opens is a signal only in the sense
 # that a tree falling in a forest is. The annotations stay too, for whoever does
 # open the run. The bump itself stays a one-line edit to tools.txt.
+#
+# Also runs on every push to main, alongside the weekly cron, so a bump to
+# tools.txt (or its absence, when upstream moved and nobody bumped it) shows up
+# at merge time too — the cron stays for drift that happens with no commit at
+# all.
+#
+# Serialised rather than cancel-on-superseded (see the concurrency: block
+# below): upsert-tracking-issue's list-then-create is not safe to run twice at
+# once, and this job is a few minutes, not the ~25 of image-scan's `pins`.
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "23 7 * * 1"
   workflow_dispatch:
+
+concurrency:
+  group: tool-versions
+  cancel-in-progress: false
 
 permissions:
   contents: read

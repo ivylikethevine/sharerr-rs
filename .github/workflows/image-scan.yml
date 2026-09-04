@@ -17,10 +17,17 @@
 # has a fixable hole".
 #
 # Both are advisory. A CVE landing upstream is not a reason to redden somebody's
-# unrelated PR, so this runs on its own schedule and never blocks a merge —
-# `docker.yml`'s manual-approval gate is what stops a genuinely bad image from
-# reaching `:latest` in the first place; this is what tells you a *previous*
-# one has gone stale.
+# unrelated PR, so this never blocks a merge — `docker.yml`'s manual-approval
+# gate is what stops a genuinely bad image from reaching `:latest` in the first
+# place; this is what tells you a *previous* one has gone stale.
+#
+# Runs on the weekly schedule and on every push to main. The push case mostly
+# re-checks images the push itself did not change — `trivy` scans
+# `ghcr.io/<repo>:latest`, which only moves on a `v*` tag, and `pins` scans the
+# same Dockerfile/compose digests regardless of what a given commit touched —
+# but a merge is still a reasonable moment to hear about a CVE that landed
+# upstream since the last cron, same reasoning as advisories.yml and
+# tool-versions.yml.
 #
 # They differ in how they speak, and deliberately. `trivy` writes a ::warning
 # and a step summary: its subject is one image that a rebuild fixes, and the
@@ -32,6 +39,8 @@
 name: Image scan
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "37 6 * * 3"
   workflow_dispatch:
@@ -39,6 +48,15 @@ on:
 permissions:
   contents: read
   packages: read
+
+# `pins` upserts a tracking issue via a list-then-create that is not safe to
+# run twice at once (see upsert-tracking-issue's own header); serialised
+# rather than cancelled, same shape as advisories.yml and tool-versions.yml.
+# `trivy` shares the group too — simpler than splitting one workflow's two
+# jobs across two groups for a scan that already takes single-digit minutes.
+concurrency:
+  group: image-scan
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}

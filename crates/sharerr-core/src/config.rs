@@ -69,7 +69,7 @@ pub mod secret_keys {
             /// Shared secret embedded in builtin-tracker announce URLs.
             TRACKER_TOKEN = "tracker.token";
             /// gluetun's control server API key, sent as `X-Api-Key`. Required since
-            /// gluetun v3.40 made `apikey` the default auth type for the control
+            /// gluetun v3.39.1 made `apikey` the default auth type for the control
             /// server; without it every request comes back `401`.
             GLUETUN_API_KEY = "gluetun.api_key";
             /// The API key for the *second* gluetun poller — the torrent client's own

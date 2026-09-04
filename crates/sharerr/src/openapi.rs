@@ -74,7 +74,7 @@ configured\" would confirm the port belongs to sharerr.
 **Base URL.** None is listed. A sharerr instance is reached at whatever address \
 its operator advertises — often behind a VPN with a rotating forwarded port, \
 which is the whole reason the gossip and lighthouse endpoints exist.",
-        license(name = "AGPL-3.0-or-later"),
+        license(name = "MIT"),
         version = env!("CARGO_PKG_VERSION"),
     ),
     tags(
