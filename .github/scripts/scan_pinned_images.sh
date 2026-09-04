@@ -60,6 +60,12 @@ _HI_SEVERITIES="$(echo "$_HI_SEVERITY" | tr ',' '/')"
 
 _HI_REPORT="${SHARERR_SCAN_REPORT:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/image-scan-report.md}"
 
+# How many images to scan concurrently. Each one is two independent `trivy
+# image` invocations (network + a local vuln DB lookup), so this is
+# I/O-and-network bound rather than CPU bound - 4 is comfortably under a
+# hosted runner's core count without hammering a registry.
+_HI_JOBS="${SHARERR_SCAN_JOBS:-4}"
+
 for _hi_need in trivy jq; do
   command -v "$_hi_need" >/dev/null 2>&1 || {
     echo "scan_pinned_images: no $_hi_need on PATH" >&2
@@ -106,13 +112,16 @@ function _hi_lines() {
 # the reference) and a compose `image:`. Naming a tag literally anywhere in
 # this file would create a second place to edit on every bump.
 #
-# `FROM <stage> AS`-style internal references carry neither tag nor digest and
-# drop out on their own, as does anything still on a bare tag: only a
-# `name:tag@sha256:...` triple matches.
+# One Dockerfile, not two: it used to build both docker/Dockerfile and
+# docker/Dockerfile.lighthouse, before the two merged into one file with two
+# runtime targets (see docker/Dockerfile's own header). A `FROM <stage> AS`
+# internal reference carries neither tag nor digest and drops out on its own,
+# so the multi-stage file's several `FROM` lines still resolve to just the two
+# real base-image pins.
 _hi_pins="$_HI_WORK/pins"
 {
   sed -n 's/^FROM \(--platform=[^ ]* \)\?\([^:@ ]*\):\([^@ ]*\)@\(sha256:[0-9a-f]*\).*/\2|\3|\4/p' \
-    Dockerfile Dockerfile.lighthouse 2>/dev/null
+    docker/Dockerfile 2>/dev/null
   find docker \( -name '*.yml' -o -name '*.yaml' \) -exec \
     sed -n 's/^[[:space:]]*image:[[:space:]]*\([^:@ ]*\):\([^@ ]*\)@\(sha256:[0-9a-f]*\).*/\1|\2|\3/p' {} +
 } | sort -u >"$_hi_pins"
@@ -122,9 +131,154 @@ if [ "$_hi_total" -eq 0 ]; then
   echo "scan_pinned_images: no digest-pinned images found - is the checkout complete?" >&2
   exit 127
 fi
-echo "scanning $_hi_total pinned base image(s):"
+echo "scanning $_hi_total pinned base image(s), $_HI_JOBS at a time:"
 sed 's/^/  /' "$_hi_pins"
 echo
+
+# Indexed so each worker below gets its own scratch directory (no filename
+# collisions from a `/`-bearing image ref) and so the console log and the
+# report can both be replayed back in the same, stable order the pins were
+# read in, no matter which worker happened to finish first.
+_hi_indexed="$_HI_WORK/pins.indexed"
+nl -ba -w1 -s'|' "$_hi_pins" >"$_hi_indexed"
+
+# _hi_scan_one <idx> <image> <tag> <pinned> - one image, start to finish,
+# entirely self-contained: everything it learns goes into files under its own
+# $_HI_WORK/w<idx>/ rather than a shared variable, because this runs as a
+# background job and nothing it sets in its own subshell is visible to the
+# parent once it exits. The console narration (the numbered comments below,
+# unchanged from the sequential version) is buffered into w<idx>/log instead
+# of printed directly, so N of these running at once do not interleave their
+# ::group:: blocks into unreadable output - the parent replays every log in
+# pin order after the whole batch finishes.
+#
+# Writes w<idx>/verdict: three space-separated 0/1 flags, "<hit> <win>
+# <unscanned>" - the same three counters the sequential version accumulated
+# directly, now read back by the parent instead. An image this function
+# cannot scan at all (step 1 failing outright) writes no verdict file, which
+# the parent treats as "0 0 0": silently excluded from every count, exactly
+# as the sequential version's own `continue` there did.
+function _hi_scan_one() {
+  local idx="$1" image="$2" tag="$3" pinned="$4"
+  local ref="$image:$tag"
+  local wd="$_HI_WORK/w$idx"
+  mkdir -p "$wd"
+  local log="$wd/log"
+
+  {
+    echo "::group::$ref"
+
+    # 1. what the pin has today
+    if ! _hi_trivy "$image@$pinned" "$wd/a.json"; then
+      echo "  could not scan the pinned digest - skipping" >&2
+      echo "::endgroup::"
+      exit 0
+    fi
+    # trivy has no vulnerability source for every distro it can identify, and
+    # that report comes back with a null .Results rather than an empty finding
+    # list. Zero findings and zero data are not the same answer, and reporting
+    # the second as the first is how an unscanned image sits inside a green job
+    # forever.
+    if [ "$(jq -r '.Results | type' "$wd/a.json")" = null ]; then
+      echo "  not scanned: trivy has no vulnerability data for this image"
+      # shellcheck disable=SC2016
+      printf -- '- `%s` - trivy has no vulnerability data for this OS, so its zero means "not scanned", not "clean".\n' \
+        "$ref" >"$wd/stale.md"
+      echo "0 0 1" >"$wd/verdict"
+      echo "::endgroup::"
+      exit 0
+    fi
+
+    _hi_ids "$wd/a.json" >"$wd/a.ids"
+    a_n="$(_hi_lines "$wd/a.ids")"
+
+    # 2. the quiet path, and the one this stays on almost every week
+    if [ "$a_n" -eq 0 ]; then
+      echo "  clean: no fixable $_HI_SEVERITIES findings in the pinned digest"
+      echo "::endgroup::"
+      exit 0
+    fi
+    echo "  pinned digest has $a_n fixable finding(s)"
+
+    # 3. what the tag points at now. Scanned rather than merely resolved because
+    # the resolve is free either way and the counts are the whole question.
+    if ! _hi_trivy "$ref" "$wd/b.json"; then
+      echo "  could not scan the current tag - reporting the pin as-is" >&2
+      # shellcheck disable=SC2016
+      printf -- '- `%s` - %d fixable finding(s); the current tag could not be scanned\n' \
+        "$ref" "$a_n" >"$wd/stale.md"
+      echo "1 0 0" >"$wd/verdict"
+      echo "::endgroup::"
+      exit 0
+    fi
+    _hi_ids "$wd/b.json" >"$wd/b.ids"
+    b_n="$(_hi_lines "$wd/b.ids")"
+    candidate="$(_hi_digest "$wd/b.json")"
+
+    # 4. upstream has not rebuilt - there is nothing to repin to
+    if [ -n "$candidate" ] && [ "$candidate" = "$pinned" ]; then
+      echo "  the tag still resolves to the pinned digest - no rebuild to take"
+      # shellcheck disable=SC2016
+      printf -- '- `%s` - %d fixable finding(s), and the tag still resolves to the pinned digest. Nothing to repin to yet.\n' \
+        "$ref" "$a_n" >"$wd/stale.md"
+      echo "1 0 0" >"$wd/verdict"
+      echo "::endgroup::"
+      exit 0
+    fi
+
+    # 5. rebuilt, but no better - repinning would be churn, so do not ask for it
+    if [ "$b_n" -ge "$a_n" ]; then
+      echo "  the tag has been rebuilt but still has $b_n finding(s) - no gain"
+      # shellcheck disable=SC2016
+      printf -- '- `%s` - %d fixable finding(s); the current tag has %d, so a repin would not reduce the count.\n' \
+        "$ref" "$a_n" "$b_n" >"$wd/stale.md"
+      echo "1 0 0" >"$wd/verdict"
+      echo "::endgroup::"
+      exit 0
+    fi
+
+    # 6. the one case worth acting on
+    closed="$(comm -23 "$wd/a.ids" "$wd/b.ids" | tr '\n' ' ')"
+    echo "  ACTIONABLE: repinning drops $a_n finding(s) to $b_n"
+    # Every hit below is a markdown code span in report text, which is a
+    # backtick shellcheck reads as a command substitution and no expansion
+    # anyone wants.
+    # shellcheck disable=SC2016
+    {
+      printf -- '#### `%s`: %d fixable finding(s) -> %d\n\n' "$ref" "$a_n" "$b_n"
+      printf -- 'Closed by the repin: %s\n\n' "$(echo "$closed" | sed 's/ *$//;s/ /, /g')"
+      printf -- '```diff\n'
+      printf -- '-%s@%s\n' "$ref" "$pinned"
+      printf -- '+%s@%s\n' "$ref" "${candidate:-<resolve the tag>}"
+      printf -- '```\n\n'
+      printf -- 'Pinned in:\n\n'
+      grep -rl "@$pinned" docker 2>/dev/null | sed 's|^|- `|;s|$|`|' || true
+      printf -- '\n'
+    } >"$wd/actionable.md"
+    echo "1 1 0" >"$wd/verdict"
+    echo "::endgroup::"
+  } >"$log" 2>&1
+}
+
+# A hand-rolled job pool rather than `xargs -P`: the worker is a shell
+# function with locals and early `exit`s (clean under `set -e` inside its own
+# subshell), and exporting it across an xargs-spawned `bash -c` would mean
+# re-quoting every one of those `printf` backtick spans through a second
+# layer of shell. `wait -n` (bash 4.3+, present on every runner this targets)
+# blocks for the next background job to finish rather than all of them, which
+# is what keeps exactly $_HI_JOBS in flight instead of launching all of them
+# at once or waiting for a full batch between rounds.
+_hi_running=0
+while IFS='|' read -r idx image tag pinned; do
+  [ -n "$image" ] || continue
+  if [ "$_hi_running" -ge "$_HI_JOBS" ]; then
+    wait -n
+    _hi_running=$((_hi_running - 1))
+  fi
+  _hi_scan_one "$idx" "$image" "$tag" "$pinned" &
+  _hi_running=$((_hi_running + 1))
+done <"$_hi_indexed"
+wait
 
 _hi_actionable="$_HI_WORK/actionable.md"
 _hi_stale="$_HI_WORK/stale.md"
@@ -134,99 +288,24 @@ _hi_stale="$_HI_WORK/stale.md"
 _hi_hits=0
 _hi_wins=0
 _hi_unscanned=0
-# Redirected from the file, not piped into: a piped `while` runs in a subshell
-# and every counter above would be lost with it.
-#
-# The disable rides on the whole loop rather than on each printf below: every
-# hit is a markdown code span in report text, which is a backtick shellcheck
-# reads as a command substitution and no expansion anyone wants.
-# shellcheck disable=SC2016
-while IFS='|' read -r image tag pinned; do
+# Replayed in pin order, not finish order - a worker that scans a slow image
+# first and a worker that scans a fast one last must not reorder either the
+# console log or the report relative to the sequential version.
+while IFS='|' read -r idx image tag pinned; do
   [ -n "$image" ] || continue
-  ref="$image:$tag"
+  wd="$_HI_WORK/w$idx"
 
-  echo "::group::$ref"
+  [ -f "$wd/log" ] && cat "$wd/log"
 
-  # 1. what the pin has today
-  if ! _hi_trivy "$image@$pinned" "$_HI_WORK/a.json"; then
-    echo "  could not scan the pinned digest - skipping" >&2
-    echo "::endgroup::"
-    continue
+  if [ -f "$wd/verdict" ]; then
+    read -r hit win unscanned <"$wd/verdict"
+    _hi_hits=$((_hi_hits + hit))
+    _hi_wins=$((_hi_wins + win))
+    _hi_unscanned=$((_hi_unscanned + unscanned))
   fi
-  # trivy has no vulnerability source for every distro it can identify, and
-  # that report comes back with a null .Results rather than an empty finding
-  # list. Zero findings and zero data are not the same answer, and reporting
-  # the second as the first is how an unscanned image sits inside a green job
-  # forever.
-  if [ "$(jq -r '.Results | type' "$_HI_WORK/a.json")" = null ]; then
-    echo "  not scanned: trivy has no vulnerability data for this image"
-    printf -- '- `%s` - trivy has no vulnerability data for this OS, so its zero means "not scanned", not "clean".\n' \
-      "$ref" >>"$_hi_stale"
-    _hi_unscanned=$((_hi_unscanned + 1))
-    echo "::endgroup::"
-    continue
-  fi
-
-  _hi_ids "$_HI_WORK/a.json" >"$_HI_WORK/a.ids"
-  a_n="$(_hi_lines "$_HI_WORK/a.ids")"
-
-  # 2. the quiet path, and the one this stays on almost every week
-  if [ "$a_n" -eq 0 ]; then
-    echo "  clean: no fixable $_HI_SEVERITIES findings in the pinned digest"
-    echo "::endgroup::"
-    continue
-  fi
-  _hi_hits=$((_hi_hits + 1))
-  echo "  pinned digest has $a_n fixable finding(s)"
-
-  # 3. what the tag points at now. Scanned rather than merely resolved because
-  # the resolve is free either way and the counts are the whole question.
-  if ! _hi_trivy "$ref" "$_HI_WORK/b.json"; then
-    echo "  could not scan the current tag - reporting the pin as-is" >&2
-    printf -- '- `%s` - %d fixable finding(s); the current tag could not be scanned\n' \
-      "$ref" "$a_n" >>"$_hi_stale"
-    echo "::endgroup::"
-    continue
-  fi
-  _hi_ids "$_HI_WORK/b.json" >"$_HI_WORK/b.ids"
-  b_n="$(_hi_lines "$_HI_WORK/b.ids")"
-  candidate="$(_hi_digest "$_HI_WORK/b.json")"
-
-  # 4. upstream has not rebuilt - there is nothing to repin to
-  if [ -n "$candidate" ] && [ "$candidate" = "$pinned" ]; then
-    echo "  the tag still resolves to the pinned digest - no rebuild to take"
-    printf -- '- `%s` - %d fixable finding(s), and the tag still resolves to the pinned digest. Nothing to repin to yet.\n' \
-      "$ref" "$a_n" >>"$_hi_stale"
-    echo "::endgroup::"
-    continue
-  fi
-
-  # 5. rebuilt, but no better - repinning would be churn, so do not ask for it
-  if [ "$b_n" -ge "$a_n" ]; then
-    echo "  the tag has been rebuilt but still has $b_n finding(s) - no gain"
-    printf -- '- `%s` - %d fixable finding(s); the current tag has %d, so a repin would not reduce the count.\n' \
-      "$ref" "$a_n" "$b_n" >>"$_hi_stale"
-    echo "::endgroup::"
-    continue
-  fi
-
-  # 6. the one case worth acting on
-  _hi_wins=$((_hi_wins + 1))
-  closed="$(comm -23 "$_HI_WORK/a.ids" "$_HI_WORK/b.ids" | tr '\n' ' ')"
-  echo "  ACTIONABLE: repinning drops $a_n finding(s) to $b_n"
-  {
-    printf -- '#### `%s`: %d fixable finding(s) -> %d\n\n' "$ref" "$a_n" "$b_n"
-    printf -- 'Closed by the repin: %s\n\n' "$(echo "$closed" | sed 's/ *$//;s/ /, /g')"
-    printf -- '```diff\n'
-    printf -- '-%s@%s\n' "$ref" "$pinned"
-    printf -- '+%s@%s\n' "$ref" "${candidate:-<resolve the tag>}"
-    printf -- '```\n\n'
-    printf -- 'Pinned in:\n\n'
-    grep -rl "@$pinned" Dockerfile Dockerfile.lighthouse docker 2>/dev/null | sed 's|^|- `|;s|$|`|' || true
-    printf -- '\n'
-  } >>"$_hi_actionable"
-  echo "::endgroup::"
-done <"$_hi_pins"
+  [ -f "$wd/actionable.md" ] && cat "$wd/actionable.md" >>"$_hi_actionable"
+  [ -f "$wd/stale.md" ] && cat "$wd/stale.md" >>"$_hi_stale"
+done <"$_hi_indexed"
 
 # The report is one file for both consumers: the workflow feeds it to
 # $GITHUB_STEP_SUMMARY on every path, and to the issue body when it is

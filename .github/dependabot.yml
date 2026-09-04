@@ -84,7 +84,8 @@ updates:
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
 
-  # Dockerfile and Dockerfile.lighthouse, both under /docker.
+  # docker/Dockerfile — one file now, building both the sharerr and lighthouse
+  # runtime images from a shared builder stage.
   - package-ecosystem: docker
     directory: /docker
     schedule:

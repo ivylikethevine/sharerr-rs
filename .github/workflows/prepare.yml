@@ -1,0 +1,123 @@
+# Two questions every heavy job in ci.yml, docker.yml and docker-lighthouse.yml
+# needs answered before it can start: which runner to use, and whether this event
+# even touched anything that job cares about. Both used to be separate reusable
+# workflows (`runner.yml`, `changes.yml`) — two VM boots, sequentially `needs:`ed,
+# for what is together a fork check and a `git diff` against a filter. Merged here
+# into one VM so a caller pays that latency once, not twice.
+#
+# runner selection
+# -----------------
+# `vars.RUNNER_LABEL` names a self-hosted machine, and unlike `secrets.*` it is
+# NOT withheld from a `pull_request` run triggered by a fork — GitHub only scopes
+# secrets that way. ci.yml and docker.yml both trigger on `pull_request`, and for
+# that event the workflow file that actually runs is the one on the fork's own
+# branch, not this repo's — so a fork PR that simply read
+# `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}` in `runs-on:` would still resolve
+# to the real label and get its own job steps scheduled on it. This job is the
+# fix: it is the one place that checks whether the run is a fork PR, and every
+# other job reads its output instead of the raw variable.
+#
+# changed-files detection
+# ------------------------
+# Whether anything besides workflow YAML (or whatever `inputs.filters` names)
+# changed. A caller passes its own filter (ci.yml and docker.yml want "anything
+# except .github/workflows/**"; docker-lighthouse.yml wants only the paths that
+# feed its image) so the "code" key means something different per caller, same as
+# it did in changes.yml.
+#
+# Deliberately no `if:` on the `changes` output's job here — whether this should
+# run at all (push/pull_request only, not schedule or workflow_dispatch) is each
+# caller's own call. A caller that skips this entirely (by not gating on it) gets
+# `code` simply unset, which every downstream `if:` below already treats as
+# "assume yes": `needs.prepare.outputs.code == 'true'` is the only condition any
+# job needs now — no separate `result == 'skipped'` branch, because this workflow
+# itself decides that a schedule/dispatch run "changed" everything, once, instead
+# of leaving that decision to N copies of the same ternary in the caller.
+name: Prepare
+
+on:
+  workflow_call:
+    inputs:
+      filters:
+        description: >
+          `dorny/paths-filter` filter rules (YAML), with a single key "code" —
+          the fileset downstream jobs should treat as "something changed".
+        required: true
+        type: string
+    outputs:
+      label:
+        description: The runner label every other job in the caller should use.
+        value: ${{ jobs.prepare.outputs.label }}
+      code:
+        description: >
+          'true' if a file matching `inputs.filters`'s "code" key changed, or if
+          the triggering event is not push/pull_request (schedule, dispatch —
+          treated as "everything changed", since there is no diff to filter).
+        value: ${{ jobs.prepare.outputs.code }}
+
+# Every step below only reads github.event/vars or lists a PR's changed files —
+# nothing here needs a scope broader than the one read permission the paths
+# filter requires.
+permissions:
+  pull-requests: read
+
+jobs:
+  prepare:
+    name: prepare
+    # Always hosted, deliberately: this decides whether anything else in the
+    # calling workflow reaches the self-hosted box, so it cannot be the thing a
+    # fork PR could already redirect.
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      label: ${{ steps.pick.outputs.label }}
+      code: ${{ steps.decide.outputs.code }}
+    steps:
+      # Through env:, not inlined into the run: line — a template expanded
+      # straight into a shell command is exactly what a crafted PR title or
+      # branch name could abuse if it ever appeared here.
+      - id: pick
+        env:
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          LABEL: ${{ vars.RUNNER_LABEL }}
+        run: |
+          set -euo pipefail
+          if [ "$FORK" = "true" ]; then
+            echo "label=ubuntu-latest" >>"$GITHUB_OUTPUT"
+            echo "::notice title=runner::fork PR - GitHub-hosted only, ignoring RUNNER_LABEL"
+          else
+            echo "label=${LABEL:-ubuntu-latest}" >>"$GITHUB_OUTPUT"
+          fi
+
+      - if: github.event_name == 'push' || github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # some-with-excludes, not the default `some`: a bare negated pattern
+      # matches nothing on its own (picomatch needs a positive rule to negate
+      # against), and plain `some` would also count workflow files toward a
+      # match since `**` matches those too. This is the combination that
+      # actually means "some changed file lives outside .github/workflows/**"
+      # for callers whose filter uses a negated pattern; it has no effect on a
+      # caller (docker-lighthouse.yml) whose filter has none.
+      - if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: ${{ inputs.filters }}
+
+      # Collapses the filter's answer and "there was no diff to filter" into
+      # one output, so every downstream job checks one thing instead of two.
+      - id: decide
+        env:
+          FILTERED: ${{ steps.filter.outcome == 'success' }}
+          MATCHED: ${{ steps.filter.outputs.code }}
+        run: |
+          set -euo pipefail
+          if [ "$FILTERED" = "true" ]; then
+            echo "code=$MATCHED" >>"$GITHUB_OUTPUT"
+          else
+            echo "code=true" >>"$GITHUB_OUTPUT"
+          fi

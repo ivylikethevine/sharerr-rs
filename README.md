@@ -1,25 +1,17 @@
 # sharerr
 
+> EXPERIMENTAL UNTIL v1.0.0
+
+_Share your media library with friends, over the tools you already run._
+
 [![CI](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/ci.yml)
 [![Docker](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker.yml)
 [![Docker (lighthouse)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker-lighthouse.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/docker-lighthouse.yml)
-[![CodeQL](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/codeql.yml/badge.svg)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/codeql.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fivylikethevine.github.io%2Fsharerr-rs%2Fbadges%2Fcoverage.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/ID/badge)](https://www.bestpractices.dev/projects/ID)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
-[![Docs](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/pages.yml/badge.svg)](https://ivylikethevine.github.io/sharerr-rs/)
-[![Security Policy](https://img.shields.io/badge/security-policy-blue.svg)](docs/SECURITY.md)
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/ID/baseline)](https://www.bestpractices.dev/projects/ID)
 [![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg)](Cargo.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
-
----
-
-## EXPERIMENTAL UNTIL v1.0.0-stable RELEASES
-
-NOTE: Project is in active development, many things are subject to change and this current state is not a representation of final, published quality. This is a hobby project.
-
----
-
-Share your media library with friends, over the tools you already run.
 
 sharerr connects to your *arr apps — Sonarr, Radarr, Lidarr, Readarr, Whisparr —
 finds everything tagged `sharerr`, builds a
@@ -37,7 +29,7 @@ design is built around.
 > for what's still ahead. Large parts were written with generative AI — see
 > [AI usage](#ai-usage).
 
-## Table of contents
+## Contents
 
 - [What works today](#what-works-today)
 - [Screenshots](#screenshots)
@@ -72,42 +64,42 @@ version](docs/RELEASING.md), and [how to contribute](docs/CONTRIBUTING.md).
 
 ## What works today
 
-|                                                                                  |   |
-|----------------------------------------------------------------------------------|---|
-| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr**                  | ✅ |
-| Torrent construction, files never moved                                          | ✅ |
-| Seeding through qBittorrent, Transmission, **or rTorrent/ruTorrent**             | ✅ |
-| Builtin BitTorrent tracker, served by sharerr itself                             | ✅ |
-| Torznab feed for Prowlarr, with magnet links                                     | ✅ |
-| Jackett compatibility: URLs, indexer list, JSON results                          | ✅ |
-| Media metadata in the feeds: resolution, codecs, channels, runtime               | ✅ |
-| Audio metadata too: sample rate, bit depth, and the real format in the title     | ✅ |
-| Web UI: first-run wizard, settings, connection tests                             | ✅ |
-| Items page: every discovered file, its torrent and announce-token status         | ✅ |
-| Per-item detail page: release title vs. file name, media, swarm, path chain      | ✅ |
-| Manual per-item actions: retry, force rebuild, unshare — never touches the file  | ✅ |
-| Library composition: what you are sharing, by format, state and source           | ✅ |
-| Sync history strip: every recent pass at a glance, failures marked               | ✅ |
-| Status tiles that refresh themselves, without re-polling your *arr apps          | ✅ |
-| Path-mapping diagnostics in the browser                                          | ✅ |
-| Friend/peer management: per-friend keys, revoke, last-seen                       | ✅ |
-| Per-friend scoping: this friend sees TV, that one films                          | ✅ |
-| Per-friend announce-token attribution: revoking a friend cuts tracker access too | ✅ |
-| Safe rotation of the shared fallback announce token: old and new both work       | ✅ |
-| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal           | ✅ |
-| Plain directory sharing, no *arr app at all                                      | ✅ |
-| Dynamic endpoint from gluetun: rotating exit IP and forwarded port               | ✅ |
-| Peer endpoint memory and signed endpoint gossip between friends                  | ✅ |
-| The lighthouse: rendezvous for a friend whose address rotated while unwatched    | ✅ |
-| Topology diagram: sources, this instance, and friends in one picture             | ✅ |
-| Live per-torrent swarm view: who is connected to each torrent right now          | ✅ |
-| Swarm history: an hourly chart, so "quiet now" and "quiet for a fortnight" differ | ✅ |
-| Reachability script for checking from outside your network (`/debug`)            | ✅ |
-| Webhook notifications (generic, Discord, Apprise), six triggers, each on its own switch | ✅ |
-| Config backup and restore: download the effective `sharerr.toml`, restore it later    | ✅ |
-| `/metrics` (OpenMetrics) for Prometheus, bearer-token gated and off by default   | ✅ |
-| A dashboard-widget JSON endpoint, for Homepage, Homarr, or Glance                | ✅ |
-| OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)              | ✅ |
+|                                                                                         |     |
+| --------------------------------------------------------------------------------------- | --- |
+| Discovery by tag: Sonarr, Radarr, **Lidarr, Readarr, Whisparr**                         | ✅  |
+| Torrent construction, files never moved                                                 | ✅  |
+| Seeding through qBittorrent, Transmission, **or rTorrent/ruTorrent**                    | ✅  |
+| Builtin BitTorrent tracker, served by sharerr itself                                    | ✅  |
+| Torznab feed for Prowlarr, with magnet links                                            | ✅  |
+| Jackett compatibility: URLs, indexer list, JSON results                                 | ✅  |
+| Media metadata in the feeds: resolution, codecs, channels, runtime                      | ✅  |
+| Audio metadata too: sample rate, bit depth, and the real format in the title            | ✅  |
+| Web UI: first-run wizard, settings, connection tests                                    | ✅  |
+| Items page: every discovered file, its torrent and announce-token status                | ✅  |
+| Per-item detail page: release title vs. file name, media, swarm, path chain             | ✅  |
+| Manual per-item actions: retry, force rebuild, unshare — never touches the file         | ✅  |
+| Library composition: what you are sharing, by format, state and source                  | ✅  |
+| Sync history strip: every recent pass at a glance, failures marked                      | ✅  |
+| Status tiles that refresh themselves, without re-polling your *arr apps                 | ✅  |
+| Path-mapping diagnostics in the browser                                                 | ✅  |
+| Friend/peer management: per-friend keys, revoke, last-seen                              | ✅  |
+| Per-friend scoping: this friend sees TV, that one films                                 | ✅  |
+| Per-friend announce-token attribution: revoking a friend cuts tracker access too        | ✅  |
+| Safe rotation of the shared fallback announce token: old and new both work              | ✅  |
+| Ratio and bandwidth limits: per-torrent upload cap and seed-ratio goal                  | ✅  |
+| Plain directory sharing, no *arr app at all                                             | ✅  |
+| Dynamic endpoint from gluetun: rotating exit IP and forwarded port                      | ✅  |
+| Peer endpoint memory and signed endpoint gossip between friends                         | ✅  |
+| The lighthouse: rendezvous for a friend whose address rotated while unwatched           | ✅  |
+| Topology diagram: sources, this instance, and friends in one picture                    | ✅  |
+| Live per-torrent swarm view: who is connected to each torrent right now                 | ✅  |
+| Swarm history: an hourly chart, so "quiet now" and "quiet for a fortnight" differ       | ✅  |
+| Reachability script for checking from outside your network (`/debug`)                   | ✅  |
+| Webhook notifications (generic, Discord, Apprise), six triggers, each on its own switch | ✅  |
+| Config backup and restore: download the effective `sharerr.toml`, restore it later      | ✅  |
+| `/metrics` (OpenMetrics) for Prometheus, bearer-token gated and off by default          | ✅  |
+| A dashboard-widget JSON endpoint, for Homepage, Homarr, or Glance                       | ✅  |
+| OpenAPI 3.1 document for the machine-facing API (`sharerr openapi`)                     | ✅  |
 
 Full detail on which *arr apps, torrent clients, and indexers are supported —
 and the trait/seam each plugs into — along with things tried and deliberately
@@ -116,18 +108,18 @@ more), is [`docs/SUPPORT.md`](docs/SUPPORT.md).
 
 ## Screenshots
 
-| | |
-| --- | --- |
-| ![Status](docs/screenshots/status.webp) | ![Items](docs/screenshots/items.webp) |
+|                                             |                                                                         |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| ![Status](docs/screenshots/status.webp)     | ![Items](docs/screenshots/items.webp)                                   |
 | ![Topology](docs/screenshots/topology.webp) | ![Topology, networking only](docs/screenshots/topology-networking.webp) |
-| ![Friends](docs/screenshots/peers.webp) | ![Debug](docs/screenshots/debug.webp) |
+| ![Friends](docs/screenshots/peers.webp)     | ![Debug](docs/screenshots/debug.webp)                                   |
 
 Settings is one long page; it is shown here in four parts, top to bottom.
 
-| | |
-| --- | --- |
-| ![Settings: general and library sources](docs/screenshots/settings-1.webp) | ![Settings: torrent client](docs/screenshots/settings-2.webp) |
-| ![Settings: tracker and path mappings](docs/screenshots/settings-3.webp) | ![Settings: seeding limits, gluetun, lighthouse, sync and account](docs/screenshots/settings-4.webp) |
+|                                                                            |                                                                                                      |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| ![Settings: general and library sources](docs/screenshots/settings-1.webp) | ![Settings: torrent client](docs/screenshots/settings-2.webp)                                        |
+| ![Settings: tracker and path mappings](docs/screenshots/settings-3.webp)   | ![Settings: seeding limits, gluetun, lighthouse, sync and account](docs/screenshots/settings-4.webp) |
 
 ## Quickstart
 
@@ -145,7 +137,7 @@ docker run -d --name sharerr \
 > release. Every push to `main` does publish a `ghcr.io/…:sha-<commit>` image
 > unattended, if you want to track development before the first release;
 > otherwise build the image yourself (`docker build -f docker/Dockerfile -t
-> sharerr-rs .` at the repository root) and use that name in place of the
+sharerr-rs .` at the repository root) and use that name in place of the
 > `ghcr.io/…` reference.
 
 Then open `http://localhost:8477/`. The first visit asks you to create an account —
@@ -358,8 +350,8 @@ friend's lighthouse needs nothing checked in Settings, and running one for
 friends needs nothing typed here.
 
 Its own binary and image (`sharerr-lighthouse`, `crates/sharerr-lighthouse`,
-built from `docker/Dockerfile.lighthouse`) is meant to be self-hosted by anyone
-on neutral ground:
+built from `docker/Dockerfile`'s `runtime-lighthouse` target) is meant to be
+self-hosted by anyone on neutral ground:
 
 ```bash
 docker run -d --name sharerr-lighthouse -p 7878:7878 \
@@ -377,7 +369,7 @@ sharerr's own image above; every push to `main` does publish a
 track development before the first release. To build it yourself instead:
 
 ```bash
-docker build -f docker/Dockerfile.lighthouse -t sharerr-lighthouse .
+docker build -f docker/Dockerfile --target runtime-lighthouse -t sharerr-lighthouse .
 docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sharerr-lighthouse
 ```
 
@@ -640,16 +632,16 @@ reasoning.
 The UI covers everything, but each verb has a headless equivalent, which is what a
 scripted deployment or a secrets manager wants:
 
-| Command                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `sharerr sync`               | One reconciliation pass, then exit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Command                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `sharerr sync`               | One reconciliation pass, then exit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution** — the check most likely to explain "nothing is shared". The same checks back the web UI's **Status** page, so the two cannot disagree. `--fix` creates a missing tag or qBittorrent category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (`--search-root`, default `/media`) by name and size — a proposal to review, never written automatically. Everything else still needs a person. |
-| `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `sharerr vault list`         | Lists which secret keys are currently set, without their values.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `sharerr openapi`            | Prints the OpenAPI 3.1 document for the machine-facing API, generated from the handlers themselves (`--output` writes it to a file; `docs/openapi.json` is this output, committed). Reads no config, opens no vault. See [docs/API.md](docs/API.md).                                                                                                                                                                                                                                                                       |
-| `sharerr preview`            | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout in a real browser with no instance behind it. Reads nothing; a development aid, not something an operator needs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `sharerr vault list`         | Lists which secret keys are currently set, without their values.                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `sharerr openapi`            | Prints the OpenAPI 3.1 document for the machine-facing API, generated from the handlers themselves (`--output` writes it to a file; `docs/openapi.json` is this output, committed). Reads no config, opens no vault. See [docs/API.md](docs/API.md).                                                                                                                                                                                                                                                                                  |
+| `sharerr preview`            | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout in a real browser with no instance behind it. Reads nothing; a development aid, not something an operator needs.                                                                                                                                                                                                                                                                                         |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -698,20 +690,20 @@ bytes. No real content is involved anywhere.
 
 ## Layout
 
-| Crate                  |                                                           |
-| ---------------------- | --------------------------------------------------------- |
+| Crate                  |                                                                                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `sharerr`              | The binary: CLI, web UI, Torznab/Jackett, tracker, reconciliation, directory libraries, gossip, lighthouse client, notifications |
-| `sharerr-core`         | Domain types, layered config, path mapping. No I/O        |
-| `sharerr-arr`          | Sonarr/Radarr/Lidarr/Readarr/Whisparr clients and tagged-content discovery |
-| `sharerr-client`       | The narrow trait a torrent client backend implements      |
-| `sharerr-qbit`         | qBittorrent WebUI client                                  |
-| `sharerr-transmission` | Transmission RPC client                                   |
-| `sharerr-rtorrent`     | rTorrent XML-RPC client                                   |
-| `sharerr-store`        | Encrypted vault + SQLite store                            |
-| `sharerr-torrent`      | Torrent construction and tracker resolution               |
-| `sharerr-probe`        | Reads what a media file is, where no *arr can say         |
-| `sharerr-lighthouse`   | The lighthouse rendezvous service — its own binary too    |
-| `sharerr-testkit`      | Synthetic fixtures. Never in a release build              |
+| `sharerr-core`         | Domain types, layered config, path mapping. No I/O                                                                               |
+| `sharerr-arr`          | Sonarr/Radarr/Lidarr/Readarr/Whisparr clients and tagged-content discovery                                                       |
+| `sharerr-client`       | The narrow trait a torrent client backend implements                                                                             |
+| `sharerr-qbit`         | qBittorrent WebUI client                                                                                                         |
+| `sharerr-transmission` | Transmission RPC client                                                                                                          |
+| `sharerr-rtorrent`     | rTorrent XML-RPC client                                                                                                          |
+| `sharerr-store`        | Encrypted vault + SQLite store                                                                                                   |
+| `sharerr-torrent`      | Torrent construction and tracker resolution                                                                                      |
+| `sharerr-probe`        | Reads what a media file is, where no *arr can say                                                                                |
+| `sharerr-lighthouse`   | The lighthouse rendezvous service — its own binary too                                                                           |
+| `sharerr-testkit`      | Synthetic fixtures. Never in a release build                                                                                     |
 
 The original design brief, and the two corrections the implementation forced on
 it, are in [docs/DESIGN.md](docs/DESIGN.md).

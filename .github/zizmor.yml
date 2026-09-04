@@ -27,6 +27,7 @@ rules:
       - advisories.yml
       - ci.yml
       - coverage.yml
+      - docker-image.yml
       - docker-lighthouse.yml
       - docker.yml
       - image-scan.yml

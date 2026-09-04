@@ -1,55 +1,10 @@
-# Builds the image, and publishes it to GHCR two ways.
-#
-# Every push to `main` ships unattended, under a tag that carries nothing but
-# the commit sha — no `latest`, no branch name, nothing a human would stumble
-# across browsing GHCR's tag list. See the `sha-tag` step below for the exact
-# format. A `v*` tag goes through the slower, approval-gated path described
-# below instead. Pull requests build both architectures but ship nothing
-# either way.
-#
-# That split is deliberate: the build is load-bearing as the MSRV check
-# (below), while publishing the tags an operator would actually reach for —
-# `latest`, a semver — should be something you choose to do, not a side
-# effect of merging. The sha-only tag is a lower-stakes middle ground: it
-# publishes unattended because nobody can pull it without already knowing the
-# exact commit that produced it.
-#
-# This also doubles as the MSRV check for the whole project. The Dockerfile's
-# builder stage is pinned to the workspace's declared rust-version (1.98) while a
-# developer's local toolchain is invariably newer, so a build here is the only
-# thing that reliably catches code reaching past the MSRV. That is why pull
-# requests build the image even though they never publish it.
-#
-# A `v*` tag no longer publishes straight to `:latest`/`:X.Y.Z` unattended: `build`
-# pushes the real, fully-built multi-arch image to a provisional tag nobody would
-# discover by browsing GHCR, and `publish` — gated behind a required reviewer, see
-# the `environment: release` comment below — retags exactly that digest onto the
-# tags an operator would actually pull. Nothing rebuilds between the two; a
-# reviewer is approving the bytes that were already built and attested, not asking
-# for a second, unaudited build to happen. The `main`-push sha tag skips this
-# entirely — see the header paragraph above for why that is safe to leave
-# unattended.
-#
-# `workflow_dispatch` is this workflow's rehearsal: `build` now pushes to the
-# same provisional `pending-<sha>` tag on a manual dispatch as it does on a real
-# `v*` push (see the `login`/`push`/`tags` conditions below, each with a
-# `github.event_name == 'workflow_dispatch'` branch added), and gets a real
-# provenance attestation against that tag too — so the whole build-push-attest
-# path can be exercised any day, not only discovered broken the day a tag is
-# actually pushed. `publish` cannot be reached this way: it hard-requires
-# `github.event_name == 'push'` in addition to the tag-ref check — without
-# that, dispatching against an *existing* `v*` tag ref alone satisfies
-# `startsWith(github.ref, 'refs/tags/v')`, so a manual dispatch aimed at a
-# released tag could reach `publish` and retag `latest`, contingent only on
-# the `release` environment's reviewer setting actually being configured
-# (which, per the comment below, it might not be). The event check makes
-# that impossible regardless of environment config.
-#
-# No separate "fake version" input: this workflow's tags are git-ref-derived
-# and the fake provisional destination (`pending-<sha>`) needs no version to
-# be meaningful - the sha it is keyed on is real either way. `needs.build.outputs.tags` (the
-# human-facing `latest`/semver tags `meta` would compute) is simply never read
-# on a dispatch, because `publish` never runs on one.
+# Builds `docker/Dockerfile`'s `runtime-sharerr` target and publishes it to
+# GHCR. Everything about how that happens — the unattended sha-tag path on a
+# `main` push, the approval-gated `v*` tag path, the workflow_dispatch
+# rehearsal, the amd64-only PR build, the cache strategy — lives in
+# docker-image.yml, shared with docker-lighthouse.yml. See that file for the
+# reasoning behind each of those choices; only what is specific to *this*
+# image is here.
 
 name: Docker
 
@@ -60,265 +15,141 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Covers the whole run including the called workflow — this is what keeps a
+# quick follow-up push from leaving a superseded build running, without
+# sharing a queue with docker-lighthouse.yml's own group.
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
-# Read-only by default; each job below elevates only the permission it needs,
-# rather than every job inheriting `packages: write` whether it pushes or not.
-permissions:
-  contents: read
-
-env:
-  # GHCR rejects uppercase paths. `github.repository` happens to be all-lowercase
-  # today, so no normalisation is needed — worth remembering if the repo is ever
-  # moved under an org whose name has capitals in it.
-  IMAGE: ghcr.io/${{ github.repository }}
-
 jobs:
-  # Same gate as ci.yml's `changes` job — see the comment there. A push/PR
-  # that only touches .github/workflows/** can't change what this workflow
-  # would build, so there's nothing here for a 30-minute multi-arch build to
-  # re-prove. Tag pushes bypass this entirely (see `build`'s `if:` below): a
-  # release must build regardless of what the diff says.
-  # See changes.yml: shared with ci.yml, which wants the identical "anything
-  # outside .github/workflows/**" filter.
-  changes:
-    name: detect changes
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    # changes.yml's own job asks for `pull-requests: read` (dorny/paths-filter
-    # lists a PR's files through the API). A reusable workflow's job cannot
-    # request a scope the calling job does not hold, so granting it here is
-    # what makes the call valid at all — without it GitHub rejects this file
-    # outright rather than failing the run.
+  # A called workflow's jobs cannot request a permission this job does not
+  # hold — every scope any job inside docker-image.yml needs (including the
+  # nested `prepare` call's `pull-requests: read`) has to be granted here.
+  docker:
+    name: docker
     permissions:
       contents: read
+      packages: write
+      id-token: write
+      attestations: write
       pull-requests: read
-    uses: ./.github/workflows/changes.yml
+    uses: ./.github/workflows/docker-image.yml
     with:
+      # GHCR rejects uppercase paths. `github.repository` happens to be
+      # all-lowercase today, so no normalisation is needed — worth
+      # remembering if the repo is ever moved under an org whose name has
+      # capitals in it.
+      image: ghcr.io/${{ github.repository }}
+      target: runtime-sharerr
+      cache-scope: sharerr
+      publish-concurrency-group: release-docker
+      # Anything outside .github/workflows/** — a workflow-only change can't
+      # move what this image builds. Tag pushes bypass this filter entirely
+      # (docker-image.yml's own `build` job `if:`).
       filters: |
         code:
           - '**'
           - '!.github/workflows/**'
+          - '!**/*.md'
+          - '!docs/screenshots/**'
 
-  # See runner.yml: keeps a fork's pull_request build off the self-hosted box
-  # the same way ci.yml does. This workflow's `build` job never pushes on a
-  # fork PR either way (see the login step's condition below), but it still
-  # compiles the fork's own Dockerfile and Rust source, which is exactly the
-  # code a fork PR should not get to run wherever RUNNER_LABEL points.
-  runner:
-    name: pick the runner
-    uses: ./.github/workflows/runner.yml
-
-  build:
-    name: build
-    needs: [runner, changes]
-    if: >-
-      needs.runner.result == 'success' &&
-      (startsWith(github.ref, 'refs/tags/v') ||
-       needs.changes.result == 'skipped' ||
-       needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
-    timeout-minutes: 30
+  # Only on a real `v*` tag push, and only after `docker`'s own `publish` job
+  # has cleared its `environment: release` approval — `needs: docker` inherits
+  # that gate rather than asking for a second one, so cutting a release is
+  # still one approval, not two. Lives in this file rather than a standalone
+  # release.yml because there is no cross-workflow `needs:` in Actions; a
+  # `workflow_run`-triggered release would have to poll GitHub to learn
+  # whether docker-lighthouse.yml's own build also succeeded for this tag,
+  # which is exactly the coupling docs/RELEASING.md's "a break in one build
+  # cannot hold the other's release" deliberately avoids. A lighthouse build
+  # failure therefore does not block this job — the release still ships,
+  # describing whichever images actually published.
+  release:
+    name: create the GitHub Release
+    needs: docker
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The only job in this tree that needs it - `gh release create` writes a
+    # Releases-tab entry and, if the tag somehow didn't already exist, the tag
+    # itself. Nothing else here pushes back to GitHub.
     permissions:
-      contents: read
-      # Only actually exercised on a `v*` tag push — see the login step below —
-      # but a job's permissions are fixed before any step's `if:` is evaluated,
-      # so it has to be granted here regardless of which event triggered this run.
-      packages: write
-      id-token: write
-      attestations: write
-    outputs:
-      # The tags this image should carry once approved — computed here from
-      # metadata-action so `publish` promotes exactly what this build decided,
-      # rather than re-deriving the same ref/semver logic a second time.
-      tags: ${{ steps.meta.outputs.tags }}
-      # Where `publish` finds the digest this job actually pushed.
-      pending-ref: ${{ steps.pending.outputs.ref }}
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
           persist-credentials: false
 
-      # QEMU is needed for the arm64 leg, but only barely: the Dockerfile
-      # cross-compiles the Rust build natively, so the only emulated work is the
-      # runtime stage's apt-get and useradd. That is seconds, against the ~45
-      # minutes an emulated `cargo build --release` would cost.
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        with:
-          platforms: arm64
-
-      # Required for --platform builds and for the type=gha cache backend.
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      # Only when something is actually going to be pushed. A PR from a fork gets a
-      # read-only GITHUB_TOKEN, so logging in would fail for exactly the
-      # contributors least equipped to diagnose it — there is nothing to log in for
-      # on a PR. `workflow_dispatch` now logs in too: see the header comment's
-      # rehearsal paragraph. Keep this condition identical to `push:` below.
-      - if: >-
-          startsWith(github.ref, 'refs/tags/v') ||
-          (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-          github.event_name == 'workflow_dispatch'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # The tags this build *would* publish, computed either way: `publish`
-      # reads this output regardless of whether this run pushes anything today.
-      # Also emits the OCI labels, including org.opencontainers.image.source —
-      # that label is what links the GHCR package back to this repo and lets it
-      # inherit the repo's permissions.
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=sha
-
-      # A tag nobody would find by browsing GHCR's tag list, named after the
-      # commit rather than a counter so two runs of the same push never race
-      # each other for it. This is where a `v*` tag's real build actually
-      # lands — `publish` only ever points the human-facing tags at it.
-      - id: pending
+      # A tag that disagrees with the binary's own `--version` should fail
+      # here, before a release page claims otherwise - every crate still
+      # reads `version.workspace = true`, so this is the one place that
+      # claim lives.
+      - name: Confirm the tag matches the workspace version
         env:
-          SHA: ${{ github.sha }}
-        run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
-
-      # The unattended publish path: every push to `main` ships straight to
-      # this tag and nothing else — no `latest`, no branch name — findable
-      # only by someone who already has the commit sha that produced it.
-      # Matches `type=sha`'s own default naming (`meta` above, and
-      # CLAUDE.md's Repository section) so there is one sha-tag format to
-      # know, not two.
-      - id: sha-tag
-        env:
-          SHA: ${{ github.sha }}
-        run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
-
-      - id: push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          # A `v*` tag pushes to the provisional ref above — the real tags
-          # computed by `meta` reach GHCR only once `publish` is approved. A
-          # `main` push ships straight to its own sha-only tag with no
-          # approval gate — see that step's own comment for why. A manual
-          # `workflow_dispatch` also pushes now, to the same provisional ref a
-          # tag push would use — the rehearsal path; see the header comment.
-          # Every other event (a PR) keeps pushing nothing at all: those
-          # builds still exist solely to compile, which is what makes this
-          # job double as the MSRV gate.
-          push: >-
-            ${{ startsWith(github.ref, 'refs/tags/v') ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
-                github.event_name == 'workflow_dispatch' }}
-          tags: >-
-            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.pending.outputs.ref ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
-                steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # `mode=min`, not `max`. Exporting the intermediate builder stage would
-          # push a multi-GB release target/ tree per architecture into a cache that
-          # is 10 GB for the whole repository — evicting ci.yml's rust-cache — for a
-          # layer that can never be reused anyway, since `COPY . .` sits before the
-          # build and every commit changes its digest. What does get reused is the
-          # runtime stage's emulated apt-get, and min covers that.
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
-
-      # Signed proof that this exact digest was built by this workflow run, from
-      # this commit — checkable later with `gh attestation verify <image> --repo
-      # <owner>/<repo>` against whichever tag `publish` eventually points at it.
-      # `push-to-registry` attaches it to the image in GHCR as an OCI referrer,
-      # so it travels with the digest through the retag `publish` does below
-      # rather than needing to be regenerated against the final tags. Also runs
-      # on a rehearsal dispatch, against the same provisional tag a real tag
-      # push would attest — the rehearsal is meant to exercise this step too,
-      # not skip it and discover it broken on the day it matters.
-      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-  # The only job that publishes, and it waits for you.
-  #
-  # `environment: release` is what makes GitHub hold this job pending until a
-  # required reviewer approves it in the web UI. THAT REVIEWER IS NOT CONFIGURED
-  # BY THIS FILE — it is a repo setting, and until it exists the environment
-  # imposes no gate at all and this job runs unattended. One-time setup:
-  # Settings -> Environments -> New environment -> "release" -> tick "Required
-  # reviewers" and add yourself (and anyone else who should be able to approve
-  # a publish).
-  publish:
-    name: publish to GHCR (manual approval)
-    needs: build
-    # `github.event_name == 'push'`, not just the ref check: a workflow_dispatch
-    # run against an *existing* `v*` tag's ref would otherwise satisfy
-    # `startsWith(github.ref, 'refs/tags/v')` on its own and reach this job too
-    # - a real gap `build`'s rehearsal branch (see the header comment) would
-    # otherwise open, unattended, contingent only on whether the `release`
-    # environment's reviewer setting has actually been configured. This makes
-    # the rehearsal path structurally unable to publish regardless of that.
-    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: release
-    # Serialized, never cancelled, independent of the workflow-level
-    # `docker-${{ github.ref }}` group above: two close `v*` tags each carry a
-    # distinct ref (so the workflow-level group would let them run side by
-    # side), but only one retag onto the shared `latest` tag should ever be in
-    # flight at a time. A branch/PR build cancelling a superseded run is still
-    # correct and unaffected - this concurrency block only scopes the one job
-    # that touches the human-facing tags.
-    #
-    # `release-docker`, not the bare `release` docker-lighthouse.yml's own
-    # `publish` job also uses - deliberately a different group. The header
-    # comment's "a break in one build cannot hold the other's release" would
-    # stop being true if the two shared a queue: a stuck sharerr publish would
-    # then also block every lighthouse publish behind it, and neither image
-    # is a dependency of the other's release.
-    concurrency:
-      group: release-docker
-      cancel-in-progress: false
-    permissions:
-      packages: write
-    steps:
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # `imagetools create` needs the buildx CLI but builds nothing and needs no
-      # emulation — it is a registry-side copy of an existing manifest list onto
-      # new tags, which is what makes this job a retag rather than a rebuild.
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Promote the approved image to its real tags
-        env:
-          TAGS: ${{ needs.build.outputs.tags }}
-          PENDING: ${{ needs.build.outputs.pending-ref }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          args=()
-          while IFS= read -r tag; do
-            [ -n "$tag" ] && args+=(--tag "$tag")
-          done <<<"$TAGS"
-          if [ "${#args[@]}" -eq 0 ]; then
-            echo "no tags computed by the build job — nothing to promote" >&2
+          ws_version="$(awk '
+            /^\[workspace\.package\]/ { f = 1; next }
+            f && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }
+            /^\[/ { f = 0 }
+          ' Cargo.toml)"
+          tag_version="${TAG#v}"
+          if [ "$ws_version" != "$tag_version" ]; then
+            echo "::error::tag $TAG names version $tag_version, but Cargo.toml's [workspace.package] version is $ws_version" >&2
             exit 1
           fi
-          docker buildx imagetools create "${args[@]}" "$PENDING"
+          echo "tag $TAG matches workspace version $ws_version"
+
+      # The preamble GitHub's generated notes get prepended to below - see
+      # docs/RELEASING.md's own "Verifying a published image" section, which
+      # this restates so a reader of the release page never has to leave it.
+      - name: Write the release preamble
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Images"
+            echo
+            echo '```'
+            echo "docker pull ghcr.io/${REPO}:${TAG}"
+            echo "docker pull ghcr.io/${OWNER}/sharerr-lighthouse:${TAG}"
+            echo '```'
+            echo
+            echo "## Verifying what shipped"
+            echo
+            echo '```'
+            echo "gh attestation verify oci://ghcr.io/${REPO}:${TAG} --repo ${REPO}"
+            echo "gh attestation verify oci://ghcr.io/${OWNER}/sharerr-lighthouse:${TAG} --repo ${REPO}"
+            echo '```'
+            echo
+            echo "See [docs/RELEASING.md](https://github.com/${REPO}/blob/${TAG}/docs/RELEASING.md) for what these commands prove."
+          } >"$RUNNER_TEMP/preamble.md"
+
+      # `--verify-tag` is redundant given the `if:` above already requires a
+      # real tag push, but it costs nothing and turns a race or a misfired
+      # dispatch into a loud failure instead of a release built from whatever
+      # the default branch happened to be. `--generate-notes` derives the rest
+      # from merged PR titles since the last tag - the model
+      # docs/SUPPORT.md's "A maintained CHANGELOG.md" section names as the
+      # replacement for a hand-written changelog, not a `CHANGELOG.md` file.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=()
+          case "$TAG" in
+            *-*) prerelease_flag=(--prerelease) ;;
+          esac
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            --notes-file "$RUNNER_TEMP/preamble.md" \
+            "${prerelease_flag[@]}"

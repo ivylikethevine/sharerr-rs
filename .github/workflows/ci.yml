@@ -13,11 +13,16 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # Weekly, for `audit` only. A new advisory against a dependency is not something
-  # a commit to this repo causes, so waiting for the next push to hear about it is
-  # waiting for the wrong event.
-  schedule:
-    - cron: "0 6 * * 1"
+  # No weekly `schedule:` here — `audit` used to carry one for exactly the
+  # reason a stale-comment-shaped trap warns against: a new advisory against a
+  # dependency is not something a commit to this repo causes, so waiting for
+  # the next push to hear about it is waiting for the wrong event. But
+  # advisories.yml already runs `cargo deny check advisories` weekly, in the
+  # shape CLAUDE.md's "Three scheduled workflows" section prescribes for
+  # exactly this class of finding — keeping one tracking issue current rather
+  # than turning a Monday-morning run red with no diff to point at. Two crons
+  # answering the same question, one of them in the wrong shape, was the
+  # actual bug; `audit` below now exists purely as the per-PR gate.
 
 # A quick follow-up commit should not leave the previous run burning a runner.
 concurrency:
@@ -31,52 +36,42 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether anything besides workflow YAML changed. Editing this file (or
-  # runner.yml, pages.yml, ...) can't move a Rust lint, a test result, or a
-  # shellcheck finding, so there is nothing below for those jobs to re-check —
-  # this lets them report "skipped" instead of actually re-running cargo.
-  # zizmor and actionlint are deliberately exempt from this gate: they audit
-  # .github/ itself, so a workflow-only change is exactly the case they exist
-  # to catch.
+  # Which runner to use, and whether anything besides workflow YAML changed —
+  # merged into one call (see prepare.yml) so every heavy job below waits on one
+  # VM boot instead of two. Editing this file (or pages.yml, ...) can't move a
+  # Rust lint, a test result, or a shellcheck finding, so there is nothing below
+  # for those jobs to re-check on a workflow-only change. zizmor and actionlint
+  # are deliberately exempt from this gate: they audit .github/ itself, so a
+  # workflow-only change is exactly the case they exist to catch.
   #
-  # Only push and pull_request get filtered. On schedule (the weekly
-  # cargo-deny run) or workflow_dispatch (a human asking for the checks) this
-  # job doesn't even run, and the jobs below treat that skip as "assume yes" —
-  # a diff against the wrong commit must never be the reason a real check goes
-  # quiet.
-  # See changes.yml: shared with docker.yml, which wants the identical
-  # "anything outside .github/workflows/**" filter.
-  changes:
-    name: detect changes
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    # changes.yml's own job asks for `pull-requests: read` (dorny/paths-filter
-    # lists a PR's files through the API). A reusable workflow's job cannot
-    # request a scope the calling job does not hold, so granting it here is
-    # what makes the call valid at all — without it GitHub rejects this file
-    # outright rather than failing the run.
+  # `prepare` itself decides what a schedule or workflow_dispatch run means (see
+  # its own header comment): every job below only ever checks
+  # `needs.prepare.outputs.code == 'true'`, with no separate "assume yes on
+  # skip" branch to keep in sync.
+  # Shared with docker.yml, which wants the identical "anything outside
+  # .github/workflows/**" filter.
+  prepare:
+    name: prepare
     permissions:
-      contents: read
       pull-requests: read
-    uses: ./.github/workflows/changes.yml
+    uses: ./.github/workflows/prepare.yml
     with:
       filters: |
         code:
           - '**'
           - '!.github/workflows/**'
-
-  # See runner.yml: the one place that decides whether a run gets the
-  # self-hosted box, so a fork's pull_request run — which executes the fork's
-  # own copy of every *other* job below — can never read vars.RUNNER_LABEL
-  # straight off this repo and land its own code there.
-  runner:
-    name: pick the runner
-    uses: ./.github/workflows/runner.yml
+          - '!**/*.md'
+          - '!docs/screenshots/**'
+          # NOT '!docs/**' wholesale: crates/sharerr/src/openapi.rs reads
+          # ../../docs/openapi.json in a test, so that one file under docs/ is
+          # genuinely code and must still trip this filter.
 
   fmt:
     name: rustfmt
-    needs: [runner, changes]
-    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
+    needs: prepare
+    if: needs.prepare.outputs.code == 'true'
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,13 +82,17 @@ jobs:
       # rustfmt.toml sets only stable options (edition 2024, max_width,
       # use_field_init_shorthand), so the stable toolchain is sufficient — this
       # does not need nightly rustfmt.
-      # Pinned by commit, so `toolchain:` is stated explicitly: this action
-      # normally infers the toolchain from the ref name (`@stable`), and a SHA has
-      # no name to infer from.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          components: rustfmt
+      #
+      # A direct `rustup` call, not dtolnay/rust-toolchain: that action force-pushes
+      # every branch and tag on each Rust release, so any SHA pin of it goes stale
+      # (zizmor's `impostor-commit`) within about six weeks — this repo hit that in
+      # practice, not hypothetically. zizmor's own `superfluous-actions` audit
+      # recommends this exact replacement. `--profile minimal --no-self-update`
+      # matches what the action itself passed to rustup.
+      - name: Install the stable toolchain (rustfmt)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --no-self-update
+          rustup default stable
 
       # Its own job rather than a step in `test`: it takes seconds, and a stray
       # blank line should not hide the test results behind a failed job.
@@ -101,9 +100,10 @@ jobs:
 
   test:
     name: clippy + tests
-    needs: [runner, changes]
-    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
+    needs: prepare
+    if: needs.prepare.outputs.code == 'true'
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -111,11 +111,11 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # See the note in the `fmt` job about naming the toolchain explicitly.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: stable
-          components: clippy
+      # See the note in the `fmt` job about installing via rustup directly.
+      - name: Install the stable toolchain (clippy)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup default stable
 
       # `cache-on-failure` because this job is *designed* to fail: it is the gate on
       # unwrap_used/expect_used. Without it, every lint failure throws away the
@@ -123,6 +123,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # A PR reads main's cache and never writes its own multi-hundred-MB
+          # entry — with three rust-cache namespaces plus the buildx `type=gha`
+          # cache sharing one 10 GB repo-wide budget, PR traffic writing here
+          # would otherwise evict all of them continuously.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Clippy and the tests share a job because they share target/ and the
       # registry, so splitting them would pay for the dependency build twice.
@@ -148,9 +153,10 @@ jobs:
   # multi-arch matrix. `docker.yml` still catches it — this just catches it first.
   msrv:
     name: msrv (1.98)
-    needs: [runner, changes]
-    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
+    needs: prepare
+    if: needs.prepare.outputs.code == 'true'
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -159,15 +165,20 @@ jobs:
           persist-credentials: false
 
       # Pinned to the workspace's declared rust-version. When that changes, this
-      # changes with it — they are the same claim in two places.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          toolchain: "1.98"
+      # changes with it — they are the same claim in two places (three, counting
+      # docker/Dockerfile's identical FROM pin). See the `fmt` job's note about
+      # installing via rustup directly rather than dtolnay/rust-toolchain.
+      - name: Install the 1.98 toolchain
+        run: |
+          rustup toolchain install 1.98 --profile minimal --no-self-update
+          rustup default 1.98
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
           key: msrv
+          # See the `test` job's identical save-if — same cache-budget reasoning.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `check`, not `test`: this asks whether the code *compiles* on the declared
       # minimum, which is the whole claim. Running the suite again on an older
@@ -176,9 +187,10 @@ jobs:
 
   audit:
     name: cargo-deny
-    needs: [runner, changes]
-    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
+    needs: prepare
+    if: needs.prepare.outputs.code == 'true'
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,9 +214,10 @@ jobs:
   # block commented out and nothing noticed.
   scripts:
     name: shell + compose
-    needs: [runner, changes]
-    if: needs.runner.result == 'success' && (needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true')
-    runs-on: ${{ needs.runner.outputs.label }}
+    needs: prepare
+    if: needs.prepare.outputs.code == 'true'
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -260,18 +273,23 @@ jobs:
             echo "::endgroup::"
           done
 
-  # GitHub Actions security audit: expression injection, untrusted checkouts
-  # feeding privileged jobs, cache/artifact poisoning — the class of bug that
-  # SHA-pinning actions and reading crafted input through env: (see runner.yml)
-  # exist to prevent, checked automatically instead of by convention alone.
-  #
-  # Pinned hosted, not needs.runner: this job installs no apt packages and
-  # never touches the Docker socket, so it has nothing to gain from a
-  # self-hosted box — and it is exactly the job that should not be the one
-  # deciding, by its own runner, whether it trusts that box.
-  zizmor:
-    name: zizmor
+  # GitHub Actions security audit plus workflow syntax checking, merged into one
+  # job: zizmor catches expression injection, untrusted checkouts feeding
+  # privileged jobs, and cache/artifact poisoning; actionlint catches a bad
+  # `needs`, an invalid context, a step referencing an undefined output — the
+  # workflows are code too, and nothing else checks their syntax beyond "does
+  # the YAML parse". Both audit `.github/` itself, so a workflow-only change is
+  # exactly the case they exist to catch — neither gates on `prepare`. Both are
+  # pinned hosted rather than `needs.prepare.outputs.label`: neither installs
+  # apt packages or touches the Docker socket, so neither has anything to gain
+  # from the self-hosted box, and this is exactly the job that should not be the
+  # one deciding, by its own runner, whether it trusts that box. Both install
+  # through ./.github/actions/setup-tool, which caches the pinned release binary
+  # instead of a fresh `pip install`/`go install` on every run.
+  workflow-lint:
+    name: workflow lint (zizmor + actionlint)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -279,57 +297,38 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # Cached and pinned to a known-good version rather than the newest on
-      # every run — zizmor's own findings should change because the workflows
-      # changed, not because the linter did. ./setup-tool downloads the pinned
-      # release once per version and caches the binary, instead of a
-      # `pip install` on every run.
       - uses: ./.github/actions/setup-tool
         with:
           tool: zizmor
 
-      - name: Audit the workflows
+      - name: Audit the workflows (zizmor)
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --no-progress .github/
 
-  # Bad `needs`, invalid contexts, a step referencing an undefined output — the
-  # workflows are code too, and nothing else checks their syntax beyond
-  # "does the YAML parse".
-  actionlint:
-    name: actionlint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      # Was `go install` on every run; ./setup-tool caches the pinned release
-      # binary instead of resolving and building the module each time.
       - uses: ./.github/actions/setup-tool
         with:
           tool: actionlint
 
-      - name: Lint the workflows
+      - name: Lint the workflows (actionlint)
         run: actionlint -color
 
-  # Advisory, not a gate: DL3008 (pin every apt package) and its neighbours are
-  # about a Debian mirror's churn, not a defect in this Dockerfile — worth
-  # seeing, never worth reddening a PR over. `.hadolint.yaml` documents the
-  # handful of rules that do not apply here at all (a reason per entry); what
-  # is not in that list still surfaces below.
-  #
-  # Intentionally the newest hadolint release rather than a pin: unlike a
-  # style linter whose findings should only move when the Dockerfile does,
-  # hadolint occasionally adds a rule for a genuinely new class of mistake,
-  # and this job never blocks a merge regardless of which version notices it.
-  hadolint:
-    name: hadolint (advisory)
-    needs: changes
-    if: needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true'
+  # Three advisory-only checks, merged into one job: none of them ever blocks a
+  # merge, and each already ends in its own ./.github/actions/advisory-note
+  # call, so the step summary each produces is unchanged — only the VM they
+  # share is. hadolint and markdownlint keep their `prepare` gate, now as a
+  # step-level `if:` instead of a job-level one; typos stays ungated, same as
+  # before — a typo can live in Rust source as easily as in a doc. One
+  # consequence of sharing a job: if `prepare` itself fails outright (not
+  # merely reports no code changes), this whole job — typos included — is
+  # skipped along with it, where standalone `typos` previously ran regardless.
+  # `prepare` failing outright is rare enough not to be worth an `if:
+  # always()` job condition to preserve that corner exactly.
+  advisory:
+    name: advisory (hadolint + markdownlint + typos)
+    needs: prepare
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -337,35 +336,49 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
+      # Advisory, not a gate: DL3008 (pin every apt package) and its
+      # neighbours are about a Debian mirror's churn, not a defect in this
+      # Dockerfile — worth seeing, never worth reddening a PR over.
+      # `.hadolint.yaml` documents the handful of rules that do not apply here
+      # at all (a reason per entry); what is not in that list still surfaces
+      # below.
+      #
+      # Intentionally the newest hadolint release rather than a pin: unlike a
+      # style linter whose findings should only move when the Dockerfile does,
+      # hadolint occasionally adds a rule for a genuinely new class of
+      # mistake, and this step never blocks a merge regardless of which
+      # version notices it.
       - name: Install hadolint
+        if: needs.prepare.outputs.code == 'true'
         run: |
           set -euo pipefail
           curl -sL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
             -o /usr/local/bin/hadolint
           chmod +x /usr/local/bin/hadolint
 
-      - id: lint
-        name: Lint the Dockerfiles
+      - id: hadolint
+        name: Lint the Dockerfile
+        if: needs.prepare.outputs.code == 'true'
         run: |
           set -uo pipefail
           : >"$RUNNER_TEMP/hadolint.out"
-          hadolint -c .hadolint.yaml docker/Dockerfile docker/Dockerfile.lighthouse >>"$RUNNER_TEMP/hadolint.out" 2>&1
+          hadolint -c .hadolint.yaml docker/Dockerfile >>"$RUNNER_TEMP/hadolint.out" 2>&1
           status=$?
           if [ -s "$RUNNER_TEMP/hadolint.out" ]; then
             cat "$RUNNER_TEMP/hadolint.out"
             echo "found=1" >>"$GITHUB_OUTPUT"
           else
-            echo "hadolint: clean across both Dockerfiles"
+            echo "hadolint: clean"
             echo "found=0" >>"$GITHUB_OUTPUT"
           fi
           exit "$status"
         continue-on-error: true
 
-      - name: Truncate the findings before they go in the summary
-        if: steps.lint.outputs.found == '1'
+      - name: Truncate the hadolint findings before they go in the summary
+        if: needs.prepare.outputs.code == 'true' && steps.hadolint.outputs.found == '1'
         run: sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
 
-      - if: steps.lint.outputs.found == '1'
+      - if: needs.prepare.outputs.code == 'true' && steps.hadolint.outputs.found == '1'
         uses: ./.github/actions/advisory-note
         with:
           title: hadolint
@@ -376,21 +389,10 @@ jobs:
             reason per silenced rule; anything reaching here is deliberately left visible.
           report-file: ${{ runner.temp }}/hadolint-summary.out
 
-  # Advisory, same reasoning as hadolint above: a heading level or a stray
-  # long line in a doc is worth seeing and has never shipped a bug.
-  markdownlint:
-    name: markdownlint (advisory)
-    needs: changes
-    if: needs.changes.result == 'skipped' || needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      - id: lint
+      # Advisory, same reasoning as hadolint above: a heading level or a
+      # stray long line in a doc is worth seeing and has never shipped a bug.
+      - id: markdownlint
+        if: needs.prepare.outputs.code == 'true'
         continue-on-error: true
         uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
         with:
@@ -398,7 +400,7 @@ jobs:
             **/*.md
           config: ".markdownlint.yaml"
 
-      - if: steps.lint.outcome == 'failure'
+      - if: needs.prepare.outputs.code == 'true' && steps.markdownlint.outcome == 'failure'
         uses: ./.github/actions/advisory-note
         with:
           title: markdownlint
@@ -408,31 +410,21 @@ jobs:
             Advisory only: this job never blocks a merge. See the step above for the
             findings, or run `markdownlint-cli2 '**/*.md'` locally.
 
-  # Advisory, and deliberately so for now: this is the first run of `typos`
-  # against this tree at all, and _typos.toml's own header says why it starts
-  # with no entries. Promote this to a gate
-  # (same shape as `fmt`/`test`/`msrv` above, no `continue-on-error`) once a
-  # run or two has come back clean or the allowlist has caught up with what's
-  # left. Not gated on `changes`: a typo can live in Rust source as easily as
-  # in a doc, so this runs on every push and PR like workflow-lint does.
-  typos:
-    name: typos (advisory)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
+      # Advisory, and deliberately so for now: this is the first run of
+      # `typos` against this tree at all, and _typos.toml's own header says
+      # why it starts with no entries. Promote this to a gate (same shape as
+      # `fmt`/`test`/`msrv` above, no `continue-on-error`) once a run or two
+      # has come back clean or the allowlist has caught up with what's left.
       - uses: ./.github/actions/setup-tool
         with:
           tool: typos
 
-      - id: lint
+      - id: typos
         name: Check for typos
         continue-on-error: true
         run: typos
 
-      - if: steps.lint.outcome == 'failure'
+      - if: steps.typos.outcome == 'failure'
         uses: ./.github/actions/advisory-note
         with:
           title: typos

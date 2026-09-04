@@ -197,23 +197,27 @@ added later inherits the tolerance instead of needing to remember it.
 ## Repository
 
 Publishing to GHCR happens two ways. Every push to `main` builds both
-architectures — that build is load-bearing as the MSRV check — and ships
-unattended under a `sha-<7-char-sha>` tag and nothing else: no `latest`, no
-`:main`, no branch tag of any kind, so an image only turns up for someone who
-already has the commit sha that produced it. A `v*` tag goes through the
-slower, approval-gated path (`build` then `publish`, see each workflow's own
-comments) and is what actually moves `latest` and the semver tags.
+architectures and ships unattended under a `sha-<7-char-sha>` tag and nothing
+else: no `latest`, no `:main`, no branch tag of any kind, so an image only
+turns up for someone who already has the commit sha that produced it. A pull
+request builds amd64 only — see "One Dockerfile, two targets" below — so `main`
+is also where the arm64 cross path gets proven on every merge, not just on a
+release. A `v*` tag goes through the slower, approval-gated path (`build` then
+`publish`, see `docker-image.yml`'s own comments) and is what actually moves
+`latest` and the semver tags.
 
-**Two images ship, from two workflows.** `docker.yml` builds `docker/Dockerfile`
-into `ghcr.io/<repo>`; `docker-lighthouse.yml` builds
-`docker/Dockerfile.lighthouse` into `ghcr.io/<owner>/sharerr-lighthouse`. They
-are separate so a break in one cannot
-hold the other's release, and so each is approved on its own. Both Dockerfiles
-pin the toolchain to `rust-version`, and **both pins have to move together** —
-a lighthouse pin that silently drifts behind `rust-version` leaves that image
-with no working MSRV check at all, and nothing reports it.
+**Two images ship, from two workflows, out of one Dockerfile.** `docker.yml`
+and `docker-lighthouse.yml` are both thin callers of the shared
+`docker-image.yml`, passing `target: runtime-sharerr` /
+`target: runtime-lighthouse` into `docker/Dockerfile` — one file, one builder
+stage, one MSRV pin. They still publish as two separate images (`ghcr.io/<repo>`
+and `ghcr.io/<owner>/sharerr-lighthouse`) behind two separate approvals, so a
+break in one build still cannot hold the other's release; what they no longer
+have is a second copy of the pin to drift out of sync. That used to be a real
+trap — "both pins have to move together" — and merging the file is what
+removed it rather than a comment enforcing it.
 
-**Every container image is pinned by digest, not just by tag.** Both Dockerfiles
+**Every container image is pinned by digest, not just by tag.** `docker/Dockerfile`
 and all nine compose files under `docker/` carry `name:tag@sha256:...`. The tag
 stays for legibility; the digest is what actually resolves. Adding an image
 means pinning it the same way — `docker buildx imagetools inspect <ref>
@@ -221,8 +225,24 @@ means pinning it the same way — `docker buildx imagetools inspect <ref>
 
 Two things read those pins back, and neither tolerates a bare tag:
 `.github/scripts/scan_pinned_images.sh` extracts them by regex (a bare tag is
-invisible to it, so an unpinned image is silently unscanned), and dependabot's
-`docker` / `docker-compose` entries rewrite tag and digest together.
+invisible to it, so an unpinned image is silently unscanned — this is also why
+it always needs to be pointed at `docker/Dockerfile`'s actual path, not a bare
+filename: it missed both base-image pins entirely until that path was fixed),
+and dependabot's `docker` / `docker-compose` entries rewrite tag and digest
+together.
+
+**cargo-chef caches the dependency compile as a real image layer, not a
+`--mount=type=cache`.** `docker/Dockerfile` cooks the workspace's ~400
+third-party crates once per package (`cargo chef cook --package <sharerr |
+sharerr-lighthouse>`) before `COPY . .` ever runs, so CI — where a
+`--mount=type=cache` mount never persisted between runs in the first place —
+finally gets a warm dependency layer instead of rebuilding cold on every PR.
+The one way to break this silently: give `cook` and the `cargo build`
+immediately after it different flags (profile, `--target`, `--package`), or
+put a cache mount back on either step. Either mistake produces a correct image
+and zero speedup, with the cook step still reporting `CACHED` — see the
+Dockerfile's own comments at the `builder-sharerr` and `builder-lighthouse`
+stages before touching either.
 
 **A compose file's _name_ decides whether dependabot manages it.** The
 `docker-compose` ecosystem matches filenames against

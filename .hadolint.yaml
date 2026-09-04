@@ -10,10 +10,10 @@ ignored:
   # does. The base image tag is what this build's reproducibility actually
   # rests on.
   - DL3008
-  # `$CROSS` in both Dockerfiles is deliberately unquoted: it is either empty
-  # or a space-separated list of package names for `apt-get install`, and
-  # quoting it would collapse that list into one invalid argument instead of
-  # several packages.
+  # `$CROSS` in the `toolchain` stage is deliberately unquoted: it is either
+  # empty or a space-separated list of package names for `apt-get install`,
+  # and quoting it would collapse that list into one invalid argument instead
+  # of several packages.
   - SC2086
   # `USER sharerr` / `USER lighthouse` names an account this same Dockerfile
   # creates via `useradd --uid 1000`, so it resolves to the same numeric id

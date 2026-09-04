@@ -1,0 +1,371 @@
+# Builds one runtime target out of docker/Dockerfile, and publishes it to GHCR
+# two ways. Shared by docker.yml (target: runtime-sharerr) and
+# docker-lighthouse.yml (target: runtime-lighthouse) — the two workflows used to
+# each carry their own copy of everything below, down to a byte-identical
+# "Promote the approved image to its real tags" shell block. Everything that
+# differed between them is now an `inputs.*` value; every comment on *why* each
+# piece of this works the way it does moved here with the code it explains, and
+# is not repeated in either caller.
+#
+# Every push to `main` ships unattended, under a tag that carries nothing but
+# the commit sha — no `latest`, no branch name, nothing a human would stumble
+# across browsing GHCR's tag list. See the `sha-tag` step below for the exact
+# format. A `v*` tag goes through the slower, approval-gated path described
+# below instead.
+#
+# That split is deliberate: the build is load-bearing as the MSRV check
+# (below), while publishing the tags an operator would actually reach for —
+# `latest`, a semver — should be something you choose to do, not a side
+# effect of merging. The sha-only tag is a lower-stakes middle ground: it
+# publishes unattended because nobody can pull it without already knowing the
+# exact commit that produced it.
+#
+# This also doubles as the MSRV check for the whole project. docker/Dockerfile's
+# builder stage is pinned to the workspace's declared rust-version (1.98) while a
+# developer's local toolchain is invariably newer, so a build here is the only
+# thing that reliably catches code reaching past the MSRV. That is why pull
+# requests build the image even though they never publish it — amd64 only,
+# though: see the `platforms` step below for why arm64 stays a main/tag-only
+# check rather than a per-PR one.
+#
+# A `v*` tag no longer publishes straight to `:latest`/`:X.Y.Z` unattended: `build`
+# pushes the real, fully-built multi-arch image to a provisional tag nobody would
+# discover by browsing GHCR, and `publish` — gated behind a required reviewer, see
+# the `environment: release` comment below — retags exactly that digest onto the
+# tags an operator would actually pull. Nothing rebuilds between the two; a
+# reviewer is approving the bytes that were already built and attested, not asking
+# for a second, unaudited build to happen. The `main`-push sha tag skips this
+# entirely — see the paragraph above for why that is safe to leave unattended.
+#
+# `workflow_dispatch` is this workflow's rehearsal: `build` pushes to the same
+# provisional `pending-<sha>` tag on a manual dispatch as it does on a real `v*`
+# push (see the `login`/`push`/`tags` conditions below, each with a
+# `github.event_name == 'workflow_dispatch'` branch added), and gets a real
+# provenance attestation against that tag too — so the whole build-push-attest
+# path can be exercised any day, not only discovered broken the day a tag is
+# actually pushed. `publish` cannot be reached this way: it hard-requires
+# `github.event_name == 'push'` in addition to the tag-ref check — without
+# that, dispatching against an *existing* `v*` tag ref alone satisfies
+# `startsWith(github.ref, 'refs/tags/v')`, so a manual dispatch aimed at a
+# released tag could reach `publish` and retag `latest`, contingent only on
+# the `release` environment's reviewer setting actually being configured
+# (which, per the comment below, it might not be). The event check makes
+# that impossible regardless of environment config.
+#
+# No separate "fake version" input: this workflow's tags are git-ref-derived
+# and the fake provisional destination (`pending-<sha>`) needs no version to
+# be meaningful - the sha it is keyed on is real either way. `needs.build.outputs.tags` (the
+# human-facing `latest`/semver tags `meta` would compute) is simply never read
+# on a dispatch, because `publish` never runs on one.
+
+name: Build and publish a Docker image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The image reference to build and publish, without a tag (e.g. ghcr.io/owner/repo).
+        type: string
+        required: true
+      target:
+        description: The docker/Dockerfile build target — runtime-sharerr or runtime-lighthouse.
+        type: string
+        required: true
+      filters:
+        description: dorny/paths-filter rules (YAML), passed through to prepare.yml.
+        type: string
+        required: true
+      cache-scope:
+        description: The type=gha buildx cache scope for this image (kept distinct per image so they don't evict each other).
+        type: string
+        required: true
+      publish-concurrency-group:
+        description: The concurrency group for the `publish` job — kept distinct per image so a stuck publish on one can never queue behind, or block, the other's.
+        type: string
+        required: true
+      build-timeout:
+        description: Minutes before the `build` job is killed.
+        type: number
+        default: 30
+      extra-labels:
+        description: >-
+          Extra OCI labels for docker/metadata-action, on top of its defaults.
+          docker.yml gets org.opencontainers.image.source for free because its
+          `image` is the repository itself; an image named for a crate instead
+          (the lighthouse) has to state the link back to this repo explicitly.
+        type: string
+        default: ""
+
+# No workflow-level `concurrency:` here, deliberately: that stays in each
+# caller (`docker-${{ github.ref }}` / `docker-lighthouse-${{ github.ref }}`),
+# which is what keeps the two images from sharing one queue. A group declared
+# here would apply across both callers instead.
+#
+# Read-only by default; each job below elevates only the permission it needs,
+# rather than every job inheriting `packages: write` whether it pushes or not.
+# The calling job's own `permissions:` is the ceiling here — see each caller's
+# `uses:` block, which has to grant every one of these up front.
+permissions:
+  contents: read
+
+jobs:
+  # Which runner to use, and whether anything this image cares about changed —
+  # see prepare.yml. Tag pushes bypass the result entirely (`build`'s `if:`
+  # below): a release must build regardless of what the diff says.
+  prepare:
+    name: prepare
+    permissions:
+      pull-requests: read
+    uses: ./.github/workflows/prepare.yml
+    with:
+      filters: ${{ inputs.filters }}
+
+  # See prepare.yml: the one place that decides whether a run gets the
+  # self-hosted box, so a fork's pull_request build — which compiles the
+  # fork's own Dockerfile and Rust source — can never read vars.RUNNER_LABEL
+  # straight off this repo and land its own code there. This job never pushes
+  # on a fork PR either way (see the login step's condition below), but it
+  # still runs the compile, which is exactly the code a fork PR should not
+  # get to run wherever RUNNER_LABEL points.
+  build:
+    name: build
+    needs: prepare
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      needs.prepare.outputs.code == 'true'
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: ${{ inputs.build-timeout }}
+    permissions:
+      contents: read
+      # Only actually exercised on a `v*` tag push — see the login step below —
+      # but a job's permissions are fixed before any step's `if:` is evaluated,
+      # so it has to be granted here regardless of which event triggered this run.
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      # The tags this image should carry once approved — computed here from
+      # metadata-action so `publish` promotes exactly what this build decided,
+      # rather than re-deriving the same ref/semver logic a second time.
+      tags: ${{ steps.meta.outputs.tags }}
+      # Where `publish` finds the digest this job actually pushed.
+      pending-ref: ${{ steps.pending.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      # QEMU is needed for the arm64 leg, but only barely: the Dockerfile
+      # cross-compiles the Rust build natively, so the only emulated work is the
+      # runtime stage's apt-get and useradd. That is seconds, against the ~45
+      # minutes an emulated `cargo build --release` would cost. Skipped
+      # entirely on a PR, where `platforms` below never asks for arm64 at all —
+      # a PR's job is proving amd64 still builds and still passes the MSRV
+      # check; the cross-compile path is verified on every push to `main` and
+      # every `v*` tag instead, so it cannot rot unnoticed for longer than one
+      # merge.
+      - if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+
+      # Required for --platform builds and for the type=gha cache backend.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Only when something is actually going to be pushed. A PR from a fork gets a
+      # read-only GITHUB_TOKEN, so logging in would fail for exactly the
+      # contributors least equipped to diagnose it — there is nothing to log in for
+      # on a PR. `workflow_dispatch` now logs in too: see the header comment's
+      # rehearsal paragraph. Keep this condition identical to `push:` below.
+      - if: >-
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+          github.event_name == 'workflow_dispatch'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The tags this build *would* publish, computed either way: `publish`
+      # reads this output regardless of whether this run pushes anything today.
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.image }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # No `-` clause: a prerelease tag (v1.0.0-rc1) must never move
+            # `latest` onto a release candidate.
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
+            type=sha
+          labels: ${{ inputs.extra-labels }}
+
+      # A tag nobody would find by browsing GHCR's tag list, named after the
+      # commit rather than a counter so two runs of the same push never race
+      # each other for it. This is where a `v*` tag's real build actually
+      # lands — `publish` only ever points the human-facing tags at it.
+      - id: pending
+        env:
+          IMAGE: ${{ inputs.image }}
+          SHA: ${{ github.sha }}
+        run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
+
+      # The unattended publish path: every push to `main` ships straight to
+      # this tag and nothing else — no `latest`, no branch name — findable
+      # only by someone who already has the commit sha that produced it.
+      # Matches `type=sha`'s own default naming (`meta` above, and
+      # CLAUDE.md's Repository section) so there is one sha-tag format to
+      # know, not two.
+      - id: sha-tag
+        env:
+          IMAGE: ${{ inputs.image }}
+          SHA: ${{ github.sha }}
+        run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
+
+      - id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ inputs.target }}
+          # amd64 only on a PR; both architectures on a push to `main` and on
+          # a `v*` tag, which is what actually needs to prove the arm64 cross
+          # path (and what `publish` eventually promotes). See the QEMU step
+          # above for the corresponding skip.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          # A `v*` tag pushes to the provisional ref above — the real tags
+          # computed by `meta` reach GHCR only once `publish` is approved. A
+          # `main` push ships straight to its own sha-only tag with no
+          # approval gate — see that step's own comment for why. A manual
+          # `workflow_dispatch` also pushes now, to the same provisional ref a
+          # tag push would use — the rehearsal path; see the header comment.
+          # Every other event (a PR) keeps pushing nothing at all: those
+          # builds still exist solely to compile, which is what makes this
+          # job double as the MSRV gate.
+          push: >-
+            ${{ startsWith(github.ref, 'refs/tags/v') ||
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+                github.event_name == 'workflow_dispatch' }}
+          tags: >-
+            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.pending.outputs.ref ||
+                (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
+                steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # `cache-from` reads on every event; `cache-to` writes only from a
+          # push to `main`. A PR or a `v*` tag reads whatever `main` last
+          # wrote (GitHub Actions cache entries are visible to every ref, not
+          # just the one that wrote them — a tag build especially has no need
+          # to write its own copy of a cache `main` just populated).
+          #
+          # `mode=max`, now that docker/Dockerfile cooks its dependency layer
+          # with cargo-chef: exporting the builder stage is the entire point —
+          # under `mode=min`, only the final image's layers would export, and
+          # the cargo-chef cook layer that makes CI builds warm would never
+          # reach the cache at all. `mode=min` was the right call for the
+          # pre-chef Dockerfile (the old comment here explained why: `COPY . .`
+          # sat before the build and every commit changed its digest, so the
+          # only reusable layer was the runtime stage's emulated apt-get) — it
+          # stops being right the moment the layer being exported is a
+          # manifest-derived dependency build instead of the whole workspace.
+          cache-from: type=gha,scope=${{ inputs.cache-scope }}
+          cache-to: >-
+            ${{ (github.ref == 'refs/heads/main' && github.event_name == 'push') &&
+                format('type=gha,mode=max,scope={0}', inputs.cache-scope) || '' }}
+
+      # Signed proof that this exact digest was built by this workflow run, from
+      # this commit — checkable later with `gh attestation verify <image> --repo
+      # <owner>/<repo>` against whichever tag `publish` eventually points at it.
+      # `push-to-registry` attaches it to the image in GHCR as an OCI referrer,
+      # so it travels with the digest through the retag `publish` does below
+      # rather than needing to be regenerated against the final tags. Also runs
+      # on a rehearsal dispatch, against the same provisional tag a real tag
+      # push would attest — the rehearsal is meant to exercise this step too,
+      # not skip it and discover it broken on the day it matters.
+      - if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ inputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # The only job that publishes, and it waits for you.
+  #
+  # `environment: release` is what makes GitHub hold this job pending until a
+  # required reviewer approves it in the web UI. THAT REVIEWER IS NOT CONFIGURED
+  # BY THIS FILE — it is a repo setting, and until it exists the environment
+  # imposes no gate at all and this job runs unattended. One-time setup:
+  # Settings -> Environments -> New environment -> "release" -> tick "Required
+  # reviewers" and add yourself (and anyone else who should be able to approve
+  # a publish).
+  #
+  # Hard-coded, not `inputs.*`: both callers already want the identical literal
+  # "release", and a non-existent environment name is auto-created on first
+  # use with *no* protection rules — an expression that evaluated to a typo or
+  # an empty input would silently produce an ungated publish, exactly what this
+  # whole approval gate exists to prevent. `publish-concurrency-group` below is
+  # the one input that does need to vary per caller, and a wrong value there
+  # fails safe (worst case, two publishes serialize that didn't need to).
+  publish:
+    name: publish to GHCR (manual approval)
+    needs: build
+    # `github.event_name == 'push'`, not just the ref check: a workflow_dispatch
+    # run against an *existing* `v*` tag's ref would otherwise satisfy
+    # `startsWith(github.ref, 'refs/tags/v')` on its own and reach this job too
+    # - a real gap `build`'s rehearsal branch (see the header comment) would
+    # otherwise open, unattended, contingent only on whether the `release`
+    # environment's reviewer setting has actually been configured. This makes
+    # the rehearsal path structurally unable to publish regardless of that.
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    # Serialized, never cancelled, independent of each caller's own
+    # workflow-level `docker[-lighthouse]-${{ github.ref }}` group: two close
+    # `v*` tags each carry a distinct ref (so that group would let them run
+    # side by side), but only one retag onto the shared `latest` tag should
+    # ever be in flight at a time.
+    #
+    # `inputs.publish-concurrency-group`, not a literal here: the two callers
+    # need genuinely distinct groups (`release-docker` / `release-lighthouse`)
+    # — a stuck sharerr publish must never queue behind, or block, a
+    # lighthouse one, which is exactly what one shared group would do. Unlike
+    # `environment:` above, a wrong value here cannot un-gate anything; it can
+    # only over- or under-serialize two publishes that were already both
+    # behind the same reviewer approval.
+    concurrency:
+      group: ${{ inputs.publish-concurrency-group }}
+      cancel-in-progress: false
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `imagetools create` needs the buildx CLI but builds nothing and needs no
+      # emulation — it is a registry-side copy of an existing manifest list onto
+      # new tags, which is what makes this job a retag rather than a rebuild.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Promote the approved image to its real tags
+        env:
+          TAGS: ${{ needs.build.outputs.tags }}
+          PENDING: ${{ needs.build.outputs.pending-ref }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<<"$TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no tags computed by the build job — nothing to promote" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${args[@]}" "$PENDING"
