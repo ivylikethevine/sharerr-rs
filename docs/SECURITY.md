@@ -173,6 +173,27 @@ values. This paragraph is the record of that dismissal; a dismissal is
 fingerprint-bound to the flagged line, so moving the code resets it and the
 finding reappears as new.
 
+**The vault key _names_ `rust/cleartext-logging` flags in `commands/doctor.rs`.**
+`TorrentClientSettings::api_key_key` and `::password_key` are
+`Option<&'static str>`, and the only values they ever hold are the
+`secret_keys` constants — `"qbittorrent.api_key"`, `"transmission.password"`
+and friends. They name the vault slot a secret is stored _under_; they cannot
+carry the secret itself, because the type is a compile-time literal and no
+runtime value is ever assigned to one. `doctor` prints them so an operator can
+see which slot to fill (`qbittorrent.api_key is set`), which is most of what
+the command is for. CodeQL matches them on the field name alone — anything
+containing `api_key` or `password` is sensitive to its heuristic, regardless of
+what flows through it — and there is no rename that both drops those substrings
+and still says what the field is. Dismissed rather than renamed.
+
+**The operator's own username in `doctor`'s client summary.** The same query
+flags `println!("  client: {} {} (user {username})")`. That line exists so an
+operator confirms _which account_ the configured client authenticates as; a
+`doctor` run that hid it would send someone to debug the wrong service, the
+same failure the surrounding comment describes for the URL. It writes to the
+operator's terminal about their own instance, not to a shared log, and the
+username is not a credential.
+
 **`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack) is not in this
 list**, though a stale Scorecard report may claim it should be. `rsa` would
 ride in only via `sqlx-mysql`, and `sqlx` 0.9's mysql backend does not depend

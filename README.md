@@ -4,8 +4,15 @@
 
 _Share your media library with friends, over the tools you already run._
 
-<!--TODO: Add a release badge for each of the docker images -->
+<!-- All three release badges read the same GitHub Release version, on purpose.
+docs/RELEASING.md's publish gate only creates the Release page once _both_
+images carry the tag, so one number is the honest answer for all three - and
+shields.io has no GHCR version endpoint to ask instead, so this is also the
+only reading that cannot drift per-image. -->
 
+[![Release](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=github&label=release)](https://github.com/ivylikethevine/sharerr-rs/releases/latest)
+[![sharerr image](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=docker&logoColor=white&label=ghcr.io%2Fsharerr-rs)](https://github.com/ivylikethevine/sharerr-rs/pkgs/container/sharerr-rs)
+[![lighthouse image](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=docker&logoColor=white&label=ghcr.io%2Fsharerr-lighthouse)](https://github.com/ivylikethevine/sharerr-rs/pkgs/container/sharerr-lighthouse)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fivylikethevine.github.io%2Fsharerr-rs%2Fbadges%2Fcoverage.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14449/badge)](https://www.bestpractices.dev/projects/14449)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)

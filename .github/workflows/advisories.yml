@@ -65,7 +65,7 @@ jobs:
       # SHA-pinned like every other, so dependabot owns its version; cargo-deny
       # itself is resolved to its own latest release, which is what you want
       # from the thing reading the advisory database.
-      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+      - uses: taiki-e/install-action@5bf6ce016fd2e72eefc647cbca1e4213f65955b8 # v2.87.5
         with:
           tool: cargo-deny
 
