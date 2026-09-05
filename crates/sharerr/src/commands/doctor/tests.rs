@@ -1,4 +1,3 @@
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
 use sharerr_core::config::{LibraryKind, TorrentBackend};
