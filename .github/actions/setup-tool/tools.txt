@@ -58,4 +58,4 @@ cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/d
 # "lychee-v0.24.2" as newer than any pin forever, which is why this row no
 # longer needs `check = "-"` to opt out of drift checking entirely.
 lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v|1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
-typos|1.50.0|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||a1497c9626ba0bab731b3e37c12ac9051bbfa2a253463d4d574c28f190b5497b
+typos|1.50.1|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||edf0545109aee6a22751d04ddecb97c45be47d3aa0409564fb895eeeace91b1e

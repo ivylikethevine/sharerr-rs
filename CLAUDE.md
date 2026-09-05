@@ -57,6 +57,18 @@ entirely locally (one-time CLI download; the script's header says where
 from). Not part of the always-run loop, since it is slow; run it before
 pushing anything touching crypto, secret handling, or a workflow file.
 
+**A local run needs the toolchain's `rust-src` component, and the script now
+refuses without it.** The extractor expands macros through an embedded
+rust-analyzer that reads `core`'s sources out of `rust-src`; nothing installs
+it by default. Without it every `format!`, `assert!`, `println!` and `panic!`
+fails to expand and the report says "clean" whether the tree is or not - one
+run here failed 4274 expansions across 91 of 106 files and found two things.
+That is why the preflight exists; `SKIP_RUST_SRC_CHECK=1` bypasses it, and a
+clean result then means nothing. Note also that even a healthy run resolves
+very few of the query's logging sinks under `build-mode: none` - `tracing::`
+macros are not modelled as sinks at all (only `log::`, `println!` and
+`panic!` are), so a local zero is not evidence the Security tab is empty.
+
 **A PR's CodeQL check only shows alerts on lines the diff touched.** A full
 local run scans the whole tree and surfaces findings no PR ever showed; a
 first full run here found 52, chiefly in two auth-adjacent test suites. Most

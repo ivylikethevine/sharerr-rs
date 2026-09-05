@@ -54,8 +54,53 @@ case "${1:-both}" in
         ;;
 esac
 
+# The Rust extractor expands macros through an embedded rust-analyzer, which
+# reads `core`'s own sources out of the toolchain's `rust-src` component.
+# Nothing installs that by default: rustup omits it until asked, and a distro
+# rust package (Arch's among them) splits it into a separate package. Without
+# it every `format!`, `assert!`, `println!` and `panic!` in the tree fails to
+# expand — and that failure is silent. Extraction still succeeds, the analysis
+# still runs, and this script still prints "clean", while the sinks the
+# cleartext-logging and log-injection queries match on have simply stopped
+# existing in the database. One run here failed 4274 expansions under
+# `crates/` and reported two findings; the same tree with `rust-src` present
+# is the only number worth acting on. Checked rather than assumed, because
+# "clean" and "never analyzed" are indistinguishable in the output.
+if [ -z "${SKIP_RUST_SRC_CHECK:-}" ] && [[ " ${LANGUAGES[*]} " == *" rust "* ]]; then
+    if ! command -v rustc >/dev/null 2>&1; then
+        echo "run_codeql: no rustc on PATH - the rust extractor needs one to find its sysroot." >&2
+        exit 127
+    fi
+    RUST_SYSROOT="$(rustc --print sysroot)"
+    if ! [ -f "$RUST_SYSROOT/lib/rustlib/src/rust/library/core/src/macros/mod.rs" ]; then
+        cat >&2 <<EOF
+run_codeql: rust-src is missing from $RUST_SYSROOT.
+
+Without it the extractor cannot expand core's builtin macros, so every
+format!/assert!/println!/panic! drops out of the database and this script
+reports "clean" whether the tree is or not. Install it and re-run:
+
+    rustup component add rust-src   # a rustup toolchain
+    sudo pacman -S rust-src         # Arch's distro rust
+
+SKIP_RUST_SRC_CHECK=1 runs anyway, understanding that a clean result then
+means nothing.
+EOF
+        exit 1
+    fi
+fi
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
+
+# CI analyses a fresh checkout, which has no `target/`; a working tree has one,
+# and extracting it means minutes spent on generated build artefacts plus
+# findings in code no PR could ever touch. Excluded so a local run answers the
+# same question CI's does.
+cat >"$WORKDIR/config.yml" <<'YAML'
+paths-ignore:
+  - target
+YAML
 
 STATUS=0
 for lang in "${LANGUAGES[@]}"; do
@@ -64,6 +109,7 @@ for lang in "${LANGUAGES[@]}"; do
         --language="$lang" \
         --build-mode=none \
         --source-root=. \
+        --codescanning-config="$WORKDIR/config.yml" \
         --quiet
 
     echo "==> analyzing $lang against the default code-scanning suite"

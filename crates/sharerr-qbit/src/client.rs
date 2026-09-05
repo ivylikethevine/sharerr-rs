@@ -292,7 +292,14 @@ mod tests {
         )
         .expect("builds");
         let rendered = format!("{key:?}");
-        assert!(!rendered.contains("jCGn3V76"), "{rendered}");
+        // The condition is reduced to a bool and the failure message is a
+        // literal, deliberately: interpolating `rendered` would hand CodeQL a
+        // value tainted by `with_api_key` reaching `panic_fmt`, which is a
+        // `rust/cleartext-logging` alert (#21) proving nothing - the string
+        // under test is the redacted one. A bool cannot carry the key, and the
+        // assertion's own name says what broke.
+        let leaked = rendered.contains("jCGn3V76");
+        assert!(!leaked, "Debug printed the api key verbatim");
     }
 
     #[test]
