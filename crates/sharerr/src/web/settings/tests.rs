@@ -1148,6 +1148,8 @@ async fn save_seeding_rejects_a_non_numeric_upload_limit() {
         Form(SeedingForm {
             upload_limit_kib: "lots".to_owned(),
             ratio_limit: String::new(),
+            private: None,
+            magnet_links: None,
         }),
     )
     .await;
@@ -1165,6 +1167,8 @@ async fn save_seeding_rejects_a_negative_ratio() {
         Form(SeedingForm {
             upload_limit_kib: String::new(),
             ratio_limit: "-1".to_owned(),
+            private: None,
+            magnet_links: None,
         }),
     )
     .await;
@@ -1183,6 +1187,8 @@ async fn save_seeding_writes_the_limits() {
         Form(SeedingForm {
             upload_limit_kib: "500".to_owned(),
             ratio_limit: "2.5".to_owned(),
+            private: None,
+            magnet_links: None,
         }),
     )
     .await;
@@ -1191,6 +1197,62 @@ async fn save_seeding_writes_the_limits() {
     let written = std::fs::read_to_string(&config_path).expect("save_seeding writes the file");
     assert!(written.contains("upload_limit_kib = 500"), "{written}");
     assert!(written.contains("ratio_limit = 2.5"), "{written}");
+}
+
+/// Both checkboxes are always-write booleans, the same as every other
+/// checkbox in settings — an unticked box submits nothing, and this handler
+/// treats that as `false` regardless of what was previously stored. That is
+/// only safe because the rendered form always reflects the current value
+/// (`{% if seeding_private %}checked{% endif %}`), so a round trip through the
+/// real page preserves it; this test exercises the write side of that
+/// contract directly, bypassing the template.
+#[tokio::test]
+async fn save_seeding_writes_private_and_magnet_links() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let config_path = serve.config_path().to_path_buf();
+    let state = web_state(serve);
+
+    let response = save_seeding(
+        State(state),
+        Form(SeedingForm {
+            upload_limit_kib: String::new(),
+            ratio_limit: String::new(),
+            private: Some("1".to_owned()),
+            magnet_links: Some("1".to_owned()),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+    let written = std::fs::read_to_string(&config_path).expect("save_seeding writes the file");
+    assert!(written.contains("private = true"), "{written}");
+    assert!(written.contains("magnet_links = true"), "{written}");
+}
+
+/// The other half of the contract above: an unticked checkbox writes `false`
+/// explicitly, the same as every other boolean settings field — there is no
+/// third "leave alone" state.
+#[tokio::test]
+async fn save_seeding_writes_false_for_unticked_checkboxes() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let config_path = serve.config_path().to_path_buf();
+    let state = web_state(serve);
+
+    let response = save_seeding(
+        State(state),
+        Form(SeedingForm {
+            upload_limit_kib: String::new(),
+            ratio_limit: String::new(),
+            private: None,
+            magnet_links: None,
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+    let written = std::fs::read_to_string(&config_path).expect("save_seeding writes the file");
+    assert!(written.contains("private = false"), "{written}");
+    assert!(written.contains("magnet_links = false"), "{written}");
 }
 
 #[tokio::test]
@@ -1926,6 +1988,8 @@ async fn save_seeding_with_blank_fields_unsets_both_limits() {
         Form(SeedingForm {
             upload_limit_kib: String::new(),
             ratio_limit: String::new(),
+            private: None,
+            magnet_links: None,
         }),
     )
     .await;

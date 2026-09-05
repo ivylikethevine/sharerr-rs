@@ -320,6 +320,7 @@ impl Syncer {
             skip_checking: client_config.skip_checking,
             upload_limit_kib: client_config.upload_limit_kib,
             ratio_limit: client_config.ratio_limit,
+            private: config.seeding.private,
             torrent_dir: config.torrent_dir(),
         };
 
@@ -825,6 +826,13 @@ impl Syncer {
                 item.media.as_ref(),
             )
             .await?;
+        // `None` for `Reused`: an operator's own torrent or a cross-seed is not
+        // sharerr's to characterise, so `set_seeding` leaves the stored
+        // `private` value exactly as it was rather than guessing.
+        let private = match outcome {
+            SeedOutcome::Added { private, .. } => Some(private),
+            SeedOutcome::Reused { .. } => None,
+        };
         self.store
             .set_seeding(
                 item.source,
@@ -832,6 +840,7 @@ impl Syncer {
                 outcome.info_hash(),
                 token_fingerprint(announce).as_deref(),
                 matches!(outcome, SeedOutcome::Added { .. }),
+                private,
             )
             .await?;
 

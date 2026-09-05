@@ -804,6 +804,7 @@ mod tests {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
+            private: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -838,7 +839,14 @@ mod tests {
         store.upsert(&seeding_item(1, 1_000)).await.unwrap();
         store.upsert(&seeding_item(2, 24)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &"00".repeat(20), None, true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1,
+                &"00".repeat(20),
+                None,
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 

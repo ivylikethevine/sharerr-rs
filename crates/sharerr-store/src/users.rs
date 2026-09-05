@@ -9,11 +9,13 @@
 //! inline would stall `/health` for the duration of a login attempt.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::Row;
+use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use sharerr_core::endpoint::now_epoch;
@@ -162,7 +164,57 @@ fn validate_password(password: &SecretString) -> Result<()> {
     Ok(())
 }
 
+/// Caps how many Argon2 operations run at once, across every caller —
+/// `hash_password` and `verify_password` below are the only two ways this
+/// crate ever hashes or verifies a password, so every entry point (login,
+/// setup, change-password) funnels through here whether or not the caller
+/// knows it exists.
+///
+/// A flood of unauthenticated login POSTs would otherwise turn the blocking
+/// pool itself into the amplification surface: each attempt costs ~19 MiB
+/// and tens of milliseconds of real CPU (see this module's header comment),
+/// including one against an unknown username via [`DECOY_HASH`]. Tokio's
+/// blocking pool defaults to 512 threads, so nothing else naturally bounds
+/// how many of those run at once; this does. `max(4, _)` so a small container
+/// still has enough headroom for a handful of genuinely simultaneous
+/// logins — the goal is bounding an unbounded flood, not making ordinary
+/// light concurrency (this crate's own parallel test run included) queue on
+/// a knife's edge against [`HASH_SLOT_WAIT`].
+static HASH_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| {
+    let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    Semaphore::new(cpus.max(4))
+});
+
+/// How long a caller waits for a slot before giving up. Bounded on purpose —
+/// the point is a request eventually failing under sustained load, not
+/// building an unbounded queue behind the blocking pool — but generous
+/// enough that ordinary contention among a handful of legitimate concurrent
+/// attempts (each tens of milliseconds of real work) clears well within it
+/// rather than spuriously refusing one.
+const HASH_SLOT_WAIT: Duration = Duration::from_secs(3);
+
+/// The wait-then-fail-fast logic, over any semaphore — split out so tests can
+/// exercise it against a small throwaway one instead of racing every other
+/// test in this binary for a slot on the real, process-wide [`HASH_SLOTS`].
+async fn acquire_slot(
+    semaphore: &Semaphore,
+    wait: Duration,
+) -> Result<tokio::sync::SemaphorePermit<'_>> {
+    match tokio::time::timeout(wait, semaphore.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        // `close()` is never called on this semaphore, so this arm is
+        // unreachable in practice; treated the same as exhaustion rather
+        // than unwrapped, since the workspace lints against that.
+        Ok(Err(_)) | Err(_) => Err(StoreError::TooBusy),
+    }
+}
+
+async fn acquire_hash_slot() -> Result<tokio::sync::SemaphorePermit<'static>> {
+    acquire_slot(&HASH_SLOTS, HASH_SLOT_WAIT).await
+}
+
 async fn hash_password(password: &SecretString) -> Result<String> {
+    let _permit = acquire_hash_slot().await?;
     let password = clone_secret(password);
     tokio::task::spawn_blocking(move || blocking_hash(&password))
         .await
@@ -171,6 +223,7 @@ async fn hash_password(password: &SecretString) -> Result<String> {
 
 /// `None` means no such account: a decoy hash is substituted so the cost matches.
 async fn verify_password(password: &SecretString, stored: Option<String>) -> Result<bool> {
+    let _permit = acquire_hash_slot().await?;
     let password = clone_secret(password);
     tokio::task::spawn_blocking(move || {
         let stored = stored.unwrap_or_else(|| DECOY_HASH.clone());
@@ -216,6 +269,8 @@ fn blocking_verify(password: &str, stored: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::time::Instant;
 
     use super::*;
     use sharerr_testkit::secrets::fresh_password;
@@ -419,5 +474,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.user_count().await.unwrap(), 2);
+    }
+
+    /// The mechanism `acquire_hash_slot` builds on, isolated to a throwaway
+    /// semaphore rather than the real process-wide `HASH_SLOTS` — every other
+    /// test above also hashes or verifies a password, so asserting against
+    /// the shared static here would mean racing them for a slot.
+    #[tokio::test]
+    async fn a_saturated_semaphore_fails_fast_rather_than_queuing() {
+        let semaphore = Semaphore::new(1);
+        let _held = semaphore.acquire().await.unwrap();
+
+        let start = Instant::now();
+        let result = acquire_slot(&semaphore, Duration::from_millis(50)).await;
+
+        assert!(matches!(result, Err(StoreError::TooBusy)), "{result:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must fail fast once the wait expires, not hang: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_freed_slot_lets_the_next_request_through() {
+        let semaphore = Semaphore::new(1);
+        {
+            let _held = semaphore.acquire().await.unwrap();
+            // Freed at the end of this block, before anyone else asks.
+        }
+
+        assert!(
+            acquire_slot(&semaphore, Duration::from_millis(50))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// The semaphore must not break ordinary concurrent use — several logins
+    /// at once, comfortably inside the real cap, all still resolve correctly
+    /// rather than serialising into failures.
+    #[tokio::test]
+    async fn concurrent_correct_logins_all_succeed() {
+        let store = store().await;
+        let password = fresh_password();
+        store
+            .create_user("operator", &secret(&password))
+            .await
+            .unwrap();
+
+        let attempts: Vec<_> = (0..8)
+            .map(|_| {
+                let store = store.clone();
+                let password = secret(&password);
+                tokio::spawn(async move { store.verify_password("operator", &password).await })
+            })
+            .collect();
+
+        for attempt in attempts {
+            assert!(
+                attempt.await.unwrap().unwrap(),
+                "every correct login must still verify"
+            );
+        }
     }
 }

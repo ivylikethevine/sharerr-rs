@@ -440,6 +440,13 @@ pub struct SettingsPage {
     /// Seed-ratio goal, applied at add time. Empty when unset — see
     /// [`sharerr_core::config::SeedingConfig::ratio_limit`].
     pub seeding_ratio_limit: String,
+    /// Whether newly built torrents set BEP 27's private flag. On by default
+    /// — see [`sharerr_core::config::SeedingConfig::private`].
+    pub seeding_private: bool,
+    /// Whether the feeds may advertise a magnet per item. Off by default, and
+    /// only takes effect for a non-private item even when on — see
+    /// [`sharerr_core::config::FeedConfig::magnet_links`].
+    pub feed_magnet_links: bool,
 
     pub tracker_advertised_host: String,
     pub tracker_port: String,

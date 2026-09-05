@@ -205,14 +205,18 @@ original.
 
 Radarr's direct Torznab indexer has no setting to prefer a `.torrent`
 enclosure over a magnet when a feed offers both, and the first live run
-showed it choosing the magnet (qBittorrent-B's record: `has_metadata: false`,
-a `magnet_uri` whose `dn=` was the release title). Every torrent sharerr
-builds is private, so a magnet can never complete against it anywhere.
-Prowlarr's per-indexer "Prefer Magnet URL" is the one place this is
-configurable, so the script pins it to `false` and confirms the pin took. A
-real friend should use the same setup: Radarr through Prowlarr, not directly.
-See [`docs/SUPPORT.md`](../docs/SUPPORT.md#removing-the-feeds-magnet-link-entirely)
-for the open question this leaves.
+(before `feed.magnet_links` defaulted off) showed it choosing the magnet
+anyway (qBittorrent-B's record: `has_metadata: false`, a `magnet_uri` whose
+`dn=` was the release title). Every torrent sharerr builds is private by
+default, so a magnet can never complete against it anywhere. Prowlarr's
+per-indexer "Prefer Magnet URL" is the one place this is configurable, so the
+script still pins it to `false` and confirms the pin took — belt-and-braces
+now that the feed advertises no magnet under the default config at all, and
+the setup an operator who does turn `feed.magnet_links` on should still
+copy. A real friend should use the same topology: Radarr through Prowlarr,
+not directly. See
+[`docs/SUPPORT.md`](../docs/SUPPORT.md#the-feeds-magnet-link) for the
+settled decision this leaves in place.
 
 ### Why `tracker.advertised_host` is a service name here, not `localhost`
 

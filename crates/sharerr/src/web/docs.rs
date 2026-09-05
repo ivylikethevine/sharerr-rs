@@ -39,6 +39,8 @@ pub const CONFIG_RTORRENT: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#rtorrent";
 pub const CONFIG_SEEDING: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#seeding";
+pub const CONFIG_FEED: &str =
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#feed";
 pub const CONFIG_TRACKER: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#tracker";
 pub const CONFIG_PATH_MAP: &str =
@@ -176,6 +178,7 @@ mod tests {
             ("CONFIG_TRANSMISSION", super::CONFIG_TRANSMISSION),
             ("CONFIG_RTORRENT", super::CONFIG_RTORRENT),
             ("CONFIG_SEEDING", super::CONFIG_SEEDING),
+            ("CONFIG_FEED", super::CONFIG_FEED),
             ("CONFIG_TRACKER", super::CONFIG_TRACKER),
             ("CONFIG_PATH_MAP", super::CONFIG_PATH_MAP),
             ("CONFIG_LIGHTHOUSE", super::CONFIG_LIGHTHOUSE),

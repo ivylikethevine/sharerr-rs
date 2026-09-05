@@ -100,9 +100,17 @@ A few things are **by design**, not a vulnerability report waiting to happen:
   the response to their own request. Nothing else trusts either header; see
   `arrived_over_https` in `crates/sharerr/src/web/auth.rs`. If your network
   is not a trusted LAN, put a TLS-terminating proxy in front.
-- **No login rate limit or lockout, and no security response headers** (CSP,
-  `X-Frame-Options`, and so on). Argon2's cost per attempt is the only brake
-  on guessing, which is the trade a LAN tool with one operator account makes.
+- **No account lockout, and no security response headers** (CSP,
+  `X-Frame-Options`, and so on). A per-source-address throttle on `/login`
+  and `/setup` (5 attempts/minute, 429 past it — see `Throttle` in
+  `crates/sharerr/src/web/auth.rs`) and a store-level cap on concurrent
+  Argon2 operations (`HASH_SLOTS` in `crates/sharerr-store/src/users.rs`)
+  close the CPU/memory amplification an unauthenticated flood would
+  otherwise create, but neither ever locks an account out: with exactly one
+  operator account, a lockout would hand an attacker a free denial of
+  service against the one person allowed in. Argon2's cost per attempt
+  remains the actual brake on guessing itself, the trade a LAN tool with one
+  operator account makes.
 - **The feed API key and the `.torrent` download token travel as query-string
   parameters**, and the tracker's announce and scrape tokens as path
   segments. Consistent with the threat model, but query strings and paths
@@ -149,11 +157,15 @@ internet. The assurance case follows from that threat model:
   removes the memory-safety class of bug, and static analysis (CodeQL,
   clippy, cargo-deny) runs on every push and weekly against the dependency
   graph, so a new advisory in a dependency is caught without anyone looking.
-- **What this does not cover, by design**: no login rate limit, no security
+- **What this does not cover, by design**: no account lockout, no security
   response headers, no recovery from a lost master key. Anyone deploying
   outside the model (a public-facing instance, an untrusted network) should
   treat this section as the boundary of what sharerr defends against and put
-  a reverse proxy with its own rate limiting and headers in front.
+  a reverse proxy with its own rate limiting and headers in front — the
+  built-in login throttle (see above) is keyed on the connecting socket's own
+  address and never a forwarded-for header, so behind such a proxy every
+  request collapses to one address and the throttle degrades to a global
+  limit across every visitor.
 
 ## What is out of scope
 

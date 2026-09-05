@@ -17,6 +17,7 @@ default, and what sets it.
   - [`[transmission]`](#transmission)
   - [`[rtorrent]`](#rtorrent)
 - [`[seeding]`](#seeding)
+- [`[feed]`](#feed)
 - [`[tracker]`](#tracker)
 - [`[[path_map]]`](#path_map)
 - [`[lighthouse]`](#lighthouse)
@@ -171,6 +172,17 @@ touched. The client's own engine does the enforcing. See the README's
 | -------------------------- | ----- | ------- | ------------------------------------------------------ |
 | `seeding.upload_limit_kib` | int   | unset   | Per-torrent upload cap, KiB/s.                         |
 | `seeding.ratio_limit`      | float | unset   | Seed-ratio goal. Not honoured by rTorrent — see above. |
+| `seeding.private`          | bool  | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/SUPPORT.md`](SUPPORT.md#the-feeds-magnet-link). |
+
+## `[feed]`
+
+What the Torznab and Jackett feeds advertise alongside the `.torrent` link
+every item already carries. Settings page: the same "Seeding limits" panel
+as `[seeding]` above, since the two are meant to be read together.
+
+| TOML key            | Type | Default | Notes                                                                                                                                                                                              |
+| -------------------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feed.magnet_links` | bool | `false` | Emit a `magneturl` (Torznab) / `MagnetUri` (Jackett) attribute per item. Only ever produces one for an item that is *also* not private (`seeding.private = false`); a private item's magnet can never resolve, so it is omitted rather than advertised broken. See [`docs/SUPPORT.md`](SUPPORT.md#the-feeds-magnet-link). |
 
 ## `[tracker]`
 

@@ -56,6 +56,12 @@ pub enum StoreError {
     #[error("password hashing failed: {0}")]
     PasswordHash(String),
 
+    /// Every Argon2 slot (`sharerr_store::users`'s `HASH_SLOTS`) is in use —
+    /// distinct from [`Self::PasswordHash`] so a caller can answer `503`
+    /// rather than `500`: this is load, not a broken hash or a panicked task.
+    #[error("too many concurrent password checks — try again shortly")]
+    TooBusy,
+
     #[error("a user named {username:?} already exists")]
     UserExists { username: String },
 
@@ -279,9 +285,9 @@ impl Store {
                 source, source_id, file_id, spec_json, release_title, arr_path,
                 size, ids_json, info_hash, announce_token_fp, created_by_sharerr,
                 state, last_error, created_at, updated_at, media_json,
-                achieved_ratio, ratio_limit_reported
+                achieved_ratio, ratio_limit_reported, private
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18)
             ON CONFLICT (source, file_id) DO UPDATE SET
                 source_id     = excluded.source_id,
                 spec_json     = excluded.spec_json,
@@ -303,6 +309,9 @@ impl Store {
                 -- assigning that would strip the claim `set_seeding` recorded —
                 -- and with it the client's licence to remove the torrent on
                 -- withdrawal. Only `set_seeding` writes this column.
+                -- `private` is the same story one column down: a rediscovery
+                -- knows nothing about the torrent, only `set_seeding` (when it
+                -- actually knows) writes this column, so it too is absent here.
                 -- COALESCE for the same reason as info_hash, one step removed: a
                 -- rediscovery whose *arr has not analysed the file yet, or whose
                 -- probe failed this pass, arrives with NULL. Assigning it would
@@ -340,6 +349,7 @@ impl Store {
         .bind(media_json.as_deref())
         .bind(item.achieved_ratio)
         .bind(item.ratio_limit_reported)
+        .bind(i64::from(item.private))
         .fetch_one(&self.pool)
         .await?;
 
@@ -410,6 +420,12 @@ impl Store {
     /// sharerr added or one it adopted, and is the only thing that writes that
     /// column — see [`SharedItem::created_by_sharerr`], and the withdrawal path
     /// that reads it.
+    ///
+    /// `private` is `Some` only when the caller actually knows — sharerr just
+    /// built or reused its own cached `.torrent`, decoded to be sure — and
+    /// `None` for an adopted torrent nobody here characterised. `COALESCE`
+    /// leaves the column exactly as it was in the `None` case, the same
+    /// treatment `upsert` already gives `info_hash` and `announce_token_fp`.
     pub async fn set_seeding(
         &self,
         source: MediaSource,
@@ -417,16 +433,19 @@ impl Store {
         info_hash: &str,
         announce_token_fp: Option<&str>,
         created_by_sharerr: bool,
+        private: Option<bool>,
     ) -> Result<()> {
         self.update_item(
             sqlx::query(
                 "UPDATE shared_items SET info_hash = ?, announce_token_fp = ?, \
-                 created_by_sharerr = ?, state = ?, last_error = NULL, updated_at = ? \
+                 created_by_sharerr = ?, private = COALESCE(?, private), state = ?, \
+                 last_error = NULL, updated_at = ? \
                  WHERE source = ? AND file_id = ?",
             )
             .bind(info_hash)
             .bind(announce_token_fp)
             .bind(i64::from(created_by_sharerr))
+            .bind(private.map(i64::from))
             .bind(ShareState::Seeding.as_str()),
             source,
             file_id,
@@ -526,8 +545,8 @@ impl Store {
         self.update_item(
             sqlx::query(
                 "UPDATE shared_items SET info_hash = NULL, announce_token_fp = NULL, \
-                 created_by_sharerr = 0, state = ?, last_error = NULL, updated_at = ? \
-                 WHERE source = ? AND file_id = ?",
+                 created_by_sharerr = 0, private = 1, state = ?, last_error = NULL, \
+                 updated_at = ? WHERE source = ? AND file_id = ?",
             )
             .bind(ShareState::Pending.as_str()),
             source,
@@ -636,7 +655,7 @@ impl ScopeFilter {
 
 const SELECT_COLUMNS: &str = "SELECT id, source, source_id, file_id, spec_json, release_title, \
      arr_path, size, ids_json, info_hash, announce_token_fp, created_by_sharerr, state, \
-     last_error, created_at, media_json, achieved_ratio, ratio_limit_reported \
+     last_error, created_at, media_json, achieved_ratio, ratio_limit_reported, private \
      FROM shared_items";
 
 fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
@@ -688,6 +707,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> Result<SharedItem> {
         media,
         achieved_ratio: row.try_get("achieved_ratio")?,
         ratio_limit_reported: row.try_get("ratio_limit_reported")?,
+        private: row.try_get::<i64, _>("private")? != 0,
     })
 }
 
@@ -752,6 +772,7 @@ mod tests {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
+            private: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -894,6 +915,7 @@ mod tests {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
+            private: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -1067,7 +1089,14 @@ mod tests {
         store.upsert(&episode(1001)).await.unwrap();
 
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1001,
+                "abc123",
+                Some("fp1"),
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 
@@ -1082,7 +1111,14 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1001,
+                "abc123",
+                Some("fp1"),
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 
@@ -1117,7 +1153,14 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1001,
+                "abc123",
+                Some("fp1"),
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 
@@ -1148,7 +1191,14 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1001,
+                "abc123",
+                Some("fp1"),
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 
@@ -1167,7 +1217,14 @@ mod tests {
         let store = Store::open_in_memory().await.unwrap();
         store.upsert(&episode(1001)).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1001, "abc123", Some("fp1"), true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1001,
+                "abc123",
+                Some("fp1"),
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 

@@ -217,6 +217,9 @@ pub mod config_paths {
         SEEDING_UPLOAD_LIMIT_KIB = "seeding.upload_limit_kib";
         /// Seed-ratio goal — see [`super::SeedingConfig::ratio_limit`].
         SEEDING_RATIO_LIMIT = "seeding.ratio_limit";
+        /// BEP 27's private flag on newly built torrents — see
+        /// [`super::SeedingConfig::private`].
+        SEEDING_PRIVATE = "seeding.private";
 
         /// Whether the lighthouse rendezvous service runs as extra routes on one
         /// of this instance's own listeners — see [`super::LighthouseConfig`].
@@ -263,6 +266,10 @@ pub mod config_paths {
         /// see [`super::MetricsConfig`]. The bearer token they require is a vault
         /// secret, [`super::secret_keys::METRICS_TOKEN`].
         METRICS_ENABLED = "metrics.enabled";
+
+        /// Whether the feeds advertise a magnet link per item — see
+        /// [`super::FeedConfig::magnet_links`].
+        FEED_MAGNET_LINKS = "feed.magnet_links";
     }
 
     /// The config path holding one *arr app's URL — the write-side counterpart
@@ -340,6 +347,9 @@ pub struct Config {
     /// `/metrics` and the dashboard-widget JSON endpoint. Off by default — see
     /// [`MetricsConfig`].
     pub metrics: MetricsConfig,
+    /// What the feeds advertise alongside the `.torrent` enclosure — see
+    /// [`FeedConfig`].
+    pub feed: FeedConfig,
     /// Translations between how the *arr apps, sharerr, and qBittorrent each see
     /// the media library. Empty means all three agree on paths.
     pub path_map: Vec<PathMapping>,
@@ -387,6 +397,7 @@ impl Default for Config {
             checks: ChecksConfig::default(),
             notifications: NotificationsConfig::default(),
             metrics: MetricsConfig::default(),
+            feed: FeedConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
             peers: Vec::new(),
@@ -833,7 +844,7 @@ crate::str_enum!(LighthouseMount {
 /// condition. A single field that means two different things depending on
 /// which client is configured would be a footgun, so it is left out rather
 /// than faked.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SeedingConfig {
     /// Per-torrent upload cap in KiB/s. Applied at add time, and to every
@@ -844,6 +855,34 @@ pub struct SeedingConfig {
     /// Stop seeding once this ratio is reached. Same lifecycle as
     /// [`Self::upload_limit_kib`].
     pub ratio_limit: Option<f64>,
+    /// Set BEP 27's private flag on every torrent sharerr builds from here on.
+    ///
+    /// On by default, and that default matters: this is the whole reason the
+    /// tracker exists (see `sharerr_torrent::factory`'s header comment).
+    /// Turning it off lets a client fall back to DHT and PEX, which is also
+    /// what lets a stripped-down feed magnet
+    /// (see [`super::FeedConfig::magnet_links`]) actually resolve — but it
+    /// means **revoking a friend no longer removes them from the swarm**: the
+    /// tracker stops being the only way peers find each other. Applies only
+    /// to torrents built after the change; the flag lives inside the info
+    /// dictionary, so flipping it changes the info hash and existing shares
+    /// keep whatever they were built with (see `shared_items.private` in the
+    /// store).
+    pub private: bool,
+}
+
+impl Default for SeedingConfig {
+    fn default() -> Self {
+        Self {
+            upload_limit_kib: None,
+            ratio_limit: None,
+            // A bare `#[derive(Default)]` would make this `false` — public by
+            // default — which is the one outcome that must never happen
+            // silently. Spelled out so `#[serde(default)]` on `Config` fills
+            // a missing `[seeding]` block with `private: true`, not `false`.
+            private: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -968,6 +1007,28 @@ pub struct ChecksConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     pub enabled: bool,
+}
+
+/// What the Torznab and Jackett feeds advertise alongside the `.torrent`
+/// enclosure every item already carries.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeedConfig {
+    /// Emit a `magneturl` (Torznab) / `MagnetUri` (Jackett) attribute per item.
+    ///
+    /// Off by default: every torrent sharerr builds is private unless
+    /// [`super::SeedingConfig::private`] was turned off for it, and a magnet
+    /// can never complete against a private torrent — nothing in the swarm
+    /// answers a `ut_metadata` request, and a client that prefers a magnet
+    /// over the working `.torrent` link stalls forever. See
+    /// `docs/SUPPORT.md#the-feeds-magnet-link`.
+    ///
+    /// Even with this on, an individual item's magnet is only emitted when
+    /// that item is itself non-private — the two settings are independent,
+    /// but the combination "magnets on, everything private" would otherwise
+    /// advertise a link guaranteed to stall, so it is made inert rather than
+    /// harmful.
+    pub magnet_links: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

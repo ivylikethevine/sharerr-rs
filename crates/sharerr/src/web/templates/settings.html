@@ -686,6 +686,7 @@
   {%- else %}{% call chip("set", "limits set") %}{% endcall %}{% endif %}</h2>
 <div class="doclinks">
   {% call ui::doc(crate::web::docs::CONFIG_SEEDING, "Seeding limits reference") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::CONFIG_FEED, "Feed magnet link reference") %}{% endcall %}
 </div>
 <form method="post" action="/settings/seeding" class="panel">
   <p class="hint">
@@ -707,6 +708,45 @@
          inputmode="decimal" placeholder="e.g. 2.0"
          {% call lock_attr("seeding.ratio_limit") %}{% endcall %}>
   {% call locked("seeding.ratio_limit") %}{% endcall %}
+
+  <label class="hint">
+    <input type="checkbox" name="private" value="1" {% if seeding_private %}checked{% endif %}
+           {% call lock_attr("seeding.private") %}{% endcall %}>
+    Mark newly built torrents private (BEP 27)
+  </label>
+  {% call locked("seeding.private") %}{% endcall %}
+  <p class="hint">
+    On by default, and it is why sharerr's own tracker exists: with this on, a
+    torrent's swarm is exactly the friends sharerr introduces it to, and
+    revoking a friend removes them from it. Turning it off lets a client also
+    use DHT and PEX to find peers — <strong>including a revoked friend, who is
+    then no longer cut off</strong> — but it is what a feed magnet needs to
+    ever actually resolve, below. Only applies to torrents built after you
+    change it; existing shares keep whatever they were built with.
+  </p>
+
+  <label class="hint">
+    <input type="checkbox" name="magnet_links" value="1" {% if feed_magnet_links %}checked{% endif %}
+           {% call lock_attr("feed.magnet_links") %}{% endcall %}>
+    Advertise a magnet link in the feed, alongside the <code>.torrent</code>
+  </label>
+  {% call locked("feed.magnet_links") %}{% endcall %}
+  {% if feed_magnet_links && seeding_private %}
+  <p class="warn">
+    Private is still on above, so this has no effect yet: nothing in the
+    swarm can answer a magnet's metadata request for a private torrent, so no
+    magnet is emitted for any item built while private. Turn private off too
+    if you want a working magnet — see the note above for what that costs.
+  </p>
+  {% else %}
+  <p class="hint">
+    Off by default. Every torrent sharerr builds is private unless you turn
+    that off above, and a magnet can never complete against a private
+    torrent — a client that prefers it over the working
+    <code>.torrent</code> link stalls forever. On only ever adds a magnet for
+    an item that is itself not private.
+  </p>
+  {% endif %}
 
   <button type="submit">Save</button>
 </form>

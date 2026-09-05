@@ -44,15 +44,21 @@ pub enum AnnounceRefresh {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SeedOutcome {
     /// A torrent already covering this file was found; nothing was added.
+    /// Whether it is private is not knowable here without an extra export
+    /// call per item — an operator's own torrent or a cross-seed, not one
+    /// sharerr built — so the caller does not update `shared_items.private`
+    /// for this outcome and whatever the row already holds stands.
     Reused { info_hash: String },
-    /// A new torrent was built and handed to qBittorrent.
-    Added { info_hash: String },
+    /// A new torrent was built and handed to qBittorrent. `private` is
+    /// decoded from the actual bytes just built or reused from sharerr's own
+    /// cache — see [`Seeder::seed`].
+    Added { info_hash: String, private: bool },
 }
 
 impl SeedOutcome {
     pub fn info_hash(&self) -> &str {
         match self {
-            Self::Reused { info_hash } | Self::Added { info_hash } => info_hash,
+            Self::Reused { info_hash } | Self::Added { info_hash, .. } => info_hash,
         }
     }
 }
@@ -70,6 +76,11 @@ pub struct Seeder {
     /// Seed-ratio goal, same lifecycle as `upload_limit_kib`. `None` leaves
     /// the client's own default/global ratio setting in effect.
     pub ratio_limit: Option<f64>,
+    /// Whether newly built torrents set BEP 27's private flag. See
+    /// `sharerr_core::config::SeedingConfig::private`. Read once per
+    /// `.torrent` build, so a config change only affects torrents built
+    /// after it lands — existing shares keep whatever they were built with.
+    pub private: bool,
     /// Where sharerr keeps a copy of each `.torrent` it builds.
     pub torrent_dir: PathBuf,
 }
@@ -82,6 +93,7 @@ impl std::fmt::Debug for Seeder {
             .field("skip_checking", &self.skip_checking)
             .field("upload_limit_kib", &self.upload_limit_kib)
             .field("ratio_limit", &self.ratio_limit)
+            .field("private", &self.private)
             .field("torrent_dir", &self.torrent_dir)
             .finish_non_exhaustive()
     }
@@ -157,7 +169,16 @@ impl Seeder {
             .await
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 
-        Ok(SeedOutcome::Added { info_hash })
+        // Decoded from the bytes just built (or reused from sharerr's own
+        // cache) rather than taken from `self.private`: a cached `.torrent`
+        // may predate a later config change, and this is what actually got
+        // handed to the client. Falls back to the conservative `true` if the
+        // bytes this function itself just produced somehow fail to decode —
+        // should not happen, but privateness is not something to guess public.
+        let private = sharerr_torrent::Torrent::read_from_bytes(&data)
+            .map_or(true, |torrent| torrent.is_private());
+
+        Ok(SeedOutcome::Added { info_hash, private })
     }
 
     /// Take responsibility for a torrent the client already had, without
@@ -478,6 +499,7 @@ impl Seeder {
         let path = paths.sharerr.clone();
         let announce = announce.clone();
         let torrent_dir = self.torrent_dir.clone();
+        let private = self.private;
         // Owned: the closure below outlives this frame on a blocking thread.
         let media = media.cloned();
 
@@ -490,6 +512,7 @@ impl Seeder {
                 path: &path,
                 announce: &announce,
                 media: media.as_ref(),
+                private,
             })?;
 
             // Best-effort: the torrent is already in memory and about to be
@@ -748,6 +771,7 @@ mod tests {
             skip_checking: true,
             upload_limit_kib: None,
             ratio_limit: None,
+            private: true,
             torrent_dir,
         }
     }
@@ -816,6 +840,7 @@ mod tests {
                 path: &media,
                 announce: &old_announce,
                 media: None,
+                private: true,
             })
             .unwrap();
 
@@ -881,6 +906,7 @@ mod tests {
                 path: &media,
                 announce: &announce,
                 media: None,
+                private: true,
             })
             .unwrap();
 
@@ -916,7 +942,8 @@ mod tests {
         assert_eq!(
             outcome,
             SeedOutcome::Added {
-                info_hash: built.info_hash.clone()
+                info_hash: built.info_hash.clone(),
+                private: true,
             }
         );
 
@@ -947,6 +974,7 @@ mod tests {
                 path: &media,
                 announce: &old_announce,
                 media: None,
+                private: true,
             })
             .unwrap();
 
@@ -983,7 +1011,8 @@ mod tests {
         assert_eq!(
             outcome,
             SeedOutcome::Added {
-                info_hash: built.info_hash.clone()
+                info_hash: built.info_hash.clone(),
+                private: true,
             }
         );
 
@@ -1022,6 +1051,7 @@ mod tests {
                 path: &media,
                 announce: &announce,
                 media: None,
+                private: true,
             })
             .unwrap();
 
@@ -1066,13 +1096,15 @@ mod tests {
                 path: &media,
                 announce: &announce,
                 media: None,
+                private: true,
             })
             .unwrap();
         assert_ne!(rebuilt.info_hash, stale.info_hash);
         assert_eq!(
             outcome,
             SeedOutcome::Added {
-                info_hash: rebuilt.info_hash.clone()
+                info_hash: rebuilt.info_hash.clone(),
+                private: true,
             }
         );
 
@@ -1137,6 +1169,7 @@ mod tests {
                     Url::parse("http://their-tracker.example/announce").unwrap(),
                 ),
                 media: None,
+                private: true,
             })
             .unwrap();
 
@@ -1256,6 +1289,7 @@ mod tests {
                 path: &media,
                 announce: &announce,
                 media: None,
+                private: true,
             })
             .unwrap();
 
@@ -1422,6 +1456,7 @@ mod tests {
                 path: media,
                 announce: &AnnounceSet::single(Url::parse(announce).unwrap()),
                 media: None,
+                private: true,
             })
             .unwrap()
     }

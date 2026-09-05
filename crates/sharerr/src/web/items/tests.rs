@@ -18,6 +18,7 @@ fn item(source: MediaSource, spec: MediaSpec, state: ShareState) -> SharedItem {
         info_hash: None,
         announce_token_fp: None,
         created_by_sharerr: true,
+        private: true,
         state,
         last_error: None,
         created_at: None,
@@ -389,6 +390,7 @@ fn a_row_says_whether_sharerr_created_the_torrent() {
 
     let reused = SharedItem {
         created_by_sharerr: false,
+        private: true,
         ..item(MediaSource::Radarr, spec, ShareState::Seeding)
     };
     assert!(!row(&reused, &[], None, TokenFps::default(), None).created_by_sharerr);
