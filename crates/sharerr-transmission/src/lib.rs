@@ -31,8 +31,8 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
-    AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
-    http_client, normalise_base,
+    AddRequest, ClientError, ClientKind, Result, SeedingLimits, TorrentClient, TorrentFileEntry,
+    TorrentSummary, http_client, normalise_base,
 };
 use url::Url;
 
@@ -246,6 +246,20 @@ struct ListedTorrent {
     /// torrent is held to — see [`ratio_limit_reported`].
     #[serde(default)]
     seed_ratio_mode: i64,
+    /// Whether `upload_limit` is in force for this torrent at all.
+    #[serde(default)]
+    upload_limited: bool,
+    /// KB/s, the unit `torrent-set`'s `uploadLimit` takes — sharerr passes
+    /// its KiB/s figure straight through on both sides, so it reads back as
+    /// the number that was written.
+    #[serde(default)]
+    upload_limit: u64,
+}
+
+/// The per-torrent upload cap Transmission is enforcing, or `None` when the
+/// torrent is not individually limited.
+fn upload_limit_reported(torrent: &ListedTorrent) -> Option<u64> {
+    torrent.upload_limited.then_some(torrent.upload_limit)
 }
 
 /// The actual per-torrent limit Transmission is enforcing, or `None` when this
@@ -333,7 +347,8 @@ impl TorrentClient for TransmissionClient {
                 "torrent-get",
                 json!({
                     "fields": ["hashString", "name", "downloadDir", "labels", "status",
-                               "uploadRatio", "seedRatioLimit", "seedRatioMode"]
+                               "uploadRatio", "seedRatioLimit", "seedRatioMode",
+                               "uploadLimited", "uploadLimit"]
                 }),
             )
             .await?;
@@ -370,6 +385,7 @@ impl TorrentClient for TransmissionClient {
             };
 
             let ratio_limit = ratio_limit_reported(&torrent);
+            let upload_limit_kib = upload_limit_reported(&torrent);
             out.push(TorrentSummary {
                 // Lowercased because sharerr joins on this against its own store,
                 // which holds lowercase hex.
@@ -381,6 +397,7 @@ impl TorrentClient for TransmissionClient {
                 is_seeding: is_seeding_status(torrent.status),
                 ratio: ratio_reported(torrent.upload_ratio),
                 ratio_limit,
+                upload_limit_kib,
                 tags: torrent.labels,
             });
         }
@@ -489,6 +506,28 @@ impl TorrentClient for TransmissionClient {
         )
         .await
         .map(|_| ())
+    }
+
+    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        if limits.is_empty() {
+            return Ok(());
+        }
+        // The same `torrent-set` arguments `add` sends for a configured goal,
+        // carrying only the fields with an opinion — a `None` field is left
+        // as the torrent has it.
+        let mut arguments = json!({ "ids": [hash] });
+        if let Some(kib) = limits.upload_limit_kib {
+            arguments["uploadLimit"] = json!(kib);
+            arguments["uploadLimited"] = json!(true);
+        }
+        if let Some(ratio) = limits.ratio_limit {
+            arguments["seedRatioLimit"] = json!(ratio);
+            // 1 = this torrent's own limit, overriding the session default.
+            arguments["seedRatioMode"] = json!(1);
+        }
+        self.rpc("torrent-set", arguments).await?;
+        tracing::info!(hash, ?limits, "applied the configured seeding limits");
+        Ok(())
     }
 
     async fn set_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
@@ -933,6 +972,83 @@ mod tests {
             .upload_limit_kib(512)
             .ratio_limit(2.5);
         client(&server).add(&request).await.unwrap();
+    }
+
+    /// `set_limits` is one `torrent-set` carrying only the stated fields —
+    /// a ratio sharerr has no opinion on is not mentioned, so the operator's
+    /// own stays.
+    #[tokio::test]
+    async fn set_limits_is_one_torrent_set_carrying_only_the_stated_fields() {
+        let server = MockServer::start().await;
+        mount_handshake(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .and(wiremock::matchers::body_string_contains("torrent-set"))
+            .and(wiremock::matchers::body_string_contains(
+                "\"uploadLimited\":true",
+            ))
+            .and(wiremock::matchers::body_string_contains(
+                "\"uploadLimit\":512",
+            ))
+            .and(wiremock::matchers::body_string_contains("abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(json!({}))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let limits = SeedingLimits {
+            upload_limit_kib: Some(512),
+            ratio_limit: None,
+        };
+        client(&server).set_limits("abc123", &limits).await.unwrap();
+
+        let bodies: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(sharerr_testkit::mock::body_text)
+            .collect();
+        assert!(
+            !bodies.iter().any(|b| b.contains("seedRatio")),
+            "an unstated ratio must not be touched: {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_limits_with_nothing_configured_sends_nothing() {
+        let server = MockServer::start().await;
+        client(&server)
+            .set_limits("abc123", &SeedingLimits::default())
+            .await
+            .unwrap();
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// `list` reads the cap back in the unit it was written, and only when
+    /// Transmission says the per-torrent limit is actually in force.
+    #[tokio::test]
+    async fn list_reports_the_upload_cap_only_when_limited() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [
+                { "hashString": "AAA", "name": "a", "downloadDir": "/d", "status": 6,
+                  "uploadLimited": true, "uploadLimit": 512 },
+                { "hashString": "BBB", "name": "b", "downloadDir": "/d", "status": 6,
+                  "uploadLimited": false, "uploadLimit": 512 },
+            ]})),
+        )
+        .await;
+
+        let all = client(&server).list(None).await.unwrap();
+        assert_eq!(all[0].upload_limit_kib, Some(512));
+        assert_eq!(
+            all[1].upload_limit_kib, None,
+            "a stale figure that is not in force"
+        );
     }
 
     /// The common case — no seeding goal configured — must cost exactly the

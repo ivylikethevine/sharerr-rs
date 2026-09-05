@@ -159,8 +159,12 @@ limit, remove a stale tracker) see
 
 ## `[seeding]`
 
-Applied once, at the moment sharerr hands a torrent to whichever client is
-selected — never re-applied or enforced afterward. See the README's
+Applied when sharerr hands a torrent to whichever client is selected, and
+restated on every torrent sharerr created on the first sync pass after a
+value changes. An unset key is no opinion: nothing is sent, and whatever the
+client holds for a torrent stays, so clearing a limit you no longer want is
+done in the client. Torrents sharerr adopted rather than created are never
+touched. The client's own engine does the enforcing. See the README's
 ["Seeding limits"](../README.md#seeding-limits).
 
 | TOML key                   | Type  | Default | Notes                                                  |
@@ -273,17 +277,34 @@ mentions under ["Friends finding each other"](../README.md#friends-finding-each-
 | ------------------------------- | ----------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `notifications.kind`            | `generic` \| `discord` \| `apprise` | `generic`         | Which payload shape to send.                                                                                                                                   |
 | `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.                                                                                           |
-| `notifications.triggers`        | array of strings                    | all six, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
+| `notifications.heartbeat_secs`  | int                                 | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                                |
+| `notifications.triggers`        | array of strings                    | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
-The six triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
+The ten triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
 `endpoint_rotated` (the gluetun-resolved advertised address changing —
 usually the one most likely to silently break a friend's downloads),
 `items_shared` and `item_failed` (each digested into one notification per
-sync pass rather than one per item), and `peer_revoked`.
+sync pass rather than one per item), `peer_revoked`, `peer_first_contact`
+(a friend's first authenticated feed request or attributed tracker
+announce — the moment a key you handed out was actually used),
+`tracker_unreachable` (your own advertised tracker address stopped
+accepting connections after having been confirmed reachable; needs
+[`checks.reachability`](#checks), dials every fifteen minutes, and never
+fires on an address that was never confirmed, so a router that refuses
+hairpinning stays silent), `library_unreadable` (a `[[library]]` path that
+could not be read or only partly listed this sync pass, once per distinct
+reason rather than once per pass), and `heartbeat`.
 
-Vault secret: `notifications.webhook_url` — in the vault rather than
-`sharerr.toml` even though it is not credential-shaped at a glance, because a
-Discord webhook URL embeds its own bearer token in the path.
+`heartbeat` is the odd one out: it never posts to the webhook. It is an
+Uptime-Kuma-style push — a plain GET to `notifications.heartbeat_url`, every
+`heartbeat_secs`, only while the instance would answer `/ready` with 200 — so
+the monitor on the other end notices when the pushes _stop_. Paste the
+monitor's push URL whole, query string included.
+
+Vault secrets: `notifications.webhook_url` and `notifications.heartbeat_url`
+— in the vault rather than `sharerr.toml` even though neither is
+credential-shaped at a glance, because a Discord webhook URL embeds its own
+bearer token in the path, and a push URL embeds the monitor's.
 
 ## `[metrics]`
 
@@ -413,9 +434,10 @@ sharerr vault remove <key>
 | `gluetun.api_key`           | Tracker-facing gluetun control server API key                                          |
 | `gluetun_client.api_key`    | Torrent-client-facing gluetun control server API key                                   |
 | `notifications.webhook_url` | Where a sync-failure/peer-quiet notification is POSTed                                 |
+| `notifications.heartbeat_url` | Uptime-Kuma-style push URL fetched on a timer while ready (see [`[notifications]`](#notifications)) |
 | `metrics.token`             | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics)) |
 
-Those thirteen are the keys `sharerr vault set` accepts. `sharerr vault list`
+Those fourteen are the keys `sharerr vault set` accepts. `sharerr vault list`
 shows every key the vault holds, which includes a few sharerr manages
 itself and `vault set` refuses: `tracker.token_previous` (the rotated-out
 announce token, see [`[tracker]`](#tracker)), `identity.signing_key` (this

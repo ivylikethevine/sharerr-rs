@@ -289,6 +289,7 @@ async fn handle_announce(
 
     if let Some(peer_id) = auth.attributed_to {
         crate::torznab::record_sighting(
+            &state.serve,
             &store,
             peer_id,
             EndpointKind::Client,
@@ -816,8 +817,12 @@ mod tests {
             .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
             .await
             .unwrap();
+        // Only the notification path reads `state`, and with no master key
+        // there is no webhook to reach — see `notify::peer_first_contact`.
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
 
         crate::torznab::record_sighting(
+            &serve,
             &store,
             sam.id,
             EndpointKind::Client,

@@ -51,9 +51,10 @@ release (or `:latest`, which tracks it).
 ## What is in scope
 
 sharerr handles real credentials (*arr API keys, torrent-client credentials,
-the tracker's announce token, gluetun API keys, a notification webhook URL,
-and this instance's Ed25519 gossip signing key) in its encrypted vault, and
-exposes a web UI, a Torznab feed, gossip, and a BitTorrent tracker over HTTP.
+the tracker's announce token, gluetun API keys, the notification webhook and
+heartbeat push URLs, and this instance's Ed25519 gossip signing key) in its
+encrypted vault, and exposes a web UI, a Torznab feed, gossip, and a
+BitTorrent tracker over HTTP.
 Anything that could read, write, or bypass authentication for any of those
 is in scope: vault or session handling, the auth guard in front of every UI
 page except `/setup`, `/login`, `/logout` and `/assets`, the per-peer key

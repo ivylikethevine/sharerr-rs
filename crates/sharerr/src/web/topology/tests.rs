@@ -15,6 +15,7 @@ fn summary(hash: &str, seeding: bool) -> sharerr_client::TorrentSummary {
         is_seeding: seeding,
         ratio: None,
         ratio_limit: None,
+        upload_limit_kib: None,
     }
 }
 

@@ -7,18 +7,20 @@
 //! Everything else — scheduling, ratios, RSS, categories as an organising system —
 //! belongs to the client and is none of sharerr's business.
 //!
-//! So the surface here is deliberately narrow — ten operations. That narrowness is what
+//! So the surface here is deliberately narrow — eleven operations. That narrowness is what
 //! makes a second client tractable at all: qBittorrent, Transmission, Deluge and
 //! rTorrent disagree about almost everything *except* "add this torrent, with the
 //! data already at this path". Announces always go to sharerr's own tracker, so a
 //! client needs no tracker of its own.
 //!
 //! The one deliberate exception is [`AddRequest::upload_limit_kib`] and
-//! [`AddRequest::ratio_limit`]: an operator-configured seeding goal, stated
-//! once at add time through whichever native mechanism the client already
-//! offers for it. sharerr still runs no scheduling of its own — the client's
-//! own already-running seeding engine does the continuous enforcement, the
-//! same as it would for a torrent added by hand.
+//! [`AddRequest::ratio_limit`], with [`TorrentClient::set_limits`] as their
+//! after-the-fact counterpart: an operator-configured seeding goal, stated
+//! at add time through whichever native mechanism the client already offers
+//! for it, and restated on a torrent sharerr created when the configured
+//! goal later changes. sharerr still runs no scheduling of its own — the
+//! client's own already-running seeding engine does the continuous
+//! enforcement, the same as it would for a torrent added by hand.
 
 use std::fmt::Debug;
 
@@ -304,6 +306,51 @@ pub struct TorrentSummary {
     /// (rTorrent) the backend has no per-torrent ratio-limit RPC at all — see the
     /// module docs on `sharerr_rtorrent`.
     pub ratio_limit: Option<f64>,
+    /// The per-torrent upload cap the client is enforcing, in KiB/s, when it
+    /// reports one. `None` is the same three-way ambiguity as
+    /// [`Self::ratio_limit`]: no cap, the global default, or a backend
+    /// (rTorrent) whose list call cannot report the throttle's rate.
+    pub upload_limit_kib: Option<u64>,
+}
+
+/// An operator's seeding goal for one torrent, as [`TorrentClient::set_limits`]
+/// applies it. `None` on either field means **no opinion**: that field is
+/// left exactly as the client has it, never cleared. An operator who tunes a
+/// limit by hand in the client, with nothing configured in sharerr, must
+/// not have it undone on the next pass — so removing a goal from `[seeding]`
+/// stops sharerr restating it, and clearing it off a torrent is done in the
+/// client, the same as for a torrent added by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SeedingLimits {
+    /// Per-torrent upload cap in KiB/s.
+    pub upload_limit_kib: Option<u64>,
+    /// Seed-ratio goal.
+    pub ratio_limit: Option<f64>,
+}
+
+impl SeedingLimits {
+    /// Whether there is anything here to apply at all.
+    pub fn is_empty(&self) -> bool {
+        self.upload_limit_kib.is_none() && self.ratio_limit.is_none()
+    }
+
+    /// Whether `reported` — what a client's [`TorrentClient::list`] says a
+    /// torrent is held to — already satisfies every field this goal has an
+    /// opinion on. A `None` here matches anything; a `None` on the reported
+    /// side against a `Some` here does not.
+    pub fn matches(&self, reported: &TorrentSummary) -> bool {
+        let cap_ok = match self.upload_limit_kib {
+            None => true,
+            Some(want) => reported.upload_limit_kib == Some(want),
+        };
+        let ratio_ok = match self.ratio_limit {
+            None => true,
+            Some(want) => reported
+                .ratio_limit
+                .is_some_and(|have| (have - want).abs() < 0.001),
+        };
+        cap_ok && ratio_ok
+    }
 }
 
 /// One file inside a torrent.
@@ -347,13 +394,14 @@ pub struct AddRequest<'a> {
     pub skip_checking: bool,
     /// Add without starting. Used by dry runs and tests.
     pub stopped: bool,
-    /// Per-torrent upload cap in KiB/s, applied once at add time. The one
+    /// Per-torrent upload cap in KiB/s, applied at add time. The one
     /// exception to this trait's "ratios and scheduling belong to the
-    /// client" rule at the module level: sharerr states the goal once here,
-    /// and the client's own seeding engine enforces it from then on —
-    /// sharerr never polls or re-applies it.
+    /// client" rule at the module level: sharerr states the goal here (and
+    /// restates it through [`TorrentClient::set_limits`] if the configured
+    /// goal later changes), and the client's own seeding engine enforces it
+    /// from then on — sharerr never polls for it.
     pub upload_limit_kib: Option<u64>,
-    /// Seed-ratio goal, applied once at add time — same caveat as
+    /// Seed-ratio goal, applied at add time — same caveat as
     /// [`Self::upload_limit_kib`].
     pub ratio_limit: Option<f64>,
 }
@@ -481,6 +529,19 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// Adding a URL the torrent already has must be a no-op, not a duplicate
     /// entry: this runs again on every pass that re-seeds the item.
     async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()>;
+
+    /// Apply the `Some` fields of `limits` to a torrent the client already
+    /// holds; a `None` field is left untouched (see [`SeedingLimits`]). With
+    /// both `None` this is a no-op and must not reach the wire.
+    ///
+    /// The retroactive half of [`AddRequest::upload_limit_kib`] and
+    /// [`AddRequest::ratio_limit`]. Only ever pointed at a torrent sharerr
+    /// created: a torrent it adopted carries the operator's own limits, and
+    /// rewriting those would be the same overreach as replacing their
+    /// trackers. A client that cannot express one of the two (rTorrent has
+    /// no per-torrent ratio) applies what it can and logs the rest, matching
+    /// what its `add` does.
+    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()>;
 
     /// The `.torrent` bytes for a torrent the client already holds.
     ///
@@ -625,6 +686,57 @@ mod tests {
 
     /// A subpath base must keep its prefix once normalised, or a reverse-proxied
     /// client would have its last segment replaced by `Url::join`.
+    fn reported(upload_limit_kib: Option<u64>, ratio_limit: Option<f64>) -> TorrentSummary {
+        TorrentSummary {
+            hash: "abc".to_owned(),
+            name: String::new(),
+            save_path: String::new(),
+            content_path: String::new(),
+            category: String::new(),
+            tags: Vec::new(),
+            is_seeding: true,
+            ratio: None,
+            ratio_limit,
+            upload_limit_kib,
+        }
+    }
+
+    /// `matches` is what keeps the retroactive apply off the wire on the
+    /// common pass: every field the goal has an opinion on must agree; a
+    /// field it has no opinion on matches whatever the client holds.
+    #[test]
+    fn seeding_limits_match_when_every_stated_field_agrees() {
+        let goal = SeedingLimits {
+            upload_limit_kib: Some(500),
+            ratio_limit: Some(2.0),
+        };
+        assert!(goal.matches(&reported(Some(500), Some(2.0))));
+        assert!(
+            goal.matches(&reported(Some(500), Some(2.0004))),
+            "float slack"
+        );
+        assert!(!goal.matches(&reported(None, Some(2.0))));
+        assert!(!goal.matches(&reported(Some(500), None)));
+        assert!(!goal.matches(&reported(Some(400), Some(2.0))));
+
+        let cap_only = SeedingLimits {
+            upload_limit_kib: Some(500),
+            ratio_limit: None,
+        };
+        assert!(
+            cap_only.matches(&reported(Some(500), Some(3.0))),
+            "a ratio sharerr has no opinion on is the operator's"
+        );
+
+        let none = SeedingLimits::default();
+        assert!(none.is_empty());
+        assert!(none.matches(&reported(None, None)));
+        assert!(
+            none.matches(&reported(Some(500), Some(3.0))),
+            "no goal at all never touches a torrent"
+        );
+    }
+
     #[test]
     fn a_normalised_subpath_base_keeps_its_prefix() {
         let base = Url::parse("http://host/qbit").unwrap();

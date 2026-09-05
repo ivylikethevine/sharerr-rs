@@ -243,12 +243,19 @@ pub struct NotificationsForm {
     clear_webhook_url: Option<String>,
     kind: String,
     peer_quiet_secs: String,
+    heartbeat_url: String,
+    clear_heartbeat_url: Option<String>,
+    heartbeat_secs: String,
     trigger_sync_failed: Option<String>,
     trigger_peer_quiet: Option<String>,
     trigger_endpoint_rotated: Option<String>,
     trigger_items_shared: Option<String>,
     trigger_item_failed: Option<String>,
     trigger_peer_revoked: Option<String>,
+    trigger_peer_first_contact: Option<String>,
+    trigger_tracker_unreachable: Option<String>,
+    trigger_library_unreadable: Option<String>,
+    trigger_heartbeat: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -776,12 +783,16 @@ pub async fn save_checks(State(state): State<WebState>, Form(form): Form<ChecksF
     .await
 }
 
-/// A webhook fired on sync failure or a peer going quiet.
+/// A webhook fired on sync failure or a peer going quiet, plus the
+/// heartbeat push.
 ///
-/// The URL is a vault secret — see
+/// Both URLs are vault secrets — see
 /// [`sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL`] for why —
-/// so this is two writes, same shape as [`save_gluetun`]: a secret and a
-/// config section.
+/// so this is three writes: the heartbeat URL first through [`apply_secret`]
+/// on its own, then the same secret-and-section pair as [`save_gluetun`] via
+/// [`write_config_and_secret`]. The heartbeat URL goes first because it is
+/// the write with nothing to roll back: a rejected config edit after it
+/// leaves a valid push URL stored and the page saying so.
 pub async fn save_notifications(
     State(state): State<WebState>,
     Form(form): Form<NotificationsForm>,
@@ -789,6 +800,40 @@ pub async fn save_notifications(
     let webhook = form.webhook_url.trim();
     if !webhook.is_empty() && url::Url::parse(webhook).is_err() {
         return reject(&state, "That does not look like a valid webhook URL.").await;
+    }
+    let heartbeat = form.heartbeat_url.trim();
+    if !heartbeat.is_empty() && url::Url::parse(heartbeat).is_err() {
+        return reject(
+            &state,
+            "That does not look like a valid heartbeat push URL.",
+        )
+        .await;
+    }
+    // Blank leaves the interval as it is: the input renders `disabled` when a
+    // `SHARERR_*` variable pins it, and a disabled input submits nothing.
+    let heartbeat_secs: Option<u64> = match form.heartbeat_secs.trim() {
+        "" => None,
+        text => match text.parse() {
+            Ok(secs) => Some(secs),
+            Err(_) => {
+                return reject(
+                    &state,
+                    "The heartbeat interval must be a whole number of seconds.",
+                )
+                .await;
+            }
+        },
+    };
+
+    if let Err(message) = apply_secret(
+        &state,
+        secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
+        heartbeat,
+        form.clear_heartbeat_url.is_some(),
+    )
+    .await
+    {
+        return reject(&state, &message).await;
     }
 
     write_config_and_secret(
@@ -808,6 +853,12 @@ pub async fn save_notifications(
                 config_paths::NOTIFICATIONS_PEER_QUIET_SECS,
                 i64::try_from(secs).unwrap_or(604_800),
             )]);
+            if let Some(secs) = heartbeat_secs {
+                file.apply([Edit::int(
+                    config_paths::NOTIFICATIONS_HEARTBEAT_SECS,
+                    i64::try_from(secs).unwrap_or(60),
+                )]);
+            }
 
             use sharerr_core::config::NotificationTrigger as Trigger;
             let selected: Vec<&'static str> = [
@@ -820,6 +871,19 @@ pub async fn save_notifications(
                 (form.trigger_items_shared.is_some(), Trigger::ItemsShared),
                 (form.trigger_item_failed.is_some(), Trigger::ItemFailed),
                 (form.trigger_peer_revoked.is_some(), Trigger::PeerRevoked),
+                (
+                    form.trigger_peer_first_contact.is_some(),
+                    Trigger::PeerFirstContact,
+                ),
+                (
+                    form.trigger_tracker_unreachable.is_some(),
+                    Trigger::TrackerUnreachable,
+                ),
+                (
+                    form.trigger_library_unreadable.is_some(),
+                    Trigger::LibraryUnreadable,
+                ),
+                (form.trigger_heartbeat.is_some(), Trigger::Heartbeat),
             ]
             .into_iter()
             .filter_map(|(checked, trigger)| checked.then_some(trigger.as_str()))
@@ -1713,6 +1777,24 @@ async fn build_page(
             .notifications
             .triggers
             .contains(&sharerr_core::config::NotificationTrigger::PeerRevoked),
+        notifications_trigger_peer_first_contact: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::PeerFirstContact),
+        notifications_trigger_tracker_unreachable: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::TrackerUnreachable),
+        notifications_trigger_library_unreadable: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::LibraryUnreadable),
+        notifications_trigger_heartbeat: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::Heartbeat),
+        notifications_heartbeat_set: is_set(secret_keys::NOTIFICATIONS_HEARTBEAT_URL),
+        notifications_heartbeat_secs: config.notifications.heartbeat_secs,
 
         metrics_enabled: config.metrics.enabled,
         metrics_token_set: is_set(secret_keys::METRICS_TOKEN),

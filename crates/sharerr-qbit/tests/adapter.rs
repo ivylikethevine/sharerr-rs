@@ -8,7 +8,7 @@
 
 use secrecy::SecretString;
 use serde_json::json;
-use sharerr_client::{AddRequest, ClientError, ClientKind, TorrentClient};
+use sharerr_client::{AddRequest, ClientError, ClientKind, SeedingLimits, TorrentClient};
 use sharerr_qbit::QbitClient;
 use sharerr_testkit::mock::{QBIT_API_KEY as API_KEY, base_url, mount_ok};
 use url::Url;
@@ -250,15 +250,22 @@ async fn list_maps_ratio_and_resolves_qbittorrents_sentinels() {
     Mock::given(method("GET"))
         .and(path("/api/v2/torrents/info"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "hash": "fixed", "ratio": 1.85, "ratio_limit": 2.0 },
-            { "hash": "unlimited", "ratio": 0.5, "ratio_limit": -1.0 },
-            { "hash": "global", "ratio": 0.1, "ratio_limit": -2.0 },
+            { "hash": "fixed", "ratio": 1.85, "ratio_limit": 2.0, "up_limit": 512_000 },
+            { "hash": "unlimited", "ratio": 0.5, "ratio_limit": -1.0, "up_limit": -1 },
+            { "hash": "global", "ratio": 0.1, "ratio_limit": -2.0, "up_limit": 0 },
         ])))
         .mount(&server)
         .await;
 
     let list = TorrentClient::list(&client(&server), None).await.unwrap();
     assert_eq!(list.len(), 3);
+    assert_eq!(
+        list[0].upload_limit_kib,
+        Some(500),
+        "bytes/s read back as KiB/s"
+    );
+    assert_eq!(list[1].upload_limit_kib, None, "-1 is no cap");
+    assert_eq!(list[2].upload_limit_kib, None, "0 is no cap");
     assert_eq!(list[0].ratio, Some(1.85));
     assert_eq!(list[0].ratio_limit, Some(2.0));
     assert_eq!(list[1].ratio, Some(0.5));
@@ -431,6 +438,75 @@ async fn add_trackers_is_silent_when_the_url_is_already_present() {
 /// `torrents/export` is bencode. Read as bytes and returned untouched — a
 /// `String` round trip would mangle the binary `pieces` field, and with it
 /// the infohash of every torrent sharerr adopts.
+/// `set_limits` restates each stated field through its own qBittorrent
+/// endpoint, in qBittorrent's units: bytes/s for the cap. A field with no
+/// opinion (`None`) is not sent at all, so the operator's own value on the
+/// torrent survives.
+#[tokio::test]
+async fn set_limits_posts_one_endpoint_per_stated_field() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/setUploadLimit"))
+        .and(wiremock::matchers::body_string_contains("hashes=abc123"))
+        .and(wiremock::matchers::body_string_contains("limit=512000"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/setShareLimits"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let limits = SeedingLimits {
+        upload_limit_kib: Some(500),
+        ratio_limit: None,
+    };
+    TorrentClient::set_limits(&client(&server), "abc123", &limits)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn set_limits_with_a_ratio_sends_share_limits_with_time_limits_left_global() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v2/torrents/setShareLimits"))
+        .and(wiremock::matchers::body_string_contains("hashes=abc123"))
+        .and(wiremock::matchers::body_string_contains("ratioLimit=2.5"))
+        .and(wiremock::matchers::body_string_contains(
+            "seedingTimeLimit=-2",
+        ))
+        .and(wiremock::matchers::body_string_contains(
+            "inactiveSeedingTimeLimit=-2",
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let limits = SeedingLimits {
+        upload_limit_kib: None,
+        ratio_limit: Some(2.5),
+    };
+    TorrentClient::set_limits(&client(&server), "abc123", &limits)
+        .await
+        .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+/// Nothing configured is nothing on the wire.
+#[tokio::test]
+async fn set_limits_with_nothing_configured_sends_nothing() {
+    let server = MockServer::start().await;
+    TorrentClient::set_limits(&client(&server), "abc123", &SeedingLimits::default())
+        .await
+        .unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn export_returns_the_torrent_bytes_verbatim() {
     // Not valid UTF-8, deliberately: 0x80..0x9f is what a `pieces` field
@@ -492,6 +568,16 @@ async fn every_trait_method_translates_a_server_failure_the_same_way() {
         TorrentClient::add_trackers(&qbit, hash, &urls)
             .await
             .unwrap_err(),
+        TorrentClient::set_limits(
+            &qbit,
+            hash,
+            &SeedingLimits {
+                upload_limit_kib: Some(1),
+                ratio_limit: None,
+            },
+        )
+        .await
+        .unwrap_err(),
     ];
     for err in &errors {
         match err {

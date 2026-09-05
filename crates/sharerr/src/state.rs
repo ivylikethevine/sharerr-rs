@@ -934,6 +934,13 @@ pub(crate) mod fixtures {
         ) -> sharerr_client::Result<()> {
             unimplemented!("not needed by the fixtures that use this stub")
         }
+        async fn set_limits(
+            &self,
+            _hash: &str,
+            _limits: &sharerr_client::SeedingLimits,
+        ) -> sharerr_client::Result<()> {
+            unimplemented!("not needed by the fixtures that use this stub")
+        }
         async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
             unimplemented!("not needed by the fixtures that use this stub")
         }
