@@ -94,7 +94,7 @@ impl GluetunTarget {
         }
     }
 
-    pub(crate) fn api_key_secret(self) -> &'static str {
+    pub(crate) fn credential_key(self) -> &'static str {
         match self {
             Self::Tracker => secret_keys::GLUETUN_API_KEY,
             Self::Client => secret_keys::GLUETUN_CLIENT_API_KEY,
@@ -407,7 +407,7 @@ async fn poll_once(
         let rendered = format!(
             "no {} configured — skipping the poll rather than sending a \
              request that would only come back 401",
-            target.api_key_secret()
+            target.credential_key()
         );
         if record_error(status, last_error, rendered.clone()).await {
             tracing::warn!(target = target.label(), "{rendered}");
@@ -767,8 +767,8 @@ mod tests {
         assert_eq!(GluetunTarget::Tracker.config(&config).poll_secs, 11);
         assert_eq!(GluetunTarget::Client.config(&config).poll_secs, 22);
         assert_ne!(
-            GluetunTarget::Tracker.api_key_secret(),
-            GluetunTarget::Client.api_key_secret()
+            GluetunTarget::Tracker.credential_key(),
+            GluetunTarget::Client.credential_key()
         );
 
         let (tracker_enabled, tracker_url, tracker_poll) = GluetunTarget::Tracker.config_paths();
@@ -855,7 +855,7 @@ mod tests {
             snapshot
                 .last_error
                 .as_deref()
-                .is_some_and(|e| e.contains(target.api_key_secret())),
+                .is_some_and(|e| e.contains(target.credential_key())),
             "{:?}",
             snapshot.last_error
         );
@@ -912,7 +912,7 @@ mod tests {
                 )
                 .unwrap();
                 vault
-                    .put(target.api_key_secret(), &SecretString::from("a-key"))
+                    .put(target.credential_key(), &SecretString::from("a-key"))
                     .unwrap();
                 vault
                     .put(
@@ -975,7 +975,7 @@ mod tests {
                 )
                 .unwrap();
                 vault
-                    .put(target.api_key_secret(), &SecretString::from("a-key"))
+                    .put(target.credential_key(), &SecretString::from("a-key"))
                     .unwrap();
                 drop(vault);
 

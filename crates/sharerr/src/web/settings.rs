@@ -317,7 +317,7 @@ pub async fn save_arr(
     // an API key; its settings live in the Libraries section.
     let (Some(url_path), Some(secret_key)) = (
         config_paths::url_for(source),
-        secret_keys::api_key_for(source),
+        secret_keys::credential_for(source),
     ) else {
         return reject(&state, "There is no such service to configure.").await;
     };
@@ -690,7 +690,7 @@ pub async fn save_gluetun_client(
 /// The save logic both gluetun sections share — `target` is the only thing
 /// that differs between the tracker's poller and the client's, and it
 /// already carries both the paths and the vault key
-/// ([`GluetunTarget::config_paths`], [`GluetunTarget::api_key_secret`]).
+/// ([`GluetunTarget::config_paths`], [`GluetunTarget::credential_key`]).
 async fn save_gluetun_section(
     state: WebState,
     form: GluetunForm,
@@ -727,7 +727,7 @@ async fn save_gluetun_section(
             }
             Ok(())
         },
-        target.api_key_secret(),
+        target.credential_key(),
         &form.api_key,
         form.clear_api_key.is_some(),
     )
@@ -1517,7 +1517,7 @@ pub(super) fn arr_section(
     primary: bool,
 ) -> Option<ArrSection> {
     let url_path = config_paths::url_for(kind)?;
-    let key = secret_keys::api_key_for(kind)?;
+    let key = secret_keys::credential_for(kind)?;
     Some(ArrSection {
         source: kind.as_str(),
         title: title_case(kind.as_str()),

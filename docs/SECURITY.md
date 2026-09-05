@@ -164,19 +164,27 @@ sharerr is misusing their API in a way that creates the exposure.
 
 **The `sharerr.toml` path CodeQL's `rust/path-injection` query flags in
 `config_io.rs`** is guarded rather than dismissed, by a `..` check inlined
-into both `ConfigFile::open` and `ConfigFile::write_validated`. The value is
-always `ServeState::config_path()`, set once at process start from `--config`
-or `SHARERR_CONFIG` and never reassigned — whoever controls that flag already
-controls the process, so there was never a privilege boundary here to enforce,
-only the query's `DotDotCheck` sanitizer pattern to satisfy. What the query
-actually calls "user-provided" is not the flag: CodeQL's axum model treats
-every parameter of a route handler as remote input, the `State` extractor
-included, so `state.serve.config_path()` inside a settings handler is the
-source. The guard is a real, if narrow, behaviour change: an operator-supplied
-config path can no longer contain `..`, including a legitimate one such as a
+into `ConfigFile::open`, `ConfigFile::write_validated` and
+`ConfigFile::backup_path`. The value is always `ServeState::config_path()`,
+set once at process start from `--config` or `SHARERR_CONFIG` and never
+reassigned — whoever controls that flag already controls the process, so
+there was never a privilege boundary here to enforce, only the query's
+`DotDotCheck` sanitizer pattern to satisfy. What the query actually calls
+"user-provided" is not the flag: CodeQL's axum model treats every parameter
+of a route handler as remote input, the `State` extractor included, so
+`state.serve.config_path()` inside a settings handler is the source. The
+guard is a real, if narrow, behaviour change: an operator-supplied config
+path can no longer contain `..`, including a legitimate one such as a
 relative bind-mount a directory up, and must be valid UTF-8. Kept as the
 worked example of a query whose only recognised barrier costs something,
 unlike the two `cleartext-logging` findings below.
+
+`backup_path` needed the guard a second time because it is a second,
+independent sink: `web/settings.rs` calls it on a `ConfigFile::replacing`
+value — which, unlike `open`, never checks its path up front — from inside
+the settings handler. It returns `None` on a `..` or non-UTF-8 path rather
+than an error, since its only job is naming a backup for the operator to
+read, and `write_validated` would refuse to write such a path anyway.
 
 The check's shape is dictated by the query, and a first attempt got it wrong:
 `DotDotCheck` is a barrier _guard_, which only clears later reads of the
@@ -215,6 +223,21 @@ of the field that had been renamed. Those two config fields
 `#[serde(rename = "username")]` keeping the `sharerr.toml` key, the
 `SHARERR_TRANSMISSION__USERNAME` override and the `config_paths` string
 constants exactly as they were. Operators see no change.
+
+A later round found the same query still flagging the `println!` in
+`doctor.rs`'s `Report::fail`, this time one hop further upstream than any
+field: `SensitiveDataHeuristics.qll` treats a matching **function name**,
+not just a field or variable, as a source at every call site. Two functions
+qualified purely by name — `secret_keys::api_key_for` and
+`GluetunTarget::api_key_secret`, both `Option<&'static str>` accessors
+returning a vault _key name_, never a value — alongside `doctor.rs`'s own
+`fn secret`/`fn quiet_secret` and every local (`api_key`, `api_key_for_fix`,
+…) that carried a real `SecretString` from vault to client but happened to
+sit on a path that also reaches a `report.fail(...)` call naming the key.
+All of it renamed around the word `credential` — `credential_for`,
+`credential_key`, `fn credential`/`fn quiet_credential` — which matches none
+of the heuristic's regexes. As before, no vault key, TOML key, or printed
+message changed; only the Rust identifiers naming them moved.
 
 **`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack) is not in this
 list**, though a stale Scorecard report may claim it should be. `rsa` would

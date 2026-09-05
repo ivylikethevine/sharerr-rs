@@ -84,7 +84,7 @@ impl Outcome {
 async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
     let service = config.service(kind);
     // The caller filtered Directory out, and every *arr app has a vault key.
-    let Some(key) = secret_keys::api_key_for(kind) else {
+    let Some(key) = secret_keys::credential_for(kind) else {
         return Outcome::Bad("Unknown service.".to_owned());
     };
 

@@ -168,8 +168,20 @@ impl ConfigFile {
 
     /// Where [`Self::write_validated`] will move the current file, when it is
     /// replacing one.
+    ///
+    /// Carries the same inline `..` guard as `write_validated` — see that
+    /// method's comment for why the shape (checked `&str` receiver, rebuilt
+    /// `Path`) is load-bearing for CodeQL's `DotDotCheck` sanitizer. A `..` or
+    /// non-UTF-8 path yields `None` here rather than an error: the caller only
+    /// wants a name to show the operator, and `write_validated` would refuse
+    /// to write such a path anyway.
     pub fn backup_path(&self) -> Option<PathBuf> {
-        (self.recovered && self.path.exists()).then(|| invalid_path(&self.path))
+        let path_text = self.path.to_str()?;
+        if path_text.contains("..") {
+            return None;
+        }
+        let path = std::path::Path::new(path_text);
+        (self.recovered && path.exists()).then(|| invalid_path(path))
     }
 
     /// Apply edits in order. Nothing is written until [`Self::write_validated`].
@@ -757,6 +769,24 @@ username = "admin"
 
         let err = ConfigFile::open(&path).expect_err("a `..` component must be refused");
         assert!(format!("{err:#}").contains(".."), "{err:#}");
+    }
+
+    /// The same guard, reached through `backup_path` — the one caller
+    /// (`web/settings.rs`) invokes it on a `replacing` document before
+    /// `write_validated` ever runs, so this needs its own guard rather than
+    /// inheriting one. Without it, a `..` path that happens to resolve to a
+    /// file that exists would report a backup `write_validated` would then
+    /// refuse to make.
+    #[test]
+    fn backup_path_refuses_a_path_containing_dot_dot_even_when_it_resolves_to_a_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sharerr.toml"), "tag = \"x\"\n").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let path = sub.join("..").join("sharerr.toml");
+        assert!(path.exists(), "the `..` path must resolve to a real file");
+
+        assert_eq!(ConfigFile::replacing(&path).backup_path(), None);
     }
 
     /// The same guard, reached through `write_validated` rather than `open` —

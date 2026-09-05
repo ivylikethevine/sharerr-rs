@@ -220,7 +220,7 @@ fn check_vault(
     for key in config
         .configured_sources()
         .into_iter()
-        .filter_map(secret_keys::api_key_for)
+        .filter_map(secret_keys::credential_for)
     {
         match vault.get(key) {
             Ok(Some(_)) => report.ok(format!("{key} is set")),
@@ -246,13 +246,13 @@ fn check_torrent_credential(
     client: &sharerr_core::config::TorrentClientConfig<'_>,
     report: &mut Report,
 ) -> Option<checks::TorrentCredential> {
-    let secret = |key: &'static str| -> Result<Option<SecretString>, String> {
+    let stored = |key: &'static str| -> Result<Option<SecretString>, String> {
         vault
             .get(key)
             .map_err(|err| format!("{key} could not be read: {}", chain(&err)))
     };
 
-    match checks::resolve_torrent_credential(client, &secret) {
+    match checks::resolve_torrent_credential(client, &stored) {
         Ok(Some(credential)) => {
             match (
                 &credential,
@@ -314,14 +314,15 @@ fn fail_unreadable(report: &mut Report, key: &str, err: impl std::error::Error) 
 /// For credentials that are alternatives rather than requirements: a missing API
 /// key is not a fault when a password is configured, and saying so would turn a
 /// correct setup into a failing report.
-fn quiet_secret(vault: Option<&Vault>, key: &str) -> Option<SecretString> {
+fn quiet_credential(vault: Option<&Vault>, key: &str) -> Option<SecretString> {
     vault?.get(key).ok().flatten()
 }
 
-/// Fetch a secret, reporting the precise reason it is unavailable — **exactly
-/// once**. A read error and a missing entry have different fixes, and reporting a
-/// decryption failure as a missing value sends the operator the wrong way.
-fn secret(vault: Option<&Vault>, key: &str, report: &mut Report) -> Option<SecretString> {
+/// Fetch a stored credential, reporting the precise reason it is unavailable —
+/// **exactly once**. A read error and a missing entry have different fixes,
+/// and reporting a decryption failure as a missing value sends the operator
+/// the wrong way.
+fn credential(vault: Option<&Vault>, key: &str, report: &mut Report) -> Option<SecretString> {
     let Some(vault) = vault else {
         // The vault section already said why it could not be opened; do not
         // restate it, but do record that this check could not run.
@@ -371,29 +372,35 @@ async fn check_arr(
     report: &mut Report,
 ) -> Vec<Discovered> {
     // Only *arr apps reach here, and every *arr app has a vault key.
-    let Some(key_name) = secret_keys::api_key_for(kind) else {
+    let Some(key_name) = secret_keys::credential_for(kind) else {
         return Vec::new();
     };
 
-    // `secret` reports its own failure, in this command's voice and with the
+    // `credential` reports its own failure, in this command's voice and with the
     // `vault set` hint. Handing `checks` an `Ok(None)` afterwards would report it a
     // second time, so a missing credential short-circuits here instead.
-    let Some(api_key) = secret(vault, key_name, report) else {
+    let Some(arr_credential) = credential(vault, key_name, report) else {
         return Vec::new();
     };
 
     // Cloned before the first check consumes it: `--fix` needs a live credential
     // to create the tag with, and re-deriving it from the vault a second time
     // would mean opening it twice for one command.
-    let api_key_for_fix = api_key.clone();
+    let credential_for_fix = arr_credential.clone();
 
-    let outcome = checks::check_arr(kind, Some(&service.url), Ok(Some(api_key)), &config.tag).await;
+    let outcome = checks::check_arr(
+        kind,
+        Some(&service.url),
+        Ok(Some(arr_credential)),
+        &config.tag,
+    )
+    .await;
 
     // `TagMissing` is the one mechanical case `--fix` can close here: creating
     // the tag turns it into `TagUnused` (or `Ready`, if content already carries
     // it by the time this runs) without a restart or a second invocation.
     if fix && let ArrOutcome::TagMissing { .. } = &outcome {
-        return fix_missing_tag(kind, service, config, api_key_for_fix, report).await;
+        return fix_missing_tag(kind, service, config, credential_for_fix, report).await;
     }
 
     // The rendering is this command's own — a terminal report in the third person,
@@ -468,10 +475,10 @@ async fn fix_missing_tag(
     kind: MediaSource,
     service: &ServiceConfig,
     config: &Config,
-    api_key: SecretString,
+    credential: SecretString,
     report: &mut Report,
 ) -> Vec<Discovered> {
-    let client = match sharerr_arr::ArrClient::new(kind, &service.url, api_key) {
+    let client = match sharerr_arr::ArrClient::new(kind, &service.url, credential) {
         Ok(client) => client,
         Err(err) => {
             report.fail(format!("could not create tag {:?}: {err}", config.tag));
@@ -575,7 +582,7 @@ async fn check_qbit(
     // further down needs its own qBittorrent-specific client, since "category"
     // is not a concept the generic `TorrentClient` trait carries — Transmission
     // has none.
-    let api_key_for_category = match &credential {
+    let category_credential = match &credential {
         checks::TorrentCredential::ApiKey(key) => Some(key.clone()),
         checks::TorrentCredential::Password(_) => None,
     };
@@ -637,9 +644,9 @@ async fn check_qbit(
     // which need no pre-creation — so this only runs for that backend, and only
     // once an API key is actually available to build a second client with.
     if config.torrent_backend == TorrentBackend::Qbittorrent
-        && let Some(api_key) = api_key_for_category
+        && let Some(credential) = category_credential
     {
-        check_qbit_category(url, api_key, label, fix, report).await;
+        check_qbit_category(url, credential, label, fix, report).await;
     }
 }
 
@@ -653,7 +660,7 @@ async fn check_qbit(
 /// has not looked at qBittorrent's own settings.
 async fn check_qbit_category(
     url: &Url,
-    api_key: SecretString,
+    credential: SecretString,
     label: &str,
     fix: bool,
     report: &mut Report,
@@ -662,7 +669,7 @@ async fn check_qbit_category(
         return;
     }
 
-    let client = match sharerr_qbit::QbitClient::with_api_key(url, api_key) {
+    let client = match sharerr_qbit::QbitClient::with_api_key(url, credential) {
         Ok(client) => client,
         Err(err) => {
             report.warn(format!("could not check qBittorrent's categories: {err}"));
@@ -709,7 +716,7 @@ fn check_tracker(config: &Config, vault: Option<&Vault>, report: &mut Report) {
          correct torrents whose announces fail until it is running",
     );
 
-    if quiet_secret(vault, secret_keys::TRACKER_TOKEN_PREVIOUS).is_some() {
+    if quiet_credential(vault, secret_keys::TRACKER_TOKEN_PREVIOUS).is_some() {
         report.info(
             "a previous announce token is still accepted alongside the current one — \
              finish the rotation from Settings once nothing needs the old one any more",
@@ -756,8 +763,8 @@ async fn check_gluetun(
         return;
     };
 
-    let api_key = quiet_secret(vault, target.api_key_secret());
-    let client = match crate::gluetun::GluetunClient::new(control, api_key) {
+    let credential = quiet_credential(vault, target.credential_key());
+    let client = match crate::gluetun::GluetunClient::new(control, credential) {
         Ok(client) => client,
         Err(err) => {
             report.fail(format!("{err}"));
@@ -1166,40 +1173,40 @@ mod tests {
         });
     }
 
-    // ------------------------------------------------------- quiet_secret/secret
+    // ------------------------------------------------ quiet_credential/credential
 
     #[test]
-    fn quiet_secret_is_none_without_a_vault_and_reports_nothing() {
-        assert!(quiet_secret(None, "sonarr.api_key").is_none());
+    fn quiet_credential_is_none_without_a_vault_and_reports_nothing() {
+        assert!(quiet_credential(None, "sonarr.api_key").is_none());
     }
 
     #[test]
-    fn quiet_secret_and_secret_read_a_real_vault_without_reporting_the_quiet_ones() {
+    fn quiet_credential_and_credential_read_a_real_vault_without_reporting_the_quiet_ones() {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = vault_in(&dir);
         vault
             .put("sonarr.api_key", &SecretString::from("k"))
             .unwrap();
 
-        assert!(quiet_secret(Some(&vault), "sonarr.api_key").is_some());
-        assert!(quiet_secret(Some(&vault), "radarr.api_key").is_none());
+        assert!(quiet_credential(Some(&vault), "sonarr.api_key").is_some());
+        assert!(quiet_credential(Some(&vault), "radarr.api_key").is_none());
 
         let mut report = Report::default();
-        assert!(secret(Some(&vault), "sonarr.api_key", &mut report).is_some());
+        assert!(credential(Some(&vault), "sonarr.api_key", &mut report).is_some());
         assert_eq!(report.failures, 0, "a present secret is not a failure");
     }
 
     #[test]
-    fn secret_reports_a_missing_key_and_a_closed_vault_each_exactly_once() {
+    fn credential_reports_a_missing_key_and_a_closed_vault_each_exactly_once() {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault_in(&dir);
 
         let mut report = Report::default();
-        assert!(secret(Some(&vault), "radarr.api_key", &mut report).is_none());
+        assert!(credential(Some(&vault), "radarr.api_key", &mut report).is_none());
         assert_eq!(report.failures, 1);
 
         let mut report = Report::default();
-        assert!(secret(None, "radarr.api_key", &mut report).is_none());
+        assert!(credential(None, "radarr.api_key", &mut report).is_none());
         assert_eq!(report.failures, 1);
     }
 

@@ -290,7 +290,7 @@ pub async fn snapshot(
                 .into_iter()
                 // `configured_sources` yields only *arr apps, each of which has a key.
                 .filter_map(|kind| {
-                    sharerr_core::config::secret_keys::api_key_for(kind).map(|key| (kind, key))
+                    sharerr_core::config::secret_keys::credential_for(kind).map(|key| (kind, key))
                 })
                 .map(|(kind, key)| {
                     let api_key = secret(key);

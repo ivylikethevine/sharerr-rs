@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// `(source, config path, vault key)` for every *arr app sharerr reads
-/// config for — the one table [`secret_keys::api_key_for`] and
+/// config for — the one table [`secret_keys::credential_for`] and
 /// [`config_paths::url_for`] both index.
 ///
 /// Previously two independent five-arm matches answering the same
@@ -122,7 +122,7 @@ pub mod secret_keys {
     /// A function rather than five match arms at each call site — every consumer
     /// asks the same question, and a sixth app should mean editing one place.
     /// `None` for the directory source, which has no credential at all.
-    pub fn api_key_for(source: crate::MediaSource) -> Option<&'static str> {
+    pub fn credential_for(source: crate::MediaSource) -> Option<&'static str> {
         super::ARR_WIRING
             .iter()
             .find(|(s, ..)| *s == source)
@@ -258,7 +258,7 @@ pub mod config_paths {
     }
 
     /// The config path holding one *arr app's URL — the write-side counterpart
-    /// of [`super::secret_keys::api_key_for`], for the same reason: every
+    /// of [`super::secret_keys::credential_for`], for the same reason: every
     /// consumer asks the same question, and a sixth app should mean editing one
     /// function. `None` for the directory source, which has no URL.
     pub fn url_for(source: crate::MediaSource) -> Option<&'static str> {
