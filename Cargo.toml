@@ -127,20 +127,21 @@ utoipa-axum = "0.2.0"
 wiremock = "0.6.5"
 zeroize = "1.9.0"
 
-# The workspace's own crates. Path-only, no `version`: nothing here is published
-# to crates.io (docs/SUPPORT.md), and the workspace version is a placeholder -
-# see [workspace.package] above.
-sharerr-arr = { path = "crates/sharerr-arr" }
-sharerr-client = { path = "crates/sharerr-client" }
-sharerr-core = { path = "crates/sharerr-core" }
-sharerr-lighthouse = { path = "crates/sharerr-lighthouse" }
-sharerr-qbit = { path = "crates/sharerr-qbit" }
-sharerr-rtorrent = { path = "crates/sharerr-rtorrent" }
-sharerr-probe = { path = "crates/sharerr-probe" }
-sharerr-store = { path = "crates/sharerr-store" }
-sharerr-transmission = { path = "crates/sharerr-transmission" }
-sharerr-testkit = { path = "crates/sharerr-testkit" }
-sharerr-torrent = { path = "crates/sharerr-torrent" }
+# The workspace's own crates. The `version` is the placeholder from
+# [workspace.package] above, never bumped; it stays here only because
+# deny.toml's `wildcards = "deny"` reads a path dependency with no version as a
+# wildcard (cargo-deny's `bans` check fails the PR otherwise).
+sharerr-arr = { version = "0.0.0-dev", path = "crates/sharerr-arr" }
+sharerr-client = { version = "0.0.0-dev", path = "crates/sharerr-client" }
+sharerr-core = { version = "0.0.0-dev", path = "crates/sharerr-core" }
+sharerr-lighthouse = { version = "0.0.0-dev", path = "crates/sharerr-lighthouse" }
+sharerr-qbit = { version = "0.0.0-dev", path = "crates/sharerr-qbit" }
+sharerr-rtorrent = { version = "0.0.0-dev", path = "crates/sharerr-rtorrent" }
+sharerr-probe = { version = "0.0.0-dev", path = "crates/sharerr-probe" }
+sharerr-store = { version = "0.0.0-dev", path = "crates/sharerr-store" }
+sharerr-transmission = { version = "0.0.0-dev", path = "crates/sharerr-transmission" }
+sharerr-testkit = { version = "0.0.0-dev", path = "crates/sharerr-testkit" }
+sharerr-torrent = { version = "0.0.0-dev", path = "crates/sharerr-torrent" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
