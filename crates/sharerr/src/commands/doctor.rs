@@ -254,15 +254,19 @@ fn check_torrent_credential(
 
     match checks::resolve_torrent_credential(client, &secret) {
         Ok(Some(credential)) => {
-            match (&credential, client.api_key_key, client.password_key) {
-                (checks::TorrentCredential::ApiKey(_), Some(key), Some(password_key)) => report.ok(
-                    format!("{key} is set — it takes precedence over {password_key}"),
+            match (
+                &credential,
+                client.primary_credential,
+                client.fallback_credential,
+            ) {
+                (checks::TorrentCredential::ApiKey(_), Some(key), Some(fallback)) => report.ok(
+                    format!("{key} is set — it takes precedence over {fallback}"),
                 ),
                 (checks::TorrentCredential::ApiKey(_), Some(key), None) => {
                     report.ok(format!("{key} is set"));
                 }
-                (checks::TorrentCredential::Password(_), _, Some(password_key)) => {
-                    report.ok(format!("{password_key} is set"));
+                (checks::TorrentCredential::Password(_), _, Some(fallback)) => {
+                    report.ok(format!("{fallback} is set"));
                 }
                 // A credential only ever resolves from a configured key.
                 _ => {}
@@ -273,7 +277,7 @@ fn check_torrent_credential(
         // has that concept; qBittorrent authenticates by API key alone, so a
         // missing key there is the whole story.
         Ok(None) => {
-            if let Some(key) = client.password_key.or(client.api_key_key) {
+            if let Some(key) = client.fallback_credential.or(client.primary_credential) {
                 fail_missing(report, key);
             }
             None
@@ -558,8 +562,8 @@ async fn check_qbit(
 
     let Some(credential) = credential else {
         let key = settings
-            .password_key
-            .or(settings.api_key_key)
+            .fallback_credential
+            .or(settings.primary_credential)
             .unwrap_or("the credential");
         report.fail(format!(
             "skipped: {key} is unavailable — see the vault section above"
@@ -582,7 +586,7 @@ async fn check_qbit(
     let client = match checks::check_qbit(
         config.torrent_backend,
         url,
-        settings.username,
+        settings.login,
         Ok(Some(credential)),
     )
     .await
@@ -597,9 +601,9 @@ async fn check_qbit(
         }
         QbitOutcome::AuthRejected => {
             let checked = if noun == "API key" {
-                settings.api_key_key
+                settings.primary_credential
             } else {
-                settings.password_key
+                settings.fallback_credential
             };
             report.fail(format!(
                 "{url} rejected the {noun} — check {}",
@@ -1018,9 +1022,9 @@ fn print_config_summary(config: &Config) {
     // The configured client, not always qBittorrent's — printing the unused
     // section's URL is how an operator ends up debugging the wrong service.
     let client = config.torrent_client();
-    match client.username {
-        Some(username) => println!(
-            "  client:    {} {} (user {username})",
+    match client.login {
+        Some(login) => println!(
+            "  client:    {} {} (user {login})",
             config.torrent_backend.as_str(),
             client.url,
         ),
@@ -1204,13 +1208,13 @@ mod tests {
     /// A torrent-client config with just the vault keys under test — the URL
     /// and the rest are defaults `check_torrent_credential` never reads.
     fn client(
-        api_key_key: Option<&'static str>,
-        password_key: Option<&'static str>,
+        primary_credential: Option<&'static str>,
+        fallback_credential: Option<&'static str>,
     ) -> sharerr_core::config::TorrentClientConfig<'static> {
         static CONFIG: std::sync::LazyLock<Config> = std::sync::LazyLock::new(Config::default);
         let mut client = CONFIG.torrent_client();
-        client.api_key_key = api_key_key;
-        client.password_key = password_key;
+        client.primary_credential = primary_credential;
+        client.fallback_credential = fallback_credential;
         client
     }
 

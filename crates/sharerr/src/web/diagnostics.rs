@@ -425,7 +425,7 @@ async fn torrent_client_line(
     let backend = config.torrent_backend;
     let client = config.torrent_client_for(backend);
     let credential = checks::resolve_torrent_credential(&client, secret);
-    let outcome = checks::check_qbit(backend, client.url, client.username, credential).await;
+    let outcome = checks::check_qbit(backend, client.url, client.login, credential).await;
 
     let (message, ok) = match outcome {
         QbitOutcome::Ready { version, kind, .. } => {

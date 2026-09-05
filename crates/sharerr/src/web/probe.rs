@@ -213,7 +213,7 @@ async fn torrent_client_badge(
     let secret = super::diagnostics::secret_reader(state.serve.open_vault().await);
     let credential = resolve_torrent_credential(&client, &secret);
 
-    let outcome = check_qbit(backend, client.url, client.username, credential).await;
+    let outcome = check_qbit(backend, client.url, client.login, credential).await;
 
     match outcome {
         QbitOutcome::NoCredential => Outcome::Bad("No password stored. Save one first.".to_owned()),

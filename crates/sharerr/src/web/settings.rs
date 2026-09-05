@@ -1387,7 +1387,8 @@ fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool)
         .filter(|backend| *backend != config.torrent_backend)
         .any(|backend| {
             let client = config.torrent_client_for(backend);
-            client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
+            client.primary_credential.is_some_and(is_set)
+                || client.fallback_credential.is_some_and(is_set)
         })
 }
 
@@ -1614,12 +1615,12 @@ async fn build_page(
         qbit_skip_checking: config.qbittorrent.skip_checking,
 
         transmission_url: config.transmission.url.to_string(),
-        transmission_username: config.transmission.username.clone(),
+        transmission_username: config.transmission.login.clone(),
         transmission_password_set: is_set(secret_keys::TRANSMISSION_PASSWORD),
         transmission_label: config.transmission.label.clone(),
 
         rtorrent_url: config.rtorrent.url.to_string(),
-        rtorrent_username: config.rtorrent.username.clone(),
+        rtorrent_username: config.rtorrent.login.clone(),
         rtorrent_password_set: is_set(secret_keys::RTORRENT_PASSWORD),
         rtorrent_label: config.rtorrent.label.clone(),
 
