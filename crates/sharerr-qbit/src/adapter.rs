@@ -12,7 +12,8 @@
 
 use async_trait::async_trait;
 use sharerr_client::{
-    AddRequest, ClientError, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
+    AddRequest, ClientError, ClientKind, Result, SeedingLimits, TorrentClient, TorrentFileEntry,
+    TorrentSummary,
 };
 
 use crate::QbitClient;
@@ -73,6 +74,7 @@ impl TorrentClient for QbitClient {
                 tags: t.tag_list().into_iter().map(str::to_owned).collect(),
                 ratio: Some(t.ratio),
                 ratio_limit: t.ratio_limit_reported(),
+                upload_limit_kib: t.upload_limit_kib_reported(),
                 hash: t.hash,
                 name: t.name,
                 save_path: t.save_path,
@@ -119,6 +121,12 @@ impl TorrentClient for QbitClient {
 
     async fn add_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
         self.add_torrent_trackers(hash, urls)
+            .await
+            .map_err(|e| self.translate(e))
+    }
+
+    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        self.set_torrent_limits(hash, limits)
             .await
             .map_err(|e| self.translate(e))
     }

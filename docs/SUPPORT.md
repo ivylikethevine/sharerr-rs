@@ -49,7 +49,8 @@ torrent's tracker list in place (`set_trackers`, for endpoint rotation) and
 adds to one without disturbing the rest (`add_trackers`, for a torrent
 sharerr adopts rather than creates); whether it can hand back a `.torrent` it
 already holds (`export`); and how it expresses `upload_limit_kib` and
-`ratio_limit` at add time through whatever native mechanism it offers.
+`ratio_limit`, at add time and again on an existing torrent (`set_limits`,
+for a goal that changed), through whatever native mechanism it offers.
 
 Where the three differ:
 
@@ -117,6 +118,16 @@ built announce URLs, and every improvement to endpoint handling had to be
 made twice. A `sharerr.toml` still naming `tracker.backend` fails to load
 with an error saying exactly this. See [`DESIGN.md`](DESIGN.md)'s
 "Corrections the implementation forced".
+
+### Multi-user
+
+Decided against. sharerr has exactly one user: the admin who configures it
+and owns the library. The `users` table exists and only the first-run claim
+ever creates a row, and that is the design, not a gap. A second user would
+mean deciding what a friendship, a library, and a torrent client belong to
+before any access-control surface could be built, and nothing this project
+does needs that answer: friends are peers with their own instance, not
+accounts on yours.
 
 ### Removing the feed's magnet link entirely
 

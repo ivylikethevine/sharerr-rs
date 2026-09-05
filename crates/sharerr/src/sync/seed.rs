@@ -62,12 +62,13 @@ pub struct Seeder {
     pub category: String,
     pub tag: String,
     pub skip_checking: bool,
-    /// Per-torrent upload cap in KiB/s, applied at add time. `None` leaves
-    /// the client's own default in effect. See `[seeding]` in
+    /// Per-torrent upload cap in KiB/s, applied at add time and restated by
+    /// `Syncer::reconcile_limits` on torrents sharerr already created.
+    /// `None` leaves the client's own default in effect. See `[seeding]` in
     /// `sharerr.toml`.
     pub upload_limit_kib: Option<u64>,
-    /// Seed-ratio goal, applied at add time. `None` leaves the client's own
-    /// default/global ratio setting in effect.
+    /// Seed-ratio goal, same lifecycle as `upload_limit_kib`. `None` leaves
+    /// the client's own default/global ratio setting in effect.
     pub ratio_limit: Option<f64>,
     /// Where sharerr keeps a copy of each `.torrent` it builds.
     pub torrent_dir: PathBuf,
@@ -663,6 +664,7 @@ mod tests {
         set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
         add_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
         add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+        set_limits_calls: std::sync::Mutex<Vec<(String, sharerr_client::SeedingLimits)>>,
         /// `.torrent` bytes `export` hands back, or `None` for a client that
         /// has no such call — the Transmission and rTorrent case.
         export_result: Option<Vec<u8>>,
@@ -719,6 +721,17 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((hash.to_owned(), urls.to_vec()));
+            Ok(())
+        }
+        async fn set_limits(
+            &self,
+            hash: &str,
+            limits: &sharerr_client::SeedingLimits,
+        ) -> sharerr_client::Result<()> {
+            self.set_limits_calls
+                .lock()
+                .unwrap()
+                .push((hash.to_owned(), *limits));
             Ok(())
         }
         async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
@@ -1307,6 +1320,7 @@ mod tests {
             is_seeding: true,
             ratio: None,
             ratio_limit: None,
+            upload_limit_kib: None,
         }
     }
 

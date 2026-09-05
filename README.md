@@ -87,8 +87,8 @@ whole design is built around.
   page with per-item detail and manual retry/rebuild/unshare, library
   composition, sync history, self-refreshing status tiles, and path-mapping
   diagnostics.
-- **Operations**: webhook notifications (generic, Discord, Apprise) on six
-  triggers, config backup and restore, `/metrics` (OpenMetrics) and a
+- **Operations**: webhook notifications (generic, Discord, Apprise) on nine
+  triggers plus an Uptime-Kuma-style heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
   dashboard-widget JSON endpoint behind a bearer token, and an OpenAPI 3.1
   document for the machine-facing API.
 
@@ -215,7 +215,8 @@ is running. Field reference: [`[tracker]`](docs/SETTINGS.md#tracker).
 ### Seeding limits
 
 Settings → Seeding limits takes an upload-speed cap (KiB/s) and a seed-ratio
-goal, applied once per torrent at the moment sharerr hands it to the client:
+goal, applied to each torrent as sharerr hands it to the client and restated
+on the torrents sharerr already created whenever a value changes:
 
 ```toml
 [seeding]
@@ -224,9 +225,12 @@ ratio_limit = 2.0
 ```
 
 The client's own seeding engine honours them from then on, the same as for a
-torrent added by hand, so a change here only affects torrents added _after_
-it. Leave a field blank for no cap. rTorrent honours the cap but not the
-ratio; see [`docs/SUPPORT.md`](docs/SUPPORT.md#torrent-clients-what-actually-seeds).
+torrent added by hand. A changed value reaches every torrent sharerr created
+on the next sync pass, once; a torrent sharerr adopted keeps whatever limits
+it had. A blank field is no opinion rather than "no cap": sharerr sends
+nothing for it, so a limit you want gone comes off in the client. rTorrent
+honours the cap but not the ratio; see
+[`docs/SUPPORT.md`](docs/SUPPORT.md#torrent-clients-what-actually-seeds).
 
 ### A dynamic endpoint (gluetun)
 
@@ -334,10 +338,13 @@ pulls and accepts their pushes; it just never initiates.
 
 A friend who stops showing up can be reported rather than noticed: with a
 webhook URL stored as `notifications.webhook_url`, sharerr POSTs there on
-whichever of six triggers are enabled (a sync failing, a friend going quiet,
-the advertised endpoint rotating, items newly shared or failing to share, a
-friend's key being revoked), as generic JSON, a Discord webhook, or an
-Apprise `/notify`. Field reference:
+whichever of nine triggers are enabled (a sync failing, a friend going quiet
+or making first contact, the advertised endpoint rotating or the tracker
+behind it going unreachable, items newly shared or failing to share, a
+library path becoming unreadable, a friend's key being revoked), as generic
+JSON, a Discord webhook, or an Apprise `/notify`. A tenth, the heartbeat,
+goes the other way: a push to an Uptime-Kuma-style URL while the instance is
+ready, so a monitor notices the silence. Field reference:
 [`[notifications]`](docs/SETTINGS.md#notifications).
 
 ## Topology
@@ -538,23 +545,14 @@ not features:
 
 Smallest first, by how much each item touches:
 
-- **The remaining notification triggers.** Four more (a friend's first
-  contact, the tracker going unreachable, an unreadable `[[library]]` path,
-  an Uptime-Kuma-style heartbeat) each need a trigger wired onto detection.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
-- **Seeding limits that apply retroactively.** The cap and ratio bind at add
-  time only; changing them later does nothing to an already-seeding torrent.
 - **Transfer accounting.** The tracker resolves which friend an announce
   belongs to but discards the `uploaded`/`downloaded` totals it carries.
   Keeping them would unlock a per-friend "served" indicator and a real
   bytes-out figure on the status page.
 - **Request flow.** Discovery is one-way today. An inbound request queue
   with an approve step is the other half of the original idea.
-- **Multi-user.** The `users` table exists but only the first-run claim ever
-  creates a row. A second user means deciding what a friendship, a library,
-  and a torrent client belong to before any access-control surface can be
-  built.
 
 ## Getting help and contributing
 

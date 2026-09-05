@@ -46,6 +46,9 @@ struct QbitState {
     trackers_added: Vec<String>,
     /// Bodies of `torrents/removeTrackers` calls.
     trackers_removed: Vec<String>,
+    /// Bodies of `torrents/setUploadLimit` and `torrents/setShareLimits`
+    /// calls, for the retroactive-limits assertions.
+    limits_set: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +74,8 @@ struct AddedTorrent {
     /// to `None`.
     ratio: f64,
     ratio_limit: f64,
+    /// `torrents/info`'s `up_limit`, bytes/s; `-1` is qBittorrent's "no cap".
+    up_limit: i64,
 }
 
 impl AddedTorrent {
@@ -89,6 +94,7 @@ impl AddedTorrent {
             data: Vec::new(),
             ratio: 0.0,
             ratio_limit: -2.0,
+            up_limit: -1,
         }
     }
 
@@ -153,6 +159,7 @@ impl FakeQbit {
                     data: Vec::new(),
                     ratio: 0.0,
                     ratio_limit: -2.0,
+                    up_limit: -1,
                 });
                 ResponseTemplate::new(200).set_body_string("Ok.")
             })
@@ -180,6 +187,7 @@ impl FakeQbit {
                             "tags": "sharerr",
                             "ratio": t.ratio,
                             "ratio_limit": t.ratio_limit,
+                            "up_limit": t.up_limit,
                         })
                     })
                     .collect();
@@ -231,6 +239,32 @@ impl FakeQbit {
             })
             .mount(server)
             .await;
+
+        // The retroactive-limits surface: both endpoints record their body
+        // and update what `torrents/info` reports next, so a pass after an
+        // apply sees the new figures the way a real qBittorrent would.
+        for endpoint in ["setUploadLimit", "setShareLimits"] {
+            let state = Arc::clone(&self.state);
+            Mock::given(method("POST"))
+                .and(route(format!("/api/v2/torrents/{endpoint}")))
+                .respond_with(move |request: &Request| {
+                    let body = String::from_utf8_lossy(&request.body).into_owned();
+                    let mut state = state.lock().unwrap();
+                    let hash = form_field(&body, "hashes=").unwrap_or_default().to_owned();
+                    if let Some(t) = state.torrents.iter_mut().find(|t| t.hash == hash) {
+                        if let Some(limit) = form_field(&body, "limit=") {
+                            t.up_limit = limit.parse().unwrap_or(-1);
+                        }
+                        if let Some(ratio) = form_field(&body, "ratioLimit=") {
+                            t.ratio_limit = ratio.parse().unwrap_or(-2.0);
+                        }
+                    }
+                    state.limits_set.push(body);
+                    ResponseTemplate::new(200).set_body_string("Ok.")
+                })
+                .mount(server)
+                .await;
+        }
 
         // The tracker-rotation surface: a torrent sharerr added reports the
         // harness's birth announce URL, so a rotated endpoint produces one add
@@ -327,6 +361,7 @@ impl FakeQbit {
             add_calls: state.add_calls,
             trackers_added: state.trackers_added.clone(),
             trackers_removed: state.trackers_removed.clone(),
+            limits_set: state.limits_set.clone(),
         }
     }
 }
@@ -337,6 +372,7 @@ struct QbitSnapshot {
     add_calls: usize,
     trackers_added: Vec<String>,
     trackers_removed: Vec<String>,
+    limits_set: Vec<String>,
 }
 
 /// Pull a `key=value` out of either a multipart header or a urlencoded body.
@@ -490,6 +526,40 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
     }
 }
 
+impl Harness {
+    /// A second syncer over the same store, client and tracker, with a
+    /// different `[seeding]` — what a settings save produces in production,
+    /// where `ServeState::invalidate` rebuilds the syncer from the new config.
+    fn rebuilt_with_seeding(&self, seeding: SeedingConfig) -> Syncer {
+        let config = Config {
+            seeding,
+            ..self.syncer.config.clone()
+        };
+        let sonarr = sharerr_arr::ArrClient::new(
+            MediaSource::Sonarr,
+            &mock::base_url(&self._sonarr),
+            SecretString::from("test-key"),
+        )
+        .unwrap();
+        let seeder = Seeder {
+            qbit: Arc::clone(&self.syncer.seeder.qbit),
+            category: "sharerr".to_owned(),
+            tag: "sharerr".to_owned(),
+            skip_checking: false,
+            upload_limit_kib: seeding.upload_limit_kib,
+            ratio_limit: seeding.ratio_limit,
+            torrent_dir: self.torrents.path().to_path_buf(),
+        };
+        Syncer::new(
+            config,
+            self.syncer.store().clone(),
+            vec![Box::new(sonarr)],
+            Arc::clone(&self.tracker) as Arc<dyn TrackerProvider>,
+            seeder,
+        )
+    }
+}
+
 /// The default library: one tagged series with two files.
 async fn tagged_harness() -> Harness {
     harness(None, SeedingConfig::default()).await
@@ -637,7 +707,8 @@ async fn a_first_sync_shares_every_tagged_file() {
             unchanged: 0,
             unshared: 0,
             failed: 0,
-            sources_failed: 0
+            sources_failed: 0,
+            library_unreadable: None,
         }
     );
 
@@ -678,7 +749,8 @@ async fn running_sync_twice_changes_nothing_the_second_time() {
             unchanged: 2,
             unshared: 0,
             failed: 0,
-            sources_failed: 0
+            sources_failed: 0,
+            library_unreadable: None,
         }
     );
 
@@ -776,6 +848,124 @@ async fn an_add_carries_the_configured_seeding_goal() {
             Some("2")
         );
     }
+}
+
+/// The roadmap's "seeding limits that apply retroactively": a goal changed
+/// after a torrent was added reaches it on the next pass of the rebuilt
+/// syncer, exactly once, and a syncer whose goal the client already reports
+/// sends nothing.
+#[tokio::test]
+async fn a_changed_seeding_goal_reaches_torrents_already_seeding_once() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    h.syncer.run(false).await.unwrap();
+    assert!(
+        h.qbit.snapshot().limits_set.is_empty(),
+        "no goal configured and none reported: nothing to reconcile"
+    );
+    let seeding = h.qbit.snapshot().live.len();
+    assert!(seeding > 0);
+
+    // The operator sets a cap and a ratio; the syncer is rebuilt.
+    let goal = SeedingConfig {
+        upload_limit_kib: Some(250),
+        ratio_limit: Some(1.5),
+    };
+    let changed = h.rebuilt_with_seeding(goal);
+    changed.run(false).await.unwrap();
+
+    let set = h.qbit.snapshot().limits_set;
+    assert_eq!(
+        set.len(),
+        seeding * 2,
+        "one setUploadLimit and one setShareLimits per seeding torrent: {set:?}"
+    );
+    assert!(
+        set.iter().any(|b| b.contains("limit=256000")),
+        "250 KiB/s converted to bytes/s: {set:?}"
+    );
+    assert!(set.iter().any(|b| b.contains("ratioLimit=1.5")), "{set:?}");
+    for torrent in h.qbit.snapshot().live {
+        assert_eq!(torrent.up_limit, 256_000);
+        assert_eq!(torrent.ratio_limit, 1.5);
+    }
+
+    // The same syncer again: already applied, nothing more on the wire.
+    changed.run(false).await.unwrap();
+    assert_eq!(h.qbit.snapshot().limits_set.len(), seeding * 2);
+
+    // A restart with the same goal: the client reports it, so nothing to do.
+    h.rebuilt_with_seeding(goal).run(false).await.unwrap();
+    assert_eq!(h.qbit.snapshot().limits_set.len(), seeding * 2);
+
+    // What the store holds is the limit now in force, not the stale reading.
+    for item in h.syncer.store().all_items().await.unwrap() {
+        assert_eq!(item.ratio_limit_reported, Some(1.5), "{item:?}");
+    }
+
+    // Dropping the ratio from config is "no opinion", not "clear it": only
+    // the changed cap goes out, and the ratio on the torrent stays.
+    h.rebuilt_with_seeding(SeedingConfig {
+        upload_limit_kib: Some(100),
+        ratio_limit: None,
+    })
+    .run(false)
+    .await
+    .unwrap();
+    let set = h.qbit.snapshot().limits_set;
+    assert_eq!(
+        set.len(),
+        seeding * 3,
+        "one setUploadLimit per torrent: {set:?}"
+    );
+    assert!(set.iter().any(|b| b.contains("limit=102400")), "{set:?}");
+    for torrent in h.qbit.snapshot().live {
+        assert_eq!(torrent.ratio_limit, 1.5, "left alone");
+    }
+
+    // And no goal at all never touches a torrent, whatever the client holds.
+    h.rebuilt_with_seeding(SeedingConfig::default())
+        .run(false)
+        .await
+        .unwrap();
+    assert_eq!(h.qbit.snapshot().limits_set.len(), seeding * 3);
+}
+
+/// An adopted torrent carries the operator's own limits; a configured goal
+/// must never be written over them.
+#[tokio::test]
+async fn a_seeding_goal_is_never_applied_to_an_adopted_torrent() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    // Restate both items as adopted rather than created — the same trick
+    // `withdrawing_an_adopted_torrent_leaves_it_in_the_client` uses.
+    for item in h.syncer.store().all_items().await.unwrap() {
+        h.syncer
+            .store()
+            .set_seeding(
+                item.source,
+                item.file_id,
+                item.info_hash.as_deref().unwrap(),
+                item.announce_token_fp.as_deref(),
+                false,
+            )
+            .await
+            .unwrap();
+    }
+
+    h.rebuilt_with_seeding(SeedingConfig {
+        upload_limit_kib: Some(250),
+        ratio_limit: Some(1.5),
+    })
+    .run(false)
+    .await
+    .unwrap();
+
+    assert!(
+        h.qbit.snapshot().limits_set.is_empty(),
+        "adopted torrents keep the operator's limits"
+    );
 }
 
 #[tokio::test]

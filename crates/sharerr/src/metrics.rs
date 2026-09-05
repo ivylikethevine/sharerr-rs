@@ -847,7 +847,7 @@ mod tests {
             .create_peer("alex", &key("alex"), sharerr_store::PeerScope::All)
             .await
             .unwrap();
-        assert!(store.touch_peer(seen.id).await.unwrap());
+        assert!(store.touch_peer(seen.id).await.unwrap().updated());
         store
             .create_peer("quiet", &key("quiet"), sharerr_store::PeerScope::All)
             .await

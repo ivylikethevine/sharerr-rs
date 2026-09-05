@@ -83,6 +83,11 @@ pub mod secret_keys {
             /// bearer token in the path, so this is exactly the kind of value this
             /// project treats as a secret everywhere else.
             NOTIFICATIONS_WEBHOOK_URL = "notifications.webhook_url";
+            /// An Uptime-Kuma-style push URL, fetched with a GET on a timer
+            /// while this instance is ready — see [`super::NotificationTrigger::Heartbeat`].
+            /// In the vault for the same reason as [`NOTIFICATIONS_WEBHOOK_URL`]:
+            /// a push URL embeds the monitor's own token in its path.
+            NOTIFICATIONS_HEARTBEAT_URL = "notifications.heartbeat_url";
             /// The bearer token `/metrics` and the dashboard-widget endpoint require,
             /// when `[metrics] enabled = true`. Operator-typed like [`TRACKER_TOKEN`]
             /// — unlike the generated keys below, nothing generates this on its own,
@@ -247,6 +252,9 @@ pub mod config_paths {
         NOTIFICATIONS_KIND = "notifications.kind";
         /// How long a peer must go unseen before "gone quiet" fires, in seconds.
         NOTIFICATIONS_PEER_QUIET_SECS = "notifications.peer_quiet_secs";
+        /// How often the heartbeat push fires, in seconds — see
+        /// [`super::NotificationsConfig::heartbeat_secs`].
+        NOTIFICATIONS_HEARTBEAT_SECS = "notifications.heartbeat_secs";
         /// Which [`super::NotificationTrigger`]s are enabled, as an array of
         /// their wire strings.
         NOTIFICATIONS_TRIGGERS = "notifications.triggers";
@@ -306,7 +314,8 @@ pub struct Config {
     /// Only read when `torrent_backend` selects it.
     pub rtorrent: RtorrentConfig,
     pub tracker: TrackerConfig,
-    /// A per-torrent upload/ratio goal, applied once at add time — see
+    /// A per-torrent upload/ratio goal, applied at add time and restated on
+    /// sharerr's own already-seeding torrents when it changes — see
     /// [`SeedingConfig`]. Unset by default: no cap, no goal, matching
     /// today's behaviour exactly until an operator opts in.
     pub seeding: SeedingConfig,
@@ -575,11 +584,10 @@ pub struct TorrentClientConfig<'a> {
     /// Whether to skip hash-checking on add. Always `false` for Transmission,
     /// which has no such switch.
     pub skip_checking: bool,
-    /// Per-torrent upload cap in KiB/s, applied at add time — see
+    /// Per-torrent upload cap in KiB/s — see
     /// [`SeedingConfig::upload_limit_kib`].
     pub upload_limit_kib: Option<u64>,
-    /// Seed-ratio goal, applied at add time — see
-    /// [`SeedingConfig::ratio_limit`].
+    /// Seed-ratio goal — see [`SeedingConfig::ratio_limit`].
     pub ratio_limit: Option<f64>,
 }
 
@@ -828,9 +836,13 @@ crate::str_enum!(LighthouseMount {
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SeedingConfig {
-    /// Per-torrent upload cap in KiB/s, applied at add time.
+    /// Per-torrent upload cap in KiB/s. Applied at add time, and to every
+    /// torrent sharerr created on the first sync pass after it changes.
+    /// Unset means no opinion: nothing is sent, and whatever the client
+    /// holds for a torrent stays.
     pub upload_limit_kib: Option<u64>,
-    /// Stop seeding once this ratio is reached, applied at add time.
+    /// Stop seeding once this ratio is reached. Same lifecycle as
+    /// [`Self::upload_limit_kib`].
     pub ratio_limit: Option<f64>,
 }
 
@@ -1003,6 +1015,12 @@ pub struct NotificationsConfig {
     /// `0` turns the peer-quiet check off without touching sync-failure
     /// notifications, which are unconditional once a webhook is configured.
     pub peer_quiet_secs: u64,
+    /// How often the heartbeat push fires, in seconds, once
+    /// [`secret_keys::NOTIFICATIONS_HEARTBEAT_URL`] is set and the
+    /// [`NotificationTrigger::Heartbeat`] trigger is enabled. `0` turns the
+    /// heartbeat off. Match this to the push monitor's own expected interval,
+    /// which is what decides how long a silence counts as down.
+    pub heartbeat_secs: u64,
     /// Which triggers actually send, once a webhook is configured. Every
     /// trigger not listed here is silent regardless of what fires it — see
     /// [`NotificationTrigger`] and `notify::send`.
@@ -1018,6 +1036,10 @@ impl Default for NotificationsConfig {
             // that "did Sam's instance die" is answered before it has been true
             // for a month.
             peer_quiet_secs: 7 * 24 * 3600,
+            // Uptime Kuma's own default push interval. The push does nothing
+            // until a push URL is stored, so this is the cadence an operator
+            // gets by only pasting the URL.
+            heartbeat_secs: 60,
             // Everything, matching this project's existing behavior before a
             // per-trigger toggle existed at all: notifications fire
             // unconditionally once a webhook is set, and an operator narrows
@@ -1050,6 +1072,27 @@ pub enum NotificationTrigger {
     ItemFailed,
     /// A friend's key was revoked — see `web::peers::revoke`.
     PeerRevoked,
+    /// A friend made contact for the very first time — their first
+    /// authenticated feed request or attributed tracker announce, the moment
+    /// `last_seen_at` goes from never to now. See `torznab::record_sighting`.
+    PeerFirstContact,
+    /// This instance's own advertised tracker address stopped accepting
+    /// connections after having been confirmed reachable. Only ever fires
+    /// with `[checks] reachability = true`, since dialling one's own public
+    /// address is the same NAT-hairpin question that check is opt-in for —
+    /// see `notify::reachability_loop`.
+    TrackerUnreachable,
+    /// A `[[library]]` path could not be read this sync pass — missing, not a
+    /// directory, permission-denied, or only partly listable. Fired once per
+    /// distinct reason, not once per pass — see `commands::serve::background`.
+    LibraryUnreadable,
+    /// An Uptime-Kuma-style push: a GET to
+    /// [`secret_keys::NOTIFICATIONS_HEARTBEAT_URL`] every
+    /// [`NotificationsConfig::heartbeat_secs`] while this instance would
+    /// answer `/ready` with 200. Unlike every other trigger this never posts
+    /// to the webhook; it is the one that goes silent when something is wrong
+    /// rather than speaking up. See `notify::heartbeat_loop`.
+    Heartbeat,
 }
 
 crate::str_enum!(NotificationTrigger {
@@ -1059,6 +1102,10 @@ crate::str_enum!(NotificationTrigger {
     ItemsShared => "items_shared",
     ItemFailed => "item_failed",
     PeerRevoked => "peer_revoked",
+    PeerFirstContact => "peer_first_contact",
+    TrackerUnreachable => "tracker_unreachable",
+    LibraryUnreadable => "library_unreadable",
+    Heartbeat => "heartbeat",
 });
 
 impl NotificationTrigger {
@@ -1074,6 +1121,10 @@ impl NotificationTrigger {
             Self::ItemsShared => "items newly shared",
             Self::ItemFailed => "items failed to share",
             Self::PeerRevoked => "friend revoked",
+            Self::PeerFirstContact => "friend made first contact",
+            Self::TrackerUnreachable => "tracker unreachable",
+            Self::LibraryUnreadable => "library path unreadable",
+            Self::Heartbeat => "heartbeat push",
         }
     }
 }

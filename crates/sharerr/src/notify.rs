@@ -20,9 +20,21 @@
 //! or a digest of what it added/failed), [`quiet_peers_loop`] itself (a peer
 //! whose `last_seen_at` has not moved in longer than
 //! `notifications.peer_quiet_secs`), `gluetun::poll_once` (the advertised
-//! endpoint rotating), and `web::peers::revoke` (a friend's key revoked). None
-//! block on each other, and none failing to reach the webhook stops anything
-//! else sharerr does — a notification is best-effort by nature.
+//! endpoint rotating), `web::peers::revoke` (a friend's key revoked),
+//! `torznab::record_sighting` via [`peer_first_contact`] (a friend's very
+//! first sighting), [`reachability_loop`] here (this instance's own tracker
+//! address no longer accepting connections), and `commands::serve::background`
+//! again for a `[[library]]` path that could not be read. None block on each
+//! other, and none failing to reach the webhook stops anything else sharerr
+//! does — a notification is best-effort by nature.
+//!
+//! # The heartbeat is the odd one out
+//!
+//! [`heartbeat_loop`] never posts to the webhook. It fetches a separate
+//! Uptime-Kuma-style push URL on a timer while the instance is healthy, so the
+//! monitor on the other end notices *silence*. It shares the trigger list so
+//! one tickbox turns it off, but nothing else here — different URL, different
+//! verb, different failure semantics (a missed push is the signal).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -175,6 +187,192 @@ impl Webhook {
             Err(err) => {
                 tracing::warn!(error = %err, event, "could not reach the notification webhook");
             }
+        }
+    }
+}
+
+/// A friend was just seen for the first time — `torznab::record_sighting`
+/// observed [`sharerr_store::Touch::First`] for them. Fires
+/// [`NotificationTrigger::PeerFirstContact`] with their label and how they
+/// showed up (feed request or tracker announce).
+///
+/// The label is looked up here rather than passed in because the tracker's
+/// announce path only knows the peer's id; one indexed read on an event that
+/// happens once per friend ever is not worth widening both call sites for.
+pub async fn peer_first_contact(
+    state: &ServeState,
+    store: &sharerr_store::Store,
+    peer_id: i64,
+    kind: sharerr_store::EndpointKind,
+) {
+    if !trigger_enabled(state, NotificationTrigger::PeerFirstContact).await {
+        return;
+    }
+    let label = match store.peer(peer_id).await {
+        Ok(Some(peer)) => peer.label,
+        Ok(None) => format!("friend #{peer_id}"),
+        Err(err) => {
+            tracing::warn!(peer_id, error = %err, "could not look up a peer for its first-contact notification");
+            format!("friend #{peer_id}")
+        }
+    };
+    send(
+        state,
+        NotificationTrigger::PeerFirstContact,
+        &first_contact_message(&label, kind),
+    )
+    .await;
+}
+
+/// The one-line body of a first-contact notification, split out so the
+/// wording is testable without a store or a vault.
+fn first_contact_message(label: &str, kind: sharerr_store::EndpointKind) -> String {
+    let how = match kind {
+        sharerr_store::EndpointKind::Api => "fetched the feed",
+        sharerr_store::EndpointKind::Client => "announced to the tracker",
+        sharerr_store::EndpointKind::Tracker => "made contact",
+    };
+    format!("{label} {how} for the first time")
+}
+
+/// How often [`reachability_loop`] dials the advertised tracker address. The
+/// check is a single TCP connect bounded by `checks::REACH_TIMEOUT`, so this
+/// is about not hammering one's own router, not about cost.
+const REACH_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Watch this instance's own advertised tracker address for going
+/// unreachable, on a timer. Never returns.
+///
+/// Gated twice: on `[checks] reachability` (the opt-in that owns the
+/// NAT-hairpin caveat — see `checks::check_reachable`) and on the
+/// [`NotificationTrigger::TrackerUnreachable`] trigger. It notifies only on
+/// the transition from confirmed-reachable to not, so an instance whose
+/// router never hairpins is never told its port is closed; it simply never
+/// reaches the "reachable" state a later failure would be measured against.
+pub async fn reachability_loop(state: Arc<ServeState>) {
+    let mut watch = ReachWatch::default();
+    loop {
+        let (enabled, trigger) = (
+            state.config().await.checks.reachability,
+            trigger_enabled(&state, NotificationTrigger::TrackerUnreachable).await,
+        );
+        if enabled && trigger {
+            let base = state.endpoint().current();
+            let outcome = crate::checks::check_reachable(base.as_ref()).await;
+            if let Some(message) = watch.observe(base.as_ref(), &outcome) {
+                send(&state, NotificationTrigger::TrackerUnreachable, &message).await;
+            }
+        }
+        tokio::time::sleep(REACH_CHECK_INTERVAL).await;
+    }
+}
+
+/// The transition detector behind [`reachability_loop`]: remembers whether
+/// the last dial succeeded, and yields a message exactly when a confirmed
+/// address stops answering.
+#[derive(Debug, Default)]
+struct ReachWatch {
+    was_reachable: bool,
+}
+
+impl ReachWatch {
+    /// Feed one dial's outcome; `Some(message)` when it is worth notifying.
+    fn observe(
+        &mut self,
+        base: Option<&url::Url>,
+        outcome: &crate::checks::ReachOutcome,
+    ) -> Option<String> {
+        use crate::checks::ReachOutcome;
+        let reachable = outcome.is_reachable();
+        let fell = self.was_reachable && !reachable;
+        self.was_reachable = reachable;
+        if !fell {
+            return None;
+        }
+        let address = base.map(ToString::to_string).unwrap_or_default();
+        Some(match outcome {
+            ReachOutcome::Refused(reason) => {
+                format!("{address} stopped accepting connections ({reason})")
+            }
+            ReachOutcome::TimedOut => {
+                format!("{address} stopped accepting connections (timed out)")
+            }
+            ReachOutcome::NotConfigured => {
+                "the advertised tracker address is no longer configured".to_owned()
+            }
+            ReachOutcome::Unusable(reason) => {
+                format!("the advertised tracker address became unusable ({reason})")
+            }
+            ReachOutcome::Reachable => unreachable!("a reachable outcome is never a fall"),
+        })
+    }
+}
+
+/// Push an Uptime-Kuma-style heartbeat on a timer. Never returns.
+///
+/// Each tick: `notifications.heartbeat_secs` is re-read (so the UI can change
+/// it without a restart; `0` parks the loop on a one-minute re-check), the
+/// [`NotificationTrigger::Heartbeat`] trigger is consulted, and the push URL
+/// is read from the vault. The GET goes out only while the instance would
+/// answer `/ready` with 200 — configuration loaded and the syncer built — so
+/// a monitor that expects this push sees the same truth `/ready` tells.
+///
+/// The vault is opened every tick rather than once, the same as
+/// `check_quiet_peers`: Argon2 is tens of milliseconds, the minimum tick is
+/// a minute, and it means a URL pasted into Settings takes effect on the next
+/// beat rather than after a restart.
+pub async fn heartbeat_loop(state: Arc<ServeState>) {
+    loop {
+        let secs = state.config().await.notifications.heartbeat_secs;
+        if secs == 0 {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            continue;
+        }
+        if trigger_enabled(&state, NotificationTrigger::Heartbeat).await
+            && is_ready(&state).await
+            && let Some((url, client)) = heartbeat_target(&state).await
+        {
+            push_heartbeat(&client, &url).await;
+        }
+        tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
+    }
+}
+
+/// The readiness `/ready` reports, without the database round-trip: the
+/// configuration loaded and the syncer is built. Cheap enough to ask every
+/// beat.
+async fn is_ready(state: &ServeState) -> bool {
+    state.config_error().await.is_none() && state.syncer().await.is_ok()
+}
+
+/// The stored push URL and the shared client, or `None` when there is
+/// nothing to push to (the ordinary state — most instances have no monitor).
+async fn heartbeat_target(state: &ServeState) -> Option<(url::Url, reqwest::Client)> {
+    let vault = state.open_vault().await.ok()?;
+    let Ok(Some(configured)) = vault.get(secret_keys::NOTIFICATIONS_HEARTBEAT_URL) else {
+        return None;
+    };
+    let Ok(url) = url::Url::parse(configured.expose_secret()) else {
+        tracing::warn!("notifications.heartbeat_url is not a valid URL — check Settings");
+        return None;
+    };
+    Some((url, http_client()?.clone()))
+}
+
+/// One heartbeat: a bare GET, which is what Uptime Kuma's push monitor
+/// expects (`/api/push/<token>?status=up&msg=OK&ping=`, all of it already in
+/// the stored URL). Best-effort like every other sender here.
+async fn push_heartbeat(client: &reqwest::Client, url: &url::Url) {
+    match client.get(url.clone()).send().await {
+        Ok(response) if response.status().is_success() => {
+            tracing::debug!("sent a heartbeat");
+        }
+        Ok(response) => tracing::warn!(
+            status = %response.status(),
+            "the heartbeat push URL responded with an error"
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not reach the heartbeat push URL");
         }
     }
 }
@@ -656,6 +854,208 @@ mod tests {
         // `0` turns the check off entirely — see `NotificationsConfig::peer_quiet_secs`.
         // No database exists at this data_dir; a store touch here would fail.
         assert_eq!(check_quiet_peers(&state).await, Ok(()));
+    }
+
+    // ------------------------------------------------------- first contact
+
+    #[test]
+    fn first_contact_message_says_how_the_friend_showed_up() {
+        assert_eq!(
+            first_contact_message("Sam", sharerr_store::EndpointKind::Api),
+            "Sam fetched the feed for the first time"
+        );
+        assert_eq!(
+            first_contact_message("Sam", sharerr_store::EndpointKind::Client),
+            "Sam announced to the tracker for the first time"
+        );
+    }
+
+    #[test]
+    fn peer_first_contact_notifies_with_the_peers_label() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_json(serde_json::json!({
+                        "event": "friend made first contact",
+                        "message": "Sam fetched the feed for the first time"
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let store = state.store().await.unwrap();
+                let sam = store
+                    .create_peer(
+                        "Sam",
+                        &secrecy::SecretString::from("sam-key"),
+                        sharerr_store::PeerScope::All,
+                    )
+                    .await
+                    .unwrap();
+
+                peer_first_contact(&state, &store, sam.id, sharerr_store::EndpointKind::Api).await;
+            });
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn peer_first_contact_with_no_webhook_is_a_no_op_even_for_an_unknown_peer() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = sharerr_store::Store::open_in_memory().await.unwrap();
+        peer_first_contact(&serve, &store, 42, sharerr_store::EndpointKind::Client).await;
+    }
+
+    // ------------------------------------------------------- reachability
+
+    #[test]
+    fn reach_watch_notifies_only_on_the_fall_from_reachable() {
+        use crate::checks::ReachOutcome;
+        let base = url::Url::parse("http://203.0.113.5:8478/").unwrap();
+        let mut watch = ReachWatch::default();
+
+        // Never confirmed reachable (a router that refuses hairpinning): silent.
+        assert!(
+            watch
+                .observe(Some(&base), &ReachOutcome::Refused("refused".into()))
+                .is_none()
+        );
+        assert!(
+            watch
+                .observe(Some(&base), &ReachOutcome::Reachable)
+                .is_none()
+        );
+        // Confirmed, then gone: exactly one message.
+        let message = watch
+            .observe(Some(&base), &ReachOutcome::TimedOut)
+            .expect("the fall must notify");
+        assert_eq!(
+            message,
+            "http://203.0.113.5:8478/ stopped accepting connections (timed out)"
+        );
+        // Still gone: no repeat until it has been reachable again.
+        assert!(
+            watch
+                .observe(Some(&base), &ReachOutcome::TimedOut)
+                .is_none()
+        );
+        assert!(
+            watch
+                .observe(Some(&base), &ReachOutcome::Reachable)
+                .is_none()
+        );
+        assert!(
+            watch
+                .observe(Some(&base), &ReachOutcome::Refused("nope".into()))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn reach_watch_words_a_lost_or_unusable_address() {
+        use crate::checks::ReachOutcome;
+        let mut watch = ReachWatch::default();
+        watch.observe(None, &ReachOutcome::Reachable);
+        assert_eq!(
+            watch.observe(None, &ReachOutcome::NotConfigured).unwrap(),
+            "the advertised tracker address is no longer configured"
+        );
+        watch.observe(None, &ReachOutcome::Reachable);
+        assert_eq!(
+            watch
+                .observe(None, &ReachOutcome::Unusable("no host".into()))
+                .unwrap(),
+            "the advertised tracker address became unusable (no host)"
+        );
+    }
+
+    // ---------------------------------------------------------- heartbeat
+
+    #[tokio::test]
+    async fn a_heartbeat_is_a_bare_get_to_the_stored_url() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/push/abc"))
+            .and(wiremock::matchers::query_param("status", "up"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = url::Url::parse(&format!(
+            "{}/api/push/abc?status=up&msg=OK&ping=",
+            server.uri()
+        ))
+        .unwrap();
+        push_heartbeat(&reqwest::Client::new(), &url).await;
+    }
+
+    #[tokio::test]
+    async fn a_failing_heartbeat_is_swallowed() {
+        let port = sharerr_testkit::net::closed_port();
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/push")).unwrap();
+        push_heartbeat(&reqwest::Client::new(), &url).await;
+    }
+
+    #[test]
+    fn heartbeat_target_resolves_the_stored_push_url() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                assert!(
+                    heartbeat_target(&state).await.is_none(),
+                    "nothing stored yet"
+                );
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
+                        &secrecy::SecretString::from("https://kuma.example/api/push/abc?status=up"),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let (url, _) = heartbeat_target(&state).await.expect("must resolve");
+                assert_eq!(url.path(), "/api/push/abc");
+            });
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_instance_is_not_ready_to_heartbeat() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        assert!(!is_ready(&serve).await);
+        assert!(heartbeat_target(&serve).await.is_none());
     }
 
     #[tokio::test]

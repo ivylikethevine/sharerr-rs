@@ -501,6 +501,14 @@ pub struct SettingsPage {
     pub notifications_trigger_items_shared: bool,
     pub notifications_trigger_item_failed: bool,
     pub notifications_trigger_peer_revoked: bool,
+    pub notifications_trigger_peer_first_contact: bool,
+    pub notifications_trigger_tracker_unreachable: bool,
+    pub notifications_trigger_library_unreadable: bool,
+    pub notifications_trigger_heartbeat: bool,
+    /// Whether an Uptime-Kuma-style push URL is stored — see
+    /// `secret_keys::NOTIFICATIONS_HEARTBEAT_URL`.
+    pub notifications_heartbeat_set: bool,
+    pub notifications_heartbeat_secs: u64,
 
     /// Whether `/metrics` and the dashboard-widget endpoint answer at all —
     /// see [`sharerr_core::config::MetricsConfig`].

@@ -29,6 +29,14 @@ pub struct TorrentInfo {
     /// see [`TorrentInfo::ratio_limit_reported`], which resolves both to `None`.
     #[serde(default)]
     pub ratio_limit: f64,
+    /// Per-torrent upload cap in **bytes/s**; `-1` (older builds) or `0`
+    /// means none — see [`TorrentInfo::upload_limit_kib_reported`].
+    #[serde(default = "no_limit")]
+    pub up_limit: i64,
+}
+
+fn no_limit() -> i64 {
+    -1
 }
 
 impl TorrentInfo {
@@ -50,6 +58,13 @@ impl TorrentInfo {
     /// a fixed number this specific torrent is held to.
     pub fn ratio_limit_reported(&self) -> Option<f64> {
         (self.ratio_limit >= 0.0).then_some(self.ratio_limit)
+    }
+
+    /// The per-torrent upload cap in KiB/s, or `None` for qBittorrent's two
+    /// "no limit" spellings (`-1` and `0`). Rounded up so a cap sharerr set
+    /// in KiB/s reads back as the same number.
+    pub fn upload_limit_kib_reported(&self) -> Option<u64> {
+        (self.up_limit > 0).then(|| u64::try_from(self.up_limit).unwrap_or(0).div_ceil(1024))
     }
 }
 

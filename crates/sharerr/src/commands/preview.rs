@@ -666,6 +666,12 @@ fn settings_page() -> SettingsPage {
         notifications_trigger_items_shared: true,
         notifications_trigger_item_failed: true,
         notifications_trigger_peer_revoked: true,
+        notifications_trigger_peer_first_contact: true,
+        notifications_trigger_tracker_unreachable: true,
+        notifications_trigger_library_unreadable: true,
+        notifications_trigger_heartbeat: true,
+        notifications_heartbeat_set: false,
+        notifications_heartbeat_secs: 60,
 
         metrics_enabled: false,
         metrics_token_set: false,

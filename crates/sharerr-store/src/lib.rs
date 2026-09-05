@@ -10,7 +10,7 @@ pub mod vault;
 
 pub use db::{SeedingSummary, Store, StoreError};
 pub use endpoints::{EndpointKind, ObservedVia, PeerEndpoint};
-pub use peers::{Peer, PeerScope};
+pub use peers::{Peer, PeerScope, Touch};
 pub use runs::{RunRecord, RunSummary};
 pub use swarm::SwarmSample;
 

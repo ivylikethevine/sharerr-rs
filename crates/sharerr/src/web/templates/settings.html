@@ -909,6 +909,45 @@
     <input type="checkbox" name="trigger_peer_revoked" value="1" {% if notifications_trigger_peer_revoked %}checked{% endif %}>
     A friend's key is revoked
   </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_peer_first_contact" value="1" {% if notifications_trigger_peer_first_contact %}checked{% endif %}>
+    A friend makes contact for the first time
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_tracker_unreachable" value="1" {% if notifications_trigger_tracker_unreachable %}checked{% endif %}>
+    The advertised tracker address stops answering (needs the reachability check under Automatic checks, above)
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_library_unreadable" value="1" {% if notifications_trigger_library_unreadable %}checked{% endif %}>
+    A library path cannot be read (once per reason, not per pass)
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_heartbeat" value="1" {% if notifications_trigger_heartbeat %}checked{% endif %}>
+    Heartbeat (the push below, not the webhook)
+  </label>
+
+  <label for="notifications_heartbeat_url">Heartbeat push URL {% call field_status(notifications_heartbeat_set) %}{% endcall %}</label>
+  <input id="notifications_heartbeat_url" name="heartbeat_url" type="password" autocomplete="off"
+         placeholder="{% call stored(notifications_heartbeat_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if notifications_heartbeat_set %}
+  <label class="hint"><input type="checkbox" name="clear_heartbeat_url" value="1"> Remove the stored URL</label>
+  {% endif %}
+  <p class="hint">
+    An Uptime Kuma push monitor's URL, pasted whole. Fetched with a GET on the
+    interval below while this instance is ready, so the monitor notices when
+    the pushes stop. Independent of the webhook above; leave it blank to send
+    none.
+  </p>
+
+  <label for="notifications_heartbeat_secs">Heartbeat interval (seconds)</label>
+  <input id="notifications_heartbeat_secs" name="heartbeat_secs" value="{{ notifications_heartbeat_secs }}" inputmode="numeric"
+         {% call lock_attr("notifications.heartbeat_secs") %}{% endcall %}>
+  {% call locked("notifications.heartbeat_secs") %}{% endcall %}
+  <p class="hint">
+    Match the monitor's own heartbeat interval. <code>0</code> turns the push
+    off without clearing the URL.
+  </p>
 
   <button type="submit">Save</button>
 </form>

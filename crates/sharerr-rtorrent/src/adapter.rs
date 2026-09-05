@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use sharerr_client::{
-    AddRequest, ClientKind, Result, TorrentClient, TorrentFileEntry, TorrentSummary,
+    AddRequest, ClientKind, Result, SeedingLimits, TorrentClient, TorrentFileEntry, TorrentSummary,
 };
 use url::Url;
 
@@ -36,6 +36,39 @@ fn as_u64(value: &XmlValue) -> u64 {
         XmlValue::Str(s) => s.trim().parse().unwrap_or(0),
         XmlValue::Array(_) | XmlValue::Struct(_) => 0,
     }
+}
+
+impl RtorrentClient {
+    /// Cap one download's upload rate through a named per-torrent throttle.
+    ///
+    /// rTorrent has no direct "set this torrent's upload cap" call — the
+    /// mechanism is a named throttle: define one at the requested rate, then
+    /// assign the download to it. The throttle name only has to be unique, so
+    /// the torrent's own (lowercased) info hash works and needs no
+    /// bookkeeping of its own; re-defining it at a new rate is how a changed
+    /// cap is applied. `throttle.up` is `(name, rate)` with the rate in KiB/s
+    /// — the same unit `AddRequest::upload_limit_kib` carries, so no
+    /// conversion. See the module docs for the getter/setter trap.
+    async fn throttle(&self, hash: &str, kib: u64) -> Result<()> {
+        let throttle_name = format!("sharerr-{hash}");
+        let rate_kib = kib.to_string();
+        self.call(
+            "throttle.up",
+            &[Param::Str(&throttle_name), Param::Str(&rate_kib)],
+        )
+        .await?;
+        self.call(
+            "d.throttle_name.set",
+            &[Param::Str(hash), Param::Str(&throttle_name)],
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+/// No native per-torrent ratio limit — see the module docs.
+fn warn_no_ratio_limit() {
+    tracing::warn!("rTorrent has no per-torrent seed-ratio limit; ratio_limit was not applied");
 }
 
 #[async_trait]
@@ -120,6 +153,11 @@ impl TorrentClient for RtorrentClient {
                 // No per-torrent ratio-limit RPC exists at all — see the module
                 // docs' "What rTorrent cannot do".
                 ratio_limit: None,
+                // The throttle's rate lives on the named throttle, not the
+                // download, and `d.multicall2` cannot follow that indirection —
+                // so `set_limits` re-applies once per syncer lifetime instead
+                // of comparing.
+                upload_limit_kib: None,
             });
         }
         Ok(out)
@@ -179,41 +217,33 @@ impl TorrentClient for RtorrentClient {
         self.call(method, &params).await?;
 
         if let Some(kib) = request.upload_limit_kib {
-            // rTorrent has no direct "set this torrent's upload cap" call —
-            // the mechanism is a named per-torrent throttle: define one at the
-            // requested rate, then assign the torrent to it. The throttle name
-            // only has to be unique, so the torrent's own info hash works and
-            // needs no bookkeeping of its own. Using `request.info_hash`
-            // rather than asking rTorrent which torrent it loaded last avoids
-            // a race: `load.raw_start` loads asynchronously, so immediately
-            // afterward "last loaded" is not reliably "the one just added",
-            // especially with a `view.sort_current` configured in
-            // `.rtorrent.rc`.
-            let hash = request.info_hash.to_ascii_lowercase();
-            let throttle_name = format!("sharerr-{hash}");
-            // `throttle.up` is `(name, rate)` with the rate in KiB/s — the
-            // same unit `AddRequest::upload_limit_kib` carries, so no
-            // conversion. See the module docs for the getter/setter trap.
-            let rate_kib = kib.to_string();
-            self.call(
-                "throttle.up",
-                &[Param::Str(&throttle_name), Param::Str(&rate_kib)],
-            )
-            .await?;
-            self.call(
-                "d.throttle_name.set",
-                &[Param::Str(&hash), Param::Str(&throttle_name)],
-            )
-            .await?;
+            // Using `request.info_hash` rather than asking rTorrent which
+            // torrent it loaded last avoids a race: `load.raw_start` loads
+            // asynchronously, so immediately afterward "last loaded" is not
+            // reliably "the one just added", especially with a
+            // `view.sort_current` configured in `.rtorrent.rc`.
+            self.throttle(&request.info_hash.to_ascii_lowercase(), kib)
+                .await?;
         }
 
         if request.ratio_limit.is_some() {
-            // No native per-torrent ratio limit — see the module docs.
-            tracing::warn!(
-                "rTorrent has no per-torrent seed-ratio limit; ratio_limit was not applied"
-            );
+            warn_no_ratio_limit();
         }
 
+        Ok(())
+    }
+
+    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        // Re-defining the hash-named throttle at the new rate is how a
+        // changed cap reaches a download already assigned to it.
+        if let Some(kib) = limits.upload_limit_kib {
+            let hash = hash.to_ascii_lowercase();
+            self.throttle(&hash, kib).await?;
+            tracing::info!(hash, kib, "applied the configured upload cap");
+        }
+        if limits.ratio_limit.is_some() {
+            warn_no_ratio_limit();
+        }
         Ok(())
     }
 
@@ -798,6 +828,69 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "show/episode.mkv");
         assert_eq!(files[0].size, 4096);
+    }
+
+    /// `set_limits` with a cap re-defines the hash-named throttle at the new
+    /// rate and re-assigns the download to it; without one, and with a ratio
+    /// rTorrent cannot express, nothing reaches the wire.
+    #[tokio::test]
+    async fn set_limits_redefines_the_throttle_or_sends_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(scalar_ok())
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        client
+            .set_limits(
+                "ABC123",
+                &SeedingLimits {
+                    upload_limit_kib: Some(250),
+                    ratio_limit: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let bodies: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(sharerr_testkit::mock::body_text)
+            .collect();
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.contains("<methodName>throttle.up</methodName>")
+                    && b.contains("sharerr-abc123")
+                    && b.contains("<string>250</string>")),
+            "expected the throttle re-defined at 250: {bodies:?}"
+        );
+        assert!(
+            bodies
+                .iter()
+                .any(|b| b.contains("d.throttle_name.set") && b.contains("sharerr-abc123")),
+            "expected the download assigned to it: {bodies:?}"
+        );
+
+        client
+            .set_limits(
+                "ABC123",
+                &SeedingLimits {
+                    upload_limit_kib: None,
+                    ratio_limit: Some(2.0),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            2,
+            "nothing more sent"
+        );
     }
 
     /// `add` with an upload limit attaches a named per-torrent throttle,

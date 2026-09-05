@@ -1387,6 +1387,68 @@ async fn save_notifications_writes_kind_and_peer_quiet_secs() {
         std::fs::read_to_string(&config_path).expect("save_notifications writes the file");
     assert!(written.contains(r#"kind = "apprise""#), "{written}");
     assert!(written.contains("peer_quiet_secs = 3600"), "{written}");
+    assert!(
+        !written.contains("heartbeat_secs"),
+        "a blank interval must leave the key alone: {written}"
+    );
+}
+
+#[tokio::test]
+async fn save_notifications_writes_the_heartbeat_interval_and_new_triggers() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let config_path = serve.config_path().to_path_buf();
+    let state = web_state(serve);
+
+    let response = save_notifications(
+        State(state),
+        Form(NotificationsForm {
+            kind: "generic".to_owned(),
+            peer_quiet_secs: "3600".to_owned(),
+            heartbeat_secs: "120".to_owned(),
+            trigger_heartbeat: Some("1".to_owned()),
+            trigger_library_unreadable: Some("1".to_owned()),
+            ..Default::default()
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+    let written =
+        std::fs::read_to_string(&config_path).expect("save_notifications writes the file");
+    assert!(written.contains("heartbeat_secs = 120"), "{written}");
+    assert!(written.contains(r#""heartbeat""#), "{written}");
+    assert!(written.contains(r#""library_unreadable""#), "{written}");
+    assert!(!written.contains(r#""sync_failed""#), "{written}");
+}
+
+#[tokio::test]
+async fn save_notifications_rejects_a_bad_heartbeat_url_or_interval() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let state = web_state(serve);
+
+    let response = save_notifications(
+        State(state.clone()),
+        Form(NotificationsForm {
+            kind: "generic".to_owned(),
+            peer_quiet_secs: "600".to_owned(),
+            heartbeat_url: "not a url".to_owned(),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let response = save_notifications(
+        State(state),
+        Form(NotificationsForm {
+            kind: "generic".to_owned(),
+            peer_quiet_secs: "600".to_owned(),
+            heartbeat_secs: "soon".to_owned(),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

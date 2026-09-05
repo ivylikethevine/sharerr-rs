@@ -6,7 +6,7 @@ use url::Url;
 
 use crate::client::QbitClient;
 use crate::error::{QbitError, Result};
-use sharerr_client::AddRequest;
+use sharerr_client::{AddRequest, SeedingLimits};
 
 use crate::models::{TorrentFile, TorrentInfo, TrackerEntry};
 
@@ -218,6 +218,43 @@ impl QbitClient {
         self.post_tracker_urls(hash, "torrents/addTrackers", &additions, "\n")
             .await?;
         tracing::info!(hash, added, "added trackers, keeping the existing ones");
+        Ok(())
+    }
+
+    /// `POST torrents/setUploadLimit` then `POST torrents/setShareLimits` —
+    /// the retroactive counterpart of the `upLimit`/`ratioLimit` parameters
+    /// [`Self::add_torrent`] passes, for a torrent already in the client.
+    ///
+    /// One call per field that is set, because qBittorrent has one endpoint
+    /// per field; a `None` field is left as the torrent has it — see
+    /// `sharerr_client::SeedingLimits`. `seedingTimeLimit` and
+    /// `inactiveSeedingTimeLimit` are sent as `-2` (global default) because
+    /// `setShareLimits` requires them and sharerr has no opinion on either.
+    pub async fn set_torrent_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        if let Some(kib) = limits.upload_limit_kib {
+            // `setUploadLimit` is bytes/s; sharerr's config is KiB/s — the
+            // same conversion `add_torrent` makes for `upLimit`.
+            let bytes = (kib * 1024).to_string();
+            self.send_ok(Method::POST, "torrents/setUploadLimit", |rb| {
+                rb.form(&[("hashes", hash), ("limit", bytes.as_str())])
+            })
+            .await?;
+        }
+        if let Some(ratio) = limits.ratio_limit {
+            let ratio = ratio.to_string();
+            self.send_ok(Method::POST, "torrents/setShareLimits", |rb| {
+                rb.form(&[
+                    ("hashes", hash),
+                    ("ratioLimit", ratio.as_str()),
+                    ("seedingTimeLimit", "-2"),
+                    ("inactiveSeedingTimeLimit", "-2"),
+                ])
+            })
+            .await?;
+        }
+        if !limits.is_empty() {
+            tracing::info!(hash, ?limits, "applied the configured seeding limits");
+        }
         Ok(())
     }
 

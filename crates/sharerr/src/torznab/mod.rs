@@ -893,6 +893,7 @@ async fn check_api_key(
                 // failure to authenticate: a read-only or busy database should not
                 // take the feed down.
                 record_sighting(
+                    state,
                     &store,
                     peer.id,
                     sharerr_store::EndpointKind::Api,
@@ -937,35 +938,45 @@ async fn check_api_key(
 /// touch-then-record sequence, just for different
 /// [`sharerr_store::EndpointKind`]s and address shapes (a bare source IP
 /// here; `ip:port` for a real BitTorrent announce).
+///
+/// `state` is only for the first-contact notification: the store decides
+/// whether this sighting was the peer's very first
+/// ([`sharerr_store::Touch::First`]), and that is the one event here worth
+/// telling the operator about — the moment a key they handed out was
+/// actually used.
 pub(crate) async fn record_sighting(
+    state: &ServeState,
     store: &sharerr_store::Store,
     peer_id: i64,
     kind: sharerr_store::EndpointKind,
     addr: Option<&str>,
 ) {
-    match store.touch_peer(peer_id).await {
-        // The touch fired, so its five-minute throttle also gates the
-        // endpoint observation — a Prowlarr RSS burst records one sighting,
-        // not one per request.
-        Ok(true) => {
-            if let Some(addr) = addr
-                && let Err(err) = store
-                    .record_peer_endpoint(
-                        peer_id,
-                        kind,
-                        addr,
-                        Some(now_epoch()),
-                        sharerr_store::ObservedVia::Direct,
-                    )
-                    .await
-            {
-                tracing::warn!(peer_id, error = %err, "could not record a peer's address");
-            }
-        }
-        Ok(false) => {}
+    let touch = match store.touch_peer(peer_id).await {
+        Ok(touch) => touch,
         Err(err) => {
             tracing::warn!(peer_id, error = %err, "could not touch a peer's last-seen time");
+            return;
         }
+    };
+    // The touch fired, so its five-minute throttle also gates the endpoint
+    // observation — a Prowlarr RSS burst records one sighting, not one per
+    // request.
+    if touch.updated()
+        && let Some(addr) = addr
+        && let Err(err) = store
+            .record_peer_endpoint(
+                peer_id,
+                kind,
+                addr,
+                Some(now_epoch()),
+                sharerr_store::ObservedVia::Direct,
+            )
+            .await
+    {
+        tracing::warn!(peer_id, error = %err, "could not record a peer's address");
+    }
+    if touch == sharerr_store::Touch::First {
+        crate::notify::peer_first_contact(state, store, peer_id, kind).await;
     }
 }
 

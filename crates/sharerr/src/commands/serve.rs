@@ -183,6 +183,8 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Tracker) => Ok(()),
         () = crate::gluetun::poll_loop(Arc::clone(&state), GluetunTarget::Client) => Ok(()),
         () = crate::notify::quiet_peers_loop(Arc::clone(&state)) => Ok(()),
+        () = crate::notify::reachability_loop(Arc::clone(&state)) => Ok(()),
+        () = crate::notify::heartbeat_loop(Arc::clone(&state)) => Ok(()),
         () = crate::gossip::exchange_loop(Arc::clone(&state)) => Ok(()),
         () = crate::system_stats::poll_loop(Arc::clone(&state)) => Ok(()),
         () = crate::swarm_history::poll_loop(Arc::clone(&state)) => Ok(()),
@@ -455,6 +457,11 @@ async fn gluetun_down(
 /// The retry runs even when periodic sync is disabled, because `/ready` should
 /// still start telling the truth once the configuration is repaired.
 async fn background(state: Arc<ServeState>) {
+    // Which library-unreadable reason was last notified, so a path that stays
+    // broken across passes is reported once, not every interval — see
+    // `notify_sync_report`. Loop-local on purpose: a restart re-notifying a
+    // still-broken path once is the right outcome, not a bug to persist away.
+    let mut library_notified: Option<String> = None;
     loop {
         let Some(syncer) = state.ensure_ready().await else {
             // Still polling here, not purely waiting: a failed `Syncer::build` has
@@ -482,7 +489,7 @@ async fn background(state: Arc<ServeState>) {
             Ok(report) => {
                 tracing::info!(%report, "sync complete");
                 state.note_sync_success().await;
-                notify_sync_report(&state, &report).await;
+                notify_sync_report(&state, &report, &mut library_notified).await;
             }
             Err(err) => {
                 let reason = format!("{err:#}");
@@ -509,10 +516,33 @@ async fn background(state: Arc<ServeState>) {
     }
 }
 
-/// The two digest triggers a successful pass can fire — split out of
+/// The digest triggers a successful pass can fire — split out of
 /// `background`'s match arm so the gating logic is testable against a
 /// synthetic [`crate::sync::SyncReport`] without driving a real sync pass.
-async fn notify_sync_report(state: &ServeState, report: &crate::sync::SyncReport) {
+///
+/// `library_notified` is the dedupe for
+/// [`NotificationTrigger::LibraryUnreadable`](sharerr_core::config::NotificationTrigger::LibraryUnreadable):
+/// the reason last sent, cleared the first pass the library reads cleanly
+/// again. A path that is still unreadable with the same reason is not
+/// repeated; a *different* reason (permission denied, then gone entirely) is.
+async fn notify_sync_report(
+    state: &ServeState,
+    report: &crate::sync::SyncReport,
+    library_notified: &mut Option<String>,
+) {
+    match &report.library_unreadable {
+        Some(reason) if library_notified.as_ref() != Some(reason) => {
+            crate::notify::send(
+                state,
+                sharerr_core::config::NotificationTrigger::LibraryUnreadable,
+                reason,
+            )
+            .await;
+            *library_notified = Some(reason.clone());
+        }
+        Some(_) => {}
+        None => *library_notified = None,
+    }
     if report.added > 0 {
         crate::notify::send(
             state,
@@ -930,6 +960,7 @@ mod tests {
                         failed: 1,
                         ..Default::default()
                     },
+                    &mut None,
                 )
                 .await;
                 // The mock's `expect(2)` — one for ItemsShared, one for
@@ -946,7 +977,64 @@ mod tests {
         let (_dir, state) = crate::state::fixtures::unconfigured();
         // No master key, so a webhook lookup would fail anyway — this proves
         // the counts gate it before that, not incidentally.
-        notify_sync_report(&state, &crate::sync::SyncReport::default()).await;
+        notify_sync_report(&state, &crate::sync::SyncReport::default(), &mut None).await;
+    }
+
+    /// The library-unreadable trigger is deduped on its reason: the same
+    /// broken path across three passes is one notification, a changed reason
+    /// is a second, and a clean pass resets so a later breakage speaks again.
+    #[test]
+    fn notify_sync_report_reports_an_unreadable_library_once_per_reason() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = Config {
+                data_dir: dir.clone(),
+                ..Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                        "event": "library path unreadable"
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(3)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let broken = |reason: &str| crate::sync::SyncReport {
+                    library_unreadable: Some(reason.to_owned()),
+                    ..Default::default()
+                };
+                let mut notified = None;
+                // Same reason three times: one notification.
+                for _ in 0..3 {
+                    notify_sync_report(&state, &broken("permission denied"), &mut notified).await;
+                }
+                assert_eq!(notified.as_deref(), Some("permission denied"));
+                // A different reason: a second.
+                notify_sync_report(&state, &broken("no such directory"), &mut notified).await;
+                // Clean pass resets; the original reason then fires a third time.
+                notify_sync_report(&state, &crate::sync::SyncReport::default(), &mut notified)
+                    .await;
+                assert!(notified.is_none());
+                notify_sync_report(&state, &broken("permission denied"), &mut notified).await;
+            });
+            Ok(())
+        });
     }
 
     /// `run`'s startup sequence — building the router, binding listeners, and

@@ -169,6 +169,11 @@ pub struct Syncer {
     /// [`Seeder::qbit`], so there is exactly one handle to keep consistent.
     seeder: Seeder,
     resolver: PathResolver,
+    /// Torrents whose seeding limits this syncer has already brought into
+    /// line with `[seeding]` — see [`Self::reconcile_limits`]. Per syncer
+    /// lifetime on purpose: a settings save rebuilds the syncer, which is
+    /// exactly when the configured goal can have changed.
+    limits_applied: std::sync::Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for Syncer {
@@ -197,6 +202,12 @@ pub struct SyncReport {
     /// are left untouched, so this is a gap in coverage rather than a set of
     /// failed items.
     pub sources_failed: usize,
+    /// Why the `[[library]]` directory scan fell short this pass, if it did —
+    /// the outright failure reason, or a note that the walk was incomplete.
+    /// `None` when every library path read cleanly (or none is configured).
+    /// Carried as text so `commands::serve::background` can notify once per
+    /// distinct reason rather than once per pass.
+    pub library_unreadable: Option<String>,
 }
 
 impl SyncReport {
@@ -255,6 +266,9 @@ struct Discovery {
     /// nothing.
     withdrawable: HashSet<MediaSource>,
     failures: usize,
+    /// The directory scanner's shortfall, if any — see
+    /// [`SyncReport::library_unreadable`].
+    library_unreadable: Option<String>,
 }
 
 impl Syncer {
@@ -335,7 +349,70 @@ impl Syncer {
             sources,
             tracker,
             seeder,
+            limits_applied: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Bring one already-seeding torrent's limits into line with `[seeding]`,
+    /// once per syncer lifetime. Returns whether anything was sent.
+    ///
+    /// The cap and ratio used to bind at add time only; this is what makes a
+    /// later change reach the torrents already seeding. Gated three ways:
+    ///
+    /// - once per hash per syncer, because the syncer is rebuilt on every
+    ///   settings save, so "first pass after a rebuild" is precisely "the
+    ///   configured goal may have changed";
+    /// - only when what the client reports differs from the goal
+    ///   ([`sharerr_client::SeedingLimits::matches`]), which keeps a
+    ///   restart's first pass off the wire for every torrent already right —
+    ///   a client that cannot report the cap (rTorrent) pays one apply per
+    ///   rebuild instead;
+    /// - and, at the call site, only for torrents sharerr created: an adopted
+    ///   torrent carries the operator's own limits.
+    ///
+    /// A field with no configured value is never touched — removing a goal
+    /// from `[seeding]` stops sharerr restating it, but clearing it off the
+    /// torrents is done in the client, so a limit the operator tuned by hand
+    /// on one of sharerr's torrents is not undone behind their back.
+    ///
+    /// A failed apply is not remembered, so the next pass retries.
+    async fn reconcile_limits(
+        &self,
+        hash: &str,
+        reported: &sharerr_client::TorrentSummary,
+    ) -> Result<bool> {
+        if self
+            .limits_applied
+            .lock()
+            .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
+            .contains(hash)
+        {
+            return Ok(false);
+        }
+        let goal = sharerr_client::SeedingLimits {
+            upload_limit_kib: self.seeder.upload_limit_kib,
+            ratio_limit: self.seeder.ratio_limit,
+        };
+        let applied = if goal.matches(reported) {
+            false
+        } else {
+            self.seeder
+                .qbit
+                .set_limits(hash, &goal)
+                .await
+                .with_context(|| {
+                    format!(
+                        "applying seeding limits to {hash} in {}",
+                        self.seeder.qbit.kind()
+                    )
+                })?;
+            true
+        };
+        self.limits_applied
+            .lock()
+            .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
+            .insert(hash.to_owned());
+        Ok(applied)
     }
 
     pub fn store(&self) -> &Store {
@@ -396,6 +473,7 @@ impl Syncer {
         let discovered = &discovery.items;
         report.discovered = discovered.len();
         report.sources_failed = discovery.failures;
+        report.library_unreadable = discovery.library_unreadable.clone();
 
         // If nothing answered, every item looks untagged. Withdrawing the entire
         // library because Sonarr happened to be restarting would be far worse than
@@ -416,9 +494,9 @@ impl Syncer {
         // this and say nothing a lookup here doesn't), and what the client
         // itself reports for its ratio, read on the Unchanged fast path below
         // and written to the store via `Store::set_ratio`.
-        let live: HashMap<String, (Option<f64>, Option<f64>)> = torrents
+        let live: HashMap<String, &sharerr_client::TorrentSummary> = torrents
             .iter()
-            .map(|t| (t.hash.to_ascii_lowercase(), (t.ratio, t.ratio_limit)))
+            .map(|t| (t.hash.to_ascii_lowercase(), t))
             .collect();
 
         let known: HashMap<(MediaSource, i64), SharedItem> = known_items?
@@ -513,17 +591,29 @@ impl Syncer {
                             "the scan was incomplete — new files are still shared, but \
                              nothing is withdrawn until the whole library can be listed"
                         );
+                        if kind == MediaSource::Directory {
+                            discovery.library_unreadable = Some(
+                                "part of a library could not be listed — new files are \
+                                 still shared, but nothing is withdrawn until the whole \
+                                 library can be read; see the log for which directory"
+                                    .to_owned(),
+                            );
+                        }
                     }
                     discovery.items.extend(scan.items);
                 }
                 Err(err) => {
                     discovery.failures += 1;
+                    let reason = format!("{err:#}");
                     tracing::error!(
                         service = %kind,
-                        error = format!("{err:#}"),
+                        error = reason,
                         "discovery failed — everything already shared from this source \
                          will be left exactly as it is"
                     );
+                    if kind == MediaSource::Directory {
+                        discovery.library_unreadable = Some(reason);
+                    }
                 }
             }
         }
@@ -535,7 +625,7 @@ impl Syncer {
         &self,
         item: &Discovered,
         announce: &AnnounceSet,
-        live: &HashMap<String, (Option<f64>, Option<f64>)>,
+        live: &HashMap<String, &sharerr_client::TorrentSummary>,
         torrents: &seed::KnownTorrents,
         known: Option<&SharedItem>,
         dry_run: bool,
@@ -549,9 +639,29 @@ impl Syncer {
         if let Some(known) = known
             && known.state == ShareState::Seeding
             && let Some(hash) = &known.info_hash
-            && let Some(&(ratio, ratio_limit)) = live.get(hash)
+            && let Some(&reported) = live.get(hash)
         {
+            let ratio = reported.ratio;
+            let mut ratio_limit = reported.ratio_limit;
             if !dry_run {
+                // Retroactive seeding limits, for sharerr's own torrents only
+                // — an adopted one carries the operator's limits, which are
+                // theirs the same way its trackers are. A failure here is a
+                // warning, like the announce refresh below: the torrent is
+                // still seeding, and the next pass retries.
+                if known.created_by_sharerr {
+                    match self.reconcile_limits(hash, reported).await {
+                        // What the store records as the limit should be the
+                        // one now in force, not the pre-apply reading.
+                        Ok(true) => ratio_limit = self.seeder.ratio_limit.or(ratio_limit),
+                        Ok(false) => {}
+                        Err(err) => tracing::warn!(
+                            item = %item.spec,
+                            error = format!("{err:#}"),
+                            "could not apply the configured seeding limits"
+                        ),
+                    }
+                }
                 match self.seeder.refresh_announce(hash, announce).await {
                     // Either branch means the live torrent now genuinely
                     // matches `announce.primary` — a no-op refresh is still a

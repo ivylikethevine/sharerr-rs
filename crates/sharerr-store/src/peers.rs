@@ -181,6 +181,25 @@ fn validate_label(label: &str) -> Result<String> {
 /// `RETURNING`: adding a column here is one edit, and a missed one is a compile
 /// error rather than a runtime `try_get` failure. `db.rs` solves the same
 /// problem for `shared_items` with `SELECT_COLUMNS`.
+/// What [`Store::touch_peer`] did with a sighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Touch {
+    /// The peer had never been seen before this — their first contact.
+    First,
+    /// `last_seen_at` moved: the throttle window had passed.
+    Refreshed,
+    /// Seen too recently to be worth a write. Nothing changed.
+    Throttled,
+}
+
+impl Touch {
+    /// Whether the row actually changed — the question every caller that
+    /// piggybacks on the throttle window asks.
+    pub fn updated(self) -> bool {
+        !matches!(self, Self::Throttled)
+    }
+}
+
 const PEER_COLUMNS: &str = "id, label, created_at, last_seen_at, revoked_at, scope, pubkey, \
      gossip_url, key_hash";
 
@@ -290,20 +309,55 @@ impl Store {
     /// seconds was pure write contention against the sync loop. Five minutes of
     /// slack keeps the answer to "recently?" honest at zero cost.
     ///
-    /// Returns whether the row was actually updated — i.e. whether the throttle
-    /// window had passed. Endpoint observation piggybacks on the same window, so
-    /// the answer is worth having.
-    pub async fn touch_peer(&self, id: i64) -> Result<bool> {
+    /// Returns what the touch did — see [`Touch`]. Endpoint observation
+    /// piggybacks on the same throttle window, and the first-contact
+    /// notification hangs off [`Touch::First`], so the distinction is worth
+    /// having.
+    ///
+    /// Two statements rather than one: the first claims a never-seen row
+    /// (`last_seen_at IS NULL`), so exactly one of any number of concurrent
+    /// first sightings observes [`Touch::First`] — a `SELECT` then `UPDATE`
+    /// would let two announces in the same instant both report it.
+    pub async fn touch_peer(&self, id: i64) -> Result<Touch> {
         let now = now_epoch();
-        let affected = sqlx::query(
-            "UPDATE peers SET last_seen_at = ?1              WHERE id = ?2 AND (last_seen_at IS NULL OR last_seen_at < ?1 - 300)",
+        let first = sqlx::query(
+            "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL",
         )
         .bind(now)
         .bind(id)
         .execute(self.pool())
         .await?
         .rows_affected();
-        Ok(affected > 0)
+        if first > 0 {
+            return Ok(Touch::First);
+        }
+        let affected = sqlx::query(
+            "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at < ?1 - 300",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        Ok(if affected > 0 {
+            Touch::Refreshed
+        } else {
+            Touch::Throttled
+        })
+    }
+
+    /// One peer by id, revoked or not — the operator's view, not the
+    /// authentication path, which is why revocation does not hide the row
+    /// here the way it does for [`Self::peer_by_key`].
+    pub async fn peer(&self, id: i64) -> Result<Option<Peer>> {
+        let row = sqlx::query(AssertSqlSafe(format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE id = ?1"
+        )))
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        row.as_ref().map(row_to_peer).transpose()
     }
 
     /// Stop honouring a peer's key. Returns whether anything changed.
@@ -509,13 +563,43 @@ mod tests {
             .unwrap();
         assert_eq!(sam.last_seen_at, None);
 
-        store.touch_peer(sam.id).await.unwrap();
+        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::First);
 
         let listed = store.list_peers().await.unwrap();
         assert!(
             listed[0].last_seen_at.is_some(),
             "a touched peer must show a last-seen time"
         );
+    }
+
+    /// The first sighting is reported exactly once; inside the throttle
+    /// window a second touch is neither a first contact nor a refresh.
+    #[tokio::test]
+    async fn only_the_first_touch_is_a_first_contact() {
+        let store = store().await;
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+
+        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::First);
+        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::Throttled);
+        assert!(!Touch::Throttled.updated());
+        assert!(Touch::Refreshed.updated());
+        assert!(Touch::First.updated());
+    }
+
+    #[tokio::test]
+    async fn peer_by_id_finds_revoked_peers_too() {
+        let store = store().await;
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        assert_eq!(store.peer(sam.id).await.unwrap().unwrap().label, "Sam");
+        assert!(store.revoke_peer(sam.id).await.unwrap());
+        assert!(store.peer(sam.id).await.unwrap().is_some());
+        assert!(store.peer(sam.id + 1).await.unwrap().is_none());
     }
 
     #[tokio::test]
