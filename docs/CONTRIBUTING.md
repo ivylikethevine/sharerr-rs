@@ -102,7 +102,7 @@ the coverage caveat.
 
 ## MSRV
 
-`rust-version` is 1.98. CI's `msrv (1.98)` job runs `cargo check --workspace
+`rust-version` is 1.98. CI's `msrv` job runs `cargo check --workspace
 --all-targets --all-features --locked` on that pinned toolchain. Locally,
 `docker build -f docker/Dockerfile .` is the equivalent check, because the
 Dockerfile pins the same toolchain and a local toolchain is invariably newer
@@ -116,17 +116,22 @@ Every job in `ci.yml` waits on `prepare`, which decides whether anything
 besides workflow YAML changed; a PR touching only `.github/workflows/**`
 shows almost no checks, by design. Everything else runs on every push and PR.
 
+The check names below are what `main`'s ruleset requires, verbatim, so a
+job rename is also a ruleset edit; that is why `msrv` carries no version in
+its name and the two image builds carry the image's name rather than sharing
+one.
+
 | Check | Workflow | Blocks a merge? |
 | --- | --- | --- |
 | `rustfmt` | `ci.yml` | Yes |
 | `clippy + tests` | `ci.yml` | Yes |
-| `msrv (1.98)` | `ci.yml` | Yes |
+| `msrv` | `ci.yml` | Yes |
 | `cargo-deny` | `ci.yml` | Yes |
 | `shell + compose` | `ci.yml` | Yes |
 | `workflow lint (zizmor + actionlint)` | `ci.yml` | Yes |
 | `advisory (hadolint + markdownlint + typos)` | `ci.yml` | No, reports only; each gets its own step summary |
 | CodeQL (`rust`, `actions`) | `codeql.yml` | Yes, as code scanning; alerts are diff-scoped |
-| Image build, amd64 only | `docker.yml`, `docker-lighthouse.yml` | Yes; also the de-facto MSRV check |
+| `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml`, `docker-lighthouse.yml` | Yes; also the de-facto MSRV check |
 
 Four more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
 `link-check.yml`) run weekly and on every push to `main`, and report by
