@@ -117,6 +117,23 @@ updates:
           - "version-update:semver-minor"
           - "version-update:semver-patch"
 
+  # The Terraform providers behind the hosted-lighthouse modules. Nothing in CI
+  # applies these, so a bump here is a published recommendation the same way a
+  # /docker/deploy pin is, and gets the same weekly cadence and cooldown.
+  - package-ecosystem: terraform
+    directories:
+      - "/docker/deploy/lighthouse/terraform/aws"
+      - "/docker/deploy/lighthouse/terraform/azure"
+      - "/docker/deploy/lighthouse/terraform/fly"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "terraform"
+    cooldown:
+      default-days: 7
+
   # The compose stacks: the tier-2 test harness under /docker, and the
   # deployment examples under /docker/deploy. The fetcher reads one directory at
   # a time and does not recurse, so every directory holding a compose file has

@@ -1,0 +1,42 @@
+#cloud-config
+# Rendered by ../modules/cloud-init for the aws/ and azure/ targets. Ubuntu
+# 24.04 is assumed on both: `docker.io` and `docker-compose-v2` are the
+# distro's own packages, so nothing is curl-piped into a shell at boot.
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  - path: /opt/sharerr-lighthouse/compose.yaml
+    permissions: "0644"
+    content: |
+      ${indent(6, compose_yaml)}
+  - path: /opt/sharerr-lighthouse/.env
+    permissions: "0600"
+    content: |
+      TZ=${tz}
+      RUST_LOG=${rust_log}
+%{ if tls ~}
+      DOMAIN=${domain}
+  - path: /opt/sharerr-lighthouse/compose.tls.yaml
+    permissions: "0644"
+    content: |
+      ${indent(6, compose_tls_yaml)}
+  - path: /opt/sharerr-lighthouse/Caddyfile
+    permissions: "0644"
+    content: |
+      ${indent(6, caddyfile)}
+%{ endif ~}
+  # Pull the lighthouse image daily so `:latest` is actually latest; the
+  # container is recreated only when the pull brought something new.
+  - path: /etc/cron.daily/sharerr-lighthouse-update
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      cd /opt/sharerr-lighthouse && docker compose ${tls ? "-f compose.yaml -f compose.tls.yaml " : ""}pull --quiet && docker compose ${tls ? "-f compose.yaml -f compose.tls.yaml " : ""}up -d --quiet-pull
+
+runcmd:
+  - systemctl enable --now docker
+  - cd /opt/sharerr-lighthouse && docker compose ${tls ? "-f compose.yaml -f compose.tls.yaml " : ""}up -d

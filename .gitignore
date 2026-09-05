@@ -23,3 +23,13 @@
 # Local agent scratch: memory, plans, session settings. Note this does *not* cover
 # the tracked CLAUDE.md at the repository root, which is shared on purpose.
 .claude
+
+# Terraform working state for the hosted-lighthouse modules under
+# docker/deploy/lighthouse/terraform. State can hold addresses and key names;
+# keep it with the rest of your homelab's, not here.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
+docker/deploy/lighthouse/terraform/fly/.generated/
