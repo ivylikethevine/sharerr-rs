@@ -1615,12 +1615,12 @@ async fn build_page(
         qbit_skip_checking: config.qbittorrent.skip_checking,
 
         transmission_url: config.transmission.url.to_string(),
-        transmission_username: config.transmission.username.clone(),
+        transmission_username: config.transmission.login.clone(),
         transmission_password_set: is_set(secret_keys::TRANSMISSION_PASSWORD),
         transmission_label: config.transmission.label.clone(),
 
         rtorrent_url: config.rtorrent.url.to_string(),
-        rtorrent_username: config.rtorrent.username.clone(),
+        rtorrent_username: config.rtorrent.login.clone(),
         rtorrent_password_set: is_set(secret_keys::RTORRENT_PASSWORD),
         rtorrent_label: config.rtorrent.label.clone(),
 

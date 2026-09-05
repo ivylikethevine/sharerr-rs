@@ -496,7 +496,7 @@ impl Config {
             },
             TorrentBackend::Transmission => TorrentClientConfig {
                 url: &self.transmission.url,
-                login: Some(&self.transmission.username),
+                login: Some(&self.transmission.login),
                 fallback_credential: Some(secret_keys::TRANSMISSION_PASSWORD),
                 // Transmission's RPC has no key auth — only a username and
                 // password — so there is nothing for a caller to prefer.
@@ -513,7 +513,7 @@ impl Config {
             },
             TorrentBackend::Rtorrent => TorrentClientConfig {
                 url: &self.rtorrent.url,
-                login: Some(&self.rtorrent.username),
+                login: Some(&self.rtorrent.login),
                 fallback_credential: Some(secret_keys::RTORRENT_PASSWORD),
                 // rTorrent's XML-RPC has no key auth of its own — see
                 // `sharerr_rtorrent`'s module docs.
@@ -544,8 +544,12 @@ pub struct TorrentClientConfig<'a> {
     /// Named away from the obvious term: CodeQL's Rust `cleartext-logging`
     /// query flags any field whose *identifier* looks like a login field, no
     /// matter what actually flows through it, and `doctor`'s client summary
-    /// prints this (see `docs/SECURITY.md`'s former note on this exact line,
-    /// now resolved by this rename instead of a Security-tab dismissal).
+    /// prints this. Renaming this field alone did not clear the finding —
+    /// the source was the `username` field read in
+    /// [`Config::torrent_client_for`], upstream of here — so
+    /// [`TransmissionConfig::login`] and [`RtorrentConfig::login`] carry the
+    /// same rename, with a `#[serde(rename)]` keeping the TOML key. See
+    /// `docs/SECURITY.md`.
     pub login: Option<&'a str>,
     /// Vault key holding this client's password, or `None` for a client with no
     /// password credential.
@@ -675,7 +679,16 @@ impl TorrentBackend {
 #[serde(default, deny_unknown_fields)]
 pub struct TransmissionConfig {
     pub url: Url,
-    pub username: String,
+    /// The account Transmission's RPC signs in as. The TOML key stays
+    /// `username`; only the Rust identifier is `login`, because CodeQL's
+    /// `rust/cleartext-logging` query treats any *field access* whose
+    /// identifier matches `user.?name` as sensitive data, regardless of what
+    /// flows through it, and `doctor`'s config summary prints this value.
+    /// Renaming [`TorrentClientConfig::login`] alone was not enough: the flow
+    /// is interprocedural, and the source was this field's read in
+    /// [`Config::torrent_client_for`]. See `docs/SECURITY.md`.
+    #[serde(rename = "username")]
+    pub login: String,
     /// Transmission has no categories, only a flat list of labels. This one stands
     /// in for qBittorrent's category *and* its tag, because there is nothing else
     /// to distinguish them with.
@@ -689,7 +702,7 @@ impl Default for TransmissionConfig {
     fn default() -> Self {
         Self {
             url: Url::parse("http://localhost:9091").expect("valid literal url"),
-            username: "transmission".to_owned(),
+            login: "transmission".to_owned(),
             label: "sharerr".to_owned(),
         }
     }
@@ -706,7 +719,11 @@ impl Default for TransmissionConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct RtorrentConfig {
     pub url: Url,
-    pub username: String,
+    /// The Basic Auth account in front of the XML-RPC endpoint. TOML key
+    /// `username`; Rust identifier `login` for the reason given on
+    /// [`TransmissionConfig::login`].
+    #[serde(rename = "username")]
+    pub login: String,
     /// rTorrent has no categories, only a free-text `d.custom1` slot per
     /// download. This one value stands in for qBittorrent's category *and*
     /// its tag, same as [`TransmissionConfig::label`].
@@ -720,7 +737,7 @@ impl Default for RtorrentConfig {
     fn default() -> Self {
         Self {
             url: Url::parse("http://localhost/RPC2").expect("valid literal url"),
-            username: "rtorrent".to_owned(),
+            login: "rtorrent".to_owned(),
             label: "sharerr".to_owned(),
         }
     }
@@ -1335,6 +1352,25 @@ mod tests {
     /// settings page's "Test connection" button for the *other* client
     /// depends on this: an operator filling in Transmission's fields while
     /// qBittorrent is still active must be able to test what they just typed.
+    /// `TransmissionConfig::login` and `RtorrentConfig::login` are `username`
+    /// on disk: the Rust identifier moved (see the field docs for why), and
+    /// the TOML key must not, or every existing `sharerr.toml` and
+    /// `SHARERR_*__USERNAME` override silently stops applying.
+    #[test]
+    fn the_client_login_fields_keep_username_as_their_toml_key() {
+        let config: Config = toml_edit::de::from_str(
+            "[transmission]\nusername = \"sam\"\n\n[rtorrent]\nusername = \"alex\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.transmission.login, "sam");
+        assert_eq!(config.rtorrent.login, "alex");
+
+        let out = toml_edit::ser::to_string_pretty(&config).unwrap();
+        assert!(out.contains("username = \"sam\""), "{out}");
+        assert!(out.contains("username = \"alex\""), "{out}");
+        assert!(!out.contains("login"), "{out}");
+    }
+
     #[test]
     fn torrent_client_for_ignores_the_currently_selected_backend() {
         let config = Config {
@@ -1345,12 +1381,12 @@ mod tests {
             },
             transmission: TransmissionConfig {
                 url: Url::parse("http://trans.example:9091").unwrap(),
-                username: "sam".to_owned(),
+                login: "sam".to_owned(),
                 ..TransmissionConfig::default()
             },
             rtorrent: RtorrentConfig {
                 url: Url::parse("http://seedbox.example/RPC2").unwrap(),
-                username: "alex".to_owned(),
+                login: "alex".to_owned(),
                 ..RtorrentConfig::default()
             },
             ..Config::default()

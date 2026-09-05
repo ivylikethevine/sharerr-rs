@@ -204,6 +204,18 @@ these three fields now are: `login`, `primary_credential` and
 Rust identifiers naming them moved. Kept as the record of *why* they moved,
 should the fields' names ever look like unmotivated churn in a future diff.
 
+That first rename cleared two of the three findings but not the username
+one, and the reason is worth recording: the query's source is the _field
+access_ whose identifier matches, and dataflow is interprocedural, so
+`TorrentClientConfig::login` being clean did not matter while
+`Config::torrent_client_for` filled it from `self.transmission.username`.
+The read of `TransmissionConfig::username` was the source, one hop upstream
+of the field that had been renamed. Those two config fields
+(`TransmissionConfig` and `RtorrentConfig`) are now `login` in Rust, with
+`#[serde(rename = "username")]` keeping the `sharerr.toml` key, the
+`SHARERR_TRANSMISSION__USERNAME` override and the `config_paths` string
+constants exactly as they were. Operators see no change.
+
 **`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack) is not in this
 list**, though a stale Scorecard report may claim it should be. `rsa` would
 ride in only via `sqlx-mysql`, and `sqlx` 0.9's mysql backend does not depend

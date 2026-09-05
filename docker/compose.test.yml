@@ -75,7 +75,7 @@ services:
     # Confirmed against this exact version's live schema while building the
     # Lidarr-direct indexer check — a silent major bump is exactly the kind of
     # surprise `seed-arr`'s direct-SQLite writes cannot tolerate.
-    image: lscr.io/linuxserver/lidarr:3.1.0.4875-ls39@sha256:2e4cdc7c8d5fa36915f446a29976ee01d3f9cc9722b8530a09121c76fbabef55
+    image: lscr.io/linuxserver/lidarr:3.1.0.4875-ls40@sha256:c74c32408fdf6e7926ad62641fc1a5544206ee65c33f2188bb179edb30e28f5a
     container_name: sharerr-test-lidarr
     environment:
       PUID: *puid
