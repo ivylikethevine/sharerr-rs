@@ -113,7 +113,18 @@ answers after a restart, not a credential. The binary reads two environment
 variables: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`) and
 `LIGHTHOUSE_SECRET_FILE` (default `/data/lighthouse.secret`). A compose version of the
 same one-liner is at
-[`docker/deploy/lighthouse/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse).
+[`docker/deploy/lighthouse/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse),
+with a `compose.tls.yaml` override that puts Caddy in front for a domain you
+own.
+
+**On a cloud free tier, by Terraform.**
+[`docker/deploy/lighthouse/terraform/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse/terraform)
+holds three root modules — one t3.micro on AWS, one B1s VM on Azure, one
+small machine on Fly.io — that stand up the container above with a
+persistent `/data`, a stable address, and TLS (Caddy with your domain on the
+VMs; built in on Fly). The README there says what each actually costs. This
+is how to run one on neutral ground for a friend group; it is not a public
+instance the project hosts, and there is none.
 
 **Embedded in sharerr.** For a single operator who would rather not run a
 second container, it can run as extra routes on one of sharerr's own

@@ -1,0 +1,39 @@
+# TLS override for the standalone lighthouse: layer it on `compose.yaml` to
+# put Caddy in front, with a certificate it fetches from Let's Encrypt for
+# `DOMAIN`. This is what the Terraform VM targets under `terraform/` apply
+# when a domain is given; by hand it is
+#
+#   DOMAIN=lighthouse.example.net docker compose -f compose.yaml -f compose.tls.yaml up -d
+#
+# with the domain's A record already pointing at this host. Only 80 and 443
+# need reaching from outside; 7878 stays published by the base file, so close
+# it at the firewall (the Terraform security groups do) or drop the `ports:`
+# block from a copy of `compose.yaml`.
+#
+# Pinned by digest like every other image under `docker/`; dependabot moves
+# the pin. `caddy:2-alpine` rather than `caddy:2` for the smaller image — the
+# reverse-proxy and ACME features are in both.
+
+services:
+  caddy:
+    image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    container_name: sharerr-lighthouse-caddy
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the hostname Caddy should obtain a certificate for}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Losing this only means a fresh
+      # issuance on the next start, but Let's Encrypt rate-limits those.
+      - caddy-data:/data
+      - caddy-config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      - lighthouse
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:

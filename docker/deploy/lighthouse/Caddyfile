@@ -1,0 +1,9 @@
+# TLS in front of the lighthouse, for the Terraform VM targets (and anyone
+# else who wants it): Caddy terminates HTTPS for `{$DOMAIN}` with a
+# Let's Encrypt certificate it obtains and renews itself, and proxies to the
+# lighthouse over the compose network. Used by `compose.tls.yaml`; the DNS A
+# record for the domain has to point at this host before the certificate can
+# be issued, and Caddy simply keeps retrying until it does.
+{$DOMAIN} {
+	reverse_proxy lighthouse:7878
+}
