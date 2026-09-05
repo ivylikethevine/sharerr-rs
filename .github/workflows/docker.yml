@@ -85,11 +85,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # The only job in this tree that needs it - `gh release create` writes a
-    # Releases-tab entry and, if the tag somehow didn't already exist, the tag
-    # itself. Nothing else here pushes back to GitHub.
+    # `gh release create` writes a Releases-tab entry and, if the tag somehow
+    # didn't already exist, the tag itself; `actions: read` is only for the
+    # cross-workflow artifact read below, the same reason pages.yml carries
+    # it. Nothing else here pushes back to GitHub.
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,14 +103,35 @@ jobs:
       # The check this job used to run sat after `publish` had already moved
       # `latest`, which was the wrong side of the gate to fail on.
 
+      # By head-sha, not the branch=main lookup pages.yml uses - a release
+      # should describe what was measured on the exact commit it tags, not
+      # whatever main last measured. See fetch-latest-artifact's own comment.
+      # continue-on-error inside the action already turns a missing run or an
+      # expired artifact into "nothing downloaded", never a failed release.
+      - name: Fetch this commit's coverage and test-count figures
+        uses: ./.github/actions/fetch-latest-artifact
+        with:
+          workflow: coverage.yml
+          artifact-name: coverage-badge
+          dest-subdir: cov
+          head-sha: ${{ github.sha }}
+          found-message: coverage figures from run
+          missing-message: no coverage run for this commit - the release notes omit the figures section
+
       # The preamble GitHub's generated notes get prepended to below - see
       # docs/RELEASING.md's own "Verifying a published image" section, which
       # this restates so a reader of the release page never has to leave it.
+      # The figures are static shields badges with the literal numbers baked
+      # in, not the live endpoint badges the README uses - this page is
+      # archival, and a live badge would silently re-render v0.0.1's release
+      # to today's coverage.
       - name: Write the release preamble
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
+          COVJSON: ${{ runner.temp }}/cov/coverage.json
+          TESTSJSON: ${{ runner.temp }}/cov/tests.json
         run: |
           set -euo pipefail
           {
@@ -127,6 +150,19 @@ jobs:
             echo '```'
             echo
             echo "See [docs/RELEASING.md](https://github.com/${REPO}/blob/${TAG}/docs/RELEASING.md) for what these commands prove."
+            if [ -f "$COVJSON" ] && [ -f "$TESTSJSON" ]; then
+              tests_count="$(jq -r .message "$TESTSJSON")"
+              cov_pct="$(jq -r .message "$COVJSON")"
+              cov_color="$(jq -r .color "$COVJSON")"
+              cov_pct_url="$(printf '%s' "$cov_pct" | sed 's/%/%25/')"
+              echo
+              echo "## This release"
+              echo
+              echo "![tests](https://img.shields.io/badge/tests-${tests_count}-blue)"
+              echo "![coverage](https://img.shields.io/badge/coverage-${cov_pct_url}-${cov_color})"
+              echo
+              echo "${tests_count} tier-1 tests, ${cov_pct} line coverage, measured on \`${GITHUB_SHA:0:7}\`."
+            fi
           } >"$RUNNER_TEMP/preamble.md"
 
       # `--verify-tag` is redundant given the `if:` above already requires a

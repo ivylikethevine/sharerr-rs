@@ -8,11 +8,10 @@ traffic comes out, and everything else follows from that. A fifth directory,
 These are deployment recipes. `docker/*.yml` one directory up are the
 **tier-2 test stacks**; do not deploy from those.
 
-> **No tagged release exists yet**, so the `:latest` these files pull does
-> not resolve. Until the first `v*` tag, either pull the `sha-<commit>` image
-> every push to `main` publishes, or build the image yourself with
-> `docker build -f docker/Dockerfile -t sharerr-rs .` and point `image:` at
-> that name. See [the tag scheme](../../docs/RELEASING.md#the-tag-scheme).
+> These files pull `:latest`, which tracks the newest tagged release. To pin
+> a specific version, point `image:` at `ghcr.io/…:vX.Y.Z` instead, or track
+> `main` between releases via the `sha-<commit>` image every push publishes.
+> See [the tag scheme](../../docs/RELEASING.md#the-tag-scheme).
 
 ## Table of contents
 

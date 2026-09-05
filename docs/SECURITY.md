@@ -2,8 +2,7 @@
 
 How to report a vulnerability, what happens next, what is in and out of
 scope, and why the existing controls fit the threat model. sharerr is
-**experimental** and has had no tagged release; see
-[Supported versions](#supported-versions).
+**experimental** and pre-1.0; see [Supported versions](#supported-versions).
 
 ## Table of contents
 
@@ -35,20 +34,19 @@ depends on their spare time.
 - **Fix and disclosure**: a confirmed vulnerability is fixed in the private
   advisory's own fork first, so the fix does not announce the bug before an
   image carries it. The advisory is published once a patched `sha-<commit>`
-  image (or, once one exists, a tagged release) is available, and a CVE is
-  requested through GitHub's advisory flow where severity warrants it.
+  image or tagged release is available, and a CVE is requested through
+  GitHub's advisory flow where severity warrants it.
 - **Credit**: reporters are credited by name or handle in the advisory and
   the release notes unless they ask to stay anonymous.
 
 ## Supported versions
 
-Exactly one supported line: the `main` branch, and the `sha-<commit>` image
-built from whatever commit is newest on it (see
+Exactly one supported line, the same honest answer a solo pre-1.0 project can
+give: the newest tagged release, plus the `main` branch and the `sha-<commit>`
+image built from whatever commit is newest on it (see
 [`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)). There is no
-older version to patch, because there has been no tagged release. Once
-`v0.1.0` ships, this section will name which tagged lines get fixes and for
-how long; until then, "upgrade" means "pull the newest `sha-<commit>`
-image".
+backporting to an older tag; "upgrade" means moving to the newest tagged
+release (or `:latest`, which tracks it).
 
 ## What is in scope
 

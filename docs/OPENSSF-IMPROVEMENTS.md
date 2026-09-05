@@ -41,10 +41,9 @@ and **SUGGESTED** don't), the answer, and the evidence. Links point at
 the link resolves once that work is merged.
 
 Four release-shaped criteria (`version_unique`, `version_tags`,
-`release_notes`, `release_notes_vulns`) are marked **Pending** — the
-mechanism for all four is built and rehearsed
-([docs/RELEASING.md](RELEASING.md)), but nothing can be Met until a real
-`v0.1.0` tag exists. Flip those the day it ships.
+`release_notes`, `release_notes_vulns`) were marked Pending until a real tag
+existed; `v0.0.1`, `v0.1.0` and `v0.1.1` have since shipped
+([docs/RELEASING.md](RELEASING.md)), so all four are now Met below.
 
 Silver as a whole isn't reachable yet regardless of any individual answer
 below: `bus_factor` and `regression_tests_added50` are both genuine,
@@ -81,11 +80,11 @@ argued around. Every other silver row here already stands on its own.
 | `repo_track` — Repo tracks changes, who made them, and when. | MUST | Met | Standard git; commits to main require verified signatures per its ruleset. |
 | `repo_interim` — Interim versions between releases are available to testers. | MUST | Met | Every push to main publishes an unattended `sha-<commit>` GHCR image. [docs/RELEASING.md#between-releases-the-sha-tag](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#between-releases-the-sha-tag). |
 | `repo_distributed` — A distributed version control system is used. | SUGGESTED | Met | Git. |
-| `version_unique` — Each release has a unique version identifier. | MUST | Pending | No tag has been cut yet — mark Unmet/N/A until `v0.1.0` ships. The mechanism is fully built and rehearsed: [docs/RELEASING.md#cutting-a-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#cutting-a-release). |
+| `version_unique` — Each release has a unique version identifier. | MUST | Met | Each `v*` tag is a unique identifier; `docker-image.yml`'s `version` step rejects a tag that isn't `vMAJOR.MINOR.PATCH[-prerelease]` before anything builds. `v0.0.1`, `v0.1.0`, `v0.1.1` shipped this way. [docs/RELEASING.md#cutting-a-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#cutting-a-release). |
 | `version_semver` — Semantic Versioning or Calendar Versioning is used. | SUGGESTED | Met | The `v*` tag is the version and must be `vMAJOR.MINOR.PATCH[-prerelease]`; docker-image.yml's `version` step rejects anything else before a build runs, and injects it into the binary. [docs/RELEASING.md#cutting-a-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#cutting-a-release). |
-| `version_tags` — Releases are identified in the VCS via tags. | SUGGESTED | Pending | Mechanism documented and rehearsed ([docs/RELEASING.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md)) but unused until the first real tag. |
-| `release_notes` — Human-readable release notes exist for each release. | MUST | Pending | `gh release create --generate-notes` is wired into the release job; nothing to point at until the first tag. [docs/RELEASING.md#the-github-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#the-github-release). |
-| `release_notes_vulns` — Release notes identify publicly known vulnerabilities fixed. | MUST | Pending | Same mechanism, same blocker — no release exists yet to carry one. |
+| `version_tags` — Releases are identified in the VCS via tags. | SUGGESTED | Met | `v0.0.1`, `v0.1.0` and `v0.1.1` are pushed, signed tags. [docs/RELEASING.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md). |
+| `release_notes` — Human-readable release notes exist for each release. | MUST | Met | `gh release create --generate-notes` produced the [v0.1.1 Release page](https://github.com/ivylikethevine/sharerr-rs/releases/tag/v0.1.1) and its predecessors. [docs/RELEASING.md#the-github-release](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/RELEASING.md#the-github-release). |
+| `release_notes_vulns` — Release notes identify publicly known vulnerabilities fixed. | MUST | Met | No publicly known vulnerability has been fixed in a release yet, so no release notes have needed to say so; [docs/SECURITY.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-happens-after-a-report)'s disclosure flow already commits to crediting a reporter in the release notes once one is. |
 
 ### Reporting
 
@@ -185,7 +184,7 @@ Everything passing requires, plus the sections below.
 
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
-| `maintenance_or_update` — Older versions are maintained, or a documented upgrade path exists. | MUST | Met | New Supported Versions section: exactly one supported line (main / the newest sha-tagged image) and what "upgrade" means until v0.1.0 ships. [docs/SECURITY.md#supported-versions](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#supported-versions). |
+| `maintenance_or_update` — Older versions are maintained, or a documented upgrade path exists. | MUST | Met | Supported Versions section: exactly one supported line (the newest tagged release, plus main / the newest sha-tagged image) and what "upgrade" means for a solo pre-1.0 project — move to the newest tag. [docs/SECURITY.md#supported-versions](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#supported-versions). |
 
 ### Reporting
 

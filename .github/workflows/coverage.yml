@@ -74,9 +74,13 @@ jobs:
           tool: cargo-llvm-cov
 
       # Collects profile data once; `report` below reads it twice (HTML, then
-      # a plain-text summary) without re-running the suite either time.
+      # a plain-text summary) without re-running the suite either time. Teed
+      # to a log so the test-count step below can sum it without a second,
+      # uninstrumented compile of the same suite.
       - name: Run the hermetic suite under instrumentation
-        run: cargo llvm-cov --workspace --all-features --locked --no-report
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --workspace --all-features --locked --no-report 2>&1 | tee test-run.log
 
       - name: Render the HTML report
         run: cargo llvm-cov report --html --output-dir coverage-html
@@ -126,13 +130,28 @@ jobs:
           printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s","cacheSeconds":300}\n' \
             "$pct" "$color" >coverage-badge/coverage.json
 
+      # Sums the "N" in every "test result: ok. N passed;" line rather than
+      # re-counting test functions with `cargo test -- --list` — that would
+      # count tests that *exist*, not tests that *ran* under this same
+      # instrumented pass, and would need a second, uninstrumented compile of
+      # the whole suite to get it. `cargo llvm-cov` doesn't instrument
+      # doctests without a nightly `--doctests` flag, so this is unit +
+      # integration tests only, same scope as the coverage percentage above.
+      - name: Compute the test-count badge endpoint
+        run: |
+          set -euo pipefail
+          total="$(awk '/^test result: ok\./ { for (i = 1; i <= NF; i++) if ($(i + 1) == "passed;") sum += $i } END { print sum + 0 }' test-run.log)"
+          mkdir -p coverage-badge
+          printf '{"schemaVersion":1,"label":"tests","message":"%s","color":"blue","cacheSeconds":300}\n' \
+            "$total" >coverage-badge/tests.json
+
       # Read by pages.yml's own `Find the last coverage run` / `Fetch that
       # run's badge endpoint` steps, keyed by this artifact name — it queries
       # for the newest successful run of this workflow on `main` and pulls
       # whatever this step uploaded there. `if:` guards against uploading an
-      # empty artifact if the step above failed to parse a percentage.
+      # empty artifact if the steps above failed to produce either file.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles('coverage-badge/coverage.json') != ''
+        if: hashFiles('coverage-badge/coverage.json', 'coverage-badge/tests.json') != ''
         with:
           name: coverage-badge
           path: coverage-badge
