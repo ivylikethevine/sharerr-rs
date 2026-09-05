@@ -1387,7 +1387,8 @@ fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool)
         .filter(|backend| *backend != config.torrent_backend)
         .any(|backend| {
             let client = config.torrent_client_for(backend);
-            client.api_key_key.is_some_and(is_set) || client.password_key.is_some_and(is_set)
+            client.primary_credential.is_some_and(is_set)
+                || client.fallback_credential.is_some_and(is_set)
         })
 }
 

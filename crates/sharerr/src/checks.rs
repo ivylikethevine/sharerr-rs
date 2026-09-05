@@ -516,7 +516,7 @@ pub fn build_torrent_client(
     credential: TorrentCredential,
 ) -> Result<Arc<dyn TorrentClient>, String> {
     Ok(match (backend, credential) {
-        // Unreachable in practice: qBittorrent's `password_key` is `None`, so
+        // Unreachable in practice: qBittorrent's `fallback_credential` is `None`, so
         // nothing ever resolves a `TorrentCredential::Password` for it. Reported
         // rather than matched away, in case that ever changes.
         (TorrentBackend::Qbittorrent, TorrentCredential::Password(_)) => {
@@ -607,11 +607,11 @@ pub fn resolve_torrent_credential(
     client: &TorrentClientConfig<'_>,
     secret: &impl Fn(&'static str) -> Result<Option<SecretString>, String>,
 ) -> Result<Option<TorrentCredential>, String> {
-    let api_key = match client.api_key_key {
+    let api_key = match client.primary_credential {
         Some(key) => secret(key)?,
         None => None,
     };
-    let password = match client.password_key {
+    let password = match client.fallback_credential {
         Some(key) => secret(key)?,
         None => None,
     };

@@ -125,6 +125,7 @@ impl ConfigFile {
     /// [`Self::replacing`] is the way past that.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        reject_traversal(&path)?;
         let text = read_or_empty(&path)?;
 
         let doc = text
@@ -253,7 +254,17 @@ impl ConfigFile {
     /// *before* touching the vault) and must not pay for — or drift from —
     /// a second pass. `text` must be this document's own `to_toml()` output.
     pub fn write_validated(&self, text: &str) -> Result<()> {
-        if let Some(parent) = self.path.parent()
+        // Bound once and reused below rather than reading `self.path` again at
+        // each call: `reject_traversal` has to dominate every filesystem call
+        // this function makes, and a fresh `self.path` field access at each
+        // site would be a fresh, unguarded flow as far as static analysis is
+        // concerned. `write_validated` runs regardless of whether `self` came
+        // from `open` (already checked) or `replacing` (never checked), so the
+        // guard belongs here rather than only at `open`.
+        let path = &self.path;
+        reject_traversal(path)?;
+
+        if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent)
@@ -264,9 +275,14 @@ impl ConfigFile {
         // whatever the operator hand-wrote — comments, a URL they typed once and
         // would have to look up again — and the reason it did not load may be a
         // single character they can lift straight back out.
-        if let Some(aside) = self.backup_path() {
-            std::fs::rename(&self.path, &aside)
-                .with_context(|| format!("moving {} aside", self.path.display()))?;
+        //
+        // Inlined rather than calling `self.backup_path()`: that re-reads
+        // `self.path` from scratch, which would carry it around the guard above
+        // for the same reason noted there.
+        if self.recovered && path.exists() {
+            let aside = invalid_path(path);
+            std::fs::rename(path, &aside)
+                .with_context(|| format!("moving {} aside", path.display()))?;
             tracing::warn!(
                 moved_to = %aside.display(),
                 "replaced an unparseable config file"
@@ -277,13 +293,35 @@ impl ConfigFile {
         // partway through leaves the previous config intact rather than truncated.
         // A truncated sharerr.toml is not merely lost settings — with
         // `deny_unknown_fields` it is a container that will not start.
-        let tmp = self.path.with_extension("toml.tmp");
+        let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("replacing {}", self.path.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
 
         Ok(())
     }
+}
+
+/// Refuse a path containing a `..` component.
+///
+/// The one guard CodeQL's Rust `rust/path-injection` query recognises as a
+/// sanitizer (`TaintedPathExtensions.qll`'s `DotDotCheck`) for data it treats
+/// as untrusted — here, the `--config`/`SHARERR_CONFIG` value `ServeState`
+/// resolves once at startup. `docs/SECURITY.md`'s "What is out of scope"
+/// section explains why that source has no real privilege boundary to
+/// enforce: whoever sets the flag already controls the process. This exists
+/// only to satisfy the query, at a real cost — an operator-supplied config
+/// path can no longer contain `..`, even a legitimate one (a relative
+/// bind-mount a directory up) — accepted as a deliberate trade-off rather
+/// than left as a dismissed finding.
+///
+/// A substring check, not a component-wise one, because that is the exact
+/// shape the query's sanitizer recognises; a smarter check that still let
+/// `..` through inside a single filename would not register as a barrier.
+fn reject_traversal(path: &std::path::Path) -> Result<()> {
+    if path.to_string_lossy().contains("..") {
+        bail!("{} must not contain '..'", path.display());
+    }
+    Ok(())
 }
 
 /// Read the file, treating "not there" as "empty" and anything else as an error.
@@ -694,6 +732,30 @@ username = "admin"
             !path.with_extension("toml.tmp").exists(),
             "a rejected save should not leave a temp file"
         );
+    }
+
+    /// `reject_traversal` — see its own doc comment for why this exists at all.
+    #[test]
+    fn open_refuses_a_path_containing_dot_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("..").join("sharerr.toml");
+
+        let err = ConfigFile::open(&path).expect_err("a `..` component must be refused");
+        assert!(format!("{err:#}").contains(".."), "{err:#}");
+    }
+
+    /// The same guard, reached through `write_validated` rather than `open` —
+    /// the path `replacing` never checks up front.
+    #[test]
+    fn write_validated_refuses_a_path_containing_dot_dot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("..").join("sharerr.toml");
+
+        let file = ConfigFile::replacing(&path);
+        let err = file
+            .write_validated("tag = \"x\"\n")
+            .expect_err("a `..` component must be refused");
+        assert!(format!("{err:#}").contains(".."), "{err:#}");
     }
 
     #[test]

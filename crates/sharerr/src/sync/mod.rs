@@ -902,17 +902,19 @@ fn build_client(config: &Config, vault: &Vault) -> Result<Arc<dyn TorrentClient>
 
     let credential = crate::checks::resolve_torrent_credential(&client, &secret)
         .map_err(|reason| anyhow::anyhow!(reason))?
-        .with_context(|| match (client.api_key_key, client.password_key) {
-            (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
-            (Some(api), None) => format!("no {api} in the vault"),
-            (None, Some(password)) => format!("no {password} in the vault"),
-            (None, None) => "no credential configured for this torrent client".to_owned(),
-        })?;
+        .with_context(
+            || match (client.primary_credential, client.fallback_credential) {
+                (Some(api), Some(password)) => format!("no {api} or {password} in the vault"),
+                (Some(api), None) => format!("no {api} in the vault"),
+                (None, Some(password)) => format!("no {password} in the vault"),
+                (None, None) => "no credential configured for this torrent client".to_owned(),
+            },
+        )?;
 
     crate::checks::build_torrent_client(
         config.torrent_backend,
         client.url,
-        client.username,
+        client.login,
         credential,
     )
     .map_err(|reason| anyhow::anyhow!(reason))

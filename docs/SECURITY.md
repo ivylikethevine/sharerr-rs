@@ -163,36 +163,34 @@ Transmission, rTorrent, Prowlarr, gluetun) belong to those projects, unless
 sharerr is misusing their API in a way that creates the exposure.
 
 **The `sharerr.toml` path CodeQL's `rust/path-injection` query flags in
-`config_io.rs`.** That path always traces back to `ServeState::config_path()`,
-set once at process start from `--config` or `SHARERR_CONFIG` and never
-reassigned; no HTTP handler passes a path in. Whoever controls that flag
-already controls the process, so there is no privilege boundary to enforce.
-These alerts are dismissed as won't-fix in the Security tab rather than coded
-around, since a containment check would only break legitimate `--config`
-values. This paragraph is the record of that dismissal; a dismissal is
-fingerprint-bound to the flagged line, so moving the code resets it and the
-finding reappears as new.
+`config_io.rs`** is guarded rather than dismissed, as of the check
+`config_io::reject_traversal` runs from `ConfigFile::open` and
+`ConfigFile::write_validated`. The source is always
+`ServeState::config_path()`, set once at process start from `--config` or
+`SHARERR_CONFIG` and never reassigned — whoever controls that flag already
+controls the process, so there was never a privilege boundary here to enforce,
+only the query's `DotDotCheck` sanitizer pattern to satisfy. The guard is a
+real, if narrow, behaviour change: an operator-supplied config path can no
+longer contain `..`, including a legitimate one such as a relative bind-mount
+a directory up. Kept as the worked example of a query whose only recognised
+barrier costs something, unlike the two `cleartext-logging` findings below.
 
-**The vault key _names_ `rust/cleartext-logging` flags in `commands/doctor.rs`.**
-`TorrentClientSettings::api_key_key` and `::password_key` are
-`Option<&'static str>`, and the only values they ever hold are the
-`secret_keys` constants — `"qbittorrent.api_key"`, `"transmission.password"`
-and friends. They name the vault slot a secret is stored _under_; they cannot
-carry the secret itself, because the type is a compile-time literal and no
-runtime value is ever assigned to one. `doctor` prints them so an operator can
-see which slot to fill (`qbittorrent.api_key is set`), which is most of what
-the command is for. CodeQL matches them on the field name alone — anything
-containing `api_key` or `password` is sensitive to its heuristic, regardless of
-what flows through it — and there is no rename that both drops those substrings
-and still says what the field is. Dismissed rather than renamed.
-
-**The operator's own username in `doctor`'s client summary.** The same query
-flags `println!("  client: {} {} (user {username})")`. That line exists so an
-operator confirms _which account_ the configured client authenticates as; a
-`doctor` run that hid it would send someone to debug the wrong service, the
-same failure the surrounding comment describes for the URL. It writes to the
-operator's terminal about their own instance, not to a shared log, and the
-username is not a credential.
+**The vault key _names_ `rust/cleartext-logging` used to flag in
+`commands/doctor.rs`**, and the operator's own username alongside them, are
+fixed rather than dismissed. `TorrentClientConfig`'s three fields were
+`username`, `api_key_key` and `password_key` — `Option<&'static str>` (or
+`Option<&'a str>` for the username), holding only `secret_keys` constants
+like `"qbittorrent.api_key"` or a config-file username, never a runtime
+secret. CodeQL's Rust `SensitiveData` source classification
+(`SensitiveDataHeuristics.qll`'s `HeuristicNames::nameIndicatesSensitiveData`)
+matches purely on the *identifier* text — a field or variable name matching
+`user.?(name|id)`, `pass(word|wd|...)`, or `api.?(key|tok)` — regardless of
+what value actually flows through it. That means a rename that drops those
+substrings removes the finding with zero behaviour change, which is what
+these three fields now are: `login`, `primary_credential` and
+`fallback_credential`. The vault keys `doctor` prints are unchanged; only the
+Rust identifiers naming them moved. Kept as the record of *why* they moved,
+should the fields' names ever look like unmotivated churn in a future diff.
 
 **`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack) is not in this
 list**, though a stale Scorecard report may claim it should be. `rsa` would

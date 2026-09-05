@@ -532,7 +532,7 @@ async fn client_node(
 
     let credential = checks::resolve_torrent_credential(&client, secret);
 
-    let outcome = checks::check_qbit(backend, client.url, client.username, credential).await;
+    let outcome = checks::check_qbit(backend, client.url, client.login, credential).await;
     let label = backend.display_name().to_owned();
 
     let mut lines = vec![address_line("url", client.url.to_string())];

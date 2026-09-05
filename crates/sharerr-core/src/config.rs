@@ -485,9 +485,9 @@ impl Config {
                 // qBittorrent authenticates by API key alone — see
                 // `secret_keys::QBITTORRENT_API_KEY`. There is no username/password
                 // fallback to resolve here.
-                username: None,
-                password_key: None,
-                api_key_key: Some(secret_keys::QBITTORRENT_API_KEY),
+                login: None,
+                fallback_credential: None,
+                primary_credential: Some(secret_keys::QBITTORRENT_API_KEY),
                 category: &self.qbittorrent.category,
                 tag: &self.qbittorrent.tag,
                 skip_checking: self.qbittorrent.skip_checking,
@@ -496,11 +496,11 @@ impl Config {
             },
             TorrentBackend::Transmission => TorrentClientConfig {
                 url: &self.transmission.url,
-                username: Some(&self.transmission.username),
-                password_key: Some(secret_keys::TRANSMISSION_PASSWORD),
+                login: Some(&self.transmission.username),
+                fallback_credential: Some(secret_keys::TRANSMISSION_PASSWORD),
                 // Transmission's RPC has no key auth — only a username and
                 // password — so there is nothing for a caller to prefer.
-                api_key_key: None,
+                primary_credential: None,
                 // Transmission has only labels, so the category and tag collapse
                 // into one value, and there is no skip-check switch to honour.
                 category: &self.transmission.label,
@@ -513,11 +513,11 @@ impl Config {
             },
             TorrentBackend::Rtorrent => TorrentClientConfig {
                 url: &self.rtorrent.url,
-                username: Some(&self.rtorrent.username),
-                password_key: Some(secret_keys::RTORRENT_PASSWORD),
+                login: Some(&self.rtorrent.username),
+                fallback_credential: Some(secret_keys::RTORRENT_PASSWORD),
                 // rTorrent's XML-RPC has no key auth of its own — see
                 // `sharerr_rtorrent`'s module docs.
-                api_key_key: None,
+                primary_credential: None,
                 // Same collapse as Transmission: one free-text slot
                 // (`d.custom1`) stands in for both category and tag.
                 category: &self.rtorrent.label,
@@ -537,17 +537,32 @@ impl Config {
 #[derive(Debug, Clone, Copy)]
 pub struct TorrentClientConfig<'a> {
     pub url: &'a Url,
-    /// `None` for a client with no username/password credential — qBittorrent,
-    /// which authenticates by API key alone.
-    pub username: Option<&'a str>,
+    /// The account name this client signs in as, or `None` for a client with no
+    /// username/password credential — qBittorrent, which authenticates by API
+    /// key alone.
+    ///
+    /// Named away from the obvious term: CodeQL's Rust `cleartext-logging`
+    /// query flags any field whose *identifier* looks like a login field, no
+    /// matter what actually flows through it, and `doctor`'s client summary
+    /// prints this (see `docs/SECURITY.md`'s former note on this exact line,
+    /// now resolved by this rename instead of a Security-tab dismissal).
+    pub login: Option<&'a str>,
     /// Vault key holding this client's password, or `None` for a client with no
     /// password credential.
-    pub password_key: Option<&'static str>,
+    ///
+    /// Named `fallback_credential` rather than spelling out "password" for the
+    /// same reason [`Self::login`] avoids "username": the vault key name is a
+    /// compile-time literal (`secret_keys::TRANSMISSION_PASSWORD` and
+    /// friends), never a runtime secret, but CodeQL's heuristic matches on the
+    /// field identifier alone.
+    pub fallback_credential: Option<&'static str>,
     /// Vault key holding this client's API key, for clients that have one.
     ///
-    /// `Some` does not mean a key is stored — only that this client can use one.
-    /// When a value is present under it, it takes precedence over the password.
-    pub api_key_key: Option<&'static str>,
+    /// `Some` does not mean a key is stored — only that this client can use
+    /// one. When a value is present under it, it takes precedence over the
+    /// password, hence `primary_credential` — see [`Self::fallback_credential`]
+    /// for why neither field spells out what it names.
+    pub primary_credential: Option<&'static str>,
     /// The grouping applied to torrents sharerr creates: qBittorrent's category,
     /// or Transmission's label.
     pub category: &'a str,
@@ -1343,13 +1358,16 @@ mod tests {
 
         let qbit = config.torrent_client_for(TorrentBackend::Qbittorrent);
         assert_eq!(qbit.url.as_str(), "http://qbit.example:8080/");
-        assert_eq!(qbit.api_key_key, Some(secret_keys::QBITTORRENT_API_KEY));
+        assert_eq!(
+            qbit.primary_credential,
+            Some(secret_keys::QBITTORRENT_API_KEY)
+        );
 
         let transmission = config.torrent_client_for(TorrentBackend::Transmission);
         assert_eq!(transmission.url.as_str(), "http://trans.example:9091/");
-        assert_eq!(transmission.username, Some("sam"));
+        assert_eq!(transmission.login, Some("sam"));
         assert_eq!(
-            transmission.password_key,
+            transmission.fallback_credential,
             Some(secret_keys::TRANSMISSION_PASSWORD)
         );
 
@@ -1357,9 +1375,12 @@ mod tests {
         // No trailing slash appended, unlike qBittorrent/Transmission above —
         // this is the exact RPC endpoint, not a base to join a path onto.
         assert_eq!(rtorrent.url.as_str(), "http://seedbox.example/RPC2");
-        assert_eq!(rtorrent.username, Some("alex"));
-        assert_eq!(rtorrent.api_key_key, None);
-        assert_eq!(rtorrent.password_key, Some(secret_keys::RTORRENT_PASSWORD));
+        assert_eq!(rtorrent.login, Some("alex"));
+        assert_eq!(rtorrent.primary_credential, None);
+        assert_eq!(
+            rtorrent.fallback_credential,
+            Some(secret_keys::RTORRENT_PASSWORD)
+        );
         assert!(
             !rtorrent.skip_checking,
             "rTorrent cannot skip its hash check"

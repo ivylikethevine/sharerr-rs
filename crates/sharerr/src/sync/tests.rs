@@ -1942,7 +1942,7 @@ fn build_succeeds_with_a_configured_library_and_torrent_client() {
 
 #[test]
 fn build_client_reports_the_missing_password_alone_when_theres_no_api_key_option() {
-    // Transmission (and rtorrent) have no `api_key_key` at all, so their "missing
+    // Transmission (and rtorrent) have no `primary_credential` at all, so their "missing
     // credential" message is the `(None, Some(password))` arm — distinct from
     // qBittorrent's `(Some(api), None)` arm covered by
     // `build_client_fails_naming_the_missing_key_for_the_selected_backend`.
