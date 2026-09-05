@@ -125,8 +125,15 @@ impl ConfigFile {
     /// [`Self::replacing`] is the way past that.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        reject_traversal(&path)?;
-        let text = read_or_empty(&path)?;
+        // The same inline guard as `write_validated`; its comment explains
+        // why this cannot be a shared helper.
+        let Some(path_text) = path.to_str() else {
+            return Err(anyhow::anyhow!("{} is not valid UTF-8", path.display()));
+        };
+        if path_text.contains("..") {
+            return Err(anyhow::anyhow!("{path_text} must not contain '..'"));
+        }
+        let text = read_or_empty(std::path::Path::new(path_text))?;
 
         let doc = text
             .parse::<DocumentMut>()
@@ -254,15 +261,46 @@ impl ConfigFile {
     /// *before* touching the vault) and must not pay for — or drift from —
     /// a second pass. `text` must be this document's own `to_toml()` output.
     pub fn write_validated(&self, text: &str) -> Result<()> {
-        // Bound once and reused below rather than reading `self.path` again at
-        // each call: `reject_traversal` has to dominate every filesystem call
-        // this function makes, and a fresh `self.path` field access at each
-        // site would be a fresh, unguarded flow as far as static analysis is
-        // concerned. `write_validated` runs regardless of whether `self` came
-        // from `open` (already checked) or `replacing` (never checked), so the
-        // guard belongs here rather than only at `open`.
-        let path = &self.path;
-        reject_traversal(path)?;
+        // Refuse a path containing `..`.
+        //
+        // This is the one check CodeQL's `rust/path-injection` query
+        // recognises as a sanitizer (`TaintedPathExtensions.qll`'s
+        // `DotDotCheck`). The query's source is the axum handler's `State`
+        // parameter — its model treats every handler argument as remote
+        // input — so `state.serve.config_path()`, set once at startup from
+        // `--config`/`SHARERR_CONFIG` and never reassigned, counts as
+        // "user-provided" here. `docs/SECURITY.md`'s "What is out of scope"
+        // section explains why there is no real privilege boundary to
+        // enforce: whoever sets that flag already controls the process. This
+        // exists to satisfy the query, at a real cost — an operator-supplied
+        // config path can no longer contain `..`, even a legitimate one (a
+        // relative bind-mount a directory up), nor be non-UTF-8 — accepted as
+        // a deliberate trade-off rather than left as a dismissed finding.
+        //
+        // The shape is load-bearing, because `DotDotCheck` is a barrier
+        // *guard*: it only clears later reads of the receiver variable of
+        // `.contains("..")`, on the false branch, inside this same function.
+        // Hence the receiver is a `str` local (`path_text`), not the `Path`
+        // and not a call chain; the check is inline, not a helper (a
+        // `reject_traversal(path)?` call is invisible to it — that was the
+        // previous attempt, and it never registered); the true branch is a
+        // literal `return` rather than `bail!`, so dominance survives a
+        // failed macro expansion; and every sink below reads a `Path` rebuilt
+        // from `path_text` *after* the check rather than `self.path` itself.
+        // It is a substring check, not a component-wise one, because that is
+        // the exact shape the query recognises. `write_validated` runs
+        // regardless of whether `self` came from `open` (already checked) or
+        // `replacing` (never checked), so the guard belongs here too.
+        let Some(path_text) = self.path.to_str() else {
+            return Err(anyhow::anyhow!(
+                "{} is not valid UTF-8",
+                self.path.display()
+            ));
+        };
+        if path_text.contains("..") {
+            return Err(anyhow::anyhow!("{path_text} must not contain '..'"));
+        }
+        let path = std::path::Path::new(path_text);
 
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -277,8 +315,7 @@ impl ConfigFile {
         // single character they can lift straight back out.
         //
         // Inlined rather than calling `self.backup_path()`: that re-reads
-        // `self.path` from scratch, which would carry it around the guard above
-        // for the same reason noted there.
+        // `self.path` from scratch, which would carry it around the guard above.
         if self.recovered && path.exists() {
             let aside = invalid_path(path);
             std::fs::rename(path, &aside)
@@ -299,29 +336,6 @@ impl ConfigFile {
 
         Ok(())
     }
-}
-
-/// Refuse a path containing a `..` component.
-///
-/// The one guard CodeQL's Rust `rust/path-injection` query recognises as a
-/// sanitizer (`TaintedPathExtensions.qll`'s `DotDotCheck`) for data it treats
-/// as untrusted — here, the `--config`/`SHARERR_CONFIG` value `ServeState`
-/// resolves once at startup. `docs/SECURITY.md`'s "What is out of scope"
-/// section explains why that source has no real privilege boundary to
-/// enforce: whoever sets the flag already controls the process. This exists
-/// only to satisfy the query, at a real cost — an operator-supplied config
-/// path can no longer contain `..`, even a legitimate one (a relative
-/// bind-mount a directory up) — accepted as a deliberate trade-off rather
-/// than left as a dismissed finding.
-///
-/// A substring check, not a component-wise one, because that is the exact
-/// shape the query's sanitizer recognises; a smarter check that still let
-/// `..` through inside a single filename would not register as a barrier.
-fn reject_traversal(path: &std::path::Path) -> Result<()> {
-    if path.to_string_lossy().contains("..") {
-        bail!("{} must not contain '..'", path.display());
-    }
-    Ok(())
 }
 
 /// Read the file, treating "not there" as "empty" and anything else as an error.
@@ -734,7 +748,8 @@ username = "admin"
         );
     }
 
-    /// `reject_traversal` — see its own doc comment for why this exists at all.
+    /// The inline `..` guard — see `write_validated`'s comment for why it
+    /// exists at all, and why it has the shape it has.
     #[test]
     fn open_refuses_a_path_containing_dot_dot() {
         let dir = tempfile::tempdir().unwrap();
@@ -756,6 +771,20 @@ username = "admin"
             .write_validated("tag = \"x\"\n")
             .expect_err("a `..` component must be refused");
         assert!(format!("{err:#}").contains(".."), "{err:#}");
+    }
+
+    /// The guard checks the path as a `str`, so a path that is not UTF-8 is
+    /// refused rather than lossily re-encoded into a different filename.
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_path_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(std::ffi::OsStr::from_bytes(b"\xff.toml"));
+
+        let err = ConfigFile::open(&path).expect_err("a non-UTF-8 path must be refused");
+        assert!(format!("{err:#}").contains("UTF-8"), "{err:#}");
     }
 
     #[test]

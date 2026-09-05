@@ -163,17 +163,29 @@ Transmission, rTorrent, Prowlarr, gluetun) belong to those projects, unless
 sharerr is misusing their API in a way that creates the exposure.
 
 **The `sharerr.toml` path CodeQL's `rust/path-injection` query flags in
-`config_io.rs`** is guarded rather than dismissed, as of the check
-`config_io::reject_traversal` runs from `ConfigFile::open` and
-`ConfigFile::write_validated`. The source is always
-`ServeState::config_path()`, set once at process start from `--config` or
-`SHARERR_CONFIG` and never reassigned — whoever controls that flag already
+`config_io.rs`** is guarded rather than dismissed, by a `..` check inlined
+into both `ConfigFile::open` and `ConfigFile::write_validated`. The value is
+always `ServeState::config_path()`, set once at process start from `--config`
+or `SHARERR_CONFIG` and never reassigned — whoever controls that flag already
 controls the process, so there was never a privilege boundary here to enforce,
-only the query's `DotDotCheck` sanitizer pattern to satisfy. The guard is a
-real, if narrow, behaviour change: an operator-supplied config path can no
-longer contain `..`, including a legitimate one such as a relative bind-mount
-a directory up. Kept as the worked example of a query whose only recognised
-barrier costs something, unlike the two `cleartext-logging` findings below.
+only the query's `DotDotCheck` sanitizer pattern to satisfy. What the query
+actually calls "user-provided" is not the flag: CodeQL's axum model treats
+every parameter of a route handler as remote input, the `State` extractor
+included, so `state.serve.config_path()` inside a settings handler is the
+source. The guard is a real, if narrow, behaviour change: an operator-supplied
+config path can no longer contain `..`, including a legitimate one such as a
+relative bind-mount a directory up, and must be valid UTF-8. Kept as the
+worked example of a query whose only recognised barrier costs something,
+unlike the two `cleartext-logging` findings below.
+
+The check's shape is dictated by the query, and a first attempt got it wrong:
+`DotDotCheck` is a barrier _guard_, which only clears later reads of the
+`str` receiver of `.contains("..")` on the false branch, within the same
+function. A `reject_traversal(path)?` helper never registered — the call is
+opaque to the guard, and its receiver was a discarded `to_string_lossy()`
+temporary rather than anything a sink read. The inline form checks a `&str`
+local and rebuilds the `Path` the sinks use from it; the comment in
+`write_validated` walks through each constraint.
 
 **The vault key _names_ `rust/cleartext-logging` used to flag in
 `commands/doctor.rs`**, and the operator's own username alongside them, are
