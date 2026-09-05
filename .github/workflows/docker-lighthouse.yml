@@ -33,8 +33,12 @@ permissions:
   contents: read
 
 jobs:
+  # Named after the image, not a bare `docker`: this and docker.yml both
+  # call docker-image.yml, and their `build` checks would otherwise both report
+  # as `docker / build` — one name two checks share cannot be required by
+  # `main`'s ruleset unambiguously.
   docker:
-    name: docker
+    name: docker (lighthouse)
     permissions:
       contents: read
       packages: write

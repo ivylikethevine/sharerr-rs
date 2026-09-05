@@ -151,8 +151,14 @@ jobs:
   # Its own job so an MSRV break fails in about a minute with a name that says what
   # it is, rather than surfacing as a Docker build failure fifteen minutes into the
   # multi-arch matrix. `docker.yml` still catches it — this just catches it first.
+  #
+  # The job name deliberately omits the version. `main`'s ruleset requires this
+  # check by its exact name; a name like `msrv (1.98)` would stop matching at
+  # the next MSRV bump and block every PR until someone edited the ruleset by
+  # hand. The version lives in the install step below instead, where it can
+  # change freely.
   msrv:
-    name: msrv (1.98)
+    name: msrv
     needs: prepare
     if: needs.prepare.outputs.code == 'true'
     runs-on: ${{ needs.prepare.outputs.label }}

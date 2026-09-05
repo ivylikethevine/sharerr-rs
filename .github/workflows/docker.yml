@@ -36,8 +36,12 @@ jobs:
   # A called workflow's jobs cannot request a permission this job does not
   # hold — every scope any job inside docker-image.yml needs (including the
   # nested `prepare` call's `pull-requests: read`) has to be granted here.
+  # Named after the image, not a bare `docker`: this and docker-lighthouse.yml
+  # both call docker-image.yml, and their `build` checks would otherwise both
+  # report as `docker / build` — one name two checks share cannot be required
+  # by `main`'s ruleset unambiguously.
   docker:
-    name: docker
+    name: docker (sharerr)
     permissions:
       contents: read
       packages: write
