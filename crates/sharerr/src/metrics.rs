@@ -560,7 +560,7 @@ async fn dashboard_endpoint(State(state): State<Arc<ServeState>>, _auth: Metrics
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use sharerr_store::RunSummary;
 
@@ -685,5 +685,410 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::AUTHORIZATION, "abc123".parse().unwrap());
         assert_eq!(bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn gluetun_success_is_reported_per_target_that_has_succeeded() {
+        // Tracker succeeded, client never has: one family, one sample, and
+        // no `target="client"` line pretending a zero is a timestamp.
+        let mut snapshot = empty_snapshot();
+        snapshot.gluetun_tracker.last_success_at = Some(1_700_000_000);
+        let text = render(&snapshot);
+        assert!(
+            text.contains(
+                "sharerr_gluetun_last_success_timestamp_seconds{target=\"tracker\"} 1700000000"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("target=\"client\""), "{text}");
+    }
+
+    #[test]
+    fn lighthouse_pass_and_per_lighthouse_success_render_only_what_happened() {
+        let mut snapshot = empty_snapshot();
+        snapshot.lighthouse.last_pass_at = Some(1_700_000_100);
+        snapshot.lighthouse.lighthouses = vec![
+            crate::lighthouse_client::LighthouseReport {
+                url: "https://beacon.example/".to_owned(),
+                last_success_at: Some(1_700_000_050),
+                last_error: None,
+            },
+            crate::lighthouse_client::LighthouseReport {
+                url: "https://never.example/".to_owned(),
+                last_success_at: None,
+                last_error: Some("403".to_owned()),
+            },
+        ];
+        let text = render(&snapshot);
+        assert!(
+            text.contains("sharerr_lighthouse_last_pass_timestamp_seconds 1700000100"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "sharerr_lighthouse_last_success_timestamp_seconds{lighthouse=\"https://beacon.example/\"} 1700000050"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("never.example"),
+            "a lighthouse that never succeeded gets no sample: {text}"
+        );
+    }
+
+    #[test]
+    fn system_sections_render_and_disk_is_optional() {
+        let mut snapshot = empty_snapshot();
+        snapshot.system = Some(SystemSnapshot {
+            cpu_percent: 12.5,
+            memory_used: 1_024,
+            memory_total: 4_096,
+            disk_used: Some(10),
+            disk_total: Some(100),
+        });
+        let text = render(&snapshot);
+        assert!(text.contains("sharerr_system_cpu_percent 12.5"), "{text}");
+        assert!(
+            text.contains("sharerr_system_memory_bytes{kind=\"used\"} 1024"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sharerr_system_memory_bytes{kind=\"total\"} 4096"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sharerr_system_disk_bytes{kind=\"used\"} 10"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sharerr_system_disk_bytes{kind=\"total\"} 100"),
+            "{text}"
+        );
+
+        // A data directory whose filesystem could not be measured drops the
+        // disk family entirely rather than reporting zeros.
+        snapshot.system = Some(SystemSnapshot {
+            cpu_percent: 0.0,
+            memory_used: 0,
+            memory_total: 0,
+            disk_used: None,
+            disk_total: None,
+        });
+        let text = render(&snapshot);
+        assert!(text.contains("sharerr_system_cpu_percent"), "{text}");
+        assert!(!text.contains("sharerr_system_disk_bytes"), "{text}");
+    }
+
+    // ------------------------------------------------- gather
+
+    use crate::state::fixtures::{store_unopenable, unconfigured};
+    use secrecy::SecretString;
+    use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
+
+    fn seeding_item(file_id: i64, size: u64) -> SharedItem {
+        SharedItem {
+            id: None,
+            source: MediaSource::Sonarr,
+            source_id: file_id,
+            file_id,
+            spec: MediaSpec::Episode {
+                series_title: "Lanternwick Hollow".to_owned(),
+                season: 1,
+                episode: file_id as u32,
+            },
+            release_title: format!("Lanternwick.Hollow.S01E0{file_id}.WEB-DL.x264-SHARERR"),
+            arr_path: std::path::PathBuf::from(format!("/tv/s01e0{file_id}.mkv")),
+            size,
+            ids: ExternalIds::default(),
+            media: None,
+            info_hash: None,
+            announce_token_fp: None,
+            created_by_sharerr: true,
+            state: ShareState::Pending,
+            last_error: None,
+            created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
+        }
+    }
+
+    /// The tolerance the doc promises: a store that will not open is an
+    /// all-zero library, not a failed scrape. Every state still has a line.
+    #[tokio::test]
+    async fn gather_reads_all_zero_when_the_store_will_not_open() {
+        let (_dir, state) = store_unopenable();
+        let snapshot = gather(&state).await;
+        assert_eq!(snapshot.items_by_state.len(), ShareState::ALL.len());
+        assert!(snapshot.items_by_state.iter().all(|(_, n)| *n == 0));
+        assert_eq!(snapshot.seeding_count, 0);
+        assert_eq!(snapshot.seeding_bytes, 0);
+        assert!(snapshot.last_run.is_none());
+        assert_eq!((snapshot.peers_total, snapshot.peers_recent), (0, 0));
+        assert!(snapshot.system.is_none());
+    }
+
+    /// Against a real store: items by state, the seeding total, friends
+    /// split into total-and-active versus seen-within-the-hour, and the
+    /// last *finished* run.
+    #[tokio::test]
+    async fn gather_counts_items_friends_and_the_last_finished_run() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+
+        store.upsert(&seeding_item(1, 1_000)).await.unwrap();
+        store.upsert(&seeding_item(2, 24)).await.unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1, &"00".repeat(20), None, true)
+            .await
+            .unwrap();
+
+        let key = |label: &str| SecretString::from(format!("{label}-key"));
+        let seen = store
+            .create_peer("alex", &key("alex"), sharerr_store::PeerScope::All)
+            .await
+            .unwrap();
+        assert!(store.touch_peer(seen.id).await.unwrap());
+        store
+            .create_peer("quiet", &key("quiet"), sharerr_store::PeerScope::All)
+            .await
+            .unwrap();
+        let gone = store
+            .create_peer("gone", &key("gone"), sharerr_store::PeerScope::All)
+            .await
+            .unwrap();
+        assert!(store.revoke_peer(gone.id).await.unwrap());
+
+        let run = store.begin_run().await.unwrap();
+        store
+            .finish_run(
+                run,
+                &RunSummary {
+                    discovered: 2,
+                    added: 1,
+                    unshared: 0,
+                    failed: 0,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let snapshot = gather(&state).await;
+        let count = |wanted: ShareState| {
+            snapshot
+                .items_by_state
+                .iter()
+                .find(|(state, _)| *state == wanted)
+                .map(|(_, n)| *n)
+                .unwrap()
+        };
+        assert_eq!(count(ShareState::Seeding), 1);
+        assert_eq!(count(ShareState::Pending), 1);
+        assert_eq!(snapshot.seeding_count, 1);
+        assert_eq!(snapshot.seeding_bytes, 1_000);
+        assert_eq!(snapshot.peers_total, 2, "revoked friends do not count");
+        assert_eq!(
+            snapshot.peers_recent, 1,
+            "only the touched friend is recent"
+        );
+        let last = snapshot
+            .last_run
+            .as_ref()
+            .expect("the finished run is reported");
+        assert_eq!(last.id, run);
+        assert_eq!(last.summary.added, 1);
+
+        let widget = DashboardWidget::from(&snapshot);
+        assert_eq!(widget.items_shared, 1);
+        assert_eq!(widget.friends_total, 2);
+        assert_eq!(widget.friends_recent, 1);
+        assert_eq!(widget.last_sync_ok, Some(true));
+        assert!(widget.last_sync_at.is_some());
+    }
+
+    /// An in-flight run has no outcome yet, so it is not "the last run" —
+    /// the same filter the status page's glance applies.
+    #[tokio::test]
+    async fn gather_ignores_a_run_that_has_not_finished() {
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        store.begin_run().await.unwrap();
+        let snapshot = gather(&state).await;
+        assert!(snapshot.last_run.is_none());
+        assert_eq!(DashboardWidget::from(&snapshot).last_sync_ok, None);
+    }
+
+    // ------------------------------------------------- router-level coverage
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use sharerr_core::config::secret_keys;
+    use tower::ServiceExt;
+
+    const TOKEN: &str = "metrics-tests-bearer-token";
+
+    fn metrics_enabled(data_dir: &std::path::Path) -> sharerr_core::Config {
+        sharerr_core::Config {
+            data_dir: data_dir.to_path_buf(),
+            metrics: sharerr_core::config::MetricsConfig { enabled: true },
+            ..Default::default()
+        }
+    }
+
+    async fn get(
+        state: &Arc<ServeState>,
+        uri: &str,
+        bearer: Option<&str>,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        let (router, _) = routes().with_state(Arc::clone(state)).split_for_parts();
+        let mut request = Request::builder().uri(uri);
+        if let Some(token) = bearer {
+            request = request.header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = router
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
+    }
+
+    /// Both endpoints against a state whose vault genuinely opens, with
+    /// `metrics.enabled = true` and `store` a hook to seed the vault before
+    /// the first request caches what it found. Same `Jail` reasoning as
+    /// `tracker.rs`'s `with_open_vault`: `Jail` scopes the master key to this
+    /// closure and serialises against every other Jail test in the binary.
+    fn with_open_vault<F, Fut>(store: impl FnOnce(&mut sharerr_store::Vault), body: F)
+    where
+        F: FnOnce(Arc<ServeState>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "metrics-tests-master-key");
+            let config = metrics_enabled(jail.directory());
+            let path = jail.directory().join("sharerr.toml");
+            let state = Arc::new(ServeState::new(config, path, None));
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut vault = state.open_vault().await.unwrap();
+                store(&mut vault);
+                drop(vault);
+                body(state).await;
+            });
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn both_endpoints_are_a_404_while_metrics_are_disabled() {
+        let (_dir, state) = unconfigured();
+        for uri in ["/metrics", "/dashboard"] {
+            let (status, _, _) = get(&state, uri, Some(TOKEN)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    /// Enabled, but the vault cannot be opened: refuse, never admit. This is
+    /// the fail-closed arm the extractor's doc singles out. Wrapped in `Jail`
+    /// with the key cleared, per CLAUDE.md: a bare test asserting the vault
+    /// *fails* to open races any Jail test that sets the key on another
+    /// thread.
+    #[test]
+    fn an_unopenable_vault_refuses_rather_than_disabling_enforcement() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let config = metrics_enabled(jail.directory());
+            let path = jail.directory().join("sharerr.toml");
+            let state = Arc::new(ServeState::new(config, path, None));
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let (status, _, _) = get(&state, "/metrics", Some(TOKEN)).await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn no_token_in_the_vault_is_a_404_even_with_a_bearer() {
+        with_open_vault(
+            |_| {},
+            |state| async move {
+                let (status, _, _) = get(&state, "/metrics", Some(TOKEN)).await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            },
+        );
+    }
+
+    #[test]
+    fn an_empty_stored_token_counts_as_none() {
+        with_open_vault(
+            |vault| {
+                vault
+                    .put(
+                        secret_keys::METRICS_TOKEN,
+                        &SecretString::from(String::new()),
+                    )
+                    .unwrap();
+            },
+            |state| async move {
+                let (status, _, _) = get(&state, "/metrics", Some("")).await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+            },
+        );
+    }
+
+    #[test]
+    fn a_missing_or_wrong_bearer_is_a_404_and_the_right_one_is_admitted() {
+        with_open_vault(
+            |vault| {
+                vault
+                    .put(
+                        secret_keys::METRICS_TOKEN,
+                        &SecretString::from(TOKEN.to_owned()),
+                    )
+                    .unwrap();
+            },
+            |state| async move {
+                let (status, _, _) = get(&state, "/metrics", None).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "no header");
+
+                let (status, _, _) = get(&state, "/metrics", Some("not-the-token")).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "wrong token");
+
+                let (status, headers, body) = get(&state, "/metrics", Some(TOKEN)).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("application/openmetrics-text; version=1.0.0; charset=utf-8")
+                );
+                assert!(
+                    body.contains("sharerr_items{state=\"seeding\"} 0"),
+                    "{body}"
+                );
+                assert!(body.trim_end().ends_with("# EOF"), "{body}");
+
+                let (status, headers, body) = get(&state, "/dashboard", Some(TOKEN)).await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("application/json")
+                );
+                let widget: serde_json::Value = serde_json::from_str(&body).unwrap();
+                assert_eq!(widget["items_shared"], 0);
+                assert_eq!(widget["friends_total"], 0);
+                assert_eq!(widget["last_sync_ok"], serde_json::Value::Null);
+            },
+        );
     }
 }

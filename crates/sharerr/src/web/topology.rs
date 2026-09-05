@@ -2111,4 +2111,357 @@ mod tests {
             Ok(())
         });
     }
+
+    // --------------------------------------------------------- client_node
+
+    use sharerr_testkit::mock::base_url;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn transmission_config(url: &url::Url) -> Config {
+        Config {
+            torrent_backend: sharerr_core::config::TorrentBackend::Transmission,
+            transmission: sharerr_core::config::TransmissionConfig {
+                url: url.clone(),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    fn qbit_config(url: &url::Url) -> Config {
+        Config {
+            torrent_backend: sharerr_core::config::TorrentBackend::Qbittorrent,
+            qbittorrent: sharerr_core::config::QbitConfig {
+                url: url.clone(),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps, reason = "matches the reader's signature")]
+    fn any_secret(_: &'static str) -> Result<Option<SecretString>, String> {
+        Ok(Some(SecretString::from(
+            sharerr_testkit::mock::QBIT_API_KEY,
+        )))
+    }
+
+    async fn transmission_answering(status: u16) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn headline(lines: &[NodeLine]) -> Vec<&str> {
+        lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    /// Every failure `client_node` can be handed, each with the status phrase
+    /// an operator reads first and — where there is one — the reason.
+    #[tokio::test]
+    async fn client_node_reports_every_failure_outcome_with_its_reason() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let none = |_: &'static str| Ok::<Option<SecretString>, String>(None);
+        let (_, lines, status, check) = client_node(&Config::default(), &state, &none, &[]).await;
+        assert_eq!(status, NodeStatus::Error);
+        assert!(
+            headline(&lines).contains(&"No credential stored"),
+            "{lines:?}"
+        );
+        assert!(check.is_none());
+
+        let sealed = |_: &'static str| Err::<Option<SecretString>, _>("sealed".to_owned());
+        let (_, lines, status, _) = client_node(&Config::default(), &state, &sealed, &[]).await;
+        assert_eq!(status, NodeStatus::Error);
+        assert!(headline(&lines).contains(&"Vault unreadable"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.tag == "why" && l.text == "sealed"));
+
+        // A credential the backend cannot use fails to build a client at all
+        // — `build_torrent_client`'s finding, before anything is dialled.
+        let not_a_key = |_: &'static str| Ok(Some(SecretString::from("pw")));
+        let bad = qbit_config(&url::Url::parse("http://127.0.0.1:1").unwrap());
+        let (_, lines, status, _) = client_node(&bad, &state, &not_a_key, &[]).await;
+        assert_eq!(status, NodeStatus::Error);
+        assert!(headline(&lines).contains(&"Misconfigured"), "{lines:?}");
+
+        let port = sharerr_testkit::net::closed_port();
+        let closed =
+            transmission_config(&url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap());
+        let (_, lines, status, _) = client_node(&closed, &state, &any_secret, &[]).await;
+        assert_eq!(status, NodeStatus::Error);
+        assert!(headline(&lines).contains(&"Unreachable"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.tag == "why"));
+
+        let server = transmission_answering(401).await;
+        let rejected = transmission_config(&base_url(&server));
+        let (_, lines, status, _) = client_node(&rejected, &state, &any_secret, &[]).await;
+        assert_eq!(status, NodeStatus::Error);
+        assert!(
+            headline(&lines).contains(&"Credential rejected"),
+            "{lines:?}"
+        );
+
+        let server = transmission_answering(500).await;
+        let failed = transmission_config(&base_url(&server));
+        let (label, lines, status, _) = client_node(&failed, &state, &any_secret, &[]).await;
+        assert_eq!(status, NodeStatus::Error);
+        assert_eq!(label, "Transmission");
+        assert!(headline(&lines).contains(&"Failed"), "{lines:?}");
+    }
+
+    fn seeding_item(hash: &str) -> sharerr_core::SharedItem {
+        use sharerr_core::{MediaSpec, ShareState, SharedItem};
+        SharedItem {
+            id: None,
+            source: MediaSource::Sonarr,
+            source_id: 1,
+            file_id: 1,
+            spec: MediaSpec::Episode {
+                series_title: "Lanternwick Hollow".to_owned(),
+                season: 1,
+                episode: 1,
+            },
+            release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+            arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+            size: 1,
+            ids: Default::default(),
+            media: None,
+            info_hash: Some(hash.to_owned()),
+            announce_token_fp: None,
+            created_by_sharerr: true,
+            state: ShareState::Seeding,
+            last_error: None,
+            created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
+        }
+    }
+
+    async fn qbit_answering(torrents: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/app/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/torrents/info"))
+            .respond_with(torrents)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// `Ready` is the one outcome with more to ask: the client is listed and
+    /// reconciled against what the store says should be seeding, and a client
+    /// that is reachable but not seeding it is Warn, not Ok.
+    #[tokio::test]
+    async fn client_node_reconciles_a_reachable_client_against_the_store() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .client_endpoint()
+            .observe(url::Url::parse("http://203.0.113.4:51413").unwrap());
+        let state = web_state(serve);
+        let hash = "ab".repeat(20);
+        let items = [seeding_item(&hash)];
+
+        let server = qbit_answering(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "hash": hash,
+                "name": "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR",
+                "state": "uploading",
+                "progress": 1.0,
+                "category": "sharerr",
+                "tags": "",
+                "size": 1,
+                "ratio": 0.0,
+                "content_path": "/tv/s01e01.mkv",
+            }])),
+        )
+        .await;
+        let (label, lines, status, check) = client_node(
+            &qbit_config(&base_url(&server)),
+            &state,
+            &any_secret,
+            &items,
+        )
+        .await;
+        assert_eq!(label, "qBittorrent");
+        assert_eq!(status, NodeStatus::Ok, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "public" && l.text.contains("203.0.113.4"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "version" && l.text.contains("5.2.3"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "seeding" && l.text == "1 of 1"),
+            "{lines:?}"
+        );
+        let check = check.expect("a reachable client is reconciled");
+        assert!(check.healthy);
+
+        // The same client with nothing loaded: reachable, but not seeding what
+        // the store says it should be.
+        let server =
+            qbit_answering(ResponseTemplate::new(200).set_body_json(serde_json::json!([]))).await;
+        let (_, lines, status, check) = client_node(
+            &qbit_config(&base_url(&server)),
+            &state,
+            &any_secret,
+            &items,
+        )
+        .await;
+        assert_eq!(status, NodeStatus::Warn, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "seeding" && l.text == "0 of 1"),
+            "{lines:?}"
+        );
+        assert!(!check.expect("reconciled").healthy);
+
+        // Signed in, but the listing itself failed: the node says so rather
+        // than reporting zero of everything.
+        let server = qbit_answering(ResponseTemplate::new(500)).await;
+        let (_, lines, status, check) = client_node(
+            &qbit_config(&base_url(&server)),
+            &state,
+            &any_secret,
+            &items,
+        )
+        .await;
+        assert_eq!(status, NodeStatus::Warn, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "seeding" && l.text.starts_with("could not list")),
+            "{lines:?}"
+        );
+        assert!(check.expect("reconciled").error.is_some());
+    }
+
+    // ------------------------------------------ instance_lines (reachability)
+
+    /// With `[checks] reachability` on, both the tracker and the feed are
+    /// dialled: a listener that answers is "reachable", one that refuses is
+    /// "unconfirmed", and a refusal downgrades Ok to Warn rather than Error.
+    #[tokio::test]
+    async fn instance_lines_dials_the_tracker_and_the_feed_when_reachability_is_on() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open = listener.local_addr().unwrap().port();
+        let closed = sharerr_testkit::net::closed_port();
+
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .endpoint()
+            .observe(format!("http://127.0.0.1:{open}").parse().unwrap());
+        let state = web_state(serve);
+        let config = Config {
+            checks: sharerr_core::config::ChecksConfig { reachability: true },
+            // The feed is dialled at `public_base_url`, which falls back to
+            // the bind port when nothing is advertised statically.
+            server: sharerr_core::config::ServerConfig {
+                bind: format!("127.0.0.1:{closed}").parse().unwrap(),
+            },
+            ..Config::default()
+        };
+
+        let (lines, status) = instance_lines(&config, &state).await;
+
+        assert_eq!(status, NodeStatus::Warn, "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "tracker" && l.text == "reachable"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "feed" && l.text == "unconfirmed (refused)"),
+            "{lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_lines_has_no_tracker_address_to_dial_before_one_is_advertised() {
+        let closed = sharerr_testkit::net::closed_port();
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let config = Config {
+            checks: sharerr_core::config::ChecksConfig { reachability: true },
+            server: sharerr_core::config::ServerConfig {
+                bind: format!("127.0.0.1:{closed}").parse().unwrap(),
+            },
+            ..Config::default()
+        };
+
+        let (lines, status) = instance_lines(&config, &state).await;
+
+        assert_eq!(status, NodeStatus::Error, "not advertised stays Error");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.tag == "tracker" && l.text == "no address to check"),
+            "{lines:?}"
+        );
+    }
+
+    // ------------------------------------------------- gather (store paths)
+
+    #[tokio::test]
+    async fn gather_survives_a_store_that_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::store_unopenable();
+        let state = web_state(serve);
+        let page = gather(&state).await;
+        assert_eq!(page.nodes.len(), 2, "sharerr and the client, no friends");
+    }
+
+    #[tokio::test]
+    async fn gather_labels_the_path_edge_once_a_library_has_been_scanned() {
+        let (dir, serve) = crate::state::fixtures::unconfigured();
+        let media = tempfile::tempdir().unwrap();
+        let library = sharerr_testkit::library::tv_library(media.path()).unwrap();
+        let config = Config {
+            data_dir: dir.path().to_path_buf(),
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: library.root.join("tv"),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+        serve.replace_config(config).await;
+        let store = serve.store().await.unwrap();
+        store.upsert(&seeding_item(&"cd".repeat(20))).await.unwrap();
+        let state = web_state(serve);
+
+        let page = gather(&state).await;
+
+        assert!(
+            page.nodes
+                .iter()
+                .any(|n| matches!(n.icon, NodeIcon::Library)),
+            "{:?}",
+            page.nodes
+        );
+        assert!(
+            page.edges.iter().any(|e| e.label.ends_with("resolve")),
+            "{:?}",
+            page.edges
+        );
+    }
 }

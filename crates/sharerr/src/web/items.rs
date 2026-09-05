@@ -1844,4 +1844,244 @@ mod tests {
         let got = store.get(MediaSource::Sonarr, 1).await.unwrap().unwrap();
         assert_eq!(got.state, ShareState::Unshared);
     }
+
+    // ------------------------------------------------------- the long tail
+
+    #[test]
+    fn column_hint_is_empty_for_a_column_that_has_none() {
+        assert_eq!(column_hint("nope"), "");
+        assert!(!column_hint("state").is_empty());
+    }
+
+    /// A source outside the kind-scoped set is admitted by its own source
+    /// alone — a narrow scope that does not name it never falls through to
+    /// the declared-kind check.
+    #[test]
+    fn scope_admits_never_reads_a_declared_kind_for_an_arr_source() {
+        let it = item(
+            MediaSource::Radarr,
+            MediaSpec::Movie {
+                title: "X".to_owned(),
+                year: None,
+            },
+            ShareState::Seeding,
+        );
+        assert!(!scope_admits(PeerScope::Tv, &it));
+        assert!(scope_admits(PeerScope::Movies, &it));
+    }
+
+    #[tokio::test]
+    async fn a_row_lists_every_external_id_in_lookup_order() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&SharedItem {
+                ids: sharerr_core::ExternalIds {
+                    tvdb: Some(1),
+                    tmdb: Some(2),
+                    tvmaze: Some(3),
+                    imdb: Some("tt4".to_owned()),
+                    musicbrainz: Some("mb5".to_owned()),
+                    goodreads: Some("gr6".to_owned()),
+                    isbn: Some("9787".to_owned()),
+                },
+                ..named(MediaSource::Radarr, "Harborlight", 1)
+            })
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(page(State(state), Query(ItemsQuery::default())).await).await;
+
+        for id in [
+            "tvdb 1",
+            "tmdb 2",
+            "tvmaze 3",
+            "imdb tt4",
+            "musicbrainz mb5",
+            "goodreads gr6",
+            "isbn 9787",
+        ] {
+            assert!(html.contains(id), "missing {id} in:\n{html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_source_hint_names_an_artist_for_music_and_an_author_for_books() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&item(
+                MediaSource::Lidarr,
+                MediaSpec::Track {
+                    artist: "Quiet Harbour".to_owned(),
+                    album: "Lanterns".to_owned(),
+                    track: Some(1),
+                },
+                ShareState::Seeding,
+            ))
+            .await
+            .unwrap();
+        store
+            .upsert(&SharedItem {
+                file_id: 2,
+                ..item(
+                    MediaSource::Readarr,
+                    MediaSpec::Book {
+                        author: "Mara Vell".to_owned(),
+                        title: "The Copper Vale".to_owned(),
+                    },
+                    ShareState::Seeding,
+                )
+            })
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let html = body_of(page(State(state), Query(ItemsQuery::default())).await).await;
+
+        assert!(html.contains("Lidarr artist 1, file 1"), "{html}");
+        assert!(html.contains("Readarr author 1, file 2"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn detail_lists_the_live_swarm_with_masked_peer_addresses() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let hash = "ab".repeat(20);
+        store
+            .upsert(&SharedItem {
+                info_hash: Some(hash.clone()),
+                ..named(MediaSource::Radarr, "Harborlight", 1)
+            })
+            .await
+            .unwrap();
+        let raw = sharerr_torrent::announce::info_hash_from_hex(&hash).unwrap();
+        let request = sharerr_torrent::AnnounceRequest {
+            info_hash: raw,
+            peer_id: [1; 20],
+            port: 6881,
+            left: 0,
+            event: sharerr_torrent::Event::None,
+            compact: true,
+            numwant: 50,
+            declared_ip: None,
+        };
+        serve
+            .swarms()
+            .announce(&request, "203.0.113.1:6881".parse().unwrap())
+            .await;
+        let state = web_state(serve);
+
+        let html = body_of(
+            detail(
+                State(state),
+                Path((MediaSource::Radarr, 1)),
+                Query(DetailQuery::default()),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(
+            html.contains("203.0.113.1:6881"),
+            "the full address is on hover:\n{html}"
+        );
+        assert!(
+            html.contains(&super::super::topology::mask_address("203.0.113.1:6881")),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_shows_the_announce_url_once_an_endpoint_is_advertised() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        // Only an item with a torrent has an announce URL worth showing.
+        store
+            .upsert(&SharedItem {
+                info_hash: Some("ab".repeat(20)),
+                ..named(MediaSource::Radarr, "Harborlight", 1)
+            })
+            .await
+            .unwrap();
+        serve
+            .endpoint()
+            .observe("http://203.0.113.9:51413".parse().unwrap());
+        let state = web_state(serve);
+
+        let html = body_of(
+            detail(
+                State(state),
+                Path((MediaSource::Radarr, 1)),
+                Query(DetailQuery::default()),
+            )
+            .await,
+        )
+        .await;
+
+        assert!(html.contains("203.0.113.9:51413/announce"), "{html}");
+    }
+
+    /// A relative `arr_path` cannot be resolved at all; the page shows it
+    /// unmapped rather than pretending to know whether the file exists.
+    #[tokio::test]
+    async fn detail_shows_an_unresolvable_path_as_it_was_recorded() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .upsert(&SharedItem {
+                arr_path: "relative/Harborlight.mkv".into(),
+                ..named(MediaSource::Radarr, "Harborlight", 1)
+            })
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = detail(
+            State(state),
+            Path((MediaSource::Radarr, 1)),
+            Query(DetailQuery::default()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_of(response).await;
+        assert!(html.contains("relative/Harborlight.mkv"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn every_item_action_answers_503_when_the_store_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::store_unopenable();
+        let state = web_state(serve);
+        let at = || Path((MediaSource::Radarr, 1));
+
+        let response = detail(State(state.clone()), at(), Query(DetailQuery::default())).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = retry(State(state.clone()), at()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = rebuild(State(state.clone()), at()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let response = unshare(State(state), at()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A syncer with a scannable (if empty) source completes the pass, so
+    /// the redirect carries the pass's own outcome rather than a failure to
+    /// run it at all.
+    #[tokio::test]
+    async fn retry_redirects_with_the_passes_outcome_when_it_completes() {
+        let (_dir, serve) = crate::state::fixtures::ready_with_source().await;
+        let store = serve.store().await.unwrap();
+        let mut source_item = named(MediaSource::Sonarr, "Lanternwick Hollow", 1);
+        source_item.state = ShareState::Failed;
+        store.upsert(&source_item).await.unwrap();
+        let state = web_state(serve);
+
+        let response = retry(State(state), Path((MediaSource::Sonarr, 1))).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?ok="), "{location}");
+    }
 }

@@ -978,4 +978,106 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+
+    // ------------------------------------------------------ the long tail
+
+    #[test]
+    fn the_debug_impl_names_the_state_without_its_secret() {
+        let text = format!("{:?}", state());
+        assert!(text.starts_with("LighthouseState"), "{text}");
+        assert!(!text.contains("secret"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_key_hash_and_a_future_timestamp_are_each_refused() {
+        let state = state();
+        let now = now_epoch();
+
+        let err = state
+            .report("not-hex", signed_record(1, "203.0.113.9:1", now))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ReportError::BadKeyHash);
+
+        let err = state
+            .report(
+                &hash_key("k"),
+                signed_record(1, "203.0.113.9:1", now + MAX_FUTURE_SKEW_SECS + 60),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, ReportError::FutureTimestamp);
+    }
+
+    async fn post_report(
+        state: Arc<LighthouseState>,
+        key_hash: &str,
+        record: &EndpointRecord,
+    ) -> (StatusCode, String) {
+        let response = routes(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/lighthouse/v1/report/{key_hash}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(record).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn the_report_route_answers_stale_bad_hash_and_future_timestamp_distinctly() {
+        let state = state();
+        let now = now_epoch();
+        let key_hash = hash_key("k");
+        let record = signed_record(1, "203.0.113.9:1", now);
+
+        let (status, body) = post_report(Arc::clone(&state), &key_hash, &record).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "accepted"));
+        let (status, body) = post_report(Arc::clone(&state), &key_hash, &record).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "stale"));
+
+        let (status, body) = post_report(Arc::clone(&state), "not-hex", &record).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("64 hex"), "{body}");
+
+        let future = signed_record(1, "203.0.113.9:1", now + MAX_FUTURE_SKEW_SECS + 60);
+        let (status, body) = post_report(state, &key_hash, &future).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("in the future"), "{body}");
+    }
+
+    /// A lookup under something that is not a key hash still gets a decoy,
+    /// deterministic for that input, rather than a differently shaped answer.
+    #[tokio::test]
+    async fn the_lookup_route_answers_a_malformed_key_hash_with_a_decoy() {
+        let state = state();
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let response = routes(Arc::clone(&state))
+                .oneshot(
+                    Request::get("/lighthouse/v1/lookup/not-a-hash")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            bodies.push(
+                axum::body::to_bytes(response.into_body(), 1 << 16)
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(bodies[0], bodies[1], "the decoy is stable for one input");
+        let record: EndpointRecord = serde_json::from_slice(&bodies[0]).unwrap();
+        assert!(verify(&record).is_err(), "a decoy never verifies");
+    }
 }

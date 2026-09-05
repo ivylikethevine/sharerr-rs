@@ -3371,4 +3371,351 @@ mod tests {
                 .contains(r#"tag = "recovered""#)
         );
     }
+
+    // ------------------------------------------ handlers with an open vault
+    //
+    // The tests above stop at the vault's door. These open one for real,
+    // through `figment::Jail` (CLAUDE.md's one sanctioned way), so the
+    // secret-writing half of a save — `apply_secret`, the tracker-token
+    // rotation tail — actually runs.
+
+    /// Drive `body` against a `WebState` whose vault opens; `Jail` scopes the
+    /// master key to this closure and serialises against every other Jail
+    /// test in the binary. Not async, hence the runtime built here.
+    fn with_open_vault<F, Fut>(body: F)
+    where
+        F: FnOnce(WebState, std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "settings-tests-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            // A save reloads the config from this file, and a reload that
+            // forgot `data_dir` would move the vault path out from under the
+            // very secret the save just wrote.
+            std::fs::write(
+                &path,
+                format!("data_dir = {:?}\n", jail.directory().display().to_string()),
+            )
+            .unwrap();
+            let serve =
+                std::sync::Arc::new(crate::state::ServeState::new(config, path.clone(), None));
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(body(web_state(serve), path));
+            Ok(())
+        });
+    }
+
+    async fn stored(state: &WebState, key: &str) -> Option<String> {
+        state
+            .serve
+            .open_vault()
+            .await
+            .unwrap()
+            .get(key)
+            .unwrap()
+            .map(|secret| secret.expose_secret().to_owned())
+    }
+
+    fn tracker_form(token: &str, clear: bool) -> TrackerForm {
+        TrackerForm {
+            advertised_host: "sharerr.example".to_owned(),
+            port: "51413".to_owned(),
+            advertised_url: String::new(),
+            token: token.to_owned(),
+            clear_token: clear.then(|| "on".to_owned()),
+        }
+    }
+
+    #[test]
+    fn generate_secret_mints_a_tracker_token_and_stores_it() {
+        with_open_vault(|state, _| async move {
+            let response = generate_secret(
+                State(state.clone()),
+                axum::extract::Path("tracker".to_owned()),
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let minted = stored(&state, secret_keys::TRACKER_TOKEN)
+                .await
+                .expect("the minted token is in the vault");
+            assert_eq!(minted.len(), crate::secrets::KEY_BYTES * 2, "hex");
+        });
+    }
+
+    /// The tracker form's three vault paths in sequence: a typed token
+    /// rotates in, a second one shifts the first to the previous slot,
+    /// finalize retires that slot, and the clear checkbox removes it all.
+    #[test]
+    fn save_tracker_rotates_finalizes_and_clears_the_token_through_the_vault() {
+        with_open_vault(|state, _| async move {
+            let response = save_tracker(
+                State(state.clone()),
+                Query(NextQuery::default()),
+                Form(tracker_form("first-token", false)),
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+            assert_eq!(
+                stored(&state, secret_keys::TRACKER_TOKEN).await.as_deref(),
+                Some("first-token")
+            );
+
+            save_tracker(
+                State(state.clone()),
+                Query(NextQuery::default()),
+                Form(tracker_form("second-token", false)),
+            )
+            .await;
+            assert_eq!(
+                stored(&state, secret_keys::TRACKER_TOKEN_PREVIOUS)
+                    .await
+                    .as_deref(),
+                Some("first-token")
+            );
+
+            let response = finalize_tracker(State(state.clone())).await;
+            assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::LOCATION)
+                    .unwrap(),
+                "/settings?saved=tracker"
+            );
+            assert!(
+                stored(&state, secret_keys::TRACKER_TOKEN_PREVIOUS)
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                stored(&state, secret_keys::TRACKER_TOKEN).await.as_deref(),
+                Some("second-token")
+            );
+
+            let response = save_tracker(
+                State(state.clone()),
+                Query(NextQuery::default()),
+                Form(tracker_form("", true)),
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+            assert!(stored(&state, secret_keys::TRACKER_TOKEN).await.is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn save_tracker_rejects_a_token_that_cannot_be_a_url_segment() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_tracker(
+            State(state),
+            Query(NextQuery::default()),
+            Form(tracker_form("ab/cd+ef==", false)),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn save_metrics_writes_the_flag_and_stores_then_clears_the_token() {
+        with_open_vault(|state, config_path| async move {
+            let response = save_metrics(
+                State(state.clone()),
+                Form(MetricsForm {
+                    enabled: Some("on".to_owned()),
+                    token: "scrape-me".to_owned(),
+                    clear_token: None,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+            let written = std::fs::read_to_string(&config_path).unwrap();
+            assert!(written.contains("[metrics]"), "{written}");
+            assert!(written.contains("enabled = true"), "{written}");
+            assert_eq!(
+                stored(&state, secret_keys::METRICS_TOKEN).await.as_deref(),
+                Some("scrape-me")
+            );
+
+            let response = save_metrics(
+                State(state.clone()),
+                Form(MetricsForm {
+                    enabled: None,
+                    token: String::new(),
+                    clear_token: Some("on".to_owned()),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+            assert!(stored(&state, secret_keys::METRICS_TOKEN).await.is_none());
+        });
+    }
+
+    // ------------------------------------------ the remaining plain saves
+
+    #[tokio::test]
+    async fn save_checks_writes_the_reachability_flag() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_checks(
+            State(state),
+            Form(ChecksForm {
+                reachability: Some("on".to_owned()),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("reachability = true"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_lighthouse_with_no_urls_unsets_the_list() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_lighthouse(
+            State(state),
+            Form(LighthouseForm {
+                enabled: None,
+                mount: "tracker".to_owned(),
+                urls: "\n\n".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!written.contains("urls"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_seeding_with_blank_fields_unsets_both_limits() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_seeding(
+            State(state),
+            Form(SeedingForm {
+                upload_limit_kib: String::new(),
+                ratio_limit: String::new(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!written.contains("upload_limit_kib"), "{written}");
+        assert!(!written.contains("ratio_limit"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn save_sync_rejects_a_non_numeric_interval() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_sync(
+            State(state),
+            Form(SyncForm {
+                enabled: Some("on".to_owned()),
+                interval_secs: "soon".to_owned(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_paths_writes_the_rows_and_drops_the_spare_blank_one() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config_path = serve.config_path().to_path_buf();
+        let state = web_state(serve);
+
+        let response = save_paths(
+            State(state),
+            Query(NextQuery::default()),
+            Form(PathsForm {
+                arr: vec!["/data/media".to_owned(), String::new()],
+                sharerr: vec!["/media".to_owned(), String::new()],
+                qbit: vec!["/downloads".to_owned(), String::new()],
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("/data/media"), "{written}");
+        assert!(written.contains("/downloads"), "{written}");
+    }
+
+    /// qBittorrent has its own save; handing it to the RPC-style one is a
+    /// programming error the handler refuses rather than half-applies.
+    #[tokio::test]
+    async fn save_rpc_client_refuses_the_backend_that_has_its_own_save() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = save_rpc_client(
+            &state,
+            None,
+            RpcClientForm::default(),
+            TorrentBackend::Qbittorrent,
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // ------------------------------------------------------- build_page
+
+    #[tokio::test]
+    async fn build_page_names_the_backup_path_when_the_config_failed_to_load() {
+        let (_dir, serve) = crate::state::fixtures::unloadable();
+        // The notice only names a backup when there is a file to move aside.
+        std::fs::write(serve.config_path(), "taag = 1\n").unwrap();
+
+        let rendered = build_page(&web_state(serve), None, None).await;
+
+        assert!(rendered.config_error.is_some());
+        let notice = rendered
+            .config_notice
+            .expect("a save will move the file aside");
+        assert!(notice.contains("will be kept as"), "{notice}");
+    }
+
+    #[tokio::test]
+    async fn build_page_lists_each_configured_library_before_the_spare_row() {
+        let (dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .replace_config(sharerr_core::Config {
+                data_dir: dir.path().to_path_buf(),
+                library: vec![sharerr_core::config::LibraryConfig {
+                    path: "/media/tv".into(),
+                    kind: sharerr_core::config::LibraryKind::Tv,
+                }],
+                ..Default::default()
+            })
+            .await;
+
+        let rendered = build_page(&web_state(serve), None, None).await;
+
+        assert_eq!(rendered.libraries.len(), 2);
+        assert_eq!(rendered.libraries[0].path, "/media/tv");
+        assert_eq!(rendered.libraries[0].kind, "tv");
+        assert!(rendered.libraries[1].path.is_empty());
+    }
 }

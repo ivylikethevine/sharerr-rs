@@ -403,6 +403,7 @@ struct Harness {
 /// Build a stack with Sonarr serving `series_json` (the library's own tagged
 /// series when `None`) and the library on disk.
 async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness {
+    crate::test_support::trace();
     let media = tempfile::tempdir().unwrap();
     let torrents = tempfile::tempdir().unwrap();
     let lib = library::tv_library(media.path()).unwrap();
@@ -2013,4 +2014,150 @@ async fn the_debug_impl_names_the_tag_and_source_kinds_without_the_credentials()
     let h = tagged_harness().await;
     let debug = format!("{:?}", h.syncer);
     assert!(debug.contains("sharerr"), "{debug}");
+}
+
+// ------------------------------------------------------------ the long tail
+
+#[test]
+fn a_report_reads_as_a_sentence_and_names_unscannable_sources() {
+    let report = SyncReport {
+        discovered: 3,
+        added: 1,
+        reused: 1,
+        unchanged: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        report.to_string(),
+        "3 discovered, 1 added, 1 reused, 1 unchanged, 0 unshared, 0 failed"
+    );
+    assert!(!report.has_problems());
+
+    let partial = SyncReport {
+        sources_failed: 2,
+        ..Default::default()
+    };
+    assert!(
+        partial
+            .to_string()
+            .contains("2 source(s) could not be scanned")
+    );
+    assert!(partial.has_problems());
+    let (sentence, failed) = partial.describe(true);
+    assert!(failed, "{sentence}");
+}
+
+#[test]
+fn build_arr_needs_both_a_configured_url_and_a_stored_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = vault_in(&dir);
+    let config = Config {
+        sonarr: Some(ServiceConfig {
+            url: Url::parse("http://sonarr.example:8989").unwrap(),
+        }),
+        ..Config::default()
+    };
+
+    assert!(
+        super::build_arr(MediaSource::Radarr, &config, &vault)
+            .unwrap()
+            .is_none(),
+        "not configured"
+    );
+    let err = super::build_arr(MediaSource::Sonarr, &config, &vault).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("sonarr.api_key is not in the vault"),
+        "{err:#}"
+    );
+
+    vault
+        .put(
+            sharerr_core::config::secret_keys::SONARR_API_KEY,
+            &SecretString::from("k"),
+        )
+        .unwrap();
+    assert!(
+        super::build_arr(MediaSource::Sonarr, &config, &vault)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn build_client_names_the_missing_credential_for_the_selected_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+
+    let err = super::build_client(&Config::default(), &vault).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("no qbittorrent.api_key in the vault"),
+        "{err:#}"
+    );
+
+    let transmission = Config {
+        torrent_backend: sharerr_core::config::TorrentBackend::Transmission,
+        ..Config::default()
+    };
+    let err = super::build_client(&transmission, &vault).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("no transmission.password in the vault"),
+        "{err:#}"
+    );
+}
+
+/// The unchanged fast path when the cached `.torrent` has gone missing:
+/// nothing can be compared, so nothing is confirmed, but the ratio the
+/// client reported is still recorded.
+#[tokio::test]
+async fn the_unchanged_fast_path_still_records_the_ratio_without_a_cached_torrent() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let items = h.syncer.store().all_items().await.unwrap();
+    let item = items.first().unwrap();
+    let hash = item.info_hash.clone().unwrap();
+
+    std::fs::remove_file(sharerr_torrent::torrent_file_path(h.torrents.path(), &hash)).unwrap();
+    h.qbit.set_ratio(&hash, 0.5, 1.0);
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.unchanged, 2);
+
+    let updated = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.achieved_ratio, Some(0.5));
+}
+
+/// The same path when the cached `.torrent` is unreadable garbage: a
+/// warning, the ratio still recorded, and the item still Unchanged rather
+/// than Failed — the torrent is seeding either way.
+#[tokio::test]
+async fn the_unchanged_fast_path_tolerates_a_corrupt_cached_torrent() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let items = h.syncer.store().all_items().await.unwrap();
+    let item = items.first().unwrap();
+    let hash = item.info_hash.clone().unwrap();
+
+    std::fs::write(
+        sharerr_torrent::torrent_file_path(h.torrents.path(), &hash),
+        b"not bencode",
+    )
+    .unwrap();
+    h.qbit.set_ratio(&hash, 0.25, 1.0);
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.unchanged, 2);
+    assert_eq!(report.failed, 0);
+
+    let updated = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.achieved_ratio, Some(0.25));
 }

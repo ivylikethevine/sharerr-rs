@@ -871,4 +871,126 @@ mod tests {
             Ok(())
         });
     }
+
+    // ------------------------------------------------------ the long tail
+
+    /// A whole pass, end to end, against a live lighthouse: our record lands
+    /// under the friend's key hash and the pass is stamped as completed.
+    /// Opens a real vault through `Jail` (for the gossip identity the
+    /// self-record is signed with), per CLAUDE.md.
+    #[test]
+    fn run_completes_a_pass_against_a_live_lighthouse() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "lighthouse-client-tests");
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let (lighthouse, url) = spawn_lighthouse().await;
+                let config = sharerr_core::Config {
+                    data_dir: jail.directory().to_path_buf(),
+                    lighthouse: sharerr_core::config::LighthouseConfig {
+                        urls: vec![url],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let path = jail.directory().join("sharerr.toml");
+                let state = Arc::new(ServeState::new(config, path, None));
+                let alex = state
+                    .store()
+                    .await
+                    .unwrap()
+                    .create_peer("Alex", &SecretString::from("alex-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+
+                run(&state, &reqwest::Client::new()).await;
+
+                let snapshot = state.lighthouse_status().snapshot().await;
+                assert!(snapshot.last_pass_at.is_some(), "{snapshot:?}");
+                assert_eq!(snapshot.lighthouses.len(), 1);
+                assert!(snapshot.lighthouses[0].last_success_at.is_some());
+                assert!(
+                    sharerr_lighthouse::verify(&lighthouse.lookup(&alex.key_hash).await).is_ok(),
+                    "our signed record is filed under Alex's key hash"
+                );
+            });
+            Ok(())
+        });
+    }
+
+    #[tokio::test]
+    async fn a_report_to_nothing_listening_is_recorded_as_that_lighthouses_failure() {
+        let port = sharerr_testkit::net::closed_port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let (store, _alex) = store_with_peer("Alex", "alex-key").await;
+        let peers = store.list_peers().await.unwrap();
+        let own = signed_lighthouse_record(1, "203.0.113.9:41234", 1000);
+        let status = LighthouseStatus::default();
+
+        report(
+            &reqwest::Client::new(),
+            std::slice::from_ref(&url),
+            &peers,
+            Some(&own),
+            &status,
+        )
+        .await;
+
+        let snapshot = status.snapshot().await;
+        assert_eq!(snapshot.lighthouses.len(), 1);
+        assert_eq!(snapshot.lighthouses[0].url, url.to_string());
+        assert!(snapshot.lighthouses[0].last_error.is_some(), "{snapshot:?}");
+        assert!(snapshot.lighthouses[0].last_success_at.is_none());
+    }
+
+    /// A lookup that fails on the wire or with a non-2xx answer is a debug
+    /// line and nothing recorded — the next lighthouse, or the next pass,
+    /// gets its turn.
+    #[tokio::test]
+    async fn a_failed_lookup_records_nothing() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let answered_500 = Url::parse(&server.uri()).unwrap();
+        let port = sharerr_testkit::net::closed_port();
+        let nothing_listening = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let http = reqwest::Client::new();
+
+        let err = lookup_one(&http, &answered_500, "hash", "pk")
+            .await
+            .unwrap_err();
+        assert!(err.contains("lookup answered 500"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault_in(&dir);
+        let (store, peer) = store_with_peer("Alex", "our-key-for-alex").await;
+        let record = signed_lighthouse_record(1, "http://203.0.113.9:41234", 1000);
+        store
+            .bind_peer_pubkey(peer.id, &record.pubkey)
+            .await
+            .unwrap();
+        vault
+            .put(
+                &secret_keys::peer_gossip_key(peer.id),
+                &SecretString::from("alex-issued-us-this-key"),
+            )
+            .unwrap();
+        let peers = store.list_peers().await.unwrap();
+        let status = LighthouseStatus::default();
+
+        lookup_quiet(
+            &http,
+            &[nothing_listening, answered_500],
+            &peers,
+            &vault,
+            &store,
+            &status,
+        )
+        .await;
+
+        assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
+        assert!(status.snapshot().await.last_recovery_at.is_none());
+    }
 }

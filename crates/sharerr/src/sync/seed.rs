@@ -727,6 +727,7 @@ mod tests {
     }
 
     fn seeder(qbit: Arc<dyn TorrentClient>, torrent_dir: PathBuf) -> Seeder {
+        crate::test_support::trace();
         Seeder {
             qbit,
             category: "sharerr".to_owned(),
@@ -1397,5 +1398,170 @@ mod tests {
             &files,
             Path::new("/downloads/tv/lanternwick.s02e01.mkv")
         ));
+    }
+
+    // ------------------------------------------------------ the long tail
+
+    fn built(media: &Path, announce: &str) -> sharerr_torrent::BuiltTorrent {
+        TorrentFactory
+            .create(&TorrentRequest {
+                path: media,
+                announce: &AnnounceSet::single(Url::parse(announce).unwrap()),
+                media: None,
+            })
+            .unwrap()
+    }
+
+    /// Adopting a torrent sharerr had cached under a *stale* announce: the
+    /// cache is rewritten in place, and the client is still only told to add
+    /// the tracker, never to replace its list.
+    #[tokio::test]
+    async fn adopting_a_cached_torrent_with_a_stale_announce_rewrites_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let old = built(&media, "http://old.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let cached = torrent_file_path(&torrent_dir, &old.info_hash);
+        write_torrent_file(&cached, &old.data).unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), torrent_dir);
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+
+        seeder.adopt(&old.info_hash, &announce).await.unwrap();
+
+        let rewritten = std::fs::read(&cached).unwrap();
+        assert_eq!(
+            sharerr_torrent::read_announce(&rewritten)
+                .unwrap()
+                .as_deref(),
+            Some(announce.primary.as_str())
+        );
+        assert_eq!(client.add_trackers_calls.lock().unwrap().len(), 1);
+    }
+
+    /// An exported torrent that already announces to sharerr is cached as is
+    /// — never cached before, so it still has to be verified and written.
+    #[tokio::test]
+    async fn adopting_an_export_that_already_announces_to_sharerr_caches_it_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let theirs = built(&media, "http://sharerr.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, torrent_dir.clone());
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+
+        seeder.adopt(&theirs.info_hash, &announce).await.unwrap();
+
+        let cached = std::fs::read(torrent_file_path(&torrent_dir, &theirs.info_hash)).unwrap();
+        assert_eq!(cached, theirs.data);
+    }
+
+    /// The client hands back a `.torrent` for a different swarm than the one
+    /// it was asked about: refused, and nothing is cached under either hash.
+    #[tokio::test]
+    async fn adopting_refuses_an_export_whose_info_hash_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let other = dir.path().join("other.mkv");
+        std::fs::write(&other, b"entirely different bytes").unwrap();
+        let wrong = built(&other, "http://their-tracker.example/announce");
+        let asked_for = built(&media, "http://their-tracker.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient {
+            export_result: Some(wrong.data),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, torrent_dir.clone());
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+
+        let err = seeder
+            .adopt(&asked_for.info_hash, &announce)
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("handed back a .torrent for"),
+            "{err:#}"
+        );
+        assert!(!torrent_file_path(&torrent_dir, &asked_for.info_hash).exists());
+    }
+
+    async fn seed_with_known_hash(dir: &Path, hash: &str, client: Arc<StubClient>) -> SeedOutcome {
+        let media = dir.join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let seeder = seeder(client, dir.join("torrents"));
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+        seeder
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::default(),
+                Some(hash),
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    /// A cache entry that cannot be read or parsed is a reason to rebuild,
+    /// not to fail the item.
+    #[tokio::test]
+    async fn seed_rebuilds_when_the_cached_torrent_is_unreadable_or_unparseable() {
+        let dir = tempfile::tempdir().unwrap();
+        let torrent_dir = dir.path().join("torrents");
+
+        // Unreadable: the cache path is a directory.
+        std::fs::create_dir_all(torrent_file_path(&torrent_dir, "unreadable")).unwrap();
+        let client = Arc::new(StubClient::default());
+        let outcome = seed_with_known_hash(dir.path(), "unreadable", client.clone()).await;
+        assert!(matches!(outcome, SeedOutcome::Added { .. }), "{outcome:?}");
+
+        // Unparseable: garbage where bencode should be.
+        write_torrent_file(&torrent_file_path(&torrent_dir, "garbage"), b"not bencode").unwrap();
+        let outcome = seed_with_known_hash(dir.path(), "garbage", client.clone()).await;
+        assert!(matches!(outcome, SeedOutcome::Added { .. }), "{outcome:?}");
+        assert_eq!(client.add_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_media_file_that_cannot_be_stat_ed_counts_as_a_stale_cache() {
+        let seeder = seeder(Arc::new(StubClient::default()), PathBuf::from("/torrents"));
+        assert!(
+            seeder
+                .cached_size_is_stale(
+                    Path::new("/nonexistent/movie.mkv"),
+                    1,
+                    "hash",
+                    Path::new("/torrents/hash.torrent"),
+                )
+                .await
+        );
+    }
+
+    /// A client entry with no save path cannot cover anything; the search
+    /// moves on rather than matching it against an empty prefix.
+    #[tokio::test]
+    async fn find_existing_skips_a_torrent_with_no_save_path() {
+        let seeder = seeder(Arc::new(StubClient::default()), PathBuf::from("/torrents"));
+        let known = KnownTorrents::index(&[summary("abc", "", "")]);
+        let found = seeder
+            .find_existing(&known, Path::new("/downloads/movie.mkv"))
+            .await
+            .unwrap();
+        assert!(found.is_none());
     }
 }

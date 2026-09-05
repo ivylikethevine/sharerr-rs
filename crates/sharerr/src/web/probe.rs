@@ -233,7 +233,7 @@ async fn torrent_client_badge(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::result_large_err)]
 
     use super::*;
     use axum::body::to_bytes;
@@ -448,5 +448,261 @@ mod tests {
                 "{service} must answer 200"
             );
         }
+    }
+
+    // ------------------------------------------- badges with an open vault
+    //
+    // Everything above finds the vault unreadable. These open one for real,
+    // through `figment::Jail` (the one sanctioned way — see CLAUDE.md), so
+    // the badge gets past credential resolution and the *arr or client
+    // outcome it renders is the one under test.
+
+    use std::sync::Arc;
+
+    use sharerr_testkit::mock::{base_url, mount_json};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Drive `body` against a `WebState` whose vault opens, with `sharerr.toml`
+    /// loaded from `config`. `Jail` scopes the master key to this closure and
+    /// serialises against every other Jail test in the binary; it is not
+    /// async, hence the plain `#[test]` callers and the runtime built here.
+    fn with_open_vault<F, Fut>(config: Config, body: F)
+    where
+        F: FnOnce(WebState) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "probe-tests-master-key");
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..config
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let serve = Arc::new(crate::state::ServeState::new(config, path, None));
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(body(web_state(serve)));
+            Ok(())
+        });
+    }
+
+    async fn store(state: &WebState, key: &str, value: &str) {
+        let mut vault = state.serve.open_vault().await.unwrap();
+        vault
+            .put(key, &secrecy::SecretString::from(value.to_owned()))
+            .unwrap();
+    }
+
+    fn sonarr_at(url: &Url) -> Config {
+        Config {
+            sonarr: Some(ServiceConfig { url: url.clone() }),
+            ..Config::default()
+        }
+    }
+
+    async fn mount_sonarr_status(server: &MockServer) {
+        mount_json(
+            server,
+            "/api/v3/system/status",
+            sharerr_testkit::library::system_status_json("Sonarr"),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn arr_badge_refuses_a_kind_with_no_credential_key() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let html =
+            body_of(arr_badge(MediaSource::Directory, &state, &Config::default()).await).await;
+        assert!(html.contains("Unknown service"), "{html}");
+    }
+
+    #[test]
+    fn arr_badge_asks_for_a_url_then_a_key_before_dialling() {
+        with_open_vault(Config::default(), |state| async move {
+            let html =
+                body_of(arr_badge(MediaSource::Sonarr, &state, &Config::default()).await).await;
+            assert!(html.contains("No URL configured"), "{html}");
+
+            let server = MockServer::start().await;
+            let config = sonarr_at(&base_url(&server));
+            let html = body_of(arr_badge(MediaSource::Sonarr, &state, &config).await).await;
+            assert!(html.contains("No API key stored"), "{html}");
+            assert!(
+                server.received_requests().await.unwrap().is_empty(),
+                "nothing is dialled without a key"
+            );
+        });
+    }
+
+    #[test]
+    fn arr_badge_reports_each_way_the_app_can_turn_it_away() {
+        with_open_vault(Config::default(), |state| async move {
+            store(&state, secret_keys::SONARR_API_KEY, "k").await;
+
+            let server = MockServer::start().await;
+            sharerr_testkit::mock::mount_json_status(
+                &server,
+                "/api/v3/system/status",
+                401,
+                serde_json::json!({}),
+            )
+            .await;
+            let html = body_of(
+                arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&base_url(&server))).await,
+            )
+            .await;
+            assert!(html.contains("API key was rejected"), "{html}");
+
+            let server = MockServer::start().await;
+            sharerr_testkit::mock::mount_json_status(
+                &server,
+                "/api/v3/system/status",
+                500,
+                serde_json::json!({}),
+            )
+            .await;
+            let html = body_of(
+                arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&base_url(&server))).await,
+            )
+            .await;
+            assert!(html.contains("class=\"error\""), "{html}");
+
+            let port = sharerr_testkit::net::closed_port();
+            let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let html =
+                body_of(arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&url)).await).await;
+            assert!(html.contains("Could not reach it"), "{html}");
+        });
+    }
+
+    #[test]
+    fn arr_badge_distinguishes_a_missing_tag_an_unused_tag_and_tagged_files() {
+        with_open_vault(Config::default(), |state| async move {
+            store(&state, secret_keys::SONARR_API_KEY, "k").await;
+
+            let server = MockServer::start().await;
+            mount_sonarr_status(&server).await;
+            mount_json(&server, "/api/v3/tag", serde_json::json!([])).await;
+            let html = body_of(
+                arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&base_url(&server))).await,
+            )
+            .await;
+            assert!(html.contains("no tag named"), "{html}");
+
+            let server = MockServer::start().await;
+            mount_sonarr_status(&server).await;
+            mount_json(&server, "/api/v3/tag", sharerr_testkit::library::tag_json()).await;
+            mount_json(&server, "/api/v3/series", serde_json::json!([])).await;
+            let html = body_of(
+                arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&base_url(&server))).await,
+            )
+            .await;
+            assert!(html.contains("class=\"ok\""), "{html}");
+            assert!(html.contains("nothing carries it yet"), "{html}");
+
+            let media = tempfile::tempdir().unwrap();
+            let library = sharerr_testkit::library::tv_library(media.path()).unwrap();
+            let server = MockServer::start().await;
+            mount_sonarr_status(&server).await;
+            mount_json(&server, "/api/v3/tag", sharerr_testkit::library::tag_json()).await;
+            mount_json(&server, "/api/v3/series", library.series_json()).await;
+            mount_json(&server, "/api/v3/episodefile", library.episodefile_json()).await;
+            mount_json(&server, "/api/v3/episode", library.episode_json()).await;
+            let html = body_of(
+                arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&base_url(&server))).await,
+            )
+            .await;
+            assert!(html.contains("class=\"ok\""), "{html}");
+            assert!(html.contains("2 file(s) tagged"), "{html}");
+        });
+    }
+
+    fn transmission_at(url: &Url) -> Config {
+        Config {
+            torrent_backend: TorrentBackend::Transmission,
+            transmission: sharerr_core::config::TransmissionConfig {
+                url: url.clone(),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    async fn transmission_answering(status: u16, body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[test]
+    fn torrent_client_badge_reports_every_outcome_for_the_client_it_was_asked_about() {
+        with_open_vault(Config::default(), |state| async move {
+            let server = MockServer::start().await;
+            let config = transmission_at(&base_url(&server));
+            let badge = |config: Config, state: WebState| async move {
+                body_of(torrent_client_badge(&state, &config, TorrentBackend::Transmission).await)
+                    .await
+            };
+
+            let html = badge(config.clone(), state.clone()).await;
+            assert!(html.contains("No password stored"), "{html}");
+
+            store(&state, secret_keys::TRANSMISSION_PASSWORD, "pw").await;
+
+            let server = transmission_answering(
+                200,
+                serde_json::json!({ "result": "success", "arguments": { "version": "4.0.5" } }),
+            )
+            .await;
+            let html = badge(transmission_at(&base_url(&server)), state.clone()).await;
+            assert!(html.contains("Signed in to Transmission 4.0.5"), "{html}");
+
+            let server = transmission_answering(401, serde_json::json!({})).await;
+            let html = badge(transmission_at(&base_url(&server)), state.clone()).await;
+            assert!(html.contains("credential was rejected"), "{html}");
+
+            let server = transmission_answering(500, serde_json::json!({})).await;
+            let html = badge(transmission_at(&base_url(&server)), state.clone()).await;
+            assert!(html.contains("Signed in, but:"), "{html}");
+
+            let port = sharerr_testkit::net::closed_port();
+            let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let html = badge(transmission_at(&url), state.clone()).await;
+            assert!(html.contains("Could not reach it"), "{html}");
+
+            // A credential the backend cannot use: qBittorrent wants an API
+            // key and finds a password-shaped value — nothing is dialled.
+            store(&state, secret_keys::QBITTORRENT_API_KEY, "pw").await;
+            let html = body_of(
+                torrent_client_badge(&state, &Config::default(), TorrentBackend::Qbittorrent).await,
+            )
+            .await;
+            assert!(html.contains("class=\"error\""), "{html}");
+        });
+    }
+
+    #[tokio::test]
+    async fn library_badge_counts_an_empty_directory_as_a_folder_with_nothing_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            library: vec![sharerr_core::config::LibraryConfig {
+                path: dir.path().to_path_buf(),
+                kind: sharerr_core::config::LibraryKind::Tv,
+            }],
+            ..Config::default()
+        };
+        let html = body_of(library_badge(&config).await).await;
+        assert!(html.contains("class=\"ok\""), "{html}");
+        assert!(
+            html.contains("1 folder(s), 0 media file(s) found"),
+            "{html}"
+        );
     }
 }

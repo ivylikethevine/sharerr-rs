@@ -822,6 +822,7 @@ pub(crate) mod fixtures {
     /// The `TempDir` is returned because it must outlive the test — dropping it
     /// deletes the directory the config points at.
     pub(crate) fn unconfigured() -> (tempfile::TempDir, Arc<ServeState>) {
+        crate::test_support::trace();
         let dir = tempfile::tempdir().unwrap();
         let config = Config {
             data_dir: dir.path().to_path_buf(),
@@ -833,6 +834,7 @@ pub(crate) mod fixtures {
 
     /// The same fresh container, except its `sharerr.toml` did not load at all.
     pub(crate) fn unloadable() -> (tempfile::TempDir, Arc<ServeState>) {
+        crate::test_support::trace();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sharerr.toml");
         let state = ServeState::new(
@@ -848,6 +850,7 @@ pub(crate) mod fixtures {
     /// handler's "store unavailable" branch without depending on real
     /// filesystem permissions.
     pub(crate) fn store_unopenable() -> (tempfile::TempDir, Arc<ServeState>) {
+        crate::test_support::trace();
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("sharerr.db")).unwrap();
         let config = Config {
