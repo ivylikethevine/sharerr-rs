@@ -878,7 +878,7 @@ fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option
         return Ok(None);
     };
     // Only called over `MediaSource::ARRS`, and every *arr app has a vault key.
-    let Some(key_name) = secret_keys::api_key_for(kind) else {
+    let Some(key_name) = secret_keys::credential_for(kind) else {
         return Ok(None);
     };
     let api_key = vault

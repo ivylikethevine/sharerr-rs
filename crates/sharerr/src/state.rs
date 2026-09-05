@@ -549,7 +549,7 @@ impl ServeState {
     /// cache each call was an Argon2 derivation on a timer.
     pub async fn gluetun_api_key(&self, target: GluetunTarget) -> Option<SecretString> {
         self.cached_from_vault(&self.slot(target).api_key, |vault| {
-            vault.get(target.api_key_secret()).ok().flatten()
+            vault.get(target.credential_key()).ok().flatten()
         })
         .await
     }
