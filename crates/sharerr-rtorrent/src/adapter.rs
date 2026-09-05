@@ -877,4 +877,70 @@ mod tests {
         assert_eq!(as_u64(&XmlValue::Int(-1)), 0);
         assert_eq!(as_u64(&XmlValue::Array(Vec::new())), 0);
     }
+
+    // ---- `call_batch`'s own shape checks, distinct from `call_multi`'s: the
+    // multicall extension wraps each per-call return value in a one-element
+    // array, so a bare scalar top level, a row count that disagrees with the
+    // calls sent, and a row that is neither that wrapper nor a fault struct
+    // are three different ways for rTorrent to answer something this client
+    // never asked.
+
+    #[tokio::test]
+    async fn call_batch_rejects_a_non_array_top_level_reply() {
+        let server = MockServer::start().await;
+        mount_scalar(&server).await;
+
+        let no_params: &[Param<'_>] = &[];
+        let err = client(&server)
+            .call_batch(&[("d.name", no_params)])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("an array of per-call results"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_batch_rejects_a_result_count_that_does_not_match_the_calls() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
+            .mount(&server)
+            .await;
+
+        let no_params: &[Param<'_>] = &[];
+        let err = client(&server)
+            .call_batch(&[("d.name", no_params)])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("returned 2 results for 1 calls"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_batch_rejects_a_row_that_is_neither_a_value_nor_a_fault() {
+        let server = MockServer::start().await;
+        // One row, but a bare integer rather than the one-element array the
+        // multicall extension wraps every successful return value in.
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+                "<array><data><value><i8>0</i8></value></data></array>",
+            )))
+            .mount(&server)
+            .await;
+
+        let no_params: &[Param<'_>] = &[];
+        let err = client(&server)
+            .call_batch(&[("d.name", no_params)])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("a one-element array or a fault struct"),
+            "{err}"
+        );
+    }
 }

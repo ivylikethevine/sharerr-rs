@@ -133,3 +133,34 @@ pub use models::SystemStatus;
 // Re-exported from core (it moved there for the directory source, which is not
 // an *arr app) so existing importers keep compiling unchanged.
 pub use sharerr_core::Discovered;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::join_by_parent;
+
+    /// A file whose parent id names no listed container is dropped with a
+    /// warning rather than joined to nothing — sharing it would produce a
+    /// release named after a record the *arr app no longer has.
+    #[test]
+    fn a_file_whose_parent_is_not_listed_is_dropped() {
+        let containers = [10_i64, 20];
+        // (file id, parent id)
+        let files = vec![(1_i64, 10_i64), (2, 20), (3, 30), (4, 10)];
+
+        let joined = join_by_parent(
+            &containers,
+            files,
+            |c| *c,
+            |f| f.1,
+            |f| f.0,
+            "Some Artist",
+            "album",
+        );
+
+        let ids: Vec<i64> = joined.iter().map(|(_, f)| f.0).collect();
+        assert_eq!(ids, vec![1, 2, 4], "file 3's parent 30 is not listed");
+        assert!(joined.iter().all(|(c, f)| **c == f.1));
+    }
+}

@@ -95,26 +95,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # A tag that disagrees with the binary's own `--version` should fail
-      # here, before a release page claims otherwise - every crate still
-      # reads `version.workspace = true`, so this is the one place that
-      # claim lives.
-      - name: Confirm the tag matches the workspace version
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          ws_version="$(awk '
-            /^\[workspace\.package\]/ { f = 1; next }
-            f && /^version[[:space:]]*=/ { gsub(/"/, "", $3); print $3; exit }
-            /^\[/ { f = 0 }
-          ' Cargo.toml)"
-          tag_version="${TAG#v}"
-          if [ "$ws_version" != "$tag_version" ]; then
-            echo "::error::tag $TAG names version $tag_version, but Cargo.toml's [workspace.package] version is $ws_version" >&2
-            exit 1
-          fi
-          echo "tag $TAG matches workspace version $ws_version"
+      # No tag-versus-Cargo.toml check here any more: the tag *is* the version
+      # (docs/RELEASING.md, "Cutting a release"), and docker-image.yml's
+      # `version` step rejects a malformed tag before `build` pushes anything.
+      # The check this job used to run sat after `publish` had already moved
+      # `latest`, which was the wrong side of the gate to fail on.
 
       # The preamble GitHub's generated notes get prepended to below - see
       # docs/RELEASING.md's own "Verifying a published image" section, which

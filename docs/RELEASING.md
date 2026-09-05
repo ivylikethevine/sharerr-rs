@@ -51,9 +51,18 @@ unpublished; anything that says `:latest` in a compose file will not pull.
 
 ## Cutting a release
 
-Bump `[workspace.package].version` in `Cargo.toml` first; the tag follows it.
-`docker.yml`'s `release` job fails loudly, before writing anything, if the tag
-disagrees with it. Then push a **signed** tag: `main`'s ruleset already
+The tag is the version; there is nothing to bump first.
+`[workspace.package].version` in `Cargo.toml` is a fixed `0.0.0-dev`
+placeholder: a build script in each binary crate reads `SHARERR_VERSION`,
+`docker/Dockerfile` takes it as a build arg, and `docker-image.yml`'s
+`version` step sets it to the tag minus its `v` (or to `0.0.0-dev+g<sha7>`
+for a `main` push or a rehearsal). `sharerr --version`, the web footer, the
+OpenAPI document, Jackett's `server_config` and `sharerr-lighthouse --version`
+all report that one string.
+A tag that is not `vMAJOR.MINOR.PATCH[-prerelease]` fails the `version` step
+before anything is built or pushed.
+
+Push a **signed** tag: `main`'s ruleset already
 requires verified commit signatures, and `git tag -v` gives anyone checking
 out the release something to verify beyond "GitHub says this ref exists".
 

@@ -28,6 +28,12 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{Cli, Command, VaultCommand};
 
+/// The version this binary reports, everywhere it reports one: `--version`,
+/// the web footer, the OpenAPI document, Jackett's `server_config`. Set by
+/// build.rs from `SHARERR_VERSION` (the `v*` tag in a release build), and
+/// otherwise Cargo.toml's placeholder.
+pub const VERSION: &str = env!("SHARERR_VERSION");
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();

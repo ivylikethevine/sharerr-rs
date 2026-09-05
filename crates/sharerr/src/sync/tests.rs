@@ -2161,3 +2161,101 @@ async fn the_unchanged_fast_path_tolerates_a_corrupt_cached_torrent() {
         .unwrap();
     assert_eq!(updated.achieved_ratio, Some(0.25));
 }
+
+// ------------------------------------------------------------------ the report
+
+/// The one-line summary `sharerr sync` prints: the source-failure clause is
+/// there only when a source actually failed, since "0 source(s) could not be
+/// scanned" on every healthy pass would train an operator to stop reading.
+#[test]
+fn the_report_mentions_unscannable_sources_only_when_there_were_any() {
+    let clean = SyncReport {
+        discovered: 3,
+        added: 1,
+        unchanged: 2,
+        ..Default::default()
+    };
+    let line = clean.to_string();
+    assert!(
+        line.starts_with("3 discovered, 1 added, 0 reused, 2 unchanged, 0 unshared, 0 failed"),
+        "{line}"
+    );
+    assert!(!line.contains("could not be scanned"), "{line}");
+    assert!(!clean.has_problems());
+
+    let gapped = SyncReport {
+        sources_failed: 2,
+        ..Default::default()
+    };
+    let line = gapped.to_string();
+    assert!(
+        line.ends_with("(2 source(s) could not be scanned; their shares were left alone)"),
+        "{line}"
+    );
+    assert!(gapped.has_problems());
+}
+
+// ------------------------------------------------------------------ construction
+
+/// The error an operator gets from `sharerr sync` when the vault has no
+/// credential for the selected client names the key to set, per backend —
+/// not a generic "no credential", and not the *other* client's key.
+#[test]
+fn a_missing_torrent_credential_names_the_key_for_the_selected_backend() {
+    use sharerr_core::config::{TorrentBackend, secret_keys};
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+
+    for (backend, key) in [
+        (
+            TorrentBackend::Qbittorrent,
+            secret_keys::QBITTORRENT_API_KEY,
+        ),
+        (
+            TorrentBackend::Transmission,
+            secret_keys::TRANSMISSION_PASSWORD,
+        ),
+        (TorrentBackend::Rtorrent, secret_keys::RTORRENT_PASSWORD),
+    ] {
+        let config = Config {
+            torrent_backend: backend,
+            ..Config::default()
+        };
+        let err = super::build_client(&config, &vault).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains(&format!("no {key} in the vault")),
+            "{backend:?}: {rendered}"
+        );
+    }
+}
+
+/// A configured *arr app whose API key never reached the vault fails
+/// construction with the key's name, rather than building a client that
+/// would be rejected on its first request.
+#[test]
+fn a_configured_arr_app_without_its_key_in_the_vault_names_the_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let vault = vault_in(&dir);
+    let config = Config {
+        sonarr: Some(ServiceConfig {
+            url: Url::parse("http://sonarr.example:8989").unwrap(),
+        }),
+        ..Config::default()
+    };
+
+    let err = super::build_arr(MediaSource::Sonarr, &config, &vault).unwrap_err();
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("sonarr is configured but") && rendered.contains("is not in the vault"),
+        "{rendered}"
+    );
+
+    // And an app that is simply not configured is not an error at all.
+    assert!(
+        super::build_arr(MediaSource::Radarr, &config, &vault)
+            .unwrap()
+            .is_none()
+    );
+}

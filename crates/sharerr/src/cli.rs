@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "sharerr",
-    version,
+    version = crate::VERSION,
     about = "Share your media library with friends over the tools you already run"
 )]
 pub struct Cli {

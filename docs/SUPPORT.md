@@ -143,7 +143,10 @@ but the project is not taking on an eleven-crate dependency-ordered release
 process for a distribution path it does not intend to support. Nothing in
 the manifests enforces this (only `sharerr-testkit` carries
 `publish = false`); it is a decision, not a guard. The Docker image is the
-only supported way to run sharerr.
+only supported way to run sharerr. Since the workspace version became a
+placeholder (the tag is the version; see
+[`docs/RELEASING.md`](RELEASING.md#cutting-a-release)), every crate would
+also publish as `0.0.0-dev` - a second reason, not a new decision.
 
 ### A maintained CHANGELOG.md
 

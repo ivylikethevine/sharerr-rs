@@ -545,3 +545,25 @@ async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
         .await
         .unwrap();
 }
+
+// --------------------------------------------------------------- decoding
+
+/// A 200 whose body is not the JSON the endpoint promises is reported as a
+/// decode failure naming the path, not as a success with nothing in it and not
+/// as a generic HTTP error — the difference between "qBittorrent is fine and
+/// has no torrents" and "something in front of qBittorrent answered instead".
+#[tokio::test]
+async fn a_body_that_is_not_the_expected_json_is_a_decode_error_naming_the_path() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>login please</html>"))
+        .mount(&server)
+        .await;
+
+    let err = client(&server).torrents_info(None, None).await.unwrap_err();
+    match &err {
+        QbitError::Decode { path, .. } => assert!(path.contains("torrents/info"), "{path}"),
+        other => panic!("expected Decode, got {other:?}"),
+    }
+}

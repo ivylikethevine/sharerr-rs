@@ -14,6 +14,13 @@ name: Tool versions
 # that a tree falling in a forest is. The annotations stay too, for whoever does
 # open the run. The bump itself stays a one-line edit to tools.txt.
 #
+# Timing matches dependabot's. Both run on Monday (dependabot at its 05:00 UTC
+# default, this cron two hours later, so its PRs exist before this check
+# runs), and check_tool_versions.sh applies the same 7-day cooldown that
+# dependabot.yml's `cooldown:` blocks do: a release younger than a week is
+# reported as pending, not as drift, so this issue never opens for a bump
+# dependabot is deliberately not proposing yet.
+#
 # Also runs on every push to main, alongside the weekly cron, so a bump to
 # tools.txt (or its absence, when upstream moved and nobody bumped it) shows up
 # at merge time too — the cron stays for drift that happens with no commit at

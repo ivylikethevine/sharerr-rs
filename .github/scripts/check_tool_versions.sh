@@ -41,6 +41,14 @@
 # Deliberately absent everywhere below: hadolint and trivy. Both are installed
 # from `releases/latest` on purpose (ci.yml and image-scan.yml each say why),
 # so there is no pin to drift.
+#
+# Timing follows .github/dependabot.yml. A release (or a re-pushed Docker Hub
+# tag) younger than COOLDOWN_DAYS is reported as pending, not as drift:
+# dependabot's `cooldown: default-days: 7` exists so a compromised release can
+# be caught upstream before this repo's CI ever runs it, and it would be odd
+# for this script to open an issue asking for the very bump dependabot is
+# deliberately still waiting on. TOOL_COOLDOWN_DAYS=0 shows everything
+# upstream has published.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -51,6 +59,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # shellcheck disable=SC1091
 source .github/actions/setup-tool/lib.sh
 
+# Mirrors `cooldown: default-days` in .github/dependabot.yml; change both.
+COOLDOWN_DAYS="${TOOL_COOLDOWN_DAYS:-7}"
+
 for _ctv_need in curl jq; do
   command -v "$_ctv_need" >/dev/null 2>&1 || {
     echo "check_tool_versions: no $_ctv_need on PATH" >&2
@@ -58,14 +69,51 @@ for _ctv_need in curl jq; do
   }
 done
 
-# _latest <owner/repo> - the newest release tag, or empty if the API declines.
+# _latest <owner/repo> <tag-prefix> - prints `due|newest|age`. `due` is the
+# highest-versioned non-draft, non-prerelease release at least COOLDOWN_DAYS
+# old (what dependabot would propose today, and what a pin is measured
+# against); `newest` is the highest-versioned such release regardless of age;
+# `age` is its age in whole days. All three empty if the API declines.
+#
+# Ordered by version, not by date, and only over tags shaped
+# `<prefix><digits>[.<digits>...]`. Both matter: actions/checkout re-releases
+# every old major on the same day (v2.8.0 next to v7.0.1, all published
+# within the hour), so "newest by date" is whichever backport landed last;
+# and github/codeql-action's `codeql-bundle-vX.Y.Z` CLI bundles share the
+# repo with the action's own `vX.Y.Z` series, so they must not compete with
+# it. `releases/latest`, which this used to read, orders by created_at and
+# gets the first case wrong the same way.
+#
 # Unauthenticated this is rate-limited to 60/hour per IP; in Actions the
-# workflow passes GH_TOKEN, which raises that far above the size of the roster.
+# workflow passes GH_TOKEN, which raises that far above the size of the
+# roster.
 function _latest() {
   local auth=()
   [ -n "${GH_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GH_TOKEN")
-  curl -sSf "${auth[@]}" "https://api.github.com/repos/$1/releases/latest" 2>/dev/null |
-    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1
+  curl -sSf "${auth[@]}" "https://api.github.com/repos/$1/releases?per_page=30" 2>/dev/null |
+    jq -r --argjson days "$COOLDOWN_DAYS" --arg prefix "$2" '
+      [ .[] | select(.draft or .prerelease | not)
+            | select(.tag_name | startswith($prefix))
+            | (.tag_name | ltrimstr($prefix)) as $v
+            | select($v | test("^[0-9]+(\\.[0-9]+)*$"))
+            | . + { v: ($v | split(".") | map(tonumber)) } ]
+      | sort_by(.v) | reverse
+      | (now - $days * 86400) as $cutoff
+      | (map(select((.published_at | fromdateiso8601) <= $cutoff)) | first) as $due
+      | first as $newest
+      | [ ($due.tag_name // ""),
+          ($newest.tag_name // ""),
+          (if $newest then ((now - ($newest.published_at | fromdateiso8601)) / 86400 | floor | tostring) else "" end)
+        ] | join("|")' 2>/dev/null
+}
+
+# _pending_note <due> <newest> <age> - the parenthetical for a row whose
+# upstream moved inside the cooldown; empty when there is nothing pending.
+function _pending_note() {
+  if [ -n "$2" ] && [ "$2" != "$1" ]; then
+    printf ' (%s released %s day(s) ago, inside the %s-day cooldown dependabot.yml also applies)' \
+      "$2" "$3" "$COOLDOWN_DAYS"
+  fi
 }
 
 bad=0
@@ -93,24 +141,27 @@ while IFS='|' read -r tool pinned _ _ _ check tag_prefix _; do
     ;;
   esac
 
-  latest="$(_latest "$repo")"
+  # The tag prefix is per-row (7th tools.txt column, defaulting to "v") - what
+  # lets lychee's own "lychee-v0.24.2" upstream tags compare correctly against
+  # a pin that (like every row's) carries no prefix at all.
+  prefix="${tag_prefix:-v}"
+  IFS='|' read -r latest newest age <<<"$(_latest "$repo" "$prefix")"
   # A missing upstream answer is a rate limit or an outage, not a stale pin;
   # counting it as outdated would open an issue about GitHub being slow.
-  if [ -z "$latest" ]; then
+  if [ -z "$latest" ] && [ -z "$newest" ]; then
     printf '%-16s %-12s (could not read the upstream release)\n' "$tool" "$pinned"
     continue
   fi
 
-  # The tag prefix stripped from `latest` is per-row (7th tools.txt column,
-  # defaulting to "v"), not a symmetric strip on both sides - what lets
-  # lychee's own "lychee-v0.24.2" upstream tags compare correctly against a
-  # pin that (like every row's) carries no prefix at all, instead of needing
-  # its own `check = "-"` opt-out the way it used to.
-  prefix="${tag_prefix:-v}"
-  if [ "${latest#"$prefix"}" = "$pinned" ]; then
-    printf '%-16s %-12s current\n' "$tool" "$pinned"
+  # A pin already at `newest` (someone bumped by hand inside the cooldown) is
+  # current; an empty `due` with a `newest` means the only release is still
+  # inside the cooldown, which is also not drift.
+  note=""
+  [ "${newest#"$prefix"}" != "$pinned" ] && note="$(_pending_note "$latest" "$newest" "$age")"
+  if [ -z "$latest" ] || [ "${latest#"$prefix"}" = "$pinned" ] || [ "${newest#"$prefix"}" = "$pinned" ]; then
+    printf '%-16s %-12s current%s\n' "$tool" "$pinned" "$note"
   else
-    printf '%-16s %-12s OUTDATED (latest: %s)\n' "$tool" "$pinned" "$latest"
+    printf '%-16s %-12s OUTDATED (latest: %s)%s\n' "$tool" "$pinned" "$latest" "$note"
     # surfaces in the workflow run's summary and annotations when run by CI
     [ -n "${GITHUB_ACTIONS:-}" ] &&
       printf '::warning title=%s outdated::pinned %s, latest %s - bump it in .github/actions/setup-tool/tools.txt\n' \
@@ -141,32 +192,23 @@ echo
 while IFS='|' read -r repo comment pin; do
   [ -n "$repo" ] || continue
 
-  latest="$(_latest "$repo")"
-  if [ -z "$latest" ]; then
+  # Every `uses:` comment in this tree is `v<semver>` (the awk filter below
+  # guarantees it), so the prefix is always "v" here. github/codeql-action's
+  # `codeql-bundle-*` releases, which used to need a check-by-hand branch at
+  # this point, are filtered out inside _latest by shape.
+  IFS='|' read -r latest newest age <<<"$(_latest "$repo" v)"
+  if [ -z "$latest" ] && [ -z "$newest" ]; then
     printf '%-45s %-10s (could not read the upstream release)\n' "$repo" "$comment"
     continue
   fi
-  # A repo can run more than one release train off the same `releases/latest`
-  # endpoint - github/codeql-action is the example in this tree: its "latest
-  # release" by publish date is a `codeql-bundle-vX.Y.Z` CLI bundle, not the
-  # action's own `vX.Y.Z` series this pin actually tracks. There is no way to
-  # tell those apart from here except shape, so a `latest` that does not look
-  # like this pin's own scheme is reported as unresolved instead of a false
-  # OUTDATED - see this repo's own SUPPORT.md-style caveat: guessing wrong is
-  # worse than saying nothing.
-  case "$latest" in
-  v[0-9]*) ;;
-  *)
-    printf '%-45s %-10s (upstream latest release, %s, is not this pin'"'"'s v<version> scheme - check by hand)\n' \
-      "$repo" "$comment" "$latest"
-    continue
-    ;;
-  esac
 
-  if [ "${latest#v}" = "${comment#v}" ]; then
-    printf '%-45s %-10s current\n' "$repo" "$comment"
+  # Same cooldown rule as the tools.txt section above.
+  note=""
+  [ "${newest#v}" != "${comment#v}" ] && note="$(_pending_note "$latest" "$newest" "$age")"
+  if [ -z "$latest" ] || [ "${latest#v}" = "${comment#v}" ] || [ "${newest#v}" = "${comment#v}" ]; then
+    printf '%-45s %-10s current%s\n' "$repo" "$comment" "$note"
   else
-    printf '%-45s %-10s OUTDATED (latest: %s, pinned %s)\n' "$repo" "$comment" "$latest" "$pin"
+    printf '%-45s %-10s OUTDATED (latest: %s, pinned %s)%s\n' "$repo" "$comment" "$latest" "$pin" "$note"
     [ -n "${GITHUB_ACTIONS:-}" ] &&
       printf '::warning title=%s outdated::pinned %s, latest %s - bump the SHA and the trailing comment everywhere %s is used\n' \
         "$repo" "$comment" "$latest" "$repo"
@@ -209,8 +251,13 @@ while IFS='|' read -r image tag pinned; do
   # `pinned` below is the bare hex digest (the sed capture drops the
   # `sha256:` prefix, matching scan_pinned_images.sh's own convention) - strip
   # the same prefix off the API's answer so the two are comparable.
-  current="$(curl -sSf "https://hub.docker.com/v2/repositories/$hub_path/tags/$tag" 2>/dev/null |
-    jq -r '.digest // empty' | sed 's/^sha256://')"
+  #
+  # `age` is how many whole days ago the tag was last pushed (Docker Hub's
+  # timestamps carry fractional seconds jq's parser rejects, hence the sub).
+  IFS='|' read -r current age <<<"$(curl -sSf "https://hub.docker.com/v2/repositories/$hub_path/tags/$tag" 2>/dev/null |
+    jq -r '[ (.digest // "" | sub("^sha256:"; "")),
+             (if .tag_last_pushed then ((now - (.tag_last_pushed | sub("\\.[0-9]+"; "") | fromdateiso8601)) / 86400 | floor | tostring) else "" end)
+           ] | join("|")' 2>/dev/null)"
   if [ -z "$current" ]; then
     printf '%-45s %-24s (could not read the current tag digest)\n' "$ref" "${pinned:0:19}..."
     continue
@@ -218,6 +265,11 @@ while IFS='|' read -r image tag pinned; do
 
   if [ "$current" = "$pinned" ]; then
     printf '%-45s %-24s current\n' "$ref" "${pinned:0:19}..."
+  elif [ -n "$age" ] && [ "$age" -lt "$COOLDOWN_DAYS" ]; then
+    # dependabot's docker ecosystem waits out the same cooldown before it
+    # proposes the new digest; so does this row.
+    printf '%-45s %-24s current (tag re-pushed %s day(s) ago, inside the %s-day cooldown dependabot.yml also applies)\n' \
+      "$ref" "${pinned:0:19}..." "$age" "$COOLDOWN_DAYS"
   else
     printf '%-45s %-24s OUTDATED (tag now resolves to %s)\n' "$ref" "${pinned:0:19}..." "$current"
     [ -n "${GITHUB_ACTIONS:-}" ] &&

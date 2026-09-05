@@ -755,4 +755,56 @@ mod tests {
             }
         );
     }
+
+    /// A subtree nested past [`MAX_DEPTH`] is cut off rather than walked
+    /// forever (a bind-mount loop looks exactly like this), and the cut is
+    /// reported as an incomplete scan so nothing under it is ever withdrawn.
+    #[test]
+    fn a_walk_deeper_than_the_limit_is_cut_short_and_marked_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("Ash.Verge.2021.mkv"), 16);
+
+        let mut deep = root.to_path_buf();
+        for level in 0..=MAX_DEPTH {
+            deep.push(format!("level{level}"));
+        }
+        touch(&deep.join("Buried.Deep.2020.mkv"), 16);
+
+        let outcome = scan(&library(root, LibraryKind::Movie)).unwrap();
+        assert_eq!(outcome.items.len(), 1, "only the shallow file is shared");
+        assert_eq!(outcome.incomplete, 1);
+    }
+
+    /// The root itself being unlistable is different from one subdirectory
+    /// being so: there is nothing to share around it, so the scan fails
+    /// outright (and, upstream, withdraws nothing) rather than reporting an
+    /// empty-but-incomplete library.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_library_root_fails_the_scan() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        touch(&root.join("Ash.Verge.2021.mkv"), 16);
+        fs::set_permissions(root, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let outcome = scan(&library(root, LibraryKind::Movie));
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            matches!(outcome, Err(ScanError::Unreadable { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    /// A run of leading digits too long to be a track number is no track,
+    /// not a panic and not a truncated one.
+    #[test]
+    fn a_track_number_that_does_not_fit_is_no_track() {
+        assert_eq!(leading_number("01 - Something"), Some(1));
+        assert_eq!(leading_number("Something"), None);
+        assert_eq!(leading_number("99999999999999999999 - Something"), None);
+    }
 }

@@ -3,7 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+# A placeholder, never bumped. The version a release reports is the `v*` tag,
+# injected at build time through SHARERR_VERSION: crates/sharerr/build.rs reads
+# it, docker/Dockerfile takes it as a build arg, docker-image.yml derives it
+# from the tag. Anything built without it - a laptop `cargo build`, a bare
+# `docker build` - reports this string. See docs/RELEASING.md.
+version = "0.0.0-dev"
 edition = "2024"
 # Above edition 2024's 1.85 floor for two reasons: `settings::strip_prefix` needs
 # `str::split_at_checked` in a const context (1.86), and the reconciliation loop
@@ -122,18 +127,21 @@ utoipa-axum = "0.2.0"
 wiremock = "0.6.5"
 zeroize = "1.9.0"
 
-# The workspace's own crates, so a version bump is one edit rather than five.
-sharerr-arr = { version = "0.1.0", path = "crates/sharerr-arr" }
-sharerr-client = { version = "0.1.0", path = "crates/sharerr-client" }
-sharerr-core = { version = "0.1.0", path = "crates/sharerr-core" }
-sharerr-lighthouse = { version = "0.1.0", path = "crates/sharerr-lighthouse" }
-sharerr-qbit = { version = "0.1.0", path = "crates/sharerr-qbit" }
-sharerr-rtorrent = { version = "0.1.0", path = "crates/sharerr-rtorrent" }
-sharerr-probe = { version = "0.1.0", path = "crates/sharerr-probe" }
-sharerr-store = { version = "0.1.0", path = "crates/sharerr-store" }
-sharerr-transmission = { version = "0.1.0", path = "crates/sharerr-transmission" }
-sharerr-testkit = { version = "0.1.0", path = "crates/sharerr-testkit" }
-sharerr-torrent = { version = "0.1.0", path = "crates/sharerr-torrent" }
+# The workspace's own crates. The `version` is the placeholder from
+# [workspace.package] above, never bumped; it stays here only because
+# deny.toml's `wildcards = "deny"` reads a path dependency with no version as a
+# wildcard (cargo-deny's `bans` check fails the PR otherwise).
+sharerr-arr = { version = "0.0.0-dev", path = "crates/sharerr-arr" }
+sharerr-client = { version = "0.0.0-dev", path = "crates/sharerr-client" }
+sharerr-core = { version = "0.0.0-dev", path = "crates/sharerr-core" }
+sharerr-lighthouse = { version = "0.0.0-dev", path = "crates/sharerr-lighthouse" }
+sharerr-qbit = { version = "0.0.0-dev", path = "crates/sharerr-qbit" }
+sharerr-rtorrent = { version = "0.0.0-dev", path = "crates/sharerr-rtorrent" }
+sharerr-probe = { version = "0.0.0-dev", path = "crates/sharerr-probe" }
+sharerr-store = { version = "0.0.0-dev", path = "crates/sharerr-store" }
+sharerr-transmission = { version = "0.0.0-dev", path = "crates/sharerr-transmission" }
+sharerr-testkit = { version = "0.0.0-dev", path = "crates/sharerr-testkit" }
+sharerr-torrent = { version = "0.0.0-dev", path = "crates/sharerr-torrent" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

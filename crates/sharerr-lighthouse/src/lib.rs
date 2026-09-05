@@ -53,6 +53,11 @@
 //! [`LighthouseState::report`]'s own docs cover the pinning that second
 //! refusal comes from.
 
+/// The version this binary reports via `--version`. Set by build.rs from
+/// `SHARERR_VERSION` (the `v*` tag in a release build), and otherwise
+/// Cargo.toml's placeholder - the same mechanism as the sharerr crate.
+pub const VERSION: &str = env!("SHARERR_VERSION");
+
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};

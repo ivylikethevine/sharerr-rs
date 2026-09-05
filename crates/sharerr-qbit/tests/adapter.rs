@@ -466,3 +466,40 @@ async fn export_of_an_unknown_torrent_is_an_error() {
             .is_err()
     );
 }
+
+/// The error path through every mutating trait method, not just `version`:
+/// each one wraps its own `QbitClient` call in the same `translate`, and a
+/// method that forgot to would surface a `QbitError` where the sync loop
+/// expects a `ClientError`.
+#[tokio::test]
+async fn every_trait_method_translates_a_server_failure_the_same_way() {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&server)
+        .await;
+
+    let qbit = client(&server);
+    let hash = "aabbccddeeff00112233445566778899aabbccdd";
+    let urls = [Url::parse("http://tracker.example/announce").unwrap()];
+
+    let errors = [
+        TorrentClient::files(&qbit, hash).await.unwrap_err(),
+        TorrentClient::remove(&qbit, hash).await.unwrap_err(),
+        TorrentClient::set_trackers(&qbit, hash, &urls)
+            .await
+            .unwrap_err(),
+        TorrentClient::add_trackers(&qbit, hash, &urls)
+            .await
+            .unwrap_err(),
+    ];
+    for err in &errors {
+        match err {
+            ClientError::Api { kind, detail } => {
+                assert_eq!(*kind, ClientKind::QBittorrent);
+                assert!(detail.contains("boom"), "{detail}");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
+    }
+}

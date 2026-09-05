@@ -28,6 +28,12 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     // a developer who exports it gets an unrelated startup failure from any
     // sharerr command.
     "E2E_MEDIA",
+    // Set by crates/sharerr/build.rs via `cargo::rustc-env`, and cargo exports
+    // a build script's rustc-env vars into `cargo run` and `cargo test` too, so
+    // it reaches every test's process environment. Without this every config
+    // test fails with "unknown field `version`" under `cargo test`, and a
+    // developer who sets it for a local build gets the same from `cargo run`.
+    "VERSION",
     "E2E_COMPOSE",
     "E2E_LIDARR",
 ];
@@ -238,6 +244,7 @@ mod tests {
             jail.set_env("SHARERR_CONFIG", "/config/sharerr.toml");
             jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
             jail.set_env("SHARERR_MASTER_KEY_FILE", "/run/secrets/key");
+            jail.set_env("SHARERR_VERSION", "1.2.3");
             jail.set_env("SHARERR_TAG", "still-works");
 
             let cfg = load(&jail.directory().join("absent.toml"))

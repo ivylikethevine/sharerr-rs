@@ -267,7 +267,7 @@ async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) ->
         port: state.with_config(|c| c.server.bind.port()).await,
         external: false,
         api_key: "",
-        app_version: env!("CARGO_PKG_VERSION"),
+        app_version: crate::VERSION,
         blackholedir: "",
         updatedisabled: true,
         prerelease: false,

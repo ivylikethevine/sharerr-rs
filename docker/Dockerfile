@@ -129,8 +129,17 @@ COPY --from=planner /src/recipe.json recipe.json
 RUN TRIPLE="$(cat /triple)" \
  && cargo chef cook --release --locked --target "$TRIPLE" --package sharerr --recipe-path recipe.json
 COPY . .
+# The version the binary reports (docs/RELEASING.md: the tag is the version;
+# Cargo.toml's is a placeholder). Declared *after* cook, deliberately: an ARG
+# invalidates the cache of every instruction that follows it in the stage, and
+# the cook layer must never depend on which tag is being built. It is not a
+# cargo flag, so the byte-identical rule above is untouched — cook never
+# compiles sharerr itself, and sharerr's build.rs is the only thing that reads
+# it (as does sharerr-lighthouse's, in its own stage below). Empty (a bare
+# `docker build`) means build.rs falls back to the placeholder.
+ARG SHARERR_VERSION
 RUN TRIPLE="$(cat /triple)" \
- && cargo build --release --locked --package sharerr --target "$TRIPLE" \
+ && SHARERR_VERSION="$SHARERR_VERSION" cargo build --release --locked --package sharerr --target "$TRIPLE" \
  && install -D "target/$TRIPLE/release/sharerr" /out/sharerr
 
 # --- sharerr-lighthouse ---
@@ -147,8 +156,10 @@ COPY --from=planner /src/recipe.json recipe.json
 RUN TRIPLE="$(cat /triple)" \
  && cargo chef cook --release --locked --target "$TRIPLE" --package sharerr-lighthouse --recipe-path recipe.json
 COPY . .
+# Same placement and reasoning as the sharerr stage above.
+ARG SHARERR_VERSION
 RUN TRIPLE="$(cat /triple)" \
- && cargo build --release --locked --package sharerr-lighthouse --target "$TRIPLE" \
+ && SHARERR_VERSION="$SHARERR_VERSION" cargo build --release --locked --package sharerr-lighthouse --target "$TRIPLE" \
  && install -D "target/$TRIPLE/release/sharerr-lighthouse" /out/sharerr-lighthouse
 
 # No --platform override, deliberately: this stage must be pulled for the *target*

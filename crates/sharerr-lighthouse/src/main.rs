@@ -12,6 +12,7 @@ use sharerr_lighthouse::LighthouseState;
 #[derive(Debug, Parser)]
 #[command(
     name = "sharerr-lighthouse",
+    version = sharerr_lighthouse::VERSION,
     about = "The sharerr lighthouse rendezvous service"
 )]
 struct Cli {
