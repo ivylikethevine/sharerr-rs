@@ -575,7 +575,7 @@ mod tests {
     use std::sync::Arc;
 
     use sharerr_core::config::{GluetunConfig, LibraryConfig, LibraryKind, ServiceConfig};
-    use sharerr_store::db::RunSummary;
+    use sharerr_store::runs::RunSummary;
     use url::Url;
 
     use super::*;

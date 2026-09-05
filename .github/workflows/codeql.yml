@@ -44,19 +44,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Per-language change detection, so a PR touching only Rust source does not
-  # also pay for the `actions` analysis leg, and vice versa. Deliberately not
-  # routed through prepare.yml: this workflow never touches
-  # `vars.RUNNER_LABEL` (both legs are pinned `ubuntu-latest` — CodeQL has
-  # nothing to gain from the self-hosted box either), so it only needs the
-  # paths-filter half, with two keys instead of prepare.yml's one.
+  # Per-language change detection for pushes to main, so a docs-only merge
+  # does not pay for either analysis leg. Deliberately not routed through
+  # prepare.yml: this workflow never touches `vars.RUNNER_LABEL` (both legs
+  # are pinned `ubuntu-latest` — CodeQL has nothing to gain from the
+  # self-hosted box either), so it only needs the paths-filter half, with two
+  # keys instead of prepare.yml's one.
   #
-  # On schedule (the Tuesday baseline run) or workflow_dispatch, both languages
-  # run unconditionally — there is no diff to filter, and the scheduled run's
-  # whole purpose is establishing the baseline every PR gets diffed against.
+  # Pull requests deliberately bypass the filter and run both languages. The
+  # `main` ruleset requires a CodeQL result before a PR can merge, and that
+  # requirement waits for an upload on the PR head for every category the
+  # tool has ever reported. A skipped leg uploads nothing, so a PR that
+  # touched only `crates/` sat on "Code scanning is waiting for results from
+  # CodeQL" indefinitely with no way to satisfy it. Schedule (the Tuesday
+  # baseline run) and workflow_dispatch skip the filter for the same reason:
+  # there is no diff to filter, and the baseline every PR gets diffed against
+  # has to cover both languages.
   context:
     name: detect changes
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
