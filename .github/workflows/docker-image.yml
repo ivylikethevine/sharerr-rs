@@ -37,6 +37,11 @@
 # for a second, unaudited build to happen. The `main`-push sha tag skips this
 # entirely — see the paragraph above for why that is safe to leave unattended.
 #
+# The tag is also the version the binary reports. Cargo.toml carries a fixed
+# placeholder; the `version` step below strips the `v` from the tag (or stamps
+# a dev build as `0.0.0-dev+g<sha7>`) and hands it to the Dockerfile as a build
+# arg. There is nothing to bump before tagging.
+#
 # `workflow_dispatch` is this workflow's rehearsal: `build` pushes to the same
 # provisional `pending-<sha>` tag on a manual dispatch as it does on a real `v*`
 # push (see the `login`/`push`/`tags` conditions below, each with a
@@ -227,12 +232,40 @@ jobs:
           SHA: ${{ github.sha }}
         run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
 
+      # The version the binary reports. A `v*` tag is the version, verbatim
+      # minus the `v`; everything else is a dev build stamped with its commit.
+      # Cargo.toml's own version is a placeholder (docs/RELEASING.md, "Cutting
+      # a release"); the Dockerfile hands this to crates/sharerr/build.rs as a
+      # build arg. This is also the only shape check a tag gets, and it runs
+      # before the build, so a malformed tag fails here rather than after
+      # `publish` has already moved `latest`.
+      - id: version
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$REF" in
+            refs/tags/v*)
+              if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+                echo "::error::tag $REF_NAME is not vMAJOR.MINOR.PATCH[-prerelease]" >&2
+                exit 1
+              fi
+              echo "version=${REF_NAME#v}" >>"$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "version=0.0.0-dev+g${SHA:0:7}" >>"$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/Dockerfile
           target: ${{ inputs.target }}
+          build-args: SHARERR_VERSION=${{ steps.version.outputs.version }}
           # amd64 only on a PR; both architectures on a push to `main` and on
           # a `v*` tag, which is what actually needs to prove the arm64 cross
           # path (and what `publish` eventually promotes). See the QEMU step

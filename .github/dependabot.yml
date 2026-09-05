@@ -12,7 +12,9 @@
 #
 #   * The curl/pip/go-installed tool versions in ci.yml (zizmor, actionlint,
 #     hadolint) have no ecosystem here at all. `tool-versions.yml` watches that
-#     drift and keeps one tracking issue current.
+#     drift and keeps one tracking issue current, on the same Monday cadence
+#     and with the same 7-day cooldown as the `cooldown:` blocks below, so the
+#     two never disagree about whether an upstream release counts yet.
 #   * Whether a base-image bump actually *fixes* anything. Dependabot's docker
 #     ecosystem is version-updates-only — GHSA carries no container ecosystem,
 #     so there are no alerts to drive a security-update mode — and a digest is

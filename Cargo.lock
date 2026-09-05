@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "askama",
@@ -2522,7 +2522,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-arr"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "futures",
  "reqwest",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-client"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-core"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "serde",
  "serde_json",
@@ -2563,7 +2563,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-lighthouse"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "axum",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-probe"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "matroska",
  "mp4",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-qbit"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2615,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-rtorrent"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -2632,7 +2632,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-store"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-testkit"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -2668,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-torrent"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "hex",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "sharerr-transmission"
-version = "0.1.0"
+version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "base64 0.23.1",

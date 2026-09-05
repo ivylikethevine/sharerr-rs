@@ -75,7 +75,7 @@ configured\" would confirm the port belongs to sharerr.
 its operator advertises — often behind a VPN with a rotating forwarded port, \
 which is the whole reason the gossip and lighthouse endpoints exist.",
         license(name = "MIT"),
-        version = env!("CARGO_PKG_VERSION"),
+        version = crate::VERSION,
     ),
     tags(
         (name = "torznab", description = "\
@@ -420,7 +420,7 @@ mod tests {
             committed.trim_end(),
             to_json().unwrap(),
             "docs/openapi.json is out of date — regenerate it with \
-             `cargo run -- openapi --output docs/openapi.json`"
+             `cargo run --bin sharerr -- openapi --output docs/openapi.json`"
         );
     }
 

@@ -1081,7 +1081,7 @@ pub struct TopologyPage {
 /// The running binary's version, for the page footer — so a bug report or a
 /// "which build has that fix" question can be answered from any page.
 pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate::VERSION
 }
 
 impl TopologyPage {
@@ -1631,5 +1631,29 @@ mod tests {
                  a typo here disables nothing and the save is discarded silently"
             );
         }
+    }
+
+    /// Every variant of the two topology enums renders to something the
+    /// template can use: a status maps to a CSS class, and every drawn edge
+    /// style has both a dash pattern and a tooltip, while `None` has neither
+    /// (no line, so nothing to explain).
+    #[test]
+    fn every_node_status_and_edge_style_renders() {
+        assert_eq!(NodeStatus::Ok.css_class(), "ok");
+        assert_eq!(NodeStatus::Warn.css_class(), "warn");
+        assert_eq!(NodeStatus::Error.css_class(), "error");
+        assert_eq!(NodeStatus::Unknown.css_class(), "hint");
+
+        for style in [
+            EdgeStyle::Solid,
+            EdgeStyle::Dashed,
+            EdgeStyle::Dotted,
+            EdgeStyle::Sparse,
+        ] {
+            assert!(style.dasharray().is_some(), "{style:?}");
+            assert!(!style.describe().is_empty(), "{style:?}");
+        }
+        assert_eq!(EdgeStyle::None.dasharray(), None);
+        assert_eq!(EdgeStyle::None.describe(), "");
     }
 }

@@ -188,6 +188,21 @@ into the one `docker/Dockerfile`, so there is one MSRV pin. That used to be
 two pins that had to move together; merging the file is what removed the
 trap, not a comment.
 
+**The version is the tag; never bump `[workspace.package].version`.** It is
+a fixed `0.0.0-dev` placeholder. Three places carry the real one:
+`crates/sharerr/build.rs` and its twin in `crates/sharerr-lighthouse`
+(read `SHARERR_VERSION`, fall back to the placeholder), `docker/Dockerfile`'s
+`ARG SHARERR_VERSION` in each builder stage (declared _after_ the cook step,
+so the chef layer never depends on it), and `docker-image.yml`'s `version` step, which strips the
+`v` from the tag or stamps `0.0.0-dev+g<sha7>` on a dev build. That step is
+also the only shape check a tag gets, and it runs before anything is pushed.
+`docs/openapi.json` is generated with the placeholder and needs no
+regeneration at release time. One trap: cargo exports a build script's
+`rustc-env` variables into `cargo test` and `cargo run` too, so
+`SHARERR_VERSION` sits in every test's environment inside the config
+loader's `SHARERR_` prefix; `settings::NON_CONFIG_ENV` lists it, and any
+future build-time variable with that prefix needs the same entry.
+
 ### Digest pins
 
 **Every container image is pinned by digest, not just by tag**, in
