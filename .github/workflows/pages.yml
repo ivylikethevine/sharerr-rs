@@ -64,28 +64,30 @@ jobs:
           source: ./
           destination: ./_site
 
-      # The coverage badge, written straight into _site after Jekyll has run:
-      # the file needs no front matter and no _config.yml exclusion to survive
-      # the build untouched. Looked up by API query for the newest successful
-      # coverage.yml run on `main`, rather than off the triggering event's own
-      # payload — that serves `push` and `workflow_dispatch` runs the same way
-      # it serves `workflow_run`, with one code path, via ./fetch-latest-artifact.
-      - name: Fetch the last coverage run's badge endpoint
+      # The coverage and test-count badges, written straight into _site after
+      # Jekyll has run: the files need no front matter and no _config.yml
+      # exclusion to survive the build untouched. Looked up by API query for
+      # the newest successful coverage.yml run on `main`, rather than off the
+      # triggering event's own payload — that serves `push` and
+      # `workflow_dispatch` runs the same way it serves `workflow_run`, with
+      # one code path, via ./fetch-latest-artifact.
+      - name: Fetch the last coverage run's badge endpoints
         id: cov-run
         uses: ./.github/actions/fetch-latest-artifact
         with:
           workflow: coverage.yml
           artifact-name: coverage-badge
           dest-subdir: cov
-          found-message: coverage figure from run
-          missing-message: no successful coverage run on main yet - the badge stays 'not measured'
+          found-message: coverage figures from run
+          missing-message: no successful coverage run on main yet - the badges stay 'not measured'
 
       # jekyll-build-pages is a *container* action - it runs as root inside
       # docker, so _site comes back root-owned and a plain mkdir under it is
       # denied without the chown first.
-      - name: Write the shields endpoint
+      - name: Write the shields endpoints
         env:
           COVJSON: ${{ runner.temp }}/cov/coverage.json
+          TESTSJSON: ${{ runner.temp }}/cov/tests.json
         run: |
           set -euo pipefail
           sudo chown -R "$(id -u):$(id -g)" _site
@@ -97,6 +99,14 @@ jobs:
             printf '{"schemaVersion":1,"label":"coverage","message":"not measured","color":"inactive","cacheSeconds":300}\n' \
               >_site/badges/coverage.json
             echo "::warning::no coverage artifact to read - badge published as 'not measured'"
+          fi
+          if [ -f "$TESTSJSON" ]; then
+            cp "$TESTSJSON" _site/badges/tests.json
+            echo "tests badge: $(cat _site/badges/tests.json)"
+          else
+            printf '{"schemaVersion":1,"label":"tests","message":"not measured","color":"inactive","cacheSeconds":300}\n' \
+              >_site/badges/tests.json
+            echo "::warning::no coverage artifact to read - tests badge published as 'not measured'"
           fi
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

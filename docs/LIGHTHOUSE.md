@@ -94,9 +94,9 @@ Three ways, from the most to the least isolated.
 **Its own container.** The `sharerr-lighthouse` image is built from
 `docker/Dockerfile`'s `runtime-lighthouse` target and published to GHCR as
 its own package, on its own `v*` tag series and behind its own approval, so a
-sharerr release is not silently also a lighthouse release. No tagged release
-exists yet, so `:latest` does not resolve; `sha-<commit>` tracks `main`
-instead (see [`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)),
+sharerr release is not silently also a lighthouse release. `:latest` tracks
+the newest tagged lighthouse release; `sha-<commit>` tracks `main` between
+releases instead (see [`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)),
 or build it yourself:
 
 ```bash

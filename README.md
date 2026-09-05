@@ -5,14 +5,15 @@
 _Share your media library with friends, over the tools you already run._
 
 <!-- All three release badges read the same GitHub Release version, on purpose.
-docs/RELEASING.md's publish gate only creates the Release page once _both_
-images carry the tag, so one number is the honest answer for all three - and
-shields.io has no GHCR version endpoint to ask instead, so this is also the
-only reading that cannot drift per-image. -->
+The `release` job (docker.yml) only waits on this repo's own image build, so a
+lighthouse build failure never blocks it - but shields.io has no GHCR version
+endpoint to ask instead, so reading the Release version is still the only one
+that cannot drift per-image. -->
 
 [![Release](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=github&label=release)](https://github.com/ivylikethevine/sharerr-rs/releases/latest)
 [![sharerr image](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=docker&logoColor=white&label=ghcr.io%2Fsharerr-rs)](https://github.com/ivylikethevine/sharerr-rs/pkgs/container/sharerr-rs)
 [![lighthouse image](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=docker&logoColor=white&label=ghcr.io%2Fsharerr-lighthouse)](https://github.com/ivylikethevine/sharerr-rs/pkgs/container/sharerr-lighthouse)
+[![Tests](https://img.shields.io/endpoint?url=https%3A%2F%2Fivylikethevine.github.io%2Fsharerr-rs%2Fbadges%2Ftests.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fivylikethevine.github.io%2Fsharerr-rs%2Fbadges%2Fcoverage.json)](https://github.com/ivylikethevine/sharerr-rs/actions/workflows/coverage.yml)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14449/badge)](https://www.bestpractices.dev/projects/14449)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
@@ -122,11 +123,11 @@ docker run -d --name sharerr \
   ghcr.io/ivylikethevine/sharerr-rs:latest
 ```
 
-> `:latest` and any version tag don't exist yet; there has been no tagged
-> release. Every push to `main` publishes a `ghcr.io/…:sha-<commit>` image
-> (see [the tag scheme](docs/RELEASING.md#the-tag-scheme)), or build it
-> yourself with `docker build -f docker/Dockerfile -t sharerr-rs .` and use
-> that name instead.
+> `:latest` tracks the newest tagged release. To pin a specific version, use
+> `ghcr.io/ivylikethevine/sharerr-rs:vX.Y.Z`, or to track `main` between
+> releases, `ghcr.io/…:sha-<commit>` (see
+> [the tag scheme](docs/RELEASING.md#the-tag-scheme)). Building it yourself
+> with `docker build -f docker/Dockerfile -t sharerr-rs .` works too.
 
 Then open `http://localhost:8477/`. The first visit asks you to create an
 account; whoever gets there first claims the instance, so do it now rather
@@ -518,18 +519,15 @@ attached.
 
 ### Before v1
 
-Operational tasks that block a first tagged release, not features:
+Operational tasks that stand between the current 0.1.x releases and a 1.0,
+not features:
 
-- **Run the release pipeline for real.** `build` has been rehearsed via
-  `workflow_dispatch`; `publish` and `release` need a real tag push, so the
-  first `v*` tag is the first time either runs. The `release` environment's
-  required reviewer has to be confirmed in repo settings first. See
-  [`docs/RELEASING.md`](docs/RELEASING.md).
 - **Rehearse one real upgrade across a migration.** Eleven forward-only
   sqlx migrations exist, all only ever run against a fresh database.
 - **Decide the magnet-link question.** Every torrent is private, so a
   magnet can never resolve, and Radarr's direct Torznab client has been seen
-  picking it anyway. Reconsider before tagging, not after; see
+  picking it anyway. Left in for now; revisit if a real report shows a
+  direct Radarr/Sonarr connection picking it. See
   [`docs/SUPPORT.md`](docs/SUPPORT.md#removing-the-feeds-magnet-link-entirely).
 - **Decide the login-rate-limit question.** The security policy lists no
   rate limiting as by-design for a trusted LAN, while the deploy docs call

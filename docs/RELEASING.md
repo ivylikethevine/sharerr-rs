@@ -1,9 +1,10 @@
 # Releasing
 
 What a `v*` tag does, the tag scheme every image follows, the one-time setup
-it depends on, and how to rehearse the path without it reaching anyone. No
-tag has yet driven this path end to end, so rehearse it rather than trusting
-it.
+it depends on, and how to rehearse the path without it reaching anyone.
+`v0.0.1`, `v0.1.0` and `v0.1.1` have driven it end to end; rehearsing via
+`workflow_dispatch` is still the way to test a change to the workflows
+themselves without cutting a tag.
 
 ## Table of contents
 
@@ -46,8 +47,6 @@ page is a pointer at it.
 | `v*` tag | `pending-<full-sha>` from `build`; then, after approval, `publish` retags that digest as `X.Y.Z`, `X.Y`, `latest` and `sha-<7>` | amd64 + arm64 |
 
 A prerelease tag (one with a `-` segment, `v1.0.0-rc1`) never moves `latest`.
-Until the first `v*` tag exists, `:latest` and every version tag are
-unpublished; anything that says `:latest` in a compose file will not pull.
 
 ## Cutting a release
 

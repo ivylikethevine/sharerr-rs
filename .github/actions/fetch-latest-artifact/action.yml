@@ -1,10 +1,12 @@
 name: Fetch latest artifact
-# pages.yml looks up the newest successful run of coverage.yml, then downloads
-# its coverage-badge artifact. One action keeps this repo's one call site
-# reading the same way a second one would, so a future one (say, a
-# package-size figure) is a `uses:` line instead of a second hand-written
+# pages.yml looks up the newest successful run of coverage.yml on `main`, then
+# downloads its coverage-badge artifact; docker.yml's `release` job looks up
+# the run for the exact tagged commit instead, via `head-sha`, so a Release
+# page carries the figures for what it actually shipped rather than whatever
+# `main` last measured. One action keeps both call sites reading the same
+# way, so a future one is a `uses:` line instead of a second hand-written
 # lookup.
-description: Find the newest successful run of a workflow and download one artifact from it
+description: Find a successful run of a workflow and download one artifact from it
 
 inputs:
   workflow:
@@ -16,6 +18,13 @@ inputs:
   dest-subdir:
     description: destination directory under runner.temp
     required: true
+  head-sha:
+    description: >-
+      commit sha to find a run for instead of the newest on main - a release
+      tag reads the coverage run for the exact commit it points at, rather
+      than whatever main last measured
+    required: false
+    default: ""
   found-message:
     description: logged as "<found-message> <run_id>" when a run is found
     required: true
@@ -44,13 +53,19 @@ runs:
         GH_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
         WORKFLOW: ${{ inputs.workflow }}
+        HEAD_SHA: ${{ inputs.head-sha }}
         FOUND_MESSAGE: ${{ inputs.found-message }}
         MISSING_MESSAGE: ${{ inputs.missing-message }}
         WARN_ON_MISSING: ${{ inputs.warn-on-missing }}
       run: |
         set -euo pipefail
+        if [ -n "$HEAD_SHA" ]; then
+          query="head_sha=$HEAD_SHA&status=success&per_page=1"
+        else
+          query="branch=main&status=success&per_page=1"
+        fi
         run_id="$(gh api \
-          "repos/$REPO/actions/workflows/$WORKFLOW/runs?branch=main&status=success&per_page=1" \
+          "repos/$REPO/actions/workflows/$WORKFLOW/runs?$query" \
           --jq '.workflow_runs[0].id // empty')"
         echo "run_id=$run_id" >>"$GITHUB_OUTPUT"
         if [ -n "$run_id" ]; then
