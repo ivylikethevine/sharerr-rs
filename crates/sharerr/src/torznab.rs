@@ -2125,4 +2125,85 @@ mod tests {
         assert!(xml.contains(&"aa".repeat(20)), "{xml}");
         assert!(!xml.contains(&"bb".repeat(20)), "{xml}");
     }
+
+    // ------------------------------------------------------ the long tail
+
+    #[test]
+    fn category_follows_the_source_first_and_the_spec_second() {
+        let mut adult = episode("Lanternwick", 1, 1);
+        adult.source = MediaSource::Whisparr;
+        assert_eq!(category_for(&adult), CAT_XXX);
+
+        let mut track = movie("Lanterns");
+        track.source = MediaSource::Lidarr;
+        track.spec = MediaSpec::Track {
+            artist: "Quiet Harbour".to_owned(),
+            album: "Lanterns".to_owned(),
+            track: Some(1),
+        };
+        assert_eq!(category_for(&track), CAT_AUDIO);
+
+        let mut book = movie("The Copper Vale");
+        book.source = MediaSource::Readarr;
+        book.spec = MediaSpec::Book {
+            author: "Mara Vell".to_owned(),
+            title: "The Copper Vale".to_owned(),
+        };
+        assert_eq!(category_for(&book), CAT_BOOKS);
+    }
+
+    #[test]
+    fn an_episode_filter_that_matches_the_season_but_not_the_episode_excludes() {
+        let query = SearchQuery {
+            t: "tvsearch".to_owned(),
+            season: Some(1),
+            ep: Some(2),
+            ..Default::default()
+        };
+        assert!(!query.matches(&episode("Lanternwick", 1, 1)));
+        assert!(query.matches(&episode("Lanternwick", 1, 2)));
+    }
+
+    #[test]
+    fn contains_ci_falls_back_to_unicode_lowercasing_for_non_ascii_text() {
+        assert!(contains_ci("Lanternwick Höllow", "höllow"));
+        assert!(!contains_ci("Lanternwick Höllow", "hollow"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_function_is_a_torznab_error_not_a_404() {
+        let (_dir, state) = with_peer().await;
+        let text = body(&state, "/api?t=bogus&apikey=sam-key").await;
+        assert!(text.contains("no such function: bogus"), "{text}");
+        assert_eq!(
+            get(&state, "/api?t=bogus&apikey=sam-key").await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_reports_an_unready_store_and_a_release_without_a_torrent_has_no_magnet() {
+        let (_dir, state) = crate::state::fixtures::store_unopenable();
+        let Err(err) = collect(&state, &SearchQuery::default(), PeerScope::All, "fp").await else {
+            panic!("a store that will not open cannot answer a search");
+        };
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.1.contains("not ready"), "{}", err.1);
+
+        let (_dir, state) = unconfigured();
+        let store = state.store().await.unwrap();
+        let mut item = movie("Harborlight");
+        item.info_hash = Some("ab".repeat(20));
+        item.state = ShareState::Seeding;
+        store.upsert(&item).await.unwrap();
+        let matched = collect(&state, &SearchQuery::default(), PeerScope::All, "fp")
+            .await
+            .unwrap();
+        assert_eq!(matched.items.len(), 1);
+        assert!(matched.magnet_url(&matched.items[0]).starts_with("magnet:"));
+        // A release the store lists but whose torrent is not built yet has
+        // nothing a magnet could name.
+        item.info_hash = None;
+        assert_eq!(matched.magnet_url(&item), "");
+    }
 }

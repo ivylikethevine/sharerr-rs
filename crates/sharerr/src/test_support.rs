@@ -13,6 +13,24 @@ use secrecy::SecretString;
 /// `build_arr`/`build_client`/`build_tracker`) can be exercised directly
 /// against one of these, no `SHARERR_MASTER_KEY` required.
 pub(crate) fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
+    trace();
     sharerr_store::Vault::open(dir.path().join("vault.bin"), &SecretString::from("master"))
         .expect("opening a fresh vault file cannot fail")
+}
+
+/// Install a process-wide `tracing` subscriber at `TRACE`, once, capturing
+/// output per test the way `cargo test` captures `println!`.
+///
+/// Without a subscriber every `tracing::warn!(..)` and friend short-circuits
+/// before evaluating its fields, so the `Err(err) => tracing::warn!(...)`
+/// arms this suite drives on purpose execute only their first line. Every
+/// fixture that builds a `ServeState`, `Vault`, `Seeder` or sync harness
+/// calls this, so those arms run in full — and a field expression that
+/// panics (a `Display` impl on a poisoned value, say) fails the test that
+/// reached it instead of passing silently.
+pub(crate) fn trace() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_test_writer()
+        .try_init();
 }

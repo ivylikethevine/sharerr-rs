@@ -1310,4 +1310,127 @@ mod tests {
 
         assert!(runs.is_empty());
     }
+
+    // ------------------------------------------------- torrent_client_line
+
+    use sharerr_testkit::mock::base_url;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn transmission_config(url: &Url) -> Config {
+        Config {
+            torrent_backend: sharerr_core::config::TorrentBackend::Transmission,
+            transmission: sharerr_core::config::TransmissionConfig {
+                url: url.clone(),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    /// A vault reader that answers every key with a password — Transmission
+    /// authenticates with one, so the check gets past credential resolution
+    /// and on to the wire.
+    #[allow(clippy::unnecessary_wraps, reason = "matches the reader's signature")]
+    fn password(_: &'static str) -> Result<Option<SecretString>, String> {
+        Ok(Some(SecretString::from("pw")))
+    }
+
+    async fn transmission_answering(status: u16, body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn torrent_client_line_names_a_reachable_client_with_its_version() {
+        let server = transmission_answering(
+            200,
+            serde_json::json!({ "result": "success", "arguments": { "version": "4.0.5" } }),
+        )
+        .await;
+        let line = torrent_client_line(&transmission_config(&base_url(&server)), &password).await;
+        assert!(line.ok, "{line:?}");
+        assert!(line.message.contains("4.0.5"), "{line:?}");
+        assert_eq!(line.name, "Torrent client");
+    }
+
+    #[tokio::test]
+    async fn torrent_client_line_reports_a_rejected_credential() {
+        let server = transmission_answering(401, serde_json::json!({})).await;
+        let line = torrent_client_line(&transmission_config(&base_url(&server)), &password).await;
+        assert!(!line.ok);
+        assert!(line.message.contains("rejected the credential"), "{line:?}");
+    }
+
+    #[tokio::test]
+    async fn torrent_client_line_reports_a_server_error_as_failed() {
+        let server = transmission_answering(500, serde_json::json!({})).await;
+        let line = torrent_client_line(&transmission_config(&base_url(&server)), &password).await;
+        assert!(!line.ok);
+        assert!(line.message.starts_with("failed:"), "{line:?}");
+    }
+
+    #[tokio::test]
+    async fn torrent_client_line_reports_nothing_listening_as_unreachable() {
+        let port = sharerr_testkit::net::closed_port();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let line = torrent_client_line(&transmission_config(&url), &password).await;
+        assert!(!line.ok);
+        assert!(line.message.starts_with("could not reach it:"), "{line:?}");
+    }
+
+    #[tokio::test]
+    async fn torrent_client_line_reports_an_unreadable_vault_as_such() {
+        let sealed = |_: &'static str| Err::<Option<SecretString>, _>("vault sealed".to_owned());
+        let line = torrent_client_line(&Config::default(), &sealed).await;
+        assert!(!line.ok);
+        assert_eq!(line.message, "credential unreadable: vault sealed");
+    }
+
+    #[tokio::test]
+    async fn torrent_client_line_reports_a_url_the_client_cannot_use_as_misconfigured() {
+        let config = Config {
+            qbittorrent: sharerr_core::config::QbitConfig {
+                url: Url::parse("file:///not-a-host").unwrap(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let line = torrent_client_line(&config, &password).await;
+        assert!(!line.ok);
+        assert!(line.message.starts_with("misconfigured:"), "{line:?}");
+    }
+
+    // ------------------------------------------------------ lighthouse_view
+
+    /// A configured lighthouse the poller has not reached yet has no row, and
+    /// a short row list is itself unhealthy — see the function's own comment.
+    #[tokio::test]
+    async fn lighthouse_view_is_unhealthy_until_every_configured_lighthouse_has_reported() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        assert!(lighthouse_view(&state, &Config::default()).await.is_none());
+
+        let config = Config {
+            lighthouse: sharerr_core::config::LighthouseConfig {
+                urls: vec![Url::parse("https://beacon.example/").unwrap()],
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let view = lighthouse_view(&state, &config)
+            .await
+            .expect("one lighthouse is configured");
+        assert_eq!(view.configured, 1);
+        assert!(view.rows.is_empty());
+        assert!(!view.healthy);
+        assert!(view.last_pass.is_none());
+        assert_eq!(view.lookups_attempted, 0);
+    }
 }

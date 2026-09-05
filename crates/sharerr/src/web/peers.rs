@@ -1312,4 +1312,109 @@ mod tests {
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         );
     }
+
+    // ------------------------------------------------------ the long tail
+
+    #[test]
+    fn an_absolute_timestamp_outside_the_calendar_renders_nothing() {
+        assert_eq!(absolute(i64::MAX), "");
+    }
+
+    #[tokio::test]
+    async fn set_gossip_for_a_friend_that_no_longer_exists_is_rejected() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+
+        let response = set_gossip(
+            State(state),
+            Path(999),
+            Form(GossipForm {
+                url: "https://sams-sharerr.example".to_owned(),
+                key: String::new(),
+                clear_key: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// The gossip key's whole life through the vault: stored with the URL,
+    /// cleared by the checkbox, and — once stored again — removed along with
+    /// the friend. Opens a real vault through `Jail`, per CLAUDE.md.
+    #[test]
+    fn a_gossip_key_is_stored_cleared_and_removed_with_the_friend() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "peers-tests-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+            let state = web_state(serve.clone());
+
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+                let vault_key = secret_keys::peer_gossip_key(sam.id);
+                async fn stored(serve: &crate::state::ServeState, key: &str) -> bool {
+                    serve
+                        .open_vault()
+                        .await
+                        .unwrap()
+                        .get(key)
+                        .unwrap()
+                        .is_some()
+                }
+
+                let response = set_gossip(
+                    State(state.clone()),
+                    Path(sam.id),
+                    Form(GossipForm {
+                        url: "https://sams-sharerr.example".to_owned(),
+                        key: "a-key-sam-issued-us".to_owned(),
+                        clear_key: None,
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+                assert!(stored(&serve, &vault_key).await, "stored with the URL");
+
+                let response = set_gossip(
+                    State(state.clone()),
+                    Path(sam.id),
+                    Form(GossipForm {
+                        url: "https://sams-sharerr.example".to_owned(),
+                        key: String::new(),
+                        clear_key: Some("on".to_owned()),
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+                assert!(!stored(&serve, &vault_key).await, "the checkbox clears it");
+
+                set_gossip(
+                    State(state.clone()),
+                    Path(sam.id),
+                    Form(GossipForm {
+                        url: "https://sams-sharerr.example".to_owned(),
+                        key: "a-key-sam-issued-us".to_owned(),
+                        clear_key: None,
+                    }),
+                )
+                .await;
+                let response = delete(State(state), Path(sam.id)).await;
+                assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+                assert!(
+                    !stored(&serve, &vault_key).await,
+                    "deleting the friend removes the key"
+                );
+            });
+            Ok(())
+        });
+    }
 }

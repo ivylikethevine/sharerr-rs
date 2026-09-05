@@ -1354,4 +1354,128 @@ mod tests {
             .unwrap();
         assert_eq!(bytes.as_ref(), built.data.as_slice());
     }
+
+    // ------------------------------------------------------ the long tail
+
+    fn shared_item() -> sharerr_core::model::SharedItem {
+        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+        SharedItem {
+            id: None,
+            source: MediaSource::Sonarr,
+            source_id: 1,
+            file_id: 1,
+            spec: MediaSpec::Episode {
+                series_title: "Lanternwick Hollow".to_owned(),
+                season: 1,
+                episode: 1,
+            },
+            release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+            arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+            size: 1,
+            ids: ExternalIds::default(),
+            media: None,
+            info_hash: None,
+            announce_token_fp: None,
+            created_by_sharerr: true,
+            state: ShareState::Pending,
+            last_error: None,
+            created_at: None,
+            achieved_ratio: None,
+            ratio_limit_reported: None,
+        }
+    }
+
+    /// An announce carrying a friend's own key hash, through the real router:
+    /// admitted, answered, and the address it came from recorded against that
+    /// friend as a client-side sighting.
+    #[test]
+    fn an_attributed_announce_records_the_clients_address_through_the_router() {
+        with_open_vault(|state| async move {
+            use sharerr_core::model::MediaSource;
+            // With no instance token configured every announce is admitted
+            // unattributed; attribution only happens once one is required.
+            state
+                .open_vault()
+                .await
+                .unwrap()
+                .put(
+                    sharerr_core::config::secret_keys::TRACKER_TOKEN,
+                    &SecretString::from("instance-token"),
+                )
+                .unwrap();
+            let store = state.store().await.unwrap();
+            let sam = store
+                .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                .await
+                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            store
+                .set_seeding(MediaSource::Sonarr, 1, &"00".repeat(20), None, true)
+                .await
+                .unwrap();
+
+            let hash = "%00".repeat(20);
+            let (status, body) = get(
+                &state,
+                &format!(
+                    "/announce/{}?info_hash={hash}&peer_id={hash}&port=6881",
+                    sam.key_hash
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "{body}");
+
+            let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+            assert_eq!(endpoints.len(), 1, "{endpoints:?}");
+            assert_eq!(endpoints[0].kind, EndpointKind::Client);
+            assert!(
+                endpoints[0].addr.starts_with("203.0.113.7:"),
+                "{endpoints:?}"
+            );
+        });
+    }
+
+    /// The row says seeding but the cached file is gone (a wiped data
+    /// directory with an intact database): a 404 that says so, not a 500.
+    /// And with the file present, a `?token=` download is rewritten for the
+    /// friend the token names — the router-level counterpart of
+    /// `a_downloaded_torrent_is_attributed_to_the_peer_whose_token_it_carries`.
+    #[tokio::test]
+    async fn a_torrent_download_is_a_404_without_its_file_and_attributed_with_one() {
+        use sharerr_core::model::MediaSource;
+        let (dir, state) = with_advertised_host();
+        let store = state.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let built = built_torrent(dir.path(), "http://seed.example:8477/announce");
+        store.upsert(&shared_item()).await.unwrap();
+        store
+            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None, true)
+            .await
+            .unwrap();
+        let uri = format!("/torrents/{}.torrent", built.info_hash);
+
+        let (status, body) = get(&state, &uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("torrent file missing"), "{body}");
+
+        let torrent_dir = state.config().await.torrent_dir();
+        tokio::fs::create_dir_all(&torrent_dir).await.unwrap();
+        tokio::fs::write(
+            sharerr_torrent::torrent_file_path(&torrent_dir, &built.info_hash),
+            &built.data,
+        )
+        .await
+        .unwrap();
+
+        // `get` lossily decodes the body, so the rewrite itself is asserted
+        // on `attributed_bytes` directly elsewhere; this proves the route
+        // takes the token path and still serves a torrent.
+        let (status, body) = get(&state, &format!("{uri}?token={}", sam.key_hash)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains(&sam.key_hash), "{body}");
+    }
 }
