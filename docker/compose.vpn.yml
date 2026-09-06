@@ -111,7 +111,7 @@ services:
       - "127.0.0.1:28080:8080"
 
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:a00b6a597a3832a1814cde0ef60abc55c94644f3f80902c3432f6af6de8d4a96
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:8d48fa8c619caadfb103f04efea8747e2a2762d6c7551690919cffb987e61cee
     container_name: sharerr-vpn-test-qbittorrent
     # The whole point of this stack. No `networks:`, and no `ports:` — both belong
     # to gluetun now, and declaring either here is an error.
@@ -141,7 +141,7 @@ services:
       - "127.0.0.1:28989:8989"
 
   radarr:
-    image: lscr.io/linuxserver/radarr:6.3.0@sha256:119aaa4a4f7349bcd2a136c5373a0d7925b5479915c7dfe0c0ad352db2a6d438
+    image: lscr.io/linuxserver/radarr:6.3.0@sha256:95ba0801df4d9d1d79d0d9a3849f656542497dab061d91b87ad4f53a71aff3ef
     container_name: sharerr-vpn-test-radarr
     networks: [vpn]
     environment:
