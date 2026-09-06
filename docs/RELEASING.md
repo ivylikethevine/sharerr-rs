@@ -19,18 +19,29 @@ themselves without cutting a tag.
 
 ## What ships, and where
 
-Two container images, from two workflows, each approved separately, plus a
-GitHub Release page once both images have their tags:
+Two container images, built by one workflow and approved together, plus a
+GitHub Release page once both are published:
 
 | Image | Workflow | `docker/Dockerfile` target |
 | --- | --- | --- |
 | `ghcr.io/ivylikethevine/sharerr-rs` | `docker.yml` | `runtime-sharerr` |
-| `ghcr.io/ivylikethevine/sharerr-lighthouse` | `docker-lighthouse.yml` | `runtime-lighthouse` |
+| `ghcr.io/ivylikethevine/sharerr-lighthouse` | `docker.yml` | `runtime-lighthouse` |
 
-Both workflows are thin callers of the shared `docker-image.yml`, which holds
-the build/publish logic. One Dockerfile, one builder stage, one MSRV pin; two
-packages behind two approvals, so a break in one build cannot hold the
-other's release.
+`docker.yml` runs two build jobs — `docker` and `lighthouse` — each a thin
+caller of the shared `docker-image.yml`, which holds the actual build logic.
+One Dockerfile, one builder stage, one MSRV pin. The two build jobs run
+unattended and independently, but a single `publish` job, behind one
+`environment: release` approval, promotes both: approving a release approves
+both images as a matched set. If either build fails, `publish` never runs,
+and neither image is promoted.
+
+This used to be two separate workflow files, each with its own approval,
+specifically so a break in one build could never hold up the other's
+release — cutting a release meant approving twice. That has been reversed in
+favor of the one-approval flow above: the two images now always ship
+together or not at all, trading the old failure isolation (a lighthouse-only
+break no longer lets the sharerr image ship on its own) for a release that
+only ever needs one click.
 
 Nothing else is published anywhere: no crates.io (see
 [`docs/SUPPORT.md`](SUPPORT.md#publishing-to-cratesio)), no binaries attached
@@ -71,18 +82,22 @@ git push origin v1.2.3
 git tag -v v1.2.3   # verify, the same as a commit
 ```
 
-Each workflow's `build` job then runs unattended: checks out the tag,
-cross-compiles both architectures, pushes the multi-arch image to
+Each of `docker.yml`'s two build jobs then runs unattended: checks out the
+tag, cross-compiles both architectures, pushes its multi-arch image to
 `pending-<sha>` with a signed build-provenance attestation. `publish` runs
-next, behind a required reviewer, and does not rebuild: it retags the exact
-digest `build` attested with `docker buildx imagetools create`. Approving a
-release means approving bytes that already exist. See `docker-image.yml`'s
-own comments for the job-by-job detail.
+next, behind one required reviewer, and does not rebuild either image: it
+retags the exact digests `docker` and `lighthouse` attested with `docker
+buildx imagetools create`, one image at a time. Approving a release means
+approving bytes that already exist, for both images at once. See
+`docker-image.yml`'s own comments for the job-by-job detail of a single
+build, and `docker.yml`'s `publish` job for how the two are promoted
+together.
 
 ## The GitHub Release
 
-`docker.yml` carries one more job, `release`, that runs after `publish` and
-creates the Releases-tab entry:
+`docker.yml` carries one more job, `release`, that runs after `publish` —
+so only once both images have actually been promoted — and creates the
+Releases-tab entry:
 
 - **Title and tag**: the pushed `v*` tag, verbatim.
 - **Notes**: `gh release create --generate-notes`, so merged PR titles since
@@ -93,9 +108,9 @@ creates the Releases-tab entry:
   the model instead of a `CHANGELOG.md`.
 - **Prerelease**: a tag with a `-` segment is marked as one.
 
-It runs independently of `docker-lighthouse.yml`; a lighthouse build failure
-does not block it, and the release describes whichever images actually
-finished publishing for that tag.
+Because `release` needs `publish`, which itself needs both build jobs to have
+succeeded, the release always describes both images — there is no longer a
+path where one image ships without the other, or without the Release page.
 
 ## The one-time setup this depends on
 
@@ -107,16 +122,16 @@ before trusting that a release needs a human in the loop.
 
 ## Rehearsing it
 
-Both workflows accept a manual `workflow_dispatch`: `build` pushes to the
-same `pending-<sha>` tag and produces the same attestation a real tag push
-would, so the whole build-push-attest path can be exercised any day.
-`publish` and `release` both require `github.event_name == 'push'`, which a
-dispatch can never satisfy, so a rehearsal publishes nothing and creates no
-Release whatever the environment's reviewer setting says.
+`docker.yml` accepts a manual `workflow_dispatch`: both its build jobs push
+to the same `pending-<sha>` tags and produce the same attestations a real tag
+push would, so the whole build-push-attest path for both images can be
+exercised any day. `publish` and `release` both require
+`github.event_name == 'push'`, which a dispatch can never satisfy, so a
+rehearsal publishes nothing and creates no Release whatever the
+environment's reviewer setting says.
 
 ```bash
 gh workflow run docker.yml
-gh workflow run docker-lighthouse.yml
 ```
 
 ## Verifying a published image

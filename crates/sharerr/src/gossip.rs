@@ -47,9 +47,6 @@ use sharerr_store::{EndpointKind, ObservedVia, Store};
 use crate::state::ServeState;
 use crate::torznab::Caller;
 
-/// How often the outbound exchange runs against friends with a configured URL.
-const EXCHANGE_INTERVAL: Duration = Duration::from_secs(900);
-
 /// Cap on records accepted in one POST — a friend relays a friend list, not a
 /// crawl of the internet.
 const MAX_RECORDS: usize = 64;
@@ -469,7 +466,12 @@ pub async fn exchange_loop(state: Arc<ServeState>) {
         if let Err(reason) = outcome {
             tracing::debug!(reason, "gossip exchange skipped");
         }
-        tokio::time::sleep(EXCHANGE_INTERVAL).await;
+        // Read fresh each pass, the same as `sync`'s own loop
+        // (`commands::serve::background`) — cheap, and it means a changed
+        // `gossip.exchange_secs` takes effect on the next tick rather than
+        // needing a restart.
+        let interval = state.with_config(|c| c.gossip.exchange_secs).await;
+        tokio::time::sleep(Duration::from_secs(interval)).await;
     }
 }
 

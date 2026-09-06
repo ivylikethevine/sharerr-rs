@@ -9,6 +9,7 @@ behind it.
 
 - [Tier 1: hermetic](#tier-1-hermetic)
 - [Tier 2: the compose stacks](#tier-2-the-compose-stacks)
+- [Tier 3: the mesh stack](#tier-3-the-mesh-stack)
 - [Fixtures](#fixtures)
 - [Coverage](#coverage)
 - [Benchmarks and fuzzing](#benchmarks-and-fuzzing)
@@ -60,12 +61,46 @@ The assertion that justifies this tier existing, and that no mock can prove:
 after a real sync through a real torrent client, every media file has the
 same inode, mtime, and length it started with.
 
-The two-instance script drives a real gossip/request/grab exchange between
+The two-instance script drives a real Torznab request/grab exchange between
 two independent sharerr stacks, the one scenario a single-instance stack
-cannot exercise. See
+cannot exercise — it creates a peer purely to mint a Torznab key for
+Prowlarr, but never wires the two instances as gossip partners; see
+[Tier 3](#tier-3-the-mesh-stack) for the tier that actually does. See
 [`docker/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md)
 for each stack's services, ports, and how to exercise the feed and tracker by
 hand.
+
+## Tier 3: the mesh stack
+
+```bash
+./scripts/run_docker_tests_mesh.sh
+```
+
+Opt-in and local only; CI never runs it, same as tier 2. No *arr app and no
+torrent client — tiers 1-2 already prove the media path; this one proves the
+gossip/lighthouse mesh instead, which had zero end-to-end coverage before it
+existed: no other compose stack sets `gossip_url` or `lighthouse.urls`, and
+the lighthouse appears in no other test stack.
+
+Three independent sharerr nodes and one independent lighthouse. The script
+meshes every pair (not just a line) so trust-on-first-use binds every
+identity, then severs the direct link between two of them and rotates one
+node's advertised endpoint — the one event the whole reconnection system
+exists to survive. Bash asserts the mechanical outcomes by reading each
+node's own peers page: the still-linked pair updates directly, the severed
+pair recovers only through the third node's relay or the lighthouse, and a
+restarted node rejoins and re-converges. `crates/sharerr/tests/e2e_mesh.rs`
+covers the one thing bash cannot: an actual Ed25519 verification that the
+lighthouse's answer is a real record, not one of its fabricated decoys.
+
+`gossip.exchange_secs`, `lighthouse.interval_secs`, and
+`lighthouse.quiet_secs` default to 900/900/3600 seconds and have no
+settings-page field — a real deployment has no reason to run tighter, and
+exposing a floor-less knob in the UI would invite hammering every friend's
+instance. `docker/compose.mesh.yml` sets all three to single-digit seconds
+via `SHARERR_*` environment overrides, which is the one sanctioned reason to
+go below the default at all; see `GossipConfig`'s own doc in
+`crates/sharerr-core/src/config.rs`.
 
 ## Fixtures
 

@@ -20,6 +20,7 @@ default, and what sets it.
 - [`[feed]`](#feed)
 - [`[tracker]`](#tracker)
 - [`[[path_map]]`](#path_map)
+- [`[gossip]`](#gossip)
 - [`[lighthouse]`](#lighthouse)
 - [`[gluetun]` and `[gluetun_client]`](#gluetun-and-gluetun_client)
 - [`[sync]`](#sync)
@@ -224,18 +225,40 @@ sharerr = "/media/tv"
 qbit = "/downloads/tv"
 ```
 
+## `[gossip]`
+
+Endpoint gossip with friends — see `sharerr::gossip`'s module docs for the
+protocol. One key, config-file only: there is no settings-page field for
+it, unlike every other interval in this file (`sync.interval_secs`,
+`gluetun.poll_secs`). Those two clamp to a floor before a form ever renders
+them; this one deliberately has none, since the only reason to set it below
+the default is a test bed of several real sharerr nodes converging in
+seconds rather than the production default's fifteen minutes — see
+`docs/TESTING.md`'s "Tier 3" section. A web field with no floor would be a
+standing invitation to set it to a few seconds in production and hammer
+every friend's instance; `sharerr.toml` or a `SHARERR_GOSSIP__*` override
+still reaches it.
+
+| TOML key                | Type | Default | Notes                                                            |
+| ------------------------ | ---- | ------- | ----------------------------------------------------------------- |
+| `gossip.exchange_secs`   | int  | `900`   | How often the outbound exchange runs against friends with a `gossip_url`. No floor. |
+
 ## `[lighthouse]`
 
 See [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the design and for running one. `enabled`
 controls _hosting_ one on this instance's own listener; `lighthouse.urls`
 (below the _client_ half) is independent — consuming a friend's lighthouse
 needs nothing here, and hosting one for friends needs nothing set there.
+`interval_secs` and `quiet_secs` are config-file only for the same reason
+`gossip.exchange_secs` is — see `[gossip]` above.
 
-| TOML key             | Type                    | Default    | Notes                                                                                                              |
-| -------------------- | ----------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------ |
-| `lighthouse.enabled` | bool                    | `false`    | Run the lighthouse as extra routes on one of sharerr's own listeners.                                              |
-| `lighthouse.mount`   | `frontend` \| `tracker` | `frontend` | Which listener, when `enabled`.                                                                                    |
-| `lighthouse.urls`    | list of urls            | `[]`       | Lighthouse(s) this instance reports its own endpoint to and queries for a quiet friend — independent of `enabled`. |
+| TOML key                 | Type                    | Default    | Notes                                                                                                              |
+| ------------------------- | ----------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------ |
+| `lighthouse.enabled`     | bool                    | `false`    | Run the lighthouse as extra routes on one of sharerr's own listeners.                                              |
+| `lighthouse.mount`       | `frontend` \| `tracker` | `frontend` | Which listener, when `enabled`.                                                                                    |
+| `lighthouse.urls`        | list of urls            | `[]`       | Lighthouse(s) this instance reports its own endpoint to and queries for a quiet friend — independent of `enabled`. |
+| `lighthouse.interval_secs` | int                   | `900`      | How often the report-and-lookup pass runs. No floor; matches `gossip.exchange_secs` by default on purpose.         |
+| `lighthouse.quiet_secs`  | int                     | `3600`     | How long a peer must go unseen before a lighthouse lookup is worth trying. No floor.                               |
 
 ## `[gluetun]` and `[gluetun_client]`
 
@@ -475,10 +498,10 @@ variable, rather than accepting a save that would be silently discarded.
 `SHARERR_MASTER_KEY` (and `SHARERR_MASTER_KEY_FILE`, pointing at a Docker
 secret) is the one setting that has no `sharerr.toml` equivalent at all,
 since it is what encrypts the vault the file's own secrets would otherwise
-need to unlock. It, `SHARERR_CONFIG`, and the tier-2 test suite's
-`SHARERR_E2E_*` variables are the only `SHARERR_*` names that are not config
-fields; any other unrecognised `SHARERR_*` variable is a startup error, same
-as an unknown key in the file.
+need to unlock. It, `SHARERR_CONFIG`, and the opt-in test suites' own
+`SHARERR_E2E_*` variables (tiers 2 and 3) are the only `SHARERR_*` names
+that are not config fields; any other unrecognised `SHARERR_*` variable is
+a startup error, same as an unknown key in the file.
 
 The `sharerr-lighthouse` binary reads no `sharerr.toml` and has two
 variables of its own: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`) and

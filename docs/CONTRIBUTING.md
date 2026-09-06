@@ -131,7 +131,7 @@ one.
 | `workflow lint (zizmor + actionlint)` | `ci.yml` | Yes |
 | `advisory (hadolint + markdownlint + typos)` | `ci.yml` | No, reports only; each gets its own step summary |
 | CodeQL (`rust`, `actions`) | `codeql.yml` | Yes, as code scanning; alerts are diff-scoped |
-| `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml`, `docker-lighthouse.yml` | Yes; also the de-facto MSRV check |
+| `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml` | Yes; also the de-facto MSRV check |
 
 Four more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
 `link-check.yml`) run weekly and on every push to `main`, and report by

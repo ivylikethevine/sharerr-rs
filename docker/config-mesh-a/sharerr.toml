@@ -1,0 +1,29 @@
+# Configuration for node A of the gossip mesh test stack — tier 3. See
+# docker/README.md's "The mesh stack" section and
+# scripts/run_docker_tests_mesh.sh.
+#
+# Deliberately carries no *arr app and no torrent client: this stack proves
+# the gossip/lighthouse mesh, not the media sync path tiers 1-2 already
+# cover. Secrets — this instance's gossip identity, the tracker token, and
+# every friend's issued key — live in the vault, minted on first use; see
+# the script for how they get there.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[tracker]
+# A service name, not "localhost" — the other mesh nodes dial this address
+# directly, the same reasoning compose.two-instance.yml's own note gives.
+advertised_host = "sharerr-a"
+port = 8477
+
+[lighthouse]
+# Consumed only — this instance does not host the lighthouse itself, the
+# standalone `lighthouse` service in compose.mesh.yml does.
+urls = ["http://lighthouse:7878"]
+
+[sync]
+enabled = false

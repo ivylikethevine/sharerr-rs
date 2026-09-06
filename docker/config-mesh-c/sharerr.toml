@@ -1,0 +1,19 @@
+# Configuration for node C of the gossip mesh test stack — tier 3. See
+# docker/README.md's "The mesh stack" section and
+# scripts/run_docker_tests_mesh.sh.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[tracker]
+advertised_host = "sharerr-c"
+port = 8477
+
+[lighthouse]
+urls = ["http://lighthouse:7878"]
+
+[sync]
+enabled = false

@@ -15,6 +15,12 @@
 /docker/state-tm
 /docker/state-rt
 /docker/state-two-instance
+# The mesh stack's own live config copies — see run_docker_tests_mesh.sh for
+# why these are scratch copies of docker/config-mesh-*/sharerr.toml rather
+# than that checked-in directory itself: one scenario rewrites a node's
+# config in place through a real settings POST, the same way an operator's
+# browser would, and that must never land on the tracked template.
+/docker/state-mesh
 
 # Never commit a master key.
 .env

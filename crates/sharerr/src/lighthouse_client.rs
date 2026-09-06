@@ -48,16 +48,14 @@ use url::Url;
 use crate::gossip;
 use crate::state::ServeState;
 
-/// How often the report-and-lookup pass runs. Matches
-/// `gossip::EXCHANGE_INTERVAL` — there is no reason for a lighthouse pass to
-/// run on a different cadence than gossip's own.
-const INTERVAL: Duration = Duration::from_secs(900);
-
-/// A peer is worth a lighthouse lookup once it has been this long since they
-/// were last seen — direct or gossiped. Matches the order of magnitude of
-/// `notify::QUIET_CHECK_INTERVAL`: an hour costs nothing in responsiveness
-/// for something that, when it happens at all, happens on the order of days.
-const QUIET_THRESHOLD_SECS: i64 = 3600;
+// How often the report-and-lookup pass runs, and how long a peer must go
+// unseen before it is worth a lighthouse lookup, both live in
+// `Config::lighthouse` (`interval_secs`, `quiet_secs`) rather than as consts
+// here — see that struct for the defaults, which match this comment's old
+// values (900s, matching `gossip`'s own exchange interval; 3600s, the order
+// of magnitude of `notify::QUIET_CHECK_INTERVAL`). Configurable so a tier-3
+// test bed of several real sharerr nodes can converge in seconds instead of
+// waiting out a 15-minute poll.
 
 /// What the lighthouse poller last did, so the UI can say whether reporting is
 /// actually working.
@@ -192,12 +190,18 @@ pub async fn sync_loop(state: Arc<ServeState>) {
 
     loop {
         run(&state, &http).await;
-        tokio::time::sleep(INTERVAL).await;
+        // Read fresh each pass, the same as `sync`'s own loop
+        // (`commands::serve::background`) and `gossip::exchange_loop` — a
+        // changed `lighthouse.interval_secs` takes effect on the next tick.
+        let interval = state.with_config(|c| c.lighthouse.interval_secs).await;
+        tokio::time::sleep(Duration::from_secs(interval)).await;
     }
 }
 
 async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
-    let urls = state.with_config(|c| c.lighthouse.urls.clone()).await;
+    let (urls, quiet_secs) = state
+        .with_config(|c| (c.lighthouse.urls.clone(), c.lighthouse.quiet_secs))
+        .await;
     if urls.is_empty() {
         return;
     }
@@ -218,7 +222,7 @@ async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
     // them together rather than one after the other.
     tokio::join!(
         report(http, &urls, &peers, own.as_ref(), &status),
-        lookup_quiet(http, &urls, &peers, &vault, &store, &status)
+        lookup_quiet(http, &urls, &peers, &vault, &store, quiet_secs, &status)
     );
     // Stamped after both halves finish, so "last pass" means a completed one
     // rather than one that started and is still in flight.
@@ -320,14 +324,16 @@ async fn lookup_quiet(
     peers: &[Peer],
     vault: &Vault,
     store: &Store,
+    quiet_secs: u64,
     status: &LighthouseStatus,
 ) {
     let now = now_epoch();
+    let quiet_secs = i64::try_from(quiet_secs).unwrap_or(i64::MAX);
 
     let quiet: Vec<&Peer> = peers
         .iter()
         .filter(|p| !p.is_revoked())
-        .filter(|p| is_quiet(p, now))
+        .filter(|p| is_quiet(p, now, quiet_secs))
         .collect();
     // Counted here rather than inside the per-peer call, so the number means
     // "friends this pass had reason to look up" — zero being the healthy case,
@@ -343,9 +349,9 @@ async fn lookup_quiet(
 /// Whether a peer has been silent long enough to be worth a lighthouse
 /// lookup. Split out so [`lookup_quiet`] can count the quiet ones before
 /// spawning the lookups, and so the threshold has one test to its name.
-fn is_quiet(peer: &Peer, now: i64) -> bool {
+fn is_quiet(peer: &Peer, now: i64, quiet_secs: i64) -> bool {
     peer.last_seen_at
-        .is_none_or(|seen| now - seen >= QUIET_THRESHOLD_SECS)
+        .is_none_or(|seen| now - seen >= quiet_secs)
 }
 
 /// One friend's lookup across every configured lighthouse, stopping at the
@@ -553,18 +559,19 @@ mod tests {
     #[tokio::test]
     async fn quietness_is_measured_against_the_threshold() {
         let now = 1_000_000;
+        let threshold = 3600;
         let (_store, mut peer) = store_with_peer("Alex", "alex-key").await;
 
         peer.last_seen_at = Some(now - 60);
-        assert!(!is_quiet(&peer, now));
+        assert!(!is_quiet(&peer, now, threshold));
 
-        peer.last_seen_at = Some(now - QUIET_THRESHOLD_SECS);
-        assert!(is_quiet(&peer, now));
+        peer.last_seen_at = Some(now - threshold);
+        assert!(is_quiet(&peer, now, threshold));
 
         // Never seen at all: the friend has the key but has never used it, so
         // a lighthouse is exactly the thing that might find them.
         peer.last_seen_at = None;
-        assert!(is_quiet(&peer, now));
+        assert!(is_quiet(&peer, now, threshold));
     }
 
     /// Sign a record via `sharerr_lighthouse::signable_bytes` directly —
@@ -737,6 +744,7 @@ mod tests {
             &peers,
             &vault,
             &store,
+            3600,
             &LighthouseStatus::default(),
         )
         .await;
@@ -775,6 +783,7 @@ mod tests {
             &peers,
             &vault,
             &store,
+            3600,
             &LighthouseStatus::default(),
         )
         .await;
@@ -814,6 +823,7 @@ mod tests {
             &peers,
             &vault,
             &store,
+            3600,
             &LighthouseStatus::default(),
         )
         .await;
@@ -986,6 +996,7 @@ mod tests {
             &peers,
             &vault,
             &store,
+            3600,
             &status,
         )
         .await;

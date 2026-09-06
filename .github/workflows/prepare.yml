@@ -1,5 +1,6 @@
-# Two questions every heavy job in ci.yml, docker.yml and docker-lighthouse.yml
-# needs answered before it can start: which runner to use, and whether this event
+# Two questions every heavy job in ci.yml and docker.yml (both its `docker`
+# and `lighthouse` callers of docker-image.yml) needs answered before it can
+# start: which runner to use, and whether this event
 # even touched anything that job cares about. Both used to be separate reusable
 # workflows (`runner.yml`, `changes.yml`) — two VM boots, sequentially `needs:`ed,
 # for what is together a fork check and a `git diff` against a filter. Merged here
@@ -20,10 +21,10 @@
 # changed-files detection
 # ------------------------
 # Whether anything besides workflow YAML (or whatever `inputs.filters` names)
-# changed. A caller passes its own filter (ci.yml and docker.yml want "anything
-# except .github/workflows/**"; docker-lighthouse.yml wants only the paths that
-# feed its image) so the "code" key means something different per caller, same as
-# it did in changes.yml.
+# changed. A caller passes its own filter (ci.yml and docker.yml's `docker`
+# job want "anything except .github/workflows/**"; docker.yml's `lighthouse`
+# job wants only the paths that feed its image) so the "code" key means
+# something different per caller, same as it did in changes.yml.
 #
 # Deliberately no `if:` on the `changes` output's job here — whether this should
 # run at all (push/pull_request only, not schedule or workflow_dispatch) is each
@@ -100,7 +101,7 @@ jobs:
       # match since `**` matches those too. This is the combination that
       # actually means "some changed file lives outside .github/workflows/**"
       # for callers whose filter uses a negated pattern; it has no effect on a
-      # caller (docker-lighthouse.yml) whose filter has none.
+      # caller (docker.yml's `lighthouse` job) whose filter has none.
       - if: github.event_name == 'push' || github.event_name == 'pull_request'
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
