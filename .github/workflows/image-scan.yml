@@ -21,13 +21,15 @@
 # gate is what stops a genuinely bad image from reaching `:latest` in the first
 # place; this is what tells you a *previous* one has gone stale.
 #
-# Runs on the weekly schedule and on every push to main. The push case mostly
-# re-checks images the push itself did not change — `trivy` scans
-# `ghcr.io/<repo>:latest`, which only moves on a `v*` tag, and `pins` scans the
-# same Dockerfile/compose digests regardless of what a given commit touched —
-# but a merge is still a reasonable moment to hear about a CVE that landed
-# upstream since the last cron, same reasoning as advisories.yml and
-# tool-versions.yml.
+# Runs on the weekly schedule and after every green CI run on main. The
+# latter mostly re-checks images the push itself did not change — `trivy`
+# scans `ghcr.io/<repo>:latest`, which only moves on a `v*` tag, and `pins`
+# scans the same Dockerfile/compose digests regardless of what a given commit
+# touched — but a merge is still a reasonable moment to hear about a CVE that
+# landed upstream since the last cron, same reasoning as advisories.yml and
+# tool-versions.yml. Gated on green, not a bare `push`, so a tree that failed
+# CI isn't scanned as if it were about to ship — see pages.yml's header for
+# why a workflow_run trigger is safe despite zizmor's default suspicion of it.
 #
 # They differ in how they speak, and deliberately. `trivy` writes a ::warning
 # and a step summary: its subject is one image that a rebuild fixes, and the
@@ -38,8 +40,10 @@
 
 name: Image scan
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "37 6 * * 3"
@@ -66,6 +70,12 @@ jobs:
     name: scan published image (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # only a green push to main gets a fresh scan; the schedule and a manual
+    # dispatch pass the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,7 +129,7 @@ jobs:
           exit "$status"
 
       - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '1'
-        uses: ./.github/actions/advisory-note
+        uses: $/.github/actions/advisory-note
         with:
           title: trivy
           warning-body: Fixable HIGH/CRITICAL vulnerabilities in ${{ env.IMAGE }}:latest - advisory, not blocking
@@ -138,6 +148,12 @@ jobs:
     name: scan the pinned base images (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # only a green push to main gets a fresh scan; the schedule and a manual
+    # dispatch pass the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     permissions:
       contents: read
       # the one write this job does: upsert (and close) its own tracking issue
@@ -194,7 +210,7 @@ jobs:
       # See .github/actions/upsert-tracking-issue for the shape this,
       # advisories.yml, and tool-versions.yml all share.
       - name: Keep the tracking issue current
-        uses: ./.github/actions/upsert-tracking-issue
+        uses: $/.github/actions/upsert-tracking-issue
         with:
           label: image-scan
           label-color: D93F0B

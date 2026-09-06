@@ -1,10 +1,12 @@
 name: Scorecard
 
-# OpenSSF Scorecard. Runs on every push to main, so the badge reflects the
-# state of the default branch the same day it changes, plus a weekly schedule
-# as a backstop for score movement this repo didn't cause directly — an
-# upstream Scorecard check definition changing, or a quiet week with no pushes
-# at all.
+# OpenSSF Scorecard. Runs after every green CI run on main, so the badge
+# reflects the state of the default branch the same day it changes without
+# grading a tree CI already rejected, plus a weekly schedule as a backstop
+# for score movement this repo didn't cause directly — an upstream Scorecard
+# check definition changing, or a quiet week with no pushes at all. See
+# pages.yml's header for why a workflow_run trigger is safe despite zizmor's
+# default suspicion of it.
 #
 # Most of what it grades this repo already does: every `uses:` is SHA-pinned,
 # dependabot covers four ecosystems, workflow permissions are least-privilege
@@ -22,23 +24,25 @@ name: Scorecard
 # downloads. Publicly, publish_results puts the score on the OpenSSF API that a
 # README badge can read.
 #
-# publish_results only takes effect on `push` and `schedule` against the
-# default branch — the action's own README lists those as the two supported
-# publishing triggers; `workflow_dispatch` runs the analysis but is not
-# guaranteed to publish, which is why it stays as a manual, unpublished
-# rehearsal rather than the thing keeping the badge current.
+# publish_results fires on every non-pull_request event — that is the
+# action's only gate, looser than the README's documented "push, schedule"
+# list — so the workflow_run chain and a manual dispatch both publish; only
+# `pull_request` would run the analysis without publishing, and this file
+# never triggers on that event at all.
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "41 7 * * 2"
   workflow_dispatch:
 
-# Only push can realistically overlap with itself — two quick pushes to main
-# — so cancelling the superseded run is safe: Scorecard grades the current
-# state of the branch, not a history of every push, and the newer run already
-# covers whatever the older one would have found.
+# Only a push to main can realistically overlap with itself — two quick
+# merges — so cancelling the superseded run is safe: Scorecard grades the
+# current state of the branch, not a history of every push, and the newer
+# run already covers whatever the older one would have found.
 concurrency:
   group: scorecard-${{ github.ref }}
   cancel-in-progress: true
@@ -53,6 +57,12 @@ jobs:
     name: supply-chain scorecard
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # only a green push to main gets a fresh score; the schedule and a manual
+    # dispatch pass the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     # Deliberately no `environment:` gate: this runs on a schedule, and a
     # schedule cannot pass one — a required reviewer would leave every weekly
     # run queued for an approval nobody is waiting to give. docker.yml's

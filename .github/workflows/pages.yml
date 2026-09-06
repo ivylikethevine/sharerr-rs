@@ -9,7 +9,18 @@
 
 name: Deploy docs to Pages
 
-on:
+# `workflow_run` is the usual dangerous-triggers shape in name only: the
+# flagged risk is a privileged run checking out the head SHA of whatever
+# triggered it and building from attacker-controlled content. This one does
+# not. `build`'s checkout carries no `ref:`, so it always builds the default
+# branch; the coverage figure comes from an API query for the newest green
+# coverage.yml run on `main` rather than from the triggering run's own
+# payload; and coverage.yml itself never runs on `pull_request` — so there is
+# no attacker-controlled byte anywhere in the path. Every other workflow in
+# this repo that chains off a green CI run the same way (coverage.yml,
+# advisories.yml, image-scan.yml, link-check.yml, scorecard.yml,
+# tool-versions.yml) points back to this comment rather than repeating it.
+on: # zizmor: ignore[dangerous-triggers]
   push:
     branches: ["main"]
     paths:
@@ -21,8 +32,7 @@ on:
   # coverage-badge artifact actually reaches the published badges/coverage.json
   # rather than freezing at whatever the last docs-touching push happened to
   # carry — coverage.yml runs on every merge to main, none of which necessarily
-  # touch the paths above. See .github/zizmor.yml's dangerous-triggers entry
-  # for why this is safe despite zizmor's default suspicion of workflow_run.
+  # touch the paths above.
   workflow_run:
     workflows: [Coverage]
     types: [completed]
@@ -73,7 +83,7 @@ jobs:
       # one code path, via ./fetch-latest-artifact.
       - name: Fetch the last coverage run's badge endpoints
         id: cov-run
-        uses: ./.github/actions/fetch-latest-artifact
+        uses: $/.github/actions/fetch-latest-artifact
         with:
           workflow: coverage.yml
           artifact-name: coverage-badge

@@ -133,7 +133,7 @@ jobs:
     name: prepare
     permissions:
       pull-requests: read
-    uses: ./.github/workflows/prepare.yml
+    uses: $/.github/workflows/prepare.yml
     with:
       filters: ${{ inputs.filters }}
 

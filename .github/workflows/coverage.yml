@@ -7,16 +7,23 @@
 # scripts/run_docker_tests.sh) and stays local and opt-in there too — coverage over a
 # suite this workflow cannot run would just be a misleading percentage.
 #
-# `push: branches: [main]` rather than dispatch-only: the README badge below
-# needs a number that tracks the default branch, not the last time somebody
-# remembered to ask. Instrumented builds don't share ci.yml's cache-friendly
-# artifacts, so this does pay for its own full rebuild on every merge to
-# `main` — worth it for a badge that means something, not worth paying on
-# every `pull_request` too, so that trigger is deliberately absent.
+# Chained off a green CI run rather than `push: branches: [main]` directly:
+# the README badge below needs a number that tracks the default branch, but
+# only a tree `cargo test` already passed on is worth spending a full
+# instrumented rebuild on. Instrumented builds don't share ci.yml's
+# cache-friendly artifacts, so this does pay for its own full rebuild on
+# every green merge to `main` — worth it for a badge that means something,
+# not worth paying on every `pull_request` too, so that trigger is
+# deliberately absent. See pages.yml's header for why a workflow_run trigger
+# is safe despite zizmor's default suspicion of it: no job here checks out
+# the triggering run's ref, and CI never runs `pull_request` from a fork with
+# a token this job could reach.
 name: Coverage
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -38,6 +45,12 @@ jobs:
     name: cargo-llvm-cov (workspace)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # only a green push to main gets a fresh run; a manual dispatch passes
+    # the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     permissions:
       contents: read
     steps:
@@ -69,7 +82,7 @@ jobs:
       # change under a commit that touched no code. ./setup-tool downloads the
       # pin as a release binary once per version and caches it, instead of a
       # fresh `cargo install --version 0.9.0 --locked` source build every run.
-      - uses: ./.github/actions/setup-tool
+      - uses: $/.github/actions/setup-tool
         with:
           tool: cargo-llvm-cov
 
