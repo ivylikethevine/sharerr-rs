@@ -36,6 +36,10 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     "VERSION",
     "E2E_COMPOSE",
     "E2E_LIDARR",
+    // Read by the opt-in mesh suite (crates/sharerr/tests/e2e_mesh.rs) —
+    // the raw gossip key one mesh node issued another, needed for the
+    // lighthouse lookup the Rust assertion runs against a live key hash.
+    "E2E_MESH_KEY",
 ];
 
 const fn strip_prefix(var: &str) -> &str {

@@ -5,10 +5,10 @@
 _Share your media library with friends, over the tools you already run._
 
 <!-- All three release badges read the same GitHub Release version, on purpose.
-The `release` job (docker.yml) only waits on this repo's own image build, so a
-lighthouse build failure never blocks it - but shields.io has no GHCR version
-endpoint to ask instead, so reading the Release version is still the only one
-that cannot drift per-image. -->
+docker.yml's `release` job now waits on both images being published (a single
+`publish` job promotes them together - see docs/RELEASING.md), so the two can
+never drift apart - but shields.io has no GHCR version endpoint to ask
+instead, so reading the Release version is still how all three stay in sync. -->
 
 [![Release](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=github&label=release)](https://github.com/ivylikethevine/sharerr-rs/releases/latest)
 [![sharerr image](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=docker&logoColor=white&label=ghcr.io%2Fsharerr-rs)](https://github.com/ivylikethevine/sharerr-rs/pkgs/container/sharerr-rs)

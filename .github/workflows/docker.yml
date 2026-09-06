@@ -1,10 +1,17 @@
-# Builds `docker/Dockerfile`'s `runtime-sharerr` target and publishes it to
-# GHCR. Everything about how that happens — the unattended sha-tag path on a
-# `main` push, the approval-gated `v*` tag path, the workflow_dispatch
-# rehearsal, the amd64-only PR build, the cache strategy — lives in
-# docker-image.yml, shared with docker-lighthouse.yml. See that file for the
-# reasoning behind each of those choices; only what is specific to *this*
-# image is here.
+# Builds both container images — `docker/Dockerfile`'s `runtime-sharerr` and
+# `runtime-lighthouse` targets — and publishes them to GHCR behind one manual
+# approval. Everything about how a single image is built — the unattended
+# sha-tag path on a `main` push, the workflow_dispatch rehearsal, the
+# amd64-only PR build, the cache strategy — lives in docker-image.yml, called
+# once per image below. What's here is specific to *this* repo: which two
+# images exist, the one `publish` gate that promotes both, and the GitHub
+# Release that follows.
+#
+# One workflow, one approval, deliberately: the two images used to live in
+# separate workflow files, each with its own `environment: release` gate, so
+# cutting a release meant approving twice. See docs/RELEASING.md for why that
+# was reversed. The two images now ship as a matched set — if either build
+# fails, `publish` never runs and neither image nor the Release goes out.
 
 name: Docker
 
@@ -15,20 +22,20 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Covers the whole run including the called workflow — this is what keeps a
-# quick follow-up push from leaving a superseded build running, without
-# sharing a queue with docker-lighthouse.yml's own group.
+# Covers the whole run, both called `docker-image.yml` jobs included — this
+# is what keeps a quick follow-up push from leaving a superseded build of
+# either image running.
 concurrency:
   group: docker-${{ github.ref }}
   cancel-in-progress: true
 
 # A job-level `permissions:` block fully replaces this default for that job
-# — it doesn't intersect with it — and both jobs below already declare their
-# own, so this has no effect on either today. It exists so a future job added
-# without its own block defaults to least-privilege rather than the runner's
-# permissive default, and because Scorecard's Token-Permissions check looks
-# for a top-level declaration specifically, independent of whether any job
-# actually relies on it.
+# — it doesn't intersect with it — and every job below already declares its
+# own, so this has no effect on any of them today. It exists so a future job
+# added without its own block defaults to least-privilege rather than the
+# runner's permissive default, and because Scorecard's Token-Permissions
+# check looks for a top-level declaration specifically, independent of
+# whether any job actually relies on it.
 permissions:
   contents: read
 
@@ -36,10 +43,16 @@ jobs:
   # A called workflow's jobs cannot request a permission this job does not
   # hold — every scope any job inside docker-image.yml needs (including the
   # nested `prepare` call's `pull-requests: read`) has to be granted here.
-  # Named after the image, not a bare `docker`: this and docker-lighthouse.yml
+  # Named after the image, not a bare `docker`: this and `lighthouse` below
   # both call docker-image.yml, and their `build` checks would otherwise both
   # report as `docker / build` — one name two checks share cannot be required
-  # by `main`'s ruleset unambiguously.
+  # by `main`'s ruleset unambiguously. Keeping these names exactly as they
+  # were when the two images lived in separate workflow files is deliberate:
+  # `main`'s ruleset requires the check names `docker (sharerr) / build` and
+  # `docker (lighthouse) / build` verbatim (docs/CONTRIBUTING.md), and a
+  # reusable-workflow check is named `<this job's name> / <called job's
+  # name>` regardless of which file the caller job lives in — so merging the
+  # two callers into this file needs no ruleset edit.
   docker:
     name: docker (sharerr)
     permissions:
@@ -57,7 +70,6 @@ jobs:
       image: ghcr.io/${{ github.repository }}
       target: runtime-sharerr
       cache-scope: sharerr
-      publish-concurrency-group: release-docker
       # Anything outside .github/workflows/** — a workflow-only change can't
       # move what this image builds. Tag pushes bypass this filter entirely
       # (docker-image.yml's own `build` job `if:`).
@@ -68,20 +80,153 @@ jobs:
           - '!**/*.md'
           - '!docs/screenshots/**'
 
-  # Only on a real `v*` tag push, and only after `docker`'s own `publish` job
-  # has cleared its `environment: release` approval — `needs: docker` inherits
-  # that gate rather than asking for a second one, so cutting a release is
-  # still one approval, not two. Lives in this file rather than a standalone
-  # release.yml because there is no cross-workflow `needs:` in Actions; a
-  # `workflow_run`-triggered release would have to poll GitHub to learn
-  # whether docker-lighthouse.yml's own build also succeeded for this tag,
-  # which is exactly the coupling docs/RELEASING.md's "a break in one build
-  # cannot hold the other's release" deliberately avoids. A lighthouse build
-  # failure therefore does not block this job — the release still ships,
-  # describing whichever images actually published.
+  # The lighthouse — a standalone rendezvous service meant to be self-hosted
+  # by anyone, on neutral ground away from any particular library (see
+  # docs/LIGHTHOUSE.md) — gets its own image and its own tag series, built
+  # from the same docker/Dockerfile's `runtime-lighthouse` target. It used to
+  # also get its own approval, in its own workflow file; see the file header
+  # above for why that changed. See the `docker` job's comment above for why
+  # this job keeps the name `docker (lighthouse)`.
+  lighthouse:
+    name: docker (lighthouse)
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      pull-requests: read
+    uses: ./.github/workflows/docker-image.yml
+    with:
+      # A second package in the owner's namespace rather than a suffix on
+      # this repo's — `sharerr-lighthouse` is the crate's name and the
+      # binary's name, and an operator looking for it should find it under
+      # that name.
+      image: ghcr.io/${{ github.repository_owner }}/sharerr-lighthouse
+      target: runtime-lighthouse
+      cache-scope: lighthouse
+      # Half of the sharerr image's: this image builds one crate with no
+      # *arr clients, no torrent clients and no sqlx, and its runtime stage
+      # installs the same two packages.
+      build-timeout: 15
+      # The sharerr image is named for the repository itself, so
+      # docker/metadata-action's default OCI labels already link the GHCR
+      # package back to it. This image is named for the crate instead, so
+      # the link back to the repo has to be stated.
+      extra-labels: |
+        org.opencontainers.image.source=https://github.com/${{ github.repository }}
+        org.opencontainers.image.title=sharerr-lighthouse
+        org.opencontainers.image.description=The lighthouse — a standalone key-hash to endpoint rendezvous service for sharerr
+      # Narrower than the sharerr image's: this image is built from one
+      # crate that depends on nothing else in the workspace, so a change
+      # confined to, say, crates/sharerr-qbit cannot alter what this job
+      # would produce. The lockfile and the root manifest are in the list
+      # because the build is `--locked` and resolves against both. Tag
+      # pushes bypass this filter entirely (docker-image.yml's own `build`
+      # job `if:`).
+      filters: |
+        code:
+          - 'crates/sharerr-lighthouse/**'
+          - 'docker/Dockerfile'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+
+  # The only job that publishes, and it waits for you.
+  #
+  # `environment: release` is what makes GitHub hold this job pending until a
+  # required reviewer approves it in the web UI. THAT REVIEWER IS NOT
+  # CONFIGURED BY THIS FILE — it is a repo setting, and until it exists the
+  # environment imposes no gate at all and this job runs unattended.
+  # One-time setup: Settings -> Environments -> New environment -> "release"
+  # -> tick "Required reviewers" and add yourself (and anyone else who should
+  # be able to approve a publish).
+  #
+  # `needs: [docker, lighthouse]` is what makes this one approval cover both
+  # images, and what makes them ship as a matched set: if either build
+  # fails, this job — and `release` below it — never runs, and neither image
+  # is promoted from its `pending-<sha>` tag.
+  publish:
+    name: publish to GHCR (manual approval)
+    needs: [docker, lighthouse]
+    # `github.event_name == 'push'`, not just the ref check: a
+    # workflow_dispatch run against an *existing* `v*` tag's ref would
+    # otherwise satisfy `startsWith(github.ref, 'refs/tags/v')` on its own
+    # and reach this job too - a real gap docker-image.yml's `build` job's
+    # rehearsal branch (see that file's header comment) would otherwise
+    # open, unattended, contingent only on whether the `release`
+    # environment's reviewer setting has actually been configured. This
+    # makes the rehearsal path structurally unable to publish regardless of
+    # that.
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    # One group, not two: both images are promoted by this one job, so
+    # there is no longer a job boundary for a stuck sharerr publish to queue
+    # behind, or block, a lighthouse one — that used to be the reason for
+    # two distinct groups, back when two separate `publish` jobs existed.
+    # Serialized (never cancelled) so that two close `v*` tags never have
+    # two promotions of the shared `latest` tag in flight at once; the
+    # workflow-level `docker-${{ github.ref }}` group above doesn't cover
+    # that, since two different tags are two different refs.
+    concurrency:
+      group: release-images
+      cancel-in-progress: false
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `imagetools create` needs the buildx CLI but builds nothing and needs
+      # no emulation — it is a registry-side copy of an existing manifest
+      # list onto new tags, which is what makes this a retag rather than a
+      # rebuild.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Promote the approved sharerr image to its real tags
+        env:
+          TAGS: ${{ needs.docker.outputs.tags }}
+          PENDING: ${{ needs.docker.outputs.pending-ref }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<<"$TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no tags computed by the docker (sharerr) build — nothing to promote" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${args[@]}" "$PENDING"
+
+      - name: Promote the approved lighthouse image to its real tags
+        env:
+          TAGS: ${{ needs.lighthouse.outputs.tags }}
+          PENDING: ${{ needs.lighthouse.outputs.pending-ref }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(--tag "$tag")
+          done <<<"$TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "no tags computed by the docker (lighthouse) build — nothing to promote" >&2
+            exit 1
+          fi
+          docker buildx imagetools create "${args[@]}" "$PENDING"
+
+  # Only on a real `v*` tag push, and only after `publish` has cleared its
+  # `environment: release` approval — `needs: publish` inherits that gate
+  # rather than asking for a second one, and now also means the Release is
+  # only ever created once *both* images have actually been promoted, so the
+  # `docker pull`/`gh attestation verify` preamble below is always accurate
+  # for both.
   release:
     name: create the GitHub Release
-    needs: docker
+    needs: publish
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5

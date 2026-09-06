@@ -97,9 +97,23 @@ their own `features`. Do not pin a version in a crate manifest.
 ## Testing tiers
 
 Tier 1 is hermetic `cargo test`; tier 2 is `./scripts/run_docker_tests.sh`
-behind the `e2e` feature and `#[ignore]`, compiled by CI but never run. Never
-add `--include-ignored`. The tiers, stacks and fixtures are in
-[`docs/TESTING.md`](docs/TESTING.md). What is not derivable from there:
+(and `run_docker_tests_two_instance.sh`) behind the `e2e` feature and
+`#[ignore]`, compiled by CI but never run; tier 3 is
+`./scripts/run_docker_tests_mesh.sh`, the gossip/lighthouse mesh test bed,
+same feature and gate. Never add `--include-ignored`. The tiers, stacks and
+fixtures are in [`docs/TESTING.md`](docs/TESTING.md). What is not derivable
+from there:
+
+**`gossip.exchange_secs`, `lighthouse.interval_secs`, and
+`lighthouse.quiet_secs` are config keys, not constants, specifically so tier
+3 does not have to wait out the production defaults (900/900/3600 seconds)
+to see a mesh converge.** They deliberately have no settings-page field and
+no `config_paths` entry, unlike every other interval in `Config` — a web
+field with no floor (there is one on purpose; see `GossipConfig`'s own doc
+in `crates/sharerr-core/src/config.rs`) would be a standing invitation to
+set it to a few seconds in production and hammer every friend's instance.
+`sharerr.toml` or a `SHARERR_GOSSIP__*` / `SHARERR_LIGHTHOUSE__*` override
+still reaches them, same as any other config key.
 
 Fixtures worth knowing by name: `state::fixtures::{unconfigured, unloadable}`
 (a fresh container, with or without a loadable `sharerr.toml`; keep the
@@ -182,11 +196,16 @@ plus `#[derive(Default)]`) so a field added later inherits it.
 
 The tag scheme, the two images, and the approval gate are in
 [`docs/RELEASING.md`](docs/RELEASING.md). What matters when editing the
-workflows: `docker.yml` and `docker-lighthouse.yml` are thin callers of
-`docker-image.yml`, passing `target: runtime-sharerr` / `runtime-lighthouse`
-into the one `docker/Dockerfile`, so there is one MSRV pin. That used to be
-two pins that had to move together; merging the file is what removed the
-trap, not a comment.
+workflows: `docker.yml` builds both images — its `docker` and `lighthouse`
+jobs are thin callers of `docker-image.yml`, passing
+`target: runtime-sharerr` / `runtime-lighthouse` into the one
+`docker/Dockerfile`, so there is one MSRV pin. That used to be two pins that
+had to move together; merging the file is what removed the trap, not a
+comment. `docker-image.yml` only builds and attests; `docker.yml`'s own
+`publish` job is the one `environment: release` gate that promotes both
+images together, so cutting a release is one approval, not two — see
+`docs/RELEASING.md` for why that used to be two workflow files and two
+gates.
 
 **The version is the tag; never bump `[workspace.package].version`.** It is
 a fixed `0.0.0-dev` placeholder. Three places carry the real one:

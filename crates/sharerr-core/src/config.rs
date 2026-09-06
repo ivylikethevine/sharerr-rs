@@ -326,6 +326,8 @@ pub struct Config {
     /// [`SeedingConfig`]. Unset by default: no cap, no goal, matching
     /// today's behaviour exactly until an operator opts in.
     pub seeding: SeedingConfig,
+    /// Endpoint gossip with friends — see [`GossipConfig`].
+    pub gossip: GossipConfig,
     /// Embedding the lighthouse rendezvous service on one of this instance's
     /// own listeners. Off by default — see [`LighthouseConfig`].
     pub lighthouse: LighthouseConfig,
@@ -390,6 +392,7 @@ impl Default for Config {
             rtorrent: RtorrentConfig::default(),
             tracker: TrackerConfig::default(),
             seeding: SeedingConfig::default(),
+            gossip: GossipConfig::default(),
             lighthouse: LighthouseConfig::default(),
             gluetun: GluetunConfig::default(),
             gluetun_client: GluetunConfig::default(),
@@ -885,7 +888,39 @@ impl Default for SeedingConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// Endpoint gossip between friends — see `sharerr::gossip`'s module docs for
+/// the protocol itself. Deliberately config-file only, with no settings-page
+/// field and no [`config_paths`] entry, unlike every other interval in this
+/// file (`sync.interval_secs`, `gluetun.poll_secs`): those all clamp to a
+/// floor before a form ever renders them, and this one deliberately has
+/// none — see `exchange_secs`'s own doc — because the one real reason to set
+/// it below the default is a test bed of several real sharerr nodes, not
+/// ordinary operation. A web field with no floor would be a standing
+/// invitation to set it to a few seconds in production and hammer every
+/// friend's instance; `sharerr.toml` or a `SHARERR_GOSSIP__EXCHANGE_SECS`
+/// override stays available for whoever genuinely wants it tighter or
+/// looser than the default.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GossipConfig {
+    /// How often the outbound exchange runs against friends with a
+    /// configured `gossip_url`, in seconds. No floor: unlike
+    /// [`GluetunConfig::MIN_POLL_SECS`], a shorter interval here has no
+    /// meaningful cost beyond a few extra idle HTTP round trips to friends
+    /// who are already reachable, and a real deployment has no reason to set
+    /// this below the default — the one thing that does is a test bed of
+    /// several real sharerr nodes, which needs convergence in seconds rather
+    /// than fifteen minutes.
+    pub exchange_secs: u64,
+}
+
+impl Default for GossipConfig {
+    fn default() -> Self {
+        Self { exchange_secs: 900 }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LighthouseConfig {
     pub enabled: bool,
@@ -897,6 +932,30 @@ pub struct LighthouseConfig {
     /// friend's lighthouse without running one, or run one without using it
     /// themselves. Empty means this half of the feature is off.
     pub urls: Vec<Url>,
+    /// How often the report-and-lookup pass runs, in seconds. See
+    /// [`GossipConfig::exchange_secs`]'s doc for why there is no floor —
+    /// the same reasoning applies here, and the default matches gossip's own
+    /// interval on purpose: there is no reason for a lighthouse pass to run
+    /// on a different cadence than gossip's.
+    pub interval_secs: u64,
+    /// A peer is worth a lighthouse lookup once it has been silent this
+    /// long, in seconds — direct or gossiped. The default matches the order
+    /// of magnitude of `notify`'s own `QUIET_CHECK_INTERVAL`: an hour costs
+    /// nothing in responsiveness for something that, when it happens at
+    /// all, happens on the order of days.
+    pub quiet_secs: u64,
+}
+
+impl Default for LighthouseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mount: LighthouseMount::default(),
+            urls: Vec::new(),
+            interval_secs: 900,
+            quiet_secs: 3600,
+        }
+    }
 }
 
 /// Reject any `tracker.backend` value with the migration story.
@@ -1443,6 +1502,35 @@ mod tests {
     #[test]
     fn the_reachability_check_is_off_by_default() {
         assert!(!Config::default().checks.reachability);
+    }
+
+    /// These three fields replaced hardcoded constants
+    /// (`gossip::EXCHANGE_INTERVAL`, `lighthouse_client::INTERVAL`,
+    /// `lighthouse_client::QUIET_THRESHOLD_SECS`) — the default has to match
+    /// the old literal exactly, or every existing deployment's gossip and
+    /// lighthouse cadence changes the moment it upgrades.
+    #[test]
+    fn gossip_and_lighthouse_intervals_default_to_their_old_hardcoded_values() {
+        let config = Config::default();
+        assert_eq!(config.gossip.exchange_secs, 900);
+        assert_eq!(config.lighthouse.interval_secs, 900);
+        assert_eq!(config.lighthouse.quiet_secs, 3600);
+    }
+
+    /// No settings-page field reaches these (see [`GossipConfig`]'s own
+    /// doc for why), but `sharerr.toml` and a `SHARERR_*` override both
+    /// still have to work — this is how a tier-3 test bed of several real
+    /// sharerr nodes converges in seconds rather than the production
+    /// default's fifteen minutes.
+    #[test]
+    fn gossip_and_lighthouse_intervals_are_overridable_from_toml() {
+        let config: Config = toml_edit::de::from_str(
+            "[gossip]\nexchange_secs = 3\n\n[lighthouse]\ninterval_secs = 3\nquiet_secs = 5\n",
+        )
+        .unwrap();
+        assert_eq!(config.gossip.exchange_secs, 3);
+        assert_eq!(config.lighthouse.interval_secs, 3);
+        assert_eq!(config.lighthouse.quiet_secs, 5);
     }
 
     /// The environment scan lowercases `SHARERR_*` and turns `__` into `.`, so a

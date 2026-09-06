@@ -1,0 +1,21 @@
+# Configuration for node B of the gossip mesh test stack — tier 3. Sits in
+# the middle of the line topology (A-B-C): the only node with two peers, and
+# so the only one that can relay a record between the other two once their
+# own direct link is severed. See docker/README.md's "The mesh stack"
+# section and scripts/run_docker_tests_mesh.sh.
+
+data_dir = "/data"
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[tracker]
+advertised_host = "sharerr-b"
+port = 8477
+
+[lighthouse]
+urls = ["http://lighthouse:7878"]
+
+[sync]
+enabled = false

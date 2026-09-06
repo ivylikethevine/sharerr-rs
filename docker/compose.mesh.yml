@@ -1,0 +1,137 @@
+# Tier 3: three independent sharerr nodes and one independent lighthouse, on
+# one network — the stack that proves the gossip/reconnection mesh itself
+# rather than the media sync path tiers 1-2 already cover. See
+# `scripts/run_docker_tests_mesh.sh` and `docker/README.md`'s "The mesh
+# stack" section.
+#
+# ## Why no *arr app and no torrent client
+#
+# Every other stack exists to prove a real file lands unmoved on a real disk
+# through a real torrent client. This one proves something orthogonal: that
+# three sharerr processes find each other, relay each other's signed address
+# records, and recover through the lighthouse when a direct link is cut.
+# None of that touches Sonarr/Radarr, qBittorrent, or a single byte of media,
+# so none of it is here — every extra service would be startup time and
+# flake surface bought for nothing this tier needs.
+#
+# ## Why the lighthouse is built, not pulled
+#
+# `ghcr.io/ivylikethevine/sharerr-lighthouse:latest` is a published image;
+# this stack instead builds `docker/Dockerfile`'s `runtime-lighthouse` target
+# from the working tree, the same way the three sharerr nodes are built — so
+# a change to the lighthouse crate is exercised by the same `--build` this
+# script already runs, not by whatever last shipped.
+#
+# ## The topology: fully meshed, then one edge deliberately cut
+#
+# `scripts/run_docker_tests_mesh.sh` starts every node meshed with every
+# other — all three pairs, not just a line — so trust-on-first-use binds
+# every pair's identity and the lighthouse has something real to answer with
+# for all three. Only once that is settled does it clear the direct A<->C
+# link, keeping both peer rows and both already-bound pubkeys. That ordering
+# is load-bearing, not incidental: `gossip::ingest` refuses to relay a
+# record about anyone the receiver has no existing row for ("records about
+# strangers are ignored" — the trust model gossip's own module docs
+# describe), so a permanent line topology could never reach the state this
+# stack needs to prove anything interesting once A moves.
+#
+# ## Why the three gossip/lighthouse intervals are seconds, not the defaults
+#
+# `gossip.exchange_secs` / `lighthouse.interval_secs` /
+# `lighthouse.quiet_secs` default to 900/900/3600 — a real deployment has no
+# reason to run tighter than that, and the settings page deliberately has no
+# field for them (see `GossipConfig`'s own doc in
+# crates/sharerr-core/src/config.rs). A test that waited out the production
+# defaults would take the better part of an hour; the environment overrides
+# below are the one sanctioned reason to set them below the default at all.
+#
+# ## Why the config mounts point at `state-mesh/`, not `config-mesh-*/`
+#
+# One scenario rotates node A's advertised port through a real
+# `/settings/tracker` POST — the same one an operator's browser would send —
+# which rewrites `sharerr.toml` in place. `docker/config-mesh-{a,b,c}` are
+# the checked-in templates; `run_docker_tests_mesh.sh` copies them into the
+# gitignored `docker/state-mesh/` before bringing the stack up, precisely so
+# that live rewrite lands on a throwaway copy and never dirties the tracked
+# file the way it did the first time this script ran without that copy step.
+
+name: sharerr-mesh
+
+services:
+  lighthouse:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime-lighthouse
+    container_name: sharerr-mesh-lighthouse
+    environment:
+      TZ: Etc/UTC
+      RUST_LOG: sharerr_lighthouse=debug,info
+    volumes:
+      - lighthouse-data:/data
+    ports:
+      - "127.0.0.1:63878:7878"
+
+  sharerr-a:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: sharerr-mesh-sharerr-a
+    depends_on: [lighthouse]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+      # Convergence in seconds rather than the production default's fifteen
+      # minutes — see the file header. `SHARERR_LIGHTHOUSE__QUIET_SECS` is
+      # deliberately short enough that a link severed mid-test goes quiet
+      # well within the script's own wait budget.
+      SHARERR_GOSSIP__EXCHANGE_SECS: "3"
+      SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
+      SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
+    volumes:
+      - ./state-mesh/config-a:/config
+      - sharerr-mesh-data-a:/data
+    ports:
+      - "127.0.0.1:63481:8477"
+
+  sharerr-b:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: sharerr-mesh-sharerr-b
+    depends_on: [lighthouse]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+      SHARERR_GOSSIP__EXCHANGE_SECS: "3"
+      SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
+      SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
+    volumes:
+      - ./state-mesh/config-b:/config
+      - sharerr-mesh-data-b:/data
+    ports:
+      - "127.0.0.1:63482:8477"
+
+  sharerr-c:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: sharerr-mesh-sharerr-c
+    depends_on: [lighthouse]
+    environment:
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+      SHARERR_GOSSIP__EXCHANGE_SECS: "3"
+      SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
+      SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
+    volumes:
+      - ./state-mesh/config-c:/config
+      - sharerr-mesh-data-c:/data
+    ports:
+      - "127.0.0.1:63483:8477"
+
+volumes:
+  lighthouse-data:
+  sharerr-mesh-data-a:
+  sharerr-mesh-data-b:
+  sharerr-mesh-data-c:

@@ -18,11 +18,12 @@ Everything in `tests/fixtures/media` is synthetic (see
 - [The opt-in test suite](#the-opt-in-test-suite)
 - [Seeding tagged content](#seeding-tagged-content)
 - [Views of one library](#views-of-one-library)
-- [The five stacks](#the-five-stacks)
+- [The six stacks](#the-six-stacks)
 - [Ports](#ports)
 - [The two-instance stack](#the-two-instance-stack)
   - [Why Prowlarr sits in front of instance B's Radarr](#why-prowlarr-sits-in-front-of-instance-bs-radarr)
   - [Why `tracker.advertised_host` is a service name here, not `localhost`](#why-trackeradvertised_host-is-a-service-name-here-not-localhost)
+- [The mesh stack](#the-mesh-stack)
 - [Tearing down](#tearing-down)
 
 ## Running it
@@ -147,7 +148,7 @@ always do, and identical mounts would hide every path-mapping bug:
 which turns "sharerr never writes to what it shares" into something the
 kernel enforces.
 
-## The five stacks
+## The six stacks
 
 | Stack | File | What it adds |
 | --- | --- | --- |
@@ -156,6 +157,7 @@ kernel enforces.
 | Transmission | `compose.transmission.yml` | Seeds through Transmission. Credentials given up front by compose; it always verifies on add. |
 | rTorrent | `compose.rtorrent.yml` | Seeds through `crazymax/rtorrent-rutorrent`, which bundles rTorrent, ruTorrent, and an nginx proxy answering HTTP XML-RPC over rTorrent's SCGI socket. No `.htpasswd`, so Basic Auth is off and the configured credentials are placeholders. Exists because `sharerr-rtorrent`'s unit tests run against a hand-mocked server, which proves the crate parses what it _expects_, not what a real rTorrent sends. |
 | Two-instance | `compose.two-instance.yml` | Two sharerr + Radarr + qBittorrent stacks wired together as friends, plus a Prowlarr. [Below](#the-two-instance-stack). |
+| Mesh | `compose.mesh.yml` | Three independent sharerr nodes and one independent lighthouse — no *arr app, no torrent client. Proves the gossip/reconnection mesh instead of the media path. [Below](#the-mesh-stack). |
 
 Every stack asserts the same thing about the tracker: built torrents carry
 an announce URL from sharerr's own tracker, regardless of `torrent_backend`.
@@ -178,6 +180,10 @@ combination can run at once.
 
 sharerr's port doubles as the tracker: friends announce to it directly, so
 in a real deployment it has to be reachable from outside the container.
+
+The mesh stack does not fit this table — three sharerr nodes and one
+lighthouse, not two clients and an *arr app — so its ports are listed with
+[the stack itself](#the-mesh-stack) instead.
 
 ## The two-instance stack
 
@@ -227,6 +233,29 @@ in them ever needs a different container to dial it back. Here
 by Docker's embedded DNS on the shared network, on port 8477, sharerr's
 internal listen port rather than the host-published one.
 
+## The mesh stack
+
+```bash
+./scripts/run_docker_tests_mesh.sh
+```
+
+| Service | Port |
+| --- | --- |
+| Lighthouse | 127.0.0.1:63878 |
+| sharerr-a | 127.0.0.1:63481 |
+| sharerr-b | 127.0.0.1:63482 |
+| sharerr-c | 127.0.0.1:63483 |
+
+Tier 3: three independent sharerr nodes and one independent lighthouse, no
+*arr app and no torrent client. See
+[`docs/TESTING.md`](../docs/TESTING.md#tier-3-the-mesh-stack) for what it
+proves and why the gossip/lighthouse intervals run in seconds here rather
+than the production default, and `docker/compose.mesh.yml`'s own header for
+the full design — the topology it meshes, why the config mounts point at a
+gitignored `state-mesh/` scratch copy rather than the checked-in
+`config-mesh-*` templates, and why the lighthouse is built from the working
+tree rather than pulled.
+
 ## Tearing down
 
 Two halves are needed: `-v` drops the named volumes (API keys are regenerated
@@ -240,6 +269,7 @@ docker compose -f docker/compose.vpn.yml down -v          && rm -rf docker/state
 docker compose -f docker/compose.transmission.yml down -v && rm -rf docker/state-tm
 docker compose -f docker/compose.rtorrent.yml down -v     && rm -rf docker/state-rt
 docker compose -f docker/compose.two-instance.yml down -v && rm -rf docker/state-two-instance
+docker compose -f docker/compose.mesh.yml down -v         && rm -rf docker/state-mesh
 ```
 
 If `rm -rf` fails with a permission error, Docker auto-created the directory
