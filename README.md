@@ -232,6 +232,29 @@ nothing for it, so a limit you want gone comes off in the client. rTorrent
 honours the cap but not the ratio; see
 [`docs/SUPPORT.md`](docs/SUPPORT.md#torrent-clients-what-actually-seeds).
 
+The same panel also holds two settled "Before v1" roadmap questions, since an
+operator reasons about them together:
+
+```toml
+[seeding]
+private = true      # default
+[feed]
+magnet_links = false # default
+```
+
+`seeding.private` sets BEP 27's private flag on torrents built from then on
+— on by default, which is the whole reason sharerr's own tracker exists.
+Turning it off lets a client also find peers via DHT and PEX, which means
+**revoking a friend no longer removes them from that torrent's swarm**.
+`feed.magnet_links` makes the Torznab and Jackett feeds advertise a magnet
+alongside the `.torrent` link, off by default because a magnet can never
+resolve against a private torrent. Turning it on only ever produces a magnet
+for an item that is itself not private; the combination "magnets on,
+everything still private" is accepted but produces nothing, rather than
+advertising a link guaranteed to stall a friend's client. See
+[`docs/SUPPORT.md`](docs/SUPPORT.md#the-feeds-magnet-link) for why this was
+an open question and how it was resolved.
+
 ### A dynamic endpoint (gluetun)
 
 Behind a VPN with provider port forwarding there is no stable address to
@@ -529,17 +552,8 @@ attached.
 Operational tasks that stand between the current 0.1.x releases and a 1.0,
 not features:
 
-- **Rehearse one real upgrade across a migration.** Eleven forward-only
+- **Rehearse one real upgrade across a migration.** Twelve forward-only
   sqlx migrations exist, all only ever run against a fresh database.
-- **Decide the magnet-link question.** Every torrent is private, so a
-  magnet can never resolve, and Radarr's direct Torznab client has been seen
-  picking it anyway. Left in for now; revisit if a real report shows a
-  direct Radarr/Sonarr connection picking it. See
-  [`docs/SUPPORT.md`](docs/SUPPORT.md#removing-the-feeds-magnet-link-entirely).
-- **Decide the login-rate-limit question.** The security policy lists no
-  rate limiting as by-design for a trusted LAN, while the deploy docs call
-  forwarding port 8477 directly a workable option. One of the two should
-  move.
 
 ### Open work
 

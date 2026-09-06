@@ -263,10 +263,10 @@ impl ServeState {
     ///
     /// Unlike [`Config::public_base_url`], which only ever knows the
     /// statically configured address, this reflects gluetun's live
-    /// resolution the same way the magnet tiers a torznab response carries
-    /// already do via `endpoint().recent()` — the feed and the tracker share
-    /// one advertised address, so a `.torrent` download link must track it
-    /// too. Falls back to the static address, then to
+    /// resolution the same way a torznab response's magnet tiers do (when
+    /// magnets are enabled) via `endpoint().recent()` — the feed and the
+    /// tracker share one advertised address, so a `.torrent` download link
+    /// must track it too. Falls back to the static address, then to
     /// `http://localhost:<bind port>`, in the same order
     /// `Config::public_base_url` does.
     pub async fn public_base_url(&self) -> String {
@@ -965,6 +965,7 @@ pub(crate) mod fixtures {
             skip_checking: true,
             upload_limit_kib: None,
             ratio_limit: None,
+            private: config.seeding.private,
             torrent_dir: dir.path().to_path_buf(),
         };
         // Opened from `config.database_path()`, the same path `ServeState::store`

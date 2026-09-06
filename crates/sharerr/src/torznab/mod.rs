@@ -590,7 +590,8 @@ pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
     responses(
         (status = 200, content_type = "application/xml", description =
          "A Torznab document: the capabilities XML for `t=caps`, otherwise an RSS \
-          feed of matching releases. Each item carries a `.torrent` link and a magnet \
+          feed of matching releases. Each item carries a `.torrent` link, and — only \
+          when `feed.magnet_links` is on and the item itself is not private — a magnet \
           whose announce tiers are attributed to the calling peer.", body = String),
         (status = 400, content_type = "application/xml", description =
          "No such Torznab function — a Torznab `<error code=\"202\">`.", body = String),
@@ -644,6 +645,11 @@ pub(crate) struct Matched {
     /// the same condition the magnet omits a token entirely: no tracker token
     /// configured, so there is nothing to attribute.
     download_token: Option<String>,
+    /// `feed.magnet_links` at the time of this search — see
+    /// [`sharerr_core::config::FeedConfig::magnet_links`]. A magnet is only
+    /// ever rendered when this is on *and* the specific item is not private;
+    /// see [`Self::magnet_url`].
+    magnet_links_enabled: bool,
     /// How many items were considered, before filtering.
     pub total: usize,
 }
@@ -659,8 +665,21 @@ impl Matched {
         }
     }
 
-    /// The same release as a magnet URI, or empty when there is no info hash.
+    /// The same release as a magnet URI, or empty when there is no info hash,
+    /// magnets are turned off, or this specific item is private.
+    ///
+    /// The two settings are independent (see
+    /// [`sharerr_core::config::FeedConfig::magnet_links`] and
+    /// [`sharerr_core::config::SeedingConfig::private`]), but "magnets on,
+    /// this item private" would otherwise advertise a link guaranteed to
+    /// stall against a swarm nothing else can join — see
+    /// `docs/SUPPORT.md#the-feeds-magnet-link`. Made inert
+    /// here rather than left for the operator to notice, the same way the
+    /// tracker fails closed rather than half-answering.
     pub fn magnet_url(&self, item: &SharedItem) -> String {
+        if !self.magnet_links_enabled || item.private {
+            return String::new();
+        }
         match item.info_hash.as_deref() {
             Some(hash) => magnet_uri(
                 hash,
@@ -711,6 +730,8 @@ pub(crate) async fn collect(
         .filter(|item| query.matches_with(needle.as_deref(), item))
         .collect();
 
+    let magnet_links_enabled = state.config().await.feed.magnet_links;
+
     // The magnet's `tr` tiers: every recently held endpoint, the same list a
     // freshly built torrent carries, with an announce token when one is set —
     // the magnet is an alternative to the `.torrent`, so it must grant the same
@@ -724,13 +745,22 @@ pub(crate) async fn collect(
     // set, announces are unauthenticated for everyone and there is nothing
     // to attribute, so the URL carries no token segment, same as today.
     let token = state.tracker_token().await.is_some().then_some(peer_token);
-    let announces: Vec<String> = state
-        .endpoint()
-        .recent()
-        .iter()
-        .filter_map(|base| sharerr_torrent::announce_url(base, token).ok())
-        .map(|url| url.to_string())
-        .collect();
+
+    // Skipped entirely under the default `feed.magnet_links = false`: nothing
+    // in `Matched::magnet_url` will ever read this once disabled, and
+    // building it is one HTTP-URL parse and one percent-encode per recently
+    // held endpoint, for every search.
+    let announces_encoded = if magnet_links_enabled {
+        state
+            .endpoint()
+            .recent()
+            .iter()
+            .filter_map(|base| sharerr_torrent::announce_url(base, token).ok())
+            .map(|url| encode_component(url.as_ref()))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(Matched {
         items: matched,
@@ -741,8 +771,9 @@ pub(crate) async fn collect(
         // deployment hands out a `.torrent` pointing at
         // `http://localhost:<port>` on the friend's own box.
         base: state.public_base_url().await,
-        announces_encoded: announces.iter().map(|a| encode_component(a)).collect(),
+        announces_encoded,
         download_token: token.map(str::to_owned),
+        magnet_links_enabled,
         total,
     })
 }

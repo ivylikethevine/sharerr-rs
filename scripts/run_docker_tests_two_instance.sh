@@ -254,15 +254,16 @@ cat /tmp/sharerr-a-doctor.log
 "${COMPOSE[@]}" exec -T sharerr-a sharerr sync >/dev/null
 
 # 7. Point Radarr-B at instance A *through Prowlarr*, not a direct Torznab
-#    indexer — the first live run of this script grabbed by magnet instead of
-#    the .torrent enclosure sharerr also advertises. Evidence: qBittorrent-B's
-#    own torrent record showed `has_metadata: false`, and its `magnet_uri`'s
-#    `dn=` was the release title, not the torrent's real internal filename
-#    (see docs/SUPPORT.md's "Removing the feed's magnet link entirely"). A magnet can never complete
-#    against a private torrent — nothing in the swarm will ever answer its
-#    `ut_metadata` request, which is the whole reason the tracker exists —
-#    and Radarr's own direct Torznab client has no setting to prefer the
-#    .torrent instead: that preference exists only on Prowlarr's indexer,
+#    indexer — the first live run of this script (before feed.magnet_links
+#    defaulted off, see docs/SUPPORT.md's "The feed's magnet link") grabbed by
+#    magnet instead of the .torrent enclosure sharerr also advertised back
+#    then. Evidence: qBittorrent-B's own torrent record showed
+#    `has_metadata: false`, and its `magnet_uri`'s `dn=` was the release
+#    title, not the torrent's real internal filename. A magnet can never
+#    complete against a private torrent — nothing in the swarm will ever
+#    answer its `ut_metadata` request, which is the whole reason the tracker
+#    exists — and Radarr's own direct Torznab client has no setting to prefer
+#    the .torrent instead: that preference exists only on Prowlarr's indexer,
 #    "Prefer Magnet URL" (`torrentBaseSettings.preferMagnetUrl`, `false` by
 #    default), so this is also what a real friend's setup should look like.
 #

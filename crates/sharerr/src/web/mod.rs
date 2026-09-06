@@ -52,6 +52,10 @@ use crate::web::templates::{StatusPage, render};
 pub struct WebState {
     pub serve: Arc<ServeState>,
     pub sessions: Arc<Sessions>,
+    /// Per-source-address limit on `/login` and `/setup` POSTs — a UI
+    /// property, same reasoning as [`Self::sessions`]. See
+    /// [`crate::web::auth::Throttle`].
+    pub throttle: Arc<crate::web::auth::Throttle>,
 }
 
 impl WebState {
@@ -97,6 +101,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     let state = WebState {
         serve,
         sessions: Arc::new(Sessions::default()),
+        throttle: Arc::new(crate::web::auth::Throttle::default()),
     };
 
     // One `route_layer` over the whole protected group rather than per route, so
@@ -171,9 +176,17 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
             auth::require_auth,
         ));
 
+    // Throttled as its own group, `route_layer`'d before `/logout` and
+    // `/assets` join — those are not an unauthenticated guessing surface, and
+    // widening the guard to the whole public router would rate-limit an
+    // asset fetch alongside a login attempt for no reason.
     let public = Router::new()
         .route("/setup", get(auth::setup_page).post(auth::setup_submit))
         .route("/login", get(auth::login_page).post(auth::login_submit))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::throttle_unauthenticated_posts,
+        ))
         .route("/logout", post(auth::logout))
         .route("/assets/{file}", get(asset));
 
@@ -265,6 +278,7 @@ pub(crate) fn web_state(serve: Arc<ServeState>) -> WebState {
     WebState {
         serve,
         sessions: Arc::new(Sessions::default()),
+        throttle: Arc::new(crate::web::auth::Throttle::default()),
     }
 }
 
@@ -486,6 +500,22 @@ mod tests {
         Request::builder().method("POST").uri(path)
     }
 
+    /// `throttle_unauthenticated_posts` reads the connection's own address,
+    /// which `into_make_service_with_connect_info` supplies in the real
+    /// server. Driving the router directly with `.oneshot` skips that, and
+    /// the extractor then fails with a 500 that looks like a handler bug —
+    /// see `tracker.rs`'s `get` test helper for the same trap. Every test
+    /// that POSTs to `/login` or `/setup` and expects to reach the handler
+    /// needs this.
+    fn insert_connect_info(request: &mut Request<Body>) {
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [203, 0, 113, 50],
+                12345,
+            ))));
+    }
+
     /// The one-glance numbers, checked against a store with known contents.
     #[tokio::test]
     async fn the_glance_counts_items_friends_and_runs() {
@@ -513,6 +543,7 @@ mod tests {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
+            private: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -835,16 +866,17 @@ mod tests {
     #[tokio::test]
     async fn claiming_the_instance_redirects_to_the_wizard() {
         let (_dir, app) = router();
-        let response = send(
-            app,
-            post("/setup")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "username=operator&password=hunter22&confirm=hunter22",
-                ))
-                .unwrap(),
-        )
-        .await;
+        let mut request = post("/setup")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "username=operator&password=hunter22&confirm=hunter22",
+            ))
+            .unwrap();
+        // `throttle_unauthenticated_posts` needs the connection's address,
+        // which `into_make_service_with_connect_info` supplies in the real
+        // server — see `tracker.rs`'s `get` helper for the same trap.
+        insert_connect_info(&mut request);
+        let response = send(app, request).await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(location(&response), "/wizard");
@@ -891,17 +923,64 @@ mod tests {
         }
     }
 
+    /// The login throttle, asserted over the real router: the Nth same-origin
+    /// POST from one source address to `/login` is refused with `429` and a
+    /// `Retry-After` header, and a GET from the very same address is
+    /// unaffected — the throttle only ever counts POSTs.
+    #[tokio::test]
+    async fn too_many_login_posts_from_one_address_are_refused() {
+        let (_dir, app) = router();
+
+        let login_attempt = || {
+            let mut request = post("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=a&password=wrong"))
+                .unwrap();
+            insert_connect_info(&mut request);
+            request
+        };
+
+        for attempt in 0..5 {
+            let response = send(app.clone(), login_attempt()).await;
+            assert_ne!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "attempt {attempt} should still be within budget"
+            );
+        }
+
+        let refused = send(app.clone(), login_attempt()).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            refused
+                .headers()
+                .contains_key(axum::http::header::RETRY_AFTER),
+            "a 429 must tell the client when to try again"
+        );
+
+        // A page load from the same address is a GET, never counted, and
+        // must still work while the address is throttled for POSTs — the
+        // fresh, unclaimed instance this test runs against redirects `/login`
+        // to `/setup` rather than rendering it, so "not throttled" is
+        // "anything but 429", not a bare 200.
+        let mut get_request = get("/login");
+        insert_connect_info(&mut get_request);
+        let page = send(app, get_request).await;
+        assert_ne!(page.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
     /// A same-origin POST must get past the layer — a CSRF check that rejects
     /// everything would pass the test above while breaking the application.
     #[tokio::test]
     async fn a_same_origin_post_is_not_refused_by_the_csrf_layer() {
         let (_dir, app) = router();
-        let request = post("/login")
+        let mut request = post("/login")
             .header("origin", "http://box.lan:8477")
             .header("host", "box.lan:8477")
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from("username=a&password=b"))
             .unwrap();
+        insert_connect_info(&mut request);
 
         let response = send(app, request).await;
         assert_ne!(

@@ -616,6 +616,8 @@ fn settings_page() -> SettingsPage {
 
         seeding_upload_limit_kib: "2048".to_owned(),
         seeding_ratio_limit: "2.5".to_owned(),
+        seeding_private: true,
+        feed_magnet_links: false,
 
         tracker_advertised_host: "seed.example.com".to_owned(),
         tracker_port: "51413".to_owned(),
@@ -835,6 +837,7 @@ fn composition_fixture() -> Option<crate::web::templates::Composition> {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: false,
+            private: true,
             state,
             last_error: None,
             created_at: None,

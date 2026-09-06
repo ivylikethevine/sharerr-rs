@@ -90,12 +90,23 @@ Three ways to handle that, in rough order of how much they buy you:
 
 1. **A TLS reverse proxy** in front, with `tracker.advertised_url` set to the
    `https://` address so announce URLs match what friends can reach, and
-   `X-Forwarded-Proto` set so sharerr marks the session cookie `Secure`.
+   `X-Forwarded-Proto` set so sharerr marks the session cookie `Secure`. Note
+   that sharerr's own login throttle (see below) keys on the connecting
+   socket's address and never a forwarded-for header, so behind this every
+   request collapses to the proxy's own address and the throttle degrades to
+   a global limit across every visitor — bring the proxy's own per-client
+   rate limiting if that matters to you.
 2. **A second, tracker-only listener** via `tracker.bind`. It carries the
    tracker routes and `.torrent` downloads and not the UI, so you can forward
    that port and leave 8477 on loopback.
 3. **Forward 8477 as it is**, which works, and is a login page on the open
-   internet with no rate limit in front of it.
+   internet. sharerr throttles `/login` and `/setup` per source address (5
+   attempts/minute, 429 past it) and caps concurrent password hashing
+   store-wide, so a flood cannot turn Argon2's own cost into a resource
+   exhaustion attack — but there is still no account lockout (deliberate; see
+   [the security policy](../../docs/SECURITY.md#what-is-in-scope)) and no
+   security response headers, so this remains the option that buys the
+   least.
 
 sharerr opens no BitTorrent peer port of its own. The `6881` in these files
 is always qBittorrent's.

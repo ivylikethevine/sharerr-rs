@@ -301,7 +301,7 @@
         ],
         "responses": {
           "200": {
-            "description": "A Torznab document: the capabilities XML for `t=caps`, otherwise an RSS feed of matching releases. Each item carries a `.torrent` link and a magnet whose announce tiers are attributed to the calling peer.",
+            "description": "A Torznab document: the capabilities XML for `t=caps`, otherwise an RSS feed of matching releases. Each item carries a `.torrent` link, and — only when `feed.magnet_links` is on and the item itself is not private — a magnet whose announce tiers are attributed to the calling peer.",
             "content": {
               "application/xml": {
                 "schema": {
@@ -1531,7 +1531,7 @@
           "tracker"
         ],
         "summary": "`GET /torrents/{info_hash}.torrent` — the file itself.",
-        "description": "Serves out of `data_dir/torrents`, which is where the factory wrote it. The\nTorznab feed links here, so this is what a friend's Sonarr actually fetches.\n\nThe cached file on disk always carries the shared instance token (or none),\nbecause it is written once by the sync loop and reused for every requester.\nWhen the request carries a `token` that still resolves to an active peer,\nthe announce URLs are rewritten in memory — never on disk — to that peer's\nown token before the response goes out, the same attribution the feed's\nmagnet links already carry.",
+        "description": "Serves out of `data_dir/torrents`, which is where the factory wrote it. The\nTorznab feed links here, so this is what a friend's Sonarr actually fetches.\n\nThe cached file on disk always carries the shared instance token (or none),\nbecause it is written once by the sync loop and reused for every requester.\nWhen the request carries a `token` that still resolves to an active peer,\nthe announce URLs are rewritten in memory — never on disk — to that peer's\nown token before the response goes out — the same per-peer attribution a\nfeed magnet carries too, when `feed.magnet_links` is on.",
         "operationId": "torrentFile",
         "parameters": [
           {

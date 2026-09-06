@@ -612,6 +612,10 @@ pub async fn save_lighthouse(
 pub struct SeedingForm {
     upload_limit_kib: String,
     ratio_limit: String,
+    /// A checkbox: present (any value) when checked, absent when not — see
+    /// `CLAUDE.md`'s note on why every field here needs `#[serde(default)]`.
+    private: Option<String>,
+    magnet_links: Option<String>,
 }
 
 /// A blank field means no goal; anything else must be a whole number of
@@ -644,8 +648,15 @@ fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
 }
 
 /// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
-/// hands a torrent to the client — see [`sharerr_core::config::SeedingConfig`]
-/// and `docs/SETTINGS.md`'s `[seeding]` section.
+/// hands a torrent to the client, plus two settled "Before v1" roadmap
+/// questions that pair naturally with them: whether new torrents are
+/// private (`seeding.private`) and whether the feeds may advertise a magnet
+/// for a non-private one (`feed.magnet_links`) — see
+/// [`sharerr_core::config::SeedingConfig`], [`sharerr_core::config::FeedConfig`]
+/// and `docs/SETTINGS.md`'s `[seeding]` and `[feed]` sections. One form,
+/// one save, even though the two booleans land in different `sharerr.toml`
+/// tables: an operator reasons about them together, since turning `private`
+/// off is what makes `magnet_links` capable of doing anything.
 pub async fn save_seeding(
     State(state): State<WebState>,
     Form(form): Form<SeedingForm>,
@@ -658,6 +669,8 @@ pub async fn save_seeding(
         Ok(v) => v,
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
+    let private = form.private.is_some();
+    let magnet_links = form.magnet_links.is_some();
 
     write_config(&state, "seeding", None, move |file| {
         file.apply([
@@ -672,6 +685,8 @@ pub async fn save_seeding(
                 Some(ratio) => Edit::float(config_paths::SEEDING_RATIO_LIMIT, ratio),
                 None => Edit::unset(config_paths::SEEDING_RATIO_LIMIT),
             },
+            Edit::bool(config_paths::SEEDING_PRIVATE, private),
+            Edit::bool(config_paths::FEED_MAGNET_LINKS, magnet_links),
         ]);
         Ok(())
     })
@@ -1698,6 +1713,8 @@ async fn build_page(
             .ratio_limit
             .map(|ratio| ratio.to_string())
             .unwrap_or_default(),
+        seeding_private: config.seeding.private,
+        feed_magnet_links: config.feed.magnet_links,
 
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
         tracker_port: config

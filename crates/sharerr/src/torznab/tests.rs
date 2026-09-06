@@ -126,6 +126,7 @@ fn episode(title: &str, season: u32, ep: u32) -> SharedItem {
         info_hash: Some("ab".repeat(20)),
         announce_token_fp: None,
         created_by_sharerr: true,
+        private: true,
         state: ShareState::Seeding,
         last_error: None,
         created_at: None,
@@ -307,6 +308,7 @@ fn the_download_url_carries_a_peers_token_only_when_one_was_collected() {
         base: "http://seed.example:8477".to_owned(),
         announces_encoded: vec![],
         download_token: None,
+        magnet_links_enabled: true,
         total: 0,
     };
     assert_eq!(
@@ -578,7 +580,27 @@ use crate::state::fixtures::unconfigured;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use secrecy::SecretString;
+use sharerr_core::config::Config;
 use tower::ServiceExt;
+
+/// A fresh container like [`unconfigured`], except `feed.magnet_links` is on.
+/// Its own helper rather than a parameter on `unconfigured` itself: every
+/// other caller wants the default (off), and threading a config override
+/// through the one fixture every test in this file already imports would be
+/// a wider change than the two tests that actually need it.
+fn unconfigured_with_magnets_enabled() -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        feed: sharerr_core::config::FeedConfig { magnet_links: true },
+        ..Config::default()
+    };
+    let path = dir.path().join("sharerr.toml");
+    (
+        dir,
+        std::sync::Arc::new(ServeState::new(config, path, None)),
+    )
+}
 
 /// Ask the real router, so the answer covers routing and extraction too.
 async fn caps_with_key(state: &std::sync::Arc<ServeState>, key: Option<&str>) -> StatusCode {
@@ -785,9 +807,21 @@ async fn the_jackett_path_is_authenticated_too() {
 
 /// Seed one TV item and one film, so scoping has something to distinguish.
 async fn with_both_kinds() -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
+    with_both_kinds_in(unconfigured(), true).await
+}
+
+/// Same two items as [`with_both_kinds`], seeded into a caller-supplied
+/// container instead of always building an [`unconfigured`] one, with
+/// `shared_items.private` set explicitly rather than left at the default —
+/// for the magnet-gating tests, which need to vary both the container's
+/// `feed.magnet_links` and each item's `private` independently.
+async fn with_both_kinds_in(
+    container: (tempfile::TempDir, std::sync::Arc<ServeState>),
+    private: bool,
+) -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
     use sharerr_core::model::ShareState;
 
-    let (dir, state) = unconfigured();
+    let (dir, state) = container;
     let store = state.store().await.unwrap();
 
     for (source, file_id, hash) in [
@@ -806,6 +840,10 @@ async fn with_both_kinds() -> (tempfile::TempDir, std::sync::Arc<ServeState>) {
             .unwrap();
         store
             .set_state(source, file_id, ShareState::Seeding, None)
+            .await
+            .unwrap();
+        store
+            .set_seeding(source, file_id, &hash.repeat(20), None, true, Some(private))
             .await
             .unwrap();
     }
@@ -828,11 +866,13 @@ async fn feed_for(state: &std::sync::Arc<ServeState>, key: &str) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// The feature: two friends, two different libraries, one instance.
-/// The assembled feed carries a magnet per item — the attribute a client
-/// that prefers magnets looks for, next to the `.torrent` enclosure.
+/// Under the defaults — `feed.magnet_links` off — the feed never carries a
+/// magnet at all, regardless of whether an item is private. This is the
+/// resolved "Before v1" roadmap question: a magnet can never complete
+/// against sharerr's (default-private) torrents, so it is off until an
+/// operator opts in. See `docs/SUPPORT.md#the-feeds-magnet-link`.
 #[tokio::test]
-async fn the_feed_offers_a_magnet_alongside_the_torrent() {
+async fn the_feed_carries_no_magnet_under_the_defaults() {
     let (_dir, state) = with_both_kinds().await;
     let store = state.store().await.unwrap();
     store
@@ -843,12 +883,54 @@ async fn the_feed_offers_a_magnet_alongside_the_torrent() {
     let feed = feed_for(&state, "sam-key").await;
     assert_eq!(
         feed.matches("magneturl").count(),
+        0,
+        "magnets are opt-in: {feed}"
+    );
+}
+
+/// The feature, once opted into: two friends, two different libraries, one
+/// instance, both items marked non-private. The assembled feed carries a
+/// magnet per item — the attribute a client that prefers magnets looks for,
+/// next to the `.torrent` enclosure.
+#[tokio::test]
+async fn the_feed_offers_a_magnet_alongside_the_torrent_once_enabled_for_non_private_items() {
+    let (_dir, state) = with_both_kinds_in(unconfigured_with_magnets_enabled(), false).await;
+    let store = state.store().await.unwrap();
+    store
+        .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+        .await
+        .unwrap();
+
+    let feed = feed_for(&state, "sam-key").await;
+    assert_eq!(
+        feed.matches("magneturl").count(),
         2,
-        "every item gets one: {feed}"
+        "every non-private item gets one: {feed}"
     );
     assert!(
         feed.contains("magnet:?xt=urn:btih:aaaaaaaaaa"),
         "the magnet must carry the item's own hash: {feed}"
+    );
+}
+
+/// The footgun the two settings could otherwise combine into: magnets turned
+/// on globally, but this item is still private, so a magnet built from it
+/// could never complete. Made inert here rather than left for a friend's
+/// client to discover by stalling forever.
+#[tokio::test]
+async fn a_private_item_gets_no_magnet_even_with_magnet_links_enabled() {
+    let (_dir, state) = with_both_kinds_in(unconfigured_with_magnets_enabled(), true).await;
+    let store = state.store().await.unwrap();
+    store
+        .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+        .await
+        .unwrap();
+
+    let feed = feed_for(&state, "sam-key").await;
+    assert_eq!(
+        feed.matches("magneturl").count(),
+        0,
+        "a private item's magnet would never complete: {feed}"
     );
 }
 
@@ -1205,11 +1287,12 @@ async fn collect_reports_an_unready_store_and_a_release_without_a_torrent_has_no
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
     assert!(err.1.contains("not ready"), "{}", err.1);
 
-    let (_dir, state) = unconfigured();
+    let (_dir, state) = unconfigured_with_magnets_enabled();
     let store = state.store().await.unwrap();
     let mut item = movie("Harborlight");
     item.info_hash = Some("ab".repeat(20));
     item.state = ShareState::Seeding;
+    item.private = false;
     store.upsert(&item).await.unwrap();
     let matched = collect(&state, &SearchQuery::default(), PeerScope::All, "fp")
         .await

@@ -274,6 +274,7 @@ mod tests {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: false,
+            private: true,
             state,
             last_error: None,
             created_at: None,

@@ -533,6 +533,14 @@ pub struct SharedItem {
     /// (rTorrent) "this backend has no per-torrent ratio-limit RPC at all" —
     /// see `sharerr_client::TorrentSummary::ratio_limit`.
     pub ratio_limit_reported: Option<f64>,
+    /// Whether this item's torrent sets BEP 27's private flag. `true` on an
+    /// item with no torrent yet, matching the store's column default: privacy
+    /// is the safe assumption until something is actually known. Set once a
+    /// real torrent exists (`Store::set_seeding`, decoded from the bytes
+    /// handed to the client) and left alone by a rediscovery, which describes
+    /// a file, not a torrent. Determines whether the feed may ever emit a
+    /// magnet for this item — see `crate::config::FeedConfig::magnet_links`.
+    pub private: bool,
 }
 
 impl SharedItem {
@@ -614,6 +622,10 @@ impl Discovered {
             // `Store::set_ratio` last wrote.
             achieved_ratio: None,
             ratio_limit_reported: None,
+            // Only meaningful once a torrent exists; `Store::upsert` never
+            // writes this column at all (see its `ON CONFLICT` clause), so
+            // this value is only ever read back for a genuinely new row.
+            private: true,
         }
     }
 }

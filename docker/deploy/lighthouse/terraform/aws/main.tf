@@ -118,6 +118,10 @@ resource "aws_instance" "lighthouse" {
   key_name               = local.ssh ? aws_key_pair.lighthouse[0].key_name : null
   tags                   = local.tags
 
+  # Provider v6.0 stores this in state as cleartext rather than a hash. Fine
+  # here: `module.cloud_init.user_data` is domain/tz/log-filter and the
+  # static compose/Caddy files, never a secret — the lighthouse's one secret
+  # is generated on the box at first run, not templated in.
   user_data                   = module.cloud_init.user_data
   user_data_replace_on_change = true
 

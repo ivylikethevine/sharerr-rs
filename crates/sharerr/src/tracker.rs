@@ -16,17 +16,18 @@
 //! the path and a request without it is refused — so possessing the `.torrent` is
 //! what grants the right to announce.
 //!
-//! **Attribution.** The token is not always the one shared instance secret: a
-//! magnet built by [`crate::torznab::collect`] carries the requesting friend's
-//! own [`Peer::key_hash`](sharerr_store::Peer::key_hash) instead, so a real
-//! announce using it can be traced back to them — and revoking that friend
-//! (which already zeroes their `key_hash` out of the active peers) reaches
-//! the tracker too, not just the feed. The instance-wide shared token also
+//! **Attribution.** The token is not always the one shared instance secret:
+//! [`torrent_file`] rewrites the announce URLs of a `.torrent` it serves, in
+//! memory rather than caching a variant per peer on disk, to carry the
+//! requesting friend's own [`Peer::key_hash`](sharerr_store::Peer::key_hash)
+//! instead — see that function's docs. A real announce using it can then be
+//! traced back to them, and revoking that friend (which already zeroes their
+//! `key_hash` out of the active peers) reaches the tracker too, not just the
+//! feed. A magnet built by [`crate::torznab::collect`], when the operator has
+//! turned `feed.magnet_links` on for a non-private item, carries the same
+//! per-peer token in its `tr` tiers. The instance-wide shared token also
 //! works, unattributed, so a magnet or `.torrent` carrying it stays valid
-//! whether or not attribution is in play. See [`authenticate_token`]. A `.torrent` fetched
-//! directly gets the same treatment: [`torrent_file`] rewrites the announce
-//! URLs it serves per requester, in memory, rather than caching a variant per
-//! peer on disk — see that function's docs.
+//! whether or not attribution is in play. See [`authenticate_token`].
 //!
 //! **Rotating the shared token.** Overwriting `tracker.token` outright would
 //! instantly lock out everyone still relying on the old value. Instead a
@@ -431,8 +432,8 @@ struct TokenAuth {
 /// 2. Matches the instance's own shared legacy token (`tracker.token` in the
 ///    vault) → allowed but unattributed. This is what keeps everything
 ///    seeded before per-peer attribution existed working, and what any
-///    friend not yet re-synced to a magnet built after it existed keeps
-///    using.
+///    friend not yet re-synced to a `.torrent` (or magnet) rewritten after
+///    it existed keeps using.
 /// 3. Matches the *previous* shared legacy token, if a rotation is in
 ///    progress → allowed, unattributed, `via_previous: true`. See
 ///    `crate::web::settings::rotate_tracker_token`: this is the whole point
@@ -548,8 +549,8 @@ pub struct TorrentFileQuery {
 /// because it is written once by the sync loop and reused for every requester.
 /// When the request carries a `token` that still resolves to an active peer,
 /// the announce URLs are rewritten in memory — never on disk — to that peer's
-/// own token before the response goes out, the same attribution the feed's
-/// magnet links already carry.
+/// own token before the response goes out — the same per-peer attribution a
+/// feed magnet carries too, when `feed.magnet_links` is on.
 #[utoipa::path(
     get,
     path = "/torrents/{name}",
@@ -962,6 +963,7 @@ mod tests {
                     info_hash: None,
                     announce_token_fp: None,
                     created_by_sharerr: true,
+                    private: true,
                     state: ShareState::Pending,
                     last_error: None,
                     created_at: None,
@@ -971,7 +973,7 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
+                .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true, Some(true))
                 .await
                 .unwrap();
 
@@ -1102,6 +1104,7 @@ mod tests {
                 path: &media,
                 announce: &announce,
                 media: None,
+                private: true,
             })
             .unwrap()
     }
@@ -1258,6 +1261,7 @@ mod tests {
                     info_hash: None,
                     announce_token_fp: None,
                     created_by_sharerr: true,
+                    private: true,
                     state: ShareState::Pending,
                     last_error: None,
                     created_at: None,
@@ -1267,7 +1271,7 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true)
+                .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true, Some(true))
                 .await
                 .unwrap();
 
@@ -1320,6 +1324,7 @@ mod tests {
                 info_hash: None,
                 announce_token_fp: None,
                 created_by_sharerr: true,
+                private: true,
                 state: ShareState::Pending,
                 last_error: None,
                 created_at: None,
@@ -1329,7 +1334,14 @@ mod tests {
             .await
             .unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None, true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1,
+                &built.info_hash,
+                None,
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
 
@@ -1382,6 +1394,7 @@ mod tests {
             info_hash: None,
             announce_token_fp: None,
             created_by_sharerr: true,
+            private: true,
             state: ShareState::Pending,
             last_error: None,
             created_at: None,
@@ -1415,7 +1428,14 @@ mod tests {
                 .unwrap();
             store.upsert(&shared_item()).await.unwrap();
             store
-                .set_seeding(MediaSource::Sonarr, 1, &"00".repeat(20), None, true)
+                .set_seeding(
+                    MediaSource::Sonarr,
+                    1,
+                    &"00".repeat(20),
+                    None,
+                    true,
+                    Some(true),
+                )
                 .await
                 .unwrap();
 
@@ -1458,7 +1478,14 @@ mod tests {
         let built = built_torrent(dir.path(), "http://seed.example:8477/announce");
         store.upsert(&shared_item()).await.unwrap();
         store
-            .set_seeding(MediaSource::Sonarr, 1, &built.info_hash, None, true)
+            .set_seeding(
+                MediaSource::Sonarr,
+                1,
+                &built.info_hash,
+                None,
+                true,
+                Some(true),
+            )
             .await
             .unwrap();
         let uri = format!("/torrents/{}.torrent", built.info_hash);

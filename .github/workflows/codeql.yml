@@ -44,50 +44,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Per-language change detection for pushes to main, so a docs-only merge
-  # does not pay for either analysis leg. Deliberately not routed through
-  # prepare.yml: this workflow never touches `vars.RUNNER_LABEL` (both legs
-  # are pinned `ubuntu-latest` — CodeQL has nothing to gain from the
-  # self-hosted box either), so it only needs the paths-filter half, with two
-  # keys instead of prepare.yml's one.
+  # Both legs run on every trigger, unconditionally — pushes to main included.
+  # This used to skip a leg on a push whose diff did not touch that
+  # language's paths (a docs-only merge paid for neither analysis), via a
+  # `dorny/paths-filter` change-detection job upstream of both. That saved
+  # runner time but cost more than it saved: the `main` ruleset requires a
+  # CodeQL result before a PR can merge, and code scanning's "waiting for
+  # results" and per-category alert state on the Security tab are both keyed
+  # off the *default branch's* most recent analysis for that category. A
+  # skipped leg on a push to main uploads nothing for that category, which is
+  # what surfaced as SAST errors in the Security tab rather than a clean or
+  # merely-stale result. Pull requests, the schedule, and workflow_dispatch
+  # already bypassed the filter for the same underlying reason (see the prior
+  # revision of this file in git history if the filter is ever worth
+  # resurrecting); this removes the one trigger that still had it.
   #
-  # Pull requests deliberately bypass the filter and run both languages. The
-  # `main` ruleset requires a CodeQL result before a PR can merge, and that
-  # requirement waits for an upload on the PR head for every category the
-  # tool has ever reported. A skipped leg uploads nothing, so a PR that
-  # touched only `crates/` sat on "Code scanning is waiting for results from
-  # CodeQL" indefinitely with no way to satisfy it. Schedule (the Tuesday
-  # baseline run) and workflow_dispatch skip the filter for the same reason:
-  # there is no diff to filter, and the baseline every PR gets diffed against
-  # has to cover both languages.
-  context:
-    name: detect changes
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      actions: ${{ steps.filter.outputs.actions }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - id: filter
-        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        with:
-          filters: |
-            rust:
-              - 'crates/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'migrations/**'
-            actions:
-              - '.github/**'
-
   # Two named jobs rather than one `matrix.language: [rust, actions]` job with
   # a per-language `if:`, because job-level `if:` cannot read the `matrix`
   # context at all — actionlint rejects it outright, since the condition is
@@ -96,8 +67,6 @@ jobs:
   # now its own job with its own visible pass/fail/skip, not a matrix cell.
   analyze-rust:
     name: CodeQL (rust)
-    needs: context
-    if: needs.context.result == 'skipped' || needs.context.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -123,8 +92,6 @@ jobs:
 
   analyze-actions:
     name: CodeQL (actions)
-    needs: context
-    if: needs.context.result == 'skipped' || needs.context.outputs.actions == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

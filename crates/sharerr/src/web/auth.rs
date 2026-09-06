@@ -131,6 +131,162 @@ impl Sessions {
     }
 }
 
+/// How many `/login` or `/setup` POSTs one source address gets inside a
+/// window before a 429, and how long that window is.
+///
+/// Generous relative to a legitimate operator — the point is closing the
+/// unauthenticated CPU/memory amplification a flood of guesses creates (each
+/// one costs a real Argon2 derivation, even against an unknown username; see
+/// `sharerr_store::users`'s decoy-hash comment and its own concurrency cap),
+/// not policing someone who mistyped a password twice. **Throttle, never
+/// lock out**: with exactly one operator account, turning this into a
+/// lockout would hand an attacker a free denial of service against the one
+/// person who is allowed in.
+const THROTTLE_MAX_ATTEMPTS: u32 = 5;
+const THROTTLE_WINDOW: Duration = Duration::from_secs(60);
+
+/// One source address's standing inside the current window.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    /// Attempts recorded since `window_started`.
+    spent: u32,
+    window_started: Instant,
+}
+
+/// Per-source-address rate limit on `/login` and `/setup` POSTs.
+///
+/// A fixed window rather than a smoother token bucket: simpler to reason
+/// about and to test, and the difference does not matter here — either shape
+/// closes the same amplification, and this is a courtesy against casual
+/// flooding, not a security boundary on its own (see
+/// [`throttle_unauthenticated_posts`] for why keying on the connection's own
+/// address, never a client-supplied header, is load-bearing).
+///
+/// In memory, like [`Sessions`] and for the same reason: a property of the
+/// running process, not something worth a migration to persist. A restart
+/// resetting every bucket is an honest "start over", not a correctness
+/// problem.
+#[derive(Debug)]
+pub struct Throttle {
+    inner: RwLock<HashMap<std::net::IpAddr, Bucket>>,
+    max_attempts: u32,
+    window: Duration,
+}
+
+impl Default for Throttle {
+    fn default() -> Self {
+        Self::new(THROTTLE_MAX_ATTEMPTS, THROTTLE_WINDOW)
+    }
+}
+
+impl Throttle {
+    /// Parameterised for tests, which need a window short enough to sleep
+    /// past; production always goes through [`Default::default`].
+    fn new(max_attempts: u32, window: Duration) -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            max_attempts,
+            window,
+        }
+    }
+
+    /// Record one attempt from `ip`. `Ok(())` when the window's budget has
+    /// room; `Err(retry_after)` when it is spent, with how long until the
+    /// window resets.
+    async fn check(&self, ip: std::net::IpAddr) -> Result<(), Duration> {
+        let now = Instant::now();
+        let mut buckets = self.inner.write().await;
+
+        // Lazy eviction, on every write, the same reasoning as
+        // `Sessions::create`: a handful of stale entries in a HashMap costs
+        // nothing, and an instance nobody is flooding should not run a
+        // reaper task for it.
+        buckets.retain(|_, bucket| now.duration_since(bucket.window_started) < self.window);
+
+        let bucket = buckets.entry(ip).or_insert(Bucket {
+            spent: 0,
+            window_started: now,
+        });
+
+        if bucket.spent >= self.max_attempts {
+            let retry_after = self
+                .window
+                .saturating_sub(now.duration_since(bucket.window_started));
+            return Err(retry_after);
+        }
+
+        bucket.spent += 1;
+        Ok(())
+    }
+}
+
+/// Gate in front of [`login_submit`] and [`setup_submit`]: refuse with `429`
+/// once one source address has made too many attempts inside the window —
+/// see [`Throttle`].
+///
+/// Keyed on [`std::net::SocketAddr`] from the connection itself, **never**
+/// `X-Forwarded-For` or any other client-supplied header — the same rule
+/// `arrived_over_https`'s doc comment states for the `Secure` cookie flag,
+/// for the same reason: a spoofable header must never buy a privilege, and
+/// a rate-limit exemption is exactly that. Behind a reverse proxy every
+/// request therefore collapses to one address and this degrades to a global
+/// limit across every visitor — acceptable, since the store-level
+/// concurrency cap (`sharerr_store::users`) is what actually bounds the
+/// damage, and `docs/SECURITY.md` already tells such a deployment to bring
+/// its own limiter.
+///
+/// Deliberately reads [`ConnectInfo`](axum::extract::ConnectInfo) out of the
+/// request's own extensions rather than taking it as an extractor argument:
+/// an extractor argument is resolved for *every* method before this
+/// function's body runs at all, so a GET here would need it present too.
+/// `serve` always supplies it (`into_make_service_with_connect_info`), but a
+/// test driving this router directly with `.oneshot` — as most of this
+/// crate's route tests do — normally has no reason to and must not be made
+/// to for a plain page load.
+pub async fn throttle_unauthenticated_posts(
+    State(state): State<WebState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if request.method() == axum::http::Method::GET {
+        return next.run(request).await;
+    }
+
+    let remote = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
+
+    let Some(remote) = remote else {
+        // Only reachable if this listener was not bound with
+        // `into_make_service_with_connect_info` — every real one is (see
+        // `commands::serve`) — or a test exercises a POST without supplying
+        // it. Fail open rather than refuse every sign-in attempt over a
+        // configuration problem nobody attempting to log in caused.
+        tracing::error!("no connection address available; skipping the login throttle");
+        return next.run(request).await;
+    };
+
+    match state.throttle.check(remote).await {
+        Ok(()) => next.run(request).await,
+        Err(retry_after) => {
+            tracing::warn!(ip = %remote, "too many login attempts");
+            let mut response = (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many attempts. Try again shortly.",
+            )
+                .into_response();
+            if let Ok(value) = axum::http::HeaderValue::from_str(&retry_after.as_secs().to_string())
+            {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+            response
+        }
+    }
+}
+
 /// Check a proposed password against the rules the forms state.
 ///
 /// Shared by setup and by the change-password form so the two cannot drift — the
@@ -258,6 +414,7 @@ pub async fn setup_submit(
         // Both of these are the user's mistake and safe to show verbatim.
         Err(StoreError::InvalidUser(message)) => return reject(message),
         Err(StoreError::UserExists { .. }) => return Redirect::to("/login").into_response(),
+        Err(StoreError::TooBusy) => return too_busy(),
         Err(err) => return internal(&format!("creating the account: {err}")),
     }
 
@@ -309,6 +466,7 @@ pub async fn login_submit(
             )
                 .into_response()
         }
+        Err(StoreError::TooBusy) => too_busy(),
         Err(err) => internal(&format!("checking the password: {err}")),
     }
 }
@@ -387,6 +545,7 @@ pub async fn change_password(
             tracing::warn!(%username, "rejected a password change: wrong current password");
             return settings_error(&state, "That is not your current password.").await;
         }
+        Err(StoreError::TooBusy) => return too_busy(),
         Err(err) => return internal(&format!("checking the password: {err}")),
     }
 
@@ -397,6 +556,7 @@ pub async fn change_password(
         // editing the database underneath us.
         Ok(false) => return settings_error(&state, "That account no longer exists.").await,
         Err(StoreError::InvalidUser(message)) => return settings_error(&state, message).await,
+        Err(StoreError::TooBusy) => return too_busy(),
         Err(err) => return internal(&format!("changing the password: {err}")),
     }
 
@@ -558,6 +718,19 @@ pub fn internal(message: &str) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, message.to_owned()).into_response()
 }
 
+/// `StoreError::TooBusy`'s response: every Argon2 slot
+/// (`sharerr_store::users`'s `HASH_SLOTS`) is in use. `503`, not `500` — this
+/// is load, not a broken hash or a panicked task, and not something the
+/// per-source-address [`Throttle`] alone can prevent, since a flood spread
+/// across many addresses never trips it.
+fn too_busy() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Too many password checks in flight right now. Try again shortly.",
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -565,6 +738,77 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
     use sharerr_testkit::secrets::fresh_password;
+
+    fn loopback() -> std::net::IpAddr {
+        std::net::IpAddr::from([127, 0, 0, 1])
+    }
+
+    #[tokio::test]
+    async fn a_burst_past_the_limit_is_refused() {
+        let throttle = Throttle::new(3, Duration::from_secs(60));
+        let ip = loopback();
+
+        for attempt in 0..3 {
+            assert!(
+                throttle.check(ip).await.is_ok(),
+                "attempt {attempt} should still be within budget"
+            );
+        }
+        assert!(
+            throttle.check(ip).await.is_err(),
+            "the 4th attempt inside one window must be refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_different_source_address_has_its_own_budget() {
+        let throttle = Throttle::new(1, Duration::from_secs(60));
+        let a = loopback();
+        let b = std::net::IpAddr::from([127, 0, 0, 2]);
+
+        assert!(throttle.check(a).await.is_ok());
+        assert!(
+            throttle.check(a).await.is_err(),
+            "a's single-attempt budget is spent"
+        );
+        assert!(
+            throttle.check(b).await.is_ok(),
+            "b must not be affected by a's flood"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_window_resets_once_it_elapses() {
+        let throttle = Throttle::new(1, Duration::from_secs(60));
+        let ip = loopback();
+
+        assert!(throttle.check(ip).await.is_ok());
+        assert!(throttle.check(ip).await.is_err());
+
+        // Age the bucket past its window rather than sleeping for real — the
+        // same trick `an_idle_session_expires` below uses for `Sessions`.
+        if let Some(bucket) = throttle.inner.write().await.get_mut(&ip) {
+            bucket.window_started = Instant::now() - throttle.window - Duration::from_secs(1);
+        }
+
+        assert!(
+            throttle.check(ip).await.is_ok(),
+            "a new window must grant a fresh budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_attempt_reports_how_long_until_the_window_resets() {
+        let throttle = Throttle::new(1, Duration::from_secs(60));
+        let ip = loopback();
+        throttle.check(ip).await.unwrap();
+
+        let retry_after = throttle.check(ip).await.unwrap_err();
+        assert!(
+            retry_after <= Duration::from_secs(60) && !retry_after.is_zero(),
+            "{retry_after:?}"
+        );
+    }
 
     #[tokio::test]
     async fn a_session_round_trips_and_can_be_revoked() {

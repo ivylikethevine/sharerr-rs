@@ -1,0 +1,13 @@
+-- Whether this item's torrent sets BEP 27's private flag.
+--
+-- Every torrent sharerr has ever built up to this migration set the flag
+-- unconditionally, so DEFAULT 1 backfills existing rows with the literal
+-- truth rather than a guess. `Store::set_seeding` is the only place that
+-- writes a value it actually knows -- decoded from the bytes just built or
+-- reused from sharerr's own cache, not from whatever `[seeding]` currently
+-- says, since a cached `.torrent` can predate a later config change. An
+-- adopted torrent (`SeedOutcome::Reused`, an operator's own or a cross-seed)
+-- leaves this column untouched: sharerr did not build it and has no honest
+-- answer for what it is, so the safe assumption -- private -- stands. See
+-- `sharerr_core::config::SeedingConfig::private` and `docs/SUPPORT.md`.
+ALTER TABLE shared_items ADD COLUMN private INTEGER NOT NULL DEFAULT 1;

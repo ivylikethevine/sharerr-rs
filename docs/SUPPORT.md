@@ -13,12 +13,13 @@ being either committed to or declined, see
   - [Library sources (where tagged content comes from)](#library-sources-where-tagged-content-comes-from)
   - [Torrent clients (what actually seeds)](#torrent-clients-what-actually-seeds)
   - [Indexers (what consumes the feed)](#indexers-what-consumes-the-feed)
+  - [The feed's magnet link](#the-feeds-magnet-link)
 - [Not supported](#not-supported)
   - [Media-server library sources (Jellyfin, Emby, Plex)](#media-server-library-sources-jellyfin-emby-plex)
   - [Readarr as a direct indexer](#readarr-as-a-direct-indexer)
   - [Transmission-compatible forks, as their own tier-2 target](#transmission-compatible-forks-as-their-own-tier-2-target)
   - [qBittorrent's embedded tracker as a second backend](#qbittorrents-embedded-tracker-as-a-second-backend)
-  - [Removing the feed's magnet link entirely](#removing-the-feeds-magnet-link-entirely)
+  - [Multi-user](#multi-user)
   - [Publishing to crates.io](#publishing-to-cratesio)
   - [A maintained CHANGELOG.md](#a-maintained-changelogmd)
 
@@ -84,6 +85,29 @@ Radarr-direct is exercised only by hand. The feed also advertises
 it is just untested, see [below](#readarr-as-a-direct-indexer). No further
 indexer work is currently planned.
 
+### The feed's magnet link
+
+Off by default (`[feed] magnet_links`), resolving what used to be an open
+roadmap question. Every torrent sharerr builds is private, so a magnet built
+from one can never complete: nothing in the swarm will answer a
+`ut_metadata` request. Worse, a client that supports both a magnet and a
+`.torrent` enclosure often *prefers* the magnet — the two-instance
+end-to-end test hit exactly this the hard way, when Radarr's direct Torznab
+client picked the magnet over the working `.torrent` and stalled forever
+(see [`docker/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md)'s
+two-instance section for the Prowlarr `preferMagnetUrl` pin that works
+around it, since Radarr/Sonarr's own direct client has no equivalent knob).
+
+Turning `feed.magnet_links` on only ever emits a magnet for an item that is
+*also* not private (`[seeding] private = false` — `private` is on by
+default). The two settings are independent, and the combination "magnets on,
+item private" is made inert rather than left to stall a friend's client.
+Turning `private` off is the bigger decision of the two — it hands a client
+DHT and PEX, so **revoking a friend no longer removes them from that
+torrent's swarm**, the one property `private` exists to guarantee. See
+[`docs/SETTINGS.md`](SETTINGS.md#seeding-limits) for both fields' settings-page
+documentation.
+
 ## Not supported
 
 One place to check before re-proposing something.
@@ -128,24 +152,6 @@ mean deciding what a friendship, a library, and a torrent client belong to
 before any access-control surface could be built, and nothing this project
 does needs that answer: friends are peers with their own instance, not
 accounts on yours.
-
-### Removing the feed's magnet link entirely
-
-Considered and left in, for now. Every torrent sharerr builds is private, so
-a magnet can never complete against one: nothing in the swarm will answer a
-`ut_metadata` request. The two-instance end-to-end test confirmed it the hard
-way, when Radarr's direct Torznab client picked the magnet over the working
-`.torrent` enclosure and stalled forever. The fix there was a Prowlarr in
-front of Radarr with `preferMagnetUrl` pinned to `false`, the one place that
-preference is configurable; see
-[`docker/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md)'s
-two-instance section.
-
-That does nothing for a friend who points Radarr or Sonarr _directly_ at the
-feed. Stripping `magneturl` (and Jackett's `magnet_uri`) would close the gap
-for every consumer at once, but it still helps a genuinely DHT-capable one,
-and pulling it is a one-line change to make the moment a real report shows it
-biting a direct connection.
 
 ### Publishing to crates.io
 

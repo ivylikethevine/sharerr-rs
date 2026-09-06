@@ -124,6 +124,7 @@ fn a_real_torrent(dir: &Path, name: &str) -> Vec<u8> {
             path: &path,
             announce: &AnnounceSet::single(Url::parse(FOREIGN_ANNOUNCE).unwrap()),
             media: None,
+            private: true,
         })
         .unwrap()
         .data
@@ -502,6 +503,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         skip_checking: false,
         upload_limit_kib: seeding.upload_limit_kib,
         ratio_limit: seeding.ratio_limit,
+        private: seeding.private,
         torrent_dir: torrents.path().to_path_buf(),
     };
 
@@ -548,6 +550,7 @@ impl Harness {
             skip_checking: false,
             upload_limit_kib: seeding.upload_limit_kib,
             ratio_limit: seeding.ratio_limit,
+            private: seeding.private,
             torrent_dir: self.torrents.path().to_path_buf(),
         };
         Syncer::new(
@@ -828,6 +831,7 @@ async fn an_add_carries_the_configured_seeding_goal() {
     let h = tagged_harness_with_seeding(SeedingConfig {
         upload_limit_kib: Some(500),
         ratio_limit: Some(2.0),
+        ..SeedingConfig::default()
     })
     .await;
     h.syncer.run(false).await.unwrap();
@@ -870,6 +874,7 @@ async fn a_changed_seeding_goal_reaches_torrents_already_seeding_once() {
     let goal = SeedingConfig {
         upload_limit_kib: Some(250),
         ratio_limit: Some(1.5),
+        ..SeedingConfig::default()
     };
     let changed = h.rebuilt_with_seeding(goal);
     changed.run(false).await.unwrap();
@@ -908,6 +913,7 @@ async fn a_changed_seeding_goal_reaches_torrents_already_seeding_once() {
     h.rebuilt_with_seeding(SeedingConfig {
         upload_limit_kib: Some(100),
         ratio_limit: None,
+        ..SeedingConfig::default()
     })
     .run(false)
     .await
@@ -949,6 +955,7 @@ async fn a_seeding_goal_is_never_applied_to_an_adopted_torrent() {
                 item.info_hash.as_deref().unwrap(),
                 item.announce_token_fp.as_deref(),
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -957,6 +964,7 @@ async fn a_seeding_goal_is_never_applied_to_an_adopted_torrent() {
     h.rebuilt_with_seeding(SeedingConfig {
         upload_limit_kib: Some(250),
         ratio_limit: Some(1.5),
+        ..SeedingConfig::default()
     })
     .run(false)
     .await
@@ -1234,6 +1242,7 @@ async fn withdrawing_an_adopted_torrent_leaves_it_in_the_client() {
                 item.info_hash.as_deref().unwrap(),
                 item.announce_token_fp.as_deref(),
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -1843,6 +1852,7 @@ async fn a_broken_arr_app_never_causes_its_shares_to_be_withdrawn() {
         info_hash: Some("radarrhash0000000000000000000000000000aa".to_owned()),
         announce_token_fp: None,
         created_by_sharerr: true,
+        private: true,
         state: ShareState::Seeding,
         last_error: None,
         created_at: None,

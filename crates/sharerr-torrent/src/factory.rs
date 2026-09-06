@@ -29,6 +29,11 @@ pub struct TorrentRequest<'a> {
     /// for whoever opens the `.torrent` by hand. `None` writes no comment at all
     /// rather than an empty one.
     pub media: Option<&'a sharerr_core::MediaMeta>,
+    /// Whether to set BEP 27's private flag. See
+    /// `sharerr_core::config::SeedingConfig::private` for what turning this
+    /// off costs: DHT/PEX become available, so revoking a friend no longer
+    /// removes them from the swarm.
+    pub private: bool,
 }
 
 /// A finished torrent, in memory.
@@ -89,12 +94,15 @@ impl TorrentFactory {
         let pieces = hash_pieces(path, piece_length)?;
 
         // The info dictionary: exactly the fields BEP 3 needs for one file,
-        // plus BEP 27's private flag. Friend-to-friend sharing must not leak
-        // into the public DHT or PEX; that flag is the whole reason the
-        // tracker exists. Nothing else goes in here: the info hash is a
-        // function of the *file*, and adding metadata to this dictionary
-        // would make two torrents over one unchanged file stop matching,
-        // breaking the "reuse the torrent that already covers this file"
+        // plus BEP 27's private flag when `request.private` asks for it.
+        // Friend-to-friend sharing defaults to not leaking into the public
+        // DHT or PEX; that flag is the whole reason the tracker exists, and
+        // an operator has to opt out of it explicitly (see
+        // `sharerr_core::config::SeedingConfig::private`). Nothing else goes
+        // in here: the info hash is a function of the *file*, and adding
+        // metadata to this dictionary would make two torrents over one
+        // unchanged file stop matching, breaking the "reuse the torrent that
+        // already covers this file"
         // path that keeps sharerr from re-adding media.
         let mut info = BTreeMap::new();
         info.insert(
@@ -107,7 +115,13 @@ impl TorrentFactory {
             Value::Int(i64::try_from(piece_length).unwrap_or(i64::MAX)),
         );
         info.insert(b"pieces".to_vec(), Value::Bytes(pieces));
-        info.insert(b"private".to_vec(), Value::Int(1));
+        // Omitted entirely when off, not written as `Value::Int(0)`: present-and-
+        // zero and absent are different bencodings, so writing a literal zero
+        // would still change the info hash relative to a build that never
+        // mentioned the key. Absent is the conventional encoding for "not private".
+        if request.private {
+            info.insert(b"private".to_vec(), Value::Int(1));
+        }
 
         let mut extra = BTreeMap::new();
         // `comment` lives outside the info dictionary by BEP 3, which is also
@@ -433,6 +447,7 @@ mod tests {
                 path: &path,
                 announce,
                 media: None,
+                private: true,
             })
             .unwrap()
     }
@@ -485,6 +500,7 @@ mod tests {
                 path: &path,
                 announce: &set,
                 media: None,
+                private: true,
             })
             .unwrap();
         let described = TorrentFactory
@@ -498,6 +514,7 @@ mod tests {
                     audio_channels: Some("5.1".to_owned()),
                     ..MediaMeta::default()
                 }),
+                private: true,
             })
             .unwrap();
 

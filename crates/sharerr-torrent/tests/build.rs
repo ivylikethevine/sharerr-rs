@@ -22,6 +22,7 @@ fn build(path: &Path) -> sharerr_torrent::BuiltTorrent {
             path,
             announce: &announce,
             media: None,
+            private: true,
         })
         .unwrap()
 }
@@ -168,6 +169,7 @@ fn a_missing_file_is_reported_rather_than_panicking() {
             path: &path,
             announce: &announce,
             media: None,
+            private: true,
         })
         .unwrap_err();
 
@@ -188,6 +190,7 @@ fn a_directory_is_refused() {
             path: dir.path(),
             announce: &announce,
             media: None,
+            private: true,
         })
         .unwrap_err();
 
@@ -222,6 +225,7 @@ fn multiple_endpoints_become_ordered_announce_tiers() {
             path: &path,
             announce: &announce,
             media: None,
+            private: true,
         })
         .unwrap();
 
