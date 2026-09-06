@@ -21,6 +21,13 @@
 #     just a digest. `image-scan.yml` answers that with trivy by measuring both
 #     the pinned digest and what the tag points at now.
 #
+# The github-actions entry below scans `/.github/actions/*` as well as `/`:
+# the composite actions under `.github/actions/` (setup-tool, upsert-tracking-
+# issue, fetch-latest-artifact, advisory-note) each pin their own `uses:` —
+# actions/cache in setup-tool/action.yml, actions/download-artifact in
+# fetch-latest-artifact/action.yml — and without a directory entry naming
+# them, those SHAs were pinned but nothing here moved them.
+#
 # Every compose file in the tree is in scope, which is a constraint on
 # filenames. The docker-compose ecosystem matches files by the regex
 # `(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`; the gluetun service fragment is
@@ -35,7 +42,9 @@ updates:
   # GitHub Actions. Weekly rather than daily — this is a small project and a PR per
   # action per day would be noise nobody reads.
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: weekly
       day: monday

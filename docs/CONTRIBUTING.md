@@ -18,6 +18,7 @@ the traps and repository mechanics a person would not need spelled out.
 - [MSRV](#msrv)
 - [What CI runs](#what-ci-runs)
 - [Working on the docs](#working-on-the-docs)
+- [Which doc changes with what](#which-doc-changes-with-what)
 - [Commits and pull requests](#commits-and-pull-requests)
 - [Licence](#licence)
 
@@ -133,9 +134,12 @@ one.
 | CodeQL (`rust`, `actions`) | `codeql.yml` | Yes, as code scanning; alerts are diff-scoped |
 | `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml` | Yes; also the de-facto MSRV check |
 
-Four more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
-`link-check.yml`) run weekly and on every push to `main`, and report by
-keeping an issue current rather than by failing; none blocks a merge.
+Six more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
+`link-check.yml`, `coverage.yml`, `scorecard.yml`) run weekly and after every
+green run of `ci.yml` on `main` — not on every push regardless of outcome,
+so a tree CI just rejected isn't also scanned, coverage-measured, or scored.
+The first four report by keeping an issue current rather than by failing;
+none of the six blocks a merge.
 
 `./scripts/run_codeql.sh` runs CodeQL's analysis entirely locally, worth
 doing before pushing anything that touches crypto, secret handling, or a
@@ -173,6 +177,29 @@ one of those headings fails `cargo test`, which is the only anchor check in
 the repo. Files under `docker/`, `crates/`, and `CLAUDE.md` are excluded from
 the published docs site (`_config.yml`), so a link to them from `README.md`
 or `docs/*.md` must be an absolute GitHub URL.
+
+## Which doc changes with what
+
+[`docs/README.md`](README.md) maps each doc to the topic it owns; this is
+the same map read the other way, as a checklist — what _kind_ of change
+should make you go check a doc. The PR template's checklist just points
+here rather than repeating it.
+
+| If your change... | Update |
+| --- | --- |
+| adds, renames, or changes the default of a `sharerr.toml` field, environment variable, or vault secret | [Settings reference](SETTINGS.md) |
+| adds or drops a supported torrent client, *arr app, or indexer behaviour | [Support](SUPPORT.md) |
+| adds, removes, or changes an HTTP route (Torznab, Jackett, gossip, tracker, lighthouse, ops) | [The API](API.md) (regenerate `docs/openapi.json`; see that doc for how) |
+| moves a trust boundary, changes where state lives, or adds/removes a crate | [Architecture](ARCHITECTURE.md) |
+| changes the tag scheme, an image, the approval gate, or anything `docker.yml`/`docker-image.yml` publish | [Releasing](RELEASING.md) |
+| adds a test fixture, a compose stack, or a testing tier | [Testing](TESTING.md), and [the compose stacks doc](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md) if it touches tier 2 |
+| changes what data crosses a trust boundary, or a class of vulnerability the threat model should name | [Security policy](SECURITY.md) |
+| changes a deploy compose layout under `docker/deploy/` | [Deploying](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md) |
+| changes a convention, trap, or repository mechanic an agent would need but a person wouldn't | [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md) |
+
+A change that fits none of these rows updates no doc beyond its own code
+comments — most PRs are in this category, and the checklist item exists for
+the minority that aren't.
 
 ## Commits and pull requests
 

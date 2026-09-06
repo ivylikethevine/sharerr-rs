@@ -61,7 +61,7 @@ jobs:
       id-token: write
       attestations: write
       pull-requests: read
-    uses: ./.github/workflows/docker-image.yml
+    uses: $/.github/workflows/docker-image.yml
     with:
       # GHCR rejects uppercase paths. `github.repository` happens to be
       # all-lowercase today, so no normalisation is needed — worth
@@ -95,7 +95,7 @@ jobs:
       id-token: write
       attestations: write
       pull-requests: read
-    uses: ./.github/workflows/docker-image.yml
+    uses: $/.github/workflows/docker-image.yml
     with:
       # A second package in the owner's namespace rather than a suffix on
       # this repo's — `sharerr-lighthouse` is the crate's name and the
@@ -254,7 +254,7 @@ jobs:
       # continue-on-error inside the action already turns a missing run or an
       # expired artifact into "nothing downloaded", never a failed release.
       - name: Fetch this commit's coverage and test-count figures
-        uses: ./.github/actions/fetch-latest-artifact
+        uses: $/.github/actions/fetch-latest-artifact
         with:
           workflow: coverage.yml
           artifact-name: coverage-badge

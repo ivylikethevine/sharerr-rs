@@ -24,10 +24,15 @@ on:
   # answering the same question, one of them in the wrong shape, was the
   # actual bug; `audit` below now exists purely as the per-PR gate.
 
-# A quick follow-up commit should not leave the previous run burning a runner.
+# A quick follow-up commit should not leave the previous run burning a
+# runner — but only on a PR: coverage.yml, advisories.yml, image-scan.yml,
+# link-check.yml, scorecard.yml and tool-versions.yml now all chain off a
+# green run of this workflow on `main` (see each file's own header), so
+# cancelling a superseded push here would silently cancel the run every one
+# of them is waiting on. codeql.yml uses this same conditional shape.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -54,7 +59,7 @@ jobs:
     name: prepare
     permissions:
       pull-requests: read
-    uses: ./.github/workflows/prepare.yml
+    uses: $/.github/workflows/prepare.yml
     with:
       filters: |
         code:
@@ -241,6 +246,7 @@ jobs:
           scripts/screenshot_pages.sh scripts/run_codeql.sh
           .github/scripts/check_tool_versions.sh .github/scripts/scan_pinned_images.sh
           .github/actions/setup-tool/install.sh .github/actions/setup-tool/lib.sh
+          .github/actions/setup-tools/resolve.sh .github/actions/setup-tools/install-missing.sh
 
       # Schema-validates the compose file without needing the images or a daemon.
       - run: docker compose -f docker/compose.test.yml config -q
@@ -291,7 +297,13 @@ jobs:
   # from the self-hosted box, and this is exactly the job that should not be the
   # one deciding, by its own runner, whether it trusts that box. Both install
   # through ./.github/actions/setup-tool, which caches the pinned release binary
-  # instead of a fresh `pip install`/`go install` on every run.
+  # instead of a fresh `pip install`/`go install` on every run. The two go
+  # through $/.github/actions/setup-tools (plural) rather than two separate
+  # ./setup-tool calls — this is the one job in the repo that needs more than
+  # one pinned tool at once, so it is the one call site that benefits from
+  # setup-tools' single shared actions/cache round trip; every other single-
+  # tool call site (coverage.yml, link-check.yml, the `advisory` job below)
+  # stays on ./setup-tool.
   workflow-lint:
     name: workflow lint (zizmor + actionlint)
     runs-on: ubuntu-latest
@@ -303,18 +315,14 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      - uses: ./.github/actions/setup-tool
+      - uses: $/.github/actions/setup-tools
         with:
-          tool: zizmor
+          tools: zizmor actionlint
 
       - name: Audit the workflows (zizmor)
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --no-progress .github/
-
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: actionlint
 
       - name: Lint the workflows (actionlint)
         run: actionlint -color
@@ -397,7 +405,7 @@ jobs:
         run: sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
 
       - if: needs.prepare.outputs.code == 'true' && steps.hadolint.outputs.found == '1'
-        uses: ./.github/actions/advisory-note
+        uses: $/.github/actions/advisory-note
         with:
           title: hadolint
           warning-body: Dockerfile lint findings above - advisory, not blocking
@@ -419,7 +427,7 @@ jobs:
           config: ".markdownlint.yaml"
 
       - if: needs.prepare.outputs.code == 'true' && steps.markdownlint.outcome == 'failure'
-        uses: ./.github/actions/advisory-note
+        uses: $/.github/actions/advisory-note
         with:
           title: markdownlint
           warning-body: Markdown lint findings above - advisory, not blocking
@@ -433,7 +441,7 @@ jobs:
       # why it starts with no entries. Promote this to a gate (same shape as
       # `fmt`/`test`/`msrv` above, no `continue-on-error`) once a run or two
       # has come back clean or the allowlist has caught up with what's left.
-      - uses: ./.github/actions/setup-tool
+      - uses: $/.github/actions/setup-tool
         with:
           tool: typos
 
@@ -443,7 +451,7 @@ jobs:
         run: typos
 
       - if: steps.typos.outcome == 'failure'
-        uses: ./.github/actions/advisory-note
+        uses: $/.github/actions/advisory-note
         with:
           title: typos
           warning-body: Possible typo(s) found above - advisory, not blocking

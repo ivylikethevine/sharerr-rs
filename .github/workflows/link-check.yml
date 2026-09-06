@@ -5,15 +5,19 @@
 # this reports and never blocks — same reasoning as hadolint and markdownlint
 # in ci.yml. Weekly on its own, since a link a PR didn't touch does not go
 # stale because of that PR and re-checking it on every commit would be the
-# same round trip repeated for no new information — plus every push to main,
-# so a doc change checks its own new links right when they land rather than
-# waiting for Monday. Still not on `pull_request`: that would be the same
-# repeated round trip for anything the PR itself didn't touch, on every push
-# to the branch.
+# same round trip repeated for no new information — plus after every green CI
+# run on main, so a doc change checks its own new links right when they land
+# rather than waiting for Monday, without re-checking a tree CI already
+# rejected. Still not on `pull_request`: that would be the same repeated
+# round trip for anything the PR itself didn't touch, on every push to the
+# branch. See pages.yml's header for why a workflow_run trigger is safe
+# despite zizmor's default suspicion of it.
 name: Link check
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "23 8 * * 1"
@@ -34,6 +38,12 @@ jobs:
     name: check links (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # only a green push to main gets a fresh sweep; the schedule and a manual
+    # dispatch pass the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,7 +56,7 @@ jobs:
       # downloads the pin as a release binary once per version and caches it,
       # instead of a fresh `cargo install --version 0.24.2 --locked` source
       # build every run.
-      - uses: ./.github/actions/setup-tool
+      - uses: $/.github/actions/setup-tool
         with:
           tool: lychee
 
@@ -67,7 +77,7 @@ jobs:
           exit "$status"
 
       - if: steps.check.outputs.found == '1'
-        uses: ./.github/actions/advisory-note
+        uses: $/.github/actions/advisory-note
         with:
           title: lychee
           warning-body: Broken link(s) found in the docs - advisory, not blocking

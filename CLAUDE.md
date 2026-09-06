@@ -272,12 +272,27 @@ into the code block), and give it a non-ref-scoped `concurrency:` group with
 racing (a push and its cron, or two quick merges) can both find no open issue
 and both create one.
 
-All four (the three above plus `link-check.yml`, which is advisory the same
-way but has no issue to upsert) run on every push to `main` in addition to
-their weekly cron. The cron catches drift no commit caused; the push trigger
-means a merge that _does_ cause one (a `Cargo.lock` bump reintroducing an
-advisory, a docs change linking somewhere dead) surfaces immediately. None
-of the four blocks a merge; `ci.yml` is the gate.
+All six of these post-merge workflows — the three tracking-issue ones above,
+plus `link-check.yml` (advisory, no issue to upsert), `coverage.yml`, and
+`scorecard.yml` — chain off a **green run of `ci.yml` on `main`**, via a
+`workflow_run` trigger, rather than firing on every push to `main`
+regardless of outcome. A tree `cargo test` just rejected isn't worth
+scanning, coverage-measuring, or scoring, and a red run reaching six
+dependent workflows was ~19 concurrent jobs per merge for no reason on the
+merges that most needed attention elsewhere. Each keeps its own weekly cron
+too, as a backstop for drift no commit caused; the `workflow_run` leg is what
+makes a merge that _does_ cause one (a `Cargo.lock` bump reintroducing an
+advisory, a docs change linking somewhere dead) surface immediately, same as
+the old push trigger did, just gated on green. `ci.yml`'s own `concurrency:`
+group only cancels a superseded run on `pull_request` now — cancelling a
+superseded push to `main` would silently cancel the run all six are waiting
+on. `docker.yml` is the one push-triggered workflow that deliberately did
+_not_ move: it publishes the `sha-<7-char-sha>` image, not a scan, and that
+should ship whether or not an advisory job would have been red. None of the
+six blocks a merge; `ci.yml` is the gate. Every `workflow_run` trigger here
+carries an inline `# zizmor: ignore[dangerous-triggers]`, with the shared
+justification living in `pages.yml`'s header — the original of this pattern
+— rather than repeated per file.
 
 **`image-scan.yml` runs two scans that answer different questions.** `trivy`
 scans the image the repo _publishes_ ("has what we shipped gone stale");
@@ -295,6 +310,21 @@ sha256-verified GitHub release asset by `.github/actions/setup-tool`.
 archive shape, verify flag, sha256), read both by that action and by
 `check_tool_versions.sh`; bumping one is a hand edit to that file and nothing
 else. hadolint and trivy are deliberately unpinned, so neither has a row.
+`.github/actions/setup-tools` (plural) is the batched sibling for a job that
+needs more than one row at once — `ci.yml`'s `workflow-lint` is the only
+current caller — resolving every pin and paying one shared `actions/cache`
+round trip instead of N; a job needing exactly one tool still goes through
+`setup-tool` (singular).
+
+**`actionlint` points at `kjanat/actionlint`, a maintained fork, not
+upstream `rhysd/actionlint`.** Upstream is stuck on 1.7.12 and rejects
+zizmor's `$/...` self-repository syntax (`rhysd/actionlint#732`, open and
+unmerged); the fork's 1.9.0 added `$/...` support, which is what let every
+`uses: ./.github/...` in this tree become `uses: $/.github/...` via `zizmor
+--fix=safe .github/`, in turn letting `.github/zizmor.yml`'s
+`self-repository` ignore block go away entirely. `tools.txt`'s comment on
+that row has the full trade (a 12-star fork of a 4,195-star tool, made
+acceptable by the sha256 pin) and the revert condition.
 
 ### Generated artifacts on main
 
@@ -306,9 +336,10 @@ pattern is `coverage.yml` uploading the figure as a build artifact, and
 run via `gh api .../actions/workflows/coverage.yml/runs`, downloading that
 artifact, and writing it into `_site/` after Jekyll has built, so it ships
 with the same Pages deploy. Copy that shape rather than reaching for a bot
-commit; `.github/zizmor.yml`'s `dangerous-triggers` entry says why the
-`workflow_run` trigger is safe here (no attacker-controlled ref is ever
-checked out or read).
+commit; `pages.yml`'s own header comment says why the `workflow_run` trigger
+is safe here (no attacker-controlled ref is ever checked out or read) — the
+same comment every other `workflow_run`-triggered workflow in the repo
+points back to rather than repeating.
 
 ### Where the roadmap lives
 

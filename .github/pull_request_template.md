@@ -24,6 +24,7 @@ If one of these cannot be completed, give a justification.
 - [ ] Tier-1 tests stay hermetic: no network, no containers, no database
 - [ ] This adds or extends a test that would have failed without the change, if it's a new feature or a bug fix ([test policy](../docs/CONTRIBUTING.md#test-policy))
 - [ ] No secret reaches `sharerr.toml` ([settings reference](../docs/SETTINGS.md#vault-secrets))
+- [ ] Affected docs are updated ([which doc changes with what](../docs/CONTRIBUTING.md#which-doc-changes-with-what))
 
 ## AI disclosure
 

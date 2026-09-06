@@ -24,14 +24,19 @@ name: Advisories
 # fail on something the repo itself changed, which is ci.yml's job; advisories
 # is the only one that can start failing with nobody having touched anything.
 #
-# Also runs on every push to main, alongside the weekly cron: a merge is the
-# other moment worth checking, since a bumped Cargo.lock can introduce an
-# already-published advisory the same way a new one landing upstream can. The
-# cron stays because the common case above — nobody touched anything — needs
-# it regardless.
+# Also chained off every green CI run on main, alongside the weekly cron: a
+# merge is the other moment worth checking, since a bumped Cargo.lock can
+# introduce an already-published advisory the same way a new one landing
+# upstream can. Gated on green rather than a bare `push` so a tree
+# `cargo test` already rejected isn't also the one this reports against —
+# see pages.yml's header for why a workflow_run trigger is safe despite
+# zizmor's default suspicion of it. The cron stays because the common case
+# above — nobody touched anything — needs it regardless.
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "11 7 * * 1"
@@ -49,6 +54,12 @@ jobs:
     name: RUSTSEC advisories against Cargo.lock (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # only a green push to main gets a fresh run; the schedule and a manual
+    # dispatch pass the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     permissions:
       contents: read
       # the one write this job does: upsert (and close) its own tracking issue
@@ -109,7 +120,7 @@ jobs:
       # once the issue is upserted, so no separate trailing step here has to
       # do it a second time.
       - name: Keep the tracking issue current
-        uses: ./.github/actions/upsert-tracking-issue
+        uses: $/.github/actions/upsert-tracking-issue
         with:
           label: advisories
           label-color: B60205

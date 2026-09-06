@@ -21,6 +21,7 @@ the map.
 | --- | --- |
 | [Architecture](ARCHITECTURE.md) | The crate map, how a share moves end to end, trust boundaries, where state lives, and refactors weighed and declined. |
 | [Design brief](DESIGN.md) | The original statement of intent, kept verbatim, and where the implementation disproved it. |
+| [Alternatives](ALTERNATIVES.md) | How sharerr differs from acquisition/ratio automation (Autobrr, cross-seed) and from a shared or pooled *arr instance, and what it deliberately trades away. |
 
 ## Changing it
 

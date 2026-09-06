@@ -41,7 +41,16 @@
 # Bumping a pin is a hand edit here, and nothing else - the caching action.yml
 # reads the version back out of install.sh's `resolve`.
 zizmor|1.30.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed
-actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint||8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+# Points at kjanat/actionlint, a maintained fork, not upstream rhysd/actionlint:
+# upstream is stuck on 1.7.12 and rejects zizmor's `$/...` self-repository
+# syntax (rhysd/actionlint#732, open and unmerged as of this pin), which is
+# what previously forced zizmor.yml's whole self-repository ignore block.
+# The fork's v1.9.0 added `$/...` support, unblocking that rewrite. A 12-star
+# fork of a 4,195-star tool is a real trade, made acceptable by the sha256
+# column: a compromised future fork release can't land silently, since
+# install.sh refuses a checksum mismatch. Revert to rhysd/actionlint (and
+# restore zizmor.yml's self-repository block) if that PR ever merges.
+actionlint|1.14.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:kjanat/actionlint||14151358d71bdf746bb360480dc145ee241c16ce2807e7368e6bddabbec34da6
 # verify is "llvm-cov --version", not the bare flag every other row uses: the
 # binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."
 # works, by expecting its own subcommand name as the first argument even when

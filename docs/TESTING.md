@@ -119,8 +119,8 @@ cargo llvm-cov --workspace --all-features --locked --no-report
 cargo llvm-cov report --html --output-dir coverage-html
 ```
 
-`coverage.yml` runs this over tier 1 only, on every push to `main`, and
-publishes the figure as a shields.io endpoint badge through `pages.yml`
+`coverage.yml` runs this over tier 1 only, after every green run of `ci.yml`
+on `main`, and publishes the figure as a shields.io endpoint badge through `pages.yml`
 rather than a Codecov upload: no third-party account, no token. There is no
 threshold and no gate; a number that measures only the hermetic suite is
 worth publishing, not worth failing a PR over. The

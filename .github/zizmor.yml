@@ -10,38 +10,22 @@ rules:
   # and trivy under "Pinned tool versions that dependabot cannot see".
   unpinned-tools:
     ignore:
-      - image-scan.yml:107
-      - image-scan.yml:158
+      - image-scan.yml:117
+      - image-scan.yml:174
 
-  # zizmor 1.30.0 added this audit: it wants every workspace-relative
-  # `uses: ./.github/...` rewritten to GitHub's July-2026 `$/` self-repository
-  # syntax. The rewrite is blocked for now by the other workflow linter this
-  # repo pins: actionlint 1.7.12 — the newest release there is — rejects `$/`
-  # as an invalid `uses:` format, so applying zizmor's auto-fix turns the
-  # actionlint job red instead. Ignored per file rather than fixed until an
-  # actionlint release understands the syntax; when one ships, apply
-  # `zizmor --fix=safe .github/`, drop this whole block, and bump both pins in
-  # ../actions/setup-tool/tools.txt together.
-  self-repository:
-    ignore:
-      - advisories.yml
-      - ci.yml
-      - coverage.yml
-      - docker-image.yml
-      - docker.yml
-      - image-scan.yml
-      - link-check.yml
-      - pages.yml
-      - tool-versions.yml
+  # self-repository is not listed here: every workspace-relative `uses:
+  # ./.github/...` was rewritten to GitHub's `$/` self-repository syntax once
+  # ./setup-tool's actionlint pin moved to kjanat/actionlint (see
+  # tools.txt's comment on that row) — the fork understands `$/...` where
+  # upstream rhysd/actionlint 1.7.12 rejected it as an invalid `uses:`
+  # format. Applied with `zizmor --fix=safe .github/`.
 
-  # pages.yml's `workflow_run` trigger is the usual dangerous shape in name
-  # only: the flagged risk is a privileged run checking out the head SHA of
-  # whatever triggered it and building from attacker-controlled content. This
-  # one does not. `build`'s checkout carries no `ref:`, so it always builds the
-  # default branch; the coverage figure comes from an API query for the newest
-  # green coverage.yml run on `main` rather than from the triggering run's own
-  # payload; and coverage.yml itself never runs on `pull_request` — so there is
-  # no attacker-controlled byte anywhere in the path.
-  dangerous-triggers:
-    ignore:
-      - pages.yml:12
+  # dangerous-triggers is not listed here: every workflow_run trigger in this
+  # repo (pages.yml, coverage.yml, advisories.yml, image-scan.yml,
+  # link-check.yml, scorecard.yml, tool-versions.yml) carries its own inline
+  # `# zizmor: ignore[dangerous-triggers]` comment on the `on:` line instead,
+  # next to the justification each file's own header gives — pages.yml's is
+  # the canonical copy the rest point back to. Inline over a line-numbered
+  # entry here on purpose: a line-numbered entry silently detaches the moment
+  # the file it names is edited, and this file now has seven of them to keep
+  # in sync.

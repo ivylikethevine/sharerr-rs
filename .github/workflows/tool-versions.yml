@@ -21,17 +21,21 @@ name: Tool versions
 # reported as pending, not as drift, so this issue never opens for a bump
 # dependabot is deliberately not proposing yet.
 #
-# Also runs on every push to main, alongside the weekly cron, so a bump to
-# tools.txt (or its absence, when upstream moved and nobody bumped it) shows up
-# at merge time too — the cron stays for drift that happens with no commit at
-# all.
+# Also chained off every green CI run on main, alongside the weekly cron, so
+# a bump to tools.txt (or its absence, when upstream moved and nobody bumped
+# it) shows up at merge time too — the cron stays for drift that happens with
+# no commit at all. Gated on green rather than a bare `push` — see pages.yml's
+# header for why a workflow_run trigger is safe despite zizmor's default
+# suspicion of it.
 #
 # Serialised rather than cancel-on-superseded (see the concurrency: block
 # below): upsert-tracking-issue's list-then-create is not safe to run twice at
 # once, and this job is a few minutes, not the ~25 of image-scan's `pins`.
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   schedule:
     - cron: "23 7 * * 1"
@@ -49,6 +53,12 @@ jobs:
     name: pinned CI tools vs upstream
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # only a green push to main gets a fresh check; the schedule and a manual
+    # dispatch pass the first clause
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     permissions:
       contents: read
       # the one write this job does: upsert (and close) its own tracking issue
@@ -98,7 +108,7 @@ jobs:
       # See .github/actions/upsert-tracking-issue for the shape this,
       # advisories.yml, and image-scan.yml's `pins` job all share.
       - name: Keep the tracking issue current
-        uses: ./.github/actions/upsert-tracking-issue
+        uses: $/.github/actions/upsert-tracking-issue
         with:
           label: tool-versions
           label-color: 0E8A16

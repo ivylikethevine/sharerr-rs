@@ -1,0 +1,49 @@
+# A PR closed (merged or abandoned) with a run still queued or in progress on
+# its head commit is a runner burning minutes on work nobody will read the
+# result of. `ci.yml`'s `cancel-in-progress: true` already handles a *new*
+# push superseding an old one on the same PR; this handles the other way a
+# run outlives its usefulness — the PR itself going away.
+#
+# Same-repo PRs only, deliberately: a fork PR's GITHUB_TOKEN has no `actions:
+# write` to reach with, so the guard below is what keeps this from failing
+# loudly on every fork closure instead of just doing nothing.
+name: Cancel a closed PR's runs
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  cancel:
+    name: cancel the closed PR's runs
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel queued and running runs on the head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          n=0
+          for status in queued in_progress waiting pending requested; do
+            while read -r id name; do
+              [ -n "$id" ] || continue
+              echo "cancelling $name run $id ($status) for PR #$PR"
+              gh run cancel --repo "$GITHUB_REPOSITORY" "$id" ||
+                echo "::warning title=cancel::could not cancel run $id ($name) - a read-only token?"
+              n=$((n + 1))
+            done <<EOF_RUNS
+          $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$HEAD_SHA" --status "$status" \
+              --json databaseId,workflowName \
+              --jq ".[] | select(.databaseId != $GITHUB_RUN_ID) | \"\(.databaseId) \(.workflowName)\"")
+          EOF_RUNS
+          done
+          echo "PR #$PR closed: $n run(s) cancelled"
