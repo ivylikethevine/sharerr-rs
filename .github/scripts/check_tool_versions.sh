@@ -116,6 +116,18 @@ function _pending_note() {
   fi
 }
 
+# _at_least <pinned> <due> - true when the pinned version is at or above
+# `due`, compared as dotted numerics (sort -V), never as strings. The
+# comparison is against `due`, not `newest`, because `due` is what dependabot
+# would propose today: a pin at or ahead of it is current. That includes a pin
+# sitting *between* the two - v2.87.6 pinned while v2.87.2 was the cooled-down
+# release and v2.87.7 had shipped that morning - which an equality test read
+# as "behind v2.87.2" and opened the tracking issue over a pin that was in
+# fact five releases ahead of what it was being measured against.
+function _at_least() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -n1)" = "$1" ]
+}
+
 bad=0
 
 echo "## tools.txt (release-asset installs)"
@@ -153,12 +165,13 @@ while IFS='|' read -r tool pinned _ _ _ check tag_prefix _; do
     continue
   fi
 
-  # A pin already at `newest` (someone bumped by hand inside the cooldown) is
-  # current; an empty `due` with a `newest` means the only release is still
-  # inside the cooldown, which is also not drift.
+  # A pin at or ahead of `due` (someone bumped by hand inside the cooldown,
+  # to `newest` or to anything between) is current; an empty `due` with a
+  # `newest` means the only release is still inside the cooldown, which is
+  # also not drift.
   note=""
   [ "${newest#"$prefix"}" != "$pinned" ] && note="$(_pending_note "$latest" "$newest" "$age")"
-  if [ -z "$latest" ] || [ "${latest#"$prefix"}" = "$pinned" ] || [ "${newest#"$prefix"}" = "$pinned" ]; then
+  if [ -z "$latest" ] || _at_least "$pinned" "${latest#"$prefix"}"; then
     printf '%-16s %-12s current%s\n' "$tool" "$pinned" "$note"
   else
     printf '%-16s %-12s OUTDATED (latest: %s)%s\n' "$tool" "$pinned" "$latest" "$note"
@@ -205,7 +218,7 @@ while IFS='|' read -r repo comment pin; do
   # Same cooldown rule as the tools.txt section above.
   note=""
   [ "${newest#v}" != "${comment#v}" ] && note="$(_pending_note "$latest" "$newest" "$age")"
-  if [ -z "$latest" ] || [ "${latest#v}" = "${comment#v}" ] || [ "${newest#v}" = "${comment#v}" ]; then
+  if [ -z "$latest" ] || _at_least "${comment#v}" "${latest#v}"; then
     printf '%-45s %-10s current%s\n' "$repo" "$comment" "$note"
   else
     printf '%-45s %-10s OUTDATED (latest: %s, pinned %s)%s\n' "$repo" "$comment" "$latest" "$pin" "$note"
