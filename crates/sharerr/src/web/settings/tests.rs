@@ -1646,34 +1646,52 @@ fn url_placeholder_names_each_arrs_documented_default_port() {
 
 // ------------------------------------------------ config export / import
 
-#[tokio::test]
-async fn export_config_serves_the_effective_config_as_a_downloadable_attachment() {
-    let (_dir, serve) = crate::state::fixtures::unconfigured();
-    let live = serve.config().await;
-    let state = web_state(serve);
+// `crate::settings::validate` merges `Env::prefixed("SHARERR_")` over the
+// parsed document, so this reads the real process environment — a bare
+// `#[tokio::test]` asserting `reparsed.data_dir == live.data_dir` can flip to
+// `left: "/from-env"` whenever `settings.rs`'s
+// `the_environment_still_wins_during_recovery` Jail test (which sets
+// `SHARERR_DATA_DIR=/from-env`) is live on another thread. `Jail` only
+// serialises against other `Jail` closures, so this has to be one too — with
+// `clear_env`, since it needs no override of its own, just none active — the
+// same pattern `save_arr_rejects_when_the_vault_will_not_open_rather_than_write_a_partial_config`
+// above uses for the same reason.
+#[test]
+fn export_config_serves_the_effective_config_as_a_downloadable_attachment() {
+    figment::Jail::expect_with(|jail| {
+        jail.clear_env();
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
 
-    let response = export_config(State(state)).await;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let live = serve.config().await;
+            let state = web_state(serve);
 
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let headers = response.headers().clone();
-    assert_eq!(
-        headers.get(header::CONTENT_TYPE).unwrap(),
-        "application/toml"
-    );
-    assert_eq!(
-        headers.get(header::CONTENT_DISPOSITION).unwrap(),
-        "attachment; filename=\"sharerr-config.toml\""
-    );
+            let response = export_config(State(state)).await;
 
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let text = String::from_utf8(body.to_vec()).unwrap();
-    // Round-trips through the same validation every import goes through,
-    // and produces exactly what was live at the time of export.
-    let reparsed = crate::settings::validate(&text).unwrap();
-    assert_eq!(reparsed.tag, live.tag);
-    assert_eq!(reparsed.data_dir, live.data_dir);
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let headers = response.headers().clone();
+            assert_eq!(
+                headers.get(header::CONTENT_TYPE).unwrap(),
+                "application/toml"
+            );
+            assert_eq!(
+                headers.get(header::CONTENT_DISPOSITION).unwrap(),
+                "attachment; filename=\"sharerr-config.toml\""
+            );
+
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            // Round-trips through the same validation every import goes through,
+            // and produces exactly what was live at the time of export.
+            let reparsed = crate::settings::validate(&text).unwrap();
+            assert_eq!(reparsed.tag, live.tag);
+            assert_eq!(reparsed.data_dir, live.data_dir);
+        });
+        Ok(())
+    });
 }
 
 #[tokio::test]
