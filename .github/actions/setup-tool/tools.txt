@@ -40,7 +40,7 @@
 #
 # Bumping a pin is a hand edit here, and nothing else - the caching action.yml
 # reads the version back out of install.sh's `resolve`.
-zizmor|1.30.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed
+zizmor|1.30.1|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
 # Points at kjanat/actionlint, a maintained fork, not upstream rhysd/actionlint:
 # upstream is stuck on 1.7.12 and rejects zizmor's `$/...` self-repository
 # syntax (rhysd/actionlint#732, open and unmerged as of this pin), which is
@@ -50,7 +50,7 @@ zizmor|1.30.0|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/
 # column: a compromised future fork release can't land silently, since
 # install.sh refuses a checksum mismatch. Revert to rhysd/actionlint (and
 # restore zizmor.yml's self-repository block) if that PR ever merges.
-actionlint|1.14.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:kjanat/actionlint||14151358d71bdf746bb360480dc145ee241c16ce2807e7368e6bddabbec34da6
+actionlint|1.17.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:kjanat/actionlint||620abd485a12b6ab1125b844a876414e1d5bd2af8a3125b27f82b01d0d9d6e5a
 # verify is "llvm-cov --version", not the bare flag every other row uses: the
 # binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."
 # works, by expecting its own subcommand name as the first argument even when
@@ -59,7 +59,7 @@ actionlint|1.14.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/
 # fails with "expected subcommand 'llvm-cov', found argument '--version'".
 # Downstream usage in coverage.yml is unaffected either way: it always goes through
 # `cargo llvm-cov ...`, which cargo itself resolves the same correct way.
-cargo-llvm-cov|0.9.0|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov||b068f7c98841aacb9c4f382b4a0c184ae82f49b56a32d442b429b2961c73be15
+cargo-llvm-cov|0.9.1|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov||b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
 # lychee tags its releases "lychee-v<version>", not "v<version>" like every
 # other row here - the url column copes fine (the literal "lychee-v" prefix
 # just sits in front of %v). The trailing "lychee-v" column is what lets

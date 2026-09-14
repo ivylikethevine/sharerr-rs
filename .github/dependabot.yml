@@ -35,59 +35,58 @@
 # `gluetun.reference.yaml`, with no "compose" in it, would never be fetched.
 # A new file that holds an image pin has to satisfy that regex, or it goes
 # unmanaged in a way nothing here will complain about.
+#
+# Every ecosystem below feeds one multi-ecosystem group, so a Monday run opens
+# (or rebases) a single pull request carrying every update at once, instead of
+# one PR per ecosystem and group. Consequences worth knowing:
+#
+#   * The schedule and commit-message live on the group only; GitHub rejects
+#     an ecosystem-level `schedule` for an entry assigned to a group, and every
+#     entry must name its `patterns` (`["*"]` is "everything").
+#   * A semver-major Cargo bump now rides in the same PR as a patch bump rather
+#     than getting one of its own. The `ignore:` rules below are what keep the
+#     deliberate pins (sqlx's major, the MSRV toolchain) out of it; anything
+#     else that breaks CI in the combined PR has to be excluded here or fixed
+#     in that PR.
+#   * `cooldown:` stays per ecosystem, since it is not a group-level key.
+#   * Dependabot *security* updates, if enabled in the repository settings,
+#     are not version updates and still open their own PRs.
 
 version: 2
 
+multi-ecosystem-groups:
+  all-dependencies:
+    # Weekly rather than daily — this is a small project, and tool-versions.yml
+    # is timed to land on the same Monday.
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "deps"
+
 updates:
-  # GitHub Actions. Weekly rather than daily — this is a small project and a PR per
-  # action per day would be noise nobody reads.
+  # GitHub Actions. The directory list covers the composite actions under
+  # `.github/actions/`; see the header.
   - package-ecosystem: github-actions
     directories:
       - "/"
       - "/.github/actions/*"
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "ci"
+    multi-ecosystem-group: all-dependencies
+    patterns: ["*"]
     # A week between an action's release and dependabot proposing it here — long
     # enough for a compromised release to be caught and yanked upstream before
     # this repo's own CI ever runs it.
     cooldown:
       default-days: 7
-    groups:
-      # The docker/* actions are released together and are used together in one
-      # job; separate PRs for each would mean reviewing the same change five times.
-      docker:
-        patterns:
-          - "docker/*"
-      actions:
-        patterns:
-          - "*"
-        exclude-patterns:
-          - "docker/*"
 
-  # Cargo. Grouped by semver impact rather than per-crate: a patch bump across
-  # thirty transitive crates is one review, while a major bump is a decision and
-  # deserves its own PR.
   - package-ecosystem: cargo
     directory: /
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps"
+    multi-ecosystem-group: all-dependencies
+    patterns: ["*"]
     # Same reasoning as the github-actions entry above: give a crates.io release
     # a week to be caught if it turns out to be a supply-chain problem.
     cooldown:
       default-days: 7
-    groups:
-      minor-and-patch:
-        update-types:
-          - minor
-          - patch
     ignore:
       # sqlx is pinned deliberately: sharerr-store and sharerr-testkit must resolve
       # a single libsqlite3-sys, and `seed-arr` writes to Sonarr's and Radarr's own
@@ -99,12 +98,8 @@ updates:
   # runtime images from a shared builder stage.
   - package-ecosystem: docker
     directory: /docker
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 2
-    commit-message:
-      prefix: "docker"
+    multi-ecosystem-group: all-dependencies
+    patterns: ["*"]
     # Same reasoning as the other entries above.
     cooldown:
       default-days: 7
@@ -128,18 +123,14 @@ updates:
 
   # The Terraform providers behind the hosted-lighthouse modules. Nothing in CI
   # applies these, so a bump here is a published recommendation the same way a
-  # /docker/deploy pin is, and gets the same weekly cadence and cooldown.
+  # /docker/deploy pin is.
   - package-ecosystem: terraform
     directories:
       - "/docker/deploy/lighthouse/terraform/aws"
       - "/docker/deploy/lighthouse/terraform/azure"
       - "/docker/deploy/lighthouse/terraform/fly"
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 3
-    commit-message:
-      prefix: "terraform"
+    multi-ecosystem-group: all-dependencies
+    patterns: ["*"]
     cooldown:
       default-days: 7
 
@@ -163,17 +154,7 @@ updates:
       - "/docker/deploy"
       - "/docker/deploy/*"
       - "/docker/deploy/dual-vpn/*"
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "docker"
+    multi-ecosystem-group: all-dependencies
+    patterns: ["*"]
     cooldown:
       default-days: 7
-    groups:
-      # The *arr images move together on linuxserver's own release cadence and
-      # are upgraded together in practice; one PR per stack beats five.
-      servarr:
-        patterns:
-          - "lscr.io/linuxserver/*"
