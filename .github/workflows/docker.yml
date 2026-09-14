@@ -19,7 +19,10 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Draft PRs build nothing until marked ready; ci.yml's `pull_request:`
+  # trigger explains the activity types and the job-level `if:` below.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 # Covers the whole run, both called `docker-image.yml` jobs included — this
@@ -55,6 +58,7 @@ jobs:
   # two callers into this file needs no ruleset edit.
   docker:
     name: docker (sharerr)
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       contents: read
       packages: write
@@ -89,6 +93,7 @@ jobs:
   # this job keeps the name `docker (lighthouse)`.
   lighthouse:
     name: docker (lighthouse)
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       contents: read
       packages: write

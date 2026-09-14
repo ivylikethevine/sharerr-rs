@@ -11,7 +11,19 @@ name: CI
 on:
   push:
     branches: [main]
+  # Draft PRs run nothing. The default activity types (opened, synchronize,
+  # reopened) are listed explicitly because naming any `types:` replaces
+  # them, and two are added: `ready_for_review`, which is the run that
+  # actually checks a draft once it is marked ready, and `converted_to_draft`,
+  # which exists only so this workflow's `concurrency:` group cancels a run
+  # still in flight for a PR that just went back to draft. The skip itself is
+  # a job-level `if:` on every job with no `needs:` (here `prepare` and
+  # `workflow-lint`); everything downstream of `prepare` skips with it. A
+  # skipped required check does not block anything a draft could do anyway,
+  # since a draft cannot merge. docker.yml and codeql.yml use this same shape
+  # and point back here.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
   # No weekly `schedule:` here — `audit` used to carry one for exactly the
   # reason a stale-comment-shaped trap warns against: a new advisory against a
@@ -57,6 +69,8 @@ jobs:
   # .github/workflows/**" filter.
   prepare:
     name: prepare
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       pull-requests: read
     uses: $/.github/workflows/prepare.yml
@@ -306,6 +320,8 @@ jobs:
   # stays on ./setup-tool.
   workflow-lint:
     name: workflow lint (zizmor + actionlint)
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
