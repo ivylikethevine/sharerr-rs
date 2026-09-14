@@ -136,7 +136,7 @@ argued around. Every other silver row here already stands on its own.
 | `delivery_unsigned` — No unsigned hash is fetched over plain HTTP and trusted. | MUST | Met | Every checksum this project relies on is HTTPS-fetched; CI tool downloads (zizmor, actionlint, cargo-llvm-cov, lychee, typos, hadolint) are now verified against a recorded/published sha256 after download — hardened as part of this pass. [.github/actions/setup-tool/tools.txt](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/actions/setup-tool/tools.txt). |
 | `vulnerabilities_fixed_60_days` — Medium+ severity vulnerabilities are fixed within 60 days of disclosure. | MUST | Met | No vulnerability has been disclosed yet to measure against; the process (docs/SECURITY.md) commits to prompt triage and fix. Revisit with real data once one exists. |
 | `vulnerabilities_critical_fixed` — Critical vulnerabilities are fixed rapidly. | SHOULD | Met | Same — process-based commitment, no historical data yet. |
-| `no_leaked_credentials` — No valid credentials are leaked in the repository. | MUST | Met | GitHub secret scanning is on by default for public repos; the vault design keeps secrets out of `sharerr.toml` by construction (`skip_serializing`), and CodeQL's own cleartext-logging queries run on every push. |
+| `no_leaked_credentials` — No valid credentials are leaked in the repository. | MUST | Met | GitHub secret scanning is on by default for public repos; the vault design keeps secrets out of `sharerr.toml` by construction (`skip_serializing`), and CodeQL's own cleartext-logging queries run on every PR and every green CI run on `main`. |
 
 ### Analysis
 
@@ -145,7 +145,7 @@ argued around. Every other silver row here already stands on its own.
 | `static_analysis` — Static analysis is applied before major releases. | MUST | Met | CodeQL (Rust + Actions) and clippy run on every push and PR, not just before releases. [.github/workflows/codeql.yml](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/workflows/codeql.yml). |
 | `static_analysis_common_vulnerabilities` — At least one static analysis tool targets common vulnerability classes for the language. | SUGGESTED | Met | CodeQL's Rust query pack is exactly this. |
 | `static_analysis_fixed` — Medium+ severity findings are fixed in a timely way. | MUST | Met | CI blocks on clippy findings; CodeQL alerts are triaged and either fixed or dismissed with a written reason (see docs/SECURITY.md's "What is out of scope"). |
-| `static_analysis_often` — Static analysis runs on every commit or at least daily. | SUGGESTED | Met | CodeQL runs on every push/PR plus a weekly baseline cron. |
+| `static_analysis_often` — Static analysis runs on every commit or at least daily. | SUGGESTED | Met | CodeQL runs on every PR and every green CI run on `main`, plus a weekly baseline cron. |
 | `dynamic_analysis` — Dynamic analysis (fuzzing, etc.) is applied before major releases. | SUGGESTED | Unmet | Not present. Deliberately tracked as a real gap in `.scorecard.yml` rather than hidden — three candidate fuzz targets are named (sharerr-torrent, sharerr-rtorrent's XML-RPC parsing, sharerr-probe's media parsing). |
 | `dynamic_analysis_unsafe` — A dynamic tool with memory-safety detection is used, for memory-unsafe languages. | SUGGESTED | N/A | N/A — Rust, with `unsafe_code = "forbid"` at the workspace level and zero `unsafe` blocks across 104 source files (verified by grep today). |
 | `dynamic_analysis_enable_assertions` — Assertions are enabled during dynamic analysis. | SUGGESTED | Met | Rust's `debug_assert!` is active in the debug-profile builds the test suite runs under. |
@@ -255,7 +255,7 @@ Everything passing requires, plus the sections below.
 
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
-| `static_analysis_common_vulnerabilities` — A static analysis tool targeting common vulnerabilities is used (elevated from Suggested). | MUST | Met | CodeQL's Rust security query pack, run on every push/PR plus weekly. |
+| `static_analysis_common_vulnerabilities` — A static analysis tool targeting common vulnerabilities is used (elevated from Suggested). | MUST | Met | CodeQL's Rust security query pack, run on every PR and every green CI run on `main`, plus weekly. |
 | `dynamic_analysis_unsafe` — A dynamic memory-safety tool is used, for memory-unsafe languages (elevated from Suggested). | MUST | N/A | N/A — Rust, `unsafe_code = "forbid"`, zero `unsafe` blocks. |
 | `static_analysis_often` — Static analysis runs on every commit or daily. | SUGGESTED | Met | Same as passing. |
 | `dynamic_analysis` — Dynamic analysis is applied to proposed releases. | SUGGESTED | Unmet | Same acknowledged gap as passing. |

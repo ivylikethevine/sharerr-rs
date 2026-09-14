@@ -18,7 +18,7 @@ name: Deploy docs to Pages
 # payload; and coverage.yml itself never runs on `pull_request` — so there is
 # no attacker-controlled byte anywhere in the path. Every other workflow in
 # this repo that chains off a green CI run the same way (coverage.yml,
-# advisories.yml, image-scan.yml, link-check.yml, scorecard.yml,
+# advisories.yml, codeql.yml, image-scan.yml, link-check.yml, scorecard.yml,
 # tool-versions.yml) points back to this comment rather than repeating it.
 on: # zizmor: ignore[dangerous-triggers]
   push:

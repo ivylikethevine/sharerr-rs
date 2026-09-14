@@ -272,12 +272,12 @@ into the code block), and give it a non-ref-scoped `concurrency:` group with
 racing (a push and its cron, or two quick merges) can both find no open issue
 and both create one.
 
-All six of these post-merge workflows — the three tracking-issue ones above,
-plus `link-check.yml` (advisory, no issue to upsert), `coverage.yml`, and
-`scorecard.yml` — chain off a **green run of `ci.yml` on `main`**, via a
+All seven of these post-merge workflows — the three tracking-issue ones above,
+plus `link-check.yml` (advisory, no issue to upsert), `coverage.yml`,
+`scorecard.yml`, and `codeql.yml`'s `main` leg — chain off a **green run of `ci.yml` on `main`**, via a
 `workflow_run` trigger, rather than firing on every push to `main`
 regardless of outcome. A tree `cargo test` just rejected isn't worth
-scanning, coverage-measuring, or scoring, and a red run reaching six
+scanning, coverage-measuring, or scoring, and a red run reaching seven
 dependent workflows was ~19 concurrent jobs per merge for no reason on the
 merges that most needed attention elsewhere. Each keeps its own weekly cron
 too, as a backstop for drift no commit caused; the `workflow_run` leg is what
@@ -285,11 +285,12 @@ makes a merge that _does_ cause one (a `Cargo.lock` bump reintroducing an
 advisory, a docs change linking somewhere dead) surface immediately, same as
 the old push trigger did, just gated on green. `ci.yml`'s own `concurrency:`
 group only cancels a superseded run on `pull_request` now — cancelling a
-superseded push to `main` would silently cancel the run all six are waiting
+superseded push to `main` would silently cancel the run all seven are waiting
 on. `docker.yml` is the one push-triggered workflow that deliberately did
 _not_ move: it publishes the `sha-<7-char-sha>` image, not a scan, and that
 should ship whether or not an advisory job would have been red. None of the
-six blocks a merge; `ci.yml` is the gate. Every `workflow_run` trigger here
+seven blocks a merge from its `workflow_run` leg; `ci.yml` is the gate, and
+`codeql.yml` still gates PRs through its own `pull_request` trigger. Every `workflow_run` trigger here
 carries an inline `# zizmor: ignore[dangerous-triggers]`, with the shared
 justification living in `pages.yml`'s header — the original of this pattern
 — rather than repeated per file.
