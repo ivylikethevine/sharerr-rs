@@ -19,7 +19,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Draft PRs build nothing until marked ready; ci.yml's `pull_request:`
+  # trigger explains the activity types. The skip lives on docker-image.yml's
+  # `prepare` job, not on the two caller jobs below: a skipped caller reports
+  # one check under its own name (`docker (sharerr)`), so the ruleset's
+  # required `docker (sharerr) / build` would never report and sit pending.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 # Covers the whole run, both called `docker-image.yml` jobs included — this

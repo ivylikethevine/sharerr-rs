@@ -209,7 +209,7 @@ Everything passing requires, plus the sections below.
 | Criterion | Level | Status | Notes |
 | --- | --- | --- | --- |
 | `external_dependencies` — External dependencies are listed in a machine-processable way. | MUST | Met | `Cargo.toml` / `Cargo.lock` (committed) plus `deny.toml`. |
-| `updateable_reused_components` — Reused components are easily identified and updated. | MUST | Met | Dependabot across 4 ecosystems (cargo, github-actions, docker, docker-compose), weekly, with a 7-day cooldown. [.github/dependabot.yml](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/dependabot.yml). |
+| `updateable_reused_components` — Reused components are easily identified and updated. | MUST | Met | Dependabot across 5 ecosystems (cargo, github-actions, docker, docker-compose, terraform), weekly, in one combined pull request, with a 7-day cooldown. [.github/dependabot.yml](https://github.com/ivylikethevine/sharerr-rs/blob/main/.github/dependabot.yml). |
 | `interfaces_current` — Deprecated/obsolete interfaces are avoided where a FLOSS alternative exists. | SHOULD | Met | No known use of a deprecated API; clippy would flag one, and dependencies are kept current by dependabot. |
 
 ### Build

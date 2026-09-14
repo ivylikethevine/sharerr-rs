@@ -129,8 +129,12 @@ jobs:
   # Which runner to use, and whether anything this image cares about changed —
   # see prepare.yml. Tag pushes bypass the result entirely (`build`'s `if:`
   # below): a release must build regardless of what the diff says.
+  #
+  # Draft PRs skip here, which skips `build` with it (see docker.yml's
+  # `pull_request:` trigger for why the skip is not on the caller).
   prepare:
     name: prepare
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       pull-requests: read
     uses: $/.github/workflows/prepare.yml

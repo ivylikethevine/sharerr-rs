@@ -115,7 +115,9 @@ build the image before claiming the MSRV holds.
 
 Every job in `ci.yml` waits on `prepare`, which decides whether anything
 besides workflow YAML changed; a PR touching only `.github/workflows/**`
-shows almost no checks, by design. Everything else runs on every push and PR.
+shows almost no checks, by design. Everything else runs on every push and PR,
+except a draft PR: `ci.yml`, `codeql.yml` and `docker.yml` skip every job
+until the PR is marked ready for review, which starts a full run.
 
 The check names below are what `main`'s ruleset requires, verbatim, so a
 job rename is also a ruleset edit; that is why `msrv` carries no version in

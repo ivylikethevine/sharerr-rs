@@ -29,7 +29,7 @@ x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
 
 services:
   radarr-a:
-    image: lscr.io/linuxserver/radarr:6.3.0@sha256:95ba0801df4d9d1d79d0d9a3849f656542497dab061d91b87ad4f53a71aff3ef
+    image: lscr.io/linuxserver/radarr:6.3.0@sha256:fe051413dfd91b383ba04910552e83fb0306895fefee275c48dafe7bb90807dc
     container_name: sharerr-two-instance-radarr-a
     environment:
       PUID: *puid
@@ -44,7 +44,7 @@ services:
       - "127.0.0.1:58878:7878"
 
   radarr-b:
-    image: lscr.io/linuxserver/radarr:6.3.0@sha256:95ba0801df4d9d1d79d0d9a3849f656542497dab061d91b87ad4f53a71aff3ef
+    image: lscr.io/linuxserver/radarr:6.3.0@sha256:fe051413dfd91b383ba04910552e83fb0306895fefee275c48dafe7bb90807dc
     container_name: sharerr-two-instance-radarr-b
     environment:
       PUID: *puid
@@ -60,7 +60,7 @@ services:
       - "127.0.0.1:59878:7878"
 
   qbittorrent-a:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:8d48fa8c619caadfb103f04efea8747e2a2762d6c7551690919cffb987e61cee
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:2be038f3421f60f62e8e4bf201f66f385b68e4fbc9ed3ab79051069ea22e2650
     container_name: sharerr-two-instance-qbittorrent-a
     environment:
       PUID: *puid
@@ -74,7 +74,7 @@ services:
       - "127.0.0.1:58080:8080"
 
   qbittorrent-b:
-    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:8d48fa8c619caadfb103f04efea8747e2a2762d6c7551690919cffb987e61cee
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:2be038f3421f60f62e8e4bf201f66f385b68e4fbc9ed3ab79051069ea22e2650
     container_name: sharerr-two-instance-qbittorrent-b
     environment:
       PUID: *puid
@@ -99,7 +99,7 @@ services:
     # never actually complete the transfer, and Radarr/Sonarr's own direct
     # Torznab client has no equivalent knob at all. Radarr-a needs no such
     # front door — it only ever answers announces, never grabs.
-    image: lscr.io/linuxserver/prowlarr:2.5.2@sha256:91844fa2c927ad6ede5630127183cc7868b175f6223e83e6a5da1fffea2aa782
+    image: lscr.io/linuxserver/prowlarr:2.5.2@sha256:c7502a75b021d964481c129c84590b9cbc40f83aadd4e553f173871bc0deaa3c
     container_name: sharerr-two-instance-prowlarr
     environment:
       PUID: *puid

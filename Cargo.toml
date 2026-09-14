@@ -35,7 +35,7 @@ repository = "https://github.com/ivylikethevine/sharerr-rs"
 [workspace.dependencies]
 anyhow = "1.0.104"
 argon2 = "0.6.0"
-askama = "0.16.0"
+askama = "0.16.1"
 async-trait = "0.1.92"
 # Transmission's RPC takes the .torrent as base64 in a JSON body, unlike
 # qBittorrent's multipart upload.
@@ -58,12 +58,12 @@ fd-lock = "4.0.4"
 figment = "0.10.19"
 # The facade over the futures-util that reqwest and axum already pull in;
 # used for join_all over dynamically-sized sets of independent requests.
-futures = "0.3.31"
+futures = "0.3.34"
 getrandom = "0.4.3"
 hex = "0.4.3"
 # `default-features = false` on purpose: it drops the default TLS backend in favour
 # of rustls, so no build here needs OpenSSL on the host or in the image.
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "http2", "charset"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls", "http2", "charset"] }
 rpassword = "7.5.4"
 # rTorrent speaks XML-RPC and nothing else; this crate's `Reader` decodes the
 # `<value>` tree a multicall response nests, hand-rolled rather than pulled from
@@ -103,9 +103,9 @@ sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "run
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "system"] }
 tempfile = "3.27.0"
 thiserror = "2.0.20"
-time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
+time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
 tokio = "1.53.1"
-toml_edit = "0.25.13"
+toml_edit = "0.25.15"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
 #-process, so the handler tests exercise the real middleware stack — the auth
 # guard and the cross-origin layer — rather than the handlers in isolation.

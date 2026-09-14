@@ -81,7 +81,7 @@ jobs:
       # install whatever published most recently, and a coverage run could
       # change under a commit that touched no code. ./setup-tool downloads the
       # pin as a release binary once per version and caches it, instead of a
-      # fresh `cargo install --version 0.9.0 --locked` source build every run.
+      # fresh `cargo install --version 0.9.1 --locked` source build every run.
       - uses: $/.github/actions/setup-tool
         with:
           tool: cargo-llvm-cov

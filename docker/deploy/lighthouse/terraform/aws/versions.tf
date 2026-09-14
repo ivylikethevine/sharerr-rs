@@ -10,7 +10,7 @@ terraform {
       # (this config already sets `owners`) — both already compliant, so the
       # bump needed no config change. See
       # https://registry.terraform.io/providers/hashicorp/aws/latest/docs/guides/version-6-upgrade.
-      version = "~> 6.63"
+      version = "~> 6.64"
     }
   }
 }

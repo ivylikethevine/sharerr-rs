@@ -29,7 +29,10 @@ name: CodeQL
 on:
   push:
     branches: [main]
+  # Draft PRs analyse nothing until marked ready; ci.yml's `pull_request:`
+  # trigger explains the activity types and the job-level `if:` below.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   # the default-branch baseline code scanning diffs a PR against. Without a
   # scheduled run the first PR to touch a file has nothing to compare to.
   schedule:
@@ -44,7 +47,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Both legs run on every trigger, unconditionally — pushes to main included.
+  # Both legs run on every trigger, pushes to main included; the one exception
+  # is a draft PR (see the `pull_request:` trigger above), which uploads
+  # nothing until `ready_for_review` runs both legs on the same head commit.
   # This used to skip a leg on a push whose diff did not touch that
   # language's paths (a docs-only merge paid for neither analysis), via a
   # `dorny/paths-filter` change-detection job upstream of both. That saved
@@ -67,6 +72,7 @@ jobs:
   # now its own job with its own visible pass/fail/skip, not a matrix cell.
   analyze-rust:
     name: CodeQL (rust)
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -80,18 +86,19 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: rust
           build-mode: none
 
       - name: Analyze
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           category: "/language:rust"
 
   analyze-actions:
     name: CodeQL (actions)
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -105,12 +112,12 @@ jobs:
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           languages: actions
           build-mode: none
 
       - name: Analyze
-        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           category: "/language:actions"
