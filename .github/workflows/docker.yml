@@ -20,7 +20,10 @@ on:
     branches: [main]
     tags: ["v*"]
   # Draft PRs build nothing until marked ready; ci.yml's `pull_request:`
-  # trigger explains the activity types and the job-level `if:` below.
+  # trigger explains the activity types. The skip lives on docker-image.yml's
+  # `prepare` job, not on the two caller jobs below: a skipped caller reports
+  # one check under its own name (`docker (sharerr)`), so the ruleset's
+  # required `docker (sharerr) / build` would never report and sit pending.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
@@ -58,7 +61,6 @@ jobs:
   # two callers into this file needs no ruleset edit.
   docker:
     name: docker (sharerr)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       contents: read
       packages: write
@@ -93,7 +95,6 @@ jobs:
   # this job keeps the name `docker (lighthouse)`.
   lighthouse:
     name: docker (lighthouse)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       contents: read
       packages: write

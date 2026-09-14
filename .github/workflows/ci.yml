@@ -20,8 +20,9 @@ on:
   # a job-level `if:` on every job with no `needs:` (here `prepare` and
   # `workflow-lint`); everything downstream of `prepare` skips with it. A
   # skipped required check does not block anything a draft could do anyway,
-  # since a draft cannot merge. docker.yml and codeql.yml use this same shape
-  # and point back here.
+  # since a draft cannot merge. codeql.yml uses this same shape; docker.yml
+  # too, except its `if:` sits one level down in docker-image.yml (its own
+  # trigger comment says why).
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
