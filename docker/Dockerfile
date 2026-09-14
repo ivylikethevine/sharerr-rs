@@ -37,7 +37,7 @@
 # it) descends from this pin — `cargo chef` is a driver that shells out to the
 # ambient `cargo`, it carries no toolchain of its own, so cooking dependencies
 # below proves nothing about the MSRV that building them directly wouldn't.
-FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-base
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS rust-base
 WORKDIR /src
 
 # --- cargo-chef: dependency caching, computed once for both architectures ---
