@@ -25,9 +25,17 @@ name: CodeQL
 # same 2.23.3 release, which matters here: a build mode would mean compiling the
 # workspace a second time on every push, and this analysis has nothing to say
 # that `cargo clippy` does not already say faster.
+#
+# The `main` leg chains off a green run of ci.yml rather than firing on every
+# push, the same shape as coverage.yml and scorecard.yml: a tree `cargo test`
+# just rejected is not worth a baseline upload. See pages.yml's header for why
+# a workflow_run trigger is safe despite zizmor's default suspicion of it —
+# neither job's checkout carries a `ref:`, so both analyse the default branch.
 
-on:
-  push:
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
   # Draft PRs analyse nothing until marked ready; ci.yml's `pull_request:`
   # trigger explains the activity types and the job-level `if:` below.
@@ -47,9 +55,10 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Both legs run on every trigger, pushes to main included; the one exception
-  # is a draft PR (see the `pull_request:` trigger above), which uploads
-  # nothing until `ready_for_review` runs both legs on the same head commit.
+  # Both legs run on every trigger, green CI runs on main included; the
+  # exceptions are a draft PR (see the `pull_request:` trigger above), which
+  # uploads nothing until `ready_for_review` runs both legs on the same head
+  # commit, and a CI run on main that did not succeed (see `workflow_run:`).
   # This used to skip a leg on a push whose diff did not touch that
   # language's paths (a docs-only merge paid for neither analysis), via a
   # `dorny/paths-filter` change-detection job upstream of both. That saved
@@ -62,7 +71,8 @@ jobs:
   # merely-stale result. Pull requests, the schedule, and workflow_dispatch
   # already bypassed the filter for the same underlying reason (see the prior
   # revision of this file in git history if the filter is ever worth
-  # resurrecting); this removes the one trigger that still had it.
+  # resurrecting); this removed the one trigger that still had it. (That
+  # trigger was `push`, since replaced by the `workflow_run` chain.)
   #
   # Two named jobs rather than one `matrix.language: [rust, actions]` job with
   # a per-language `if:`, because job-level `if:` cannot read the `matrix`
@@ -72,7 +82,11 @@ jobs:
   # now its own job with its own visible pass/fail/skip, not a matrix cell.
   analyze-rust:
     name: CodeQL (rust)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: >-
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -98,7 +112,11 @@ jobs:
 
   analyze-actions:
     name: CodeQL (actions)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: >-
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

@@ -39,10 +39,11 @@ on:
 
 # A quick follow-up commit should not leave the previous run burning a
 # runner — but only on a PR: coverage.yml, advisories.yml, image-scan.yml,
-# link-check.yml, scorecard.yml and tool-versions.yml now all chain off a
-# green run of this workflow on `main` (see each file's own header), so
-# cancelling a superseded push here would silently cancel the run every one
-# of them is waiting on. codeql.yml uses this same conditional shape.
+# link-check.yml, scorecard.yml, tool-versions.yml and codeql.yml now all
+# chain off a green run of this workflow on `main` (see each file's own
+# header), so cancelling a superseded push here would silently cancel the run
+# every one of them is waiting on. codeql.yml uses this same conditional
+# shape for its own `concurrency:` group.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
