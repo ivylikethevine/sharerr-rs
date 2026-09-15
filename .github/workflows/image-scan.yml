@@ -139,7 +139,7 @@ jobs:
       # pinned: trivy downloads it fresh on every scan, so a pinned binary
       # still finds what was published this morning.
       - if: steps.probe.outputs.exists == '1'
-        uses: $/.github/actions/setup-tool
+        uses: ./.github/actions/setup-tool
         with:
           tool: trivy
 
@@ -160,7 +160,7 @@ jobs:
           category: image-scan-${{ matrix.name }}
 
       - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found != '0'
-        uses: $/.github/actions/advisory-note
+        uses: ./.github/actions/advisory-note
         with:
           title: trivy
           warning-body: Fixable HIGH/CRITICAL vulnerabilities in ${{ matrix.image }}:latest - advisory, not blocking
@@ -203,7 +203,7 @@ jobs:
           persist-credentials: false
 
       # The same pinned trivy as the job above; see its install step.
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: trivy
 
@@ -232,7 +232,7 @@ jobs:
       # action writes the summary (on the clean path too, via
       # write-summary-on-resolved), the footer, and the ::warning.
       - name: Keep the tracking issue current
-        uses: $/.github/actions/upsert-tracking-issue
+        uses: ./.github/actions/upsert-tracking-issue
         with:
           label: image-scan
           label-color: D93F0B

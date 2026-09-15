@@ -100,7 +100,7 @@ jobs:
       # one code path, via ./fetch-latest-artifact.
       - name: Fetch the last coverage run's badge endpoints
         id: cov-run
-        uses: $/.github/actions/fetch-latest-artifact
+        uses: ./.github/actions/fetch-latest-artifact
         with:
           workflow: coverage.yml
           artifact-name: coverage-badge

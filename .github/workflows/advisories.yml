@@ -78,7 +78,7 @@ jobs:
       # sha256-verified release asset rather than `cargo install`, which would
       # spend two minutes compiling it every run. The advisory database itself
       # is fetched fresh on every run, whatever the binary's version.
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: cargo-deny
 
@@ -117,7 +117,7 @@ jobs:
       # once the issue is upserted, so no separate trailing step here has to
       # do it a second time.
       - name: Keep the tracking issue current
-        uses: $/.github/actions/upsert-tracking-issue
+        uses: ./.github/actions/upsert-tracking-issue
         with:
           label: advisories
           label-color: B60205

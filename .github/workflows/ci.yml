@@ -100,7 +100,7 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       pull-requests: read
-    uses: $/.github/workflows/prepare.yml
+    uses: ./.github/workflows/prepare.yml
     with:
       filters: |
         code:
@@ -188,7 +188,7 @@ jobs:
         with:
           egress-policy: audit
 
-      - uses: $/.github/actions/mark-tree
+      - uses: ./.github/actions/mark-tree
         with:
           prefix: ci-tree
 
@@ -249,7 +249,7 @@ jobs:
       # sufficient — this does not need nightly rustfmt. The action's header
       # says why rustup directly rather than dtolnay/rust-toolchain.
       - name: Install the stable toolchain (rustfmt)
-        uses: $/.github/actions/rust-toolchain
+        uses: ./.github/actions/rust-toolchain
         with:
           components: rustfmt
 
@@ -275,7 +275,7 @@ jobs:
           persist-credentials: false
 
       - name: Install the stable toolchain (clippy)
-        uses: $/.github/actions/rust-toolchain
+        uses: ./.github/actions/rust-toolchain
         with:
           components: clippy
 
@@ -353,7 +353,7 @@ jobs:
           echo "version=$msrv" >>"$GITHUB_OUTPUT"
 
       - name: Install the ${{ steps.msrv.outputs.version }} toolchain
-        uses: $/.github/actions/rust-toolchain
+        uses: ./.github/actions/rust-toolchain
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
@@ -387,7 +387,7 @@ jobs:
           persist-credentials: false
 
       # The tools.txt pin, the same binary advisories.yml runs.
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: cargo-deny
 
@@ -423,7 +423,7 @@ jobs:
 
       # The tools.txt pin, not the runner image's shellcheck, so an image
       # update cannot change what this gate reports.
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: shellcheck
 
@@ -466,7 +466,7 @@ jobs:
           persist-credentials: false
 
       - if: env.TERRAFORM_CHANGED == 'true'
-        uses: $/.github/actions/setup-tool
+        uses: ./.github/actions/setup-tool
         with:
           tool: terraform
 
@@ -514,7 +514,7 @@ jobs:
           persist-credentials: false
 
       - id: tools
-        uses: $/.github/actions/setup-tools
+        uses: ./.github/actions/setup-tools
         with:
           tools: zizmor actionlint yq
 
@@ -557,7 +557,7 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: lychee
 
@@ -590,7 +590,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: typos
 
@@ -649,7 +649,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: gitleaks
 
@@ -703,12 +703,12 @@ jobs:
       # download must surface as an advisory note below, not a red job.
       - id: hadolint-install
         continue-on-error: true
-        uses: $/.github/actions/setup-tool
+        uses: ./.github/actions/setup-tool
         with:
           tool: hadolint
 
       - if: steps.hadolint-install.outcome == 'failure'
-        uses: $/.github/actions/advisory-note
+        uses: ./.github/actions/advisory-note
         with:
           title: hadolint
           warning-body: hadolint could not be installed - the Dockerfile was not linted
@@ -737,7 +737,7 @@ jobs:
         continue-on-error: true
 
       - if: steps.hadolint.outputs.found == '1'
-        uses: $/.github/actions/advisory-note
+        uses: ./.github/actions/advisory-note
         with:
           title: hadolint
           warning-body: Dockerfile lint findings above - advisory, not blocking

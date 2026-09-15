@@ -100,7 +100,7 @@ jobs:
           persist-credentials: false
 
       - name: Install the stable toolchain
-        uses: $/.github/actions/rust-toolchain
+        uses: ./.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -159,7 +159,7 @@ jobs:
           } >"$RUNNER_TEMP/report.md"
 
       - name: Keep the tracking issue current
-        uses: $/.github/actions/upsert-tracking-issue
+        uses: ./.github/actions/upsert-tracking-issue
         with:
           label: integration
           label-color: D93F0B

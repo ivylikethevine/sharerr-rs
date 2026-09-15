@@ -69,7 +69,7 @@ jobs:
       # downloads the pin as a release binary once per version and caches it,
       # instead of a fresh `cargo install --version 0.24.2 --locked` source
       # build every run.
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: lychee
 
@@ -105,7 +105,7 @@ jobs:
       # with advisories.yml and tool-versions.yml. It writes the report to the
       # step summary and, with warning-title set, emits the ::warning too.
       - name: Keep the tracking issue current
-        uses: $/.github/actions/upsert-tracking-issue
+        uses: ./.github/actions/upsert-tracking-issue
         with:
           label: link-check
           label-color: FBCA04

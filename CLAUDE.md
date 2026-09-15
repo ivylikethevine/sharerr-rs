@@ -420,15 +420,15 @@ consistency check, which fails when `Cargo.toml`'s `rust-version` and the
 Dockerfile's `FROM rust:<x>` disagree; `ci.yml`'s `msrv` job reads its
 toolchain from `Cargo.toml`, so it has no copy to drift.
 
-**`actionlint` points at `kjanat/actionlint`, a maintained fork, not
-upstream `rhysd/actionlint`.** Upstream is stuck on 1.7.12 and rejects
-zizmor's `$/...` self-repository syntax (`rhysd/actionlint#732`, open and
-unmerged); the fork's 1.9.0 added `$/...` support, which is what let every
-`uses: ./.github/...` in this tree become `uses: $/.github/...` via `zizmor
---fix=safe .github/`, in turn letting `.github/zizmor.yml`'s
-`self-repository` ignore block go away entirely. `tools.txt`'s comment on
-that row has the full trade (a 12-star fork of a 4,195-star tool, made
-acceptable by the sha256 pin) and the revert condition.
+**Local actions are `uses: ./.github/...`, never zizmor's `$/...`
+self-repository syntax.** The tree was rewritten to `$/` once and reverted:
+OpenSSF Scorecard's Pinned-Dependencies check only treats a `./` prefix as a
+local action, so every `$/` line became a "third-party GitHubAction not
+pinned by hash" code-scanning alert (37 of them) and capped that check at
+6/10. `.github/zizmor.yml` disables the `self-repository` audit for this
+reason; don't re-apply `zizmor --fix` for it. `actionlint` still points at
+`kjanat/actionlint`, the maintained fork adopted for `$/` support; the
+`tools.txt` comment on that row has the trade and when to go back upstream.
 
 ### Generated artifacts on main
 
