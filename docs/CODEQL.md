@@ -12,6 +12,7 @@ and out of scope for a security report is in [`SECURITY.md`](SECURITY.md).
 
 - [Path injection on the config path](#path-injection-on-the-config-path)
 - [Cleartext logging of vault key names](#cleartext-logging-of-vault-key-names)
+- [Insecure cookie on the session cookie](#insecure-cookie-on-the-session-cookie)
 
 ## Path injection on the config path
 
@@ -93,3 +94,23 @@ All of it renamed around the word `credential` — `credential_for`,
 `credential_key`, `fn credential`/`fn quiet_credential` — which matches none
 of the heuristic's regexes. As before, no vault key, TOML key, or printed
 message changed; only the Rust identifiers naming them moved.
+
+## Insecure cookie on the session cookie
+
+**The `rust/insecure-cookie` finding on `web/auth.rs`'s `session_cookie`**
+is dismissed as won't-fix (alert #69), not fixed. The query reports any
+`Cookie` builder whose `Secure` attribute it cannot prove is `true`, and
+`session_cookie` sets it from `arrived_over_https(headers)` rather than a
+literal. That is the design, not an omission: sharerr is built for a
+plain-HTTP LAN, where a browser silently discards a `Secure` cookie and
+sign-in appears to do nothing, and it is also deployed behind the TLS reverse
+proxy the docs recommend, where the flag matters most. Pinning it either way
+breaks one of the two. `arrived_over_https`'s own doc comment explains why a
+spoofed `X-Forwarded-Proto` or `Forwarded` header only ever downgrades the
+spoofer's own cookie.
+
+A code-shape workaround was not attempted: the query also reports a builder
+that never sets `Secure`, so branching into `.secure(true)` on one arm would
+leave the other arm to be flagged instead. The dismissal is bound to the flagged lines, so
+moving `session_cookie` or reshaping its builder chain resurfaces the finding
+as new; point its dismissal back here.

@@ -113,7 +113,7 @@ jobs:
       # See .github/actions/upsert-tracking-issue for the shape this,
       # advisories.yml, and image-scan.yml's `pins` job all share.
       - name: Keep the tracking issue current
-        uses: $/.github/actions/upsert-tracking-issue
+        uses: ./.github/actions/upsert-tracking-issue
         with:
           label: tool-versions
           label-color: 0E8A16

@@ -63,13 +63,14 @@
 zizmor|1.30.1|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
 # Points at kjanat/actionlint, a maintained fork, not upstream rhysd/actionlint:
 # upstream is stuck on 1.7.12 and rejects zizmor's `$/...` self-repository
-# syntax (rhysd/actionlint#732, open and unmerged as of this pin), which is
-# what previously forced zizmor.yml's whole self-repository ignore block.
-# The fork's v1.9.0 added `$/...` support, unblocking that rewrite. A 12-star
-# fork of a 4,195-star tool is a real trade, made acceptable by the sha256
-# column: a compromised future fork release can't land silently, since
-# install.sh refuses a checksum mismatch. Revert to rhysd/actionlint (and
-# restore zizmor.yml's self-repository block) if that PR ever merges.
+# syntax (rhysd/actionlint#732, open and unmerged as of this pin). The fork's
+# v1.9.0 added `$/...` support. The workflows have since gone back to
+# `./.github/...` (Scorecard misreads `$/` as an unpinned third-party action;
+# see zizmor.yml's self-repository entry), so `$/` support is no longer what
+# holds this pin here. A 12-star fork of a 4,195-star tool is a real trade,
+# made acceptable by the sha256 column: a compromised future fork release
+# can't land silently, since install.sh refuses a checksum mismatch. Revert
+# to rhysd/actionlint once nothing in the workflows needs the fork.
 actionlint|1.17.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:kjanat/actionlint||620abd485a12b6ab1125b844a876414e1d5bd2af8a3125b27f82b01d0d9d6e5a
 # verify is "llvm-cov --version", not the bare flag every other row uses: the
 # binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."

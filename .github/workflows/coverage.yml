@@ -75,7 +75,7 @@ jobs:
           persist-credentials: false
 
       - name: Install the stable toolchain (llvm-tools-preview)
-        uses: $/.github/actions/rust-toolchain
+        uses: ./.github/actions/rust-toolchain
         with:
           components: llvm-tools-preview
 
@@ -90,7 +90,7 @@ jobs:
 
       # The tools.txt pin, a cached release binary rather than a
       # `cargo install` source build every run.
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: cargo-llvm-cov
 
@@ -206,7 +206,7 @@ jobs:
           persist-credentials: false
 
       - name: Install the stable toolchain (llvm-tools-preview)
-        uses: $/.github/actions/rust-toolchain
+        uses: ./.github/actions/rust-toolchain
         with:
           components: llvm-tools-preview
 
@@ -216,7 +216,7 @@ jobs:
           key: coverage
           save-if: false
 
-      - uses: $/.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tool
         with:
           tool: cargo-llvm-cov
 
@@ -230,7 +230,7 @@ jobs:
 
       # The `coverage` job's own run on `main`, never a pull_request run (the
       # action's `event` filter), so a PR's figure is never its own baseline.
-      - uses: $/.github/actions/fetch-latest-artifact
+      - uses: ./.github/actions/fetch-latest-artifact
         with:
           workflow: coverage.yml
           artifact-name: coverage-badge

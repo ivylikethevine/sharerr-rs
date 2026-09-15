@@ -1,16 +1,21 @@
 # zizmor configuration. Ignores are rule-level here or inline
 # (`# zizmor: ignore[<rule>]` on the flagged line), never by line number: a
 # line-numbered entry silently detaches the moment its file is edited.
-rules: {}
+rules:
   # unpinned-tools is not listed here: every scanner, trivy included, installs
   # a sha256-pinned binary through ./actions/setup-tool/tools.txt.
 
-  # self-repository is not listed here: every workspace-relative `uses:
-  # ./.github/...` was rewritten to GitHub's `$/` self-repository syntax once
-  # ./setup-tool's actionlint pin moved to kjanat/actionlint (see
-  # tools.txt's comment on that row) — the fork understands `$/...` where
-  # upstream rhysd/actionlint 1.7.12 rejected it as an invalid `uses:`
-  # format. Applied with `zizmor --fix=safe .github/`.
+  # zizmor 1.30.0 added this audit: it wants every workspace-relative
+  # `uses: ./.github/...` rewritten to GitHub's `$/` self-repository syntax.
+  # This tree did apply that rewrite once (`zizmor --fix=safe .github/`), and
+  # reverted it: OpenSSF Scorecard's Pinned-Dependencies check only recognises
+  # a `./` prefix as a local action, so it read every `$/...` reference as a
+  # third-party action not pinned by hash, opening one code-scanning alert per
+  # `uses:` line and capping the check's score at 6. Disabled outright rather
+  # than ignored per file, so a new workflow's local `uses:` needs no entry
+  # here. Revisit when Scorecard's parser understands `$/`.
+  self-repository:
+    disable: true
 
   # dangerous-triggers is not listed here: every workflow_run trigger in this
   # repo carries its own inline `# zizmor: ignore[dangerous-triggers]` comment
