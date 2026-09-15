@@ -120,7 +120,8 @@ the coverage floor.
 ## MSRV
 
 `rust-version` is 1.98. CI's `msrv` job runs `cargo check --workspace
---all-targets --all-features --locked` on that pinned toolchain. Locally,
+--all-targets --all-features --locked` on that toolchain, read from
+`Cargo.toml` rather than written into the workflow. Locally,
 `docker build -f docker/Dockerfile .` is the equivalent check, because the
 Dockerfile pins the same toolchain and a local toolchain is invariably newer
 and will not catch a breach on its own. Two breaches have shipped unnoticed
@@ -131,9 +132,11 @@ build the image before claiming the MSRV holds.
 
 The jobs in `ci.yml` that compile, test or lint code wait on `prepare`,
 which decides whether anything besides workflow YAML and Markdown changed; a
-PR touching only those shows few checks, by design. The checks that read
-exactly the files that filter ignores (workflow lint, links, docs, secrets)
-run regardless. Everything runs on every push to `main` and every PR, except
+PR touching only those shows few checks, by design. `terraform` narrows it
+further: it passes without validating unless the modules, a
+`.github/actions/setup-tool` file or `scripts/check.sh` changed. The checks
+that read exactly the files that filter ignores (workflow lint, links, docs,
+secrets) run regardless. Everything runs on every push to `main` and every PR, except
 a draft PR: `ci.yml`, `codeql.yml`, `docker.yml`, `coverage.yml` and
 `release-note.yml` skip every job until the PR is marked ready for review,
 which starts a full run.

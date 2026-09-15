@@ -74,13 +74,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # A direct `rustup` call, not dtolnay/rust-toolchain: see ci.yml's `fmt` job
-      # for why — that action force-pushes every ref on each Rust release, which
-      # orphans any SHA pin of it (zizmor's `impostor-commit`) within weeks.
       - name: Install the stable toolchain (llvm-tools-preview)
-        run: |
-          rustup toolchain install stable --profile minimal --component llvm-tools-preview --no-self-update
-          rustup default stable
+        uses: $/.github/actions/rust-toolchain
+        with:
+          components: llvm-tools-preview
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -108,14 +105,16 @@ jobs:
       - name: Render the HTML report
         run: cargo llvm-cov report --html --output-dir coverage-html
 
+      # Kept in a file for the badge step below, rather than rendered twice.
       - name: Summarize
         run: |
           set -euo pipefail
+          cargo llvm-cov report --summary-only >"$RUNNER_TEMP/coverage-summary.txt"
           {
             echo "### Coverage (tier 1 suite only)"
             echo
             echo '```'
-            cargo llvm-cov report --summary-only
+            cat "$RUNNER_TEMP/coverage-summary.txt"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -134,7 +133,7 @@ jobs:
       - name: Compute the badge endpoint
         run: |
           set -euo pipefail
-          pct="$(cargo llvm-cov report --summary-only | awk '/^TOTAL/ {print $10}')"
+          pct="$(awk '/^TOTAL/ {print $10}' "$RUNNER_TEMP/coverage-summary.txt")"
           value="${pct%\%}"
           color=$(awk -v v="$value" 'BEGIN {
             if (v >= 90) { print "brightgreen" }
@@ -163,9 +162,8 @@ jobs:
 
       # Read by pages.yml (newest successful run on `main`) and docker.yml's
       # release job (the run for the tagged commit), keyed by this artifact
-      # name. `if:` guards against uploading an empty artifact.
+      # name.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: hashFiles('coverage-badge/coverage.json', 'coverage-badge/tests.json') != ''
         with:
           name: coverage-badge
           path: coverage-badge
@@ -207,11 +205,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # See the `coverage` job's note about installing via rustup directly.
       - name: Install the stable toolchain (llvm-tools-preview)
-        run: |
-          rustup toolchain install stable --profile minimal --component llvm-tools-preview --no-self-update
-          rustup default stable
+        uses: $/.github/actions/rust-toolchain
+        with:
+          components: llvm-tools-preview
 
       # Reads the `coverage` job's cache from main; never writes one of its own.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -296,11 +293,13 @@ jobs:
   comment:
     name: coverage (comment)
     needs: pr
+    # Wherever `pr` ran (it has no `needs:`, so it is skipped only by its own
+    # `if:`). The event check is redundant with that but stays: it is what
+    # tells lint_workflows.sh (rule 4) this job never runs on workflow_run.
     if: >-
       !cancelled() &&
       github.event_name == 'pull_request' &&
-      !github.event.pull_request.draft &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      needs.pr.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true

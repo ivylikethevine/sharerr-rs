@@ -103,7 +103,7 @@ jobs:
             echo "- tools.txt rows: bump pin and sha256 together in \`.github/actions/setup-tool/tools.txt\`."
             echo "- Inline pins: edit the file their row names in \`.github/scripts/check_tool_versions.local.sh\`."
             echo "- Action SHAs and image digests: merge dependabot's open bump PR."
-            echo "- MSRV: make Cargo.toml, docker/Dockerfile and ci.yml's msrv job agree."
+            echo "- MSRV: make Cargo.toml and docker/Dockerfile agree."
             echo
             echo '```'
             cat "$RUNNER_TEMP/drift-table.txt"

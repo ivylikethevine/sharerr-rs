@@ -58,16 +58,16 @@ fi
 cid="$(docker run --detach --health-interval 2s --health-start-period 30s "$ref")"
 trap 'docker rm --force "$cid" >/dev/null 2>&1 || true' EXIT
 
-deadline=$((SECONDS + timeout))
-status=""
-while [ "$SECONDS" -lt "$deadline" ]; do
+start=$SECONDS
+state=""
+while [ $((SECONDS - start)) -lt "$timeout" ]; do
   state="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid")"
-  status="${state#* }"
   case "$state" in
   "running healthy")
-    echo "healthy after $((SECONDS - deadline + timeout))s"
+    echo "healthy after $((SECONDS - start))s"
     exit 0
     ;;
+  "running unhealthy") break ;;
   running*) ;;
   *)
     echo "::error title=smoke test::$ref exited before going healthy (state: $state)"
@@ -75,11 +75,11 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     exit 1
     ;;
   esac
-  [ "$status" != unhealthy ] || break
   sleep 1
 done
 
-echo "::error title=smoke test::$ref did not go healthy within ${timeout}s (health: ${status:-none})"
+health="${state#* }"
+echo "::error title=smoke test::$ref did not go healthy within ${timeout}s (health: ${health:-none})"
 docker inspect --format '{{json .State.Health}}' "$cid" || true
 docker logs "$cid" 2>&1 | tail -n 50
 exit 1

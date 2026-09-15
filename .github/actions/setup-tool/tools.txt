@@ -54,7 +54,7 @@
 #
 #   rust stable   ci.yml (fmt, test), coverage.yml   rustup's `stable` channel:
 #                 rustfmt/clippy/llvm-cov track the current compiler, and the
-#                 MSRV job pins 1.98 separately (see check_tool_versions.local.sh)
+#                 MSRV job installs Cargo.toml's rust-version separately
 #   trivy's DB    image-scan.yml   the vulnerability database is data, fetched
 #                 fresh on every scan whatever the binary pin is
 #   node / npm    ci.yml (docs), scripts/check.sh   the runner image's; the

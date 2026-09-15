@@ -416,8 +416,9 @@ locked, integrity hashes and transitive dependencies included, in
 drift check: cargo-chef (`docker/Dockerfile`'s `ARG CARGO_CHEF_VERSION`),
 chrome-devtools-mcp (the `npx` pin in `.mcp.json`) and the just-the-docs
 theme (`_config.yml`'s `remote_theme:`). The same file holds the MSRV
-consistency check, which fails when `Cargo.toml`'s `rust-version`, the
-Dockerfile's `FROM rust:<x>` and `ci.yml`'s `msrv` toolchain disagree.
+consistency check, which fails when `Cargo.toml`'s `rust-version` and the
+Dockerfile's `FROM rust:<x>` disagree; `ci.yml`'s `msrv` job reads its
+toolchain from `Cargo.toml`, so it has no copy to drift.
 
 **`actionlint` points at `kjanat/actionlint`, a maintained fork, not
 upstream `rhysd/actionlint`.** Upstream is stuck on 1.7.12 and rejects

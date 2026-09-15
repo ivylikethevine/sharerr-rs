@@ -12,6 +12,7 @@
 #   scripts/check.sh <check>...       just those checks, in that order
 #   scripts/check.sh --install [...]  first fetch the pinned tools, then run
 #   scripts/check.sh --list           print every check and its group
+#   scripts/check.sh --msrv           print Cargo.toml's rust-version
 #
 # --install downloads every tools.txt row this script uses into
 # target/ci-tools/ through .github/actions/setup-tool/install.sh (sha256
@@ -85,22 +86,31 @@ _skip() {
   return 3
 }
 
+# _reports_pin <binary> <pin> <verify flags> - the binary's version output
+# (the first three lines of running it with tools.txt's verify flags)
+# mentions the pin
+_reports_pin() {
+  local out
+  # shellcheck disable=SC2086 # the verify column is flags, word-split on purpose
+  out="$("$1" $3 2>&1 | head -3)" || true
+  case "$out" in
+  *"$2"*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 # _need <tool> - the tool is on PATH, or skip. A tools.txt tool whose version
 # does not mention the pin gets a note, since its findings may differ from CI's.
 _need() {
-  local tool="$1" row pin verify out
+  local tool="$1" row pin verify
   if ! command -v "$tool" >/dev/null 2>&1; then
     _skip "$tool is not installed (scripts/check.sh --install fetches the pinned one)"
     return
   fi
   row="$(_ci_tool_row "$tool" 2>/dev/null)" || return 0
   IFS='|' read -r _ pin _ _ verify _ <<<"$row"
-  # shellcheck disable=SC2086 # the verify column is flags, word-split on purpose
-  out="$("$tool" $verify 2>&1 | head -3)" || true
-  case "$out" in
-  *"$pin"*) ;;
-  *) echo "note: $(command -v "$tool") is not the tools.txt pin ($pin); results may differ from CI" ;;
-  esac
+  _reports_pin "$tool" "$pin" "$verify" ||
+    echo "note: $(command -v "$tool") is not the tools.txt pin ($pin); results may differ from CI"
 }
 
 # _need_node <tool> - a Markdown tool from .github/node_modules, or skip
@@ -128,16 +138,24 @@ check_test() {
   cargo test --workspace --all-features --locked
 }
 
-# `check`, not `test`: the claim is that the code compiles on the declared
-# minimum. The toolchain comes from Cargo.toml's rust-version, so this has no
-# version of its own to drift; ci.yml's msrv job installs it first.
-check_msrv() {
-  local msrv tc
+# _msrv - Cargo.toml's rust-version, the one place it is parsed: check_msrv
+# here, and through --msrv ci.yml's msrv job and check_tool_versions.local.sh
+_msrv() {
+  local msrv
   msrv="$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([0-9.]*\)".*/\1/p' Cargo.toml | head -1)"
   [ -n "$msrv" ] || {
     echo "msrv: no rust-version in Cargo.toml" >&2
     return 1
   }
+  echo "$msrv"
+}
+
+# `check`, not `test`: the claim is that the code compiles on the declared
+# minimum. The toolchain comes from Cargo.toml's rust-version, so this has no
+# version of its own to drift; ci.yml's msrv job installs it first.
+check_msrv() {
+  local msrv tc
+  msrv="$(_msrv)" || return 1
   for tc in "$msrv" "$msrv.0"; do
     if rustup run "$tc" cargo --version >/dev/null 2>&1; then
       cargo "+$tc" check --workspace --all-targets --all-features --locked
@@ -173,18 +191,17 @@ check_compose() {
 # Provider plugins go under target/ rather than a .terraform/ in the tree.
 check_terraform() {
   _need terraform || return
-  local base=docker/deploy/lighthouse/terraform dir rc=0
+  local base=docker/deploy/lighthouse/terraform dir data rc=0
   export CHECKPOINT_DISABLE=1
   terraform fmt -check -recursive -diff "$base" || rc=1
   while IFS= read -r dir; do
     echo "terraform validate: $dir"
-    TF_DATA_DIR="$root/target/terraform/${dir//\//_}" \
-      terraform -chdir="$dir" init -backend=false -input=false -no-color >/dev/null || {
+    data="$root/target/terraform/${dir//\//_}"
+    TF_DATA_DIR="$data" terraform -chdir="$dir" init -backend=false -input=false -no-color >/dev/null || {
       rc=1
       continue
     }
-    TF_DATA_DIR="$root/target/terraform/${dir//\//_}" \
-      terraform -chdir="$dir" validate -no-color || rc=1
+    TF_DATA_DIR="$data" terraform -chdir="$dir" validate -no-color || rc=1
   done < <(_files "$base/**/*.tf" | xargs -0 -n1 dirname | sort -u)
   return "$rc"
 }
@@ -259,8 +276,7 @@ install_tools() {
   for tool in "${pinned[@]}"; do
     row="$(_ci_tool_row "$tool")"
     IFS='|' read -r _ pin _ _ verify _ <<<"$row"
-    # shellcheck disable=SC2086 # the verify column is flags
-    if [ -x "$tool_dir/$tool" ] && "$tool_dir/$tool" $verify 2>&1 | head -3 | grep -qF "$pin"; then
+    if [ -x "$tool_dir/$tool" ] && _reports_pin "$tool_dir/$tool" "$pin" "$verify"; then
       echo "install: $tool $pin already in target/ci-tools"
       continue
     fi
@@ -276,7 +292,7 @@ install_tools() {
 }
 
 usage() {
-  sed -n '3,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+  sed -n '3,16s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
 }
 
 checks=()
@@ -290,6 +306,10 @@ for arg in "$@"; do
   --list)
     printf 'fast: %s\nlint: %s\nall:  %s\n' "${fast[*]}" "${lint[*]}" "${all[*]}"
     exit 0
+    ;;
+  --msrv)
+    _msrv
+    exit
     ;;
   -h | --help)
     usage

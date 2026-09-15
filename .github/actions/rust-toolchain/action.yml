@@ -1,0 +1,30 @@
+name: Rust toolchain
+# A direct `rustup` call, not dtolnay/rust-toolchain: that action force-pushes
+# every branch and tag on each Rust release, so any SHA pin of it goes stale
+# (zizmor's `impostor-commit`) within about six weeks — this repo hit that in
+# practice, not hypothetically. zizmor's own `superfluous-actions` audit
+# recommends this exact replacement. `--profile minimal --no-self-update`
+# matches what the action itself passed to rustup.
+description: Install a Rust toolchain with rustup and make it the default
+
+inputs:
+  toolchain:
+    description: the toolchain to install, e.g. stable or 1.98
+    required: false
+    default: stable
+  components:
+    description: comma-separated rustup components to add, e.g. clippy
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        rustup toolchain install "$TOOLCHAIN" --profile minimal ${COMPONENTS:+--component "$COMPONENTS"} --no-self-update
+        rustup default "$TOOLCHAIN"

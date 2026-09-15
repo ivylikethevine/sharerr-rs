@@ -90,7 +90,8 @@ jobs:
   #
   # `prepare` itself decides what a schedule or workflow_dispatch run means (see
   # its own header comment): a job below only ever checks
-  # `needs.prepare.outputs.code == 'true'` (plus `reuse`'s answer). Shared
+  # `needs.prepare.outputs.code == 'true'` (plus `reuse`'s answer), and
+  # `terraform` reads its own key back from `changes` the same way. Shared
   # with docker.yml, which wants the identical "anything outside
   # .github/workflows/**" filter.
   prepare:
@@ -110,6 +111,12 @@ jobs:
           # NOT '!docs/**' wholesale: crates/sharerr/src/openapi.rs reads
           # ../../docs/openapi.json in a test, so that one file under docs/ is
           # genuinely code and must still trip this filter.
+        # What the `terraform` job reads: the modules, and what installs and
+        # runs terraform (the tools.txt pin, the check itself).
+        terraform:
+          - 'docker/deploy/lighthouse/terraform/**'
+          - '.github/actions/setup-tool/**'
+          - 'scripts/check.sh'
 
   # Push-to-main tree dedupe, three jobs. A push to `main` whose tree a green
   # same-repo PR run already tested (merging an up-to-date PR, the usual case)
@@ -239,18 +246,12 @@ jobs:
           persist-credentials: false
 
       # rustfmt.toml sets only stable options, so the stable toolchain is
-      # sufficient — this does not need nightly rustfmt.
-      #
-      # A direct `rustup` call, not dtolnay/rust-toolchain: that action force-pushes
-      # every branch and tag on each Rust release, so any SHA pin of it goes stale
-      # (zizmor's `impostor-commit`) within about six weeks — this repo hit that in
-      # practice, not hypothetically. zizmor's own `superfluous-actions` audit
-      # recommends this exact replacement. `--profile minimal --no-self-update`
-      # matches what the action itself passed to rustup.
+      # sufficient — this does not need nightly rustfmt. The action's header
+      # says why rustup directly rather than dtolnay/rust-toolchain.
       - name: Install the stable toolchain (rustfmt)
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --no-self-update
-          rustup default stable
+        uses: $/.github/actions/rust-toolchain
+        with:
+          components: rustfmt
 
       # Its own job rather than a step in `test`: it takes seconds, and a stray
       # blank line should not hide the test results behind a failed job.
@@ -273,11 +274,10 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # See the note in the `fmt` job about installing via rustup directly.
       - name: Install the stable toolchain (clippy)
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy --no-self-update
-          rustup default stable
+        uses: $/.github/actions/rust-toolchain
+        with:
+          components: clippy
 
       # `cache-on-failure` because this job is *designed* to fail: it is the gate on
       # unwrap_used/expect_used. Without it, every lint failure throws away the
@@ -322,9 +322,10 @@ jobs:
   # multi-arch matrix. `docker.yml` still catches it — this just catches it first.
   #
   # The job name deliberately omits the version: see the required-check list
-  # in this file's header. The version lives in the install step below
-  # instead, where it can change freely; check_tool_versions.local.sh reads it
-  # there and compares it with Cargo.toml and docker/Dockerfile.
+  # in this file's header. The version is not written here at all: the
+  # install step reads Cargo.toml's rust-version, so there is nothing to bump
+  # alongside it (check_tool_versions.local.sh compares Cargo.toml with
+  # docker/Dockerfile, the one other place it is written).
   msrv:
     name: msrv
     needs: [prepare, reuse]
@@ -342,13 +343,19 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # Pinned to the workspace's declared rust-version. When that changes, this
-      # changes with it. See the `fmt` job's note about installing via rustup
-      # directly rather than dtolnay/rust-toolchain.
-      - name: Install the 1.98 toolchain
+      # The workspace's declared rust-version, parsed by the same function
+      # scripts/check.sh's check_msrv uses.
+      - id: msrv
+        name: Read the MSRV from Cargo.toml
         run: |
-          rustup toolchain install 1.98 --profile minimal --no-self-update
-          rustup default 1.98
+          set -euo pipefail
+          msrv="$(scripts/check.sh --msrv)"
+          echo "version=$msrv" >>"$GITHUB_OUTPUT"
+
+      - name: Install the ${{ steps.msrv.outputs.version }} toolchain
+        uses: $/.github/actions/rust-toolchain
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -436,12 +443,19 @@ jobs:
   # nothing in CI applies, so a syntax or provider-schema break would otherwise
   # ship unnoticed. `init -backend=false` fetches provider schemas only; no
   # credentials, no state.
+  #
+  # A code change that touches none of `prepare`'s "terraform" paths skips the
+  # install and the check, not the job: a skipped job would stop `mark`
+  # recording the tree (it refuses any skipped need), and the job is a
+  # blocking check.
   terraform:
     name: terraform (fmt + validate)
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      TERRAFORM_CHANGED: ${{ contains(fromJSON(needs.prepare.outputs.changes), 'terraform') }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -451,12 +465,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: $/.github/actions/setup-tool
+      - if: env.TERRAFORM_CHANGED == 'true'
+        uses: $/.github/actions/setup-tool
         with:
           tool: terraform
 
       - name: Check formatting and validate every module
-        run: scripts/check.sh terraform
+        run: |
+          if [ "$TERRAFORM_CHANGED" = true ]; then
+            scripts/check.sh terraform
+          else
+            echo "No Terraform module, setup-tool or check.sh change - nothing to validate."
+          fi
 
   # GitHub Actions security audit, workflow syntax checking, and this repo's
   # structural invariants, in one job: zizmor catches expression injection,
@@ -579,6 +599,16 @@ jobs:
       - name: Check spelling (typos)
         run: scripts/check.sh typos
 
+      # npm's download cache, not node_modules: `npm ci` still installs from
+      # the lockfile and checks every integrity hash, it just stops
+      # re-downloading the same tarballs. A new lockfile is a new key.
+      - name: Cache npm downloads
+        if: ${{ !cancelled() }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('.github/package-lock.json') }}
+
       # --ignore-scripts: no install hook of any dependency runs here.
       - id: npm
         name: Install the locked Markdown tools
@@ -692,11 +722,12 @@ jobs:
         if: steps.hadolint-install.outcome == 'success'
         run: |
           set -uo pipefail
-          : >"$RUNNER_TEMP/hadolint.out"
-          hadolint -c .hadolint.yaml docker/Dockerfile >>"$RUNNER_TEMP/hadolint.out" 2>&1
+          hadolint -c .hadolint.yaml docker/Dockerfile >"$RUNNER_TEMP/hadolint.out" 2>&1
           status=$?
           if [ -s "$RUNNER_TEMP/hadolint.out" ]; then
             cat "$RUNNER_TEMP/hadolint.out"
+            # truncated before it goes in the summary
+            sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
             echo "found=1" >>"$GITHUB_OUTPUT"
           else
             echo "hadolint: clean"
@@ -704,10 +735,6 @@ jobs:
           fi
           exit "$status"
         continue-on-error: true
-
-      - name: Truncate the hadolint findings before they go in the summary
-        if: steps.hadolint.outputs.found == '1'
-        run: sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
 
       - if: steps.hadolint.outputs.found == '1'
         uses: $/.github/actions/advisory-note
