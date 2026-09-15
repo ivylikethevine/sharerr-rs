@@ -11,7 +11,7 @@ default `cargo test` suite is hermetic and needs none of this.
 Everything in `tests/fixtures/media` is synthetic (see
 [`docs/TESTING.md`](../docs/TESTING.md#fixtures)).
 
-## Table of contents
+## Contents
 
 - [Running it](#running-it)
 - [Exercising the indexer and the tracker](#exercising-the-indexer-and-the-tracker)
@@ -150,33 +150,33 @@ kernel enforces.
 
 ## The six stacks
 
-| Stack | File | What it adds |
-| --- | --- | --- |
-| Plain | `compose.test.yml` | Sonarr, Radarr, Lidarr, qBittorrent, Prowlarr (opt-in). The baseline. |
-| VPN | `compose.vpn.yml` | qBittorrent inside a gluetun namespace. A genuinely different topology: qBittorrent has no network or DNS name of its own, so its address is `http://gluetun:8080` and its ports are published by gluetun. The run asserts `qbittorrent:8080` does _not_ resolve. A WireGuard server inside the stack terminates a real tunnel that goes nowhere, so the suite needs no subscription and no egress; keys in `docker/wireguard/wg0.conf` are committed on purpose. The compose file's header and `wg0.conf` explain the rest, including the in-tunnel listener gluetun's health check needs. |
-| Transmission | `compose.transmission.yml` | Seeds through Transmission. Credentials given up front by compose; it always verifies on add. |
-| rTorrent | `compose.rtorrent.yml` | Seeds through `crazymax/rtorrent-rutorrent`, which bundles rTorrent, ruTorrent, and an nginx proxy answering HTTP XML-RPC over rTorrent's SCGI socket. No `.htpasswd`, so Basic Auth is off and the configured credentials are placeholders. Exists because `sharerr-rtorrent`'s unit tests run against a hand-mocked server, which proves the crate parses what it _expects_, not what a real rTorrent sends. |
-| Two-instance | `compose.two-instance.yml` | Two sharerr + Radarr + qBittorrent stacks wired together as friends, plus a Prowlarr. [Below](#the-two-instance-stack). |
-| Mesh | `compose.mesh.yml` | Three independent sharerr nodes and one independent lighthouse — no *arr app, no torrent client. Proves the gossip/reconnection mesh instead of the media path. [Below](#the-mesh-stack). |
+| Stack        | File                       | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Plain        | `compose.test.yml`         | Sonarr, Radarr, Lidarr, qBittorrent, Prowlarr (opt-in). The baseline.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| VPN          | `compose.vpn.yml`          | qBittorrent inside a gluetun namespace. A genuinely different topology: qBittorrent has no network or DNS name of its own, so its address is `http://gluetun:8080` and its ports are published by gluetun. The run asserts `qbittorrent:8080` does _not_ resolve. A WireGuard server inside the stack terminates a real tunnel that goes nowhere, so the suite needs no subscription and no egress; keys in `docker/wireguard/wg0.conf` are committed on purpose. The compose file's header and `wg0.conf` explain the rest, including the in-tunnel listener gluetun's health check needs. |
+| Transmission | `compose.transmission.yml` | Seeds through Transmission. Credentials given up front by compose; it always verifies on add.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| rTorrent     | `compose.rtorrent.yml`     | Seeds through `crazymax/rtorrent-rutorrent`, which bundles rTorrent, ruTorrent, and an nginx proxy answering HTTP XML-RPC over rTorrent's SCGI socket. No `.htpasswd`, so Basic Auth is off and the configured credentials are placeholders. Exists because `sharerr-rtorrent`'s unit tests run against a hand-mocked server, which proves the crate parses what it _expects_, not what a real rTorrent sends.                                                                                                                                                                              |
+| Two-instance | `compose.two-instance.yml` | Two sharerr + Radarr + qBittorrent stacks wired together as friends, plus a Prowlarr. [Below](#the-two-instance-stack).                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Mesh         | `compose.mesh.yml`         | Three independent sharerr nodes and one independent lighthouse — no *arr app, no torrent client. Proves the gossip/reconnection mesh instead of the media path. [Below](#the-mesh-stack).                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 Every stack asserts the same thing about the tracker: built torrents carry
 an announce URL from sharerr's own tracker, regardless of `torrent_backend`.
 How the three clients differ is tabulated in
-[`docs/SUPPORT.md`](../docs/SUPPORT.md#torrent-clients-what-actually-seeds).
+[`docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## Ports
 
 All bound to `127.0.0.1`. Each stack takes its own leading digit so any
 combination can run at once.
 
-| Service | Plain | VPN | Transmission | rTorrent | Two-instance A | Two-instance B |
-| --- | --- | --- | --- | --- | --- | --- |
-| Sonarr | 18989 | 28989 | 38989 | 48989 | | |
-| Radarr | 17878 | 27878 | 37878 | 47878 | 58878 | 59878 |
-| Lidarr | 18686 | | | | | |
-| Torrent client WebUI | 18080 | 28080 (via gluetun) | 39091 | 48080 (ruTorrent), 48000 (XML-RPC) | 58080 | 59080 |
-| Prowlarr | 19696 (opt-in, [above](#exercising-the-indexer-and-the-tracker)) | | | | | 59696 |
-| sharerr | 18477 | 28477 | 38477 | 48477 | 58477 | 59477 |
+| Service              | Plain                                                            | VPN                 | Transmission | rTorrent                           | Two-instance A | Two-instance B |
+| -------------------- | ---------------------------------------------------------------- | ------------------- | ------------ | ---------------------------------- | -------------- | -------------- |
+| Sonarr               | 18989                                                            | 28989               | 38989        | 48989                              |                |                |
+| Radarr               | 17878                                                            | 27878               | 37878        | 47878                              | 58878          | 59878          |
+| Lidarr               | 18686                                                            |                     |              |                                    |                |                |
+| Torrent client WebUI | 18080                                                            | 28080 (via gluetun) | 39091        | 48080 (ruTorrent), 48000 (XML-RPC) | 58080          | 59080          |
+| Prowlarr             | 19696 (opt-in, [above](#exercising-the-indexer-and-the-tracker)) |                     |              |                                    |                | 59696          |
+| sharerr              | 18477                                                            | 28477               | 38477        | 48477                              | 58477          | 59477          |
 
 sharerr's port doubles as the tracker: friends announce to it directly, so
 in a real deployment it has to be reachable from outside the container.
@@ -190,11 +190,11 @@ lighthouse, not two clients and an *arr app — so its ports are listed with
 Every other stack is one sharerr against one *arr stack and proves a local
 add is safe; none proves the friend-to-friend loop. This one does:
 
-| | Every other stack | Two-instance stack |
-| --- | --- | --- |
-| What it proves | a local add never moves or rewrites a file | a friend's Radarr can index, grab, and correctly download one |
-| Torrent transport | never actually downloaded by anyone | a real BitTorrent handshake between two containers |
-| Grab trigger | `sharerr sync`, driven by the test | Radarr's own automatic search, the same command its UI sends |
+|                   | Every other stack                          | Two-instance stack                                            |
+| ----------------- | ------------------------------------------ | ------------------------------------------------------------- |
+| What it proves    | a local add never moves or rewrites a file | a friend's Radarr can index, grab, and correctly download one |
+| Torrent transport | never actually downloaded by anyone        | a real BitTorrent handshake between two containers            |
+| Grab trigger      | `sharerr sync`, driven by the test         | Radarr's own automatic search, the same command its UI sends  |
 
 Instance A is seeded like the plain stack's Radarr. Instance B's Radarr gets
 the _same_ movie by TMDB id via `seed-arr --radarr-wanted`, untagged and with
@@ -221,7 +221,7 @@ now that the feed advertises no magnet under the default config at all, and
 the setup an operator who does turn `feed.magnet_links` on should still
 copy. A real friend should use the same topology: Radarr through Prowlarr,
 not directly. See
-[`docs/SUPPORT.md`](../docs/SUPPORT.md#the-feeds-magnet-link) for the
+[`docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md#the-feeds-magnet-link) for the
 settled decision this leaves in place.
 
 ### Why `tracker.advertised_host` is a service name here, not `localhost`
@@ -239,12 +239,12 @@ internal listen port rather than the host-published one.
 ./scripts/run_docker_tests_mesh.sh
 ```
 
-| Service | Port |
-| --- | --- |
+| Service    | Port            |
+| ---------- | --------------- |
 | Lighthouse | 127.0.0.1:63878 |
-| sharerr-a | 127.0.0.1:63481 |
-| sharerr-b | 127.0.0.1:63482 |
-| sharerr-c | 127.0.0.1:63483 |
+| sharerr-a  | 127.0.0.1:63481 |
+| sharerr-b  | 127.0.0.1:63482 |
+| sharerr-c  | 127.0.0.1:63483 |
 
 Tier 3: three independent sharerr nodes and one independent lighthouse, no
 *arr app and no torrent client. See

@@ -1,6 +1,6 @@
 # A PR closed (merged or abandoned) with a run still queued or in progress on
 # its head commit is a runner burning minutes on work nobody will read the
-# result of. `ci.yml`'s `cancel-in-progress: true` already handles a *new*
+# result of. `ci.yml`'s PR-only `cancel-in-progress` already handles a *new*
 # push superseding an old one on the same PR; this handles the other way a
 # run outlives its usefulness — the PR itself going away.
 #
@@ -25,6 +25,10 @@ jobs:
     permissions:
       actions: write
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - name: Cancel queued and running runs on the head commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,18 +36,19 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # One listing of every run on the commit, filtered on anything not
+          # yet completed (queued, in_progress, waiting, pending, requested...),
+          # rather than one capped listing per status name.
           n=0
-          for status in queued in_progress waiting pending requested; do
-            while read -r id name; do
-              [ -n "$id" ] || continue
-              echo "cancelling $name run $id ($status) for PR #$PR"
-              gh run cancel --repo "$GITHUB_REPOSITORY" "$id" ||
-                echo "::warning title=cancel::could not cancel run $id ($name) - a read-only token?"
-              n=$((n + 1))
-            done <<EOF_RUNS
-          $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$HEAD_SHA" --status "$status" \
-              --json databaseId,workflowName \
-              --jq ".[] | select(.databaseId != $GITHUB_RUN_ID) | \"\(.databaseId) \(.workflowName)\"")
+          while read -r id status name; do
+            [ -n "$id" ] || continue
+            echo "cancelling $name run $id ($status) for PR #$PR"
+            gh run cancel --repo "$GITHUB_REPOSITORY" "$id" ||
+              echo "::warning title=cancel::could not cancel run $id ($name) - a read-only token?"
+            n=$((n + 1))
+          done <<EOF_RUNS
+          $(gh run list --repo "$GITHUB_REPOSITORY" --commit "$HEAD_SHA" --limit 100 \
+            --json databaseId,status,workflowName \
+            --jq ".[] | select(.databaseId != $GITHUB_RUN_ID and .status != \"completed\") | \"\(.databaseId) \(.status) \(.workflowName)\"")
           EOF_RUNS
-          done
           echo "PR #$PR closed: $n run(s) cancelled"

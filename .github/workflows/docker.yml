@@ -1,17 +1,48 @@
 # Builds both container images — `docker/Dockerfile`'s `runtime-sharerr` and
-# `runtime-lighthouse` targets — and publishes them to GHCR behind one manual
-# approval. Everything about how a single image is built — the unattended
-# sha-tag path on a `main` push, the workflow_dispatch rehearsal, the
+# `runtime-lighthouse` targets — and publishes them to GHCR through one
+# gated `publish` job. Everything about how a single image is built — the
+# unattended sha-tag path on a `main` push, the workflow_dispatch rehearsal, the
 # amd64-only PR build, the cache strategy — lives in docker-image.yml, called
 # once per image below. What's here is specific to *this* repo: which two
 # images exist, the one `publish` gate that promotes both, and the GitHub
 # Release that follows.
 #
-# One workflow, one approval, deliberately: the two images used to live in
-# separate workflow files, each with its own `environment: release` gate, so
-# cutting a release meant approving twice. See docs/RELEASING.md for why that
-# was reversed. The two images now ship as a matched set — if either build
-# fails, `publish` never runs and neither image nor the Release goes out.
+# One workflow, one `publish` job, deliberately: the two images used to live
+# in separate workflow files, each with its own `environment: release` gate,
+# so cutting a release meant clearing two gates. See docs/RELEASING.md for
+# why that was reversed. The two images now ship as a matched set — if
+# either build fails, `publish` never runs and neither image nor the Release
+# goes out.
+#
+# A `v*` tag runs the release chain, one job per link:
+#
+#   gate     tag format, signed tag, tagged commit on `main`, green ci.yml
+#   build    `docker (sharerr)` + `docker (lighthouse)`: push `pending-<sha>`
+#   scan     trivy against both pushed digests
+#   publish  promote both digests to their real tags
+#   release  the GitHub Release: notes, pull and verify commands, badges
+#
+# `publish` needs `gate`, both builds and `scan`, and `release` needs
+# `publish`, so a failure anywhere upstream promotes nothing and creates no
+# Release. `gate` runs beside the builds rather than before them: it waits on
+# ci.yml, which takes about as long as a build, and a refusal still leaves
+# both images at `pending-<sha>`, exactly where a rehearsal leaves them.
+#
+# `scan` blocks `publish` on a fixable HIGH/CRITICAL finding. The one escape
+# hatch is docker/.trivyignore (per-entry reason and expiry), committed before
+# the tag like any other change.
+#
+# Prereleases: a tag with a `-` segment (`v1.0.0-rc1`) is published under its
+# own version tag and `sha-<7>` only, never `latest` or `X.Y` (docker-image.yml's
+# `meta` step), and becomes a GitHub prerelease that is never marked Latest
+# (`release` below). Nothing here deploys Pages for any tag: the site builds
+# from `main` (pages.yml), so a prerelease cannot move it either.
+#
+# Triggers: a push to `main` (the unattended `sha-<7>` image), a `v*` tag (a
+# release), a pull request (build and smoke test only), and a manual dispatch
+# (the rehearsal; see docker-image.yml's header).
+#
+# Permissions: read-only by default; each job below declares what it adds.
 
 name: Docker
 
@@ -28,12 +59,14 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
-# Covers the whole run, both called `docker-image.yml` jobs included — this
-# is what keeps a quick follow-up push from leaving a superseded build of
-# either image running.
+# Covers the whole run, both called `docker-image.yml` jobs included. On a PR
+# a quick follow-up push cancels the superseded build. Outside a PR the group
+# is per ref *and* commit and never cancels: a second push to `main` would
+# otherwise cancel (or, while queued, replace) the first commit's run, and
+# that commit's `sha-<7>` image would never publish.
 concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: true
+  group: docker-${{ github.event_name == 'pull_request' && github.ref || format('{0}-{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # A job-level `permissions:` block fully replaces this default for that job
 # — it doesn't intersect with it — and every job below already declares its
@@ -46,6 +79,136 @@ permissions:
   contents: read
 
 jobs:
+  # The release gate. Every step is a refusal, and `publish` needs this job,
+  # so any one of them leaves both images at `pending-<sha>` and creates no
+  # Release. There is no reviewer on `environment: release` (docs/RELEASING.md):
+  # these checks are what stand between a pushed tag and GHCR. A reviewer added to the environment later would
+  # silently turn every release back into a pending approval; that is a repo
+  # setting this file cannot assert.
+  gate:
+    name: gate (tag + signature + green ci)
+    # `github.event_name == 'push'`, not just the ref check: a
+    # workflow_dispatch run against an *existing* `v*` tag's ref would
+    # otherwise satisfy `startsWith(github.ref, 'refs/tags/v')` on its own.
+    # `publish` and `release` carry the same condition, so a rehearsal can
+    # never reach them whatever the `release` environment's settings say.
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Room for the CI wait in the last step.
+    timeout-minutes: 30
+    permissions:
+      # the tag object, `main`'s allowed_signers, and the compare against `main`
+      contents: read
+      # ci.yml's runs
+      actions: read
+    outputs:
+      prerelease: ${{ steps.format.outputs.prerelease }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      # The same shape check docker-image.yml's `version` step applies before
+      # it builds, repeated here so the gate's verdict does not depend on
+      # reading another job's log. A `-` segment is a prerelease; `release`
+      # reads that from this output rather than deciding a second time.
+      - id: format
+        name: Require a vMAJOR.MINOR.PATCH[-prerelease] tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error title=release gate::tag $TAG is not vMAJOR.MINOR.PATCH[-prerelease] - nothing will be published"
+            exit 1
+          fi
+          case "$TAG" in
+          *-*) echo "prerelease=true" >>"$GITHUB_OUTPUT" ;;
+          *) echo "prerelease=false" >>"$GITHUB_OUTPUT" ;;
+          esac
+
+      # A full (not sparse) checkout: a sparse one is a blob-less partial
+      # clone, and the `git show` below would then fetch lazily.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tag object is fetched by name here, so the check never rests on
+      # how a checkout version's refspec treats tags (some fetched a tag push
+      # by commit, leaving an unsigned lightweight local tag). A lightweight
+      # tag on the remote fails below. The signer list comes from `main`, not from the
+      # tagged commit: a key removed on `main` stops verifying at once, even
+      # for a tag on an older commit that still lists it.
+      - name: Require a tag signed by a key in main's allowed_signers
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin \
+            "+refs/tags/$TAG:refs/tags/$TAG" "+refs/heads/main:refs/remotes/origin/main"
+          if [ "$(git cat-file -t "refs/tags/$TAG")" != tag ]; then
+            echo "::error title=release gate::$TAG is a lightweight tag - push a signed one (git tag -s) - nothing will be published"
+            exit 1
+          fi
+          target="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          if [ "$target" != "$SHA" ]; then
+            echo "::error title=release gate::$TAG now points at $target, but this run built $SHA - nothing will be published"
+            exit 1
+          fi
+          git show origin/main:.github/allowed_signers >"$RUNNER_TEMP/allowed_signers"
+          if ! git -c gpg.format=ssh -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/allowed_signers" \
+            tag -v "$TAG" >/dev/null 2>"$RUNNER_TEMP/tag-verify.txt"; then
+            cat "$RUNNER_TEMP/tag-verify.txt"
+            echo "::error title=release gate::$TAG is unsigned, or signed by a key not in main's .github/allowed_signers - nothing will be published"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/tag-verify.txt"
+
+      - name: Require the tagged commit on main with a green ci.yml run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # base main, head the tag's commit: "behind" or "identical" means
+          # the commit is reachable from main.
+          status="$(gh api "repos/$REPO/compare/main...$SHA" --jq .status)"
+          case "$status" in
+          behind | identical) echo "$TAG ($SHA) is on main" ;;
+          *)
+            echo "::error title=release gate::$TAG points at $SHA, which is not reachable from main (compare status: $status)"
+            exit 1
+            ;;
+          esac
+
+          # A push run on main only: a PR run tested a merge ref, not this
+          # commit. Any successful run passes (a re-run counts, and so does a
+          # run whose `carry-forward` job reused a green PR run on the same
+          # tree). A run still queued or running is waited on, up to the
+          # deadline, since the builds `publish` needs finish in about the
+          # time CI takes; no run at all, or only finished red ones, is
+          # refused at once.
+          deadline=$((SECONDS + 20 * 60))
+          while :; do
+            runs="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=100" \
+              --jq '[.workflow_runs[] | {id, status, conclusion}]')"
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "ci.yml succeeded on $SHA: run $(jq -r '[.[] | select(.conclusion == "success")][0].id' <<<"$runs")"
+              exit 0
+            fi
+            if jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null &&
+              [ "$SECONDS" -lt "$deadline" ]; then
+              echo "ci.yml is still running on $SHA; checking again in 30s"
+              sleep 30
+              continue
+            fi
+            echo "::error title=release gate::no successful ci.yml push run on main for $SHA ($(jq -c . <<<"$runs")) - nothing will be published"
+            exit 1
+          done
+
   # A called workflow's jobs cannot request a permission this job does not
   # hold — every scope any job inside docker-image.yml needs (including the
   # nested `prepare` call's `pull-requests: read`) has to be granted here.
@@ -90,9 +253,9 @@ jobs:
   # by anyone, on neutral ground away from any particular library (see
   # docs/LIGHTHOUSE.md) — gets its own image and its own tag series, built
   # from the same docker/Dockerfile's `runtime-lighthouse` target. It used to
-  # also get its own approval, in its own workflow file; see the file header
-  # above for why that changed. See the `docker` job's comment above for why
-  # this job keeps the name `docker (lighthouse)`.
+  # also get its own release gate, in its own workflow file; see the file
+  # header above for why that changed. See the `docker` job's comment above
+  # for why this job keeps the name `docker (lighthouse)`.
   lighthouse:
     name: docker (lighthouse)
     permissions:
@@ -136,32 +299,117 @@ jobs:
           - 'Cargo.toml'
           - 'Cargo.lock'
 
-  # The only job that publishes, and it waits for you.
+  # The release's vulnerability gate: trivy against the exact digests the two
+  # builds pushed to `pending-<sha>`, before `publish` can promote either. A
+  # fixable HIGH or CRITICAL finding fails this job, and `publish` needs it.
+  # `--ignore-unfixed` for the same reason image-scan.yml gives: a finding
+  # with no fix is one a rebuild cannot clear, and blocking on it would block
+  # every release.
   #
-  # `environment: release` is what makes GitHub hold this job pending until a
-  # required reviewer approves it in the web UI. THAT REVIEWER IS NOT
-  # CONFIGURED BY THIS FILE — it is a repo setting, and until it exists the
-  # environment imposes no gate at all and this job runs unattended.
-  # One-time setup: Settings -> Environments -> New environment -> "release"
-  # -> tick "Required reviewers" and add yourself (and anyone else who should
-  # be able to approve a publish).
+  # The escape hatch is docker/.trivyignore, read from the tagged commit: an
+  # accepted finding is a reviewed change with a reason and an expiry date,
+  # not a switch on the run. There is no dispatch bypass; a rehearsal runs
+  # this job too, but never reaches `publish` anyway.
   #
-  # `needs: [docker, lighthouse]` is what makes this one approval cover both
-  # images, and what makes them ship as a matched set: if either build
-  # fails, this job — and `release` below it — never runs, and neither image
-  # is promoted from its `pending-<sha>` tag.
-  publish:
-    name: publish to GHCR (manual approval)
+  # Findings go to code scanning either way (category `release-scan-<image>`),
+  # so a blocked release shows what blocked it in the Security tab as well as
+  # in the log.
+  scan:
+    name: scan ${{ matrix.name }} image (trivy)
     needs: [docker, lighthouse]
-    # `github.event_name == 'push'`, not just the ref check: a
-    # workflow_dispatch run against an *existing* `v*` tag's ref would
-    # otherwise satisfy `startsWith(github.ref, 'refs/tags/v')` on its own
-    # and reach this job too - a real gap docker-image.yml's `build` job's
-    # rehearsal branch (see that file's header comment) would otherwise
-    # open, unattended, contingent only on whether the `release`
-    # environment's reviewer setting has actually been configured. This
-    # makes the rehearsal path structurally unable to publish regardless of
-    # that.
+    # Only where a `pending-<sha>` image exists: a `v*` tag push, or a
+    # rehearsal dispatch.
+    if: >-
+      (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # pull the pending images
+      packages: read
+      # the SARIF upload
+      security-events: write
+    # Both images report, even when the first one blocks.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sharerr
+            ref: ${{ needs.docker.outputs.digest-ref }}
+          - name: lighthouse
+            ref: ${{ needs.lighthouse.outputs.digest-ref }}
+    env:
+      REF: ${{ matrix.ref }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/.trivyignore
+          sparse-checkout-cone-mode: false
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The tools.txt pin, sha256-verified; the database is fetched fresh.
+      - uses: $/.github/actions/setup-tool
+        with:
+          tool: trivy
+
+      # One scan, as JSON; the log's table and the SARIF are converted from
+      # it, so they cannot disagree. The verdict is recorded rather than
+      # failing here, so the SARIF still uploads on a finding.
+      - id: scan
+        name: Scan for fixable HIGH/CRITICAL vulnerabilities
+        run: |
+          set -euo pipefail
+          if [ -z "$REF" ]; then
+            echo "::error title=release scan::no pushed digest from the build - nothing to scan"
+            exit 1
+          fi
+          rc=0
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile docker/.trivyignore --exit-code 1 --no-progress \
+            --format json --output "$RUNNER_TEMP/trivy.json" "$REF" || rc=$?
+          # anything but 0 (clean) or 1 (a finding) is a scan that did not run
+          [ "$rc" -le 1 ] || exit "$rc"
+          trivy convert --format table "$RUNNER_TEMP/trivy.json"
+          trivy convert --format sarif --output "$RUNNER_TEMP/trivy.sarif" "$RUNNER_TEMP/trivy.json"
+          echo "found=$rc" >>"$GITHUB_OUTPUT"
+
+      - name: Upload the findings to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: ${{ runner.temp }}/trivy.sarif
+          category: release-scan-${{ matrix.name }}
+
+      - if: steps.scan.outputs.found != '0'
+        name: Block the release on a fixable finding
+        env:
+          NAME: ${{ matrix.name }}
+        run: |
+          echo "::error title=release scan::fixable HIGH/CRITICAL vulnerabilities in the $NAME image ($REF) - nothing will be published. Rebuild on patched packages, or accept a finding in docker/.trivyignore with a reason and an expiry."
+          exit 1
+
+  # The only job that publishes, and it runs unattended: `gate` above is
+  # what stands between a pushed tag and GHCR.
+  #
+  # `needs: [gate, docker, lighthouse, scan]` is what makes this one job
+  # cover both images, and what makes them ship as a matched set: if the gate
+  # refuses, either build fails, or `scan` finds a fixable HIGH/CRITICAL
+  # vulnerability in either image, this job — and `release` below it — never
+  # runs, and neither image is promoted from its `pending-<sha>` tag.
+  publish:
+    name: publish to ghcr (buildx imagetools)
+    needs: [gate, docker, lighthouse, scan]
+    # See `gate`'s `if:` for why the event check is here as well as the ref.
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -172,14 +420,32 @@ jobs:
     # two distinct groups, back when two separate `publish` jobs existed.
     # Serialized (never cancelled) so that two close `v*` tags never have
     # two promotions of the shared `latest` tag in flight at once; the
-    # workflow-level `docker-${{ github.ref }}` group above doesn't cover
-    # that, since two different tags are two different refs.
+    # workflow-level group above doesn't cover that, since two different
+    # tags are two different refs.
     concurrency:
       group: release-images
       cancel-in-progress: false
     permissions:
       packages: write
     steps:
+      # Block, not audit: this job holds `packages: write`. The allowlist
+      # covers GitHub, GHCR and Sigstore; tighten it to what the audit
+      # insights for this job actually show once a release has run under it.
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            uploads.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -189,13 +455,19 @@ jobs:
       # `imagetools create` needs the buildx CLI but builds nothing and needs
       # no emulation — it is a registry-side copy of an existing manifest
       # list onto new tags, which is what makes this a retag rather than a
-      # rebuild.
+      # rebuild. `driver: docker` uses the daemon's own builder: the default
+      # docker-container driver would pull a BuildKit image from Docker Hub,
+      # which the egress allowlist above does not (and need not) include.
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver: docker
 
-      - name: Promote the approved sharerr image to its real tags
+      # By digest, not by the `pending-<sha>` tag: the digest is what `scan`
+      # passed, and a tag can move between the two.
+      - name: Promote the sharerr image to its real tags
         env:
           TAGS: ${{ needs.docker.outputs.tags }}
-          PENDING: ${{ needs.docker.outputs.pending-ref }}
+          PENDING: ${{ needs.docker.outputs.digest-ref }}
         run: |
           set -euo pipefail
           args=()
@@ -208,10 +480,10 @@ jobs:
           fi
           docker buildx imagetools create "${args[@]}" "$PENDING"
 
-      - name: Promote the approved lighthouse image to its real tags
+      - name: Promote the lighthouse image to its real tags
         env:
           TAGS: ${{ needs.lighthouse.outputs.tags }}
-          PENDING: ${{ needs.lighthouse.outputs.pending-ref }}
+          PENDING: ${{ needs.lighthouse.outputs.digest-ref }}
         run: |
           set -euo pipefail
           args=()
@@ -224,35 +496,50 @@ jobs:
           fi
           docker buildx imagetools create "${args[@]}" "$PENDING"
 
-  # Only on a real `v*` tag push, and only after `publish` has cleared its
-  # `environment: release` approval — `needs: publish` inherits that gate
-  # rather than asking for a second one, and now also means the Release is
-  # only ever created once *both* images have actually been promoted, so the
+  # Only on a real `v*` tag push, and only after `publish` has promoted both
+  # images — `needs: publish` inherits every gate upstream of it, so the
   # `docker pull`/`gh attestation verify` preamble below is always accurate
-  # for both.
+  # for both. `gate` is named too, for its `prerelease` output.
   release:
-    name: create the GitHub Release
-    needs: publish
+    name: create the github release (gh)
+    needs: [gate, publish]
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # `gh release create` writes a Releases-tab entry and, if the tag somehow
-    # didn't already exist, the tag itself; `actions: read` is only for the
-    # cross-workflow artifact read below, the same reason pages.yml carries
-    # it. Nothing else here pushes back to GitHub.
+    # `contents: write` for `gh release create` and the generate-notes
+    # endpoint; `pull-requests: read` for each merged PR's body;
+    # `actions: read` for the cross-workflow artifact read below, the same
+    # reason pages.yml carries it.
     permissions:
       contents: write
+      pull-requests: read
       actions: read
     steps:
+      # Block, not audit: this job holds `contents: write`. Same allowlist as
+      # `publish`, and the same note: tighten it from the audit insights.
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            uploads.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
+
+      # For .github/scripts/release_notes.sh.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # No tag-versus-Cargo.toml check here any more: the tag *is* the version
-      # (docs/RELEASING.md, "Cutting a release"), and docker-image.yml's
-      # `version` step rejects a malformed tag before `build` pushes anything.
-      # The check this job used to run sat after `publish` had already moved
-      # `latest`, which was the wrong side of the gate to fail on.
+      # (docs/RELEASING.md, "Cutting a release"), and `gate` rejects a
+      # malformed tag before anything is promoted.
 
       # By head-sha, not the branch=main lookup pages.yml uses - a release
       # should describe what was measured on the exact commit it tags, not
@@ -265,17 +552,18 @@ jobs:
           workflow: coverage.yml
           artifact-name: coverage-badge
           dest-subdir: cov
+          # coverage.yml's badge run is chained off CI; its PR runs must never supply figures
+          event: workflow_run
           head-sha: ${{ github.sha }}
           found-message: coverage figures from run
           missing-message: no coverage run for this commit - the release notes omit the figures section
 
-      # The preamble GitHub's generated notes get prepended to below - see
-      # docs/RELEASING.md's own "Verifying a published image" section, which
-      # this restates so a reader of the release page never has to leave it.
-      # The figures are static shields badges with the literal numbers baked
-      # in, not the live endpoint badges the README uses - this page is
-      # archival, and a live badge would silently re-render v0.0.1's release
-      # to today's coverage.
+      # The preamble the notes below are appended to - see docs/RELEASING.md's
+      # own "Verifying a published image" section, which this restates so a
+      # reader of the release page never has to leave it. The figures are
+      # static shields badges with the literal numbers baked in, not the live
+      # endpoint badges the README uses - this page is archival, and a live
+      # badge would silently re-render v0.0.1's release to today's coverage.
       - name: Write the release preamble
         env:
           TAG: ${{ github.ref_name }}
@@ -295,9 +583,13 @@ jobs:
             echo
             echo "## Verifying what shipped"
             echo
+            echo "Build provenance, then the signed SPDX SBOM:"
+            echo
             echo '```'
             echo "gh attestation verify oci://ghcr.io/${REPO}:${TAG} --repo ${REPO}"
             echo "gh attestation verify oci://ghcr.io/${OWNER}/sharerr-lighthouse:${TAG} --repo ${REPO}"
+            echo "gh attestation verify oci://ghcr.io/${REPO}:${TAG} --repo ${REPO} --predicate-type https://spdx.dev/Document/v2.3"
+            echo "gh attestation verify oci://ghcr.io/${OWNER}/sharerr-lighthouse:${TAG} --repo ${REPO} --predicate-type https://spdx.dev/Document/v2.3"
             echo '```'
             echo
             echo "See [docs/RELEASING.md](https://github.com/${REPO}/blob/${TAG}/docs/RELEASING.md) for what these commands prove."
@@ -316,26 +608,66 @@ jobs:
             fi
           } >"$RUNNER_TEMP/preamble.md"
 
+      # "What changed" is each merged PR's `## Release note` section (the PR
+      # template's; release-note.yml warns when one is missing), skipping `none` - the
+      # model docs/COMPATIBILITY.md's "A maintained CHANGELOG.md" section
+      # names as the replacement for a hand-written changelog. The PRs are
+      # the ones GitHub's generate-notes endpoint lists between the previous
+      # non-prerelease tag and this one, so a release covers its release
+      # candidates too. Only when no PR wrote a note does that generated
+      # title list stand in as the body.
+      - name: Write the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tags="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v" --jq '.[].ref | ltrimstr("refs/tags/")')"
+          # the highest vX.Y.Z sorting below this tag (this tag itself is in
+          # the list already, or added, so awk can find its position)
+          prev="$({
+            printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true
+            printf '%s\n' "$TAG"
+          } | sort -uV | awk -v tag="$TAG" '$0 == tag { print prev; exit } { prev = $0 }')"
+          echo "previous non-prerelease tag: ${prev:-none}"
+          args=(-f "tag_name=$TAG")
+          [ -z "$prev" ] || args+=(-f "previous_tag_name=$prev")
+          gh api -X POST "repos/$REPO/releases/generate-notes" "${args[@]}" --jq .body >"$RUNNER_TEMP/generated.md"
+          .github/scripts/release_notes.sh "$REPO" "$RUNNER_TEMP/generated.md" >"$RUNNER_TEMP/changed.md"
+          {
+            cat "$RUNNER_TEMP/preamble.md"
+            echo
+            if [ -s "$RUNNER_TEMP/changed.md" ]; then
+              cat "$RUNNER_TEMP/changed.md"
+              [ -z "$prev" ] || printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$REPO" "$prev" "$TAG"
+            else
+              echo "No merged pull request wrote a release note; the merged pull requests:"
+              echo
+              cat "$RUNNER_TEMP/generated.md"
+            fi
+          } >"$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >>"$GITHUB_STEP_SUMMARY"
+
       # `--verify-tag` is redundant given the `if:` above already requires a
       # real tag push, but it costs nothing and turns a race or a misfired
       # dispatch into a loud failure instead of a release built from whatever
-      # the default branch happened to be. `--generate-notes` derives the rest
-      # from merged PR titles since the last tag - the model
-      # docs/SUPPORT.md's "A maintained CHANGELOG.md" section names as the
-      # replacement for a hand-written changelog, not a `CHANGELOG.md` file.
+      # the default branch happened to be. A prerelease (`gate`'s output: a
+      # `-` in the tag) is marked as one and never as Latest, matching the
+      # images, where it never moves `latest`.
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.gate.outputs.prerelease }}
         run: |
           set -euo pipefail
-          prerelease_flag=()
-          case "$TAG" in
-            *-*) prerelease_flag=(--prerelease) ;;
-          esac
+          flags=()
+          if [ "$PRERELEASE" = true ]; then
+            flags=(--prerelease --latest=false)
+          fi
           gh release create "$TAG" \
             --title "$TAG" \
             --verify-tag \
-            --generate-notes \
-            --notes-file "$RUNNER_TEMP/preamble.md" \
-            "${prerelease_flag[@]}"
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "${flags[@]}"

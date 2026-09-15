@@ -3,7 +3,7 @@
 //! sharerr uses rTorrent for exactly one thing: seeding files that already
 //! exist, from where they already are. Everything in this crate is shaped by
 //! the requirement that adding a share must never move, re-link, or delete
-//! media — see [`RtorrentClient::add`] for the mechanism that enforces it.
+//! media — see `RtorrentClient::add` for the mechanism that enforces it.
 //!
 //! # Why the configured URL is the RPC endpoint itself
 //!
@@ -36,8 +36,8 @@
 //! # What rTorrent cannot do
 //!
 //! Two of this trait's optional behaviours have no rTorrent equivalent, and
-//! rather than fake either, [`RtorrentClient::add`] and
-//! [`RtorrentClient::set_trackers`] warn and do the closest honest thing:
+//! rather than fake either, `RtorrentClient::add` and
+//! `RtorrentClient::set_trackers` warn and do the closest honest thing:
 //!
 //! - **No skip-checking.** rTorrent always verifies a torrent's data against
 //!   its piece hashes when a download starts; there is no documented
@@ -57,7 +57,7 @@
 //!   remove a tracker from an already-loaded torrent (tracked upstream as
 //!   [rakshasa/rtorrent#165](https://github.com/rakshasa/rtorrent/issues/165),
 //!   open since 2013) — only `d.tracker.insert` to add one. So
-//!   [`RtorrentClient::set_trackers`] cannot *replace* a torrent's trackers
+//!   `RtorrentClient::set_trackers` cannot *replace* a torrent's trackers
 //!   the way the qBittorrent and Transmission clients do: it can only insert
 //!   the new ones as an additional tier ahead of whatever is already there.
 //!   That still serves the purpose an endpoint rotation needs — the torrent
@@ -79,13 +79,13 @@
 //!
 //! # Module layout
 //!
-//! - [`client`] — [`RtorrentClient`] itself: construction and the raw
+//! - `client` — [`RtorrentClient`] itself: construction and the raw
 //!   `call`/`call_str`/`call_multi` machinery every operation is built on.
-//! - [`adapter`] — the [`sharerr_client::TorrentClient`] trait implementation:
+//! - `adapter` — the [`sharerr_client::TorrentClient`] trait implementation:
 //!   what each operation actually asks rTorrent for, and how its untyped
 //!   XML-RPC scalars become sharerr's typed fields.
-//! - [`xmlrpc`] — the wire format: building a request body, decoding a
-//!   response into an [`xmlrpc::XmlValue`]. Knows nothing about
+//! - `xmlrpc` — the wire format: building a request body, decoding a
+//!   response into an `xmlrpc::XmlValue`. Knows nothing about
 //!   `RtorrentClient` or what a call means.
 
 mod adapter;

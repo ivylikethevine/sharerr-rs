@@ -23,7 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(3600);
 /// Sample the live swarms and record the result, forever. Never returns.
 ///
 /// A store that will not open is skipped rather than treated as an error —
-/// same tolerance [`crate::commands::serve::background`] gives a config or
+/// same tolerance `crate::commands::serve::background` gives a config or
 /// credential that is not ready yet — so an instance still bringing up its
 /// vault does not spam a warning every hour.
 pub async fn poll_loop(state: Arc<ServeState>) {

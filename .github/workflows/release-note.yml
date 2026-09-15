@@ -1,0 +1,81 @@
+# Warns on a pull request whose body has no `## Release note` section, or
+# one left blank. docker.yml's `release` job builds a release's "What changed"
+# from these sections (.github/scripts/release_notes.sh), so a PR with no
+# section is a change the release page silently leaves out. `none` is a
+# fine answer for a change no user would notice.
+#
+# Advisory, not blocking: a missing note is an annotation and a step-summary
+# line, and the check stays green. The note is optional; the release falls
+# back to GitHub's generated PR-title list when no PR wrote one.
+#
+# PRs from `dev` into `main` are checked the same way, not exempted: they are
+# the PRs that land on `main`, so theirs are the sections a release reads.
+# Their author writes the aggregate note there, from the notes on the PRs
+# that went into `dev`. Dependabot's PRs are skipped: a bot cannot fill the
+# template in, and a dependency bump reaches users through the `dev` → `main`
+# PR's note.
+#
+# Its own workflow rather than a ci.yml job: it has to run on `edited`, and
+# fixing a PR description should not re-run every CI job.
+#
+# Triggers: pull_request opened, edited, synchronize, reopened and
+# ready_for_review. The body comes from the event payload; the checkout is
+# only for .github/scripts/release_notes.sh, whose `--check` holds the one
+# section grammar the release job also reads.
+#
+# Permissions: none at the workflow level; the job reads contents for that
+# sparse checkout and calls no API.
+
+name: Release note
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+# One check per PR; an edit supersedes a run still going.
+concurrency:
+  group: release-note-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  check:
+    name: release note (pr body)
+    # Drafts skip, like every other PR check (ci.yml's trigger comment).
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read # the sparse checkout of release_notes.sh
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/release_notes.sh
+          sparse-checkout-cone-mode: false
+
+      # The body via env, never inline ${{ }} in the run block: it is
+      # attacker-chosen text (zizmor: template-injection). `--check` rejects a
+      # missing heading or a blank section (whitespace and HTML comments only,
+      # CRLF bodies from the web editor included), says which on stderr, and
+      # prints the note as a release would list it (empty for `none`). A
+      # rejection is a warning here, never a failure.
+      - name: Look for a filled-in `## Release note` section
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if ! note="$(printf '%s\n' "$BODY" | bash .github/scripts/release_notes.sh --check)"; then
+            msg="no '## Release note' section with something under it (see .github/pull_request_template.md), so this PR adds nothing to the release page's \"What changed\". Optional: one or two user-facing sentences, or 'none'."
+            echo "::warning title=release note::$msg"
+            printf '> [!WARNING]\n> %s\n' "$msg" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          printf 'Release note:\n%s\n' "${note:-none}"

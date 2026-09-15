@@ -1,10 +1,11 @@
 # Two trivy scans that answer different questions, kept in one file because
 # they share a schedule and a subject.
 #
-# `trivy` scans the image this repo *publishes* — `ghcr.io/<repo>:latest` — for
-# fixable HIGH/CRITICAL vulnerabilities in whatever ended up in the runtime
-# layer: the pinned ca-certificates/curl from `apt-get`, plus whatever the Rust
-# binary itself statically links. It asks "has what we shipped gone stale".
+# `trivy` scans the two images this repo *publishes* — `ghcr.io/<repo>:latest`
+# and `ghcr.io/<owner>/sharerr-lighthouse:latest` — for fixable HIGH/CRITICAL
+# vulnerabilities in whatever ended up in the runtime layer: the pinned
+# ca-certificates/curl from `apt-get`, plus whatever the Rust binary itself
+# statically links. It asks "has what we shipped gone stale".
 #
 # `pins` scans the images this repo *builds on* — every `FROM` and `image:`
 # digest pin across the Dockerfiles and the compose stacks. It asks "is there a
@@ -17,26 +18,34 @@
 # has a fixable hole".
 #
 # Both are advisory. A CVE landing upstream is not a reason to redden somebody's
-# unrelated PR, so this never blocks a merge — `docker.yml`'s manual-approval
-# gate is what stops a genuinely bad image from reaching `:latest` in the first
-# place; this is what tells you a *previous* one has gone stale.
+# unrelated PR, so this never blocks a merge. What stands before `:latest` is
+# docker.yml: its `scan` job blocks `publish` on a fixable HIGH/CRITICAL
+# finding in the image about to ship, and `publish` itself requires green CI
+# on the tagged commit. This workflow tells you a *previous* image has gone
+# stale.
 #
-# Runs on the weekly schedule and after every green CI run on main. The
-# latter mostly re-checks images the push itself did not change — `trivy`
-# scans `ghcr.io/<repo>:latest`, which only moves on a `v*` tag, and `pins`
-# scans the same Dockerfile/compose digests regardless of what a given commit
+# Triggers: the weekly schedule, a manual dispatch, and every green CI run on
+# main. The last mostly re-checks images the push itself did not change —
+# `trivy` scans `:latest`, which only moves on a `v*` tag, and `pins` scans
+# the same Dockerfile/compose digests regardless of what a given commit
 # touched — but a merge is still a reasonable moment to hear about a CVE that
 # landed upstream since the last cron, same reasoning as advisories.yml and
 # tool-versions.yml. Gated on green, not a bare `push`, so a tree that failed
 # CI isn't scanned as if it were about to ship — see pages.yml's header for
 # why a workflow_run trigger is safe despite zizmor's default suspicion of it.
 #
-# They differ in how they speak, and deliberately. `trivy` writes a ::warning
-# and a step summary: its subject is one image that a rebuild fixes, and the
+# They differ in how they speak, and deliberately. `trivy` writes a ::warning,
+# a step summary, and a SARIF upload to code scanning (category
+# `image-scan-<image>`), so a finding also sits in the Security tab until a
+# rebuild clears it: its subject is one image that a rebuild fixes, and the
 # rebuild is a decision somebody makes while looking at the release anyway.
 # `pins` keeps a tracking issue current, because a repin that would close a CVE
 # is a standing state nobody is otherwise looking at, and an annotation in a
 # scheduled run that goes unopened is not a notification.
+#
+# Permissions: read-only by default (`packages: read` pulls the published
+# images); `trivy` adds `security-events: write` for its SARIF upload, `pins`
+# adds `issues: write` for its tracking issue.
 
 name: Image scan
 
@@ -62,12 +71,9 @@ concurrency:
   group: image-scan
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
-
 jobs:
   trivy:
-    name: scan published image (advisory)
+    name: scan published ${{ matrix.name }} image (trivy)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # only a green push to main gets a fresh scan; the schedule and a manual
@@ -76,10 +82,34 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
+    permissions:
+      contents: read
+      packages: read
+      # the SARIF upload below
+      security-events: write
+    # One image's finding must not hide the other's.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sharerr
+            image: ghcr.io/${{ github.repository }}
+          - name: lighthouse
+            image: ghcr.io/${{ github.repository_owner }}/sharerr-lighthouse
+    env:
+      IMAGE: ${{ matrix.image }}
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      # Only for docker/.trivyignore, the accepted-risk list docker.yml's
+      # release scan honours too.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          sparse-checkout: docker/.trivyignore
+          sparse-checkout-cone-mode: false
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -103,41 +133,50 @@ jobs:
             echo "::notice title=image-scan::${IMAGE}:latest has not been published yet - nothing to scan"
           fi
 
-      # Intentionally the newest Trivy and the newest vulnerability database
-      # rather than a pin: a stale scanner is a scanner that stops finding
-      # anything, which is the one failure mode a vulnerability scan cannot
-      # afford — unlike hadolint's or actionlint's pinned versions, where the
-      # findings should only move when the code under test does. `version:
-      # latest` (the action's default) keeps that; only the mechanism moved,
-      # from an unpinned `curl | sh` off trivy's `main` branch to a SHA-pinned
-      # action, itself pinned to a specific install-script commit rather than
-      # a moving branch ref.
+      # The tools.txt pin, sha256-verified. The vulnerability database is not
+      # pinned: trivy downloads it fresh on every scan, so a pinned binary
+      # still finds what was published this morning.
       - if: steps.probe.outputs.exists == '1'
-        name: Install Trivy
-        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        uses: $/.github/actions/setup-tool
+        with:
+          tool: trivy
 
+      # One scan, as JSON; the table and the SARIF below are both converted
+      # from it, so the log, the summary and the Security tab never disagree.
       - if: steps.probe.outputs.exists == '1'
         id: scan
         name: Scan for fixable HIGH/CRITICAL vulnerabilities
-        continue-on-error: true
         run: |
-          set -uo pipefail
-          trivy image --severity HIGH,CRITICAL --ignore-unfixed --format table \
-            --exit-code 1 "${IMAGE}:latest" | tee "$RUNNER_TEMP/trivy.out"
-          status=$?
-          echo "found=$([ "$status" -eq 1 ] && echo 1 || echo 0)" >>"$GITHUB_OUTPUT"
-          exit "$status"
+          set -euo pipefail
+          rc=0
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+            --ignorefile docker/.trivyignore --exit-code 1 --no-progress \
+            --format json --output "$RUNNER_TEMP/trivy.json" "${IMAGE}:latest" || rc=$?
+          # anything but 0 (clean) or 1 (a finding) is a scan that did not run
+          [ "$rc" -le 1 ] || exit "$rc"
+          trivy convert --format table "$RUNNER_TEMP/trivy.json" | tee "$RUNNER_TEMP/trivy.out"
+          trivy convert --format sarif --output "$RUNNER_TEMP/trivy.sarif" "$RUNNER_TEMP/trivy.json"
+          echo "found=$rc" >>"$GITHUB_OUTPUT"
+
+      - if: steps.probe.outputs.exists == '1'
+        name: Upload the findings to code scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: ${{ runner.temp }}/trivy.sarif
+          category: image-scan-${{ matrix.name }}
 
       - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '1'
         uses: $/.github/actions/advisory-note
         with:
           title: trivy
-          warning-body: Fixable HIGH/CRITICAL vulnerabilities in ${{ env.IMAGE }}:latest - advisory, not blocking
+          warning-body: Fixable HIGH/CRITICAL vulnerabilities in ${{ matrix.image }}:latest - advisory, not blocking
           heading: Trivy found fixable HIGH/CRITICAL vulnerabilities
           body: >-
-            In `${{ env.IMAGE }}:latest` — see the step above for the full report.
-            Rebuilding and re-tagging `:latest` (no code change required) picks up
-            patched base-image packages; this job never blocks a merge either way.
+            In `${{ matrix.image }}:latest` — also in the Security tab under
+            `image-scan-${{ matrix.name }}`. Rebuilding and re-tagging `:latest`
+            (no code change required) picks up patched base-image packages;
+            this job never blocks a merge either way.
+          report-file: ${{ runner.temp }}/trivy.out
 
       - if: steps.probe.outputs.exists == '1' && steps.scan.outputs.found == '0'
         name: Say so
@@ -145,7 +184,7 @@ jobs:
           echo "trivy: no fixable HIGH/CRITICAL vulnerabilities in ${IMAGE}:latest"
 
   pins:
-    name: scan the pinned base images (advisory)
+    name: scan pinned base images (trivy)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # only a green push to main gets a fresh scan; the schedule and a manual
@@ -159,30 +198,33 @@ jobs:
       # the one write this job does: upsert (and close) its own tracking issue
       issues: write
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # Intentionally the newest Trivy and the newest vulnerability database
-      # rather than a pin, for the reason the `trivy` job above gives: a stale
-      # scanner is a scanner that stops finding anything. See that job's
-      # install step for why this is now a SHA-pinned action rather than
-      # `curl | sh` off a moving branch.
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+      # The same pinned trivy as the job above; see its install step.
+      - uses: $/.github/actions/setup-tool
+        with:
+          tool: trivy
 
       # The three advisory verdicts (0 clean, 1 a finding with no better image
       # to move to, 2 a repin that demonstrably helps) are all green here.
       # Captured as an output rather than left to continue-on-error, which
       # collapses them all to "failure" and would lose the distinction the next
-      # step is built on; anything else really is a broken job (127 is a missing
-      # trivy or jq, or an empty checkout) and still fails loudly.
+      # step is built on; anything else really is a broken job (3 is a failed
+      # database download, 127 a missing trivy or jq, or an empty checkout)
+      # and still fails loudly. The script downloads trivy's database once
+      # before its parallel scans; see its header.
       - id: scan
         name: Compare each pinned digest against its current tag
         env:
-          SHARERR_SCAN_REPORT: ${{ runner.temp }}/image-scan-report.md
+          SCAN_REPORT: ${{ runner.temp }}/image-scan-report.md
         run: |
           set -uo pipefail
           rc=0
@@ -190,25 +232,11 @@ jobs:
           echo "verdict=$rc" >>"$GITHUB_OUTPUT"
           [ "$rc" -le 2 ] || exit "$rc"
 
-      # The report is the summary and the issue body both, so the two can never
-      # drift into saying different things. The trailer is appended
-      # unconditionally too — harmless on the clean path, since nothing reads
-      # the file there — rather than duplicating the verdict check here as
-      # well as in the `actionable` input two steps down.
-      - name: Say what it found
-        env:
-          REPORT: ${{ runner.temp }}/image-scan-report.md
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          cat "$REPORT" >>"$GITHUB_STEP_SUMMARY"
-          # the backticks are a markdown code span, not a substitution
-          # shellcheck disable=SC2016
-          printf '\nFound by [`image-scan`](%s). Closed automatically once the pins no longer need it.\n' \
-            "$RUN_URL" >>"$REPORT"
-
       # See .github/actions/upsert-tracking-issue for the shape this,
-      # advisories.yml, and tool-versions.yml all share.
+      # advisories.yml, and tool-versions.yml all share. The report is the
+      # step summary and the issue body both, so the two never disagree; the
+      # action writes the summary (on the clean path too, via
+      # write-summary-on-resolved), the footer, and the ::warning.
       - name: Keep the tracking issue current
         uses: $/.github/actions/upsert-tracking-issue
         with:
@@ -217,10 +245,9 @@ jobs:
           label-description: A pinned base image can be repinned to fix a CVE
           title: Base image repin would close known vulnerabilities
           resolved: ${{ steps.scan.outputs.verdict != '2' }}
-          close-comment: >-
-            The pins no longer have a fixable finding a repin would clear.
-            [Latest run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          close-comment: The pins no longer have a fixable finding a repin would clear.
+          resolved-when: the pins no longer need it
           body-file: ${{ runner.temp }}/image-scan-report.md
-
-      - if: steps.scan.outputs.verdict == '2'
-        run: echo "::warning title=trivy::A pinned base image can be repinned to close known vulnerabilities - see the issue"
+          write-summary-on-resolved: "true"
+          warning-title: trivy
+          warning-body: A pinned base image can be repinned to close known vulnerabilities - see the issue

@@ -6,16 +6,23 @@ not run one of their own. All three run the image GHCR publishes and nothing
 else; the two VM targets run the exact compose layout in the parent directory,
 `compose.yaml` plus `compose.tls.yaml` when a domain is given.
 
-| Target | What you get | TLS | Cost, as of writing |
-| --- | --- | --- | --- |
-| [`aws/`](aws/) | One t3.micro, Elastic IP, Docker via cloud-init | Caddy, with your domain | Free tier: 750 h/month for twelve months on older accounts, a credit allowance on newer ones |
-| [`azure/`](azure/) | One B1s VM, static IP, Docker via cloud-init | Caddy, with your domain | Free account: 750 h/month for twelve months; the Standard-SKU public IP is a few dollars a month on top |
-| [`fly/`](fly/) | One shared-cpu-1x machine with a 1 GB volume, via flyctl | Built in, at `<app>.fly.dev` | No free allowance any more; two to three dollars a month |
+| Target             | What you get                                             | TLS                          | Cost, as of writing                                                                                     |
+| ------------------ | -------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| [`aws/`](aws/)     | One t3.micro, Elastic IP, Docker via cloud-init          | Caddy, with your domain      | Free tier: 750 h/month for twelve months on older accounts, a credit allowance on newer ones            |
+| [`azure/`](azure/) | One B1s VM, static IP, Docker via cloud-init             | Caddy, with your domain      | Free account: 750 h/month for twelve months; the Standard-SKU public IP is a few dollars a month on top |
+| [`fly/`](fly/)     | One shared-cpu-1x machine with a 1 GB volume, via flyctl | Built in, at `<app>.fly.dev` | No free allowance any more; two to three dollars a month                                                |
 
 Fly is the least work and the only one with TLS on day one. The VMs are the
 only ones that can be actually free, for a year, and need a domain for TLS
 (without one they serve plain HTTP on 7878, which works but leaves the
 lookup answer only as trustworthy as the wire it travels).
+
+## Contents
+
+- [Before you start](#before-you-start)
+- [Use](#use)
+- [What runs on the box](#what-runs-on-the-box)
+- [What is deliberately not here](#what-is-deliberately-not-here)
 
 ## Before you start
 

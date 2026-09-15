@@ -9,9 +9,9 @@
 #   ./scripts/run_codeql.sh rust         just the Rust source
 #   ./scripts/run_codeql.sh actions      just the workflow YAML
 #
-# Not part of the always-run verification loop in CLAUDE.md: the CodeQL CLI
-# is a ~580MB one-time download this script does not manage, and a full
-# database build/analyze is much slower than cargo test+clippy+build+fmt.
+# Not part of scripts/check.sh, the always-run verification loop: the CodeQL
+# CLI is a ~580MB one-time download this script does not manage, and a full
+# database build/analyze is much slower than its lint and test checks.
 # Run this before pushing anything that touches crypto/secret handling or a
 # workflow file — the two query classes that have actually caught something
 # in this repo — or whenever CI's CodeQL check disagrees with what shipped

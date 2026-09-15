@@ -1,3 +1,11 @@
 {
   "tab_size": 2,
+  "languages": {
+    "Rust": {
+      "tab_size": 4,
+    },
+    "Markdown": {
+      "show_edit_predictions": false,
+    },
+  },
 }

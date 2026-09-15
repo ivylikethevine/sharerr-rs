@@ -1,52 +1,28 @@
 # Security policy
 
-How to report a vulnerability, what happens next, what is in and out of
-scope, and why the existing controls fit the threat model. sharerr is
-**experimental** and pre-1.0; see [Supported versions](#supported-versions).
+The threat model sharerr is built against, what is in and out of scope, why
+the existing controls fit that model, and how to report a vulnerability and
+what happens next. sharerr is **experimental** and pre-1.0; see
+[Supported versions](#supported-versions).
 
-## Table of contents
+## Contents
 
+- [Threat model](#threat-model)
+- [What is in scope](#what-is-in-scope)
+- [What is out of scope](#what-is-out-of-scope)
+- [Why the existing controls are enough](#why-the-existing-controls-are-enough)
+- [Supported versions](#supported-versions)
 - [Reporting a vulnerability](#reporting-a-vulnerability)
 - [What happens after a report](#what-happens-after-a-report)
-- [Supported versions](#supported-versions)
-- [What is in scope](#what-is-in-scope)
-- [Why the existing controls are enough](#why-the-existing-controls-are-enough)
-- [What is out of scope](#what-is-out-of-scope)
 
-## Reporting a vulnerability
+## Threat model
 
-Report it privately through
-[GitHub's security advisories](https://github.com/ivylikethevine/sharerr-rs/security/advisories/new)
-for this repository, not a public issue. Private vulnerability reporting is
-enabled, so that link works without being a collaborator. Include what you
-found, how to reproduce it, and what you think the impact is. There is no bug
-bounty; this is a personal project maintained by one person, and turnaround
-depends on their spare time.
-
-## What happens after a report
-
-- **Acknowledgement** within 14 days of the advisory being filed. A target,
-  not a contractual SLA.
-- **Triage**: reproduced if possible and given a severity. You will hear
-  which of "confirmed, working on a fix", "confirmed, won't fix" (with the
-  reason; see [What is out of scope](#what-is-out-of-scope)), or "not
-  reproducible, need more detail" applies.
-- **Fix and disclosure**: a confirmed vulnerability is fixed in the private
-  advisory's own fork first, so the fix does not announce the bug before an
-  image carries it. The advisory is published once a patched `sha-<commit>`
-  image or tagged release is available, and a CVE is requested through
-  GitHub's advisory flow where severity warrants it.
-- **Credit**: reporters are credited by name or handle in the advisory and
-  the release notes unless they ask to stay anonymous.
-
-## Supported versions
-
-Exactly one supported line, the same honest answer a solo pre-1.0 project can
-give: the newest tagged release, plus the `main` branch and the `sha-<commit>`
-image built from whatever commit is newest on it (see
-[`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)). There is no
-backporting to an older tag; "upgrade" means moving to the newest tagged
-release (or `:latest`, which tracks it).
+sharerr is designed to run on a trusted LAN, for one operator and the friends
+they explicitly grant a key to, not as a service exposed to the open
+internet. Everything below is measured against that. Where each trust
+boundary sits (operator and vault, this instance and a friend, the
+lighthouse, the services sharerr drives) and what crosses it is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md#trust-boundaries).
 
 ## What is in scope
 
@@ -136,11 +112,28 @@ A few things are **by design**, not a vulnerability report waiting to happen:
   shows a _previously stored_ secret again, to produce that block from a
   live instance; it sits behind the same session guard as every other page.
 
+## What is out of scope
+
+Vulnerabilities in a service sharerr _talks to_ (Sonarr, Radarr, qBittorrent,
+Transmission, rTorrent, Prowlarr, gluetun) belong to those projects, unless
+sharerr is misusing their API in a way that creates the exposure.
+
+**CodeQL findings** are either fixed or dismissed in the Security tab with
+a recorded reason; there is no in-source suppression. The record of each one
+resolved by more than an obvious fix (the `rust/path-injection` guard on the
+config path, and the `rust/cleartext-logging` renames in `doctor`) is
+[`CODEQL.md`](CODEQL.md).
+
+**`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack) is not in this
+list**, though a stale Scorecard report may claim it should be. `rsa` would
+ride in only via `sqlx-mysql`, and `sqlx` 0.9's mysql backend does not depend
+on it, so it is absent from the lockfile (`cargo tree -i rsa` matches
+nothing). Kept as the worked example of documenting a lockfile-only finding;
+`deny.toml` carries the matching note.
+
 ## Why the existing controls are enough
 
-sharerr is designed to run on a trusted LAN, for one operator and the friends
-they explicitly grant a key to, not as a service exposed to the open
-internet. The assurance case follows from that threat model:
+The assurance case follows from [the threat model](#threat-model):
 
 - **Every credential class uses a hash or cipher shaped for what it
   protects**: Argon2id for the one class a human chose (login passwords),
@@ -157,6 +150,22 @@ internet. The assurance case follows from that threat model:
   removes the memory-safety class of bug, and static analysis (CodeQL,
   clippy, cargo-deny) runs on every push and weekly against the dependency
   graph, so a new advisory in a dependency is caught without anyone looking.
+- **What ships is checked before and after it ships.** Before: a PR that
+  adds a dependency with a known high or critical advisory fails
+  `dependency review`, gitleaks scans the whole history for committed
+  credentials, and a release is refused unless its tag is signed by a listed
+  key and trivy finds no fixable HIGH or CRITICAL vulnerability in either
+  image (an accepted finding needs a reason and an expiry in
+  `docker/.trivyignore`). After: every pushed image, a `main` build's
+  `sha-<7>` included, carries signed build provenance and an SPDX SBOM
+  checkable with `gh attestation verify`, and `image-scan.yml` re-scans both
+  published images weekly. CI itself runs with least-privilege tokens,
+  SHA-pinned actions, sha256-pinned tools (hadolint, trivy, cargo-deny,
+  gitleaks, terraform, yq and the rest of `tools.txt`) and lockfile-pinned
+  npm tools, and `step-security/harden-runner` audits every job's network
+  egress, blocking it outright in the two release jobs that hold write
+  tokens. The detail is in [`RELEASING.md`](RELEASING.md) and
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs).
 - **What this does not cover, by design**: no account lockout, no security
   response headers, no recovery from a lost master key. Anyone deploying
   outside the model (a public-facing instance, an untrusted network) should
@@ -167,92 +176,45 @@ internet. The assurance case follows from that threat model:
   request collapses to one address and the throttle degrades to a global
   limit across every visitor.
 
-## What is out of scope
+## Supported versions
 
-Vulnerabilities in a service sharerr _talks to_ (Sonarr, Radarr, qBittorrent,
-Transmission, rTorrent, Prowlarr, gluetun) belong to those projects, unless
-sharerr is misusing their API in a way that creates the exposure.
+Exactly one supported line, the same honest answer a solo pre-1.0 project can
+give: the newest tagged release, plus the `main` branch and the `sha-<commit>`
+image built from whatever commit is newest on it (see
+[`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)). There is no
+backporting to an older tag; "upgrade" means moving to the newest tagged
+release (or `:latest`, which tracks it). A tagged release publishes
+unattended: the `release` environment has no required reviewer, and the
+gates are enforced in CI instead (see
+[`docs/RELEASING.md`](RELEASING.md#cutting-a-release)): a `v*` tag signed by
+a key listed in `.github/allowed_signers` on `main`, the tagged commit on
+`main` with a green `ci.yml` run, and a vulnerability scan of both images
+before either is promoted.
 
-**The `sharerr.toml` path CodeQL's `rust/path-injection` query flags in
-`config_io.rs`** is guarded rather than dismissed, by a `..` check inlined
-into `ConfigFile::open`, `ConfigFile::write_validated` and
-`ConfigFile::backup_path`. The value is always `ServeState::config_path()`,
-set once at process start from `--config` or `SHARERR_CONFIG` and never
-reassigned — whoever controls that flag already controls the process, so
-there was never a privilege boundary here to enforce, only the query's
-`DotDotCheck` sanitizer pattern to satisfy. What the query actually calls
-"user-provided" is not the flag: CodeQL's axum model treats every parameter
-of a route handler as remote input, the `State` extractor included, so
-`state.serve.config_path()` inside a settings handler is the source. The
-guard is a real, if narrow, behaviour change: an operator-supplied config
-path can no longer contain `..`, including a legitimate one such as a
-relative bind-mount a directory up, and must be valid UTF-8. Kept as the
-worked example of a query whose only recognised barrier costs something,
-unlike the two `cleartext-logging` findings below.
+## Reporting a vulnerability
 
-`backup_path` needed the guard a second time because it is a second,
-independent sink: `web/settings.rs` calls it on a `ConfigFile::replacing`
-value — which, unlike `open`, never checks its path up front — from inside
-the settings handler. It returns `None` on a `..` or non-UTF-8 path rather
-than an error, since its only job is naming a backup for the operator to
-read, and `write_validated` would refuse to write such a path anyway.
+Report it privately through
+[GitHub's security advisories](https://github.com/ivylikethevine/sharerr-rs/security/advisories/new)
+for this repository, not a public issue. Private vulnerability reporting is
+enabled, so that link works without being a collaborator. Include what you
+found, how to reproduce it, and what you think the impact is. There is no bug
+bounty; this is a personal project maintained by one person, and turnaround
+depends on their spare time.
 
-The check's shape is dictated by the query, and a first attempt got it wrong:
-`DotDotCheck` is a barrier _guard_, which only clears later reads of the
-`str` receiver of `.contains("..")` on the false branch, within the same
-function. A `reject_traversal(path)?` helper never registered — the call is
-opaque to the guard, and its receiver was a discarded `to_string_lossy()`
-temporary rather than anything a sink read. The inline form checks a `&str`
-local and rebuilds the `Path` the sinks use from it; the comment in
-`write_validated` walks through each constraint.
+## What happens after a report
 
-**The vault key _names_ `rust/cleartext-logging` used to flag in
-`commands/doctor.rs`**, and the operator's own username alongside them, are
-fixed rather than dismissed. `TorrentClientConfig`'s three fields were
-`username`, `api_key_key` and `password_key` — `Option<&'static str>` (or
-`Option<&'a str>` for the username), holding only `secret_keys` constants
-like `"qbittorrent.api_key"` or a config-file username, never a runtime
-secret. CodeQL's Rust `SensitiveData` source classification
-(`SensitiveDataHeuristics.qll`'s `HeuristicNames::nameIndicatesSensitiveData`)
-matches purely on the *identifier* text — a field or variable name matching
-`user.?(name|id)`, `pass(word|wd|...)`, or `api.?(key|tok)` — regardless of
-what value actually flows through it. That means a rename that drops those
-substrings removes the finding with zero behaviour change, which is what
-these three fields now are: `login`, `primary_credential` and
-`fallback_credential`. The vault keys `doctor` prints are unchanged; only the
-Rust identifiers naming them moved. Kept as the record of *why* they moved,
-should the fields' names ever look like unmotivated churn in a future diff.
+- **Acknowledgement** within 14 days of the advisory being filed. A target,
+  not a contractual SLA.
+- **Triage**: reproduced if possible and given a severity. You will hear
+  which of "confirmed, working on a fix", "confirmed, won't fix" (with the
+  reason; see [What is out of scope](#what-is-out-of-scope)), or "not
+  reproducible, need more detail" applies.
+- **Fix and disclosure**: a confirmed vulnerability is fixed in the private
+  advisory's own fork first, so the fix does not announce the bug before an
+  image carries it. The advisory is published once a patched `sha-<commit>`
+  image or tagged release is available, and a CVE is requested through
+  GitHub's advisory flow where severity warrants it.
+- **Credit**: reporters are credited by name or handle in the advisory and
+  the release notes unless they ask to stay anonymous.
 
-That first rename cleared two of the three findings but not the username
-one, and the reason is worth recording: the query's source is the _field
-access_ whose identifier matches, and dataflow is interprocedural, so
-`TorrentClientConfig::login` being clean did not matter while
-`Config::torrent_client_for` filled it from `self.transmission.username`.
-The read of `TransmissionConfig::username` was the source, one hop upstream
-of the field that had been renamed. Those two config fields
-(`TransmissionConfig` and `RtorrentConfig`) are now `login` in Rust, with
-`#[serde(rename = "username")]` keeping the `sharerr.toml` key, the
-`SHARERR_TRANSMISSION__USERNAME` override and the `config_paths` string
-constants exactly as they were. Operators see no change.
-
-A later round found the same query still flagging the `println!` in
-`doctor.rs`'s `Report::fail`, this time one hop further upstream than any
-field: `SensitiveDataHeuristics.qll` treats a matching **function name**,
-not just a field or variable, as a source at every call site. Two functions
-qualified purely by name — `secret_keys::api_key_for` and
-`GluetunTarget::api_key_secret`, both `Option<&'static str>` accessors
-returning a vault _key name_, never a value — alongside `doctor.rs`'s own
-`fn secret`/`fn quiet_secret` and every local (`api_key`, `api_key_for_fix`,
-…) that carried a real `SecretString` from vault to client but happened to
-sit on a path that also reaches a `report.fail(...)` call naming the key.
-All of it renamed around the word `credential` — `credential_for`,
-`credential_key`, `fn credential`/`fn quiet_credential` — which matches none
-of the heuristic's regexes. As before, no vault key, TOML key, or printed
-message changed; only the Rust identifiers naming them moved.
-
-**`RUSTSEC-2023-0071` (the `rsa` crate's Marvin Attack) is not in this
-list**, though a stale Scorecard report may claim it should be. `rsa` would
-ride in only via `sqlx-mysql`, and `sqlx` 0.9's mysql backend does not depend
-on it, so it is absent from the lockfile (`cargo tree -i rsa` matches
-nothing). Kept as the worked example of documenting a lockfile-only finding;
-`deny.toml` carries the matching note.
+Last reviewed 2026-09.

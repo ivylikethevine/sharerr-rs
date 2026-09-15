@@ -1,8 +1,12 @@
 # Everything text checks out LF everywhere. Without it, Git for Windows'
-# core.autocrlf=true would hand a Windows checkout CRLF shell scripts; this
-# repo has no Windows CI leg, but the same default would still hand a Windows
-# *contributor's* local checkout CRLF versions of scripts/*.sh and docker/*,
-# which shellcheck and hadolint both run against unmodified in CI - cheap
-# correctness either way.
+# core.autocrlf=true would hand a Windows contributor's checkout CRLF versions
+# of scripts/*.sh and docker/*, which shellcheck and hadolint both run against
+# unmodified in CI. This repo has no Windows CI leg; it is cheap correctness
+# either way.
 * text=auto eol=lf
+
+# Images are never text: no line-ending conversion, no textual diff or merge.
+*.gif binary
+*.png binary
+*.jpg binary
 *.webp binary

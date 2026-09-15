@@ -1,328 +1,337 @@
-#!/bin/bash
-# The gap .github/dependabot.yml documents, widened to cover every pin in the
-# tree that dependabot cannot see.
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# The pins dependabot cannot see, and a second look at the ones it can.
+# Prints each pin next to the newest upstream release old enough to take, and
+# exits with the number of problems (capped at 255). The tool-versions
+# workflow runs it on a schedule; it runs from a checkout too, given curl and
+# jq:
 #
-# dependabot moves three kinds of pin on its own: the SHA in a `uses:` line
-# (github-actions ecosystem), a Cargo dependency, and a compose `image:` (the
-# docker-compose ecosystem). What is left over, and what each section below
-# checks:
+#   GH_TOKEN="$(gh auth token)" .github/scripts/check_tool_versions.sh
 #
-#   1. tools.txt        - CI installs zizmor/actionlint/cargo-llvm-cov/lychee/
-#                          typos from a cached, versioned release asset by
-#                          curl, not `pip install`/`go install`/`cargo
-#                          install` on every run - no ecosystem covers that.
-#   2. Action SHAs       - dependabot DOES move these... but only once it
-#                          notices the repo; this section is the one place
-#                          that lists every distinct action+pin actually used
-#                          across every workflow and composite action, so a
-#                          dependabot PR sitting unmerged for a while shows up
-#                          here as drift too, not just as an ecosystem gap.
-#   3. Docker base images - `rust:1.98-bookworm` and `debian:bookworm-slim` in
-#                          docker/Dockerfile. dependabot's docker ecosystem
-#                          does move these (a digest refresh lands even with
-#                          `rust`'s semver bumps ignored, per dependabot.yml),
-#                          same reasoning as section 2: this is what lets a
-#                          slow-to-merge bump show up as drift in the
-#                          meantime, and it is the one place that reads
-#                          straight from docker/Dockerfile rather than
-#                          trusting dependabot noticed.
+# Sections:
+#   1. tools.txt        CI tools installed by ../actions/setup-tool, read
+#                       through its lib.sh so no pinned tool goes unchecked
+#   2. inline pins      versions pinned in workflow/config text rather than
+#                       tools.txt (e.g. a release download URL), listed in
+#                       CI_WORKFLOW_ROSTER
+#   3. action SHAs      every distinct `uses: owner/repo@<sha> # vX.Y.Z` -
+#                       dependabot moves these, but an unmerged bump shows
+#                       here as drift too
+#   4. image digests    every `FROM`/`image:` pinned by digest in files
+#                       matching CI_IMAGE_GLOBS, against Docker Hub's tag
+#   5. local checks     ci_local_checks from the per-repo hook, if any
 #
-# This prints each pinned version next to the upstream's latest release and
-# exits with the number that differ. The tool-versions workflow runs it on a
-# schedule; it runs standalone from a checkout too, given curl and jq on PATH:
+# Timing follows dependabot's cooldown: a release younger than
+# TOOL_COOLDOWN_DAYS (default 7) is shown as pending, not drift, so this never
+# asks for the bump dependabot is deliberately still waiting on.
+# TOOL_COOLDOWN_DAYS=0 shows everything upstream has published.
 #
-#   .github/scripts/check_tool_versions.sh
+# Versions are compared as dotted numerics (sort -V), never by date or as
+# strings: some upstreams re-release old majors the same day, and a pin at or
+# ahead of the cooled-down release is current.
 #
-# tools.txt's roster is read through ../actions/setup-tool/lib.sh rather than
-# copied, so a tool cannot be pinned there and go unchecked here. Sections 2
-# and 3 read straight out of the workflow/Dockerfile files for the identical
-# reason - one place to edit a pin, one place that notices it drifted.
-#
-# Deliberately absent everywhere below: hadolint and trivy. Both are installed
-# from `releases/latest` on purpose (ci.yml and image-scan.yml each say why),
-# so there is no pin to drift.
-#
-# Timing follows .github/dependabot.yml. A release (or a re-pushed Docker Hub
-# tag) younger than COOLDOWN_DAYS is reported as pending, not as drift:
-# dependabot's `cooldown: default-days: 7` exists so a compromised release can
-# be caught upstream before this repo's CI ever runs it, and it would be odd
-# for this script to open an issue asking for the very bump dependabot is
-# deliberately still waiting on. TOOL_COOLDOWN_DAYS=0 shows everything
-# upstream has published.
+# Per-repo hook: if .github/scripts/check_tool_versions.local.sh exists it is
+# sourced after the helpers below are defined and before any section runs.
+# It may:
+#   - set CI_WORKFLOW_ROSTER, one row per line:
+#       name|file-glob|sed-regex|check|tag-prefix
+#     sed-regex is a BRE with one \(capture\) around the version; every file
+#     matching file-glob is read, and all matches must agree. check and
+#     tag-prefix mean what they do in tools.txt.
+#   - set CI_IMAGE_GLOBS (space-separated git pathspec globs; empty skips
+#     section 4)
+#   - define ci_local_checks, called last. It prints its own `## heading`
+#     and rows and calls `_ci_problem "<title>" "<message>"` once per problem
+#     (that counts it and annotates under Actions). A non-zero return counts
+#     as one more problem. It may also use _ci_report_pin, _ci_latest,
+#     _ci_at_least and _ci_extract.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-# SC1091: see install.sh's identical comment - this repo's shellcheck
-# invocation runs without -x, so a bare `source=` directive doesn't resolve
-# it.
-# shellcheck disable=SC1091
+# shellcheck source=../actions/setup-tool/lib.sh
 source .github/actions/setup-tool/lib.sh
 
-# Mirrors `cooldown: default-days` in .github/dependabot.yml; change both.
-COOLDOWN_DAYS="${TOOL_COOLDOWN_DAYS:-7}"
-
-for _ctv_need in curl jq; do
-  command -v "$_ctv_need" >/dev/null 2>&1 || {
-    echo "check_tool_versions: no $_ctv_need on PATH" >&2
+for _ci_need in curl jq; do
+  command -v "$_ci_need" >/dev/null 2>&1 || {
+    echo "check_tool_versions: no $_ci_need on PATH" >&2
     exit 127
   }
 done
 
-# _latest <owner/repo> <tag-prefix> - prints `due|newest|age`. `due` is the
-# highest-versioned non-draft, non-prerelease release at least COOLDOWN_DAYS
-# old (what dependabot would propose today, and what a pin is measured
-# against); `newest` is the highest-versioned such release regardless of age;
-# `age` is its age in whole days. All three empty if the API declines.
-#
-# Ordered by version, not by date, and only over tags shaped
-# `<prefix><digits>[.<digits>...]`. Both matter: actions/checkout re-releases
-# every old major on the same day (v2.8.0 next to v7.0.1, all published
-# within the hour), so "newest by date" is whichever backport landed last;
-# and github/codeql-action's `codeql-bundle-vX.Y.Z` CLI bundles share the
-# repo with the action's own `vX.Y.Z` series, so they must not compete with
-# it. `releases/latest`, which this used to read, orders by created_at and
-# gets the first case wrong the same way.
-#
-# Unauthenticated this is rate-limited to 60/hour per IP; in Actions the
-# workflow passes GH_TOKEN, which raises that far above the size of the
-# roster.
-function _latest() {
-  local auth=()
-  [ -n "${GH_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GH_TOKEN")
-  curl -sSf "${auth[@]}" "https://api.github.com/repos/$1/releases?per_page=30" 2>/dev/null |
-    jq -r --argjson days "$COOLDOWN_DAYS" --arg prefix "$2" '
-      [ .[] | select(.draft or .prerelease | not)
-            | select(.tag_name | startswith($prefix))
-            | (.tag_name | ltrimstr($prefix)) as $v
-            | select($v | test("^[0-9]+(\\.[0-9]+)*$"))
-            | . + { v: ($v | split(".") | map(tonumber)) } ]
-      | sort_by(.v) | reverse
-      | (now - $days * 86400) as $cutoff
-      | (map(select((.published_at | fromdateiso8601) <= $cutoff)) | first) as $due
-      | first as $newest
-      | [ ($due.tag_name // ""),
-          ($newest.tag_name // ""),
-          (if $newest then ((now - ($newest.published_at | fromdateiso8601)) / 86400 | floor | tostring) else "" end)
-        ] | join("|")' 2>/dev/null
-}
-
-# _pending_note <due> <newest> <age> - the parenthetical for a row whose
-# upstream moved inside the cooldown; empty when there is nothing pending.
-function _pending_note() {
-  if [ -n "$2" ] && [ "$2" != "$1" ]; then
-    printf ' (%s released %s day(s) ago, inside the %s-day cooldown dependabot.yml also applies)' \
-      "$2" "$3" "$COOLDOWN_DAYS"
-  fi
-}
-
-# _at_least <pinned> <due> - true when the pinned version is at or above
-# `due`, compared as dotted numerics (sort -V), never as strings. The
-# comparison is against `due`, not `newest`, because `due` is what dependabot
-# would propose today: a pin at or ahead of it is current. That includes a pin
-# sitting *between* the two - v2.87.6 pinned while v2.87.2 was the cooled-down
-# release and v2.87.7 had shipped that morning - which an equality test read
-# as "behind v2.87.2" and opened the tracking issue over a pin that was in
-# fact five releases ahead of what it was being measured against.
-function _at_least() {
-  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -n1)" = "$1" ]
-}
+# mirrors `cooldown: default-days` in .github/dependabot.yml; change both
+COOLDOWN_DAYS="${TOOL_COOLDOWN_DAYS:-7}"
+CI_WORKFLOW_ROSTER="${CI_WORKFLOW_ROSTER:-}"
+# unset means the default list; set-but-empty skips the section
+CI_IMAGE_GLOBS="${CI_IMAGE_GLOBS-Dockerfile */Dockerfile **/*.Dockerfile **/compose*.y*ml docker-compose*.y*ml}"
 
 bad=0
 
-echo "## tools.txt (release-asset installs)"
-echo
-# Process substitution, not a pipe: a piped `while` runs in a subshell, so
-# $bad would be lost and this would always exit 0.
-while IFS='|' read -r tool pinned _ _ _ check tag_prefix _; do
-  [ -n "$tool" ] || continue
+# _ci_problem <title> <message> - count one problem; annotate it under Actions.
+# Escaped per workflow-command rules so a message cannot start a new command.
+function _ci_problem() {
+  bad=$((bad + 1))
+  [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  local t="${1//"%"/%25}" m="${2//"%"/%25}"
+  t="${t//$'\n'/%0A}" m="${m//$'\n'/%0A}"
+  t="${t//$'\r'/%0D}" m="${m//$'\r'/%0D}"
+  t="${t//:/%3A}"
+  printf '::warning title=%s::%s\n' "${t//,/%2C}" "$m"
+}
 
-  # "-" opts a row out of the drift report entirely - for a tool whose
-  # upstream release feed this script simply cannot read, tools.txt says why.
-  if [ "$check" = "-" ]; then
-    printf '%-16s %-12s (not drift-checked, see tools.txt)\n' "$tool" "$pinned"
-    continue
-  fi
-
-  case "$check" in
-  github:*) repo="${check#github:}" ;;
-  *)
-    printf '%-16s %-12s ERROR (unknown check kind: %s)\n' "$tool" "-" "$check"
-    bad=$((bad + 1))
-    continue
+# _ci_fetch_versions <check> - upstream versions as JSON [{tag, t}], t an
+# ISO-8601 publish time; empty output when the API declines. Unauthenticated
+# GitHub allows 60 requests/hour per IP, so CI passes GH_TOKEN.
+function _ci_fetch_versions() {
+  local kind="${1%%:*}" project="${1#*:}" auth=() host
+  case "$kind" in
+  github)
+    [ -n "${GH_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $GH_TOKEN")
+    curl -sSf ${auth[@]+"${auth[@]}"} "https://api.github.com/repos/$project/releases?per_page=30" 2>/dev/null |
+      jq -c '[ .[] | select(.draft or .prerelease | not) | {tag: .tag_name, t: .published_at} ]' 2>/dev/null
+    ;;
+  gitlab)
+    # gitlab:[host/]group%2Fname - the project path is url-encoded, so the
+    # first `/` (if any) can only end the host
+    host=gitlab.com
+    case "$project" in */*)
+      host="${project%%/*}"
+      project="${project#*/}"
+      ;;
+    esac
+    curl -sSf "https://$host/api/v4/projects/$project/repository/tags?per_page=100" 2>/dev/null |
+      jq -c '[ .[] | {tag: .name, t: (.created_at // .commit.committed_date // .commit.created_at)} ]' 2>/dev/null
+    ;;
+  npm)
+    # the full packument, for its per-version `time`; a scoped name's `/`
+    # is encoded
+    curl -sSf "https://registry.npmjs.org/${project//\//%2F}" 2>/dev/null |
+      jq -c '. as $d | [ $d.time | to_entries[] | select($d.versions[.key]) | {tag: .key, t: .value} ]' 2>/dev/null
     ;;
   esac
+}
 
-  # The tag prefix is per-row (7th tools.txt column, defaulting to "v") - what
-  # lets lychee's own "lychee-v0.24.2" upstream tags compare correctly against
-  # a pin that (like every row's) carries no prefix at all.
-  prefix="${tag_prefix:-v}"
-  IFS='|' read -r latest newest age <<<"$(_latest "$repo" "$prefix")"
-  # A missing upstream answer is a rate limit or an outage, not a stale pin;
-  # counting it as outdated would open an issue about GitHub being slow.
-  if [ -z "$latest" ] && [ -z "$newest" ]; then
-    printf '%-16s %-12s (could not read the upstream release)\n' "$tool" "$pinned"
+# _ci_latest <check> <tag-prefix> - prints `due|newest|age`, bare versions:
+# `due` is the highest release at least COOLDOWN_DAYS old (what dependabot
+# would propose today), `newest` the highest regardless of age, `age` its age
+# in days. All empty when upstream cannot be read. Only tags shaped
+# <prefix><digits>[.<digits>...] count, which drops prereleases, backport
+# tags, and unrelated series sharing a repo. An empty prefix means an
+# optional leading "v".
+function _ci_latest() {
+  local json
+  json="$(_ci_fetch_versions "$1")" || json=""
+  [ -n "$json" ] || {
+    echo "||"
+    return 0
+  }
+  jq -r --argjson days "$COOLDOWN_DAYS" --arg prefix "$2" '
+    # ISO-8601 with optional fraction and offset: fromdateiso8601 takes
+    # neither, and a committer offset is not UTC
+    def ts:
+      capture("^(?<b>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})$") as $c
+      | ($c.b + "Z" | fromdateiso8601)
+        - (if $c.z == "Z" then 0
+           else ($c.z | gsub(":"; "")) as $z
+             | (($z[1:3] | tonumber) * 3600 + ($z[3:5] | tonumber) * 60)
+               * (if $z[0:1] == "+" then 1 else -1 end)
+           end);
+    [ .[] | select(.t != null and .tag != null)
+          | (.tag | if $prefix == "" then ltrimstr("v")
+                    elif startswith($prefix) then ltrimstr($prefix)
+                    else null end) as $v
+          | select($v != null) | select($v | test("^[0-9]+(\\.[0-9]+)*$"))
+          | {v: $v, k: ($v | split(".") | map(tonumber)), t: (.t | ts)} ]
+    | sort_by(.k) | reverse
+    | (now - $days * 86400) as $cutoff
+    | (map(select(.t <= $cutoff)) | first) as $due
+    | first as $newest
+    | [ ($due.v // ""), ($newest.v // ""),
+        (if $newest then ((now - $newest.t) / 86400 | floor | tostring) else "" end)
+      ] | join("|")' <<<"$json" 2>/dev/null || echo "||"
+}
+
+# _ci_at_least <pinned> <due> - pinned is at or above due, as dotted numerics
+function _ci_at_least() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -n1)" = "$1" ]
+}
+
+# _ci_report_pin <label> <pinned> <check> <tag-prefix> <where> - one row;
+# <where> names the place to bump it, for the annotation
+function _ci_report_pin() {
+  local label="$1" pinned="$2" check="$3" prefix="$4" where="$5" due newest age note=""
+  if [ "$check" = "-" ]; then
+    printf '%-32s %-14s (not drift-checked - see %s)\n' "$label" "$pinned" "$where"
+    return 0
+  fi
+  case "$check" in
+  github:?* | gitlab:?* | npm:?*) ;;
+  *)
+    printf '%-32s %-14s ERROR (unknown check kind: %s)\n' "$label" "$pinned" "$check"
+    _ci_problem "$label" "unknown check kind '$check' - fix $where"
+    return 0
+    ;;
+  esac
+  IFS='|' read -r due newest age <<<"$(_ci_latest "$check" "$prefix")"
+  # no answer is a rate limit or an outage, not a stale pin
+  if [ -z "$due" ] && [ -z "$newest" ]; then
+    printf '%-32s %-14s (could not read upstream releases)\n' "$label" "$pinned"
+    return 0
+  fi
+  if [ -n "$newest" ] && [ "$newest" != "$pinned" ] && [ "$newest" != "$due" ]; then
+    note=" ($newest released $age day(s) ago, inside the $COOLDOWN_DAYS-day cooldown)"
+  fi
+  # an empty `due` means every release is still cooling down: not drift
+  if [ -z "$due" ] || _ci_at_least "$pinned" "$due"; then
+    printf '%-32s %-14s current%s\n' "$label" "$pinned" "$note"
+  else
+    printf '%-32s %-14s OUTDATED (latest: %s)%s\n' "$label" "$pinned" "$due" "$note"
+    _ci_problem "$label outdated" "pinned $pinned, latest $due - bump it in $where"
+  fi
+}
+
+# _ci_extract <sed-regex> <file-glob> - the distinct captures across every
+# matching file, one per line
+function _ci_extract() {
+  local f
+  { compgen -G "$2" || true; } | while IFS= read -r f; do
+    sed -n "s|.*$1.*|\1|p" "$f"
+  done | sort -u
+}
+
+# _ci_files <globs> - tracked files matching space-separated pathspec globs
+function _ci_files() {
+  local globs=() specs=() g
+  read -ra globs <<<"$1"
+  [ "${#globs[@]}" -gt 0 ] || return 0
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    for g in "${globs[@]}"; do specs+=(":(glob)$g"); done
+    git ls-files -- "${specs[@]}"
+  else
+    (
+      shopt -s globstar nullglob
+      for g in "${globs[@]}"; do
+        # shellcheck disable=SC2086 # the glob is expanded here on purpose
+        printf '%s\n' $g
+      done
+    )
+  fi | sort -u
+}
+
+if [ -f .github/scripts/check_tool_versions.local.sh ]; then
+  # shellcheck source=/dev/null # per-repo, may not exist
+  source .github/scripts/check_tool_versions.local.sh
+fi
+
+echo "## tools.txt (.github/actions/setup-tool)"
+echo
+# process substitution, not a pipe: a piped `while` runs in a subshell and
+# would lose $bad
+while IFS='|' read -r tool pinned kind url _ check prefix sha256 extra; do
+  [ -n "$tool" ] || continue
+  # a malformed row fails only when some job installs it; say so weekly
+  if [ -n "$extra" ] || [ -z "$kind" ] || [ -z "$url" ] || ! _ci_row_sha256_ok "$sha256"; then
+    printf '%-32s %-14s ERROR (malformed row - see the tools.txt header)\n' "$tool" "$pinned"
+    _ci_problem "$tool" "tools.txt row is malformed (8 columns, sha256 as a hex or platform list)"
     continue
   fi
+  _ci_report_pin "$tool" "$pinned" "$check" "$prefix" ".github/actions/setup-tool/tools.txt (pin and sha256)"
+done < <(_ci_tool_rows)
 
-  # A pin at or ahead of `due` (someone bumped by hand inside the cooldown,
-  # to `newest` or to anything between) is current; an empty `due` with a
-  # `newest` means the only release is still inside the cooldown, which is
-  # also not drift.
-  note=""
-  [ "${newest#"$prefix"}" != "$pinned" ] && note="$(_pending_note "$latest" "$newest" "$age")"
-  if [ -z "$latest" ] || _at_least "$pinned" "${latest#"$prefix"}"; then
-    printf '%-16s %-12s current%s\n' "$tool" "$pinned" "$note"
-  else
-    printf '%-16s %-12s OUTDATED (latest: %s)%s\n' "$tool" "$pinned" "$latest" "$note"
-    # surfaces in the workflow run's summary and annotations when run by CI
-    [ -n "${GITHUB_ACTIONS:-}" ] &&
-      printf '::warning title=%s outdated::pinned %s, latest %s - bump it in .github/actions/setup-tool/tools.txt\n' \
-        "$tool" "$pinned" "$latest"
-    bad=$((bad + 1))
-  fi
-done < <(_sr_tool_rows)
+if [ -n "$CI_WORKFLOW_ROSTER" ]; then
+  echo
+  echo "## Inline pins (CI_WORKFLOW_ROSTER)"
+  echo
+  while IFS='|' read -r tool glob regex check prefix; do
+    [ -n "$tool" ] || continue
+    # a row that stops matching is an error, not a skip: a roster that
+    # quietly covers nothing is worse than none
+    found="$(_ci_extract "$regex" "$glob")"
+    case "$found" in
+    "")
+      printf '%-32s %-14s ERROR (no pin matched in %s)\n' "$tool" "-" "$glob"
+      _ci_problem "$tool" "the roster regex matched nothing in $glob - the pin moved or the row is stale"
+      ;;
+    *$'\n'*)
+      printf '%-32s %-14s ERROR (pins disagree: %s)\n' "$tool" "-" "$(printf '%s' "$found" | tr '\n' ' ')"
+      _ci_problem "$tool" "$glob pins more than one version: $(printf '%s' "$found" | tr '\n' ' ')"
+      ;;
+    *)
+      _ci_report_pin "$tool" "$found" "$check" "$prefix" "$glob"
+      ;;
+    esac
+  done <<<"$CI_WORKFLOW_ROSTER"
+fi
 
 echo
 echo "## GitHub Actions (uses: SHAs)"
 echo
-
-# Every `uses: <path>@<40-hex-sha> # <comment>` across every workflow and
-# composite action, reduced to (repo, pin) and deduplicated: the same action
-# can appear a dozen times at the same pin (actions/checkout does), and a
-# subpath action (`github/codeql-action/init`, `/analyze`, `/upload-sarif`)
-# names three different entry points into one repo, not three things to pin
-# separately - `cut -d/ -f1-2` folds all of them down to the repo dependabot
-# and this script both actually track releases against, and the dedup runs
-# *after* that fold so those three collapse into the one row that matters.
-#
-# A comment that is not `v<digits>...` names a moving alias, not a version -
-# there is nothing to compare it against, so it is skipped rather than
-# misreported. Every `uses:` pin in this tree currently carries a `v<semver>`
-# comment (dtolnay/rust-toolchain's `# stable` was the one exception, and it
-# is gone - see ci.yml's `fmt` job for why), so this guard has nothing to
-# filter today; it stays as defence for the next tool pinned by a moving ref.
+# Every `uses: <path>@<40-hex> # <comment>` under .github/, folded to
+# owner/repo (github/codeql-action/init and /analyze are one repo to track)
+# and deduplicated after the fold. A comment that is not v<digits> names a
+# moving alias with nothing to compare, and is skipped.
 while IFS='|' read -r repo comment pin; do
   [ -n "$repo" ] || continue
-
-  # Every `uses:` comment in this tree is `v<semver>` (the awk filter below
-  # guarantees it), so the prefix is always "v" here. github/codeql-action's
-  # `codeql-bundle-*` releases, which used to need a check-by-hand branch at
-  # this point, are filtered out inside _latest by shape.
-  IFS='|' read -r latest newest age <<<"$(_latest "$repo" v)"
-  if [ -z "$latest" ] && [ -z "$newest" ]; then
-    printf '%-45s %-10s (could not read the upstream release)\n' "$repo" "$comment"
-    continue
-  fi
-
-  # Same cooldown rule as the tools.txt section above.
-  note=""
-  [ "${newest#v}" != "${comment#v}" ] && note="$(_pending_note "$latest" "$newest" "$age")"
-  if [ -z "$latest" ] || _at_least "${comment#v}" "${latest#v}"; then
-    printf '%-45s %-10s current%s\n' "$repo" "$comment" "$note"
-  else
-    printf '%-45s %-10s OUTDATED (latest: %s, pinned %s)%s\n' "$repo" "$comment" "$latest" "$pin" "$note"
-    [ -n "${GITHUB_ACTIONS:-}" ] &&
-      printf '::warning title=%s outdated::pinned %s, latest %s - bump the SHA and the trailing comment everywhere %s is used\n' \
-        "$repo" "$comment" "$latest" "$repo"
-    bad=$((bad + 1))
-  fi
+  _ci_report_pin "$repo" "${comment#v}" "github:$repo" "" "every use of $repo (SHA and comment, pinned ${pin:0:12})"
 done < <(
-  grep -rhoP 'uses:\s*\K[^\s@]+@[0-9a-f]{40}\s*#\s*\S+' .github/ |
-    sed -E 's/^([^@]+)@([0-9a-f]{40}) *# *(\S+)$/\1|\2|\3/' |
+  grep -rhoE 'uses:[[:space:]]*[^[:space:]@]+@[0-9a-f]{40}[[:space:]]*#[[:space:]]*[^[:space:]]+' .github/ 2>/dev/null |
+    sed -E 's/^uses:[[:space:]]*([^@]+)@([0-9a-f]{40})[[:space:]]*#[[:space:]]*([^[:space:]]+)$/\1|\2|\3/' |
     awk -F'|' '$3 ~ /^v[0-9]/ {
       n = split($1, parts, "/")
       print parts[1] "/" parts[2] "|" $3 "|" $2
     }' |
-    sort -t'|' -k1,1 -u
+    sort -t'|' -k1,1 -k2,2 -u
 )
 
-echo
-echo "## Docker base images (docker/Dockerfile)"
-echo
-
-# The same two shapes scan_pinned_images.sh reads, narrowed to the one file
-# whose pin is also this build's MSRV claim - a `FROM` here is a toolchain
-# decision, not a CVE surface scan_pinned_images.sh already covers on its own
-# schedule. Docker Hub's tag API resolves a bare tag to the manifest-list
-# digest it points at *right now*, the same field `scan_pinned_images.sh`
-# reads off a `trivy image` scan - this just skips the scan and asks Docker
-# Hub directly, since a plain "has this moved" question does not need trivy's
-# vulnerability data at all.
-while IFS='|' read -r image tag pinned; do
-  [ -n "$image" ] || continue
-  ref="$image:$tag"
-
-  # Docker Hub's API path for an official image (`rust`, `debian`, ...) is
-  # `library/<name>`, not `<name>` - the only two rows this section reads
-  # today are both official images, so this is not generalised further.
-  case "$image" in
-  */*) hub_path="$image" ;;
-  *) hub_path="library/$image" ;;
-  esac
-
-  # `pinned` below is the bare hex digest (the sed capture drops the
-  # `sha256:` prefix, matching scan_pinned_images.sh's own convention) - strip
-  # the same prefix off the API's answer so the two are comparable.
-  #
-  # `age` is how many whole days ago the tag was last pushed (Docker Hub's
-  # timestamps carry fractional seconds jq's parser rejects, hence the sub).
-  IFS='|' read -r current age <<<"$(curl -sSf "https://hub.docker.com/v2/repositories/$hub_path/tags/$tag" 2>/dev/null |
-    jq -r '[ (.digest // "" | sub("^sha256:"; "")),
-             (if .tag_last_pushed then ((now - (.tag_last_pushed | sub("\\.[0-9]+"; "") | fromdateiso8601)) / 86400 | floor | tostring) else "" end)
-           ] | join("|")' 2>/dev/null)"
-  if [ -z "$current" ]; then
-    printf '%-45s %-24s (could not read the current tag digest)\n' "$ref" "${pinned:0:19}..."
-    continue
-  fi
-
-  if [ "$current" = "$pinned" ]; then
-    printf '%-45s %-24s current\n' "$ref" "${pinned:0:19}..."
-  elif [ -n "$age" ] && [ "$age" -lt "$COOLDOWN_DAYS" ]; then
-    # dependabot's docker ecosystem waits out the same cooldown before it
-    # proposes the new digest; so does this row.
-    printf '%-45s %-24s current (tag re-pushed %s day(s) ago, inside the %s-day cooldown dependabot.yml also applies)\n' \
-      "$ref" "${pinned:0:19}..." "$age" "$COOLDOWN_DAYS"
-  else
-    printf '%-45s %-24s OUTDATED (tag now resolves to %s)\n' "$ref" "${pinned:0:19}..." "$current"
-    [ -n "${GITHUB_ACTIONS:-}" ] &&
-      printf '::warning title=%s outdated::%s now resolves to %s - repin docker/Dockerfile (scan_pinned_images.sh says whether it fixes anything)\n' \
-        "$ref" "$ref" "$current"
-    bad=$((bad + 1))
-  fi
-done < <(
-  sed -n 's/^FROM \(--platform=[^ ]* \)\?\([^:@ ]*\):\([^@ ]*\)@sha256:\([0-9a-f]*\).*/\2|\3|\4/p' \
-    docker/Dockerfile
-)
-
-echo
-echo "## MSRV (rust-version claimed in three places)"
-echo
-
-# Not a drift-against-upstream check like the three sections above - this one
-# compares the repo against itself. `docker/Dockerfile`'s `FROM` used to be the
-# only place a moving `dtolnay/rust-toolchain@<SHA>` pin's `toolchain: "1.98"`
-# input had a twin to fall out of sync with; now that ci.yml's `msrv` job
-# installs "1.98" via a bare `rustup` call instead (see that job's own
-# comment for why dtolnay/rust-toolchain doesn't stay pinnable), the same
-# claim lives in three places with nothing but this section comparing them.
-cargo_msrv="$(grep -oP 'rust-version\s*=\s*"\K[^"]+' Cargo.toml | head -1)"
-docker_msrv="$(sed -n 's/^FROM \(--platform=[^ ]* \)\?rust:\([0-9.]*\)-.*/\2/p' docker/Dockerfile | head -1)"
-ci_msrv="$(grep -oP 'rustup toolchain install \K[0-9.]+' .github/workflows/ci.yml | head -1)"
-
-if [ -z "$cargo_msrv" ] || [ -z "$docker_msrv" ] || [ -z "$ci_msrv" ]; then
-  printf 'Cargo.toml=%s docker/Dockerfile=%s ci.yml(msrv)=%s (could not read one of the three)\n' \
-    "${cargo_msrv:-?}" "${docker_msrv:-?}" "${ci_msrv:-?}"
-  bad=$((bad + 1))
-elif [ "$cargo_msrv" = "$docker_msrv" ] && [ "$cargo_msrv" = "$ci_msrv" ]; then
-  printf '%-45s current (%s)\n' "Cargo.toml / Dockerfile / ci.yml" "$cargo_msrv"
-else
-  printf 'MISMATCH: Cargo.toml=%s docker/Dockerfile=%s ci.yml(msrv)=%s\n' \
-    "$cargo_msrv" "$docker_msrv" "$ci_msrv"
-  [ -n "${GITHUB_ACTIONS:-}" ] &&
-    printf '::warning title=MSRV mismatch::Cargo.toml=%s docker/Dockerfile=%s ci.yml(msrv)=%s - these three must agree\n' \
-      "$cargo_msrv" "$docker_msrv" "$ci_msrv"
-  bad=$((bad + 1))
+if [ -n "$CI_IMAGE_GLOBS" ]; then
+  echo
+  echo "## Image digests (CI_IMAGE_GLOBS)"
+  echo
+  # The same extraction scan_pinned_images.sh uses. This asks only "has the
+  # tag moved", which Docker Hub answers without a scan; whether a move fixes
+  # anything is scan_pinned_images.sh's question.
+  while IFS='|' read -r image tag pinned; do
+    [ -n "$image" ] || continue
+    ref="$image:$tag"
+    hub="${image#docker.io/}"
+    hub="${hub#index.docker.io/}"
+    case "$hub" in
+    *.*/* | *:*/* | localhost/*)
+      printf '%-48s %-22s (not on Docker Hub - not checked)\n' "$ref" "${pinned:7:12}..."
+      continue
+      ;;
+    */*) ;;
+    *) hub="library/$hub" ;;
+    esac
+    # Docker Hub timestamps carry fractional seconds fromdateiso8601 rejects
+    IFS='|' read -r current age <<<"$(curl -sSf "https://hub.docker.com/v2/repositories/$hub/tags/$tag" 2>/dev/null |
+      jq -r '[ (.digest // ""),
+               (if .tag_last_pushed then ((now - (.tag_last_pushed | sub("\\.[0-9]+"; "") | fromdateiso8601)) / 86400 | floor | tostring) else "" end)
+             ] | join("|")' 2>/dev/null || echo "|")"
+    if [ -z "$current" ]; then
+      printf '%-48s %-22s (could not read the current tag digest)\n' "$ref" "${pinned:7:12}..."
+    elif [ "$current" = "$pinned" ]; then
+      printf '%-48s %-22s current\n' "$ref" "${pinned:7:12}..."
+    elif [ -n "$age" ] && [ "$age" -lt "$COOLDOWN_DAYS" ]; then
+      printf '%-48s %-22s current (tag re-pushed %s day(s) ago, inside the %s-day cooldown)\n' \
+        "$ref" "${pinned:7:12}..." "$age" "$COOLDOWN_DAYS"
+    else
+      printf '%-48s %-22s OUTDATED (tag now resolves to %s)\n' "$ref" "${pinned:7:12}..." "${current:7:12}..."
+      _ci_problem "$ref outdated" "$ref now resolves to $current - repin it (scan_pinned_images.sh says whether that fixes anything)"
+    fi
+  done < <(
+    _ci_files "$CI_IMAGE_GLOBS" | while IFS= read -r f; do
+      sed -nE \
+        -e 's/^FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?([^[:space:]@$]+):([^[:space:]@$:/]+)@(sha256:[0-9a-f]{64}).*/\2|\3|\4/p' \
+        -e "s/^[[:space:]]*(-[[:space:]]+)?image:[[:space:]]*[\"']?([^[:space:]@\$\"'*&]+):([^[:space:]@\$:/\"']+)@(sha256:[0-9a-f]{64}).*/\2|\3|\4/p" \
+        "$f"
+    done | sort -u
+  )
 fi
 
-exit "$bad"
+if declare -F ci_local_checks >/dev/null; then
+  echo
+  ci_local_checks || _ci_problem "local checks" "ci_local_checks in check_tool_versions.local.sh returned non-zero"
+fi
+
+exit $((bad > 255 ? 255 : bad))

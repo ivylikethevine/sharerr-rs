@@ -870,7 +870,7 @@ async fn feed_for(state: &std::sync::Arc<ServeState>, key: &str) -> String {
 /// magnet at all, regardless of whether an item is private. This is the
 /// resolved "Before v1" roadmap question: a magnet can never complete
 /// against sharerr's (default-private) torrents, so it is off until an
-/// operator opts in. See `docs/SUPPORT.md#the-feeds-magnet-link`.
+/// operator opts in. See `docs/COMPATIBILITY.md#the-feeds-magnet-link`.
 #[tokio::test]
 async fn the_feed_carries_no_magnet_under_the_defaults() {
     let (_dir, state) = with_both_kinds().await;

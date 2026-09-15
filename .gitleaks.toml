@@ -1,0 +1,30 @@
+# gitleaks configuration: the default rules, plus the handful of committed
+# strings that look like secrets and are not. ci.yml's `gitleaks` job and
+# `scripts/check.sh gitleaks` both read this file.
+#
+# Each entry pins a path AND the exact value, so a real secret later pasted
+# into the same file still fails. Add one only with a comment saying what the
+# value is.
+
+[extend]
+useDefault = true
+
+# The tier-2 VPN stack's WireGuard keypair. Both tunnel ends run inside
+# docker/compose.vpn.yml and the tunnel goes nowhere, so the keys are test
+# fixtures by design (see that file's header).
+[[allowlists]]
+description = "test-only WireGuard keys for the local VPN test stack"
+condition = "AND"
+paths = ['''^docker/wireguard/wg0\.conf$''', '''^docker/compose\.vpn\.yml$''']
+regexes = [
+  '''eL9QUo9BLkTkz2sj5vLykE3tSTAPK/n/xiczYzrSG3U=''',
+  '''eIzCt6HUi9Lycm6dtYDUsjJGe7aBlIsDfos\+M4xg2n4=''',
+]
+
+# `sharerr preview` renders every page with invented data; this is a made-up
+# friend key shown on the preview's reveal dialog.
+[[allowlists]]
+description = "invented friend key in the preview command's fixture data"
+condition = "AND"
+paths = ['''^crates/sharerr/src/commands/preview\.rs$''']
+regexes = ['''sam-9f2a7c4e1b6d3f80''']

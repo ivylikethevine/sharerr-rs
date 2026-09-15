@@ -60,13 +60,12 @@ pub const CONFIG_VAULT: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#vault-secrets";
 pub const CONFIG_ENV: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#environment-variable-overrides";
 
-pub const SUPPORTED: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#supported-services";
-pub const SUPPORTED_SOURCES: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#library-sources-where-tagged-content-comes-from";
-pub const SUPPORTED_CLIENTS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#torrent-clients-what-actually-seeds";
-pub const SUPPORTED_INDEXERS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#indexers-what-consumes-the-feed";
+pub const SUPPORTED: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#supported-services";
+pub const SUPPORTED_SOURCES: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#library-sources-where-tagged-content-comes-from";
+pub const SUPPORTED_CLIENTS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds";
+pub const SUPPORTED_INDEXERS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#indexers-what-consumes-the-feed";
 pub const UNSUPPORTED: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SUPPORT.md#not-supported";
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#not-supported";
 
 pub const API: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/API.md";
 pub const SECURITY: &str =

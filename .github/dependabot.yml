@@ -10,11 +10,19 @@
 #
 # What this file cannot cover, and what covers it instead:
 #
-#   * The curl/pip/go-installed tool versions in ci.yml (zizmor, actionlint,
-#     hadolint) have no ecosystem here at all. `tool-versions.yml` watches that
-#     drift and keeps one tracking issue current, on the same Monday cadence
-#     and with the same 7-day cooldown as the `cooldown:` blocks below, so the
-#     two never disagree about whether an upstream release counts yet.
+#   * Every row of `.github/actions/setup-tool/tools.txt` (zizmor, actionlint,
+#     shellcheck, hadolint, trivy, cargo-deny, ...): release assets with no
+#     ecosystem here at all.
+#   * Inline pins listed in `.github/scripts/check_tool_versions.local.sh`:
+#     `CARGO_CHEF_VERSION` in docker/Dockerfile, the `.mcp.json` server, and
+#     the just-the-docs `remote_theme` in `_config.yml`.
+#   * The MSRV toolchain (ignored below on purpose).
+#
+#     `tool-versions.yml` watches all three and keeps one tracking issue
+#     current, on the same Monday cadence and with the same 7-day cooldown as
+#     the `cooldown:` blocks below, so the two never disagree about whether an
+#     upstream release counts yet. It also re-checks the SHAs and digests this
+#     file does move, so an unmerged bump shows up there as drift.
 #   * Whether a base-image bump actually *fixes* anything. Dependabot's docker
 #     ecosystem is version-updates-only — GHSA carries no container ecosystem,
 #     so there are no alerts to drive a security-update mode — and a digest is
@@ -22,11 +30,9 @@
 #     the pinned digest and what the tag points at now.
 #
 # The github-actions entry below scans `/.github/actions/*` as well as `/`:
-# the composite actions under `.github/actions/` (setup-tool, upsert-tracking-
-# issue, fetch-latest-artifact, advisory-note) each pin their own `uses:` —
-# actions/cache in setup-tool/action.yml, actions/download-artifact in
-# fetch-latest-artifact/action.yml — and without a directory entry naming
-# them, those SHAs were pinned but nothing here moved them.
+# the composite actions under `.github/actions/` pin their own `uses:` (for
+# example actions/cache in setup-tool/action.yml), and without a directory
+# entry naming them, those SHAs were pinned but nothing here moved them.
 #
 # Every compose file in the tree is in scope, which is a constraint on
 # filenames. The docker-compose ecosystem matches files by the regex
@@ -40,9 +46,9 @@
 # (or rebases) a single pull request carrying every update at once, instead of
 # one PR per ecosystem and group. Consequences worth knowing:
 #
-#   * The schedule and commit-message live on the group only; GitHub rejects
-#     an ecosystem-level `schedule` for an entry assigned to a group, and every
-#     entry must name its `patterns` (`["*"]` is "everything").
+#   * The schedule, commit-message and target-branch live on the group only;
+#     GitHub rejects them on an entry assigned to a group, and every entry
+#     must name its `patterns` (`["*"]` is "everything").
 #   * A semver-major Cargo bump now rides in the same PR as a patch bump rather
 #     than getting one of its own. The `ignore:` rules below are what keep the
 #     deliberate pins (sqlx's major, the MSRV toolchain) out of it; anything
@@ -63,6 +69,10 @@ multi-ecosystem-groups:
       day: monday
     commit-message:
       prefix: "deps"
+    # Development happens on `dev`; `main` only moves by a release merge.
+    # Group-level for every ecosystem below, since entries in a
+    # multi-ecosystem group may not set their own.
+    target-branch: dev
 
 updates:
   # GitHub Actions. The directory list covers the composite actions under
@@ -93,6 +103,17 @@ updates:
       # database files. A major bump here is a migration, not an update.
       - dependency-name: sqlx
         update-types: ["version-update:semver-major"]
+
+  # CI's Markdown tools (markdownlint-cli2, prettier), pinned with integrity
+  # hashes by .github/package-lock.json. ci.yml's `docs` job and
+  # scripts/check.sh install them with `npm ci --prefix .github`; the
+  # `overrides` block there carries a transitive security floor.
+  - package-ecosystem: npm
+    directory: /.github
+    multi-ecosystem-group: all-dependencies
+    patterns: ["*"]
+    cooldown:
+      default-days: 7
 
   # docker/Dockerfile — one file now, building both the sharerr and lighthouse
   # runtime images from a shared builder stage.

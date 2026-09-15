@@ -6,7 +6,7 @@ where state lives. [The design brief](DESIGN.md) explains why sharerr is
 shaped this way; [the lighthouse doc](LIGHTHOUSE.md) and [the API
 reference](API.md) go deeper on two parts this page only summarises.
 
-## Table of contents
+## Contents
 
 - [Crate map](#crate-map)
 - [How a share moves](#how-a-share-moves)
@@ -20,20 +20,20 @@ Twelve crates under `crates/`, one workspace, two binaries (`sharerr` and
 `sharerr-lighthouse`). This table is the one place the crate list is kept;
 everything else links here.
 
-| Crate | Owns |
-| --- | --- |
-| `sharerr` | The binary: CLI, web UI, Torznab/Jackett, tracker, reconciliation, directory libraries, gossip, lighthouse client, notifications |
-| `sharerr-core` | Domain types, layered config, path mapping. No I/O, so every other crate can depend on it without pulling in a client, a database, or a web framework |
-| `sharerr-arr` | Sonarr/Radarr/Lidarr/Readarr/Whisparr clients and tagged-content discovery |
-| `sharerr-client` | The narrow `TorrentClient` trait a backend implements. `sharerr` talks to whichever backend is configured through this one interface, so a backend can be swapped without touching the reconciliation loop |
-| `sharerr-qbit` | qBittorrent WebUI client |
-| `sharerr-transmission` | Transmission RPC client |
-| `sharerr-rtorrent` | rTorrent XML-RPC client |
-| `sharerr-store` | Encrypted vault + SQLite store |
-| `sharerr-torrent` | Torrent construction and tracker resolution |
-| `sharerr-probe` | Reads what a media file is, where no *arr can say |
-| `sharerr-lighthouse` | The lighthouse rendezvous service, its own binary and image. Deliberately independent of the rest of the workspace: a separate service with a separate threat model, not a module of the main binary |
-| `sharerr-testkit` | Synthetic fixtures. Never in a release build |
+| Crate                  | Owns                                                                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharerr`              | The binary: CLI, web UI, Torznab/Jackett, tracker, reconciliation, directory libraries, gossip, lighthouse client, notifications                                                                           |
+| `sharerr-core`         | Domain types, layered config, path mapping. No I/O, so every other crate can depend on it without pulling in a client, a database, or a web framework                                                      |
+| `sharerr-arr`          | Sonarr/Radarr/Lidarr/Readarr/Whisparr clients and tagged-content discovery                                                                                                                                 |
+| `sharerr-client`       | The narrow `TorrentClient` trait a backend implements. `sharerr` talks to whichever backend is configured through this one interface, so a backend can be swapped without touching the reconciliation loop |
+| `sharerr-qbit`         | qBittorrent WebUI client                                                                                                                                                                                   |
+| `sharerr-transmission` | Transmission RPC client                                                                                                                                                                                    |
+| `sharerr-rtorrent`     | rTorrent XML-RPC client                                                                                                                                                                                    |
+| `sharerr-store`        | Encrypted vault + SQLite store                                                                                                                                                                             |
+| `sharerr-torrent`      | Torrent construction and tracker resolution                                                                                                                                                                |
+| `sharerr-probe`        | Reads what a media file is, where no *arr can say                                                                                                                                                          |
+| `sharerr-lighthouse`   | The lighthouse rendezvous service, its own binary and image. Deliberately independent of the rest of the workspace: a separate service with a separate threat model, not a module of the main binary       |
+| `sharerr-testkit`      | Synthetic fixtures. Never in a release build                                                                                                                                                               |
 
 ## How a share moves
 
@@ -57,7 +57,7 @@ flowchart LR
    already has.
 2. **Metadata fallback**: for a plain directory with no *arr app behind it,
    `sharerr-probe` reads the media file itself. See
-   [`docs/SUPPORT.md`](SUPPORT.md) for which formats.
+   [`docs/COMPATIBILITY.md`](COMPATIBILITY.md) for which formats.
 3. **Torrent construction**: `sharerr-torrent` builds a `.torrent` describing
    the file **where it already sits**. Never copied, renamed, or re-linked:
    the constraint [the design brief](DESIGN.md#what-the-brief-got-right) is
@@ -96,7 +96,7 @@ flowchart LR
 - **This instance ↔ the services it drives**: *arr apps, the torrent client,
   and gluetun are assumed to be under the same operator's control, on the
   trusted network sharerr is meant to run on. See
-  [`docs/SECURITY.md`](SECURITY.md#why-the-existing-controls-are-enough) for
+  [`docs/SECURITY.md`](SECURITY.md#threat-model) for
   the threat model that boundary sits inside.
 
 ## Where state lives

@@ -4,19 +4,20 @@ name: Scorecard
 # reflects the state of the default branch the same day it changes without
 # grading a tree CI already rejected, plus a weekly schedule as a backstop
 # for score movement this repo didn't cause directly — an upstream Scorecard
-# check definition changing, or a quiet week with no pushes at all. See
+# check definition changing, or a quiet week with no pushes at all — and on
+# every branch protection change. See
 # pages.yml's header for why a workflow_run trigger is safe despite zizmor's
 # default suspicion of it.
 #
 # Most of what it grades this repo already does: every `uses:` is SHA-pinned,
-# dependabot covers four ecosystems, workflow permissions are least-privilege
-# and declared per job, and releases are gated behind a manual approval in
-# docker.yml. The checks worth actually watching are Pinned-Dependencies (which
+# dependabot covers every package ecosystem in the tree, workflow permissions
+# are least-privilege and declared per job, and docker.yml refuses to publish
+# a release whose commit lacks a green CI run. The checks worth actually watching are Pinned-Dependencies (which
 # also grades the *Dockerfiles*, now digest-pinned) and Dangerous-Workflow.
 #
 # Its SAST check counts CodeQL and does not count zizmor, actionlint, clippy or
-# cargo-deny — a real reason to run codeql.yml, and a bad reason to believe the
-# score.
+# cargo-deny — a real reason to run codeql.yml on every push to main, and a bad
+# reason to believe the score.
 #
 # The results are shown in two places, which answer different questions.
 # Privately, the SARIF is uploaded to code scanning, so findings land in the
@@ -35,6 +36,9 @@ on: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types: [completed]
     branches: [main]
+  # A change to branch protection moves the Branch-Protection score without
+  # any commit, so it gets a fresh score the same day too.
+  branch_protection_rule:
   schedule:
     - cron: "41 7 * * 2"
   workflow_dispatch:
@@ -47,14 +51,14 @@ concurrency:
   group: scorecard-${{ github.ref }}
   cancel-in-progress: true
 
-# read-all is the floor; the analysis job takes the three write scopes it needs
-# below. Job-level permissions replace the workflow-level block rather than
+# Permissions: read-all is the floor; the analysis job takes the two write
+# scopes it needs below. Job-level permissions replace the workflow-level block rather than
 # adding to it, which is why that job spells out its read scopes again.
 permissions: read-all
 
 jobs:
   analysis:
-    name: supply-chain scorecard
+    name: supply-chain score (scorecard)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # only a green push to main gets a fresh score; the schedule and a manual
@@ -63,10 +67,8 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
-    # Deliberately no `environment:` gate: this runs on a schedule, and a
-    # schedule cannot pass one — a required reviewer would leave every weekly
-    # run queued for an approval nobody is waiting to give. docker.yml's
-    # publish gate is the one that matters.
+    # Deliberately no `environment:`: nothing here publishes a release, and
+    # docker.yml's publish gate is the one that matters.
     permissions:
       contents: read
       # the two the analysis needs, and the only write scopes in this file:
@@ -77,6 +79,10 @@ jobs:
       # Dangerous-Workflow and Token-Permissions read workflow definitions
       actions: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

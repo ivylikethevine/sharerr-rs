@@ -8,7 +8,9 @@ _Share your media library with friends, over the tools you already run._
 docker.yml's `release` job now waits on both images being published (a single
 `publish` job promotes them together - see docs/RELEASING.md), so the two can
 never drift apart - but shields.io has no GHCR version endpoint to ask
-instead, so reading the Release version is still how all three stay in sync. -->
+instead, so reading the Release version is still how all three stay in sync.
+Tests and Coverage read the JSON that pages.yml publishes under badges/ from
+coverage.yml's artifact, so renaming either workflow breaks both badges. -->
 
 [![Release](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=github&label=release)](https://github.com/ivylikethevine/sharerr-rs/releases/latest)
 [![sharerr image](https://img.shields.io/github/v/release/ivylikethevine/sharerr-rs?logo=docker&logoColor=white&label=ghcr.io%2Fsharerr-rs)](https://github.com/ivylikethevine/sharerr-rs/pkgs/container/sharerr-rs)
@@ -18,6 +20,7 @@ instead, so reading the Release version is still how all three stay in sync. -->
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14449/badge)](https://www.bestpractices.dev/projects/14449)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ivylikethevine/sharerr-rs/badge)](https://scorecard.dev/viewer/?uri=github.com/ivylikethevine/sharerr-rs)
 [![OpenSSF Baseline](https://www.bestpractices.dev/projects/14449/baseline)](https://www.bestpractices.dev/projects/14449)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/ivylikethevine/sharerr-rs/blob/main/LICENSE.md)
 [![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg)](https://github.com/ivylikethevine/sharerr-rs/blob/main/Cargo.toml)
 
 > The Scorecard badge undercounts Pinned-Dependencies: every workflow's local
@@ -40,7 +43,7 @@ whole design is built around.
 
 > View these docs as a [website](https://ivylikethevine.github.io/sharerr-rs/).
 > The reference material is indexed in [docs/README.md](docs/README.md);
-> deployment layouts are in [docker/deploy/](docker/deploy/README.md).
+> deployment layouts are in [docker/deploy/](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md).
 
 ## Contents
 
@@ -64,11 +67,11 @@ whole design is built around.
 - [The CLI](#the-cli)
 - [Building and testing](#building-and-testing)
 - [Layout](#layout)
+- [Getting help and contributing](#getting-help-and-contributing)
+- [AI usage](#ai-usage)
 - [Roadmap](#roadmap)
   - [Before v1](#before-v1)
   - [Open work](#open-work)
-- [Getting help and contributing](#getting-help-and-contributing)
-- [AI usage](#ai-usage)
 - [Licence](#licence)
 
 ## What works today
@@ -101,7 +104,7 @@ whole design is built around.
 
 Which apps, clients and indexers are supported, how the three clients differ,
 and what was tried and deliberately left out is in
-[`docs/SUPPORT.md`](docs/SUPPORT.md).
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md).
 
 ## Screenshots
 
@@ -154,7 +157,7 @@ Three things to know before going further:
 - **Two volumes matter.** `/data` holds the vault, the database, and the
   generated `.torrent` files; `/config` holds `sharerr.toml`, which the UI
   rewrites in place. Both must persist. Compose layouts for the common shapes
-  are in [`docker/deploy/`](docker/deploy/README.md).
+  are in [`docker/deploy/`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md).
 - **Port 8477 carries the web UI, the tracker, and the feed.** Anyone who
   can reach it can reach the login page, and on a plain-HTTP LAN the session
   cookie travels in the clear. See
@@ -237,7 +240,7 @@ on the next sync pass, once; a torrent sharerr adopted keeps whatever limits
 it had. A blank field is no opinion rather than "no cap": sharerr sends
 nothing for it, so a limit you want gone comes off in the client. rTorrent
 honours the cap but not the ratio; see
-[`docs/SUPPORT.md`](docs/SUPPORT.md#torrent-clients-what-actually-seeds).
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 The same panel also holds two settled "Before v1" roadmap questions, since an
 operator reasons about them together:
@@ -259,7 +262,7 @@ resolve against a private torrent. Turning it on only ever produces a magnet
 for an item that is itself not private; the combination "magnets on,
 everything still private" is accepted but produces nothing, rather than
 advertising a link guaranteed to stall a friend's client. See
-[`docs/SUPPORT.md`](docs/SUPPORT.md#the-feeds-magnet-link) for why this was
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#the-feeds-magnet-link) for why this was
 an open question and how it was resolved.
 
 ### A dynamic endpoint (gluetun)
@@ -292,11 +295,11 @@ second listener carrying only the tracker, for the topology where exactly
 one forwarded port exists and it has to be the tracker's. If the torrent
 client sits behind a _different_ gluetun than sharerr does, a second poller,
 `[gluetun_client]`, watches that tunnel with the same fields; that layout is
-[`docker/deploy/dual-vpn/`](docker/deploy/dual-vpn/README.md).
+[`docker/deploy/dual-vpn/`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/dual-vpn/README.md).
 
 Field reference and how to mint gluetun's key:
 [`[gluetun]`](docs/SETTINGS.md#gluetun-and-gluetun_client) and
-[deploying](docker/deploy/README.md).
+[deploying](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md).
 
 ### The lighthouse
 
@@ -470,7 +473,7 @@ label = "sharerr"   # stands in for qBittorrent's category and tag
 Then store the password: `printf %s "$PW" | sharerr vault set transmission.password`.
 Transmission cannot skip the hash check, so the first add of a large library
 is slower; the full comparison of the three clients is in
-[`docs/SUPPORT.md`](docs/SUPPORT.md#torrent-clients-what-actually-seeds).
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## Using rTorrent / ruTorrent instead of qBittorrent
 
@@ -493,7 +496,7 @@ Username and password are HTTP Basic Auth for the reverse proxy in front of
 the RPC endpoint; if yours has none, any placeholder values work. rTorrent
 always verifies on add, honours the upload cap but not the ratio limit, and
 cannot replace a stale tracker in place; see
-[`docs/SUPPORT.md`](docs/SUPPORT.md#torrent-clients-what-actually-seeds).
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## The CLI
 
@@ -501,16 +504,16 @@ The UI covers everything, but each verb has a headless equivalent, which is
 what a scripted deployment or a secrets manager wants. Every command takes
 `--config <path>` (or `SHARERR_CONFIG`) and `--verbose`.
 
-| Command | What it does |
-| --- | --- |
-| `sharerr serve` | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs. |
-| `sharerr sync` | One reconciliation pass, then exit. `--dry-run` reports what it would do without touching the client. |
-| `sharerr doctor` | Checks credentials, service reachability, the tag, and **path mapping resolution**, the check most likely to explain "nothing is shared". The same checks back the web UI's Status page. `--fix` creates a missing tag or category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (`--search-root`, default `/media`), never written automatically. |
-| `sharerr vault set <key>` | Reads a secret from stdin into the encrypted vault. |
-| `sharerr vault list` | Lists which secret keys are set, without their values. |
-| `sharerr vault remove <key>` | Deletes a secret from the vault. |
-| `sharerr openapi` | Prints the OpenAPI 3.1 document for the machine-facing API (`--output` writes it to a file). See [`docs/API.md`](docs/API.md). |
-| `sharerr preview` | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout with no instance behind it. A development aid. |
+| Command                      | What it does                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                  |
+| `sharerr sync`               | One reconciliation pass, then exit. `--dry-run` reports what it would do without touching the client.                                                                                                                                                                                                                                                                                                      |
+| `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution**, the check most likely to explain "nothing is shared". The same checks back the web UI's Status page. `--fix` creates a missing tag or category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (`--search-root`, default `/media`), never written automatically. |
+| `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                        |
+| `sharerr vault list`         | Lists which secret keys are set, without their values.                                                                                                                                                                                                                                                                                                                                                     |
+| `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                           |
+| `sharerr openapi`            | Prints the OpenAPI 3.1 document for the machine-facing API (`--output` writes it to a file). See [`docs/API.md`](docs/API.md).                                                                                                                                                                                                                                                                             |
+| `sharerr preview`            | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout with no instance behind it. A development aid.                                                                                                                                                                                                                                |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -523,19 +526,19 @@ See [environment variable overrides](docs/SETTINGS.md#environment-variable-overr
 
 ## Building and testing
 
-Rust **1.98** or newer, then the verification loop:
+Rust **1.98** or newer, then `cargo build`. Before sending a change, run
+what CI runs:
 
 ```bash
-cargo test --workspace --all-features --locked \
-  && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings \
-  && cargo build \
-  && cargo fmt --all --check
+scripts/check.sh --install   # once: the pinned lint and scan tools
+scripts/check.sh
 ```
 
 The default suite is hermetic: no network, no containers, no database. An
 opt-in second tier (`./scripts/run_docker_tests.sh`) drives a real *arr +
-torrent-client stack on synthetic fixtures. [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)
-has the lint policy, the MSRV check, and what CI runs;
+torrent-client stack on synthetic fixtures, and CI runs it weekly.
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) has the verification loop, the
+lint policy, the MSRV check, and what CI runs;
 [`docs/TESTING.md`](docs/TESTING.md) has the tiers.
 
 ## Layout
@@ -546,12 +549,25 @@ end to end, and where state lives are in
 the two premises the implementation disproved are in
 [`docs/DESIGN.md`](docs/DESIGN.md).
 
+## Getting help and contributing
+
+[`docs/SUPPORT.md`](docs/SUPPORT.md) says where to ask (issues, discussions,
+the private security route), what to include, and what to expect from a
+one-person project. To send a change, start with
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md).
+
+## AI usage
+
+Heavily inspired by: [Dictionarry/Profilarr's AI Transparency Statement](https://v2.dictionarry.dev/ai-transparency)
+
+I have used generative AI to write large parts of this project. All of the code here is my responsibility regardless: AI is a tool, not an owner of a project. I have personally understood, reviewed and approved all of the AI-generated code in this repository, and _mainline releases_ carry the same accountability to me as anything I write and publish myself.
+
 ## Roadmap
 
 Where sharerr is going next. Nothing below is a release commitment; the
 ordering is a judgement about value, not a schedule. An item is removed the
 moment it ships. An idea that gets declined instead moves to
-[`docs/SUPPORT.md`](docs/SUPPORT.md#not-supported), with the reason
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#not-supported), with the reason
 attached.
 
 ### Before v1
@@ -574,25 +590,6 @@ Smallest first, by how much each item touches:
   bytes-out figure on the status page.
 - **Request flow.** Discovery is one-way today. An inbound request queue
   with an approve step is the other half of the original idea.
-
-## Getting help and contributing
-
-- **Found a bug or want a feature?** [Open an issue](https://github.com/ivylikethevine/sharerr-rs/issues);
-  see [`docs/SUPPORT.md`](docs/SUPPORT.md) for what is supported today and
-  [the roadmap](#roadmap) for what is already planned or considered.
-- **Have a question, or want to show off your setup?** [Start a discussion](https://github.com/ivylikethevine/sharerr-rs/discussions).
-- **Found a security issue?** Do not open a public issue; see
-  [`docs/SECURITY.md`](docs/SECURITY.md#reporting-a-vulnerability).
-- **Want to contribute a change?** [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md),
-  and the [code of conduct](docs/CODE_OF_CONDUCT.md) for any project space.
-- **Wondering who's behind this?** [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md):
-  a personal project, maintained by one person in their spare time.
-
-## AI usage
-
-Heavily inspired by: [Dictionarry/Profilarr's AI Transparency Statement](https://v2.dictionarry.dev/ai-transparency)
-
-I have used generative AI to write large parts of this project. All of the code here is my responsibility regardless: AI is a tool, not an owner of a project. I have personally understood, reviewed and approved all of the AI-generated code in this repository, and _mainline releases_ carry the same accountability to me as anything I write and publish myself.
 
 ## Licence
 

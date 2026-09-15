@@ -5,7 +5,7 @@ sharerr's machine-facing HTTP surface has a formal contract:
 or feed it to a generator; every operation has an `operationId`, so generated
 method names are stable.
 
-## Table of contents
+## Contents
 
 - [What it covers](#what-it-covers)
 - [Why it cannot go stale](#why-it-cannot-go-stale)
@@ -54,7 +54,7 @@ which fails `cargo test` when they differ.
 ## Regenerating it
 
 ```bash
-cargo run -- openapi --output docs/openapi.json
+cargo run --bin sharerr -- openapi --output docs/openapi.json
 ```
 
 `sharerr openapi` opens no vault and no database and needs no running

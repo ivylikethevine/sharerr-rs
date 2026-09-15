@@ -7,7 +7,7 @@ with your infrastructure. Two other approaches answer adjacent-sounding
 questions, and it is worth being precise about which is which before
 reaching for any of them.
 
-## Table of contents
+## Contents
 
 - [Autobrr and cross-seed](#autobrr-and-cross-seed)
 - [A shared or pooled \*arr instance](#a-shared-or-pooled-arr-instance)
@@ -57,7 +57,7 @@ progress that lives in one place instead of being fragmented across
 instances. If what you actually want is "let my roommate watch what's on my
 server," a shared Plex or Jellyfin login is the right tool, full stop —
 sharerr deliberately does not do media serving; see
-[Support](SUPPORT.md#media-server-library-sources-jellyfin-emby-plex) for
+[Compatibility](COMPATIBILITY.md#media-server-library-sources-jellyfin-emby-plex) for
 why that was tried and removed.
 
 Where sharerr wins: no credential or infrastructure sharing at all. A friend
@@ -65,11 +65,11 @@ runs their own Sonarr, Radarr, and torrent client, keeps their own quality
 profiles, naming, and folder layout, and only ever talks to your instance
 the way any indexer talks to an *arr app — over Torznab, with a token. Per-
 friend keys with revoke, and per-friend library scoping (see
-[Support](SUPPORT.md#supported-services)), mean cutting off one friend never
+[Compatibility](COMPATIBILITY.md#supported-services)), mean cutting off one friend never
 touches another's access, and neither of you ever holds a credential to the
 other's server. That asymmetry is the actual design point, not an
 afterthought — sharerr's data model has exactly one user per instance, on
-purpose; see [Support's "Multi-user"](SUPPORT.md#multi-user) for why pooling
+purpose; see [Compatibility's "Multi-user"](COMPATIBILITY.md#multi-user) for why pooling
 several people onto one instance was considered and declined. Friends are
 peers with their own instance, never accounts on yours.
 

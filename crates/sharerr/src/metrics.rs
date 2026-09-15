@@ -5,7 +5,7 @@
 //! store, the live swarms, and the gluetun/lighthouse/system pollers; both
 //! endpoints render from it rather than each querying independently, so they
 //! cannot disagree about what "now" means. This is deliberately a separate
-//! aggregator from [`crate::web::mod::glance`], not a shared one: `glance` is
+//! aggregator from `crate::web::glance`, not a shared one: `glance` is
 //! polled by an open browser tab every 30 seconds and is documented as
 //! costing "two store queries and an in-memory swarm read" — building it from
 //! this module's snapshot would add a full item scan and two poller reads to
@@ -57,7 +57,7 @@ pub(crate) struct MetricsSnapshot {
     items_by_state: Vec<(ShareState, i64)>,
     seeding_count: i64,
     seeding_bytes: i64,
-    /// The most recent *finished* run, same filter [`crate::web::glance`]
+    /// The most recent *finished* run, same filter `crate::web::glance`
     /// applies: an in-flight run has no outcome yet.
     last_run: Option<sharerr_store::RunRecord>,
     swarm: sharerr_torrent::announce::SwarmStats,
@@ -84,7 +84,7 @@ fn items_by_state(items: &[sharerr_core::SharedItem]) -> Vec<(ShareState, i64)> 
 
 /// Gather everything both endpoints render from. Never fails outright: a
 /// store that will not open reads as an all-zero library rather than taking
-/// the endpoint down, the same tolerance [`crate::web::glance`] gives a
+/// the endpoint down, the same tolerance `crate::web::glance` gives a
 /// briefly-unavailable database.
 pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
     let (items_by_state_vec, seeding, last_run, peers_total, peers_recent) =

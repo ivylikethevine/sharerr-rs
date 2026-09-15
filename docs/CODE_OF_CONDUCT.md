@@ -6,7 +6,7 @@ meet. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the mechanics of sending a
 change; this page covers how people are expected to treat each other while
 doing it.
 
-## Table of contents
+## Contents
 
 - [Our pledge](#our-pledge)
 - [Our standards](#our-standards)
@@ -74,14 +74,14 @@ an appointed representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainer via the contact information at
-[ivylikethevine.com](https://ivylikethevine.com). All complaints will be
-reviewed and investigated promptly and fairly.
+reported privately to the maintainer at <ivylikethevine@gmail.com>. All
+complaints will be reviewed and investigated promptly and fairly.
 
 The maintainer is obligated to respect the privacy and security of the
 reporter of any incident. Found a _security_ issue rather than a conduct
-one? Use [the private advisory route](SECURITY.md#reporting-a-vulnerability)
-instead — it reaches the same person through GitHub's own private channel.
+one? Use GitHub's private vulnerability reporting instead
+([how, in `SECURITY.md`](SECURITY.md#reporting-a-vulnerability)), never a
+public issue.
 
 ## Enforcement guidelines
 

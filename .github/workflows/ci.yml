@@ -1,10 +1,37 @@
-# The hermetic tier of the test suite, plus the formatting and lint gates.
+# The hermetic tier of the test suite, plus the formatting, lint, and
+# secret-scanning gates.
 #
 # Nothing here needs a service container, a database, or the network: the *arr and
 # qBittorrent clients are exercised against wiremock on loopback, sqlx runs against
 # `sqlite::memory:`, and migrations are embedded at compile time by `sqlx::migrate!`.
 # The tier-2 suite that drives docker/compose.test.yml is deliberately excluded —
-# see the note on `cargo test` below.
+# see the note on `cargo test` in scripts/check.sh; integration.yml runs it weekly.
+#
+# Every check step calls `scripts/check.sh <check>`, the same entry point a
+# contributor runs locally, so a command lives in one place. This file keeps
+# only what is CI-specific: runners, tool installs, caches, and gating.
+#
+# Required check names. `main`'s ruleset matches these verbatim, so none
+# carries a version, shard number, or matrix value, and renaming a job below
+# is also a ruleset edit:
+#
+#   rustfmt
+#   clippy + tests                           (also runs rustdoc -D warnings)
+#   msrv
+#   cargo-deny
+#   shell + compose
+#   workflow lint (zizmor + actionlint)      (also runs lint_workflows.sh)
+#   markdown links (lychee offline)
+#
+# Blocking jobs added after the ruleset was last written, which need adding to
+# it to be enforced:
+#
+#   docs (markdownlint + prettier + typos)
+#   secrets (gitleaks)
+#   terraform (fmt + validate)
+#   dependency review                        (pull requests only)
+#
+# Never required: `advisory (hadolint)`, which only reports.
 
 name: CI
 
@@ -17,35 +44,33 @@ on:
   # actually checks a draft once it is marked ready, and `converted_to_draft`,
   # which exists only so this workflow's `concurrency:` group cancels a run
   # still in flight for a PR that just went back to draft. The skip itself is
-  # a job-level `if:` on every job with no `needs:` (here `prepare` and
-  # `workflow-lint`); everything downstream of `prepare` skips with it. A
-  # skipped required check does not block anything a draft could do anyway,
-  # since a draft cannot merge. codeql.yml uses this same shape; docker.yml
-  # too, except its `if:` sits one level down in docker-image.yml (its own
-  # trigger comment says why).
+  # a job-level `if:` on `prepare` and on every job that does not read its
+  # `code` output; the jobs that do skip with it. A skipped required check does not block anything
+  # a draft could do anyway, since a draft cannot merge. codeql.yml uses this
+  # same shape; docker.yml too, except its `if:` sits one level down in
+  # docker-image.yml (its own trigger comment says why).
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
-  # No weekly `schedule:` here — `audit` used to carry one for exactly the
-  # reason a stale-comment-shaped trap warns against: a new advisory against a
-  # dependency is not something a commit to this repo causes, so waiting for
-  # the next push to hear about it is waiting for the wrong event. But
-  # advisories.yml already runs `cargo deny check advisories` weekly, in the
-  # shape CLAUDE.md's "Three scheduled workflows" section prescribes for
-  # exactly this class of finding — keeping one tracking issue current rather
-  # than turning a Monday-morning run red with no diff to point at. Two crons
-  # answering the same question, one of them in the wrong shape, was the
-  # actual bug; `audit` below now exists purely as the per-PR gate.
+  # No weekly `schedule:` here. A new advisory against a dependency is not
+  # something a commit to this repo causes, so advisories.yml asks that
+  # question weekly and keeps one tracking issue current instead of turning a
+  # Monday-morning run red with no diff to point at; `audit` below is purely
+  # the per-PR gate.
 
 # A quick follow-up commit should not leave the previous run burning a
 # runner — but only on a PR: coverage.yml, advisories.yml, image-scan.yml,
-# link-check.yml, scorecard.yml, tool-versions.yml and codeql.yml now all
-# chain off a green run of this workflow on `main` (see each file's own
-# header), so cancelling a superseded push here would silently cancel the run
-# every one of them is waiting on. codeql.yml uses this same conditional
-# shape for its own `concurrency:` group.
+# link-check.yml, scorecard.yml and tool-versions.yml all chain off a green
+# run of this workflow on `main` (see each file's own header), so
+# cancelling a superseded push here would silently cancel the run every one of
+# them is waiting on.
+#
+# Grouped per commit outside a PR, not per ref: a group holds one running
+# and one pending run, so a quick second push to `main` would otherwise
+# replace the first commit's still-queued run, leaving that commit with no
+# CI result for docker.yml's release gate (or anything chained here) to find.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -59,15 +84,14 @@ jobs:
   # merged into one call (see prepare.yml) so every heavy job below waits on one
   # VM boot instead of two. Editing this file (or pages.yml, ...) can't move a
   # Rust lint, a test result, or a shellcheck finding, so there is nothing below
-  # for those jobs to re-check on a workflow-only change. zizmor and actionlint
-  # are deliberately exempt from this gate: they audit .github/ itself, so a
-  # workflow-only change is exactly the case they exist to catch.
+  # for those jobs to re-check on a workflow-only change. The workflow, link,
+  # docs and secret checks are deliberately exempt from this gate: each reads
+  # files the filter ignores.
   #
   # `prepare` itself decides what a schedule or workflow_dispatch run means (see
-  # its own header comment): every job below only ever checks
-  # `needs.prepare.outputs.code == 'true'`, with no separate "assume yes on
-  # skip" branch to keep in sync.
-  # Shared with docker.yml, which wants the identical "anything outside
+  # its own header comment): a job below only ever checks
+  # `needs.prepare.outputs.code == 'true'` (plus `reuse`'s answer). Shared
+  # with docker.yml, which wants the identical "anything outside
   # .github/workflows/**" filter.
   prepare:
     name: prepare
@@ -87,22 +111,135 @@ jobs:
           # ../../docs/openapi.json in a test, so that one file under docs/ is
           # genuinely code and must still trip this filter.
 
+  # Push-to-main tree dedupe, three jobs. A push to `main` whose tree a green
+  # same-repo PR run already tested (merging an up-to-date PR, the usual case)
+  # is the same code twice. `mark` records the tree a PR run took green;
+  # `reuse` finds that record on the push, and every other job then skips
+  # (each checks `needs.reuse.outputs.run == ''`, with `!cancelled()` because
+  # `reuse` itself skips on a PR); `carry-forward` copies the PR run's checks
+  # onto the pushed commit. That run still concludes `success`, which is all
+  # docker.yml's release gate asks of it. docker.yml does not dedupe: a push
+  # to `main` publishes that commit's `sha-<7>` image.
+  #
+  # The cost: `test` and `msrv` save their rust-cache only from `main`, so a
+  # reused push refreshes no cache. A manual dispatch on `main` runs in full.
+  #
+  # The lookup: the newest green same-repo pull_request run of this workflow
+  # that uploaded `ci-tree-<this push's tree>`. continue-on-error, so a failed
+  # lookup is a full run, never a skipped one.
+  reuse:
+    name: reuse a green pr run (tree match)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # find_tree_run.sh reads other runs and their artifacts
+      actions: read
+    outputs:
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts/find_tree_run.sh
+          sparse-checkout-cone-mode: false
+
+      - id: find
+        name: Find a green PR run on this tree
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TREE: ${{ github.event.head_commit.tree_id }}
+        run: .github/scripts/find_tree_run.sh ci.yml "ci-tree-$TREE" | tee -a "$GITHUB_OUTPUT"
+
+  # The pull_request half: the tree a same-repo PR run tested, recorded only
+  # once every blocking job here passed. Not merely "the run was green": a
+  # docs-only diff against `dev` skips the heavy jobs and still goes green,
+  # and that must not vouch for a push to `main` whose diff is code. A fork's
+  # run never marks (find_tree_run.sh's header says why). `advisory` is not
+  # listed: it never fails.
+  mark:
+    name: mark the tested tree
+    needs: [prepare, fmt, test, msrv, audit, scripts, terraform, workflow-lint, links, docs, gitleaks, dependency-review]
+    if: >-
+      ${{ !cancelled() && github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') &&
+          !contains(needs.*.result, 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # the tree sha of the merge commit this run tested
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: $/.github/actions/mark-tree
+        with:
+          prefix: ci-tree
+
+  # Hands the reused PR run's results to the pushed commit: one completed
+  # check run per job that succeeded there, linking back to it.
+  carry-forward:
+    name: carry forward the pr run's checks
+    needs: reuse
+    if: needs.reuse.outputs.run != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # the PR run's job list
+      actions: read
+      # the mirrored check runs
+      checks: write
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Mirror the PR run's checks onto this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ needs.reuse.outputs.run }}
+        run: |
+          set -euo pipefail
+          echo "Reusing PR run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN - this commit's tree is the one it tested." >>"$GITHUB_STEP_SUMMARY"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "success") | [.name, .html_url] | @tsv' |
+            while IFS=$'\t' read -r name url; do
+              gh api -X POST "repos/$GITHUB_REPOSITORY/check-runs" \
+                -f name="$name" -f head_sha="$GITHUB_SHA" -f status=completed \
+                -f conclusion=success -f details_url="$url" \
+                -f "output[title]=Reused from PR run $RUN" \
+                -f "output[summary]=This commit's tree is the one that run tested." >/dev/null
+              printf 'success  %s\n' "$name"
+            done
+
   fmt:
     name: rustfmt
-    needs: prepare
-    if: needs.prepare.outputs.code == 'true'
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ${{ needs.prepare.outputs.label }}
     timeout-minutes: 10
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # rustfmt.toml sets only stable options (edition 2024, max_width,
-      # use_field_init_shorthand), so the stable toolchain is sufficient — this
-      # does not need nightly rustfmt.
+      # rustfmt.toml sets only stable options, so the stable toolchain is
+      # sufficient — this does not need nightly rustfmt.
       #
       # A direct `rustup` call, not dtolnay/rust-toolchain: that action force-pushes
       # every branch and tag on each Rust release, so any SHA pin of it goes stale
@@ -117,15 +254,19 @@ jobs:
 
       # Its own job rather than a step in `test`: it takes seconds, and a stray
       # blank line should not hide the test results behind a failed job.
-      - run: cargo fmt --all --check
+      - run: scripts/check.sh fmt
 
   test:
     name: clippy + tests
-    needs: prepare
-    if: needs.prepare.outputs.code == 'true'
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ${{ needs.prepare.outputs.label }}
     timeout-minutes: 30
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
@@ -150,8 +291,10 @@ jobs:
           # would otherwise evict all of them continuously.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Clippy and the tests share a job because they share target/ and the
-      # registry, so splitting them would pay for the dependency build twice.
+      # Clippy, the tests and rustdoc share a job because they share target/
+      # and the registry, so splitting them would pay for the dependency build
+      # more than once. Each runs even if an earlier one failed, so one push
+      # reports all three.
       #
       # `-D warnings` is what gives the workspace lints teeth: unwrap_used,
       # expect_used and missing_debug_implementations are set to `warn` in
@@ -159,32 +302,40 @@ jobs:
       # fix the code — the project's convention is that test modules opt out with
       # an inner `#![allow(clippy::unwrap_used, clippy::expect_used)]`, not that
       # the workspace lint gets weakened.
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Lint (clippy -D warnings)
+        run: scripts/check.sh clippy
 
       # --all-features compiles crates/sharerr/tests/e2e.rs so it cannot silently
-      # rot, while its #[ignore] keeps it from running.
-      #
-      # Never add --include-ignored here: those tests shell out to
-      # `docker compose -f docker/compose.test.yml` and need a four-container *arr
-      # stack plus a generated fixture library. They stay local and opt-in.
-      - run: cargo test --workspace --all-features --locked
+      # rot, while its #[ignore] keeps it from running. Never add
+      # --include-ignored: those tests need a four-container *arr stack.
+      - name: Test (tier 1)
+        if: ${{ !cancelled() }}
+        run: scripts/check.sh test
+
+      # A broken intra-doc link is otherwise a warning nobody reads.
+      - name: Document (rustdoc -D warnings)
+        if: ${{ !cancelled() }}
+        run: scripts/check.sh doc
 
   # Its own job so an MSRV break fails in about a minute with a name that says what
   # it is, rather than surfacing as a Docker build failure fifteen minutes into the
   # multi-arch matrix. `docker.yml` still catches it — this just catches it first.
   #
-  # The job name deliberately omits the version. `main`'s ruleset requires this
-  # check by its exact name; a name like `msrv (1.98)` would stop matching at
-  # the next MSRV bump and block every PR until someone edited the ruleset by
-  # hand. The version lives in the install step below instead, where it can
-  # change freely.
+  # The job name deliberately omits the version: see the required-check list
+  # in this file's header. The version lives in the install step below
+  # instead, where it can change freely; check_tool_versions.local.sh reads it
+  # there and compares it with Cargo.toml and docker/Dockerfile.
   msrv:
     name: msrv
-    needs: prepare
-    if: needs.prepare.outputs.code == 'true'
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ${{ needs.prepare.outputs.label }}
     timeout-minutes: 20
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
@@ -192,9 +343,8 @@ jobs:
           persist-credentials: false
 
       # Pinned to the workspace's declared rust-version. When that changes, this
-      # changes with it — they are the same claim in two places (three, counting
-      # docker/Dockerfile's identical FROM pin). See the `fmt` job's note about
-      # installing via rustup directly rather than dtolnay/rust-toolchain.
+      # changes with it. See the `fmt` job's note about installing via rustup
+      # directly rather than dtolnay/rust-toolchain.
       - name: Install the 1.98 toolchain
         run: |
           rustup toolchain install 1.98 --profile minimal --no-self-update
@@ -207,202 +357,339 @@ jobs:
           # See the `test` job's identical save-if — same cache-budget reasoning.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # `check`, not `test`: this asks whether the code *compiles* on the declared
-      # minimum, which is the whole claim. Running the suite again on an older
-      # toolchain would double the cost to re-assert what `test` already proved.
-      - run: cargo check --workspace --all-targets --all-features --locked
+      # `cargo check` on Cargo.toml's rust-version toolchain; see check.sh.
+      - run: scripts/check.sh msrv
 
   audit:
     name: cargo-deny
-    needs: prepare
-    if: needs.prepare.outputs.code == 'true'
-    runs-on: ${{ needs.prepare.outputs.label }}
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    # Hosted, like `scripts` below: ./setup-tool may need sudo for
+    # /usr/local/bin, and cargo-deny reads files and the advisory database only.
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # Advisories, licences, and duplicate/banned crates. The tree includes
-      # argon2, chacha20poly1305, rustls and an HTTP server; this job is the
-      # advisory gate for all of them.
-      #
-      # Its own job because it is the one check that can start failing without
-      # anybody touching the repository — which is also why this workflow has a
-      # weekly `schedule:` trigger.
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      # The tools.txt pin, the same binary advisories.yml runs.
+      - uses: $/.github/actions/setup-tool
         with:
-          command: check advisories licenses bans sources
+          tool: cargo-deny
+
+      # Advisories, licences, and duplicate/banned crates. Its own job because
+      # it is the one check that can start failing without anybody touching the
+      # repository; the weekly re-check for that case is advisories.yml.
+      - name: Check advisories, licenses, bans and sources
+        run: scripts/check.sh deny
 
   # Neither of these compiles anything, and both guard files that no Rust check
   # looks at. The test stack in particular has already shipped with its `networks:`
   # block commented out and nothing noticed.
+  #
+  # Hosted rather than `needs.prepare.outputs.label`: ./setup-tool installs
+  # into /usr/local/bin with sudo, and neither check needs the self-hosted
+  # box's Docker daemon (`compose config` reads files only).
   scripts:
     name: shell + compose
-    needs: prepare
-    if: needs.prepare.outputs.code == 'true'
-    runs-on: ${{ needs.prepare.outputs.label }}
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      # Would have caught the secret spliced into a remote `sh -c` string.
-      # The .github/ half was added alongside ./setup-tool: a `run:` block
-      # inside a composite action is exactly the kind of shell nothing here
-      # would otherwise lint, and check_tool_versions.sh/scan_pinned_images.sh
-      # were sitting unchecked next to it.
-      - run: >
-          shellcheck scripts/run_docker_tests.sh scripts/run_docker_tests_two_instance.sh
-          scripts/screenshot_pages.sh scripts/run_codeql.sh
-          .github/scripts/check_tool_versions.sh .github/scripts/scan_pinned_images.sh
-          .github/actions/setup-tool/install.sh .github/actions/setup-tool/lib.sh
-          .github/actions/setup-tools/resolve.sh .github/actions/setup-tools/install-missing.sh
-
-      # Schema-validates the compose file without needing the images or a daemon.
-      - run: docker compose -f docker/compose.test.yml config -q
-
-      # The same check for the deployment recipes, which are what people
-      # actually run. Three of them `extends` the shared gluetun fragment,
-      # docker/deploy/compose.gluetun.reference.yaml, so this also catches a
-      # fragment edit that breaks its consumers — the failure mode that made a
-      # shared fragment worth the indirection.
-      #
-      # The placeholders exist because every stack guards its required inputs
-      # with `${VAR:?}`, which `config` evaluates. Values are shaped like the
-      # real thing and are not secrets; the point is to reach the schema check,
-      # not to describe a deployment.
-      - name: Validate the deployment compose files
-        run: |
-          set -euo pipefail
-          env_file="$(mktemp)"
-          cat > "$env_file" <<'PLACEHOLDERS'
-          WIREGUARD_PRIVATE_KEY=placeholder
-          WIREGUARD_ADDRESSES=10.13.13.2/32
-          GLUETUN_API_KEY=placeholder
-          SHARERR_MASTER_KEY=placeholder
-          MEDIA_PATH=/srv/media
-          EXTERNAL_NETWORK=media_default
-          PLACEHOLDERS
-          for f in \
-            docker/deploy/direct/compose.yaml \
-            docker/deploy/vpn/compose.yaml \
-            docker/deploy/sidecar/compose.yaml \
-            docker/deploy/dual-vpn/media/compose.yaml \
-            docker/deploy/dual-vpn/sharerr/compose.yaml
-          do
-            echo "::group::$f"
-            docker compose -f "$f" --env-file "$env_file" config -q
-            echo "::endgroup::"
-          done
-
-  # GitHub Actions security audit plus workflow syntax checking, merged into one
-  # job: zizmor catches expression injection, untrusted checkouts feeding
-  # privileged jobs, and cache/artifact poisoning; actionlint catches a bad
-  # `needs`, an invalid context, a step referencing an undefined output — the
-  # workflows are code too, and nothing else checks their syntax beyond "does
-  # the YAML parse". Both audit `.github/` itself, so a workflow-only change is
-  # exactly the case they exist to catch — neither gates on `prepare`. Both are
-  # pinned hosted rather than `needs.prepare.outputs.label`: neither installs
-  # apt packages or touches the Docker socket, so neither has anything to gain
-  # from the self-hosted box, and this is exactly the job that should not be the
-  # one deciding, by its own runner, whether it trusts that box. Both install
-  # through ./.github/actions/setup-tool, which caches the pinned release binary
-  # instead of a fresh `pip install`/`go install` on every run. The two go
-  # through $/.github/actions/setup-tools (plural) rather than two separate
-  # ./setup-tool calls — this is the one job in the repo that needs more than
-  # one pinned tool at once, so it is the one call site that benefits from
-  # setup-tools' single shared actions/cache round trip; every other single-
-  # tool call site (coverage.yml, link-check.yml, the `advisory` job below)
-  # stays on ./setup-tool.
-  workflow-lint:
-    name: workflow lint (zizmor + actionlint)
-    # Draft PRs skip; see the `pull_request:` trigger above.
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
           # a credential with no job left to use it.
           persist-credentials: false
 
-      - uses: $/.github/actions/setup-tools
+      # The tools.txt pin, not the runner image's shellcheck, so an image
+      # update cannot change what this gate reports.
+      - uses: $/.github/actions/setup-tool
         with:
-          tools: zizmor actionlint
+          tool: shellcheck
+
+      # Every tracked *.sh, composite-action helpers included, from git rather
+      # than a hand-kept list.
+      - name: Lint every tracked shell script (shellcheck)
+        run: scripts/check.sh shellcheck
+
+      # Schema, `${VAR:?}` interpolation and `extends` resolution for every
+      # tracked compose file, without images or a daemon. The script owns the
+      # file list and the reason for each file it does not validate alone.
+      - name: Validate every compose file
+        if: ${{ !cancelled() }}
+        run: scripts/check.sh compose
+
+  # The hosted-lighthouse Terraform modules are published recommendations that
+  # nothing in CI applies, so a syntax or provider-schema break would otherwise
+  # ship unnoticed. `init -backend=false` fetches provider schemas only; no
+  # credentials, no state.
+  terraform:
+    name: terraform (fmt + validate)
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-tool
+        with:
+          tool: terraform
+
+      - name: Check formatting and validate every module
+        run: scripts/check.sh terraform
+
+  # GitHub Actions security audit, workflow syntax checking, and this repo's
+  # structural invariants, in one job: zizmor catches expression injection,
+  # untrusted checkouts feeding privileged jobs, and cache/artifact poisoning;
+  # actionlint catches a bad `needs`, an invalid context, a step referencing an
+  # undefined output; lint_workflows.sh enforces what neither does (timeouts,
+  # persist-credentials, SHA pins with version comments, workflow_run gating).
+  # The job name predates the third and stays, since it is a required check.
+  #
+  # All three audit `.github/` itself, so a workflow-only change is exactly
+  # the case they exist to catch — none gates on `prepare`. Hosted rather than
+  # `needs.prepare.outputs.label`: this is exactly the job that should not be
+  # the one deciding, by its own runner, whether it trusts that box. One
+  # setup-tools call pays one shared actions/cache round trip for all three
+  # tools. Each check runs even when an earlier one failed, so one push shows
+  # every finding.
+  workflow-lint:
+    name: workflow lint (zizmor + actionlint)
+    needs: reuse
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: >-
+      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      - id: tools
+        uses: $/.github/actions/setup-tools
+        with:
+          tools: zizmor actionlint yq
 
       - name: Audit the workflows (zizmor)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: zizmor --no-progress .github/
+        run: scripts/check.sh zizmor
 
       - name: Lint the workflows (actionlint)
-        run: actionlint -color
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh actionlint
 
-  # Three advisory-only checks, merged into one job: none of them ever blocks a
-  # merge, and each already ends in its own ./.github/actions/advisory-note
-  # call, so the step summary each produces is unchanged — only the VM they
-  # share is. hadolint and markdownlint keep their `prepare` gate, now as a
-  # step-level `if:` instead of a job-level one; typos stays ungated, same as
-  # before — a typo can live in Rust source as easily as in a doc. One
-  # consequence of sharing a job: if `prepare` itself fails outright (not
-  # merely reports no code changes), this whole job — typos included — is
-  # skipped along with it, where standalone `typos` previously ran regardless.
-  # `prepare` failing outright is rare enough not to be worth an `if:
-  # always()` job condition to preserve that corner exactly.
-  advisory:
-    name: advisory (hadolint + markdownlint + typos)
-    needs: prepare
+      - name: Check workflow invariants (lint_workflows.sh)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh workflows
+
+  # A gate, unlike link-check.yml's weekly sweep of external URLs: this is
+  # offline, so it only reads the tree and cannot flake on someone else's
+  # server. It catches a relative link to a moved file or a `#fragment` whose
+  # heading was renamed, which is a defect a diff introduces. Not gated on
+  # `prepare`: its filter ignores **/*.md, exactly the files checked here,
+  # and a Rust-only change can still delete a file a doc links to.
+  links:
+    name: markdown links (lychee offline)
+    needs: reuse
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: >-
+      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # Advisory, not a gate: DL3008 (pin every apt package) and its
-      # neighbours are about a Debian mirror's churn, not a defect in this
-      # Dockerfile — worth seeing, never worth reddening a PR over.
-      # `.hadolint.yaml` documents the handful of rules that do not apply here
-      # at all (a reason per entry); what is not in that list still surfaces
-      # below.
-      #
-      # Intentionally the newest hadolint release rather than a pin: unlike a
-      # style linter whose findings should only move when the Dockerfile does,
-      # hadolint occasionally adds a rule for a genuinely new class of
-      # mistake, and this step never blocks a merge regardless of which
-      # version notices it.
-      - name: Install hadolint
-        if: needs.prepare.outputs.code == 'true'
-        run: |
-          set -euo pipefail
-          # Floating on `latest` (see the comment above this step for why)
-          # means there is no pin to check a checksum against in advance, but
-          # the binary and its checksums are still fetched from the same
-          # release and verified against each other before anything runs it -
-          # a compromised or MITM'd download is rejected rather than silently
-          # executed as part of CI.
-          tmp="$(mktemp -d)"
-          curl -sSfL -o "$tmp/hadolint" \
-            https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64
-          curl -sSfL -o "$tmp/checksums.sha256" \
-            https://github.com/hadolint/hadolint/releases/latest/download/checksums.sha256
-          ( cd "$tmp" && sha256sum -c --ignore-missing <(sed 's/hadolint-linux-x86_64/hadolint/' checksums.sha256) )
-          chmod +x "$tmp/hadolint"
-          sudo mv "$tmp/hadolint" /usr/local/bin/hadolint
-          rm -rf "$tmp"
+      - uses: $/.github/actions/setup-tool
+        with:
+          tool: lychee
+
+      # Tracked files only, so a local run matches CI regardless of what
+      # ignored Markdown sits in the checkout.
+      - name: Check relative links and anchors
+        run: scripts/check.sh links
+
+  # Markdown style and formatting, plus spelling across the whole tree. Not
+  # gated on `prepare`, for the same reason as `links`: the filter ignores
+  # **/*.md, and a typo can live in Rust source as easily as in a doc.
+  # markdownlint and prettier come from .github/package-lock.json (versions
+  # and integrity hashes, transitive dependencies included; dependabot's npm
+  # entry moves them). All three run even when one fails.
+  docs:
+    name: docs (markdownlint + prettier + typos)
+    needs: reuse
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: >-
+      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-tool
+        with:
+          tool: typos
+
+      # A false positive belongs in `.typos.toml` with a comment saying what
+      # the word is.
+      - name: Check spelling (typos)
+        run: scripts/check.sh typos
+
+      # --ignore-scripts: no install hook of any dependency runs here.
+      - id: npm
+        name: Install the locked Markdown tools
+        if: ${{ !cancelled() }}
+        run: npm ci --prefix .github --ignore-scripts --no-audit --no-fund
+
+      - name: Lint the Markdown (markdownlint)
+        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
+        run: scripts/check.sh markdownlint
+
+      # Fix with `.github/node_modules/.bin/prettier --write` over the files
+      # it names.
+      - name: Check the Markdown formatting (prettier)
+        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
+        run: scripts/check.sh prettier
+
+  # A committed credential stays in history after the commit that removes it,
+  # so the scan is over every commit, not the diff. `.gitleaks.toml` lists the
+  # known false positives (test-only keys), each pinned to its file and value.
+  # Not gated on `prepare`: a secret can land in a doc or a workflow.
+  gitleaks:
+    name: secrets (gitleaks)
+    needs: reuse
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: >-
+      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # the whole history, not the one commit a shallow clone would scan
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-tool
+        with:
+          tool: gitleaks
+
+      # --redact: a real finding must not be reprinted into a public log.
+      - name: Scan the history for secrets
+        run: scripts/check.sh gitleaks
+
+  # Blocks a PR that adds a dependency (a crate in Cargo.lock, an action, an
+  # npm package in .github/) with a known high or critical advisory. This is
+  # the diff-scoped gate; cargo-deny above checks the whole tree. PR-only,
+  # since the API compares a base and a head. Needs the repository's
+  # dependency graph enabled.
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+
+  # hadolint, advisory only: DL3008 (pin every apt package) and its
+  # neighbours are about a Debian mirror's churn, not a defect in this
+  # Dockerfile — worth seeing, never worth reddening a PR over.
+  # `.hadolint.yaml` documents the rules that do not apply here at all (a
+  # reason per entry); what is not in that list still surfaces below.
+  advisory:
+    name: advisory (hadolint)
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      # The tools.txt pin, so a new upstream rule arrives as a reviewed bump.
+      # continue-on-error like every other step on this path: a failed
+      # download must surface as an advisory note below, not a red job.
+      - id: hadolint-install
+        continue-on-error: true
+        uses: $/.github/actions/setup-tool
+        with:
+          tool: hadolint
+
+      - if: steps.hadolint-install.outcome == 'failure'
+        uses: $/.github/actions/advisory-note
+        with:
+          title: hadolint
+          warning-body: hadolint could not be installed - the Dockerfile was not linted
+          heading: hadolint did not run
+          body: >-
+            Advisory only: this job never blocks a merge. The install step above
+            failed, so this run says nothing about the Dockerfile either way.
 
       - id: hadolint
         name: Lint the Dockerfile
-        if: needs.prepare.outputs.code == 'true'
+        if: steps.hadolint-install.outcome == 'success'
         run: |
           set -uo pipefail
           : >"$RUNNER_TEMP/hadolint.out"
@@ -419,10 +706,10 @@ jobs:
         continue-on-error: true
 
       - name: Truncate the hadolint findings before they go in the summary
-        if: needs.prepare.outputs.code == 'true' && steps.hadolint.outputs.found == '1'
+        if: steps.hadolint.outputs.found == '1'
         run: sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
 
-      - if: needs.prepare.outputs.code == 'true' && steps.hadolint.outputs.found == '1'
+      - if: steps.hadolint.outputs.found == '1'
         uses: $/.github/actions/advisory-note
         with:
           title: hadolint
@@ -432,50 +719,3 @@ jobs:
             Advisory only: this job never blocks a merge. `.hadolint.yaml` carries a
             reason per silenced rule; anything reaching here is deliberately left visible.
           report-file: ${{ runner.temp }}/hadolint-summary.out
-
-      # Advisory, same reasoning as hadolint above: a heading level or a
-      # stray long line in a doc is worth seeing and has never shipped a bug.
-      - id: markdownlint
-        if: needs.prepare.outputs.code == 'true'
-        continue-on-error: true
-        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
-        with:
-          globs: |
-            **/*.md
-          config: ".markdownlint.yaml"
-
-      - if: needs.prepare.outputs.code == 'true' && steps.markdownlint.outcome == 'failure'
-        uses: $/.github/actions/advisory-note
-        with:
-          title: markdownlint
-          warning-body: Markdown lint findings above - advisory, not blocking
-          heading: markdownlint found something
-          body: >-
-            Advisory only: this job never blocks a merge. See the step above for the
-            findings, or run `markdownlint-cli2 '**/*.md'` locally.
-
-      # Advisory, and deliberately so for now: this is the first run of
-      # `typos` against this tree at all, and _typos.toml's own header says
-      # why it starts with no entries. Promote this to a gate (same shape as
-      # `fmt`/`test`/`msrv` above, no `continue-on-error`) once a run or two
-      # has come back clean or the allowlist has caught up with what's left.
-      - uses: $/.github/actions/setup-tool
-        with:
-          tool: typos
-
-      - id: typos
-        name: Check for typos
-        continue-on-error: true
-        run: typos
-
-      - if: steps.typos.outcome == 'failure'
-        uses: $/.github/actions/advisory-note
-        with:
-          title: typos
-          warning-body: Possible typo(s) found above - advisory, not blocking
-          heading: typos found something
-          body: >-
-            Advisory only: this job never blocks a merge. A real misspelling should
-            be fixed; a false positive belongs in `_typos.toml` with a comment saying
-            what the word is - see that file's own header. Reproduce with `typos`
-            locally.

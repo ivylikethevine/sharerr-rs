@@ -2,9 +2,10 @@
 #
 #   cargo deny check advisories licenses bans sources
 #
-# CI runs the same command on every push and once a week — the weekly run is the
-# point, since a new advisory against a dependency arrives without anyone touching
-# this repository.
+# ci.yml runs the same command as a gate on every push and pull request.
+# advisories.yml re-checks `advisories` weekly and after each green CI run on
+# main, keeping one tracking issue current — a new advisory against a
+# dependency arrives without anyone touching this repository.
 
 [graph]
 # Only the platforms sharerr is actually built for. Without this, advisories and
