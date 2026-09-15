@@ -572,7 +572,7 @@ pub struct TorrentClientConfig<'a> {
     /// [`Config::torrent_client_for`], upstream of here — so
     /// [`TransmissionConfig::login`] and [`RtorrentConfig::login`] carry the
     /// same rename, with a `#[serde(rename)]` keeping the TOML key. See
-    /// `docs/SECURITY.md`.
+    /// `docs/CODEQL.md`.
     pub login: Option<&'a str>,
     /// Vault key holding this client's password, or `None` for a client with no
     /// password credential.
@@ -708,7 +708,7 @@ pub struct TransmissionConfig {
     /// flows through it, and `doctor`'s config summary prints this value.
     /// Renaming [`TorrentClientConfig::login`] alone was not enough: the flow
     /// is interprocedural, and the source was this field's read in
-    /// [`Config::torrent_client_for`]. See `docs/SECURITY.md`.
+    /// [`Config::torrent_client_for`]. See `docs/CODEQL.md`.
     #[serde(rename = "username")]
     pub login: String,
     /// Transmission has no categories, only a flat list of labels. This one stands
@@ -864,7 +864,7 @@ pub struct SeedingConfig {
     /// tracker exists (see `sharerr_torrent::factory`'s header comment).
     /// Turning it off lets a client fall back to DHT and PEX, which is also
     /// what lets a stripped-down feed magnet
-    /// (see [`super::FeedConfig::magnet_links`]) actually resolve — but it
+    /// (see [`FeedConfig::magnet_links`]) actually resolve — but it
     /// means **revoking a friend no longer removes them from the swarm**: the
     /// tracker stops being the only way peers find each other. Applies only
     /// to torrents built after the change; the flag lives inside the info
@@ -1060,7 +1060,7 @@ pub struct ChecksConfig {
 /// exactly the kind of thing the tracker's and the lighthouse's
 /// don't-confirm-existence posture exists to avoid leaking to a bare port
 /// scan. Both endpoints also require the bearer token in
-/// [`super::secret_keys::METRICS_TOKEN`] once enabled; there is no
+/// [`secret_keys::METRICS_TOKEN`] once enabled; there is no
 /// unauthenticated form of either.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1076,11 +1076,11 @@ pub struct FeedConfig {
     /// Emit a `magneturl` (Torznab) / `MagnetUri` (Jackett) attribute per item.
     ///
     /// Off by default: every torrent sharerr builds is private unless
-    /// [`super::SeedingConfig::private`] was turned off for it, and a magnet
+    /// [`SeedingConfig::private`] was turned off for it, and a magnet
     /// can never complete against a private torrent — nothing in the swarm
     /// answers a `ut_metadata` request, and a client that prefers a magnet
     /// over the working `.torrent` link stalls forever. See
-    /// `docs/SUPPORT.md#the-feeds-magnet-link`.
+    /// `docs/COMPATIBILITY.md#the-feeds-magnet-link`.
     ///
     /// Even with this on, an individual item's magnet is only emitted when
     /// that item is itself non-private — the two settings are independent,

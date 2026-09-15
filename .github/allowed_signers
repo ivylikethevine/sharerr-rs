@@ -1,0 +1,5 @@
+# Who may sign a release tag. docker.yml's `gate` job runs `git tag -v`
+# against this file, so a `v*` tag signed by any other key publishes nothing.
+# Format: ssh-keygen(1) ALLOWED SIGNERS; the principal is the tagger email.
+# Rotating a key means adding the new line here, through a PR, before tagging.
+ivylikethevine@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJF2OGOYDlX8FtsbC3juV0UZmyCfEDUFt++trSpfU2gI

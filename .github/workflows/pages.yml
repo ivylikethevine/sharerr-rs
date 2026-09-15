@@ -6,6 +6,13 @@
 #
 # Requires GitHub Pages to be enabled once, with Source set to "GitHub Actions",
 # under the repo's Settings > Pages.
+#
+# Triggers: a push to `main` touching the site's sources, every successful
+# push-triggered coverage.yml run on `main`, and a manual dispatch.
+#
+# Permissions: read-only by default; `build` adds `actions: read` for the
+# cross-workflow artifact read, `deploy` adds `pages: write` + `id-token: write`
+# for the deployment.
 
 name: Deploy docs to Pages
 
@@ -15,11 +22,12 @@ name: Deploy docs to Pages
 # not. `build`'s checkout carries no `ref:`, so it always builds the default
 # branch; the coverage figure comes from an API query for the newest green
 # coverage.yml run on `main` rather than from the triggering run's own
-# payload; and coverage.yml itself never runs on `pull_request` — so there is
-# no attacker-controlled byte anywhere in the path. Every other workflow in
-# this repo that chains off a green CI run the same way (coverage.yml,
-# advisories.yml, codeql.yml, image-scan.yml, link-check.yml, scorecard.yml,
-# tool-versions.yml) points back to this comment rather than repeating it.
+# payload; and a coverage.yml run triggered by a pull request never reaches
+# `build` at all (its `if:` below), so there is no attacker-controlled byte
+# anywhere in the path. Every other workflow in this repo that chains off a
+# green run the same way (coverage.yml, advisories.yml, image-scan.yml,
+# link-check.yml, scorecard.yml, tool-versions.yml) points back to this
+# comment rather than repeating it.
 on: # zizmor: ignore[dangerous-triggers]
   push:
     branches: ["main"]
@@ -42,27 +50,36 @@ on: # zizmor: ignore[dangerous-triggers]
 permissions:
   contents: read
 
-# Only one Pages deployment at a time; a newer push wins over a stale one still
-# in flight rather than queuing behind it.
+# Only one Pages deployment at a time, and never cancelled: a newer run
+# queues behind the one in flight (replacing any run already queued) rather
+# than killing a deploy halfway.
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
   build:
+    name: build site (jekyll)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # A failed coverage run must not redeploy the site with a stale or missing
-    # badge; the other two triggers have no run to judge.
+    # badge, and a coverage run a pull request triggered must not redeploy it
+    # at all: `branches: [main]` matches a PR whose head branch is named
+    # `main`, a fork's included. The other two triggers have no run to judge.
     if: >-
       github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
     # actions: read is for the cross-workflow artifact read below — the site
     # build itself still needs nothing but contents.
     permissions:
       contents: read
       actions: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -88,6 +105,8 @@ jobs:
           workflow: coverage.yml
           artifact-name: coverage-badge
           dest-subdir: cov
+          # coverage.yml's badge run is chained off CI; its PR runs must never supply figures
+          event: workflow_run
           found-message: coverage figures from run
           missing-message: no successful coverage run on main yet - the badges stay 'not measured'
 
@@ -122,8 +141,10 @@ jobs:
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
 
   deploy:
+    name: deploy site (github pages)
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write
@@ -131,5 +152,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

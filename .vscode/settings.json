@@ -2,4 +2,10 @@
   "editor.tabSize": 2,
   "editor.insertSpaces": true,
   "editor.detectIndentation": false,
+  "[rust]": {
+    "editor.tabSize": 4,
+  },
+  "[markdown]": {
+    "editor.inlineSuggest.enabled": false,
+  },
 }

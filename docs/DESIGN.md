@@ -4,7 +4,7 @@ The original statement of intent for sharerr, kept verbatim because the
 implementation is answerable to it, followed by the two places where building it
 proved a premise wrong.
 
-## Table of contents
+## Contents
 
 - [The brief](#the-brief)
 - [Corrections the implementation forced](#corrections-the-implementation-forced)
@@ -71,15 +71,15 @@ Points 2 and 3 of the brief assume qBittorrent can expose a feed for Prowlarr to
 index. It cannot: qBittorrent **consumes** RSS feeds, it does not publish one.
 There is therefore no qBittorrent feed to point Prowlarr at.
 
-sharerr serves the feed itself, as **Torznab** — the format Prowlarr's *Generic
-Torznab* indexer speaks, and a better fit anyway, since Torznab carries the
+sharerr serves the feed itself, as **Torznab** — the format Prowlarr's _Generic
+Torznab_ indexer speaks, and a better fit anyway, since Torznab carries the
 TVDB/TMDb/IMDb ids that let a release match a known series or film instead of being
 parsed from its name.
 
-qBittorrent's *embedded tracker* is real and was used for a while. It has since
+qBittorrent's _embedded tracker_ is real and was used for a while. It has since
 been removed as a backend: two trackers meant two independently built announce
 URLs, and the dynamic-endpoint work made that untenable — sharerr's builtin
-tracker is now the only one. So in the end *both* halves of the original plan's
+tracker is now the only one. So in the end _both_ halves of the original plan's
 point 2 changed, the feed first and the tracker later.
 
 ### The no-egress requirement is not enforced by the test stack
@@ -89,14 +89,14 @@ compose test stack originally enforced this with an `internal: true` network,
 giving the containers no route off the host.
 
 That had to be dropped. An internal bridge also severs the host→container path
-that *published ports* travel, and the test stack's entire control plane runs over
+that _published ports_ travel, and the test stack's entire control plane runs over
 those ports — readiness probes, API-key scraping, database seeding, and the browser
 URLs in the documentation. With the network isolated, readiness probes hung against
 containers that were perfectly healthy.
 
 The requirement still stands as a property of the code, and the hermetic test suite
 covers it: the service clients are exercised against wiremock on loopback and reach
-nothing else. It is simply no longer *proved* by the kernel refusing to route. See
+nothing else. It is simply no longer _proved_ by the kernel refusing to route. See
 [docker/README.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md).
 
 ## What the brief got right

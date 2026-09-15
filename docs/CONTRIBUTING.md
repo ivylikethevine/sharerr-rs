@@ -7,7 +7,7 @@ the verification loop, the lint policy, and the MSRV rule are written down.
 is the agent-facing companion: it links here for all of that and adds only
 the traps and repository mechanics a person would not need spelled out.
 
-## Table of contents
+## Contents
 
 - [Before you start](#before-you-start)
 - [Getting set up](#getting-set-up)
@@ -20,6 +20,7 @@ the traps and repository mechanics a person would not need spelled out.
 - [Working on the docs](#working-on-the-docs)
 - [Which doc changes with what](#which-doc-changes-with-what)
 - [Commits and pull requests](#commits-and-pull-requests)
+- [AI-assisted contributions](#ai-assisted-contributions)
 - [Licence](#licence)
 
 ## Before you start
@@ -45,24 +46,37 @@ nothing in tier 1 opens a real vault.
 ## The verification loop
 
 ```bash
-cargo test --workspace --all-features --locked \
-  && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings \
-  && cargo build \
-  && cargo fmt --all --check
+scripts/check.sh --install   # once: the pinned tools, and the Markdown tools
+scripts/check.sh --fast      # seconds; nothing compiles
+scripts/check.sh             # everything below, before calling anything done
 ```
 
-Run it before calling anything done. Three things about it are easy to get
-wrong:
+`scripts/check.sh` is the one local entry point, and every check step in
+`ci.yml` (and `coverage.yml`'s floor) calls it too, so a command lives in one
+place. `--fast` is formatting, shell, compose, workflow, link, spelling and
+Markdown checks; `--lint` adds clippy, rustdoc, cargo-deny, Terraform and
+gitleaks; the default (`--all`) adds the tests, the MSRV check and the
+coverage floor. `scripts/check.sh <check>...` runs just those, and `--list`
+names them all. `--install` fetches every tool the script uses from its
+sha256-pinned row in `.github/actions/setup-tool/tools.txt` into
+`target/ci-tools/` (no sudo), and runs `npm ci --prefix .github` for
+markdownlint and prettier.
 
-- `--all-features` is not optional. It is what CI runs, and it compiles the
-  tier-2 suite behind the `e2e` feature so that suite cannot silently rot. A
-  plain `cargo test --workspace` passes locally and fails CI on a tier-2
-  compile break.
-- `cargo fmt --all --check` is what CI's `rustfmt` job runs. A change that
-  compiles and passes clippy but was never formatted fails CI on that step
-  alone. If it fails, run `cargo fmt --all` and re-run the loop.
+Four things about it are easy to get wrong:
+
+- **A missing tool is a skip locally, not a pass.** The summary line lists
+  what was skipped; under GitHub Actions the same skip is a failure. Run
+  `--install` rather than reading a partial run as green.
+- `--all-features` is not optional. The `test` check uses it, as CI does, and
+  it compiles the tier-2 suite behind the `e2e` feature so that suite cannot
+  silently rot. A plain `cargo test --workspace` passes locally and fails CI
+  on a tier-2 compile break.
+- The `fmt` check is what CI's `rustfmt` job runs. A change that compiles and
+  passes clippy but was never formatted fails CI on that step alone. If it
+  fails, run `cargo fmt --all` and re-run.
 - `cargo test` builds the test harness, not `target/debug/sharerr`. A CLI
-  smoke test needs an explicit `cargo build` first.
+  smoke test needs an explicit `cargo build` first; the script does not run
+  one.
 
 ## Clippy stays at zero warnings
 
@@ -94,12 +108,14 @@ genuinely does not apply, say why rather than leaving the box unchecked.
 
 **Tier 1** is the default `cargo test` and is hermetic: no network, no
 containers, no database. **Tier 2** is `./scripts/run_docker_tests.sh`,
-opt-in and local only, behind the `e2e` feature and `#[ignore]`; it drives a
-real *arr + torrent-client stack and proves the one thing mocks cannot, that
-a real sync leaves every media file's inode, mtime, and length untouched. CI
-compiles tier 2 but never runs it. Never add `--include-ignored` to a CI
+behind the `e2e` feature and `#[ignore]`; it drives a real *arr +
+torrent-client stack and proves the one thing mocks cannot, that a real sync
+leaves every media file's inode, mtime, and length untouched. **Tier 3** is
+the mesh stack, same feature and gate. `ci.yml` compiles tiers 2 and 3 on
+every PR but never runs them; `integration.yml` runs them on a weekly
+schedule, advisory only. Never add `--include-ignored` to a `ci.yml`
 command. [`docs/TESTING.md`](TESTING.md) has every flag, stack, fixture, and
-the coverage caveat.
+the coverage floor.
 
 ## MSRV
 
@@ -113,35 +129,85 @@ build the image before claiming the MSRV holds.
 
 ## What CI runs
 
-Every job in `ci.yml` waits on `prepare`, which decides whether anything
-besides workflow YAML changed; a PR touching only `.github/workflows/**`
-shows almost no checks, by design. Everything else runs on every push and PR,
-except a draft PR: `ci.yml`, `codeql.yml` and `docker.yml` skip every job
-until the PR is marked ready for review, which starts a full run.
+The jobs in `ci.yml` that compile, test or lint code wait on `prepare`,
+which decides whether anything besides workflow YAML and Markdown changed; a
+PR touching only those shows few checks, by design. The checks that read
+exactly the files that filter ignores (workflow lint, links, docs, secrets)
+run regardless. Everything runs on every push to `main` and every PR, except
+a draft PR: `ci.yml`, `codeql.yml`, `docker.yml`, `coverage.yml` and
+`release-note.yml` skip every job until the PR is marked ready for review,
+which starts a full run.
 
-The check names below are what `main`'s ruleset requires, verbatim, so a
-job rename is also a ruleset edit; that is why `msrv` carries no version in
-its name and the two image builds carry the image's name rather than sharing
-one.
+The check names below are matched verbatim by `main`'s ruleset, so a job
+rename is also a ruleset edit; that is why `msrv` carries no version in its
+name and the two image builds carry the image's name rather than sharing
+one. `ci.yml`'s header comment keeps the same list.
 
-| Check | Workflow | Blocks a merge? |
-| --- | --- | --- |
-| `rustfmt` | `ci.yml` | Yes |
-| `clippy + tests` | `ci.yml` | Yes |
-| `msrv` | `ci.yml` | Yes |
-| `cargo-deny` | `ci.yml` | Yes |
-| `shell + compose` | `ci.yml` | Yes |
-| `workflow lint (zizmor + actionlint)` | `ci.yml` | Yes |
-| `advisory (hadolint + markdownlint + typos)` | `ci.yml` | No, reports only; each gets its own step summary |
-| CodeQL (`rust`, `actions`) | `codeql.yml` | Yes, as code scanning; alerts are diff-scoped |
-| `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml` | Yes; also the de-facto MSRV check |
+| Check                                                                  | Workflow           | Blocks a merge?                                     |
+| ---------------------------------------------------------------------- | ------------------ | --------------------------------------------------- |
+| `rustfmt`                                                              | `ci.yml`           | Yes                                                 |
+| `clippy + tests` (also rustdoc with `-D warnings`)                     | `ci.yml`           | Yes                                                 |
+| `msrv`                                                                 | `ci.yml`           | Yes                                                 |
+| `cargo-deny`                                                           | `ci.yml`           | Yes                                                 |
+| `shell + compose`                                                      | `ci.yml`           | Yes                                                 |
+| `workflow lint (zizmor + actionlint)` (also `lint_workflows.sh`)       | `ci.yml`           | Yes                                                 |
+| `markdown links (lychee offline)`                                      | `ci.yml`           | Yes                                                 |
+| `docs (markdownlint + prettier + typos)`                               | `ci.yml`           | Yes, once added to the ruleset                      |
+| `secrets (gitleaks)`                                                   | `ci.yml`           | Yes, once added to the ruleset                      |
+| `terraform (fmt + validate)`                                           | `ci.yml`           | Yes, once added to the ruleset                      |
+| `dependency review` (pull requests only)                               | `ci.yml`           | Yes, once added to the ruleset                      |
+| `advisory (hadolint)`                                                  | `ci.yml`           | No, reports only in its step summary                |
+| `release note (pr body)`                                               | `release-note.yml` | Yes, once added to the ruleset                      |
+| CodeQL (`rust`, `actions`)                                             | `codeql.yml`       | Yes, as code scanning; alerts are diff-scoped       |
+| `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml`       | Yes; also the de-facto MSRV check and a smoke test  |
+| `coverage (pull request)`                                              | `coverage.yml`     | No; keeps one coverage comment on the PR up to date |
+
+The rows marked "once added to the ruleset" already fail red; they block a
+merge only once `main`'s ruleset lists them as required.
+
+`gitleaks` scans the whole history, not the diff, with the known false
+positives in `.gitleaks.toml`. `dependency review` fails a PR that adds a
+dependency (a crate, an action, an npm package under `.github/`) with a known
+high or critical advisory; `cargo-deny` is the whole-tree check. The
+coverage comment compares the PR's line coverage with `main`'s and with the
+floor in `scripts/check.sh` ([`TESTING.md`](TESTING.md#coverage)); same-repo
+PRs only, since a fork's token cannot write the comment.
+
+**A push to `main` whose tree a green PR run already tested is not tested
+twice.** When a same-repo PR run passes every blocking job, `ci.yml`'s `mark`
+job records the tree it tested. The push that lands that same tree on
+`main` (merging an up-to-date PR) finds the record in its `reuse` job, skips
+every other job, and `carry-forward` copies the PR run's passing checks onto
+the pushed commit, linked back to that run. The push run still concludes
+`success`. A tree the PR run never saw (`main` moved under the PR, or the PR
+run skipped jobs) runs in full, as does a manual dispatch. `docker.yml` does
+not dedupe: every push to `main` publishes its own image.
 
 Six more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
-`link-check.yml`, `coverage.yml`, `scorecard.yml`) run weekly and after every
-green run of `ci.yml` on `main` — not on every push regardless of outcome,
-so a tree CI just rejected isn't also scanned, coverage-measured, or scored.
-The first four report by keeping an issue current rather than by failing;
-none of the six blocks a merge.
+`link-check.yml`, `coverage.yml`'s `main` leg, `scorecard.yml`) run weekly
+and after every green run of `ci.yml` on `main`, not on every push
+regardless of outcome, so a tree CI just rejected isn't also scanned,
+coverage-measured, or scored. `coverage.yml`'s `main` leg fails below the
+coverage floor; the others never block anything. `advisories.yml`,
+`image-scan.yml`'s `pins` job, `tool-versions.yml` and `link-check.yml`
+report by keeping one tracking issue current rather than by failing.
+`integration.yml` runs the docker-backed tiers weekly (or one tier on manual
+dispatch), advisory, and keeps an `integration` tracking issue current the
+same way. `codeql.yml` runs on every push to `main` and weekly as well as on
+PRs.
+
+The third-party tools these jobs run that dependabot cannot see (zizmor,
+actionlint, cargo-llvm-cov, lychee, typos, shellcheck, hadolint, trivy,
+cargo-deny, gitleaks, terraform and yq) each install from a sha256-pinned row
+in `.github/actions/setup-tool/tools.txt`, and `tool-versions.yml` reports
+when one falls behind. markdownlint and prettier come from
+`.github/package-lock.json`, which dependabot's npm entry moves.
+
+Every job in every workflow starts with `step-security/harden-runner`, in
+`audit` mode except the two release jobs that hold write tokens (`publish`
+and `release` in `docker.yml`), which `block` egress to an allowlist.
+`.github/scripts/lint_workflows.sh` (rule 6) fails a job that does not start
+with it.
 
 `./scripts/run_codeql.sh` runs CodeQL's analysis entirely locally, worth
 doing before pushing anything that touches crypto, secret handling, or a
@@ -150,12 +216,12 @@ will; read a "cleartext logging" or "hard-coded cryptographic value" finding
 with that in mind, since most are test literals or redaction-proving `Debug`
 prints. There is no in-source suppression: a finding is either fixed or
 dismissed in the Security tab with a recorded reason (see
-[`docs/SECURITY.md`](SECURITY.md#what-is-out-of-scope) for the model).
+[`docs/CODEQL.md`](CODEQL.md) for the record).
 
 ## Working on the docs
 
-Every markdown file follows the same shape: one `#` title, `## Table of
-contents` as the first `##` heading, sentence-case ATX headings down to
+Every markdown file follows the same shape: one `#` title, `## Contents` as
+the first `##` heading, sentence-case ATX headings down to
 `###`, `_underscore_` for italics and `**asterisks**` for bold (pinned by
 `.markdownlint.yaml`'s `MD049`).
 
@@ -164,19 +230,30 @@ contents` as the first `##` heading, sentence-case ATX headings down to
 rather than restating it. A doc's opening paragraph says what it covers
 versus the README. When adding something, find the owner first.
 
-Two advisory linters run in CI and locally:
+Formatting, style, spelling and link checks, the same ones CI runs:
 
 ```bash
-markdownlint-cli2 '**/*.md'
-lychee '**/*.md' crates/sharerr/src/web/docs.rs
+scripts/check.sh markdownlint prettier typos links
+.github/node_modules/.bin/prettier --write <file>...   # fix what prettier names
 ```
 
-lychee does not check `#anchors`. `crates/sharerr/src/web/docs.rs` hard-codes
-the documentation links the web UI shows, with deep anchors into
-`SETTINGS.md`, `SUPPORT.md`, `SECURITY.md`, `API.md`, `LIGHTHOUSE.md` and the
-README, and has a test that resolves each against a real heading. Renaming
-one of those headings fails `cargo test`, which is the only anchor check in
-the repo. Files under `docker/`, `crates/`, and `CLAUDE.md` are excluded from
+`.prettierrc.yaml` pins the formatting (hand-wrapped prose, aligned tables)
+and `.markdownlint.yaml` the style; both tools come from
+`.github/package.json` (`npm ci --prefix .github`, which
+`scripts/check.sh --install` runs). markdownlint, prettier and typos make up
+CI's blocking `docs (markdownlint + prettier + typos)` check; a false
+positive from typos goes in `.typos.toml` with a comment saying what the
+word is. The offline lychee run is CI's blocking
+`markdown links (lychee offline)` check: it catches a relative link to a
+moved file or a `#fragment` whose heading was renamed, without touching the
+network. `link-check.yml` covers external URLs weekly and after each green
+CI run on `main`, keeping a `link-check` tracking issue open while any link
+is broken.
+`crates/sharerr/src/web/docs.rs` hard-codes the documentation links the web
+UI shows, as absolute URLs with deep anchors into `SETTINGS.md`,
+`COMPATIBILITY.md`, `SECURITY.md`, `API.md`, `LIGHTHOUSE.md` and the README,
+and has a test that resolves each against a real heading, so renaming one of
+those headings also fails `cargo test`. Files under `docker/`, `crates/`, and `CLAUDE.md` are excluded from
 the published docs site (`_config.yml`), so a link to them from `README.md`
 or `docs/*.md` must be an absolute GitHub URL.
 
@@ -187,17 +264,19 @@ the same map read the other way, as a checklist — what _kind_ of change
 should make you go check a doc. The PR template's checklist just points
 here rather than repeating it.
 
-| If your change... | Update |
-| --- | --- |
-| adds, renames, or changes the default of a `sharerr.toml` field, environment variable, or vault secret | [Settings reference](SETTINGS.md) |
-| adds or drops a supported torrent client, *arr app, or indexer behaviour | [Support](SUPPORT.md) |
-| adds, removes, or changes an HTTP route (Torznab, Jackett, gossip, tracker, lighthouse, ops) | [The API](API.md) (regenerate `docs/openapi.json`; see that doc for how) |
-| moves a trust boundary, changes where state lives, or adds/removes a crate | [Architecture](ARCHITECTURE.md) |
-| changes the tag scheme, an image, the approval gate, or anything `docker.yml`/`docker-image.yml` publish | [Releasing](RELEASING.md) |
-| adds a test fixture, a compose stack, or a testing tier | [Testing](TESTING.md), and [the compose stacks doc](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md) if it touches tier 2 |
-| changes what data crosses a trust boundary, or a class of vulnerability the threat model should name | [Security policy](SECURITY.md) |
-| changes a deploy compose layout under `docker/deploy/` | [Deploying](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md) |
-| changes a convention, trap, or repository mechanic an agent would need but a person wouldn't | [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md) |
+| If your change...                                                                                                                                                                                    | Update                                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| adds, renames, or changes the default of a `sharerr.toml` field, environment variable, or vault secret                                                                                               | [Settings reference](SETTINGS.md)                                                                                                                            |
+| adds or drops a supported torrent client, *arr app, or indexer behaviour                                                                                                                             | [Compatibility](COMPATIBILITY.md)                                                                                                                            |
+| adds, removes, or changes an HTTP route (Torznab, Jackett, gossip, tracker, lighthouse, ops)                                                                                                         | [The API](API.md) (regenerate `docs/openapi.json`; see that doc for how)                                                                                     |
+| moves a trust boundary, changes where state lives, or adds/removes a crate                                                                                                                           | [Architecture](ARCHITECTURE.md)                                                                                                                              |
+| changes the tag scheme, an image, the release gates (`docker.yml`'s `gate` and `scan` jobs; the `release` environment has no required reviewer), or anything `docker.yml`/`docker-image.yml` publish | [Releasing](RELEASING.md)                                                                                                                                    |
+| adds a test fixture, a compose stack, or a testing tier                                                                                                                                              | [Testing](TESTING.md), and [the compose stacks doc](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md) if it touches tier 2            |
+| changes what data crosses a trust boundary, or a class of vulnerability the threat model should name                                                                                                 | [Security policy](SECURITY.md)                                                                                                                               |
+| changes a deploy compose layout under `docker/deploy/`                                                                                                                                               | [Deploying](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md)                                                                  |
+| changes anything a user would notice (a feature, a fix, a default, a removed option)                                                                                                                 | the PR template's `## Release note` section, which the release workflow collects into the GitHub Release body ([Releasing](RELEASING.md#the-github-release)) |
+| fixes or dismisses a CodeQL finding for a reason a later reader could not reconstruct                                                                                                                | [CodeQL findings](CODEQL.md)                                                                                                                                 |
+| changes a convention, trap, or repository mechanic an agent would need but a person wouldn't                                                                                                         | [`CLAUDE.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/CLAUDE.md)                                                                              |
 
 A change that fits none of these rows updates no doc beyond its own code
 comments — most PRs are in this category, and the checklist item exists for
@@ -207,8 +286,26 @@ the minority that aren't.
 
 Branch from `dev`, where active development happens. `main` carries a
 ruleset requiring a pull request, a protected ref, and verified commit
-signatures. The PR title becomes the release-notes line, so write it for a
-user.
+signatures.
+
+**Every PR body needs a `## Release note` section**: one or two sentences a
+user would care about, or `none`. `release-note.yml`'s
+`release note (pr body)` check fails a PR with no section or an empty one,
+and re-runs when the description is edited, so fixing it re-runs nothing
+else. The release workflow collects those sections into the GitHub Release
+body (see [`RELEASING.md`](RELEASING.md#the-github-release)). A `dev` →
+`main` PR is checked the same way, since those are the PRs a release reads:
+its note aggregates the notes of the PRs that went into `dev`. Dependabot's
+PRs are exempt.
+
+## AI-assisted contributions
+
+Generative AI is allowed here; the README's
+[AI usage](../README.md#ai-usage) section says how the maintainer uses it.
+The same accountability applies to a contribution: disclose AI use in the PR
+template's "AI disclosure" checklist, and only submit what you have reviewed,
+understood, and would stand behind as if you had written it by hand. "The
+agent wrote it" does not explain away a bug.
 
 ## Licence
 

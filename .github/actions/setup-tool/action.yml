@@ -1,35 +1,21 @@
 name: Setup tool
-# One action for every CI tool this repo pins to a fixed version and installs
-# from a GitHub release asset. Without it, each workflow would install its own
-# tool its own way — `pip` for zizmor, `go install` for actionlint, a source
-# `cargo install` for cargo-llvm-cov and lychee — four mechanisms, no caching,
-# and a recompile or re-resolve on every run.
-#
-# The roster — version, download URL, archive shape, verify flag — lives in
-# ./tools.txt rather than in one near-identical action.yml per tool, or in the
-# `run:` line that uses each tool. .github/scripts/check_tool_versions.sh
-# reads the same rows, so a pin cannot go undrift-checked — including `lychee`
-# and `cargo-llvm-cov`, which a regex over workflow files would not find at
-# all. The trade is worth it: one cached install path, and drift coverage for
-# every pinned tool.
-#
-# Deliberately NOT ported here: hadolint and trivy. Both float on
-# `releases/latest` in this repo on purpose (ci.yml's hadolint job and
-# image-scan.yml's trivy job each say why — a pinned scanner is a scanner
-# that stops finding anything new), and this action's model is a fixed pin
-# resolved once and cached by it. Bolting a "resolve latest, then cache under
-# that" mode on for two tools would be new complexity for a small win — both
-# already avoid the recompile cost this action targets (hadolint ships a raw
-# binary off `curl`, trivy already goes through the maintained
-# `aquasecurity/setup-trivy` action).
-description: Install one of the pinned CI tools listed in ./tools.txt, with caching
+# One pinned CI tool from ./tools.txt: resolved, cached, downloaded,
+# sha256-verified, installed. The roster lives in tools.txt rather than in
+# per-tool actions or `run:` lines, so .github/scripts/check_tool_versions.sh
+# reads the same rows and no pin goes undrift-checked. ../setup-tools is the
+# batched form for a job that needs several tools.
+description: Install one pinned CI tool listed in ./tools.txt, sha256-verified and cached
 
 inputs:
   tool:
     description: which tool to install - the first column of a ./tools.txt row
     required: true
   version:
-    description: override that row's pin (normally left empty)
+    description: override the row's pin (normally empty); refused unless sha256 is also given
+    required: false
+    default: ""
+  sha256:
+    description: checksum for a version override, in tools.txt's sha256 column format
     required: false
     default: ""
 
@@ -42,30 +28,30 @@ runs:
   using: composite
   steps:
     # actions/cache needs the version as an expression, and the pin lives in
-    # tools.txt rather than in this file - so resolve it in a prior step and
-    # read it back as an output. That is what keeps the roster out of YAML.
+    # tools.txt - so resolve it first and read it back as an output
     - name: Resolve the pin for ${{ inputs.tool }}
       id: resolve
       shell: bash
       env:
-        SR_TOOL: ${{ inputs.tool }}
-        SR_TOOL_VERSION: ${{ inputs.version }}
+        CI_TOOL: ${{ inputs.tool }}
+        CI_TOOL_VERSION: ${{ inputs.version }}
+        CI_TOOL_SHA256: ${{ inputs.sha256 }}
       run: '"$GITHUB_ACTION_PATH/install.sh" resolve'
 
-    # runner.os/runner.arch on every tool, even though every current row is
-    # Linux-only (this repo has no macOS jobs) - one key shape beats adding a
-    # per-tool column the day that stops being true.
+    # the sha256 is in the key so a corrected checksum re-downloads rather
+    # than trusting bytes cached under the old one
     - name: Cache ${{ inputs.tool }}
       id: cache
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: /usr/local/bin/${{ inputs.tool }}
-        key: ${{ inputs.tool }}-${{ steps.resolve.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+        path: ${{ steps.resolve.outputs.path }}
+        key: setup-tool-${{ inputs.tool }}-${{ steps.resolve.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.sha256 }}
 
     - name: Install ${{ inputs.tool }}
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       env:
-        SR_TOOL: ${{ inputs.tool }}
-        SR_TOOL_VERSION: ${{ steps.resolve.outputs.version }}
+        CI_TOOL: ${{ inputs.tool }}
+        CI_TOOL_VERSION: ${{ steps.resolve.outputs.version }}
+        CI_TOOL_SHA256: ${{ inputs.sha256 }}
       run: '"$GITHUB_ACTION_PATH/install.sh" install'

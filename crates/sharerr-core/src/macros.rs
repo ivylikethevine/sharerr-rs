@@ -23,7 +23,7 @@
 /// - `str_enum!(Type { Variant => "str", ... }, "why parse matters here");`
 ///   — same as above, plus an extra paragraph on `parse`'s generated doc
 ///   comment for a type whose decode failures carry a consequence worth
-///   spelling out (see [`sharerr_core::model::MediaSource`] parse's own
+///   spelling out (see [`crate::model::MediaSource`] parse's own
 ///   invocation for the canonical example).
 /// - `str_enum!(Type { Variant => "str", ... }, lenient = Default, "why");`
 ///   — `parse` returns `Self` directly, falling back to `Self::Default` for

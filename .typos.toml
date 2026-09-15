@@ -1,0 +1,50 @@
+# The allowlist for the typos step in ci.yml's advisory job. Each entry says
+# what it is, so a real typo cannot hide behind a stale exception.
+#
+# Entries are added only as a real `typos` run finds them. A roster built
+# up against actual findings reflects which of sharerr's own proper nouns
+# (crate names, protocol terms, crypto primitives) the tool misreads as a
+# misspelling; one written preemptively is just guessing at findings nobody
+# has seen yet. Add a row when a run flags one, each with a comment saying
+# what the word is. See the header note on .scorecard.yml for the same
+# argument made about a different kind of guess.
+[files]
+extend-exclude = [
+  # Vendored, minified htmx; its one-letter-plus identifiers are not prose.
+  "crates/sharerr/src/web/assets/htmx.min.js",
+]
+
+[default]
+extend-ignore-re = [
+  # A deliberate misspelling on one line takes a trailing
+  # `# spellchecker: disable-line` (or `//`) comment rather than a
+  # project-wide allowance.
+  "(?Rm)^.*(#|//)\\s*spellchecker:\\s*disable-line$",
+]
+
+[default.extend-words]
+# A recognised variant spelling, used throughout the tree in identifiers
+# (`TitleError::Unparseable`) as well as prose; renaming it buys nothing.
+unparseable = "unparseable"
+# The prefix in "mis-parse" and "mis-scoped", split off at the hyphen.
+mis = "mis"
+# "Mara Vell", an invented author name in test fixtures.
+vell = "vell"
+
+[default.extend-identifiers]
+# The port-mapping protocol (Universal Plug and Play); its inner `Pn` reads
+# as a typo of `On` once the tokenizer splits the mixed case.
+UPnP = "UPnP"
+# SQL keywords given an English plural or past tense in prose ("two UPDATEs",
+# "filters are ANDed"); the tokenizer splits off the lower-case tail.
+UPDATEs = "UPDATEs"
+ANDed = "ANDed"
+
+# docs/DESIGN.md's brief is kept verbatim, original spelling included
+# ("accessable"), so it is its own file type with its own allowance rather
+# than a project-wide one.
+[type.design-brief]
+extend-glob = ["DESIGN.md"]
+
+[type.design-brief.extend-words]
+accessable = "accessable"

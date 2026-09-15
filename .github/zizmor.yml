@@ -1,17 +1,9 @@
-rules:
-  # `aquasecurity/setup-trivy` defaults its `version:` input to `latest`, which
-  # zizmor's `unpinned-tools` audit correctly reads as "installs a moving
-  # target". That is the point, not an oversight: image-scan.yml's own header
-  # comments (both `Install Trivy` steps) explain why — a pinned scanner is a
-  # scanner that stops finding anything, unlike hadolint's or actionlint's
-  # pins in ci.yml, where findings should only move when the code under test
-  # does. The action itself is still SHA-pinned; only the Trivy *version* it
-  # installs floats, same tradeoff CLAUDE.md already documents for hadolint
-  # and trivy under "Pinned tool versions that dependabot cannot see".
-  unpinned-tools:
-    ignore:
-      - image-scan.yml:117
-      - image-scan.yml:174
+# zizmor configuration. Ignores are rule-level here or inline
+# (`# zizmor: ignore[<rule>]` on the flagged line), never by line number: a
+# line-numbered entry silently detaches the moment its file is edited.
+rules: {}
+  # unpinned-tools is not listed here: every scanner, trivy included, installs
+  # a sha256-pinned binary through ./actions/setup-tool/tools.txt.
 
   # self-repository is not listed here: every workspace-relative `uses:
   # ./.github/...` was rewritten to GitHub's `$/` self-repository syntax once
@@ -21,11 +13,6 @@ rules:
   # format. Applied with `zizmor --fix=safe .github/`.
 
   # dangerous-triggers is not listed here: every workflow_run trigger in this
-  # repo (pages.yml, coverage.yml, advisories.yml, image-scan.yml,
-  # link-check.yml, scorecard.yml, tool-versions.yml) carries its own inline
-  # `# zizmor: ignore[dangerous-triggers]` comment on the `on:` line instead,
-  # next to the justification each file's own header gives — pages.yml's is
-  # the canonical copy the rest point back to. Inline over a line-numbered
-  # entry here on purpose: a line-numbered entry silently detaches the moment
-  # the file it names is edited, and this file now has seven of them to keep
-  # in sync.
+  # repo carries its own inline `# zizmor: ignore[dangerous-triggers]` comment
+  # on the `on:` line instead, next to the justification each file's own
+  # header gives — pages.yml's is the canonical copy the rest point back to.

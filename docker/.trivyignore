@@ -1,0 +1,25 @@
+# Accepted vulnerability findings: the one escape hatch for docker.yml's
+# release scan, which otherwise blocks `publish` on any fixable HIGH or
+# CRITICAL finding in either image. image-scan.yml's weekly scan of the
+# published images reads this file too, so an accepted finding does not
+# nag there either.
+#
+# Add an entry only when a rebuild cannot clear the finding yet (the fix is
+# not in the pinned base image, or it does not apply to how the image uses
+# the package), never to get a release out past a fix that exists. Every
+# entry carries, on the comment lines directly above it:
+#
+#   - why the finding does not apply, or why it is accepted until the expiry
+#   - who accepted it, and when
+#
+# and an `exp:` date on the entry itself, after which trivy stops ignoring
+# it and the scan blocks again. Keep expiries short (weeks, not months); an
+# expired entry is a prompt to look again, not to extend it by default.
+#
+# Format (one vulnerability id per line, trivy's plain .trivyignore format):
+#
+#   # CVE-2026-00000: only reachable through <feature>, which neither image
+#   # builds. Accepted by <name>, 2026-01-01.
+#   CVE-2026-00000 exp:2026-02-01
+#
+# No entries.

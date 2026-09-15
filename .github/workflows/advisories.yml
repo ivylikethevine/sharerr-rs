@@ -3,8 +3,7 @@ name: Advisories
 # The notification half of cargo-deny.
 #
 # ci.yml already runs `cargo deny check advisories licenses bans sources` on
-# every push and pull request, and on its own weekly schedule. That job is the
-# gate: it fails the build, which is the right answer when somebody's diff is
+# every push and pull request. That job is the gate: it fails the build, which is the right answer when somebody's diff is
 # what pulled in the offending crate.
 #
 # It is the wrong shape for the other case, and the other case is the common
@@ -65,18 +64,21 @@ jobs:
       # the one write this job does: upsert (and close) its own tracking issue
       issues: write
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
           # a credential with no job left to use it.
           persist-credentials: false
 
-      # A prebuilt binary rather than `cargo install`, which would spend two
-      # minutes compiling a linter on every weekly run. The action is
-      # SHA-pinned like every other, so dependabot owns its version; cargo-deny
-      # itself is resolved to its own latest release, which is what you want
-      # from the thing reading the advisory database.
-      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+      # The tools.txt pin, the same binary ci.yml's `audit` gate runs: a
+      # sha256-verified release asset rather than `cargo install`, which would
+      # spend two minutes compiling it every run. The advisory database itself
+      # is fetched fresh on every run, whatever the binary's version.
+      - uses: $/.github/actions/setup-tool
         with:
           tool: cargo-deny
 
@@ -95,8 +97,6 @@ jobs:
 
       - name: Build the report
         if: steps.check.outputs.found != '0'
-        env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           {
@@ -109,10 +109,7 @@ jobs:
             echo '```'
             cat "$RUNNER_TEMP/advisories.txt"
             echo '```'
-            echo
-            echo "Found by [\`advisories\`]($RUN_URL). Closed automatically once the tree is clean."
           } >"$RUNNER_TEMP/report.md"
-          cat "$RUNNER_TEMP/report.md" >>"$GITHUB_STEP_SUMMARY"
 
       # See .github/actions/upsert-tracking-issue for the shape this, tool-
       # versions.yml, and image-scan.yml's `pins` job all share.
@@ -127,9 +124,8 @@ jobs:
           label-description: cargo-deny reports an advisory against the locked dependency tree
           title: A RUSTSEC advisory affects a dependency in Cargo.lock
           resolved: ${{ steps.check.outputs.found == '0' }}
-          close-comment: >-
-            cargo-deny reports no advisories against the current `Cargo.lock`.
-            [Latest run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          close-comment: cargo-deny reports no advisories against the current `Cargo.lock`.
+          resolved-when: the tree is clean
           body-file: ${{ runner.temp }}/report.md
           warning-title: cargo-deny
           warning-body: A RUSTSEC advisory affects Cargo.lock - see the issue

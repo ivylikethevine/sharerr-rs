@@ -647,7 +647,7 @@ mod tests {
     /// promise the full configured interval while the background loop is
     /// actually about to retry within seconds.
     #[tokio::test]
-    async fn next_sync_reflects_a_failed_passs_backoff() {
+    async fn next_sync_reflects_a_failed_pass_backoff() {
         let (_dir, serve) = unconfigured();
         let store = serve.store().await.unwrap();
 

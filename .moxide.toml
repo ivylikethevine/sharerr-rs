@@ -6,6 +6,9 @@
 # file, and matches `#fragments` by lowercasing the heading and swapping
 # spaces for dashes - punctuation kept (src/vault/mod.rs, heading_to_slug).
 # Neither is configurable. GitHub and markdownlint's MD051 strip punctuation
+# and GitHub resolves paths against the containing file, so oxide would flag
+# links that are correct everywhere else; its unresolved-link diagnostics
+# stay off.
 unresolved_diagnostics = false
 
 excluded_folders = ["target"]

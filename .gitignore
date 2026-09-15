@@ -1,3 +1,28 @@
+# Secrets and local environment. `.env.example` files are templates with no
+# real values (docker/deploy/*/), so they stay tracked.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.crt
+.direnv/
+.envrc
+
+# A local Jekyll build of the docs site (_config.yml); CI builds the real one.
+.jekyll-cache/
+_site/
+
+# Agent settings: .claude/settings.json is shared on purpose (it is tracked);
+# the local override file and scratch worktrees are per machine. So are
+# host-specific agent notes, which go in CLAUDE.local.md rather than the
+# tracked CLAUDE.md.
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
+
+# Rust build output.
 /target
 **/*.rs.bk
 
@@ -22,14 +47,6 @@
 # browser would, and that must never land on the tracked template.
 /docker/state-mesh
 
-# Never commit a master key.
-.env
-*.key
-
-# Local agent scratch: memory, plans, session settings. Note this does *not* cover
-# the tracked CLAUDE.md at the repository root, which is shared on purpose.
-.claude
-
 # Terraform working state for the hosted-lighthouse modules under
 # docker/deploy/lighthouse/terraform. State can hold addresses and key names;
 # keep it with the rest of your homelab's, not here.
@@ -39,3 +56,6 @@
 *.tfvars
 .terraform.lock.hcl
 docker/deploy/lighthouse/terraform/fly/.generated/
+
+# npm installs of the pinned CI Markdown tools (.github/package.json)
+node_modules/

@@ -1,0 +1,180 @@
+# The docker-backed test tiers (docs/TESTING.md), which ci.yml compiles but
+# never runs: tier 2 (scripts/run_docker_tests.sh and its variants, plus the
+# two-instance stack) and tier 3 (the mesh). Each drives a real Compose stack
+# on the runner's own Docker daemon.
+#
+# Advisory, on a schedule rather than per PR: a stack takes minutes to boot and
+# pulls real images, and a flake in a third-party container must not block a
+# merge. So it keeps one `integration` tracking issue current instead: opened
+# (or rewritten) when a scheduled run fails, closed by the scheduled run that
+# passes. A manual dispatch only ever opens or updates the issue, never closes
+# it, since it may have run a different tier from the one that failed.
+#
+# The weekly run covers the default tier. A dispatch picks any one tier, or
+# all of them as a matrix. None needs a secret: the VPN stack terminates its
+# own WireGuard tunnel inside Compose with test-only keys (see
+# docker/compose.vpn.yml).
+name: Integration
+
+on:
+  schedule:
+    - cron: "29 4 * * 4"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Which tier to run
+        type: choice
+        default: default
+        options:
+          - default
+          - vpn
+          - transmission
+          - rtorrent
+          - two-instance
+          - mesh
+          - all
+
+# Serialised and never cancelled: the report job's tracking-issue upsert is
+# list-then-create, and two stacks on one runner would not collide anyway,
+# but two runs racing that upsert could each open an issue.
+concurrency:
+  group: integration
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      # Through env:, not inlined: a dispatch input is text a caller chose.
+      - id: plan
+        env:
+          TIER: ${{ inputs.tier || 'default' }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"tier":"default","script":"scripts/run_docker_tests.sh","flag":"","timeout":60},
+            {"tier":"vpn","script":"scripts/run_docker_tests.sh","flag":"--vpn","timeout":60},
+            {"tier":"transmission","script":"scripts/run_docker_tests.sh","flag":"--transmission","timeout":60},
+            {"tier":"rtorrent","script":"scripts/run_docker_tests.sh","flag":"--rtorrent","timeout":60},
+            {"tier":"two-instance","script":"scripts/run_docker_tests_two_instance.sh","flag":"","timeout":75},
+            {"tier":"mesh","script":"scripts/run_docker_tests_mesh.sh","flag":"","timeout":90}
+          ]'
+          if [ "$TIER" = all ]; then
+            matrix="$(jq -c '{include: .}' <<<"$all")"
+          else
+            matrix="$(jq -c --arg t "$TIER" '{include: [.[] | select(.tier == $t)]}' <<<"$all")"
+          fi
+          [ "$(jq '.include | length' <<<"$matrix")" -gt 0 ] || {
+            echo "::error::unknown tier '$TIER'"
+            exit 1
+          }
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+
+  tier:
+    name: integration (${{ matrix.tier }})
+    needs: plan
+    # Hosted: the stacks need a Docker daemon, /dev/net/tun (vpn) and
+    # nothing else from the self-hosted box.
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # See ci.yml's `fmt` job for why rustup directly.
+      - name: Install the stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: integration
+          # Scheduled runs are on the default branch; one entry, shared by
+          # every tier, since they compile the same e2e feature set.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && matrix.tier == 'default' }}
+
+      # Each script brings its stack up, seeds it, runs the #[ignore]d suite,
+      # and tears the stack down on any exit.
+      - name: Run the ${{ matrix.tier }} tier
+        env:
+          SCRIPT: ${{ matrix.script }}
+          FLAG: ${{ matrix.flag }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # FLAG is empty or one word
+          "$SCRIPT" $FLAG
+
+  report:
+    name: integration report
+    needs: tier
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'schedule' || needs.tier.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # the one write this job does: upsert (and close) its own tracking issue
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the report
+        if: needs.tier.result != 'success'
+        env:
+          RESULT: ${{ needs.tier.result }}
+          TIER: ${{ inputs.tier || 'default' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "The \`$TIER\` integration tier did not pass (result: \`$RESULT\`, trigger: \`$EVENT\`)."
+            echo
+            echo "Open the run below for the failing tier's log. Reproduce locally with"
+            echo "the script docs/TESTING.md names for that tier. A failure inside a"
+            echo "third-party container (a pull, a healthcheck) is worth a re-run before"
+            echo "a fix."
+          } >"$RUNNER_TEMP/report.md"
+
+      - name: Keep the tracking issue current
+        uses: $/.github/actions/upsert-tracking-issue
+        with:
+          label: integration
+          label-color: D93F0B
+          label-description: A docker-backed integration tier failed on its scheduled run
+          title: Integration tests are failing
+          resolved: ${{ needs.tier.result == 'success' }}
+          close-comment: The scheduled integration run passes again.
+          resolved-when: the scheduled run passes
+          body-file: ${{ runner.temp }}/report.md
+          warning-title: integration
+          warning-body: An integration tier failed - see the tracking issue

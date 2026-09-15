@@ -44,6 +44,7 @@ body:
         - Radarr
         - Lidarr
         - Readarr
+        - Whisparr
         - none (a plain directory, no *arr app)
         - something else / not sure
     validations:
@@ -65,12 +66,13 @@ body:
     id: layout
     attributes:
       label: Deployment layout
-      description: See docs/SETTINGS.md and docker/deploy/ for what each name covers.
+      description: See [docker/deploy/README.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md) for what each name covers.
       options:
         - direct (no VPN)
         - vpn (gluetun sidecar, one instance)
         - sidecar
         - dual-vpn (two independent stacks)
+        - lighthouse (sharerr-lighthouse, the rendezvous service)
         - not using the compose deployment examples at all
         - not sure
     validations:
@@ -107,5 +109,5 @@ body:
           required: true
         - label: >-
             If this is about something sharerr doesn't do, I checked
-            docs/SUPPORT.md — it may already carry a verdict and a reason.
+            docs/COMPATIBILITY.md — it may already carry a verdict and a reason.
           required: false

@@ -1,45 +1,65 @@
-# The pinned CI tools, one row per tool - read by ./install.sh (which installs
-# one) and by ../../scripts/check_tool_versions.sh (which reports drift against
-# each upstream's latest release). Both reach it through ./lib.sh, so this file
-# is the single roster: a tool pinned here cannot go undrift-checked.
+# The pinned CI tools, one row per tool - installed by ./install.sh (through
+# ./action.yml or ../setup-tools) and drift-checked by
+# ../../scripts/check_tool_versions.sh. Both read it through ./lib.sh, so a
+# tool pinned here cannot go unchecked.
 #
-#   name|pin|kind|url|verify|check|tag-prefix
+#   name|pin|kind|url|verify|check|tag-prefix|sha256
 #
-# name    the first column an `uses: ./.github/actions/setup-tool` names, and
-#         the executable's name - install.sh saves a `raw` download under it,
-#         and finds it inside an archive with `find -name <name>`.
-# pin     the version, WITHOUT a leading "v" even where upstream's tag has one:
-#         some projects tag v1.2.3 but name the asset 1.2.3, and only one
-#         placeholder is substituted. The url column carries the literal "v"
-#         (or, for lychee, "lychee-v") where the tag needs it.
-# kind    raw (a bare executable) or tar.gz (an archive to search inside).
-#         cmake/make kinds could be added here for a tool that ships only as
-#         source, if one is ever needed.
-# url     %v is the pin. %a would be the asset slug for this runner
-#         (linux.x86_64 / darwin.aarch64 / darwin.x86_64), resolved first so a
-#         version can never be mistaken for one - unused below because every
-#         job that installs one of these runs on Linux.
-# verify  the flag install.sh runs the installed tool with as a smoke test.
-# check   where to look for the latest release: github:<owner>/<repo>, or "-"
-#         to opt out of the drift report entirely.
-# tag-prefix  optional 7th column, only needed when upstream's release tag
-#         does not look like "v<pin>" - check_tool_versions.sh strips this
-#         (default "v") off the upstream tag before comparing to `pin`, which
-#         never carries a prefix of its own. Blank for every row except
-#         lychee, whose tags read "lychee-v<version>".
-# sha256  8th column: the expected sha256 of the downloaded file (the raw
-#         binary, or the tar.gz archive before it's extracted) at this exact
-#         pin. install.sh verifies it after download and refuses to install a
-#         mismatch, so a compromised release asset or a MITM'd download is
-#         rejected instead of silently landing on PATH and running as part of
-#         CI. Computed once, when the pin is set, with
-#         `curl -sSL <url> | sha256sum` (substitute the real %v/%a first) -
-#         this is *not* re-fetched from upstream on every run, so it changes
-#         only in the same commit that bumps `pin`, and a bumped pin with an
-#         unchanged sha256 is itself a red flag worth double-checking by hand.
+# name        the tool's executable name, and what `tool:`/`tools:` inputs
+#             name. install.sh finds it inside an archive by this name.
+# pin         the version WITHOUT a leading "v"; the url carries a literal
+#             "v" where upstream's tag or asset needs one.
+# kind        raw      a bare executable (or script)
+#             tar.gz   an archive searched for <name>; when it holds one build
+#             tar.xz   per arch side by side, this machine's arch dir is kept
+#             zip      an archive searched for <name>, the same way (needs unzip)
+#             cmake    a source tarball built with cmake
+#             make     a source tarball built with ./configure && make
+#             Source kinds may append apt build deps: `cmake:libfoo-dev,libbar-dev`
+#             (cmake always adds build-essential and cmake itself).
+# url         %v is the pin. %a is this platform's asset slug, taken from the
+#             sha256 column below - use it only with a per-platform sha256.
+# verify      flags install.sh runs the installed tool with as a smoke test.
+# check       where the drift check looks for newer releases:
+#             github:<owner>/<repo>      releases API
+#             gitlab:[<host>/]<project>  tags API; <project> url-encoded
+#                                        (group%2Fname), host defaults to gitlab.com
+#             npm:<package>              registry versions
+#             -                          not drift-checked (say why above the row)
+# tag-prefix  optional; what to strip off an upstream tag to get a pin. Blank
+#             means an optional leading "v" (v1.2.3 and 1.2.3 both work); set
+#             it when tags look like "<tool>-v1.2.3".
+# sha256      required. The sha256 of the downloaded file (the raw binary, or
+#             the archive before extraction) at this exact pin, one of:
+#               <64 hex>
+#                   one asset for every platform (a script, a source tarball,
+#                   or a roster that only runs on one platform); url has no %a
+#               <platform>[:<slug>]=<64 hex>,<platform>[:<slug>]=<64 hex>,...
+#                   one asset per platform; <platform> is linux-x86_64,
+#                   linux-aarch64, darwin-x86_64 or darwin-aarch64, and %a in
+#                   the url becomes <slug> (default: the platform itself). A
+#                   runner whose platform is not listed fails to install.
+#             Example: `x86_64-unknown-linux-gnu` assets become
+#               ...-%a.tar.gz|...|linux-x86_64:x86_64-unknown-linux-gnu=<hex>,linux-aarch64:aarch64-unknown-linux-gnu=<hex>
+#             Compute each with `curl -sSfL <url> | sha256sum` (real %v/%a
+#             substituted). It changes only in the commit that bumps `pin`; a
+#             bumped pin with an unchanged sha256 is a red flag.
 #
-# Bumping a pin is a hand edit here, and nothing else - the caching action.yml
-# reads the version back out of install.sh's `resolve`.
+# Bumping a pin is a hand edit to one row: pin and sha256 together.
+#
+# Floating by design - tools this repo deliberately does not pin, and why.
+# Each is still named here so "is this pinned?" has one place to look:
+#
+#   <tool>   <where it is installed>   <why it floats>
+#
+#   rust stable   ci.yml (fmt, test), coverage.yml   rustup's `stable` channel:
+#                 rustfmt/clippy/llvm-cov track the current compiler, and the
+#                 MSRV job pins 1.98 separately (see check_tool_versions.local.sh)
+#   trivy's DB    image-scan.yml   the vulnerability database is data, fetched
+#                 fresh on every scan whatever the binary pin is
+#   node / npm    ci.yml (docs), scripts/check.sh   the runner image's; the
+#                 Markdown tools they run are locked in .github/package-lock.json
+
 zizmor|1.30.1|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
 # Points at kjanat/actionlint, a maintained fork, not upstream rhysd/actionlint:
 # upstream is stuck on 1.7.12 and rejects zizmor's `$/...` self-repository
@@ -68,3 +88,29 @@ cargo-llvm-cov|0.9.1|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/d
 # longer needs `check = "-"` to opt out of drift checking entirely.
 lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v|1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
 typos|1.50.1|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||edf0545109aee6a22751d04ddecb97c45be47d3aa0409564fb895eeeace91b1e
+# Installed rather than taken from the runner image, whose copy moves when
+# the image does and would change what ci.yml's shellcheck gate reports with
+# no commit here to explain it.
+shellcheck|0.11.0|tar.xz|https://github.com/koalaman/shellcheck/releases/download/v%v/shellcheck-v%v.linux.x86_64.tar.xz|--version|github:koalaman/shellcheck||8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+# A pin, not `releases/latest`: new rules then arrive as a reviewed bump
+# instead of changing what an unrelated PR's advisory job reports. The job
+# never blocks a merge either way.
+hadolint|2.15.1|raw|https://github.com/hadolint/hadolint/releases/download/v%v/hadolint-linux-x86_64|--version|github:hadolint/hadolint||c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+# Pinning the binary does not stale the scan: trivy downloads its vulnerability
+# database on every run regardless of version (see the floating list above).
+trivy|0.74.0|tar.gz|https://github.com/aquasecurity/trivy/releases/download/v%v/trivy_%v_Linux-64bit.tar.gz|--version|github:aquasecurity/trivy||2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+# Tags have no "v" (0.20.2); the blank tag-prefix accepts that. Like trivy, the
+# advisory database is fetched fresh on every run, whatever this pin is.
+cargo-deny|0.20.2|tar.gz|https://github.com/EmbarkStudios/cargo-deny/releases/download/%v/cargo-deny-%v-x86_64-unknown-linux-musl.tar.gz|--version|github:EmbarkStudios/cargo-deny||9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+# Full-history secret scan in ci.yml's `gitleaks` job and scripts/check.sh.
+gitleaks|8.30.1|tar.gz|https://github.com/gitleaks/gitleaks/releases/download/v%v/gitleaks_%v_linux_x64.tar.gz|version|github:gitleaks/gitleaks||551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+# `fmt -check` and `validate` over the hosted-lighthouse modules (ci.yml's
+# `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
+# zipped, not as GitHub release assets; its GitHub releases still carry the
+# tags the drift check reads.
+terraform|1.16.1|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||745d33b4b02b7980c62a38ec1beea24ee084ea8caf3f503c200554bd9a0cbe49
+# mikefarah's Go yq, for .github/scripts/lint_workflows.sh (which also accepts
+# the Python yq, but CI pins this one).
+# Installed rather than taken from the runner image, and several distros ship
+# an unrelated jq-wrapper also called `yq`.
+yq|4.53.6|raw|https://github.com/mikefarah/yq/releases/download/v%v/yq_linux_amd64|--version|github:mikefarah/yq||c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385

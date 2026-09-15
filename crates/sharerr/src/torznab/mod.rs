@@ -673,7 +673,7 @@ impl Matched {
     /// [`sharerr_core::config::SeedingConfig::private`]), but "magnets on,
     /// this item private" would otherwise advertise a link guaranteed to
     /// stall against a swarm nothing else can join — see
-    /// `docs/SUPPORT.md#the-feeds-magnet-link`. Made inert
+    /// `docs/COMPATIBILITY.md#the-feeds-magnet-link`. Made inert
     /// here rather than left for the operator to notice, the same way the
     /// tracker fails closed rather than half-answering.
     pub fn magnet_url(&self, item: &SharedItem) -> String {

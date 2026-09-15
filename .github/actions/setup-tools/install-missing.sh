@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Installs whatever ./resolve.sh's cache step missed, one tool at a time via
-# ../setup-tool/install.sh. In a real file for the same shellcheck reason
-# ./resolve.sh and ../setup-tool/install.sh are.
-#
-# Never sets SR_TOOL_VERSION: every call here installs the tools.txt pin, so
-# install.sh's sha256 check stays on its normal pin-verifying path rather
-# than the unverified override path a `version:` input would take.
+# SPDX-License-Identifier: MIT
+# Installs whatever ./action.yml's cache step missed, one tool at a time via
+# ../setup-tool/install.sh - always the tools.txt pin, so the row's sha256 is
+# what gets verified.
 set -euo pipefail
 
-: "${SR_TOOLS:?set by action.yml}"
+: "${CI_TOOLS:?set by action.yml}"
 
-for _sr_t in $SR_TOOLS; do
-  [ -x "/usr/local/bin/$_sr_t" ] && continue
-  SR_TOOL="$_sr_t" "$(dirname "${BASH_SOURCE[0]}")/../setup-tool/install.sh" install
+# a whole-key miss restores nothing, so this only skips a binary something
+# else already put there
+for _ci_t in $CI_TOOLS; do
+  [ -x "${CI_TOOL_BIN_DIR:-/usr/local/bin}/$_ci_t" ] && continue
+  CI_TOOL="$_ci_t" "$(dirname "${BASH_SOURCE[0]}")/../setup-tool/install.sh" install
 done

@@ -12,7 +12,7 @@ name: CodeQL
 # `rust/hard-coded-cryptographic-value` looks for precisely the mistake that
 # code must not make — a hard-coded key, IV, nonce or salt.
 #
-# The `actions` half covers eight workflows, where the interesting bugs are
+# The `actions` half covers every workflow and composite action, where the interesting bugs are
 # expression injection into `run:`, an untrusted checkout feeding a privileged
 # job, and artifact or cache poisoning. That overlaps with zizmor, which already
 # gates every PR in ci.yml, and the overlap is the point rather than an
@@ -26,16 +26,19 @@ name: CodeQL
 # workspace a second time on every push, and this analysis has nothing to say
 # that `cargo clippy` does not already say faster.
 #
-# The `main` leg chains off a green run of ci.yml rather than firing on every
-# push, the same shape as coverage.yml and scorecard.yml: a tree `cargo test`
-# just rejected is not worth a baseline upload. See pages.yml's header for why
-# a workflow_run trigger is safe despite zizmor's default suspicion of it —
-# neither job's checkout carries a `ref:`, so both analyse the default branch.
+# Triggers: every push to `main`, every non-draft PR, a weekly schedule, and a
+# manual dispatch. The `main` leg fires on the push itself rather than
+# chaining off a green ci.yml run the way coverage.yml and scorecard.yml do:
+# Scorecard's SAST check counts the commits that got a CodeQL run, and a
+# commit whose CI went red (or is still running when the next merge lands)
+# would otherwise count as unanalysed. A red tree still gets its baseline.
+#
+# Permissions: read-only by default; each leg adds `security-events: write`
+# for its upload, and the actions leg `actions: read` for the workflow
+# definitions it analyses.
 
-on: # zizmor: ignore[dangerous-triggers]
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+on:
+  push:
     branches: [main]
   # Draft PRs analyse nothing until marked ready; ci.yml's `pull_request:`
   # trigger explains the activity types and the job-level `if:` below.
@@ -50,15 +53,17 @@ on: # zizmor: ignore[dangerous-triggers]
 permissions:
   contents: read
 
+# A PR's superseded run is cancelled. Outside a PR the group is per commit:
+# per ref, a quick second merge would replace the first commit's queued run,
+# and that commit would get no analysis at all.
 concurrency:
-  group: codeql-${{ github.ref }}
+  group: codeql-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Both legs run on every trigger, green CI runs on main included; the
-  # exceptions are a draft PR (see the `pull_request:` trigger above), which
-  # uploads nothing until `ready_for_review` runs both legs on the same head
-  # commit, and a CI run on main that did not succeed (see `workflow_run:`).
+  # Both legs run on every trigger; the one exception is a draft PR (see the
+  # `pull_request:` trigger above), which uploads nothing until
+  # `ready_for_review` runs both legs on the same head commit.
   # This used to skip a leg on a push whose diff did not touch that
   # language's paths (a docs-only merge paid for neither analysis), via a
   # `dorny/paths-filter` change-detection job upstream of both. That saved
@@ -71,8 +76,7 @@ jobs:
   # merely-stale result. Pull requests, the schedule, and workflow_dispatch
   # already bypassed the filter for the same underlying reason (see the prior
   # revision of this file in git history if the filter is ever worth
-  # resurrecting); this removed the one trigger that still had it. (That
-  # trigger was `push`, since replaced by the `workflow_run` chain.)
+  # resurrecting); this removed the one trigger that still had it, `push`.
   #
   # Two named jobs rather than one `matrix.language: [rust, actions]` job with
   # a per-language `if:`, because job-level `if:` cannot read the `matrix`
@@ -82,17 +86,17 @@ jobs:
   # now its own job with its own visible pass/fail/skip, not a matrix cell.
   analyze-rust:
     name: CodeQL (rust)
-    if: >-
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
-      (github.event_name != 'workflow_run' ||
-       (github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'push'))
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing here pushes back to GitHub; a lingering token in .git/config is
@@ -112,11 +116,7 @@ jobs:
 
   analyze-actions:
     name: CodeQL (actions)
-    if: >-
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
-      (github.event_name != 'workflow_run' ||
-       (github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'push'))
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -125,6 +125,10 @@ jobs:
       security-events: write
       actions: read
     steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

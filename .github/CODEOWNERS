@@ -3,7 +3,8 @@
 # for the whole tree rather than a path-by-path breakdown, because there is
 # nobody to split ownership between yet.
 #
-# GitHub reads CODEOWNERS from the repo root, .github/, or docs/ — this one
-# lives here on purpose, alongside the rest of the project's non-code docs.
+# GitHub reads CODEOWNERS from the repo root, .github/, or docs/. It lives in
+# .github/ with the other files only GitHub reads (issue forms, the PR
+# template), not in docs/, which is published as the docs site.
 
 * @ivylikethevine

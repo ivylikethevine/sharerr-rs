@@ -5,7 +5,7 @@ reads, in one place. [The README](../README.md) is where to go for
 walkthroughs and _why_; this page is where to go for the exact key, its
 default, and what sets it.
 
-## Table of contents
+## Contents
 
 - [How configuration is layered](#how-configuration-is-layered)
 - [Top-level settings](#top-level-settings)
@@ -96,7 +96,7 @@ url = "http://localhost:8989"
 
 ## `[[library]]` — plain directories
 
-Zero-dependency sharing with no *arr app at all — see the README's
+Zero-dependency sharing with no \*arr app at all — see the README's
 ["Sharing a plain directory"](../README.md#sharing-a-plain-directory-no-arr-app-at-all).
 
 | Field  | Type                                 | Notes                                               |
@@ -157,7 +157,7 @@ secured). Any placeholder values work if your proxy has no such gate.
 
 For what rTorrent cannot do (skip the hash check, honour a per-torrent ratio
 limit, remove a stale tracker) see
-[`SUPPORT.md`](SUPPORT.md#torrent-clients-what-actually-seeds).
+[`COMPATIBILITY.md`](COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## `[seeding]`
 
@@ -169,11 +169,11 @@ done in the client. Torrents sharerr adopted rather than created are never
 touched. The client's own engine does the enforcing. See the README's
 ["Seeding limits"](../README.md#seeding-limits).
 
-| TOML key                   | Type  | Default | Notes                                                  |
-| -------------------------- | ----- | ------- | ------------------------------------------------------ |
-| `seeding.upload_limit_kib` | int   | unset   | Per-torrent upload cap, KiB/s.                         |
-| `seeding.ratio_limit`      | float | unset   | Seed-ratio goal. Not honoured by rTorrent — see above. |
-| `seeding.private`          | bool  | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/SUPPORT.md`](SUPPORT.md#the-feeds-magnet-link). |
+| TOML key                   | Type  | Default | Notes                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------- | ----- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seeding.upload_limit_kib` | int   | unset   | Per-torrent upload cap, KiB/s.                                                                                                                                                                                                                                                                                                                                        |
+| `seeding.ratio_limit`      | float | unset   | Seed-ratio goal. Not honoured by rTorrent — see above.                                                                                                                                                                                                                                                                                                                |
+| `seeding.private`          | bool  | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
 
 ## `[feed]`
 
@@ -181,15 +181,15 @@ What the Torznab and Jackett feeds advertise alongside the `.torrent` link
 every item already carries. Settings page: the same "Seeding limits" panel
 as `[seeding]` above, since the two are meant to be read together.
 
-| TOML key            | Type | Default | Notes                                                                                                                                                                                              |
-| -------------------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feed.magnet_links` | bool | `false` | Emit a `magneturl` (Torznab) / `MagnetUri` (Jackett) attribute per item. Only ever produces one for an item that is *also* not private (`seeding.private = false`); a private item's magnet can never resolve, so it is omitted rather than advertised broken. See [`docs/SUPPORT.md`](SUPPORT.md#the-feeds-magnet-link). |
+| TOML key            | Type | Default | Notes                                                                                                                                                                                                                                                                                                                                 |
+| ------------------- | ---- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feed.magnet_links` | bool | `false` | Emit a `magneturl` (Torznab) / `MagnetUri` (Jackett) attribute per item. Only ever produces one for an item that is _also_ not private (`seeding.private = false`); a private item's magnet can never resolve, so it is omitted rather than advertised broken. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
 
 ## `[tracker]`
 
 | TOML key                  | Type        | Default              | Notes                                                                                                                                                           |
 | ------------------------- | ----------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tracker.advertised_host` | string      | unset (required*)    | Hostname/IP friends reach the tracker on.                                                                                                                       |
+| `tracker.advertised_host` | string      | unset (required\*)   | Hostname/IP friends reach the tracker on.                                                                                                                       |
 | `tracker.port`            | int         | `server.bind`'s port | Override when a published docker port differs from the internal one.                                                                                            |
 | `tracker.advertised_url`  | url         | unset                | Full base URL (scheme, path prefix, bracketed IPv6) — wins over `advertised_host`/`port`.                                                                       |
 | `tracker.bind`            | socket addr | unset                | A second listener carrying only the tracker and `.torrent` downloads, for a one-forwarded-port topology. File/env only — the settings page has no field for it. |
@@ -239,9 +239,9 @@ standing invitation to set it to a few seconds in production and hammer
 every friend's instance; `sharerr.toml` or a `SHARERR_GOSSIP__*` override
 still reaches it.
 
-| TOML key                | Type | Default | Notes                                                            |
-| ------------------------ | ---- | ------- | ----------------------------------------------------------------- |
-| `gossip.exchange_secs`   | int  | `900`   | How often the outbound exchange runs against friends with a `gossip_url`. No floor. |
+| TOML key               | Type | Default | Notes                                                                               |
+| ---------------------- | ---- | ------- | ----------------------------------------------------------------------------------- |
+| `gossip.exchange_secs` | int  | `900`   | How often the outbound exchange runs against friends with a `gossip_url`. No floor. |
 
 ## `[lighthouse]`
 
@@ -252,13 +252,13 @@ needs nothing here, and hosting one for friends needs nothing set there.
 `interval_secs` and `quiet_secs` are config-file only for the same reason
 `gossip.exchange_secs` is — see `[gossip]` above.
 
-| TOML key                 | Type                    | Default    | Notes                                                                                                              |
-| ------------------------- | ----------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------ |
-| `lighthouse.enabled`     | bool                    | `false`    | Run the lighthouse as extra routes on one of sharerr's own listeners.                                              |
-| `lighthouse.mount`       | `frontend` \| `tracker` | `frontend` | Which listener, when `enabled`.                                                                                    |
-| `lighthouse.urls`        | list of urls            | `[]`       | Lighthouse(s) this instance reports its own endpoint to and queries for a quiet friend — independent of `enabled`. |
-| `lighthouse.interval_secs` | int                   | `900`      | How often the report-and-lookup pass runs. No floor; matches `gossip.exchange_secs` by default on purpose.         |
-| `lighthouse.quiet_secs`  | int                     | `3600`     | How long a peer must go unseen before a lighthouse lookup is worth trying. No floor.                               |
+| TOML key                   | Type                    | Default    | Notes                                                                                                              |
+| -------------------------- | ----------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------ |
+| `lighthouse.enabled`       | bool                    | `false`    | Run the lighthouse as extra routes on one of sharerr's own listeners.                                              |
+| `lighthouse.mount`         | `frontend` \| `tracker` | `frontend` | Which listener, when `enabled`.                                                                                    |
+| `lighthouse.urls`          | list of urls            | `[]`       | Lighthouse(s) this instance reports its own endpoint to and queries for a quiet friend — independent of `enabled`. |
+| `lighthouse.interval_secs` | int                     | `900`      | How often the report-and-lookup pass runs. No floor; matches `gossip.exchange_secs` by default on purpose.         |
+| `lighthouse.quiet_secs`    | int                     | `3600`     | How long a peer must go unseen before a lighthouse lookup is worth trying. No floor.                               |
 
 ## `[gluetun]` and `[gluetun_client]`
 
@@ -296,9 +296,9 @@ which wires all of this up for four deployment shapes.
 
 ## `[checks]`
 
-| TOML key              | Type | Default | Notes                                                                                                                                                                                                                       |
-| --------------------- | ---- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `checks.reachability` | bool | `false` | Dial this instance's own advertised tracker and feed addresses and report whether they accept a TCP connection. Opt-in because many NAT setups refuse hairpinning, which would show a scary failure on a healthy instance.  |
+| TOML key              | Type | Default | Notes                                                                                                                                                                                                                      |
+| --------------------- | ---- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checks.reachability` | bool | `false` | Dial this instance's own advertised tracker and feed addresses and report whether they accept a TCP connection. Opt-in because many NAT setups refuse hairpinning, which would show a scary failure on a healthy instance. |
 
 See the README's
 ["Checking that you are actually reachable"](../README.md#checking-that-you-are-actually-reachable).
@@ -312,7 +312,7 @@ mentions under ["Friends finding each other"](../README.md#friends-finding-each-
 | ------------------------------- | ----------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `notifications.kind`            | `generic` \| `discord` \| `apprise` | `generic`         | Which payload shape to send.                                                                                                                                   |
 | `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.                                                                                           |
-| `notifications.heartbeat_secs`  | int                                 | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                                |
+| `notifications.heartbeat_secs`  | int                                 | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                               |
 | `notifications.triggers`        | array of strings                    | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
 The ten triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
@@ -348,9 +348,9 @@ Homepage, Homarr, or Glance). Both off by default and both require the bearer
 token below once enabled: unlike `/health` and `/ready`, they reveal how much
 this instance is sharing and to how many friends.
 
-| TOML key           | Type | Default | Notes                                           |
-| ------------------ | ---- | ------- | ----------------------------------------------- |
-| `metrics.enabled`  | bool | `false` | Serve `/metrics` and the dashboard-widget JSON. |
+| TOML key          | Type | Default | Notes                                           |
+| ----------------- | ---- | ------- | ----------------------------------------------- |
+| `metrics.enabled` | bool | `false` | Serve `/metrics` and the dashboard-widget JSON. |
 
 Vault secret: `metrics.token` — the bearer token both endpoints require,
 sent as `Authorization: Bearer <token>`. There is no unauthenticated form of
@@ -455,22 +455,22 @@ sharerr vault list      # which keys are set, never their values
 sharerr vault remove <key>
 ```
 
-| Vault key                   | What it is                                                                             |
-| --------------------------- | -------------------------------------------------------------------------------------- |
-| `sonarr.api_key`            | Sonarr API key                                                                         |
-| `radarr.api_key`            | Radarr API key                                                                         |
-| `lidarr.api_key`            | Lidarr API key                                                                         |
-| `readarr.api_key`           | Readarr API key                                                                        |
-| `whisparr.api_key`          | Whisparr API key                                                                       |
-| `qbittorrent.api_key`       | qBittorrent 5.2+ WebUI API key                                                         |
-| `transmission.password`     | Transmission RPC password                                                              |
-| `rtorrent.password`         | rTorrent Basic Auth password (see [`[rtorrent]`](#rtorrent))                           |
-| `tracker.token`             | Built-in tracker announce token                                                        |
-| `gluetun.api_key`           | Tracker-facing gluetun control server API key                                          |
-| `gluetun_client.api_key`    | Torrent-client-facing gluetun control server API key                                   |
-| `notifications.webhook_url` | Where a sync-failure/peer-quiet notification is POSTed                                 |
+| Vault key                     | What it is                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------- |
+| `sonarr.api_key`              | Sonarr API key                                                                                      |
+| `radarr.api_key`              | Radarr API key                                                                                      |
+| `lidarr.api_key`              | Lidarr API key                                                                                      |
+| `readarr.api_key`             | Readarr API key                                                                                     |
+| `whisparr.api_key`            | Whisparr API key                                                                                    |
+| `qbittorrent.api_key`         | qBittorrent 5.2+ WebUI API key                                                                      |
+| `transmission.password`       | Transmission RPC password                                                                           |
+| `rtorrent.password`           | rTorrent Basic Auth password (see [`[rtorrent]`](#rtorrent))                                        |
+| `tracker.token`               | Built-in tracker announce token                                                                     |
+| `gluetun.api_key`             | Tracker-facing gluetun control server API key                                                       |
+| `gluetun_client.api_key`      | Torrent-client-facing gluetun control server API key                                                |
+| `notifications.webhook_url`   | Where every enabled trigger except `heartbeat` is POSTed (see [`[notifications]`](#notifications))  |
 | `notifications.heartbeat_url` | Uptime-Kuma-style push URL fetched on a timer while ready (see [`[notifications]`](#notifications)) |
-| `metrics.token`             | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics)) |
+| `metrics.token`               | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics))              |
 
 Those fourteen are the keys `sharerr vault set` accepts. `sharerr vault list`
 shows every key the vault holds, which includes a few sharerr manages

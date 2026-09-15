@@ -53,9 +53,9 @@ FROM rust-base AS chef
 # toolchain, and would sit outside every digest-pinning and dependabot rule this
 # tree applies to `rust:*`. `--locked` so a cargo-chef point release can never
 # silently resolve different transitive deps than the ones this pin was tested
-# against. Bumping the version is a hand edit here; see
-# .github/scripts/check_tool_versions.sh, which tracks it the same way it tracks
-# zizmor and actionlint.
+# against. Bumping the version is a hand edit here; a `CI_WORKFLOW_ROSTER` row
+# in .github/scripts/check_tool_versions.local.sh reads this ARG, so the weekly
+# tool-versions drift check reports a newer cargo-chef release.
 ARG CARGO_CHEF_VERSION=0.1.78
 RUN cargo install cargo-chef --locked --version "$CARGO_CHEF_VERSION"
 
@@ -117,10 +117,10 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 # `--locked` on both, `--target "$TRIPLE"` on both, `--package sharerr` on both.
 #
 # No `--mount=type=cache` here, deliberately — a cache mount's contents do not
-# survive into the image layer (the same reason `type=gha` never helped this
-# build: see the note below on `cache-to`), and cargo-chef's entire mechanism is
-# that `cook` bakes the compiled dependency tree into the layer so BuildKit can
-# cache and export it. A cache mount at the same path would shadow that
+# survive into the image layer, so neither BuildKit's layer cache nor the
+# `type=gha` export (docker-image.yml's `cache-to` note) ever sees them, and
+# cargo-chef's entire mechanism is that `cook` bakes the compiled dependency
+# tree into the layer so BuildKit can cache and export it. A cache mount at the same path would shadow that
 # directory for the RUN's duration, cargo would see it empty, and the cook step
 # would recompile every dependency from scratch while still reporting a cache
 # hit on the *step* — correct output, zero speedup, nothing fails loudly.
@@ -166,7 +166,11 @@ RUN TRIPLE="$(cat /triple)" \
 # architecture. That is what makes the arm64 image genuinely arm64.
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime-base
 
+# Debian's security fixes land before the pinned base digest is rebuilt with
+# them, and the release scan (docker.yml) blocks on fixable HIGH/CRITICAL
+# findings, so take them here rather than waiting on a repin.
 RUN apt-get update \
+ && apt-get upgrade --yes --no-install-recommends \
  && apt-get install --yes --no-install-recommends ca-certificates curl \
  && rm --recursive --force /var/lib/apt/lists/*
 

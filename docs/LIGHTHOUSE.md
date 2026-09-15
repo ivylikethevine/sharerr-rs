@@ -4,7 +4,7 @@ The rendezvous service for friends who have lost each other's addresses: why
 it exists, the privacy property it is built around, and how to run one.
 [The README](../README.md#the-lighthouse) has the two-paragraph version.
 
-## Table of contents
+## Contents
 
 - [Why it exists](#why-it-exists)
 - [The privacy property](#the-privacy-property)
@@ -93,10 +93,11 @@ Three ways, from the most to the least isolated.
 
 **Its own container.** The `sharerr-lighthouse` image is built from
 `docker/Dockerfile`'s `runtime-lighthouse` target and published to GHCR as
-its own package, on its own `v*` tag series and behind its own approval, so a
-sharerr release is not silently also a lighthouse release. `:latest` tracks
-the newest tagged lighthouse release; `sha-<commit>` tracks `main` between
-releases instead (see [`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)),
+its own package, from the same `v*` tag and the same `publish` job as the
+sharerr image, so the two always ship as a matched set (see
+[`docs/RELEASING.md`](RELEASING.md#what-ships-and-where)). `:latest` tracks
+the newest tagged release; `sha-<commit>` tracks `main` between releases
+instead (see [`docs/RELEASING.md`](RELEASING.md#between-releases-the-sha-tag)),
 or build it yourself:
 
 ```bash

@@ -12,7 +12,7 @@ Two `docker compose` projects:
 - **`media/`**: gluetun, qBittorrent, Sonarr, Radarr. The library lives here.
 - **`sharerr/`**: its own gluetun, and sharerr.
 
-## Table of contents
+## Contents
 
 - [Why they can still talk to each other](#why-they-can-still-talk-to-each-other)
 - [Bring it up](#bring-it-up)

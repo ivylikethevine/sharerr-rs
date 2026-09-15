@@ -175,7 +175,7 @@ fn validate_label(label: &str) -> Result<String> {
     )
 }
 
-/// Every column [`row_to_peer`] decodes, in one place.
+/// Every column `row_to_peer` decodes, in one place.
 ///
 /// One list instead of separate spellings across two `SELECT`s and a
 /// `RETURNING`: adding a column here is one edit, and a missed one is a compile

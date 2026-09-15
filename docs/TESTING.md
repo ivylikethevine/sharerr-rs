@@ -1,15 +1,16 @@
 # Testing
 
-The runner, the two tiers, the compose stacks tier 2 drives, fixtures, and
-coverage. [`docs/CONTRIBUTING.md`](CONTRIBUTING.md#the-verification-loop) has
+The runner, the three tiers, the compose stacks tiers 2 and 3 drive,
+fixtures, and coverage. [`docs/CONTRIBUTING.md`](CONTRIBUTING.md#the-verification-loop) has
 the loop to run before opening a pull request; this page is the reference
 behind it.
 
-## Table of contents
+## Contents
 
 - [Tier 1: hermetic](#tier-1-hermetic)
 - [Tier 2: the compose stacks](#tier-2-the-compose-stacks)
 - [Tier 3: the mesh stack](#tier-3-the-mesh-stack)
+- [In CI: integration.yml](#in-ci-integrationyml)
 - [Fixtures](#fixtures)
 - [Coverage](#coverage)
 - [Benchmarks and fuzzing](#benchmarks-and-fuzzing)
@@ -21,7 +22,10 @@ cargo test --workspace --all-features
 ```
 
 This is what `ci.yml`'s `clippy + tests` job runs on every push and pull
-request (with `--locked` there). Nothing in it needs network access, a
+request, through `scripts/check.sh test` (with `--locked`). The same job also
+runs clippy and `scripts/check.sh doc`, which builds the rustdoc with
+`-D warnings`, so a broken intra-doc link fails CI rather than printing a
+warning nobody reads. Nothing in it needs network access, a
 container, or a database: service clients (Sonarr, Radarr, qBittorrent,
 Transmission, rTorrent) run against `wiremock` on loopback, `sqlx` runs
 against `sqlite::memory:`, and migrations are embedded at compile time by
@@ -48,7 +52,9 @@ names worth knowing.
 ./scripts/run_docker_tests_two_instance.sh    # two friend-to-friend instances
 ```
 
-Opt-in and local only; CI never runs it. One flag at a time. The script
+Opt-in locally; `ci.yml` compiles it but never runs it, and
+[`integration.yml`](#in-ci-integrationyml) runs it weekly. One flag at a
+time. The script
 brings up `docker/compose.test.yml` (or the `--vpn`, `--transmission`,
 `--rtorrent` sibling), seeds Sonarr, Radarr and Lidarr with tagged synthetic
 content via `sharerr-testkit`'s `seed-arr` binary, runs the suite behind the
@@ -76,7 +82,8 @@ hand.
 ./scripts/run_docker_tests_mesh.sh
 ```
 
-Opt-in and local only; CI never runs it, same as tier 2. No *arr app and no
+Opt-in locally, and run in CI only by `integration.yml`, same as tier 2. No
+*arr app and no
 torrent client — tiers 1-2 already prove the media path; this one proves the
 gossip/lighthouse mesh instead, which had zero end-to-end coverage before it
 existed: no other compose stack sets `gossip_url` or `lighthouse.urls`, and
@@ -102,6 +109,22 @@ via `SHARERR_*` environment overrides, which is the one sanctioned reason to
 go below the default at all; see `GossipConfig`'s own doc in
 `crates/sharerr-core/src/config.rs`.
 
+## In CI: integration.yml
+
+`integration.yml` runs the docker-backed tiers on a GitHub-hosted runner's
+own Docker daemon, on a weekly schedule rather than per PR: a stack takes
+minutes to boot and pulls real third-party images, and a flake in one of
+those must not block a merge. The schedule runs the default tier
+(`run_docker_tests.sh` with no flag). A manual dispatch picks one tier
+(`default`, `vpn`, `transmission`, `rtorrent`, `two-instance`, `mesh`) or
+`all`, which runs every tier as a matrix. No tier needs a secret.
+
+It is advisory, and reports by keeping one `integration` tracking issue
+current: a failing scheduled run opens or rewrites it, the next passing
+scheduled run closes it. A dispatch only ever opens or updates the issue,
+since it may have run a different tier from the one that failed. Reproduce a
+failure locally with the script the tier names above.
+
 ## Fixtures
 
 All test content is synthetic: invented titles, seeded pseudo-random bytes,
@@ -115,18 +138,34 @@ layout change.
 ## Coverage
 
 ```bash
-cargo llvm-cov --workspace --all-features --locked --no-report
+scripts/check.sh coverage                             # measure, then enforce the floor
 cargo llvm-cov report --html --output-dir coverage-html
 ```
 
-`coverage.yml` runs this over tier 1 only, after every green run of `ci.yml`
-on `main`, and publishes the figure as a shields.io endpoint badge through `pages.yml`
-rather than a Codecov upload: no third-party account, no token. There is no
-threshold and no gate; a number that measures only the hermetic suite is
-worth publishing, not worth failing a PR over. The
-[badge on the README](../README.md) is the current figure. See the
-workflow's own comments for the column it reads out of `cargo-llvm-cov`'s
-summary (Lines, not Regions).
+`coverage` is `coverage-run` (`cargo llvm-cov --workspace --all-features
+--locked --no-report`) followed by `coverage-floor`, which fails when line
+coverage is under `COVERAGE_FLOOR_LINES` in `scripts/check.sh`, currently
+**94%**. The floor sits a few points under the measured figure, so an
+ordinary change does not trip it and a real drop does; raise it as coverage
+rises, and write down the reason in the PR that ever lowers it.
+
+`coverage.yml` runs this over tier 1 only, on two paths:
+
+- **After every green run of `ci.yml` on `main`** (and on dispatch): it
+  measures, uploads the figures that `pages.yml` publishes as shields.io
+  endpoint badges (no Codecov upload, no third-party account, no token), and
+  enforces the floor post-merge. A run under the floor goes red after the
+  upload, and `pages.yml` keeps serving the previous badge until coverage is
+  back above it. The [badge on the README](../README.md) is the current
+  figure.
+- **On a same-repo, non-draft pull request**: it measures the PR and keeps
+  one comment on it current, with the PR's line coverage, `main`'s latest
+  figure, the change, and whether the floor is met. Advisory: it never
+  blocks a merge, and a fork's PR gets no comment, since its token cannot
+  write one.
+
+See the workflow's own comments for the column it reads out of
+`cargo-llvm-cov`'s summary (Lines, not Regions).
 
 ## Benchmarks and fuzzing
 
