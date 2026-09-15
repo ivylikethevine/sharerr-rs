@@ -132,7 +132,7 @@ updates:
       #
       # Only the three semver update-types are ignored, not the dependency
       # outright. That is the difference digest-pinning makes: a rebuild of
-      # `rust:1.98-bookworm` still arrives as a digest refresh, so the image
+      # `rust:1.98-trixie` still arrives as a digest refresh, so the image
       # keeps picking up Debian's security fixes while the toolchain stays at
       # 1.98. Ignoring `rust` wholesale — as this file did before the pins
       # existed — would freeze the layers too.

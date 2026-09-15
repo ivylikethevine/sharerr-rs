@@ -37,7 +37,7 @@
 # it) descends from this pin — `cargo chef` is a driver that shells out to the
 # ambient `cargo`, it carries no toolchain of its own, so cooking dependencies
 # below proves nothing about the MSRV that building them directly wouldn't.
-FROM --platform=$BUILDPLATFORM rust:1.98-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS rust-base
+FROM --platform=$BUILDPLATFORM rust:1.98-trixie@sha256:bf5a9aa29062a6cb03c49bd59a46eb55e3cc770caf598a221a7866e500be3082 AS rust-base
 WORKDIR /src
 
 # --- cargo-chef: dependency caching, computed once for both architectures ---
@@ -164,7 +164,7 @@ RUN TRIPLE="$(cat /triple)" \
 
 # No --platform override, deliberately: this stage must be pulled for the *target*
 # architecture. That is what makes the arm64 image genuinely arm64.
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime-base
+FROM debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132 AS runtime-base
 
 # Debian's security fixes land before the pinned base digest is rebuilt with
 # them, and the release scan (docker.yml) blocks on fixable HIGH/CRITICAL
