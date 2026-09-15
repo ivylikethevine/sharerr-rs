@@ -24,7 +24,9 @@
 # changed. A caller passes its own filter (ci.yml and docker.yml's `docker`
 # job want "anything except .github/workflows/**"; docker.yml's `lighthouse`
 # job wants only the paths that feed its image) so the "code" key means
-# something different per caller, same as it did in changes.yml.
+# something different per caller, same as it did in changes.yml. A caller
+# may add more keys and read them back from the `changes` output (ci.yml's
+# `terraform` job does).
 #
 # Deliberately no `if:` on the `changes` output's job here — whether this should
 # run at all (push/pull_request only, not schedule or workflow_dispatch) is each
@@ -41,8 +43,9 @@ on:
     inputs:
       filters:
         description: >
-          `dorny/paths-filter` filter rules (YAML), with a single key "code" —
-          the fileset downstream jobs should treat as "something changed".
+          `dorny/paths-filter` filter rules (YAML), with a key "code" — the
+          fileset downstream jobs should treat as "something changed" — and
+          optionally more keys, read back through the `changes` output.
         required: true
         type: string
     outputs:
@@ -55,6 +58,12 @@ on:
           the triggering event is not push/pull_request (schedule, dispatch —
           treated as "everything changed", since there is no diff to filter).
         value: ${{ jobs.prepare.outputs.code }}
+      changes:
+        description: >
+          A JSON array of the `inputs.filters` keys that matched, or of every
+          key when there is no diff to filter (the same events as `code`).
+          Test one with `contains(fromJSON(needs.prepare.outputs.changes), 'key')`.
+        value: ${{ jobs.prepare.outputs.changes }}
 
 # Every step below only reads github.event/vars or lists a PR's changed files —
 # nothing here needs a scope broader than the one read permission the paths
@@ -73,6 +82,7 @@ jobs:
     outputs:
       label: ${{ steps.pick.outputs.label }}
       code: ${{ steps.decide.outputs.code }}
+      changes: ${{ steps.decide.outputs.changes }}
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -114,15 +124,21 @@ jobs:
           filters: ${{ inputs.filters }}
 
       # Collapses the filter's answer and "there was no diff to filter" into
-      # one output, so every downstream job checks one thing instead of two.
+      # one answer each for `code` and `changes`, so every downstream job
+      # checks one thing instead of two. With no diff, `changes` lists every
+      # top-level key of the filters (a key starts its line; its patterns and
+      # any comment do not).
       - id: decide
         env:
           FILTERED: ${{ steps.filter.outcome == 'success' }}
           MATCHED: ${{ steps.filter.outputs.code }}
+          CHANGES: ${{ steps.filter.outputs.changes }}
+          FILTERS: ${{ inputs.filters }}
         run: |
           set -euo pipefail
           if [ "$FILTERED" = "true" ]; then
-            echo "code=$MATCHED" >>"$GITHUB_OUTPUT"
+            printf 'code=%s\nchanges=%s\n' "$MATCHED" "$CHANGES" >>"$GITHUB_OUTPUT"
           else
-            echo "code=true" >>"$GITHUB_OUTPUT"
+            keys="$(printf '%s\n' "$FILTERS" | sed -n 's/^\([A-Za-z0-9_-]\{1,\}\):.*/\1/p' | jq -cRn '[inputs]')"
+            printf 'code=true\nchanges=%s\n' "$keys" >>"$GITHUB_OUTPUT"
           fi

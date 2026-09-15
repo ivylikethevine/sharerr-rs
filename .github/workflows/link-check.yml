@@ -13,10 +13,10 @@
 # branch. See pages.yml's header for why a workflow_run trigger is safe
 # despite zizmor's default suspicion of it.
 #
-# A dead link is a standing state of the docs, not an event, so besides the
-# run's own advisory note it keeps one `link-check` tracking issue current:
-# opened when a link breaks, rewritten while any stays broken, closed by the
-# run that finds none. Settings shared with ci.yml's offline gate (accepted
+# A dead link is a standing state of the docs, not an event, so it keeps one
+# `link-check` tracking issue current: opened when a link breaks, rewritten
+# while any stays broken, closed by the run that finds none. The report also
+# goes in the step summary, with a ::warning, from that same step. Settings shared with ci.yml's offline gate (accepted
 # status codes, excluded paths, retries) are in lychee.toml.
 name: Link check
 
@@ -86,17 +86,6 @@ jobs:
             '**/*.md' crates/sharerr/src/web/docs.rs || status=$?
           echo "found=$([ "$status" -ne 0 ] && echo 1 || echo 0)" >>"$GITHUB_OUTPUT"
 
-      - if: steps.check.outputs.found == '1'
-        uses: $/.github/actions/advisory-note
-        with:
-          title: lychee
-          warning-body: Broken link(s) found in the docs - advisory, not blocking
-          heading: lychee found a broken link
-          body: >-
-            Advisory only: this job never blocks a merge. Reproduce with
-            `lychee --config lychee.toml '**/*.md' crates/sharerr/src/web/docs.rs`.
-          report-file: ${{ runner.temp }}/lychee.md
-
       - name: Build the report
         if: steps.check.outputs.found == '1'
         run: |
@@ -106,13 +95,15 @@ jobs:
             echo "\`crates/sharerr/src/web/docs.rs\`."
             echo
             echo "Fix or replace the link. A URL that is fine but refuses automated checks"
-            echo "belongs in \`lychee.toml\` with a comment saying why."
+            echo "belongs in \`lychee.toml\` with a comment saying why. Reproduce with"
+            echo "\`lychee --config lychee.toml '**/*.md' crates/sharerr/src/web/docs.rs\`."
             echo
             cat "$RUNNER_TEMP/lychee.md"
           } >"$RUNNER_TEMP/report.md"
 
       # See .github/actions/upsert-tracking-issue for the shape this shares
-      # with advisories.yml and tool-versions.yml.
+      # with advisories.yml and tool-versions.yml. It writes the report to the
+      # step summary and, with warning-title set, emits the ::warning too.
       - name: Keep the tracking issue current
         uses: $/.github/actions/upsert-tracking-issue
         with:
@@ -124,3 +115,5 @@ jobs:
           close-comment: lychee finds no broken links.
           resolved-when: every link resolves
           body-file: ${{ runner.temp }}/report.md
+          warning-title: lychee
+          warning-body: Broken link(s) found in the docs - see the tracking issue

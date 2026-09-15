@@ -14,7 +14,7 @@
 #
 # Every push to `main` ships unattended, under a tag that carries nothing but
 # the commit sha — no `latest`, no branch name, nothing a human would stumble
-# across browsing GHCR's tag list. See the `sha-tag` step below for the exact
+# across browsing GHCR's tag list. See the `dest` step below for the exact
 # format. A `v*` tag goes through the slower, gated path described below
 # instead.
 #
@@ -50,8 +50,8 @@
 #
 # `workflow_dispatch` is this workflow's rehearsal: `build` pushes to the same
 # provisional `pending-<sha>` tag on a manual dispatch as it does on a real `v*`
-# push (see the `login`/`push`/`tags` conditions below, each with a
-# `github.event_name == 'workflow_dispatch'` branch added), and gets a real
+# push (see `PUSH_IMAGE` and the `dest` step below, each with a
+# `workflow_dispatch` branch added), and gets a real
 # provenance attestation against that tag too — so the whole build-push-attest
 # path can be exercised any day, not only discovered broken the day a tag is
 # actually pushed. docker.yml's `publish` job cannot be reached this way: it
@@ -87,9 +87,6 @@ on:
       tags:
         description: The real tags this image should carry once promoted — see `build`'s own output below.
         value: ${{ jobs.build.outputs.tags }}
-      pending-ref:
-        description: Where the digest `build` pushed can be found — see `build`'s own output below.
-        value: ${{ jobs.build.outputs.pending-ref }}
       digest-ref:
         description: The pushed image by digest (image@sha256:...), empty when nothing was pushed — see `build`'s own output below.
         value: ${{ jobs.build.outputs.digest-ref }}
@@ -181,15 +178,14 @@ jobs:
       # metadata-action so `publish` promotes exactly what this build decided,
       # rather than re-deriving the same ref/semver logic a second time.
       tags: ${{ steps.meta.outputs.tags }}
-      # Where `publish` finds the digest this job actually pushed.
-      pending-ref: ${{ steps.pending.outputs.ref }}
-      # The same digest, pinned: what docker.yml's `scan` job scans and
-      # `publish` promotes, so a second push to `pending-<sha>` in between
-      # cannot swap the bytes.
+      # The digest this job pushed, pinned: what docker.yml's `scan` job
+      # scans and `publish` promotes, so a second push to `pending-<sha>` in
+      # between cannot swap the bytes.
       digest-ref: ${{ steps.digest.outputs.ref }}
     # Whether this run pushes: a `v*` tag, a push to `main`, or a dispatch
     # rehearsal. Every other event (a PR) builds only. Read by the login,
-    # build, smoke test and attestation steps below, so they cannot disagree.
+    # dest, build, smoke test and attestation steps below, so they cannot
+    # disagree.
     env:
       PUSH_IMAGE: >-
         ${{ startsWith(github.ref, 'refs/tags/v') ||
@@ -250,7 +246,6 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             # No `-` clause: a prerelease tag (v1.0.0-rc1) must never move
@@ -259,27 +254,38 @@ jobs:
             type=sha
           labels: ${{ inputs.extra-labels }}
 
-      # A tag nobody would find by browsing GHCR's tag list, named after the
+      # Where a pushing build lands (`tag`), and which of the two kinds of
+      # push this is (`kind`); both empty when `PUSH_IMAGE` says a PR, which
+      # pushes nothing and takes `meta`'s tags for the loaded image instead.
+      #
+      # `kind=pending`, a `v*` tag or a rehearsal dispatch: `pending-<sha>`, a
+      # tag nobody would find by browsing GHCR's tag list, named after the
       # commit rather than a counter so two runs of the same push never race
       # each other for it. This is where a `v*` tag's real build actually
-      # lands — `publish` only ever points the human-facing tags at it.
-      - id: pending
+      # lands — `publish` only ever points the human-facing tags at it. It
+      # also rebuilds the runtime base uncached (`no-cache-filters` below).
+      #
+      # `kind=sha`, the one other pushing event, a push to `main`: the
+      # unattended publish path, straight to `sha-<7>` and nothing else — no
+      # `latest`, no branch name — findable only by someone who already has
+      # the commit sha that produced it. Matches `type=sha`'s own default
+      # naming (`meta` above, and CLAUDE.md's Repository section) so there is
+      # one sha-tag format to know, not two. The only kind that writes the
+      # build cache (`cache-to` below).
+      - id: dest
         env:
           IMAGE: ${{ inputs.image }}
           SHA: ${{ github.sha }}
-        run: echo "ref=${IMAGE}:pending-${SHA}" >>"$GITHUB_OUTPUT"
-
-      # The unattended publish path: every push to `main` ships straight to
-      # this tag and nothing else — no `latest`, no branch name — findable
-      # only by someone who already has the commit sha that produced it.
-      # Matches `type=sha`'s own default naming (`meta` above, and
-      # CLAUDE.md's Repository section) so there is one sha-tag format to
-      # know, not two.
-      - id: sha-tag
-        env:
-          IMAGE: ${{ inputs.image }}
-          SHA: ${{ github.sha }}
-        run: echo "ref=${IMAGE}:sha-${SHA:0:7}" >>"$GITHUB_OUTPUT"
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          [ "$PUSH_IMAGE" = true ] || exit 0
+          if [[ $REF == refs/tags/v* || $EVENT == workflow_dispatch ]]; then
+            printf 'tag=%s:pending-%s\nkind=pending\n' "$IMAGE" "$SHA" >>"$GITHUB_OUTPUT"
+          else
+            printf 'tag=%s:sha-%s\nkind=sha\n' "$IMAGE" "${SHA:0:7}" >>"$GITHUB_OUTPUT"
+          fi
 
       # The version the binary reports. A `v*` tag is the version, verbatim
       # minus the `v`; everything else is a dev build stamped with its commit.
@@ -320,10 +326,10 @@ jobs:
           # path (and what `publish` eventually promotes). See the QEMU step
           # above for the corresponding skip.
           platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
-          # A `v*` tag pushes to the provisional ref above — the real tags
-          # computed by `meta` reach GHCR only once `publish` passes its
+          # A `v*` tag pushes to the provisional ref `dest` picked — the real
+          # tags computed by `meta` reach GHCR only once `publish` passes its
           # gate. A `main` push ships straight to its own sha-only tag with
-          # no gate — see that step's own comment for why. A manual
+          # no gate — see `dest`'s comment for why. A manual
           # `workflow_dispatch` also pushes now, to the same provisional ref a
           # tag push would use — the rehearsal path; see the header comment.
           # Every other event (a PR) keeps pushing nothing at all: those
@@ -340,10 +346,7 @@ jobs:
           # the docker exporter a PR's `load` uses cannot hold them.
           sbom: ${{ env.PUSH_IMAGE == 'true' }}
           provenance: ${{ env.PUSH_IMAGE == 'true' && 'mode=max' || 'false' }}
-          tags: >-
-            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && steps.pending.outputs.ref ||
-                (github.ref == 'refs/heads/main' && github.event_name == 'push') && steps.sha-tag.outputs.ref ||
-                steps.meta.outputs.tags }}
+          tags: ${{ steps.dest.outputs.tag || steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # `cache-from` reads on every event; `cache-to` writes only from a
           # push to `main`. A PR or a `v*` tag reads whatever `main` last
@@ -367,10 +370,9 @@ jobs:
           # would ship whatever packages were current when `main` last wrote
           # the cache, past the scan that is meant to see today's. The Rust
           # builder stages, where the cache saves the time, still read it.
-          no-cache-filters: >-
-            ${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && 'runtime-base' || '' }}
+          no-cache-filters: ${{ steps.dest.outputs.kind == 'pending' && 'runtime-base' || '' }}
           cache-to: >-
-            ${{ (github.ref == 'refs/heads/main' && github.event_name == 'push') &&
+            ${{ steps.dest.outputs.kind == 'sha' &&
                 format('type=gha,mode=max,scope={0}', inputs.cache-scope) || '' }}
 
       - id: digest

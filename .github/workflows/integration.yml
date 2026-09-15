@@ -78,10 +78,6 @@ jobs:
           else
             matrix="$(jq -c --arg t "$TIER" '{include: [.[] | select(.tier == $t)]}' <<<"$all")"
           fi
-          [ "$(jq '.include | length' <<<"$matrix")" -gt 0 ] || {
-            echo "::error::unknown tier '$TIER'"
-            exit 1
-          }
           echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
 
   tier:
@@ -103,11 +99,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # See ci.yml's `fmt` job for why rustup directly.
       - name: Install the stable toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+        uses: $/.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

@@ -20,27 +20,26 @@ just-the-docs|_config.yml|remote_theme: just-the-docs/just-the-docs@v\([0-9][0-9
 # shellcheck disable=SC2034 # read by check_tool_versions.sh
 CI_IMAGE_GLOBS='docker/Dockerfile docker/**/compose*.y*ml'
 
-# ci_local_checks - the MSRV is one claim written in three places: Cargo.toml's
-# rust-version, the Dockerfile's `FROM rust:<x>` (what makes `docker build` an
-# MSRV check), and ci.yml's `msrv` job toolchain. Raising only the Dockerfile
-# or ci.yml fails nowhere, so this compares them.
+# ci_local_checks - the MSRV is one claim written in two places: Cargo.toml's
+# rust-version and the Dockerfile's `FROM rust:<x>` (what makes `docker build`
+# an MSRV check). ci.yml's `msrv` job reads Cargo.toml itself, through the same
+# `scripts/check.sh --msrv` as here. Raising only one of the two fails nowhere,
+# so this compares them.
 function ci_local_checks() {
-  local cargo docker ci
-  cargo="$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([0-9.]*\)".*/\1/p' Cargo.toml | head -1)"
+  local cargo docker
+  cargo="$(scripts/check.sh --msrv 2>/dev/null)" || cargo=""
   docker="$(sed -n 's/^FROM[[:space:]]\{1,\}\(--platform=[^[:space:]]*[[:space:]]\{1,\}\)\{0,1\}rust:\([0-9.]*\)[-@].*/\2/p' docker/Dockerfile | head -1)"
-  ci="$(sed -n 's/.*rustup toolchain install \([0-9][0-9.]*\).*/\1/p' .github/workflows/ci.yml | sort -u)"
 
-  echo "## MSRV (Cargo.toml / docker/Dockerfile / ci.yml msrv job)"
+  echo "## MSRV (Cargo.toml / docker/Dockerfile)"
   echo
-  if [ -z "$cargo" ] || [ -z "$docker" ] || [ -z "$ci" ]; then
-    printf '%-32s ERROR (could not read: Cargo.toml=%s docker/Dockerfile=%s ci.yml=%s)\n' \
-      "MSRV" "${cargo:-?}" "${docker:-?}" "${ci:-?}"
-    _ci_problem "MSRV" "could not read the MSRV from all three places - Cargo.toml=${cargo:-?} docker/Dockerfile=${docker:-?} ci.yml=${ci:-?}"
-  elif [ "$cargo" = "$docker" ] && [ "$cargo" = "$ci" ]; then
+  if [ -z "$cargo" ] || [ -z "$docker" ]; then
+    printf '%-32s ERROR (could not read: Cargo.toml=%s docker/Dockerfile=%s)\n' \
+      "MSRV" "${cargo:-?}" "${docker:-?}"
+    _ci_problem "MSRV" "could not read the MSRV from both places - Cargo.toml=${cargo:-?} docker/Dockerfile=${docker:-?}"
+  elif [ "$cargo" = "$docker" ]; then
     printf '%-32s %-14s agrees\n' "MSRV" "$cargo"
   else
-    printf '%-32s MISMATCH (Cargo.toml=%s docker/Dockerfile=%s ci.yml=%s)\n' \
-      "MSRV" "$cargo" "$docker" "$(printf '%s' "$ci" | tr '\n' ' ')"
-    _ci_problem "MSRV mismatch" "Cargo.toml=$cargo docker/Dockerfile=$docker ci.yml=$(printf '%s' "$ci" | tr '\n' ' ') - these three must agree"
+    printf '%-32s MISMATCH (Cargo.toml=%s docker/Dockerfile=%s)\n' "MSRV" "$cargo" "$docker"
+    _ci_problem "MSRV mismatch" "Cargo.toml=$cargo docker/Dockerfile=$docker - these two must agree"
   fi
 }
