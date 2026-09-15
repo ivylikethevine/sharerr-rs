@@ -8,7 +8,7 @@ ____________ used to [be/do/say] ____________ but now it [is/does/says] ________
 
 ## Release note
 
-<!-- Required: one or two user-facing sentences, or `none`. A missing or blank section fails the `release note (pr body)` check. The release workflow collects these into the release body; a dev -> main PR sums up the notes of the PRs it brings in. -->
+<!-- Optional: one or two user-facing sentences, or `none`. A missing or blank section gets a warning from the `release note (pr body)` check, not a failure. The release workflow collects these into the release body; a dev -> main PR sums up the notes of the PRs it brings in. -->
 
 none
 

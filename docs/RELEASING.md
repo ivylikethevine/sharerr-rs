@@ -157,8 +157,8 @@ have actually been promoted — and creates the Releases-tab entry:
 - **What changed**: the `## Release note` section of each pull request
   between the previous non-prerelease tag and this one (so a release covers
   its release candidates too), one bullet per PR. A `none` note is left out.
-  `release-note.yml` fails a PR whose body has no such section, or a blank
-  one, so every PR answers the question; a `dev` → `main` PR's note
+  `release-note.yml` warns (without failing) on a PR whose body has no such
+  section, or a blank one; a `dev` → `main` PR's note
   aggregates the notes of the PRs merged into `dev`. See
   [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#a-maintained-changelogmd) for why this is
   the model instead of a `CHANGELOG.md`.

@@ -609,7 +609,7 @@ jobs:
           } >"$RUNNER_TEMP/preamble.md"
 
       # "What changed" is each merged PR's `## Release note` section (the PR
-      # template's; release-note.yml requires one), skipping `none` - the
+      # template's; release-note.yml warns when one is missing), skipping `none` - the
       # model docs/COMPATIBILITY.md's "A maintained CHANGELOG.md" section
       # names as the replacement for a hand-written changelog. The PRs are
       # the ones GitHub's generate-notes endpoint lists between the previous

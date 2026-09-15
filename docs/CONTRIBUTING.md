@@ -157,7 +157,7 @@ one. `ci.yml`'s header comment keeps the same list.
 | `terraform (fmt + validate)`                                           | `ci.yml`           | Yes, once added to the ruleset                      |
 | `dependency review` (pull requests only)                               | `ci.yml`           | Yes, once added to the ruleset                      |
 | `advisory (hadolint)`                                                  | `ci.yml`           | No, reports only in its step summary                |
-| `release note (pr body)`                                               | `release-note.yml` | Yes, once added to the ruleset                      |
+| `release note (pr body)`                                               | `release-note.yml` | No; warns on a missing note, never fails            |
 | CodeQL (`rust`, `actions`)                                             | `codeql.yml`       | Yes, as code scanning; alerts are diff-scoped       |
 | `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml`       | Yes; also the de-facto MSRV check and a smoke test  |
 | `coverage (pull request)`                                              | `coverage.yml`     | No; keeps one coverage comment on the PR up to date |
@@ -288,11 +288,12 @@ Branch from `dev`, where active development happens. `main` carries a
 ruleset requiring a pull request, a protected ref, and verified commit
 signatures.
 
-**Every PR body needs a `## Release note` section**: one or two sentences a
-user would care about, or `none`. `release-note.yml`'s
-`release note (pr body)` check fails a PR with no section or an empty one,
-and re-runs when the description is edited, so fixing it re-runs nothing
-else. The release workflow collects those sections into the GitHub Release
+**Every PR body should have a `## Release note` section**: one or two
+sentences a user would care about, or `none`. It is optional:
+`release-note.yml`'s `release note (pr body)` check warns on a PR with no
+section or an empty one but stays green, and re-runs when the description is
+edited, so fixing it re-runs nothing else. A PR without one is left out of
+the release page's "What changed". The release workflow collects those sections into the GitHub Release
 body (see [`RELEASING.md`](RELEASING.md#the-github-release)). A `dev` →
 `main` PR is checked the same way, since those are the PRs a release reads:
 its note aggregates the notes of the PRs that went into `dev`. Dependabot's
