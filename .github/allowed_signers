@@ -1,5 +1,9 @@
-# Who may sign a release tag. docker.yml's `gate` job runs `git tag -v`
-# against this file, so a `v*` tag signed by any other key publishes nothing.
-# Format: ssh-keygen(1) ALLOWED SIGNERS; the principal is the tagger email.
-# Rotating a key means adding the new line here, through a PR, before tagging.
-ivylikethevine@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJF2OGOYDlX8FtsbC3juV0UZmyCfEDUFt++trSpfU2gI
+# The SSH keys a release tag may be signed with - the release workflow's gate
+# job runs `git tag -v` against this file (gpg.ssh.allowedSignersFile) and
+# refuses a tag none of them signed. Each key is one of the maintainer's
+# signing keys registered on GitHub (api.github.com/users/<login>/ssh_signing_keys).
+# Rotating a key: add the new line here and merge it to main before tagging
+# with it; drop a retired key only once no tag still to be released needs it.
+ivylikethevine@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJF2OGOYDlX8FtsbC3juV0UZmyCfEDUFt++trSpfU2gI liona
+ivylikethevine@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAWq1DCyo4nB0h1+9a1mCrVmfytOg/ObFmEVMO1bIhgf bertha
+ivylikethevine@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC3Znn2ZnOKNi686zDqEFBoNQBrb4iewN7/KVgO+kZtd mavie
