@@ -104,13 +104,16 @@ jobs:
           egress-policy: audit
 
       # Only for docker/.trivyignore, the accepted-risk list docker.yml's
-      # release scan honours too, and the scan script both jobs share.
+      # release scan honours too, the scan script both jobs share, and the
+      # local actions it calls (a `uses: ./` step needs its files on disk).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
             docker/.trivyignore
             .github/scripts/trivy_scan.sh
+            .github/actions/setup-tool/
+            .github/actions/advisory-note/
           sparse-checkout-cone-mode: false
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
