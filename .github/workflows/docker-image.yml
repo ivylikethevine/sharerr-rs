@@ -113,7 +113,8 @@ on:
         default: 30
       extra-labels:
         description: >-
-          Extra OCI labels for docker/metadata-action, on top of its defaults.
+          Extra OCI metadata for docker/metadata-action, on top of its defaults,
+          applied both as image labels and as manifest and index annotations.
           docker.yml gets org.opencontainers.image.source for free because its
           `image` is the repository itself; an image named for a crate instead
           (the lighthouse) has to state the link back to this repo explicitly.
@@ -235,8 +236,18 @@ jobs:
 
       # The tags this build *would* publish, computed either way: `publish`
       # reads this output regardless of whether this run pushes anything today.
+      #
+      # The same OCI metadata goes out twice: as `labels` on each
+      # architecture's image config (what `docker inspect` shows), and as
+      # `annotations` on the manifests and the index. GHCR's package page
+      # reads a multi-arch image's description and source link off the
+      # index's annotations, never a config label, so labels alone leave the
+      # page blank. metadata-action builds the two lists from separate inputs,
+      # which is why `extra-labels` is passed to both.
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
           images: ${{ inputs.image }}
           # `latest` comes only from the explicit `type=raw` rule below, never
@@ -253,6 +264,7 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
             type=sha
           labels: ${{ inputs.extra-labels }}
+          annotations: ${{ inputs.extra-labels }}
 
       # Where a pushing build lands (`tag`), and which of the two kinds of
       # push this is (`kind`); both empty when `PUSH_IMAGE` says a PR, which
@@ -348,6 +360,11 @@ jobs:
           provenance: ${{ env.PUSH_IMAGE == 'true' && 'mode=max' || 'false' }}
           tags: ${{ steps.dest.outputs.tag || steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Pushing builds only, like `sbom`: a PR's single-platform `load`
+          # has no index, and BuildKit refuses an `index:` annotation there
+          # rather than dropping it. `publish`'s retag keeps them, since
+          # `imagetools create` from one index source copies its bytes as-is.
+          annotations: ${{ env.PUSH_IMAGE == 'true' && steps.meta.outputs.annotations || '' }}
           # `cache-from` reads on every event; `cache-to` writes only from a
           # push to `main`. A PR or a `v*` tag reads whatever `main` last
           # wrote (GitHub Actions cache entries are visible to every ref, not
