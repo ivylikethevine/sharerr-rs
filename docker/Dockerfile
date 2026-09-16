@@ -245,3 +245,7 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=15s --retries=3 \
 
 ENTRYPOINT ["/usr/local/bin/sharerr"]
 CMD ["serve"]
+
+LABEL org.opencontainers.image.source=https://github.com/ivylikethevine/sharerr-rs
+LABEL org.opencontainers.image.description="debian trixie based installation of sharerr-rs, a library sharing system"
+LABEL org.opencontainers.image.licenses=MIT
