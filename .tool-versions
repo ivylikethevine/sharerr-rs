@@ -1,0 +1,6 @@
+# asdf pins for local runs of scripts/check.sh. CI tools, yq and terraform
+# included, live in .github/actions/setup-tool/tools.txt; keep these matching.
+# rust follows CI's `stable` (Cargo.toml's rust-version is the floor).
+rust stable
+yq 4.53.6
+terraform 1.16.1
