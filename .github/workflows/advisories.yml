@@ -1,37 +1,18 @@
 name: Advisories
 
-# The notification half of cargo-deny.
+# The tracking-issue half of ci.yml's dependency audit, over Cargo.lock
+# (cargo-deny's `advisories` check; licenses, bans and sources only fail on
+# what a diff changed) and .github/package-lock.json (npm audit). ci.yml's
+# audit job blocks a pull request whose locks carry a known advisory; an
+# advisory published later against locks nobody touched would only turn a
+# scheduled run red. So this keeps one `advisories` issue current: opened on
+# a finding, rewritten while it stands, closed by the run that finds
+# everything clean. It never blocks anything.
 #
-# ci.yml already runs `cargo deny check advisories licenses bans sources` on
-# every push and pull request. That job is the gate: it fails the build, which is the right answer when somebody's diff is
-# what pulled in the offending crate.
-#
-# It is the wrong shape for the other case, and the other case is the common
-# one. A RUSTSEC advisory is published against a dependency this repo has not
-# touched in months; the weekly run turns red on a Monday morning; nobody is
-# looking at a scheduled run they did not start. The finding is a standing
-# state of `Cargo.lock`, not an event, and a red run that goes unopened is a
-# notification only in the sense that a tree falling in a forest is.
-#
-# So this workflow asks the same question and answers it differently: one
-# tracking issue, opened when an advisory lands, rewritten with the current
-# report on every later run, closed by the run that finds the tree clean. It is
-# advisory in the literal sense — it never blocks a merge, because ci.yml
-# already does that for anything a diff introduces.
-#
-# Only `advisories` here, not the full `licenses bans sources` set. Those three
-# fail on something the repo itself changed, which is ci.yml's job; advisories
-# is the only one that can start failing with nobody having touched anything.
-#
-# Also chained off every green CI run on main, alongside the weekly cron: a
-# merge is the other moment worth checking, since a bumped Cargo.lock can
-# introduce an already-published advisory the same way a new one landing
-# upstream can. Gated on green rather than a bare `push` so a tree
-# `cargo test` already rejected isn't also the one this reports against —
-# see pages.yml's header for why a workflow_run trigger is safe despite
-# zizmor's default suspicion of it. The cron stays because the common case
-# above — nobody touched anything — needs it regardless.
-
+# Runs after every green CI run on a push to main (a merge can bring in an
+# already-published advisory), weekly (advisories land with no push here), and
+# on dispatch. workflow_run is safe here: the job runs only after a green push
+# to main.
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: [CI]
@@ -44,25 +25,25 @@ on: # zizmor: ignore[dangerous-triggers]
 permissions:
   contents: read
 
+# Queue rather than cancel: a run cancelled mid-upsert can leave the tracking
+# issue half-written or open a duplicate.
 concurrency:
   group: advisories
   cancel-in-progress: false
 
 jobs:
   advisories:
-    name: RUSTSEC advisories against Cargo.lock (advisory)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # only a green push to main gets a fresh run; the schedule and a manual
-    # dispatch pass the first clause
+    name: dependency advisories (cargo-deny + npm audit, advisory)
+    # only a green push to main; the schedule and a dispatch pass the first clause
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-      # the one write this job does: upsert (and close) its own tracking issue
-      issues: write
+      issues: write # open, refresh or close the tracking issue
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
@@ -70,62 +51,83 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
           persist-credentials: false
 
-      # The tools.txt pin, the same binary ci.yml's `audit` gate runs: a
-      # sha256-verified release asset rather than `cargo install`, which would
-      # spend two minutes compiling it every run. The advisory database itself
-      # is fetched fresh on every run, whatever the binary's version.
+      # the tools.txt pin ci.yml's audit gate runs; the advisory database is
+      # fetched fresh every run
       - uses: ./.github/actions/setup-tool
         with:
           tool: cargo-deny
 
-      # cargo-deny exits non-zero on a finding and writes its report to stderr.
-      # Captured rather than left to fail the step: a finding is the case this
-      # workflow exists to report, not a broken job.
-      - id: check
-        name: Check Cargo.lock against the advisory database
+      # Each tool exits non-zero on a finding and on a failure alike. cargo-deny
+      # names an advisory (RUSTSEC-...) or a yanked crate in a finding, and npm
+      # audit's JSON carries a vulnerability count only when the audit ran, so
+      # a failed audit fails the job instead of opening an issue.
+      - id: audit
+        name: Audit the locks
         run: |
           set -uo pipefail
+          report="$RUNNER_TEMP/advisories.md"
+          found=0
+          echo "Known advisories affect locked dependencies. The fix is usually the Dependabot bump or a" >"$report"
+          echo "\`cargo update -p <crate>\`; with no patched version yet, an \`[advisories] ignore\` entry in" >>"$report"
+          echo "\`deny.toml\` **with a comment saying why**." >>"$report"
+
           rc=0
-          cargo deny check advisories \
-            >"$RUNNER_TEMP/advisories.txt" 2>&1 || rc=$?
-          cat "$RUNNER_TEMP/advisories.txt"
-          echo "found=$rc" >>"$GITHUB_OUTPUT"
+          cargo deny check advisories >"$RUNNER_TEMP/cargo-deny.txt" 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            if ! grep -qE 'RUSTSEC-|yanked' "$RUNNER_TEMP/cargo-deny.txt"; then
+              cat "$RUNNER_TEMP/cargo-deny.txt"
+              echo "::error title=cargo-deny::the audit did not run (exit $rc)"
+              exit 1
+            fi
+            found=1
+            {
+              echo
+              echo "### Rust crates (cargo-deny)"
+              echo
+              echo "\`Cargo.lock\`:"
+              echo
+              echo '````'
+              cat "$RUNNER_TEMP/cargo-deny.txt"
+              echo '````'
+            } >>"$report"
+          fi
 
-      - name: Build the report
-        if: steps.check.outputs.found != '0'
-        run: |
-          set -euo pipefail
-          {
-            echo "\`cargo deny check advisories\` is failing against the current \`Cargo.lock\`."
-            echo
-            echo "The fix is usually a \`cargo update -p <crate>\`, or dependabot's open"
-            echo "bump PR for it. Where no patched version exists yet, the escape hatch is"
-            echo "an \`[advisories] ignore\` entry in \`deny.toml\` **with a comment saying why**."
-            echo
-            echo '```'
-            cat "$RUNNER_TEMP/advisories.txt"
-            echo '```'
-          } >"$RUNNER_TEMP/report.md"
+          rc=0
+          npm audit --prefix .github --json >"$RUNNER_TEMP/npm-audit.json" || rc=$?
+          total="$(jq -r '.metadata.vulnerabilities.total // empty' "$RUNNER_TEMP/npm-audit.json" 2>/dev/null)"
+          if [ -z "$total" ]; then
+            cat "$RUNNER_TEMP/npm-audit.json"
+            echo "::error title=npm audit::the audit did not run (exit $rc)"
+            exit 1
+          fi
+          if [ "$total" -gt 0 ]; then
+            found=1
+            {
+              echo
+              echo "### Markdown tools (npm audit)"
+              echo
+              echo "\`.github/package-lock.json\`:"
+              echo
+              echo '````'
+              npm audit --prefix .github || true
+              echo '````'
+            } >>"$report"
+          fi
 
-      # See .github/actions/upsert-tracking-issue for the shape this, tool-
-      # versions.yml, and image-scan.yml's `pins` job all share.
-      # warning-title/warning-body let the action emit the ::warning itself
-      # once the issue is upserted, so no separate trailing step here has to
-      # do it a second time.
-      - name: Keep the tracking issue current
-        uses: ./.github/actions/upsert-tracking-issue
+          cat "$report"
+          echo "found=$found" >>"$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/upsert-tracking-issue
         with:
           label: advisories
           label-color: B60205
-          label-description: cargo-deny reports an advisory against the locked dependency tree
-          title: A RUSTSEC advisory affects a dependency in Cargo.lock
-          resolved: ${{ steps.check.outputs.found == '0' }}
-          close-comment: cargo-deny reports no advisories against the current `Cargo.lock`.
-          resolved-when: the tree is clean
-          body-file: ${{ runner.temp }}/report.md
-          warning-title: cargo-deny
-          warning-body: A RUSTSEC advisory affects Cargo.lock - see the issue
+          label-description: A known advisory affects a locked dependency
+          title: Known advisories affect locked dependencies
+          resolved: ${{ steps.audit.outputs.found == '0' }}
+          close-comment: cargo-deny and npm audit report nothing against the current locks.
+          resolved-when: cargo-deny and npm audit both report nothing
+          body-file: ${{ runner.temp }}/advisories.md
+          warning-title: advisories
+          warning-body: A known advisory affects a locked dependency - see the advisories issue

@@ -60,18 +60,23 @@
 #   node / npm    ci.yml (docs), scripts/check.sh   the runner image's; the
 #                 Markdown tools they run are locked in .github/package-lock.json
 
+# Installed rather than taken from the runner image, whose copy moves when the
+# image does and would change what shellcheck reports with no commit here.
+shellcheck|0.11.0|tar.xz|https://github.com/koalaman/shellcheck/releases/download/v%v/shellcheck-v%v.%a.tar.xz|--version|github:koalaman/shellcheck||linux-x86_64:linux.x86_64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198,darwin-aarch64:darwin.aarch64=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint||8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 zizmor|1.30.1|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
-# Points at kjanat/actionlint, a maintained fork, not upstream rhysd/actionlint:
-# upstream is stuck on 1.7.12 and rejects zizmor's `$/...` self-repository
-# syntax (rhysd/actionlint#732, open and unmerged as of this pin). The fork's
-# v1.9.0 added `$/...` support. The workflows have since gone back to
-# `./.github/...` (Scorecard misreads `$/` as an unpinned third-party action;
-# see zizmor.yml's self-repository entry), so `$/` support is no longer what
-# holds this pin here. A 12-star fork of a 4,195-star tool is a real trade,
-# made acceptable by the sha256 column: a compromised future fork release
-# can't land silently, since install.sh refuses a checksum mismatch. Revert
-# to rhysd/actionlint once nothing in the workflows needs the fork.
-actionlint|1.17.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:kjanat/actionlint||620abd485a12b6ab1125b844a876414e1d5bd2af8a3125b27f82b01d0d9d6e5a
+# A pin, not `releases/latest`: new rules arrive as a reviewed bump instead of
+# changing what an unrelated PR's lint reports.
+hadolint|2.15.1|raw|https://github.com/hadolint/hadolint/releases/download/v%v/hadolint-linux-x86_64|--version|github:hadolint/hadolint||c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+# Pinning the binary does not stale the scan: trivy downloads its vulnerability
+# database on every run, whatever this pin is.
+trivy|0.74.0|tar.gz|https://github.com/aquasecurity/trivy/releases/download/v%v/trivy_%v_Linux-64bit.tar.gz|--version|github:aquasecurity/trivy||2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
+# Tags are "lychee-v<version>"; the tag-prefix column strips that so the drift
+# check compares versions, not strings.
+lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v|1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
+# `version` is a subcommand, not a flag.
+gitleaks|8.30.1|tar.gz|https://github.com/gitleaks/gitleaks/releases/download/v%v/gitleaks_%v_linux_x64.tar.gz|version|github:gitleaks/gitleaks||551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+typos|1.50.2|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||abcb3e257c7c2abeff4d903f7fe68071357637605bdb283ce2251f44bc70dc09
 # verify is "llvm-cov --version", not the bare flag every other row uses: the
 # binary is a cargo subcommand plugin - built the same way "cargo llvm-cov ..."
 # works, by expecting its own subcommand name as the first argument even when
@@ -81,35 +86,14 @@ actionlint|1.17.0|tar.gz|https://github.com/kjanat/actionlint/releases/download/
 # Downstream usage in coverage.yml is unaffected either way: it always goes through
 # `cargo llvm-cov ...`, which cargo itself resolves the same correct way.
 cargo-llvm-cov|0.9.1|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/download/v%v/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz|llvm-cov --version|github:taiki-e/cargo-llvm-cov||b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
-# lychee tags its releases "lychee-v<version>", not "v<version>" like every
-# other row here - the url column copes fine (the literal "lychee-v" prefix
-# just sits in front of %v). The trailing "lychee-v" column is what lets
-# check_tool_versions.sh compare correctly instead of misreading
-# "lychee-v0.24.2" as newer than any pin forever, which is why this row no
-# longer needs `check = "-"` to opt out of drift checking entirely.
-lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v|1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
-typos|1.50.1|tar.gz|https://github.com/crate-ci/typos/releases/download/v%v/typos-v%v-x86_64-unknown-linux-musl.tar.gz|--version|github:crate-ci/typos||edf0545109aee6a22751d04ddecb97c45be47d3aa0409564fb895eeeace91b1e
-# Installed rather than taken from the runner image, whose copy moves when
-# the image does and would change what ci.yml's shellcheck gate reports with
-# no commit here to explain it.
-shellcheck|0.11.0|tar.xz|https://github.com/koalaman/shellcheck/releases/download/v%v/shellcheck-v%v.linux.x86_64.tar.xz|--version|github:koalaman/shellcheck||8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
-# A pin, not `releases/latest`: new rules then arrive as a reviewed bump
-# instead of changing what an unrelated PR's advisory job reports. The job
-# never blocks a merge either way.
-hadolint|2.15.1|raw|https://github.com/hadolint/hadolint/releases/download/v%v/hadolint-linux-x86_64|--version|github:hadolint/hadolint||c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
-# Pinning the binary does not stale the scan: trivy downloads its vulnerability
-# database on every run regardless of version (see the floating list above).
-trivy|0.74.0|tar.gz|https://github.com/aquasecurity/trivy/releases/download/v%v/trivy_%v_Linux-64bit.tar.gz|--version|github:aquasecurity/trivy||2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a
 # Tags have no "v" (0.20.2); the blank tag-prefix accepts that. Like trivy, the
 # advisory database is fetched fresh on every run, whatever this pin is.
 cargo-deny|0.20.2|tar.gz|https://github.com/EmbarkStudios/cargo-deny/releases/download/%v/cargo-deny-%v-x86_64-unknown-linux-musl.tar.gz|--version|github:EmbarkStudios/cargo-deny||9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
-# Full-history secret scan in ci.yml's `gitleaks` job and scripts/check.sh.
-gitleaks|8.30.1|tar.gz|https://github.com/gitleaks/gitleaks/releases/download/v%v/gitleaks_%v_linux_x64.tar.gz|version|github:gitleaks/gitleaks||551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 # `fmt -check` and `validate` over the hosted-lighthouse modules (ci.yml's
 # `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
 # zipped, not as GitHub release assets; its GitHub releases still carry the
 # tags the drift check reads.
-terraform|1.16.1|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||745d33b4b02b7980c62a38ec1beea24ee084ea8caf3f503c200554bd9a0cbe49
+terraform|1.16.2|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a
 # mikefarah's Go yq, for .github/scripts/lint_workflows.sh (which also accepts
 # the Python yq, but CI pins this one).
 # Installed rather than taken from the runner image, and several distros ship

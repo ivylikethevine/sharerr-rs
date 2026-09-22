@@ -1,4 +1,6 @@
-# Build output, and the OpenAPI document `sharerr openapi` generates: its bytes
-# are the generator's, never hand- or formatter-edited.
+# Paths prettier must never format: build output, the OpenAPI document
+# `sharerr openapi` generates, and untracked agent notes and worktrees.
 target/
 docs/openapi.json
+CLAUDE.local.md
+.claude/worktrees/

@@ -24,6 +24,18 @@ set -euo pipefail
 # fail on paths that look fine in the source.
 cd "$(dirname "$(readlink -f "$0")")/.."
 
+# The *arr containers run as SHARERR_TEST_UID/GID (compose's default is 1000),
+# and `seed-arr` writes their SQLite databases from the host, so the two have to
+# be the same user. Without this a host user other than 1000 (GitHub's runner is
+# 1001) gets "attempt to write a readonly database" from seeding.
+export SHARERR_TEST_UID="${SHARERR_TEST_UID:-$(id -u)}"
+export SHARERR_TEST_GID="${SHARERR_TEST_GID:-$(id -g)}"
+
+# Every check below reads curl's default behaviour (a bare `-s -w '%{http_code}'`
+# expects a 4xx/5xx to come back as a status, not an exit code), so a ~/.curlrc
+# with `fail` would abort the run on the first expected 501. `-q`, first, skips it.
+curl() { command curl -q "$@"; }
+
 # Which stack, and everything that differs between them. Ports are offset in the
 # VPN stack so both can be up at once.
 VPN=0
@@ -635,4 +647,6 @@ fi
 # above — so only it tags music. Without this, the suite's discovered-file
 # count assumes music was tagged on every stack and fails on the other three.
 export SHARERR_E2E_LIDARR=$LIDARR
-cargo test -p sharerr --features e2e -- --ignored --test-threads=1
+# `--test e2e`, not every test binary: `e2e_two_instance.rs` and `e2e_mesh.rs`
+# carry `--ignored` tests too, which need their own stacks and fail here.
+cargo test -p sharerr --features e2e --test e2e -- --ignored --test-threads=1

@@ -426,9 +426,7 @@ OpenSSF Scorecard's Pinned-Dependencies check only treats a `./` prefix as a
 local action, so every `$/` line became a "third-party GitHubAction not
 pinned by hash" code-scanning alert (37 of them) and capped that check at
 6/10. `.github/zizmor.yml` disables the `self-repository` audit for this
-reason; don't re-apply `zizmor --fix` for it. `actionlint` still points at
-`kjanat/actionlint`, the maintained fork adopted for `$/` support; the
-`tools.txt` comment on that row has the trade and when to go back upstream.
+reason; don't re-apply `zizmor --fix` for it.
 
 ### Generated artifacts on main
 

@@ -34,10 +34,12 @@
 # sourced after the helpers below are defined and before any section runs.
 # It may:
 #   - set CI_WORKFLOW_ROSTER, one row per line:
-#       name|file-glob|sed-regex|check|tag-prefix
+#       name|file-glob|sed-regex|check|tag-prefix|held
 #     sed-regex is a BRE with one \(capture\) around the version; every file
 #     matching file-glob is read, and all matches must agree. check and
-#     tag-prefix mean what they do in tools.txt.
+#     tag-prefix mean what they do in tools.txt. held, optional, is one
+#     upstream release known broken: while it is the latest, the row reads
+#     `held` instead of OUTDATED, and any later release reports as usual.
 #   - set CI_IMAGE_GLOBS (space-separated git pathspec globs; empty skips
 #     section 4)
 #   - define ci_local_checks, called last. It prints its own `## heading`
@@ -51,13 +53,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 # shellcheck source=../actions/setup-tool/lib.sh
 source .github/actions/setup-tool/lib.sh
+# shellcheck source=./lib.sh
+source .github/scripts/lib.sh
 
-for _ci_need in curl jq; do
-  command -v "$_ci_need" >/dev/null 2>&1 || {
-    echo "check_tool_versions: no $_ci_need on PATH" >&2
-    exit 127
-  }
-done
+_ci_need check_tool_versions curl jq
 
 # mirrors `cooldown: default-days` in .github/dependabot.yml; change both
 COOLDOWN_DAYS="${TOOL_COOLDOWN_DAYS:-7}"
@@ -156,10 +155,10 @@ function _ci_at_least() {
   [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | tail -n1)" = "$1" ]
 }
 
-# _ci_report_pin <label> <pinned> <check> <tag-prefix> <where> - one row;
-# <where> names the place to bump it, for the annotation
+# _ci_report_pin <label> <pinned> <check> <tag-prefix> <where> [held] - one
+# row; <where> names the place to bump it, for the annotation
 function _ci_report_pin() {
-  local label="$1" pinned="$2" check="$3" prefix="$4" where="$5" due newest age note=""
+  local label="$1" pinned="$2" check="$3" prefix="$4" where="$5" held="${6-}" due newest age note=""
   if [ "$check" = "-" ]; then
     printf '%-32s %-14s (not drift-checked - see %s)\n' "$label" "$pinned" "$where"
     return 0
@@ -184,6 +183,8 @@ function _ci_report_pin() {
   # an empty `due` means every release is still cooling down: not drift
   if [ -z "$due" ] || _ci_at_least "$pinned" "$due"; then
     printf '%-32s %-14s current%s\n' "$label" "$pinned" "$note"
+  elif [ -n "$held" ] && [ "$due" = "$held" ]; then
+    printf '%-32s %-14s held (latest %s is known broken - see %s)%s\n' "$label" "$pinned" "$due" "$where" "$note"
   else
     printf '%-32s %-14s OUTDATED (latest: %s)%s\n' "$label" "$pinned" "$due" "$note"
     _ci_problem "$label outdated" "pinned $pinned, latest $due - bump it in $where"
@@ -197,25 +198,6 @@ function _ci_extract() {
   { compgen -G "$2" || true; } | while IFS= read -r f; do
     sed -n "s|.*$1.*|\1|p" "$f"
   done | sort -u
-}
-
-# _ci_files <globs> - tracked files matching space-separated pathspec globs
-function _ci_files() {
-  local globs=() specs=() g
-  read -ra globs <<<"$1"
-  [ "${#globs[@]}" -gt 0 ] || return 0
-  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    for g in "${globs[@]}"; do specs+=(":(glob)$g"); done
-    git ls-files -- "${specs[@]}"
-  else
-    (
-      shopt -s globstar nullglob
-      for g in "${globs[@]}"; do
-        # shellcheck disable=SC2086 # the glob is expanded here on purpose
-        printf '%s\n' $g
-      done
-    )
-  fi | sort -u
 }
 
 if [ -f .github/scripts/check_tool_versions.local.sh ]; then
@@ -242,7 +224,7 @@ if [ -n "$CI_WORKFLOW_ROSTER" ]; then
   echo
   echo "## Inline pins (CI_WORKFLOW_ROSTER)"
   echo
-  while IFS='|' read -r tool glob regex check prefix; do
+  while IFS='|' read -r tool glob regex check prefix held; do
     [ -n "$tool" ] || continue
     # a row that stops matching is an error, not a skip: a roster that
     # quietly covers nothing is worse than none
@@ -257,7 +239,7 @@ if [ -n "$CI_WORKFLOW_ROSTER" ]; then
       _ci_problem "$tool" "$glob pins more than one version: $(printf '%s' "$found" | tr '\n' ' ')"
       ;;
     *)
-      _ci_report_pin "$tool" "$found" "$check" "$prefix" "$glob"
+      _ci_report_pin "$tool" "$found" "$check" "$prefix" "$glob" "$held"
       ;;
     esac
   done <<<"$CI_WORKFLOW_ROSTER"

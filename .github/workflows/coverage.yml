@@ -1,3 +1,5 @@
+name: Coverage
+
 # Line/region coverage over the hermetic (tier 1) test suite, via
 # cargo-llvm-cov. Two paths:
 #
@@ -22,38 +24,32 @@
 # can write (the comment) checks nothing out and only reads that run's own
 # artifact. A fork PR's token cannot write to the PR at all, so forks skip
 # both jobs rather than measure a figure nobody would see.
-name: Coverage
-
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
-  # Drafts skip, same as ci.yml; `converted_to_draft` is not listed because
-  # there is no PR-side comment to withdraw.
+  # drafts skip, same as ci.yml; docs-only changes can't move either figure
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: ["**/*.md", "docs/**"]
   workflow_dispatch:
-
-# Per PR, a follow-up push supersedes the previous measurement. On `main`, two
-# merges in quick succession would otherwise run two full instrumented builds
-# back to back, each triggering its own pages.yml deploy — the later one is
-# what should ship, so cancelling (or displacing a pending run) loses nothing.
-# Nothing here upserts an issue, so there is no list-then-create race to
-# serialise.
-concurrency:
-  group: coverage-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
+
+# A newer push to a pull request replaces its in-flight measurement; main's
+# runs queue, since pages.yml deploys from each one.
+concurrency:
+  group: coverage-${{ github.event.pull_request.number || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   coverage:
-    name: cargo-llvm-cov (workspace)
+    name: coverage (cargo-llvm-cov)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # only a green push to main gets a fresh run; a manual dispatch passes

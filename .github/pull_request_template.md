@@ -8,7 +8,11 @@ ____________ used to [be/do/say] ____________ but now it [is/does/says] ________
 
 ## Release note
 
-<!-- Optional: one or two user-facing sentences, or `none`. A missing or blank section gets a warning from the `release note (pr body)` check, not a failure. The release workflow collects these into the release body; a dev -> main PR sums up the notes of the PRs it brings in. -->
+<!-- One or two sentences a user reads on the release page: what they see
+     differently after upgrading, present tense, no file names. Write `none`
+     when nothing a user sees changes (tests, CI, doc wording). The release
+     workflow collects these into the release body; a dev -> main PR sums up
+     the notes of the PRs it brings in. -->
 
 none
 
@@ -29,7 +33,7 @@ If one of these cannot be completed, give a justification.
 
 ## AI disclosure
 
-AI usage is allowed on this project, but "[agent] said _______" is not a valid excuse for problems with the final product. See [AI usage](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#ai-usage).
+AI usage is allowed on this project, but "[agent] said _______" is not a valid excuse for problems with the final product. See [AI usage](https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#ai-usage) and [AI-assisted contributions](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#ai-assisted-contributions).
 
 - [ ] (If applicable) This code was written with generative AI.
 - [ ] **(If yes to above)** I have reviewed, understood, and stand behind this code as if it were entirely hand written.
