@@ -14,10 +14,8 @@
 .jekyll-cache/
 _site/
 
-# Agent settings: .claude/settings.json is shared on purpose (it is tracked);
-# the local override file and scratch worktrees are per machine. So are
-# host-specific agent notes, which go in CLAUDE.local.md rather than the
-# tracked CLAUDE.md.
+# Claude Code: .claude/settings.json is shared and tracked; personal overrides,
+# agent worktrees and host-specific agent notes stay local.
 .claude/settings.local.json
 .claude/worktrees/
 CLAUDE.local.md

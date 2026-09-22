@@ -1,51 +1,21 @@
 name: CodeQL
 
-# CodeQL over the two languages in this repo it can read: Rust and GitHub
-# Actions.
+# CodeQL over the languages here it can read: Rust and GitHub Actions.
+# The actions half overlaps zizmor on purpose: zizmor is the fast gate in
+# ci.yml, CodeQL the slower dataflow pass whose findings land in the Security
+# tab with a trace, and Scorecard's SAST check counts only this one.
+# build-mode none throughout: nothing needs compiling.
 #
-# Rust analysis went generally available in CodeQL 2.23.3 (Oct 2025) and covers
-# every OWASP Top 10 category except A06 (vulnerable and outdated components),
-# where it defers to dependabot — which is exactly the split this repo already
-# has, with cargo-deny and dependabot owning A06. The queries that earn their
-# keep here are the cryptographic ones: sharerr's vault is argon2 and
-# chacha20poly1305 over secrets that never touch `sharerr.toml`, and
-# `rust/hard-coded-cryptographic-value` looks for precisely the mistake that
-# code must not make — a hard-coded key, IV, nonce or salt.
-#
-# The `actions` half covers every workflow and composite action, where the interesting bugs are
-# expression injection into `run:`, an untrusted checkout feeding a privileged
-# job, and artifact or cache poisoning. That overlaps with zizmor, which already
-# gates every PR in ci.yml, and the overlap is the point rather than an
-# accident: zizmor is a fast opinionated linter that fails the build, CodeQL is
-# a slower dataflow analysis whose findings land in the Security tab with a
-# trace. Where they agree, a finding is cheap to trust; where only one fires, it
-# is worth reading. Neither replaces the other, and zizmor stays the gate.
-#
-# `build-mode: none` for both. Rust is a no-build language for CodeQL since the
-# same 2.23.3 release, which matters here: a build mode would mean compiling the
-# workspace a second time on every push, and this analysis has nothing to say
-# that `cargo clippy` does not already say faster.
-#
-# Triggers: every push to `main`, every non-draft PR, a weekly schedule, and a
-# manual dispatch. The `main` leg fires on the push itself rather than
-# chaining off a green ci.yml run the way coverage.yml and scorecard.yml do:
-# Scorecard's SAST check counts the commits that got a CodeQL run, and a
-# commit whose CI went red (or is still running when the next merge lands)
-# would otherwise count as unanalysed. A red tree still gets its baseline.
-#
-# Permissions: read-only by default; each leg adds `security-events: write`
-# for its upload, and the actions leg `actions: read` for the workflow
-# definitions it analyses.
-
+# Runs on every push to main (not after green CI: Scorecard counts analysed
+# commits), every non-draft PR, weekly for the default-branch baseline code
+# scanning diffs a PR against, and on dispatch. No `paths:` filter: a skipped
+# category leaves code scanning waiting on a result.
 on:
   push:
     branches: [main]
-  # Draft PRs analyse nothing until marked ready; ci.yml's `pull_request:`
-  # trigger explains the activity types and the job-level `if:` below.
+  # drafts analyse nothing (the jobs' `if`) until ready_for_review
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
-  # the default-branch baseline code scanning diffs a PR against. Without a
-  # scheduled run the first PR to touch a file has nothing to compare to.
   schedule:
     - cron: "17 6 * * 2"
   workflow_dispatch:
@@ -53,54 +23,31 @@ on:
 permissions:
   contents: read
 
-# A PR's superseded run is cancelled. Outside a PR the group is per commit:
-# per ref, a quick second merge would replace the first commit's queued run,
-# and that commit would get no analysis at all.
+# A PR's superseded run is cancelled. Outside a PR the group is per commit, so
+# a quick second merge can't replace the first commit's queued analysis.
 concurrency:
   group: codeql-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Both legs run on every trigger; the one exception is a draft PR (see the
-  # `pull_request:` trigger above), which uploads nothing until
-  # `ready_for_review` runs both legs on the same head commit.
-  # This used to skip a leg on a push whose diff did not touch that
-  # language's paths (a docs-only merge paid for neither analysis), via a
-  # `dorny/paths-filter` change-detection job upstream of both. That saved
-  # runner time but cost more than it saved: the `main` ruleset requires a
-  # CodeQL result before a PR can merge, and code scanning's "waiting for
-  # results" and per-category alert state on the Security tab are both keyed
-  # off the *default branch's* most recent analysis for that category. A
-  # skipped leg on a push to main uploads nothing for that category, which is
-  # what surfaced as SAST errors in the Security tab rather than a clean or
-  # merely-stale result. Pull requests, the schedule, and workflow_dispatch
-  # already bypassed the filter for the same underlying reason (see the prior
-  # revision of this file in git history if the filter is ever worth
-  # resurrecting); this removed the one trigger that still had it, `push`.
-  #
-  # Two named jobs rather than one `matrix.language: [rust, actions]` job with
-  # a per-language `if:`, because job-level `if:` cannot read the `matrix`
-  # context at all — actionlint rejects it outright, since the condition is
-  # evaluated before the matrix is expanded. Splitting is also a better fit
-  # for "one language failing should not hide the other's findings": each is
-  # now its own job with its own visible pass/fail/skip, not a matrix cell.
+  # One job per language rather than a matrix, so one failing can't hide the
+  # other's result.
   analyze-rust:
     name: CodeQL (rust)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      security-events: write
+      security-events: write # the SARIF upload
     steps:
+      # audit: extraction may resolve dependencies from the package index
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
           persist-credentials: false
 
       - name: Initialize CodeQL
@@ -116,18 +63,25 @@ jobs:
 
   analyze-actions:
     name: CodeQL (actions)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: read
-      # the SARIF upload, and the workflow definitions being analysed
-      security-events: write
-      actions: read
+      security-events: write # the SARIF upload
+      actions: read # the workflow definitions being analysed
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          disable-sudo: true
+          # the checkout, the API, the CodeQL bundle, and the cache
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            release-assets.githubusercontent.com:443
+            objects.githubusercontent.com:443
+            results-receiver.actions.githubusercontent.com:443
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

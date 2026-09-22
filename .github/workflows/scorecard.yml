@@ -1,79 +1,54 @@
 name: Scorecard
 
-# OpenSSF Scorecard. Runs after every green CI run on main, so the badge
-# reflects the state of the default branch the same day it changes without
-# grading a tree CI already rejected, plus a weekly schedule as a backstop
-# for score movement this repo didn't cause directly — an upstream Scorecard
-# check definition changing, or a quiet week with no pushes at all — and on
-# every branch protection change. See
-# pages.yml's header for why a workflow_run trigger is safe despite zizmor's
-# default suspicion of it.
+# OpenSSF Scorecard. The SARIF goes to code scanning (findings in the Security
+# tab with file and line), and publish_results puts the score on the OpenSSF
+# API the README badge reads. publish_results fires on every non-pull_request
+# event (the action's only gate), so every trigger below publishes.
 #
-# Most of what it grades this repo already does: every `uses:` is SHA-pinned,
-# dependabot covers every package ecosystem in the tree, workflow permissions
-# are least-privilege and declared per job, and docker.yml refuses to publish
-# a release whose commit lacks a green CI run. The checks worth actually watching are Pinned-Dependencies (which
-# also grades the *Dockerfiles*, now digest-pinned) and Dangerous-Workflow.
-#
-# Its SAST check counts CodeQL and does not count zizmor, actionlint, clippy or
-# cargo-deny — a real reason to run codeql.yml on every push to main, and a bad
-# reason to believe the score.
-#
-# The results are shown in two places, which answer different questions.
-# Privately, the SARIF is uploaded to code scanning, so findings land in the
-# repo's Security tab with file and line rather than inside an artifact nobody
-# downloads. Publicly, publish_results puts the score on the OpenSSF API that a
-# README badge can read.
-#
-# publish_results fires on every non-pull_request event — that is the
-# action's only gate, looser than the README's documented "push, schedule"
-# list — so the workflow_run chain and a manual dispatch both publish; only
-# `pull_request` would run the analysis without publishing, and this file
-# never triggers on that event at all.
-
+# workflow_run so a green push to main refreshes the score the same day; the
+# job gates on the run's conclusion and event, and checkout uses the default
+# ref, never the triggering run's payload. The weekly cron re-grades against
+# upstream's moving checks in a quiet week, and branch_protection_rule
+# re-grades Branch-Protection the moment a rule changes.
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
-  # A change to branch protection moves the Branch-Protection score without
-  # any commit, so it gets a fresh score the same day too.
   branch_protection_rule:
   schedule:
     - cron: "41 7 * * 2"
   workflow_dispatch:
 
-# Only a push to main can realistically overlap with itself — two quick
-# merges — so cancelling the superseded run is safe: Scorecard grades the
-# current state of the branch, not a history of every push, and the newer
-# run already covers whatever the older one would have found.
+# pushes to main can stack; only the newest score matters
 concurrency:
-  group: scorecard-${{ github.ref }}
+  group: scorecard
   cancel-in-progress: true
 
-# Permissions: read-all is the floor; the analysis job takes the two write
-# scopes it needs below. Job-level permissions replace the workflow-level block rather than
-# adding to it, which is why that job spells out its read scopes again.
+# read-all is the floor; job-level permissions replace this block rather than
+# adding to it, which is why the job spells out its read scopes again.
 permissions: read-all
 
 jobs:
   analysis:
     name: supply-chain score (scorecard)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # only a green push to main gets a fresh score; the schedule and a manual
-    # dispatch pass the first clause
+    # only a green push to main gets a fresh score; the other triggers pass
+    # the first clause
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
-    # Deliberately no `environment:`: nothing here publishes a release, and
-    # docker.yml's publish gate is the one that matters.
+    # A literal, not an expression: publish_results has the scorecard webapp
+    # re-fetch this file and check `runs-on:` with a static parser, so an
+    # expression gets the submission rejected while the job goes green. The
+    # same check allows no top-level env or defaults, and only the actions
+    # used below.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
-      # the two the analysis needs, and the only write scopes in this file:
-      # code scanning takes the SARIF, and publish_results signs the score it
-      # sends to the OpenSSF API with an OIDC token
+      # the only write scopes in this file: code scanning takes the SARIF, and
+      # publish_results signs the score it sends with an OIDC token
       security-events: write
       id-token: write
       # Dangerous-Workflow and Token-Permissions read workflow definitions
@@ -81,7 +56,28 @@ jobs:
     steps:
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          disable-sudo: true
+          # Scorecard's probes go to a stable set of named services: the OSSF
+          # APIs, OSV, deps.dev, the best-practices badge, oss-fuzz's build
+          # logs, Docker Hub (Dockerfile pins), and sigstore for the signed
+          # result.
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            results-receiver.actions.githubusercontent.com:443
+            api.scorecard.dev:443
+            api.securityscorecards.dev:443
+            api.deps.dev:443
+            api.osv.dev:443
+            www.bestpractices.dev:443
+            oss-fuzz-build-logs.storage.googleapis.com:443
+            index.docker.io:443
+            auth.docker.io:443
+            fulcio.sigstore.dev:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,9 +89,8 @@ jobs:
           results_format: sarif
           publish_results: true
 
-      # Kept alongside the code-scanning upload rather than replaced by it: the
-      # artifact is the whole report as the tool emitted it, which is what you
-      # want when reading a run by hand. Code scanning keeps only what it can
+      # kept alongside the code-scanning upload: the artifact is the whole
+      # report as the tool emitted it; code scanning keeps only what it can
       # map to a line.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

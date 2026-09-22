@@ -23,13 +23,6 @@ coverage.yml's artifact, so renaming either workflow breaks both badges. -->
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/ivylikethevine/sharerr-rs/blob/main/LICENSE.md)
 [![MSRV](https://img.shields.io/badge/MSRV-1.98-orange.svg)](https://github.com/ivylikethevine/sharerr-rs/blob/main/Cargo.toml)
 
-> The Scorecard badge undercounts Pinned-Dependencies: every workflow's local
-> `uses: $/.github/...` reference is flagged as an unpinned third-party action,
-> because Scorecard only recognises the older `./` form as same-repository.
-> Tracked upstream in
-> [ossf/scorecard#5232](https://github.com/ossf/scorecard/issues/5232), with a
-> fix open in [ossf/scorecard#5233](https://github.com/ossf/scorecard/pull/5233).
-
 sharerr connects to your *arr apps (Sonarr, Radarr, Lidarr, Readarr,
 Whisparr), finds everything tagged `sharerr`, builds a torrent for each file
 **where it already sits**, seeds it through your torrent client (qBittorrent,

@@ -1,25 +1,12 @@
-# Checks every external URL in the repo's markdown — and in the web UI's
-# documentation-link table, `web::docs` — for dead links.
-#
-# A rotted URL in the docs is worth seeing and has never shipped a bug, so
-# this reports and never blocks — same reasoning as the hadolint job
-# in ci.yml. Weekly on its own, since a link a PR didn't touch does not go
-# stale because of that PR and re-checking it on every commit would be the
-# same round trip repeated for no new information — plus after every green CI
-# run on main, so a doc change checks its own new links right when they land
-# rather than waiting for Monday, without re-checking a tree CI already
-# rejected. Still not on `pull_request`: that would be the same repeated
-# round trip for anything the PR itself didn't touch, on every push to the
-# branch. See pages.yml's header for why a workflow_run trigger is safe
-# despite zizmor's default suspicion of it.
-#
-# A dead link is a standing state of the docs, not an event, so it keeps one
-# `link-check` tracking issue current: opened when a link breaks, rewritten
-# while any stays broken, closed by the run that finds none. The report also
-# goes in the step summary, with a ::warning, from that same step. Settings shared with ci.yml's offline gate (accepted
-# status codes, excluded paths, retries) are in lychee.toml.
 name: Link check
 
+# External links in the docs. Advisory: a rotted URL is worth fixing but has
+# never shipped a bug, so this never fails on one and is never a required
+# check; what it finds goes to one `link-check` tracking issue, closed by the
+# run that finds none. Runs after every green CI run on a push to main (a doc
+# change checks its new links when it lands) and weekly, since links rot with
+# no push here; never per-PR. Pull requests check relative links and fragments
+# offline (ci.yml). Settings for both are lychee.toml.
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: [CI]
@@ -29,10 +16,8 @@ on: # zizmor: ignore[dangerous-triggers]
     - cron: "23 8 * * 1"
   workflow_dispatch:
 
-# Serialised, not cancel-on-superseded, and not ref-scoped: the tracking
-# issue upsert is list-then-create, so two runs at once (a merge and the cron)
-# could each find no open issue and each open one. Same shape as
-# advisories.yml and tool-versions.yml.
+# pushes to main can stack, but queue rather than cancel: a run cancelled
+# mid-upsert can leave its tracking issue half-written (or a duplicate opened)
 concurrency:
   group: link-check
   cancel-in-progress: false
@@ -42,78 +27,79 @@ permissions:
 
 jobs:
   lychee:
-    name: check links (advisory)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: lychee (advisory)
     # only a green push to main gets a fresh sweep; the schedule and a manual
     # dispatch pass the first clause
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       # the one write this job does: upsert (and close) its own tracking issue
       issues: write
     steps:
+      # audit, deliberately: lychee's job is to reach every URL the docs name,
+      # so an allowlist would be the docs' own link list.
       - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
+          disable-sudo: true
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Version-pinned: a link checker that changes its own crawling rules
-      # mid-week would report links that no commit here changed. ./setup-tool
-      # downloads the pin as a release binary once per version and caches it,
-      # instead of a fresh `cargo install --version 0.24.2 --locked` source
-      # build every run.
+      # the tools.txt pin (sha256-verified, drift-checked), the same binary
+      # ci.yml's offline check runs
       - uses: ./.github/actions/setup-tool
         with:
           tool: lychee
 
-      # Accepted codes, excluded paths and retries come from lychee.toml.
-      # Captured rather than left to fail the step: a broken link is the case
-      # this workflow exists to report, not a broken job.
+      # lychee exits 2 for broken links, which is the finding, not a failure;
+      # any other non-zero exit (bad input, a crash) still fails the job.
       - id: check
         name: Check for dead links
+        env:
+          # authenticated github.com requests dodge the anonymous rate limit
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          status=0
-          lychee --config lychee.toml \
-            --format markdown --output "$RUNNER_TEMP/lychee.md" \
-            '**/*.md' crates/sharerr/src/web/docs.rs || status=$?
-          echo "found=$([ "$status" -ne 0 ] && echo 1 || echo 0)" >>"$GITHUB_OUTPUT"
+          mapfile -d '' files < <(git ls-files -z '*.md' crates/sharerr/src/web/docs.rs)
+          rc=0
+          lychee --config lychee.toml --include-fragments --no-progress \
+            --format markdown --output "$RUNNER_TEMP/lychee.md" "${files[@]}" || rc=$?
+          case "$rc" in
+            0) echo "found=0" >>"$GITHUB_OUTPUT" ;;
+            2) echo "found=1" >>"$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
 
-      - name: Build the report
+      - name: Compose the tracking issue body
         if: steps.check.outputs.found == '1'
         run: |
           set -euo pipefail
           {
-            echo "lychee reports at least one broken external link in the docs or in"
-            echo "\`crates/sharerr/src/web/docs.rs\`."
-            echo
-            echo "Fix or replace the link. A URL that is fine but refuses automated checks"
-            echo "belongs in \`lychee.toml\` with a comment saying why. Reproduce with"
-            echo "\`lychee --config lychee.toml '**/*.md' crates/sharerr/src/web/docs.rs\`."
+            echo "lychee found dead or unreachable links in the docs. A URL that is fine but"
+            echo "refuses automated checks belongs in \`lychee.toml\` with a comment saying why."
+            echo "Reproduce with \`git ls-files -z '*.md' crates/sharerr/src/web/docs.rs | xargs -0 lychee --config lychee.toml --include-fragments\`."
             echo
             cat "$RUNNER_TEMP/lychee.md"
-          } >"$RUNNER_TEMP/report.md"
+          } >"$RUNNER_TEMP/issue.md"
 
-      # See .github/actions/upsert-tracking-issue for the shape this shares
-      # with advisories.yml and tool-versions.yml. It writes the report to the
-      # step summary and, with warning-title set, emits the ::warning too.
-      - name: Keep the tracking issue current
-        uses: ./.github/actions/upsert-tracking-issue
+      # with warning-title set, this also writes the ::warning and the step
+      # summary
+      - uses: ./.github/actions/upsert-tracking-issue
         with:
           label: link-check
           label-color: FBCA04
-          label-description: lychee reports a broken link in the docs
-          title: Broken links in the docs
-          resolved: ${{ steps.check.outputs.found == '0' }}
-          close-comment: lychee finds no broken links.
+          label-description: A link in the docs is dead or unreachable
+          title: Dead links in the docs
+          resolved: ${{ steps.check.outputs.found != '1' }}
+          close-comment: Every link resolves again.
           resolved-when: every link resolves
-          body-file: ${{ runner.temp }}/report.md
+          body-file: ${{ runner.temp }}/issue.md
           warning-title: lychee
-          warning-body: Broken link(s) found in the docs - see the tracking issue
+          warning-body: Dead or unreachable links - advisory, not blocking - see the link-check issue
