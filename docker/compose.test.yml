@@ -29,8 +29,9 @@
 # ## Sonarr, Radarr, and Lidarr keep their config in `./state`, not a named volume
 #
 # `seed-arr` runs on the host and writes to those SQLite databases directly, which
-# needs a path the host can actually open. PUID/PGID default to 1000 and follow the
-# invoking user, since the host has to read and write those files too. `down -v`
+# needs a path the host can actually open. PUID/PGID follow the invoking user (the
+# run scripts export SHARERR_TEST_UID/GID; 1000 without them), since the host has
+# to read and write those files too. `down -v`
 # does not clear a bind mount, so teardown removes `docker/state` as well.
 
 name: sharerr-test

@@ -24,6 +24,18 @@ set -euo pipefail
 # run_docker_tests.sh's comment on the same line for why `readlink -f` matters.
 cd "$(dirname "$(readlink -f "$0")")/.."
 
+# The *arr containers run as SHARERR_TEST_UID/GID (compose's default is 1000),
+# and `seed-arr` writes their SQLite databases from the host, so the two have to
+# be the same user. Without this a host user other than 1000 (GitHub's runner is
+# 1001) gets "attempt to write a readonly database" from seeding.
+export SHARERR_TEST_UID="${SHARERR_TEST_UID:-$(id -u)}"
+export SHARERR_TEST_GID="${SHARERR_TEST_GID:-$(id -g)}"
+
+# Every check below reads curl's default behaviour (a bare `-s -w '%{http_code}'`
+# expects a 4xx/5xx to come back as a status, not an exit code), so a ~/.curlrc
+# with `fail` would abort the run on the first expected 501. `-q`, first, skips it.
+curl() { command curl -q "$@"; }
+
 COMPOSE=(docker compose -f docker/compose.two-instance.yml)
 STATE=docker/state-two-instance
 

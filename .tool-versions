@@ -3,4 +3,4 @@
 # rust follows CI's `stable` (Cargo.toml's rust-version is the floor).
 rust stable
 yq 4.53.6
-terraform 1.16.1
+terraform 1.16.2

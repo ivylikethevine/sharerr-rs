@@ -25,6 +25,11 @@ set -euo pipefail
 # run_docker_tests.sh's comment on the same line for why `readlink -f` matters.
 cd "$(dirname "$(readlink -f "$0")")/.."
 
+# The readiness poll reads a bare `-s -w '%{http_code}'` as a status, so a
+# ~/.curlrc with `fail` would turn a not-yet-ready answer into an exit. `-q`,
+# first, skips it.
+curl() { command curl -q "$@"; }
+
 COMPOSE=(docker compose -f docker/compose.mesh.yml)
 
 # Must match docker/compose.mesh.yml's own published ports, and

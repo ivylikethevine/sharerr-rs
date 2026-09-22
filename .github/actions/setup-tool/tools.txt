@@ -93,7 +93,7 @@ cargo-deny|0.20.2|tar.gz|https://github.com/EmbarkStudios/cargo-deny/releases/do
 # `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
 # zipped, not as GitHub release assets; its GitHub releases still carry the
 # tags the drift check reads.
-terraform|1.16.1|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||745d33b4b02b7980c62a38ec1beea24ee084ea8caf3f503c200554bd9a0cbe49
+terraform|1.16.2|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a
 # mikefarah's Go yq, for .github/scripts/lint_workflows.sh (which also accepts
 # the Python yq, but CI pins this one).
 # Installed rather than taken from the runner image, and several distros ship
