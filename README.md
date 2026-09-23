@@ -575,6 +575,13 @@ not features:
 
 Smallest first, by how much each item touches:
 
+- **A blocked upstream shows as drift.** `check_tool_versions.sh` prints
+  `(could not read upstream releases)` for a row it cannot read and counts no
+  problem, while `tool-versions.yml` blocks egress to a fixed host list, so a
+  pin whose upstream lives on a host missing from that list reads as fine
+  forever. Counting a problem when every row one host serves went unread (a
+  blocked host rather than a one-off rate limit) would name it in the tracking
+  issue.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
 - **Transfer accounting.** The tracker resolves which friend an announce
