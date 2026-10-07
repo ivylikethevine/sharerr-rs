@@ -382,7 +382,7 @@ jobs:
           .github/scripts/trivy_scan.sh "$REF" "$RUNNER_TEMP"
 
       - name: Upload the findings to code scanning
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           sarif_file: ${{ runner.temp }}/trivy.sarif
           category: release-scan-${{ matrix.name }}
@@ -455,7 +455,7 @@ jobs:
       # rebuild. `driver: docker` uses the daemon's own builder: the default
       # docker-container driver would pull a BuildKit image from Docker Hub,
       # which the egress allowlist above does not (and need not) include.
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver: docker
 

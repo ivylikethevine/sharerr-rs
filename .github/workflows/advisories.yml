@@ -2,12 +2,12 @@ name: Advisories
 
 # The tracking-issue half of ci.yml's dependency audit, over Cargo.lock
 # (cargo-deny's `advisories` check; licenses, bans and sources only fail on
-# what a diff changed) and .github/package-lock.json (npm audit). ci.yml's
-# audit job blocks a pull request whose locks carry a known advisory; an
-# advisory published later against locks nobody touched would only turn a
-# scheduled run red. So this keeps one `advisories` issue current: opened on
-# a finding, rewritten while it stands, closed by the run that finds
-# everything clean. It never blocks anything.
+# what a diff changed) and .github/package-lock.json (npm audit, less the ids
+# in .github/osv-scanner.toml). ci.yml's audit job blocks a pull request
+# whose locks carry a known advisory; an advisory published later against
+# locks nobody touched would only turn a scheduled run red. So this keeps one
+# `advisories` issue current: opened on a finding, rewritten while it stands,
+# closed by the run that finds everything clean. It never blocks anything.
 #
 # Runs after every green CI run on a push to main (a merge can bring in an
 # already-published advisory), weekly (advisories land with no push here), and
@@ -71,7 +71,7 @@ jobs:
           found=0
           echo "Known advisories affect locked dependencies. The fix is usually the Dependabot bump or a" >"$report"
           echo "\`cargo update -p <crate>\`; with no patched version yet, an \`[advisories] ignore\` entry in" >>"$report"
-          echo "\`deny.toml\` **with a comment saying why**." >>"$report"
+          echo "\`deny.toml\` or an \`[[IgnoredVulns]]\` entry in \`.github/osv-scanner.toml\`, **with a comment saying why**." >>"$report"
 
           rc=0
           cargo deny check advisories >"$RUNNER_TEMP/cargo-deny.txt" 2>&1 || rc=$?
@@ -102,13 +102,26 @@ jobs:
             echo "::error title=npm audit::the audit did not run (exit $rc)"
             exit 1
           fi
-          if [ "$total" -gt 0 ]; then
+          # An advisory is its GHSA id, the last segment of the url npm reports
+          # it under. Ids listed in osv-scanner.toml are left out; one
+          # listed there that the audit no longer reports is stale.
+          jq -r '[.vulnerabilities[]?.via[] | objects | .url | sub(".*/"; "")] | unique[]' \
+            "$RUNNER_TEMP/npm-audit.json" >"$RUNNER_TEMP/npm-reported.txt"
+          sed -n 's/^id = "\(GHSA[-0-9a-z]*\)"$/\1/p' .github/osv-scanner.toml | sort -u >"$RUNNER_TEMP/npm-ignored.txt" || true
+          open="$(grep -vxFf "$RUNNER_TEMP/npm-ignored.txt" "$RUNNER_TEMP/npm-reported.txt" || true)"
+          stale="$(grep -vxFf "$RUNNER_TEMP/npm-reported.txt" "$RUNNER_TEMP/npm-ignored.txt" || true)"
+          for id in $stale; do
+            echo "::warning title=stale npm audit ignore::$id is no longer reported - remove it from .github/osv-scanner.toml"
+          done
+          if [ -n "$open" ]; then
             found=1
             {
               echo
               echo "### Markdown tools (npm audit)"
               echo
-              echo "\`.github/package-lock.json\`:"
+              echo "\`.github/package-lock.json\`, not in \`.github/osv-scanner.toml\`:"
+              echo
+              while IFS= read -r id; do echo "- $id"; done <<<"$open"
               echo
               echo '````'
               npm audit --prefix .github || true

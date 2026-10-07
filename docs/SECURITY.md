@@ -162,7 +162,8 @@ The assurance case follows from [the threat model](#threat-model):
   published images weekly. CI itself runs with least-privilege tokens,
   SHA-pinned actions, sha256-pinned tools (hadolint, trivy, cargo-deny,
   gitleaks, terraform, yq and the rest of `tools.txt`) and lockfile-pinned
-  npm tools, and `step-security/harden-runner` audits every job's network
+  npm tools (an advisory against one that has no patched release is accepted
+  with a reason in `.github/osv-scanner.toml`), and `step-security/harden-runner` audits every job's network
   egress, blocking it outright in the two release jobs that hold write
   tokens. The detail is in [`RELEASING.md`](RELEASING.md) and
   [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs).
