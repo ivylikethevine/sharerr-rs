@@ -6,10 +6,9 @@
 # Pins written inline in files rather than in tools.txt, one row each:
 #   name|file-glob|sed-BRE-with-one-\(capture\)|check|tag-prefix
 #
-# cargo-chef   docker/Dockerfile's `cargo install --version`; no ecosystem
-#              dependabot runs reads a Dockerfile ARG
+# cargo-chef   docker/Dockerfile's `cargo install --version`
 # chrome-devtools-mcp  the `npx` server pin in .mcp.json
-# just-the-docs  the Pages theme; `remote_theme:` is invisible to dependabot
+# just-the-docs  the Pages theme, `_config.yml`'s `remote_theme:`
 # shellcheck disable=SC2034 # read by check_tool_versions.sh
 CI_WORKFLOW_ROSTER='cargo-chef|docker/Dockerfile|ARG CARGO_CHEF_VERSION=\([0-9][0-9.]*\)|github:LukeMathWalker/cargo-chef|
 chrome-devtools-mcp|.mcp.json|chrome-devtools-mcp@\([0-9][0-9.]*\)|npm:chrome-devtools-mcp|
@@ -19,6 +18,16 @@ just-the-docs|_config.yml|remote_theme: just-the-docs/just-the-docs@v\([0-9][0-9
 # deployment examples alike.
 # shellcheck disable=SC2034 # read by check_tool_versions.sh
 CI_IMAGE_GLOBS='docker/Dockerfile docker/**/compose*.y*ml'
+
+# The Markdown tools' npm manifest, the workspace's crates, and the
+# hosted-lighthouse modules' providers. sqlx is held to its major, as
+# dependabot.yml's ignore holds it.
+# shellcheck disable=SC2034 # read by check_tool_versions.sh
+CI_MANIFESTS='npm|.github/package.json
+cargo|Cargo.toml|sqlx@major
+terraform|docker/deploy/lighthouse/terraform/aws/versions.tf
+terraform|docker/deploy/lighthouse/terraform/azure/versions.tf
+terraform|docker/deploy/lighthouse/terraform/fly/versions.tf'
 
 # ci_local_checks - the MSRV is one claim written in two places: Cargo.toml's
 # rust-version and the Dockerfile's `FROM rust:<x>` (what makes `docker build`

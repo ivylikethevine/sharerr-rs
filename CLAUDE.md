@@ -356,8 +356,8 @@ Two things read those pins back. `.github/scripts/scan_pinned_images.sh`
 extracts them by regex from the files its `git ls-files` globs match (a file
 those globs miss is never read), and an image referenced by tag alone has no
 digest to compare, so it is listed in its own report section rather than
-scanned. Dependabot's `docker` / `docker-compose` entries rewrite tag and
-digest together.
+scanned. `tool-versions.yml` reports a tag that has moved off its pinned
+digest; a repin rewrites tag and digest together, by hand.
 
 ### cargo-chef
 
@@ -379,8 +379,10 @@ Dockerfile's comments at the two builder stages before touching either.
 an image pin must satisfy that regex and sit in a directory `dependabot.yml`
 lists; `/docker/deploy/*` matches the directories _under_ `deploy`, not
 `deploy` itself, which is why `/docker/deploy` is listed separately. Every
-ecosystem feeds one multi-ecosystem group, and `target-branch: dev` sits on
-that group, since an entry inside a group may not set its own.
+entry sets `open-pull-requests-limit: 0`, so dependabot opens no
+version-update pull request: `tool-versions.yml` reports the drift in its
+tracking issue, reading the compose files `CI_IMAGE_GLOBS` in
+`check_tool_versions.local.sh` matches, and each bump is a hand edit.
 
 ### Pinned tools
 
@@ -409,7 +411,8 @@ locked, integrity hashes and transitive dependencies included, in
 `.github/package-lock.json`; install them with `npm ci --prefix .github`
 (`scripts/check.sh --install` does) and run them from
 `.github/node_modules/.bin/`: a bare `npx` from the repo root does not see
-`.github/node_modules` and fetches whatever version is current. Dependabot's npm entry moves them.
+`.github/node_modules` and fetches whatever version is current.
+`tool-versions.yml` reports a newer release of either.
 
 **A few pins live inline in other files**, and
 `.github/scripts/check_tool_versions.local.sh` rosters them for the same
