@@ -69,7 +69,7 @@ jobs:
           set -uo pipefail
           report="$RUNNER_TEMP/advisories.md"
           found=0
-          echo "Known advisories affect locked dependencies. The fix is usually the Dependabot bump or a" >"$report"
+          echo "Known advisories affect locked dependencies. The fix is usually a bump or a" >"$report"
           echo "\`cargo update -p <crate>\`; with no patched version yet, an \`[advisories] ignore\` entry in" >>"$report"
           echo "\`deny.toml\` or an \`[[IgnoredVulns]]\` entry in \`.github/osv-scanner.toml\`, **with a comment saying why**." >>"$report"
 

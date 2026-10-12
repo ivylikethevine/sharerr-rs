@@ -10,9 +10,9 @@
 # it at the firewall (the Terraform security groups do) or drop the `ports:`
 # block from a copy of `compose.yaml`.
 #
-# Pinned by digest like every other image under `docker/`; dependabot moves
-# the pin. `caddy:2-alpine` rather than `caddy:2` for the smaller image — the
-# reverse-proxy and ACME features are in both.
+# Pinned by digest like every other image under `docker/`. `caddy:2-alpine`
+# rather than `caddy:2` for the smaller image — the reverse-proxy and ACME
+# features are in both.
 
 services:
   caddy:

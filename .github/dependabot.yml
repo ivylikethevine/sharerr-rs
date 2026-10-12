@@ -1,15 +1,14 @@
-# Moves the SHA-pinned `uses:` in the workflows and composite actions, the
-# Markdown tools' npm lock, Cargo.lock, the digest-pinned images in
-# docker/Dockerfile and every compose file, and the Terraform providers, via
-# one weekly pull request into dev.
+# Names what dependabot could move: the SHA-pinned `uses:` in the workflows
+# and composite actions, the Markdown tools' npm lock, Cargo.lock, the
+# digest-pinned images in docker/Dockerfile and every compose file, and the
+# Terraform providers.
 #
 # What this file cannot cover, and what covers it instead:
 #
 #   * The CI tools in .github/actions/setup-tool/tools.txt and the inline pins
 #     in .github/scripts/check_tool_versions.local.sh (CARGO_CHEF_VERSION, the
 #     .mcp.json server, the just-the-docs theme): tool-versions.yml reports
-#     their drift in one tracking issue, on the same Monday and with the same
-#     7-day cooldown.
+#     their drift in the same tracking issue, with the same 7-day cooldown.
 #   * Whether an image bump fixes anything: the docker ecosystems are
 #     version-updates-only (GHSA has no container ecosystem), and a digest is
 #     just a digest. image-scan.yml measures that with trivy.
@@ -19,23 +18,13 @@
 # `(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`, so a new file holding an image
 # pin must match it (hence compose.gluetun.reference.yaml) or go unmanaged.
 #
-# Every ecosystem feeds one multi-ecosystem group, so a Monday run opens (or
-# rebases) a single pull request. schedule, commit-message and target-branch
-# are group-only keys (GitHub rejects them on an entry in a group); `patterns`
-# is required per entry, and cooldown/ignore stay per ecosystem. Dependabot
-# security updates, if enabled in the repository settings, still open their
-# own pull requests.
+# Each entry sets `open-pull-requests-limit: 0`, so no version-update pull
+# request opens: tool-versions.yml reports the same drift in one tracking
+# issue, and every bump is a hand edit made from it. Deleting the limits turns
+# the pull requests back on, with the schedule, cooldown and ignores they
+# need. Dependabot security updates, if enabled in the repository settings,
+# are not bound by the limit and still open their own pull requests.
 version: 2
-
-multi-ecosystem-groups:
-  all-dependencies:
-    schedule:
-      interval: weekly
-      day: monday
-    commit-message:
-      prefix: deps
-    # development happens on dev; main only moves by a release merge
-    target-branch: dev
 
 updates:
   # the composite actions under .github/actions/ pin their own `uses:`
@@ -43,8 +32,13 @@ updates:
     directories:
       - "/"
       - "/.github/actions/*"
-    multi-ecosystem-group: all-dependencies
-    patterns: ["*"]
+    schedule:
+      interval: weekly
+      day: monday
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 0
     # let a release age before its bump: a compromised release's window is its
     # first days (zizmor: dependabot-cooldown)
     cooldown:
@@ -53,15 +47,25 @@ updates:
   # .github/package.json -> package-lock.json (markdownlint-cli2, prettier)
   - package-ecosystem: npm
     directory: /.github
-    multi-ecosystem-group: all-dependencies
-    patterns: ["*"]
+    schedule:
+      interval: weekly
+      day: monday
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7
 
   - package-ecosystem: cargo
     directory: /
-    multi-ecosystem-group: all-dependencies
-    patterns: ["*"]
+    schedule:
+      interval: weekly
+      day: monday
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7
     ignore:
@@ -74,14 +78,19 @@ updates:
   # docker/Dockerfile, building both the sharerr and lighthouse images
   - package-ecosystem: docker
     directory: /docker
-    multi-ecosystem-group: all-dependencies
-    patterns: ["*"]
+    schedule:
+      interval: weekly
+      day: monday
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7
     ignore:
       # The builder stage is pinned to the MSRV (1.98), which makes
       # `docker build` the MSRV check. Only semver update-types are ignored,
-      # so digest refreshes of rust:1.98-trixie still arrive.
+      # so a digest refresh of rust:1.98-trixie is still an update.
       - dependency-name: rust
         update-types:
           - "version-update:semver-major"
@@ -94,8 +103,13 @@ updates:
       - "/docker/deploy/lighthouse/terraform/aws"
       - "/docker/deploy/lighthouse/terraform/azure"
       - "/docker/deploy/lighthouse/terraform/fly"
-    multi-ecosystem-group: all-dependencies
-    patterns: ["*"]
+    schedule:
+      interval: weekly
+      day: monday
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7
 
@@ -109,7 +123,12 @@ updates:
       - "/docker/deploy"
       - "/docker/deploy/*"
       - "/docker/deploy/dual-vpn/*"
-    multi-ecosystem-group: all-dependencies
-    patterns: ["*"]
+    schedule:
+      interval: weekly
+      day: monday
+    target-branch: dev
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 0
     cooldown:
       default-days: 7

@@ -3,8 +3,8 @@
 # the compose files it embeds are read from exactly one place: the standalone
 # lighthouse layout two directories up. What a VM runs is byte-for-byte what
 # `docker compose up -d` in `docker/deploy/lighthouse/` runs, TLS override
-# included, so there is one image pin for dependabot to move and one file to
-# read to know what is on the box.
+# included, so there is one image pin to move and one file to read to know
+# what is on the box.
 #
 # Plain `templatefile` rather than the cloudinit provider's MIME wrapper:
 # both clouds accept a bare `#cloud-config` document, and a bare document is

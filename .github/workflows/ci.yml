@@ -570,8 +570,8 @@ jobs:
   # gated on `prepare`, for the same reason as `links`: the filter ignores
   # **/*.md, and a typo can live in Rust source as easily as in a doc.
   # markdownlint and prettier come from .github/package-lock.json (versions
-  # and integrity hashes, transitive dependencies included; dependabot's npm
-  # entry moves them). All three run even when one fails.
+  # and integrity hashes, transitive dependencies included). All three run
+  # even when one fails.
   docs:
     name: docs (markdownlint + prettier + typos)
     needs: reuse

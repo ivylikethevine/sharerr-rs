@@ -202,9 +202,12 @@ PRs.
 The third-party tools these jobs run that dependabot cannot see (zizmor,
 actionlint, cargo-llvm-cov, lychee, typos, shellcheck, hadolint, trivy,
 cargo-deny, gitleaks, terraform and yq) each install from a sha256-pinned row
-in `.github/actions/setup-tool/tools.txt`, and `tool-versions.yml` reports
-when one falls behind. markdownlint and prettier come from
-`.github/package-lock.json`, which dependabot's npm entry moves.
+in `.github/actions/setup-tool/tools.txt`. markdownlint and prettier come
+from `.github/package-lock.json`. Dependabot opens no version-update pull
+request (`.github/dependabot.yml` sets each ecosystem's limit to 0):
+`tool-versions.yml` reports when a tool, an action SHA, an image digest, a
+crate, an npm package or a Terraform provider falls behind, and each bump is
+a hand edit made from its tracking issue.
 
 Every job in every workflow starts with `step-security/harden-runner`, in
 `audit` mode except the two release jobs that hold write tokens (`publish`
