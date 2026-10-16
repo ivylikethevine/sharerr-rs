@@ -43,7 +43,7 @@ base64 = "0.23.1"
 axum = "0.8.9"
 axum-extra = "0.12.6"
 chacha20poly1305 = "0.11.0"
-clap = "4.6.6"
+clap = "4.6.7"
 # Gossip records are signed by the peer they describe; Ed25519 because the keys
 # and signatures are small enough to travel in JSON and the verify cost is
 # nothing next to the HTTP request carrying it. `rand_core` stays off — key
@@ -102,9 +102,9 @@ sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "run
 # false` drops network/user/component support this project never reads.
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "system"] }
 tempfile = "3.27.0"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
-tokio = "1.53.1"
+tokio = "1.53.2"
 toml_edit = "0.25.15"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
 #-process, so the handler tests exercise the real middleware stack — the auth
@@ -122,10 +122,10 @@ url = "2.5.8"
 # forgotten. `utoipa-axum` is what makes the second half of that true: a
 # machine-facing route is mounted *through* the spec, so the router and the
 # document are the same declaration. See `sharerr::openapi`.
-utoipa = { version = "5.5.0", features = ["axum_extras", "url", "preserve_order"] }
-utoipa-axum = "0.2.0"
+utoipa = { version = "6.0.0", features = ["axum_extras", "url", "preserve_order"] }
+utoipa-axum = "0.3.0"
 wiremock = "0.6.5"
-zeroize = "1.9.0"
+zeroize = "1.9.1"
 
 # The workspace's own crates. The `version` is the placeholder from
 # [workspace.package] above, never bumped; it stays here only because
@@ -181,17 +181,3 @@ missing_fields_in_debug = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-
-# `utoipa-axum 0.2.0`, the newest crates.io release, depends on the
-# unmaintained `paste` crate (RUSTSEC-2024-0436). Upstream replaced it with
-# `pastey` in June 2026 but has not cut a release, so all three utoipa crates
-# are taken from one pinned upstream commit instead. All three, not just
-# `utoipa-axum`: it depends on `utoipa` by path inside that repository, and
-# mixing a git `utoipa` with a registry one would give the workspace two
-# incompatible copies of every trait the derive macros implement. Drop this
-# block, and the matching `allow-git` entry in deny.toml, the day utoipa-axum
-# publishes a release without `paste`.
-[patch.crates-io]
-utoipa = { git = "https://github.com/juhaku/utoipa", rev = "fbe663958f6a5b834b1fb7c15bbc6fabe4722b40" }
-utoipa-gen = { git = "https://github.com/juhaku/utoipa", rev = "fbe663958f6a5b834b1fb7c15bbc6fabe4722b40" }
-utoipa-axum = { git = "https://github.com/juhaku/utoipa", rev = "fbe663958f6a5b834b1fb7c15bbc6fabe4722b40" }

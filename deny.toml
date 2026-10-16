@@ -61,8 +61,3 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The one git source: the three utoipa crates, pinned to a single upstream
-# commit by `[patch.crates-io]` in Cargo.toml until utoipa-axum publishes a
-# release that no longer depends on the unmaintained `paste` crate. See the
-# comment on that block for why all three move together.
-allow-git = ["https://github.com/juhaku/utoipa"]
