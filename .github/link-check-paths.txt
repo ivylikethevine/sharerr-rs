@@ -1,0 +1,3 @@
+# Pathspecs link-check.yml sweeps besides the Markdown, one per line: the
+# docs the web UI serves.
+crates/sharerr/src/web/docs.rs

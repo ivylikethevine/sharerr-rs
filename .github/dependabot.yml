@@ -18,6 +18,10 @@
 # `(docker-)?compose(-\w+)?(\.[\w-]+)?\.ya?ml`, so a new file holding an image
 # pin must match it (hence compose.gluetun.reference.yaml) or go unmanaged.
 #
+# Renovate was weighed and declined: it would cover the pins this file cannot,
+# but costs a second bot, its own config dialect, and a PR stream where
+# tool-versions.yml keeps one tracking issue.
+#
 # Each entry sets `open-pull-requests-limit: 0`, so no version-update pull
 # request opens: tool-versions.yml reports the same drift in one tracking
 # issue, and every bump is a hand edit made from it. Deleting the limits turns
