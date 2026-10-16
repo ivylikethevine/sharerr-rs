@@ -37,12 +37,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-for _lw_tool in yq jq; do
-  command -v "$_lw_tool" >/dev/null 2>&1 || {
-    echo "lint_workflows: no $_lw_tool on PATH" >&2
-    exit 127
-  }
-done
+# shellcheck source=./lib.sh
+source .github/scripts/lib.sh
+_ci_need lint_workflows yq jq
 
 # YAML to JSON with whichever yq is installed: the Go one needs -o=json, the
 # Python one prints JSON already. The Python one reads `on:` as YAML 1.1's
@@ -94,13 +91,12 @@ workflow_filter='
     | "job \($job): runs on workflow_run without requiring github.event.workflow_run.conclusion == '"'"'success'"'"'"
   else empty end),
   ((.jobs // {}) | to_entries[] | .key as $job | (.value.steps // []) as $steps
-    | ([$steps[] | select((.uses // "") | startswith("actions/checkout@"))
-        | (.with // {})["sparse-checkout"] | select(. != null)
-        | tostring | split("\n")[]
+    | [$steps[] | select((.uses // "") | startswith("actions/checkout@"))
+        | (.with // {})["sparse-checkout"] | select(. != null)] as $lists
+    | select($lists | length > 0)
+    | [$lists[] | tostring | split("\n")[]
         | sub("^\\s+"; "") | sub("\\s+$"; "") | select(. != "")
-        | sub("^/"; "") | sub("/+$"; "")]) as $sparse
-    | select(($steps | map(select((.uses // "") | startswith("actions/checkout@"))
-        | (.with // {})["sparse-checkout"]) | map(select(. != null)) | length) > 0)
+        | sub("^/"; "") | sub("/+$"; "")] as $sparse
     | $steps[] | (.uses // "") | select(startswith("./"))
     | ltrimstr("./") | sub("/+$"; "") as $path
     | select([$sparse[] | . as $p | select($path == $p or ($path | startswith($p + "/")))] | length == 0)
