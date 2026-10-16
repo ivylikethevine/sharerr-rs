@@ -50,6 +50,7 @@ on:
   # same shape; docker.yml too, except its `if:` sits one level down in
   # docker-image.yml (its own trigger comment says why).
   pull_request:
+    branches: [main] # PRs into dev run nothing; dev is checked by its PR into main
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
   # No weekly `schedule:` here. A new advisory against a dependency is not
