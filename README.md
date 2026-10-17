@@ -86,8 +86,8 @@ whole design is built around.
   friends in one picture, a live per-torrent swarm view with hourly history,
   and a reachability script for checking from outside your network.
 - **The web UI**: first-run wizard, settings with connection tests, an Items
-  page with per-item detail and manual retry/rebuild/unshare, library
-  composition, sync history, self-refreshing status tiles, and path-mapping
+  page with per-item detail and manual retry/rebuild/unshare, one at a time
+  or over a selection, library composition, sync history, self-refreshing status tiles, and path-mapping
   diagnostics.
 - **Operations**: webhook notifications (generic, Discord, Apprise) on nine
   triggers plus an Uptime-Kuma-style heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
@@ -589,8 +589,6 @@ Smallest first, by how much each item touches:
 
 - **Native ntfy, Gotify, Telegram and Pushover payloads.** Apprise reaches
   them today; each would be one more `notifications.kind`.
-- **Bulk actions on Items.** Select-all with retry, rebuild or unshare over
-  the existing filters.
 - **A friend's-eye feed preview.** The feed as one chosen friend's scope
   renders it, to check scoping before handing over a key.
 - **A setup checklist on Status.** Tag created, path mapping resolved,

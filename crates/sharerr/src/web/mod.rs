@@ -114,6 +114,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/diagnostics", get(|| async { Redirect::to("/") }))
         .route("/status/tiles", get(stat_tiles))
         .route("/items", get(items::page))
+        .route("/items/bulk", post(items::bulk))
         .route("/items/{source}/{file_id}", get(items::detail))
         .route("/items/{source}/{file_id}/retry", post(items::retry))
         .route("/items/{source}/{file_id}/rebuild", post(items::rebuild))

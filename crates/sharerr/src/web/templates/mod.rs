@@ -1094,6 +1094,11 @@ pub struct StateCount {
 pub struct ItemsPage {
     pub signed_in: bool,
     pub error: Option<String>,
+    /// A bulk action's outcome, carried back through the redirect.
+    pub ok: Option<String>,
+    /// The filters in force, echoed into the bulk form so its redirect
+    /// returns to this same view.
+    pub filters: FilterState,
     pub items: Vec<ItemRow>,
     /// Rows before filtering — so "12 of 340" is answerable without a second
     /// query.
@@ -1119,6 +1124,17 @@ pub struct ItemsPage {
     /// over the same unfiltered rows `state_counts` is, and `None` when there is
     /// nothing to break down.
     pub composition: Option<Composition>,
+}
+
+/// The items page's filter and sort parameters, as given.
+#[derive(Debug, Default)]
+pub struct FilterState {
+    pub q: String,
+    pub source: String,
+    pub state: String,
+    pub kind: String,
+    pub sort: String,
+    pub dir: String,
 }
 
 /// Everything about one item, reached from a row on [`ItemsPage`] — built

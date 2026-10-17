@@ -84,3 +84,33 @@ document.addEventListener("change", function (event) {
   var control = event.target.closest && event.target.closest("[data-autosubmit]");
   if (control && control.form) control.form.submit();
 });
+
+// A `[data-select-all="name"]` checkbox ticks or clears every checkbox named
+// `name` in its form, and follows them: ticked when all are, mixed when some.
+// `form.elements` includes inputs joined to the form by a `form` attribute.
+document.addEventListener("change", function (event) {
+  var box = event.target;
+  if (box.type !== "checkbox" || !box.form) return;
+  var name = box.getAttribute("data-select-all") || box.name;
+  var master = null, boxes = [];
+  var els = box.form.elements;
+  for (var i = 0; i < els.length; i++) {
+    if (els[i].type !== "checkbox") continue;
+    if (els[i].getAttribute("data-select-all") === name) master = els[i];
+    else if (els[i].name === name) boxes.push(els[i]);
+  }
+  if (!master) return;
+  if (box === master) {
+    for (var j = 0; j < boxes.length; j++) boxes[j].checked = master.checked;
+    return;
+  }
+  var ticked = boxes.filter(function (b) { return b.checked; }).length;
+  master.checked = ticked === boxes.length;
+  master.indeterminate = ticked > 0 && ticked < boxes.length;
+});
+
+// A button with `data-confirm` asks before its form submits.
+document.addEventListener("click", function (event) {
+  var button = event.target.closest && event.target.closest("[data-confirm]");
+  if (button && !window.confirm(button.getAttribute("data-confirm"))) event.preventDefault();
+});

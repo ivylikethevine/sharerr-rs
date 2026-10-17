@@ -929,6 +929,8 @@ fn items_page() -> ItemsPage {
     ItemsPage {
         signed_in: true,
         error: None,
+        ok: None,
+        filters: crate::web::templates::FilterState::default(),
         state_counts: vec![
             StateCount {
                 label: "Seeding".to_owned(),

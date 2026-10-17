@@ -12,6 +12,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum_extra::extract::Form;
 use serde::Deserialize;
 use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
 use sharerr_store::{Peer, PeerScope, Store};
@@ -22,8 +23,8 @@ use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
 use super::templates::{
-    AddressCell, FilterOption, ItemDetailPage, ItemRow, ItemsPage, SortLink, SwarmRow, TokenStatus,
-    render,
+    AddressCell, FilterOption, FilterState, ItemDetailPage, ItemRow, ItemsPage, SortLink, SwarmRow,
+    TokenStatus, render,
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -40,6 +41,11 @@ pub struct ItemsQuery {
     sort: String,
     #[serde(default)]
     dir: String,
+    /// The outcome of a bulk action, carried back through the redirect.
+    #[serde(default)]
+    ok: String,
+    #[serde(default)]
+    error: String,
 }
 
 /// The tooltip for each sortable header — kept beside the column list so a
@@ -76,7 +82,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     };
 
     let (mut items, error) = match store.all_items().await {
-        Ok(items) => (items, None),
+        Ok(items) => (items, non_empty(&query.error)),
         Err(err) => (Vec::new(), Some(format!("could not list items: {err}"))),
     };
     let total = items.len();
@@ -220,6 +226,15 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     render(&ItemsPage {
         signed_in: true,
         error,
+        ok: non_empty(&query.ok),
+        filters: FilterState {
+            q: query.q.clone(),
+            source: query.source.clone(),
+            state: query.state.clone(),
+            kind: query.kind.clone(),
+            sort: query.sort.clone(),
+            dir: query.dir.clone(),
+        },
         total,
         shown: items.len(),
         state_counts,
@@ -685,6 +700,153 @@ pub async fn unshare(
         }
         Err(err) => redirect_with_error(source, file_id, &err.to_string()),
     }
+}
+
+/// The bulk form: which action, the checked rows as `source:file_id`, and the
+/// filters to return to.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct BulkForm {
+    action: String,
+    item: Vec<String>,
+    q: String,
+    source: String,
+    state: String,
+    kind: String,
+    sort: String,
+    dir: String,
+}
+
+/// Retry, rebuild or unshare every checked row of the items page at once.
+///
+/// Rebuild and unshare act per item exactly as their single-item actions do;
+/// retry and rebuild then share one sync pass rather than one per item, since a
+/// pass already reprocesses everything pending or failed.
+pub async fn bulk(State(state): State<WebState>, Form(form): Form<BulkForm>) -> Response {
+    let back = |key: &str, message: &str| {
+        Redirect::to(&format!(
+            "/items?q={}&source={}&state={}&kind={}&sort={}&dir={}&{key}={}",
+            urlencode(&form.q),
+            urlencode(&form.source),
+            urlencode(&form.state),
+            urlencode(&form.kind),
+            urlencode(&form.sort),
+            urlencode(&form.dir),
+            urlencode(message),
+        ))
+        .into_response()
+    };
+
+    if !matches!(form.action.as_str(), "retry" | "rebuild" | "unshare") {
+        return (StatusCode::BAD_REQUEST, "unknown bulk action").into_response();
+    }
+    if form.item.is_empty() {
+        return back("error", "Nothing was selected.");
+    }
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+
+    let mut selected = Vec::with_capacity(form.item.len());
+    let mut missing = 0;
+    for key in &form.item {
+        let parsed = key
+            .split_once(':')
+            .and_then(|(source, id)| Some((MediaSource::parse(source)?, id.parse().ok()?)));
+        match parsed {
+            Some((source, file_id)) => match store.get(source, file_id).await {
+                Ok(Some(item)) => selected.push(item),
+                Ok(None) => missing += 1,
+                Err(err) => return back("error", &format!("could not load {key}: {err}")),
+            },
+            None => missing += 1,
+        }
+    }
+
+    let outcome = match form.action.as_str() {
+        "retry" => bulk_retry(&state, &selected).await,
+        "rebuild" => bulk_rebuild(&state, &selected).await,
+        _ => bulk_unshare(&state, &selected).await,
+    };
+    let note = if missing > 0 {
+        format!(" {missing} selected item(s) no longer exist.")
+    } else {
+        String::new()
+    };
+    match outcome {
+        Ok((message, false)) => back("ok", &format!("{message}{note}")),
+        Ok((message, true)) | Err(message) => back("error", &format!("{message}{note}")),
+    }
+}
+
+/// One sync pass, if anything selected has failed; it retries every failed
+/// item, selected or not, as the single-item retry does.
+async fn bulk_retry(state: &WebState, items: &[SharedItem]) -> Result<(String, bool), String> {
+    let failed = items
+        .iter()
+        .filter(|item| item.state == ShareState::Failed)
+        .count();
+    if failed == 0 {
+        return Ok(("None of the selected items has failed.".to_owned(), true));
+    }
+    tracing::info!(failed, "bulk retry requested — running a sync pass now");
+    let (report, failed_again) = trigger_sync_now(state).await?;
+    Ok((
+        format!("Retried {failed} failed item(s): {report}"),
+        failed_again,
+    ))
+}
+
+/// Clear each selected torrent, then one sync pass builds them all afresh.
+async fn bulk_rebuild(state: &WebState, items: &[SharedItem]) -> Result<(String, bool), String> {
+    let syncer = state.serve.syncer().await?;
+    let mut prepared = 0;
+    for item in items.iter().filter(|item| item.info_hash.is_some()) {
+        syncer
+            .prepare_rebuild(item)
+            .await
+            .map_err(|err| format!("{err} (after preparing {prepared} rebuild(s))"))?;
+        prepared += 1;
+    }
+    if prepared == 0 {
+        return Ok((
+            "None of the selected items has a torrent to rebuild.".to_owned(),
+            true,
+        ));
+    }
+    tracing::info!(prepared, "bulk rebuild requested — running a sync pass now");
+    let (report, failed) = trigger_sync_now(state).await?;
+    Ok((format!("Rebuilding {prepared} item(s): {report}"), failed))
+}
+
+/// Unshare each selected item that is still shared; files are never touched.
+async fn bulk_unshare(state: &WebState, items: &[SharedItem]) -> Result<(String, bool), String> {
+    let syncer = state.serve.syncer().await?;
+    let (mut done, mut failed) = (0, 0);
+    for item in items
+        .iter()
+        .filter(|item| item.state != ShareState::Unshared)
+    {
+        match syncer.unshare_one(item).await {
+            Ok(()) => done += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    tracing::info!(done, failed, "bulk unshare (no file was touched)");
+    let unrecorded = if failed > 0 {
+        format!(" {failed} could not be recorded as unshared; see the log.")
+    } else {
+        String::new()
+    };
+    let message =
+        format!("Unshared {done} item(s) — the files themselves were not touched.{unrecorded}");
+    Ok((message, failed > 0))
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// One item, or the 404/500 response every action and the detail page answer
