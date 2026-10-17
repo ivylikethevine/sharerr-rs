@@ -1,7 +1,7 @@
 //! Driving the `seed-arr` binary against stand-in *arr databases.
 //!
 //! `seed-arr` writes the tagged fixture library straight into Sonarr's,
-//! Radarr's and Lidarr's SQLite files, because their APIs would trigger
+//! Radarr's, Lidarr's and Readarr's SQLite files, because their APIs would trigger
 //! metadata lookups the sealed compose network cannot make (see the binary's
 //! own module docs). Tier 2 runs it against databases the real apps created;
 //! nothing else did, so a typo in one of its fourteen `INSERT`s was invisible
@@ -34,7 +34,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 /// `INSERT OR IGNORE` being a no-op the second time.
 const SCHEMA: &[&str] = &[
     "CREATE TABLE Tags (Id INTEGER PRIMARY KEY, Label TEXT UNIQUE)",
-    "CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT UNIQUE)",
+    "CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT UNIQUE, Name, IsCalibreLibrary)",
     "CREATE TABLE Series (
          Id INTEGER PRIMARY KEY, TvdbId, TvRageId, TvMazeId, TmdbId, ImdbId, Title, TitleSlug,
          CleanTitle, SortTitle, Status, Overview, Images, Path, Monitored, SeasonFolder,
@@ -75,6 +75,21 @@ const SCHEMA: &[&str] = &[
          Id INTEGER PRIMARY KEY, ForeignTrackId, Title, Explicit, TrackFileId, Duration,
          MediumNumber, AbsoluteTrackNumber, ForeignRecordingId, AlbumReleaseId,
          ArtistMetadataId, OldForeignRecordingIds, OldForeignTrackIds)",
+    "CREATE TABLE AuthorMetadata (
+         Id INTEGER PRIMARY KEY, ForeignAuthorId, TitleSlug, Name, Status, Images, Aliases,
+         SortName, NameLastFirst, SortNameLastFirst)",
+    "CREATE TABLE Authors (
+         Id INTEGER PRIMARY KEY, CleanName, Path, Monitored, QualityProfileId, Tags, Added,
+         MetadataProfileId, AuthorMetadataId, MonitorNewItems)",
+    "CREATE TABLE Books (
+         Id INTEGER PRIMARY KEY, AuthorMetadataId, ForeignBookId, TitleSlug, Title,
+         ReleaseDate, CleanTitle, Monitored, AnyEditionOk, Added, RelatedBooks)",
+    "CREATE TABLE Editions (
+         Id INTEGER PRIMARY KEY, BookId, ForeignEditionId, Isbn13, Title, TitleSlug, IsEbook,
+         Images, Monitored, ManualAdd)",
+    "CREATE TABLE BookFiles (
+         Id INTEGER PRIMARY KEY, EditionId, CalibreId, Quality, Size, SceneName, DateAdded,
+         Modified, Path, Part, IndexerFlags)",
 ];
 
 async fn create_schema(path: &std::path::Path) {
@@ -359,4 +374,54 @@ async fn radarr_wanted_is_idempotent() {
     let db = open(&db_path).await;
     assert_eq!(count(&db, "Movies").await, 1);
     assert_eq!(count(&db, "MovieMetadata").await, 1);
+}
+
+/// Readarr's file hangs off an edition, and the edition off the book; a
+/// broken link there leaves Readarr's `bookfile?authorId` empty.
+#[tokio::test]
+async fn readarr_seeds_a_tagged_author_whose_file_reaches_its_book() {
+    let dir = tempfile::tempdir().unwrap();
+    let readarr = dir.path().join("readarr.db");
+    create_schema(&readarr).await;
+
+    for _ in 0..2 {
+        let out = Command::new(env!("CARGO_BIN_EXE_seed-arr"))
+            .arg("--readarr")
+            .arg(&readarr)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    let db = open(&readarr).await;
+    for table in [
+        "Authors",
+        "AuthorMetadata",
+        "Books",
+        "Editions",
+        "BookFiles",
+    ] {
+        assert_eq!(count(&db, table).await, 1, "{table}");
+    }
+    let row = sqlx::query(
+        "SELECT a.Tags AS tags, b.ForeignBookId AS foreign_id, f.Path AS path
+         FROM BookFiles f
+         JOIN Editions e ON e.Id = f.EditionId
+         JOIN Books b ON b.Id = e.BookId
+         JOIN Authors a ON a.AuthorMetadataId = b.AuthorMetadataId",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let tag: i64 = sqlx::query("SELECT Id FROM Tags WHERE Label = 'sharerr'")
+        .fetch_one(&db)
+        .await
+        .unwrap()
+        .get("Id");
+    assert_eq!(row.get::<String, _>("tags"), format!("[{tag}]"));
+    assert_eq!(
+        row.get::<String, _>("foreign_id"),
+        sharerr_testkit::library::BOOK_FOREIGN_ID
+    );
+    assert!(row.get::<String, _>("path").starts_with("/books/"));
 }

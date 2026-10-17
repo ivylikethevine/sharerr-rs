@@ -198,7 +198,52 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     protected
         .merge(public)
         .layer(middleware::from_fn(auth::deny_cross_origin))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .with_state(state)
+}
+
+/// The UI loads nothing from another origin and runs no inline script or
+/// style, so everything but its own assets is refused. `data:` images are the
+/// stylesheet's glyphs.
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
+    style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; \
+    base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+/// Adds the response headers `server.security_headers` turns on, read per
+/// request so a saved config applies without a restart. A header a handler
+/// already set is left alone.
+async fn security_headers(
+    State(state): State<WebState>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    let enabled = state.serve.with_config(|c| c.server.security_headers).await;
+    let response = next.run(request).await;
+    if enabled {
+        add_security_headers(response).await
+    } else {
+        response
+    }
+}
+
+/// The headers themselves, unconditionally; `sharerr preview` maps every
+/// response through this so a page the CSP would break shows it there first.
+pub(crate) async fn add_security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::CONTENT_SECURITY_POLICY, CONTENT_SECURITY_POLICY),
+        (header::X_FRAME_OPTIONS, "DENY"),
+        (header::REFERRER_POLICY, "no-referrer"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    ] {
+        headers
+            .entry(name)
+            .or_insert(header::HeaderValue::from_static(value));
+    }
+    response
 }
 
 /// The one page a signed-in operator lands on: what is working, what is not,
@@ -452,12 +497,13 @@ async fn glance(
 /// embedded CSS/JS a real instance does, instead of a second copy that could
 /// drift out of sync with it.
 pub(crate) async fn asset(axum::extract::Path(file): axum::extract::Path<String>) -> Response {
+    const JS: &str = "text/javascript; charset=utf-8";
     let (body, mime) = match file.as_str() {
         "style.css" => (include_str!("assets/style.css"), "text/css; charset=utf-8"),
-        "htmx.min.js" => (
-            include_str!("assets/htmx.min.js"),
-            "text/javascript; charset=utf-8",
-        ),
+        "htmx.min.js" => (include_str!("assets/htmx.min.js"), JS),
+        "layout.js" => (include_str!("assets/layout.js"), JS),
+        "settings.js" => (include_str!("assets/settings.js"), JS),
+        "topology.js" => (include_str!("assets/topology.js"), JS),
         "favicon.svg" => (include_str!("assets/favicon.svg"), "image/svg+xml"),
         _ => return (StatusCode::NOT_FOUND, "no such asset").into_response(),
     };
@@ -908,6 +954,71 @@ mod tests {
 
     /// `/assets/*` sits outside the guard so the login page can style itself —
     /// a stylesheet behind a login is a login page with no stylesheet.
+    #[tokio::test]
+    async fn security_headers_are_off_by_default() {
+        let (_dir, app) = router();
+        let response = send(app, get("/login")).await;
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::CONTENT_SECURITY_POLICY)
+        );
+    }
+
+    #[tokio::test]
+    async fn security_headers_cover_public_and_protected_routes_when_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = sharerr_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            ..sharerr_core::Config::default()
+        };
+        config.server.security_headers = true;
+        let serve = Arc::new(ServeState::new(
+            config,
+            dir.path().join("sharerr.toml"),
+            None,
+        ));
+        let app = routes(serve);
+
+        for path in ["/login", "/", "/assets/layout.js"] {
+            let response = send(app.clone(), get(path)).await;
+            let headers = response.headers();
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                CONTENT_SECURITY_POLICY,
+                "{path}"
+            );
+            assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY", "{path}");
+            assert_eq!(headers[header::REFERRER_POLICY], "no-referrer", "{path}");
+            assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{path}");
+        }
+    }
+
+    /// The CSP refuses inline script, so none may creep back into a template.
+    #[test]
+    fn no_template_carries_inline_script() {
+        let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web/templates");
+        for entry in std::fs::read_dir(templates).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "html") {
+                continue;
+            }
+            let html = std::fs::read_to_string(&path).unwrap();
+            assert!(!html.contains("<script>"), "{}", path.display());
+            assert!(!html.contains("<style"), "{}", path.display());
+            for handler in [
+                " onclick=",
+                " onchange=",
+                " onsubmit=",
+                " oninput=",
+                " onload=",
+                " style=\"",
+            ] {
+                assert!(!html.contains(handler), "{handler} in {}", path.display());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn assets_are_served_without_a_session() {
         let (_dir, app) = router();

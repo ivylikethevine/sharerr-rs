@@ -585,6 +585,60 @@ async fn check_qbit_reports_ready_and_lists_the_configured_category() {
     .await;
 
     assert_eq!(report.failures, 0);
+    assert_eq!(report.warnings, 0);
+}
+
+#[tokio::test]
+async fn check_qbit_warns_about_a_version_below_the_security_floor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/app/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.0"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/torrents/categories"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "sharerr": { "name": "sharerr", "savePath": "" } }),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut vault = vault_in(&dir);
+    vault
+        .put(
+            secret_keys::QBITTORRENT_API_KEY,
+            &SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86"),
+        )
+        .unwrap();
+    let config = Config {
+        torrent_backend: TorrentBackend::Qbittorrent,
+        qbittorrent: sharerr_core::config::QbitConfig {
+            url: Url::parse(&server.uri()).unwrap(),
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    let mut report = Report::default();
+
+    check_qbit(
+        &config,
+        stored_credential(&config, &vault),
+        false,
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(report.failures, 0, "an old client still seeds");
+    assert_eq!(report.warnings, 1);
 }
 
 #[tokio::test]

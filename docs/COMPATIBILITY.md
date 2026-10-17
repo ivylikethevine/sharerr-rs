@@ -44,11 +44,15 @@ version changes what discovery reads:
 - **Readarr** is retired upstream. **Bookshelf**, the maintained fork,
   serves the same v1 endpoints and fields discovery reads and reports itself
   as Readarr, so it is configured as `[readarr]`. Its `hardcover` images
-  return Hardcover ids where Readarr returned Goodreads ones.
+  return Hardcover ids where Readarr returned Goodreads ones; discovery
+  labels a book's id Hardcover when its metadata server (`METADATA_URL`, or
+  the one set in its UI) has `hardcover` in its host, as those images' does.
 
-Bookshelf and Sonarr v5 are checked against their source, not yet driven in
-tier 2. Both shapes sit behind the `LibrarySource` seam
-in `crates/sharerr/src/sync/mod.rs`: `kind()` plus `discover()`, which
+Tier 2 drives Bookshelf's `hardcover` image on the plain stack and Sonarr v5
+with `--sonarr-v5`; see [`TESTING.md`](TESTING.md#tier-2-the-compose-stacks).
+
+The *arr apps and the plain directory both sit behind the `LibrarySource`
+seam in `crates/sharerr/src/sync/mod.rs`: `kind()` plus `discover()`, which
 returns a scan that also says whether it was _complete_. A partial walk still
 shares what it found, but nothing is withdrawn on its behalf. That is where a
 future source would plug in; none is currently planned.

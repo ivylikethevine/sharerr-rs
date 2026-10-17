@@ -664,6 +664,27 @@ pub async fn check_qbit(
     }
 }
 
+/// The oldest qBittorrent without the WebUI's redirect-handling SSRF, fixed in
+/// 5.2.1.
+pub const QBIT_SECURITY_FLOOR: [u32; 3] = [5, 2, 1];
+
+/// Whether a qBittorrent `app/version` string (`v5.2.0`, `5.1.4beta1`) is
+/// older than [`QBIT_SECURITY_FLOOR`]. A version that does not parse is not
+/// called old.
+pub fn qbit_below_security_floor(version: &str) -> bool {
+    let mut parts = [0u32; 3];
+    let mut fields = version.trim().trim_start_matches(['v', 'V']).split('.');
+    for part in &mut parts {
+        let Some(field) = fields.next() else { break };
+        let digits = field.split(|c: char| !c.is_ascii_digit()).next();
+        match digits.and_then(|d| d.parse().ok()) {
+            Some(n) => *part = n,
+            None => return false,
+        }
+    }
+    parts < QBIT_SECURITY_FLOOR
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1182,6 +1203,19 @@ mod tests {
                 assert_eq!(kind, ClientKind::QBittorrent);
             }
             other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qbit_versions_before_5_2_1_are_below_the_security_floor() {
+        for old in ["v5.2.0", "5.1.4", "v4.6.7", "v5.2.0beta1", "v5.2"] {
+            assert!(qbit_below_security_floor(old), "{old}");
+        }
+        for current in ["v5.2.1", "v5.2.3", "5.3.0", "v6.0.0rc1", " v5.2.1 "] {
+            assert!(!qbit_below_security_floor(current), "{current}");
+        }
+        for unparsed in ["", "unknown", "vx.y"] {
+            assert!(!qbit_below_security_floor(unparsed), "{unparsed}");
         }
     }
 

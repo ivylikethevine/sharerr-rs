@@ -469,6 +469,9 @@ fn ids_summary(ids: &sharerr_core::ExternalIds) -> String {
     if let Some(v) = &ids.goodreads {
         parts.push(format!("goodreads {v}"));
     }
+    if let Some(v) = &ids.hardcover {
+        parts.push(format!("hardcover {v}"));
+    }
     if let Some(v) = &ids.isbn {
         parts.push(format!("isbn {v}"));
     }

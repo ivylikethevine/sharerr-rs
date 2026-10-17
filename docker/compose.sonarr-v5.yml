@@ -1,0 +1,12 @@
+# Sonarr v5 in place of v4, layered over compose.test.yml:
+#
+#   ./scripts/run_docker_tests.sh --sonarr-v5
+#
+# v5 still serves the v3 API discovery reads, and `seed-arr` writes the same
+# columns into its database; this proves both against a real one. v5 is a
+# prerelease, so the pin is a `develop` build and moves by hand like every
+# other pin here.
+
+services:
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:develop-5.0.0.2635-ls196@sha256:ca18c98424f88373af491835d98235506caebd6b8655997f60ffa1655cbb7fe1

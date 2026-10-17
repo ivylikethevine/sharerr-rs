@@ -108,7 +108,7 @@
           {{ peer.scope_label }}
           {% else %}
           <form method="post" action="/peers/{{ peer.id }}/scope" class="inline">
-            <select name="scope" onchange="this.form.submit()" aria-label="What {{ peer.label }} can see">
+            <select name="scope" data-autosubmit aria-label="What {{ peer.label }} can see">
               {% for option in scope_options %}
               <option value="{{ option.value }}"{% if peer.scope == option.value %} selected{% endif %}>{{ option.label }}</option>
               {% endfor %}

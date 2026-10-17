@@ -1228,6 +1228,7 @@ async fn instance_lines_dials_the_tracker_and_the_feed_when_reachability_is_on()
         // the bind port when nothing is advertised statically.
         server: sharerr_core::config::ServerConfig {
             bind: format!("127.0.0.1:{closed}").parse().unwrap(),
+            ..Default::default()
         },
         ..Config::default()
     };
@@ -1258,6 +1259,7 @@ async fn instance_lines_has_no_tracker_address_to_dial_before_one_is_advertised(
         checks: sharerr_core::config::ChecksConfig { reachability: true },
         server: sharerr_core::config::ServerConfig {
             bind: format!("127.0.0.1:{closed}").parse().unwrap(),
+            ..Default::default()
         },
         ..Config::default()
     };

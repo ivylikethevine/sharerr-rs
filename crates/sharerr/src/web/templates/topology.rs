@@ -191,7 +191,7 @@ pub struct NodeLine {
     pub text: String,
     /// `text` with the host half of any IPv4 literal and the tail of any port
     /// replaced by `•` — what the "hide addresses" toggle (on by default,
-    /// see `topology.html`'s inline script) shows instead. Equal to `text`
+    /// see `assets/topology.js`) shows instead. Equal to `text`
     /// when the line carries no address at all.
     pub masked: String,
 }

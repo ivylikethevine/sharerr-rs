@@ -991,6 +991,7 @@ async fn a_row_lists_every_external_id_in_lookup_order() {
                 imdb: Some("tt4".to_owned()),
                 musicbrainz: Some("mb5".to_owned()),
                 goodreads: Some("gr6".to_owned()),
+                hardcover: Some("hc8".to_owned()),
                 isbn: Some("9787".to_owned()),
             },
             ..named(MediaSource::Radarr, "Harborlight", 1)
@@ -1008,6 +1009,7 @@ async fn a_row_lists_every_external_id_in_lookup_order() {
         "imdb tt4",
         "musicbrainz mb5",
         "goodreads gr6",
+        "hardcover hc8",
         "isbn 9787",
     ] {
         assert!(html.contains(id), "missing {id} in:\n{html}");

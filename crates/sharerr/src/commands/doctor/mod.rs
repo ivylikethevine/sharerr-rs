@@ -607,6 +607,15 @@ async fn check_qbit(
             client,
         } => {
             report.ok(format!("{url} responded ({kind} {version})"));
+            if config.torrent_backend == TorrentBackend::Qbittorrent
+                && checks::qbit_below_security_floor(&version)
+            {
+                let [major, minor, patch] = checks::QBIT_SECURITY_FLOOR;
+                report.warn(format!(
+                    "qBittorrent {version} predates {major}.{minor}.{patch}, which fixed a \
+                     high-severity SSRF in the WebUI's redirect handling — upgrade it"
+                ));
+            }
             client
         }
         QbitOutcome::AuthRejected => {

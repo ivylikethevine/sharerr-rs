@@ -459,7 +459,8 @@ printf %s "$KEY" | sharerr vault set qbittorrent.api_key
 ```
 
 Rotating the key in qBittorrent invalidates the old one immediately, so
-store the new one at the same time. Older builds without the API key feature
+store the new one at the same time. `sharerr doctor` warns below 5.2.1,
+which fixed a high-severity SSRF in the WebUI's redirect handling. Older builds without the API key feature
 are not supported.
 
 ### If a correct key is rejected
@@ -586,20 +587,8 @@ attached.
 
 Smallest first, by how much each item touches:
 
-- **A qBittorrent 5.2.1 floor in `doctor`.** 5.2.1 fixed a high-severity
-  SSRF in redirect handling; the `app/version` probe already exists, so a
-  warning below it is a comparison.
-- **Hardcover ids labelled as Goodreads.** Bookshelf's `hardcover` images
-  return a Hardcover id as `foreignBookId`, which the Items page shows as a
-  Goodreads id.
-- **Opt-in security response headers.** A `server.security_headers` switch
-  (CSP, `X-Frame-Options`, `Referrer-Policy`) for an instance run outside the
-  trusted LAN, leaving the default as `docs/SECURITY.md` describes.
 - **Native ntfy, Gotify, Telegram and Pushover payloads.** Apprise reaches
   them today; each would be one more `notifications.kind`.
-- **Sonarr v5 and Bookshelf in tier 2.** Both are verified against source
-  only; a pinned image for each in the compose stack would catch an API
-  change the week it lands.
 - **Bulk actions on Items.** Select-all with retry, rebuild or unshare over
   the existing filters.
 - **A friend's-eye feed preview.** The feed as one chosen friend's scope

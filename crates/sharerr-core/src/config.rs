@@ -611,12 +611,18 @@ pub struct TorrentClientConfig<'a> {
 /// the Torznab feed.
 pub struct ServerConfig {
     pub bind: SocketAddr,
+    /// Send a strict `Content-Security-Policy`, `X-Frame-Options`,
+    /// `Referrer-Policy` and `X-Content-Type-Options` with every web UI
+    /// response. Off by default, for the trusted LAN `docs/SECURITY.md`
+    /// assumes; turn it on for an instance reachable from anywhere else.
+    pub security_headers: bool,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8477),
+            security_headers: false,
         }
     }
 }

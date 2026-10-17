@@ -1,8 +1,8 @@
 # The compose test stacks
 
-Disposable Sonarr + Radarr + Lidarr + torrent-client + Prowlarr stacks for
-exercising sharerr against the real services. **Entirely optional**: the
-default `cargo test` suite is hermetic and needs none of this.
+Disposable Sonarr + Radarr + Lidarr + Readarr + torrent-client + Prowlarr
+stacks for exercising sharerr against the real services. **Entirely
+optional**: the default `cargo test` suite is hermetic and needs none of this.
 
 > **Not for deploying.** These stacks build the image from source, seed
 > synthetic fixtures, publish on throwaway ports and are torn down with `-v`.
@@ -33,6 +33,7 @@ Everything in `tests/fixtures/media` is synthetic (see
 ./scripts/run_docker_tests.sh --vpn
 ./scripts/run_docker_tests.sh --transmission
 ./scripts/run_docker_tests.sh --rtorrent
+./scripts/run_docker_tests.sh --sonarr-v5     # plain stack, Sonarr v5
 ./scripts/run_docker_tests_two_instance.sh
 ```
 
@@ -70,6 +71,8 @@ that Jackett's `server/config` never echoes a key back, and, after a sync,
 that a real Sonarr (and Lidarr on the plain stack) accepts the instance as a
 Torznab indexer. That last one is the check that matters: Sonarr once refused
 the whole feed over a missing `pubDate`, and only a real client caught it.
+The plain stack also checks that Bookshelf's book is listed with its
+Hardcover id, not as a Goodreads one.
 
 Prowlarr is behind an opt-in profile, since nothing automated uses it:
 
@@ -98,20 +101,23 @@ sharerr shares what carries the `sharerr` tag and nothing else, so a stack
 with no tagged content exercises nothing: `doctor` fails with `TagNotFound`
 and `sync` bails. Getting content in cannot go through the *arr APIs:
 **adding a series, movie, or artist through the API triggers a metadata
-lookup** against `services.sonarr.tv` / `api.radarr.video` / MusicBrainz, and
+lookup** against `services.sonarr.tv` / `api.radarr.video` / MusicBrainz /
+the book metadata server, and
 every fixture title is invented, so the add fails. `seed-arr` therefore
 writes the rows straight into the apps' own SQLite databases:
 
 ```bash
-docker compose -f docker/compose.test.yml stop sonarr radarr lidarr
+docker compose -f docker/compose.test.yml stop sonarr radarr lidarr readarr
 cargo run -p sharerr-testkit --bin seed-arr -- \
     --sonarr docker/state/sonarr/sonarr.db \
     --radarr docker/state/radarr/radarr.db \
-    --lidarr docker/state/lidarr/lidarr.db
-docker compose -f docker/compose.test.yml start sonarr radarr lidarr
+    --lidarr docker/state/lidarr/lidarr.db \
+    --readarr docker/state/readarr/readarr.db
+docker compose -f docker/compose.test.yml start sonarr radarr lidarr readarr
 ```
 
-`--lidarr` is optional; only the plain stack carries a Lidarr container.
+`--lidarr` and `--readarr` are optional; only the plain stack carries Lidarr
+and Readarr containers.
 
 - **Every named app must be stopped.** Each holds its database open and will
   not observe an external write while running.
@@ -141,6 +147,7 @@ always do, and identical mounts would hide every path-mapping bug:
 | Sonarr      | `/tv`               |
 | Radarr      | `/movies`           |
 | Lidarr      | `/music`            |
+| Readarr     | `/books`            |
 | qBittorrent | `/downloads`        |
 | sharerr     | `/media`            |
 
@@ -152,7 +159,7 @@ kernel enforces.
 
 | Stack        | File                       | What it adds                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ------------ | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Plain        | `compose.test.yml`         | Sonarr, Radarr, Lidarr, qBittorrent, Prowlarr (opt-in). The baseline.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Plain        | `compose.test.yml`         | Sonarr, Radarr, Lidarr, Readarr (Bookshelf's `hardcover` image), qBittorrent, Prowlarr (opt-in). The baseline. `--sonarr-v5` layers `compose.sonarr-v5.yml` over it to run the same suite on Sonarr v5.                                                                                                                                                                                                                                                                                                                                                                                     |
 | VPN          | `compose.vpn.yml`          | qBittorrent inside a gluetun namespace. A genuinely different topology: qBittorrent has no network or DNS name of its own, so its address is `http://gluetun:8080` and its ports are published by gluetun. The run asserts `qbittorrent:8080` does _not_ resolve. A WireGuard server inside the stack terminates a real tunnel that goes nowhere, so the suite needs no subscription and no egress; keys in `docker/wireguard/wg0.conf` are committed on purpose. The compose file's header and `wg0.conf` explain the rest, including the in-tunnel listener gluetun's health check needs. |
 | Transmission | `compose.transmission.yml` | Seeds through Transmission. Credentials given up front by compose; it always verifies on add.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | rTorrent     | `compose.rtorrent.yml`     | Seeds through `crazymax/rtorrent-rutorrent`, which bundles rTorrent, ruTorrent, and an nginx proxy answering HTTP XML-RPC over rTorrent's SCGI socket. No `.htpasswd`, so Basic Auth is off and the configured credentials are placeholders. Exists because `sharerr-rtorrent`'s unit tests run against a hand-mocked server, which proves the crate parses what it _expects_, not what a real rTorrent sends.                                                                                                                                                                              |
@@ -174,6 +181,7 @@ combination can run at once.
 | Sonarr               | 18989                                                            | 28989               | 38989        | 48989                              |                |                |
 | Radarr               | 17878                                                            | 27878               | 37878        | 47878                              | 58878          | 59878          |
 | Lidarr               | 18686                                                            |                     |              |                                    |                |                |
+| Readarr              | 18787                                                            |                     |              |                                    |                |                |
 | Torrent client WebUI | 18080                                                            | 28080 (via gluetun) | 39091        | 48080 (ruTorrent), 48000 (XML-RPC) | 58080          | 59080          |
 | Prowlarr             | 19696 (opt-in, [above](#exercising-the-indexer-and-the-tracker)) |                     |              |                                    |                | 59696          |
 | sharerr              | 18477                                                            | 28477               | 38477        | 48477                              | 58477          | 59477          |

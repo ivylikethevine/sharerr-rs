@@ -1154,6 +1154,45 @@ async fn readarr_discovers_a_tagged_authors_books() {
     assert_eq!(found[0].ids.isbn.as_deref(), Some("9780000000002"));
 }
 
+#[tokio::test]
+async fn bookshelf_on_hardcover_metadata_reports_hardcover_ids() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v1").await;
+    mount_json(
+        &server,
+        "/api/v1/config/development",
+        json!({ "metadataSource": "https://hardcover.bookinfo.pro", "logSql": false }),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/author",
+        json!([{ "id": 41, "authorName": "Marisol Vane", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/book",
+        json!([{ "id": 51, "title": "The Gilded Ferry", "foreignBookId": "428113" }]),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v1/bookfile",
+        json!([{ "id": 61, "bookId": 51, "path": "/books/Marisol Vane/The Gilded Ferry.epub" }]),
+    )
+    .await;
+
+    let found = client(MediaSource::Readarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].ids.hardcover.as_deref(), Some("428113"));
+    assert_eq!(found[0].ids.goodreads, None);
+}
+
 /// Readarr reports `mediaInfo` only for an audiobook, and `null` for the ebooks
 /// that are most of a typical library. Both have to be right: an audiobook's
 /// format is what a friend's Readarr filters on, and an ebook must not end up

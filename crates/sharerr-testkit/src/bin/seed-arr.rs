@@ -1,11 +1,12 @@
-//! Write the tagged fixture library straight into Sonarr's, Radarr's, and
-//! Lidarr's databases.
+//! Write the tagged fixture library straight into Sonarr's, Radarr's,
+//! Lidarr's and Readarr's (Bookshelf's) databases.
 //!
 //! ```text
 //! cargo run -p sharerr-testkit --bin seed-arr -- \
 //!     --sonarr docker/state/sonarr/sonarr.db \
 //!     --radarr docker/state/radarr/radarr.db \
-//!     --lidarr docker/state/lidarr/lidarr.db
+//!     --lidarr docker/state/lidarr/lidarr.db \
+//!     --readarr docker/state/readarr/readarr.db
 //! ```
 //!
 //! Also seeds a *second, independent* Radarr's own "wanted" catalog entry —
@@ -16,7 +17,8 @@
 //!
 //! `POST /api/v3/series` triggers a metadata lookup against `services.sonarr.tv`,
 //! `POST /api/v3/movie` one against `api.radarr.video`, and adding an artist or
-//! album to Lidarr one against MusicBrainz. Every fixture title is invented, so
+//! album to Lidarr one against MusicBrainz, and adding an author to Readarr
+//! one against its metadata server. Every fixture title is invented, so
 //! the lookup would find nothing even with egress — writing the rows directly
 //! is the only way to get tagged content at all, independent of whether the
 //! compose network can reach the internet.
@@ -41,11 +43,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use sharerr_testkit::library::{
-    ALBUM_FOREIGN_ID, ALBUM_ID, ALBUM_RELEASE_FOREIGN_ID, ALBUM_TITLE, ARR_MOVIE_PREFIX,
-    ARR_MUSIC_PREFIX, ARR_TV_PREFIX, ARTIST_FOLDER, ARTIST_FOREIGN_ID, ARTIST_ID, ARTIST_NAME,
-    EPISODES, MOVIE_FOLDER, MOVIE_ID, MOVIE_IMDB_ID, MOVIE_TITLE, MOVIE_TMDB_ID, MOVIE_YEAR,
-    MediaFile, SERIES_FOLDER, SERIES_ID, SERIES_IMDB_ID, SERIES_TITLE, SERIES_TVDB_ID,
-    SERIES_TVMAZE_ID, TAG_LABEL, TRACKS, movie_files, music_files, tv_files,
+    ALBUM_FOREIGN_ID, ALBUM_ID, ALBUM_RELEASE_FOREIGN_ID, ALBUM_TITLE, ARR_BOOK_PREFIX,
+    ARR_MOVIE_PREFIX, ARR_MUSIC_PREFIX, ARR_TV_PREFIX, ARTIST_FOLDER, ARTIST_FOREIGN_ID, ARTIST_ID,
+    ARTIST_NAME, AUTHOR_FOLDER, AUTHOR_FOREIGN_ID, AUTHOR_ID, AUTHOR_NAME, BOOK_FOREIGN_ID,
+    BOOK_ID, BOOK_ISBN13, BOOK_TITLE, EDITION_FOREIGN_ID, EDITION_ID, EPISODES, MOVIE_FOLDER,
+    MOVIE_ID, MOVIE_IMDB_ID, MOVIE_TITLE, MOVIE_TMDB_ID, MOVIE_YEAR, MediaFile, SERIES_FOLDER,
+    SERIES_ID, SERIES_IMDB_ID, SERIES_TITLE, SERIES_TVDB_ID, SERIES_TVMAZE_ID, TAG_LABEL, TRACKS,
+    book_files, movie_files, music_files, tv_files,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 use sqlx::{Executor, Row};
@@ -71,6 +75,7 @@ const LANGUAGES: &str = "[1]";
 const TV_ROOT: &str = ARR_TV_PREFIX;
 const MOVIE_ROOT: &str = ARR_MOVIE_PREFIX;
 const MUSIC_ROOT: &str = ARR_MUSIC_PREFIX;
+const BOOK_ROOT: &str = ARR_BOOK_PREFIX;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -80,7 +85,8 @@ async fn main() -> ExitCode {
             eprintln!("{message}");
             eprintln!(
                 "usage: seed-arr --sonarr <sonarr.db> --radarr <radarr.db> \
-                 [--lidarr <lidarr.db>] [--radarr-wanted <radarr.db>]\n\
+                 [--lidarr <lidarr.db>] [--readarr <readarr.db>] \
+                 [--radarr-wanted <radarr.db>]\n\
                  \n\
                  Every named app must be stopped: it holds its database open and will\n\
                  not see an external write while running. Each flag is independent —\n\
@@ -110,6 +116,7 @@ struct Args {
     sonarr: Option<PathBuf>,
     radarr: Option<PathBuf>,
     lidarr: Option<PathBuf>,
+    readarr: Option<PathBuf>,
     radarr_wanted: Option<PathBuf>,
 }
 
@@ -122,6 +129,7 @@ fn parse_args() -> Result<Args, String> {
             "--sonarr" => &mut args.sonarr,
             "--radarr" => &mut args.radarr,
             "--lidarr" => &mut args.lidarr,
+            "--readarr" => &mut args.readarr,
             "--radarr-wanted" => &mut args.radarr_wanted,
             other => return Err(format!("unexpected argument {other:?}")),
         };
@@ -132,10 +140,12 @@ fn parse_args() -> Result<Args, String> {
     if args.sonarr.is_none()
         && args.radarr.is_none()
         && args.lidarr.is_none()
+        && args.readarr.is_none()
         && args.radarr_wanted.is_none()
     {
         return Err(
-            "nothing to do: give at least one of --sonarr, --radarr, --lidarr, --radarr-wanted"
+            "nothing to do: give at least one of --sonarr, --radarr, --lidarr, \
+             --readarr, --radarr-wanted"
                 .to_owned(),
         );
     }
@@ -185,6 +195,18 @@ async fn run(args: &Args) -> anyhow::Result<()> {
         println!(
             "tagged {TAG_LABEL:?}: {} track file(s) on {ARTIST_NAME:?}",
             music.len()
+        );
+    }
+
+    if let Some(readarr_db) = &args.readarr {
+        let books = book_files(unused_root);
+        let readarr = open(readarr_db).await?;
+        let tag_id = ensure_tag(&readarr).await?;
+        seed_readarr(&readarr, tag_id, &books).await?;
+        readarr.close().await;
+        println!(
+            "tagged {TAG_LABEL:?}: {} book file(s) by {AUTHOR_NAME:?}",
+            books.len()
         );
     }
 
@@ -548,6 +570,118 @@ async fn seed_lidarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
     Ok(())
 }
 
+/// Readarr tags the author. Its schema matches Lidarr's split: the
+/// descriptive half of an author in `AuthorMetadata`, and a book file hangs
+/// off an *edition* (`BookFiles.EditionId`), not the book. `BookFiles.Path`
+/// is the full path. Columns confirmed against Bookshelf's own schema;
+/// profile id 1 is the "eBook" quality and "Standard" metadata profile a
+/// fresh database creates.
+async fn seed_readarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyhow::Result<()> {
+    let author_path = format!("{BOOK_ROOT}/{AUTHOR_FOLDER}");
+    let tags = format!("[{tag_id}]");
+
+    db.execute(
+        sqlx::query(
+            "INSERT OR IGNORE INTO RootFolders (Path, Name, IsCalibreLibrary) VALUES (?, ?, 0)",
+        )
+        .bind(BOOK_ROOT)
+        .bind("Books"),
+    )
+    .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO AuthorMetadata (
+             Id, ForeignAuthorId, TitleSlug, Name, Status, Images, Aliases, SortName,
+             NameLastFirst, SortNameLastFirst
+         ) VALUES (?, ?, ?, ?, 0, '[]', '[]', ?, ?, ?)",
+    )
+    .bind(AUTHOR_ID)
+    .bind(AUTHOR_FOREIGN_ID)
+    .bind(slug(AUTHOR_NAME))
+    .bind(AUTHOR_NAME)
+    .bind(AUTHOR_NAME.to_lowercase())
+    .bind(last_first(AUTHOR_NAME))
+    .bind(last_first(AUTHOR_NAME).to_lowercase())
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO Authors (
+             Id, CleanName, Path, Monitored, QualityProfileId, Tags, Added,
+             MetadataProfileId, AuthorMetadataId, MonitorNewItems
+         ) VALUES (?, ?, ?, 1, 1, ?, ?, 1, ?, 0)",
+    )
+    .bind(AUTHOR_ID)
+    .bind(clean(AUTHOR_NAME))
+    .bind(&author_path)
+    .bind(&tags)
+    .bind(ADDED)
+    .bind(AUTHOR_ID)
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO Books (
+             Id, AuthorMetadataId, ForeignBookId, TitleSlug, Title, ReleaseDate, CleanTitle,
+             Monitored, AnyEditionOk, Added, RelatedBooks
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, '[]')",
+    )
+    .bind(BOOK_ID)
+    .bind(AUTHOR_ID)
+    .bind(BOOK_FOREIGN_ID)
+    .bind(slug(BOOK_TITLE))
+    .bind(BOOK_TITLE)
+    .bind(ADDED)
+    .bind(clean(BOOK_TITLE))
+    .bind(ADDED)
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO Editions (
+             Id, BookId, ForeignEditionId, Isbn13, Title, TitleSlug, IsEbook, Images,
+             Monitored, ManualAdd
+         ) VALUES (?, ?, ?, ?, ?, ?, 1, '[]', 1, 0)",
+    )
+    .bind(EDITION_ID)
+    .bind(BOOK_ID)
+    .bind(EDITION_FOREIGN_ID)
+    .bind(BOOK_ISBN13)
+    .bind(BOOK_TITLE)
+    .bind(EDITION_FOREIGN_ID)
+    .execute(db)
+    .await?;
+
+    for file in files {
+        sqlx::query(
+            "INSERT OR REPLACE INTO BookFiles (
+                 Id, EditionId, CalibreId, Quality, Size, SceneName, DateAdded, Modified,
+                 Path, Part, IndexerFlags
+             ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, 1, 0)",
+        )
+        .bind(file.file_id)
+        .bind(EDITION_ID)
+        .bind(QUALITY)
+        .bind(file.size as i64)
+        .bind(file.scene_name.as_deref())
+        .bind(ADDED)
+        .bind(ADDED)
+        .bind(&file.arr_path)
+        .execute(db)
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// "Thorne, Odalys": Readarr's `NameLastFirst`.
+fn last_first(name: &str) -> String {
+    match name.rsplit_once(' ') {
+        Some((first, last)) => format!("{last}, {first}"),
+        None => name.to_owned(),
+    }
+}
+
 /// Sonarr's `TitleSlug`, which carries a unique index — lowercase, hyphenated.
 fn slug(title: &str) -> String {
     title
@@ -602,5 +736,6 @@ mod tests {
     fn titles_reduce_the_way_the_arr_apps_index_them() {
         assert_eq!(clean("The Gilded Ferry"), "thegildedferry");
         assert_eq!(slug("Lanternwick Hollow"), "lanternwick-hollow");
+        assert_eq!(last_first("Odalys Thorne"), "Thorne, Odalys");
     }
 }

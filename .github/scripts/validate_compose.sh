@@ -51,6 +51,10 @@ for f in "${files[@]}"; do
   docker/deploy/lighthouse/compose.tls.yaml)
     args=(-f "${f%/*}/compose.yaml" -f "$f")
     ;;
+  # An override layered on the plain test stack, never run alone.
+  docker/compose.sonarr-v5.yml)
+    args=(-f docker/compose.test.yml -f "$f")
+    ;;
   *)
     args=(-f "$f")
     ;;

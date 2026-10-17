@@ -17,10 +17,11 @@ use sharerr_testkit::Library;
 
 type Builder = fn(&Path) -> std::io::Result<Library>;
 
-const BUILDERS: [(&str, Builder); 3] = [
+const BUILDERS: [(&str, Builder); 4] = [
     ("tv", sharerr_testkit::tv_library),
     ("movie", sharerr_testkit::movie_library),
     ("music", sharerr_testkit::music_library),
+    ("book", sharerr_testkit::book_library),
 ];
 
 fn main() -> ExitCode {

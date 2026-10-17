@@ -62,7 +62,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
                 )
             }),
         )
-        .route("/assets/{file}", get(crate::web::asset));
+        .route("/assets/{file}", get(crate::web::asset))
+        .layer(axum::middleware::map_response(
+            crate::web::add_security_headers,
+        ));
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await

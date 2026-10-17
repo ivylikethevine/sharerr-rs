@@ -90,8 +90,44 @@ async fn fetch_author(client: &ArrClient, author: &Author) -> Result<AuthorPaylo
     Ok((books, files))
 }
 
+/// Readarr's development settings; only the metadata server is read.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevelopmentConfig {
+    #[serde(default)]
+    metadata_source: Option<String>,
+}
+
+/// Whether `foreignBookId` is a Hardcover id rather than a Goodreads one.
+/// Bookshelf's `hardcover` images point the metadata server at
+/// `hardcover.bookinfo.pro`; nothing else in the API names the provider, so a
+/// self-hosted server is recognised only if its host says `hardcover` too.
+async fn uses_hardcover(client: &ArrClient) -> bool {
+    match client
+        .get::<DevelopmentConfig, _>("config/development", &())
+        .await
+    {
+        Ok(config) => config
+            .metadata_source
+            .as_deref()
+            .is_some_and(names_hardcover),
+        Err(err) => {
+            tracing::debug!(error = %err, "metadata source unreadable; book ids taken as Goodreads");
+            false
+        }
+    }
+}
+
+fn names_hardcover(metadata_source: &str) -> bool {
+    url::Url::parse(metadata_source.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host.contains("hardcover"))
+}
+
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
     let authors: Vec<Author> = client.get("author", &()).await?;
+    let hardcover = uses_hardcover(client).await;
     // Concurrent across authors as well as within one — see `fetch_tagged`.
     let fetched = fetch_tagged(client, &authors, tag_id, "readarr authors", fetch_author).await?;
 
@@ -114,6 +150,12 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
 
         for (book, file) in joined {
             let isbn = pick_isbn(&book.editions);
+            let work_id = non_empty(book.foreign_book_id.clone());
+            let (goodreads, hardcover) = if hardcover {
+                (None, work_id)
+            } else {
+                (work_id, None)
+            };
 
             discovered.push(Discovered {
                 source: MediaSource::Readarr,
@@ -126,7 +168,8 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 arr_path: file.path.clone().into(),
                 size: file.size,
                 ids: ExternalIds {
-                    goodreads: non_empty(book.foreign_book_id.clone()),
+                    goodreads,
+                    hardcover,
                     isbn,
                     ..ExternalIds::default()
                 },
@@ -182,6 +225,16 @@ mod tests {
     fn an_unmonitored_edition_is_better_than_no_isbn() {
         let editions = vec![edition(None, true), edition(Some("9780000000003"), false)];
         assert_eq!(pick_isbn(&editions).as_deref(), Some("9780000000003"));
+    }
+
+    #[test]
+    fn a_hardcover_metadata_host_is_recognised() {
+        assert!(names_hardcover("https://hardcover.bookinfo.pro"));
+        assert!(names_hardcover(" https://Hardcover.example.net/api "));
+        assert!(!names_hardcover("https://api.bookinfo.pro"));
+        assert!(!names_hardcover("https://api.bookinfo.club/hardcover"));
+        assert!(!names_hardcover(""));
+        assert!(!names_hardcover("not a url"));
     }
 
     #[test]

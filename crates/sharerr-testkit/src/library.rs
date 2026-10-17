@@ -26,6 +26,7 @@ pub const TAG_LABEL: &str = "sharerr";
 pub const ARR_TV_PREFIX: &str = "/tv";
 pub const ARR_MOVIE_PREFIX: &str = "/movies";
 pub const ARR_MUSIC_PREFIX: &str = "/music";
+pub const ARR_BOOK_PREFIX: &str = "/books";
 
 /// The tagged series, as the *arr apps record it.
 ///
@@ -86,6 +87,22 @@ pub const TRACKS: [(i64, i64, u32, &str); 3] = [
     (6002, 602, 3, "6e5d4c3b-2a1f-0e9d-8c7b-6a5f4e3d2c1b"),
 ];
 
+/// The tagged author, as Readarr (or Bookshelf) records it. Readarr tags the
+/// *author*, so one tagged author shares their whole catalogue.
+pub const AUTHOR_ID: i64 = 81;
+pub const AUTHOR_NAME: &str = "Odalys Thorne";
+pub const AUTHOR_FOLDER: &str = "Odalys Thorne";
+/// Numeric, as Hardcover's ids are: the stack runs Bookshelf's `hardcover`
+/// image, whose metadata server makes these Hardcover ids.
+pub const AUTHOR_FOREIGN_ID: &str = "204917";
+
+pub const BOOK_ID: i64 = 91;
+pub const BOOK_TITLE: &str = "Brass Orchard Almanac";
+pub const BOOK_FOREIGN_ID: &str = "428113";
+pub const EDITION_ID: i64 = 92;
+pub const EDITION_FOREIGN_ID: &str = "30561244";
+pub const BOOK_ISBN13: &str = "9780000000017";
+
 /// Big enough to span several pieces at the 256 KiB floor, small enough to be free.
 const FILE_SIZE: usize = 768 * 1024;
 
@@ -105,7 +122,7 @@ pub struct MediaFile {
 
 /// A written-to-disk fixture library: TV, movie, or music, all the same
 /// shape — a root directory and the files under it. Which kind it is lives
-/// in which of [`tv_library`]/[`movie_library`]/[`music_library`] built it,
+/// in which of [`tv_library`]/[`movie_library`]/[`music_library`]/[`book_library`] built it,
 /// not in the type; the `*_json` methods below are grouped by the kind of
 /// fixture they describe, not enforced apart by the type system.
 #[derive(Debug, Clone)]
@@ -194,11 +211,24 @@ pub fn music_files(root: &Path) -> Vec<MediaFile> {
         .collect()
 }
 
+/// The book fixture as a record, without touching the disk. See [`tv_files`].
+pub fn book_files(root: &Path) -> Vec<MediaFile> {
+    let suffix = format!("{AUTHOR_FOLDER}/{BOOK_TITLE}/brass.orchard.almanac.epub");
+    vec![MediaFile {
+        file_id: 701,
+        source_id: AUTHOR_ID,
+        arr_path: format!("{ARR_BOOK_PREFIX}/{suffix}"),
+        disk_path: root.join("books").join(&suffix),
+        size: FILE_SIZE as u64,
+        scene_name: None,
+    }]
+}
+
 /// Write `files` to disk and wrap them as a [`Library`] rooted at `root`.
 ///
 /// `base_seed` is the deterministic-content seed the first file gets; every
 /// later file gets `base_seed` plus its index, so the three library kinds —
-/// seeded from 1000/2000/3000 respectively — can never produce the same
+/// seeded from 1000/2000/3000/4000 respectively — can never produce the same
 /// bytes for two different files even if a library kind grows past one file.
 fn write_library(root: &Path, files: Vec<MediaFile>, base_seed: u64) -> std::io::Result<Library> {
     for (index, file) in files.iter().enumerate() {
@@ -226,6 +256,11 @@ pub fn movie_library(root: &Path) -> std::io::Result<Library> {
 /// One tagged artist with two track files on one album. Writes the files.
 pub fn music_library(root: &Path) -> std::io::Result<Library> {
     write_library(root, music_files(root), 3000)
+}
+
+/// One tagged author with one book file. Writes the files.
+pub fn book_library(root: &Path) -> std::io::Result<Library> {
+    write_library(root, book_files(root), 4000)
 }
 
 /// `GET /api/v3/tag`, shared by both apps. Includes a decoy.
@@ -413,5 +448,17 @@ mod tests {
             assert!(file.arr_path.starts_with(ARR_MUSIC_PREFIX));
             assert_ne!(Path::new(&file.arr_path), file.disk_path);
         }
+    }
+
+    #[test]
+    fn the_book_library_lands_on_disk_where_it_says_it_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = book_library(dir.path()).unwrap();
+
+        assert_eq!(library.files.len(), 1);
+        let file = &library.files[0];
+        assert_eq!(std::fs::metadata(&file.disk_path).unwrap().len(), file.size);
+        assert!(file.arr_path.starts_with(ARR_BOOK_PREFIX));
+        assert_ne!(Path::new(&file.arr_path), file.disk_path);
     }
 }

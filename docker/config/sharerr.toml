@@ -22,6 +22,9 @@ url = "http://radarr:7878"
 [lidarr]
 url = "http://lidarr:8686"
 
+[readarr]
+url = "http://readarr:8787"
+
 [qbittorrent]
 url = "http://qbittorrent:8080"
 category = "sharerr"
@@ -57,3 +60,8 @@ qbit = "/downloads/movies"
 arr = "/music"
 sharerr = "/media/music"
 qbit = "/downloads/music"
+
+[[path_map]]
+arr = "/books"
+sharerr = "/media/books"
+qbit = "/downloads/books"

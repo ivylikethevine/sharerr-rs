@@ -71,6 +71,7 @@ flag. A vault that opens but cannot be written is a directory on its
 ./scripts/run_docker_tests.sh --vpn           # qBittorrent behind gluetun
 ./scripts/run_docker_tests.sh --transmission
 ./scripts/run_docker_tests.sh --rtorrent
+./scripts/run_docker_tests.sh --sonarr-v5     # the plain stack on Sonarr v5
 ./scripts/run_docker_tests_two_instance.sh    # two friend-to-friend instances
 ```
 
@@ -78,7 +79,8 @@ Opt-in locally; `ci.yml` compiles it but never runs it, and
 [`integration.yml`](#in-ci-integrationyml) runs it weekly. One flag at a
 time. The script
 brings up `docker/compose.test.yml` (or the `--vpn`, `--transmission`,
-`--rtorrent` sibling), seeds Sonarr, Radarr and Lidarr with tagged synthetic
+`--rtorrent` sibling, or with `--sonarr-v5` the same stack on Sonarr v5),
+seeds Sonarr, Radarr, Lidarr and Readarr (Bookshelf) with tagged synthetic
 content via `sharerr-testkit`'s `seed-arr` binary, runs the suite behind the
 `e2e` feature and `#[ignore]` (`cargo test -p sharerr --features e2e --
 --ignored --test-threads=1`), and tears the stack down on exit whether the
@@ -138,8 +140,8 @@ own Docker daemon, on a weekly schedule rather than per PR: a stack takes
 minutes to boot and pulls real third-party images, and a flake in one of
 those must not block a merge. The schedule runs the default tier
 (`run_docker_tests.sh` with no flag). A manual dispatch picks one tier
-(`default`, `vpn`, `transmission`, `rtorrent`, `two-instance`, `mesh`) or
-`all`, which runs every tier as a matrix. No tier needs a secret.
+(`default`, `vpn`, `transmission`, `rtorrent`, `sonarr-v5`, `two-instance`,
+`mesh`) or `all`, which runs every tier as a matrix. No tier needs a secret.
 
 It is advisory, and reports by keeping one `integration` tracking issue
 current: a failing scheduled run opens or rewrites it, the next passing
