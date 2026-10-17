@@ -341,6 +341,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cat",
+            "in": "query",
+            "description": "Comma-separated category ids. An item matches when its category is in\nthe same top-level group as any of them, so Sonarr's default `5030,5040`\nfinds TV filed under 5000, and adult content (6000) never reaches a\nRadarr asking for 2000 even when a TMDb id matches.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -637,6 +646,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cat",
+            "in": "query",
+            "description": "Comma-separated category ids. An item matches when its category is in\nthe same top-level group as any of them, so Sonarr's default `5030,5040`\nfinds TV filed under 5000, and adult content (6000) never reaches a\nRadarr asking for 2000 even when a TMDb id matches.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -747,6 +765,15 @@
           {
             "name": "imdbid",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cat",
+            "in": "query",
+            "description": "Comma-separated category ids. An item matches when its category is in\nthe same top-level group as any of them, so Sonarr's default `5030,5040`\nfinds TV filed under 5000, and adult content (6000) never reaches a\nRadarr asking for 2000 even when a TMDb id matches.",
             "required": false,
             "schema": {
               "type": "string"

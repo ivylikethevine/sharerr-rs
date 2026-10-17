@@ -351,8 +351,14 @@ Then store each key: `printf %s "$KEY" | sharerr vault set lidarr.api_key`.
   tagging a Sonarr series shares every episode.
 - **Lidarr and Readarr are on API v1**, Sonarr/Radarr/Whisparr on v3. sharerr
   picks the right one per app; you only supply the base URL.
-- **Whisparr content is categorised as XXX**, not TV, and a friend scoped to
-  "TV only" does **not** receive it. Only an unscoped friend does.
+- **Whisparr content is categorised as XXX**, not TV or Movies, and a friend
+  scoped to "TV only" or "Movies only" does **not** receive it. Only an
+  unscoped friend does. Whisparr v2 tags per site and v3 per movie or scene;
+  sharerr tells them apart by version.
+- **Readarr is retired upstream**; its maintained fork Bookshelf works as
+  `[readarr]` unchanged. See
+  [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#library-sources-where-tagged-content-comes-from)
+  for this and for Sonarr v5's alternate episode orders.
 
 ## Friends finding each other
 
@@ -580,10 +586,48 @@ attached.
 
 Smallest first, by how much each item touches:
 
+- **A qBittorrent 5.2.1 floor in `doctor`.** 5.2.1 fixed a high-severity
+  SSRF in redirect handling; the `app/version` probe already exists, so a
+  warning below it is a comparison.
+- **Hardcover ids labelled as Goodreads.** Bookshelf's `hardcover` images
+  return a Hardcover id as `foreignBookId`, which the Items page shows as a
+  Goodreads id.
+- **Opt-in security response headers.** A `server.security_headers` switch
+  (CSP, `X-Frame-Options`, `Referrer-Policy`) for an instance run outside the
+  trusted LAN, leaving the default as `docs/SECURITY.md` describes.
+- **Native ntfy, Gotify, Telegram and Pushover payloads.** Apprise reaches
+  them today; each would be one more `notifications.kind`.
+- **Sonarr v5 and Bookshelf in tier 2.** Both are verified against source
+  only; a pinned image for each in the compose stack would catch an API
+  change the week it lands.
+- **Bulk actions on Items.** Select-all with retry, rebuild or unshare over
+  the existing filters.
+- **A friend's-eye feed preview.** The feed as one chosen friend's scope
+  renders it, to check scoping before handing over a key.
+- **A setup checklist on Status.** Tag created, path mapping resolved,
+  friend added, first pull seen, built from the `doctor` checks.
+- **Scene-style titles for Whisparr v3 scenes.** A scene without a scene
+  name is titled like a film (`Title.Year`), where Whisparr's parser expects
+  `Studio.YY.MM.DD.Title`; synthesising that needs the studio and release
+  date carried through discovery.
+- **Sign-in through a forward-auth proxy.** Trust a `Remote-User` header from
+  a configured proxy address (Authelia, Authentik), which also fixes the
+  login throttle collapsing to one global limit behind a proxy.
+- **Unraid and TrueNAS app listings.** Where much of the *arr audience
+  installs from; a Community Applications template and a TrueNAS app.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
+- **Deluge as a fourth client.** The main client still missing; its Web
+  JSON-RPC API covers add-without-moving, labels and per-torrent limits.
+- **Season packs and albums as one torrent.** One file per torrent means a
+  friend's season search returns single episodes; a multi-file torrent over
+  the existing folder still moves nothing.
+- **Hybrid v1/v2 torrents (BEP 52).** Weighed but low value while
+  Transmission's and rTorrent's v2 support stays partial.
 - **Request flow.** Discovery is one-way today. An inbound request queue
-  with an approve step is the other half of the original idea.
+  with an approve step is the other half of the original idea. Seerr (the
+  merged Overseerr and Jellyseerr) is the request app most friends already
+  run, so its request model is the one to fit.
 
 ## Licence
 

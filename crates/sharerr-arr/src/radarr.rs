@@ -2,10 +2,11 @@
 //!
 //! Simpler than Sonarr: tags are movie-level, which is naturally per-item, and the
 //! file is normally embedded in the movie resource so one call covers the library.
+//! Whisparr v3 is Radarr's codebase, so its movies and scenes walk here too.
 
 use std::path::PathBuf;
 
-use sharerr_core::{ExternalIds, MediaSource, MediaSpec};
+use sharerr_core::{ExternalIds, MediaSpec};
 
 use crate::client::ArrClient;
 use crate::error::Result;
@@ -33,7 +34,10 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
         };
 
         discovered.push(Discovered {
-            source: MediaSource::Radarr,
+            // `client.kind()`, not a hardcoded Radarr: Whisparr v3 shares this
+            // walk, and mislabelling its items would put adult content in the
+            // Movies category and hand it to a friend scoped to films.
+            source: client.kind(),
             source_id: movie.id,
             file_id: file.id,
             spec: MediaSpec::Movie {

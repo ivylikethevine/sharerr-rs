@@ -29,8 +29,25 @@ being either committed to or declined, see
 ### Library sources (where tagged content comes from)
 
 **Sonarr**, **Radarr**, **Lidarr**, **Readarr** and **Whisparr** via
-tag-driven discovery (Whisparr reuses Sonarr's walk), and the **plain
-directory** (`[[library]]`). Both shapes sit behind the `LibrarySource` seam
+tag-driven discovery, and the **plain directory** (`[[library]]`). Where a
+version changes what discovery reads:
+
+- **Whisparr v2** is Sonarr's codebase and **v3** is Radarr's, on the same
+  `/api/v3` prefix, so sharerr reads the version from `/system/status` on
+  every pass and walks sites and episodes or movies and scenes to match. v3
+  tags per movie or scene, not per site. Both land in the XXX category.
+- **Sonarr v5** still serves the v3 API sharerr reads, unchanged. It can
+  number a series in an alternate episode order (`seasonType`, such as
+  `dvd`); a release title's `SxxEyy` carries no order, so a friend's Sonarr
+  would import the file as a different episode. A tagged series on any order
+  but `official` is skipped with a warning in the log.
+- **Readarr** is retired upstream. **Bookshelf**, the maintained fork,
+  serves the same v1 endpoints and fields discovery reads and reports itself
+  as Readarr, so it is configured as `[readarr]`. Its `hardcover` images
+  return Hardcover ids where Readarr returned Goodreads ones.
+
+Bookshelf and Sonarr v5 are checked against their source, not yet driven in
+tier 2. Both shapes sit behind the `LibrarySource` seam
 in `crates/sharerr/src/sync/mod.rs`: `kind()` plus `discover()`, which
 returns a scan that also says whether it was _complete_. A partial walk still
 shares what it found, but nothing is withdrawn on its behalf. That is where a

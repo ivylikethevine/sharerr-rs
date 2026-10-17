@@ -29,6 +29,18 @@ fn api_prefix(kind: MediaSource) -> &'static str {
 }
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Whether a Whisparr reporting `version` is v3 or later, which is built on
+/// Radarr (movies and scenes, tagged per item) rather than v2's Sonarr (sites
+/// and episodes, tagged per site). A version that does not parse is taken as
+/// v2, the shape every Whisparr had before v3.
+pub fn whisparr_walks_like_radarr(version: &str) -> bool {
+    version
+        .split('.')
+        .next()
+        .and_then(|major| major.trim().parse::<u32>().ok())
+        .is_some_and(|major| major >= 3)
+}
+
 use sharerr_client::clamp_body;
 
 /// A Sonarr or Radarr v3 client.
@@ -232,9 +244,16 @@ impl ArrClient {
     /// `/tag` round trip.
     pub async fn discover_with_tag_id(&self, tag_id: i64) -> Result<Vec<Discovered>> {
         match self.kind {
-            // Whisparr is Sonarr's codebase with a different catalogue, so it walks
-            // series and episode files identically — the same code, not a copy.
-            MediaSource::Sonarr | MediaSource::Whisparr => sonarr::discover(self, tag_id).await,
+            MediaSource::Sonarr => sonarr::discover(self, tag_id).await,
+            // Whisparr v2 is Sonarr's codebase and v3 is Radarr's, both on the
+            // same `v3` prefix, so only the reported version tells them apart.
+            MediaSource::Whisparr => {
+                if whisparr_walks_like_radarr(&self.system_status().await?.version) {
+                    radarr::discover(self, tag_id).await
+                } else {
+                    sonarr::discover(self, tag_id).await
+                }
+            }
             MediaSource::Radarr => radarr::discover(self, tag_id).await,
             MediaSource::Lidarr => lidarr::discover(self, tag_id).await,
             MediaSource::Readarr => readarr::discover(self, tag_id).await,
@@ -318,6 +337,16 @@ mod tests {
         let err = client.request(Method::GET, "http://[bad").unwrap_err();
 
         assert!(matches!(err, ArrError::Url { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn whisparr_v3_and_later_walk_like_radarr() {
+        for version in ["3.0.0.1", "3.6.6.1913", "4.0.0.0"] {
+            assert!(whisparr_walks_like_radarr(version), "{version}");
+        }
+        for version in ["2.0.0.548", "", "unknown", "v3"] {
+            assert!(!whisparr_walks_like_radarr(version), "{version}");
+        }
     }
 
     /// The match in `discover_with_tag_id` is only exhaustive because this arm

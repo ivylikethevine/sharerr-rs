@@ -1249,6 +1249,49 @@ fn category_follows_the_source_first_and_the_spec_second() {
     assert_eq!(category_for(&book), CAT_BOOKS);
 }
 
+/// A Whisparr v3 film carries a real TMDb id, so an id search from a friend's
+/// Radarr matches it; only the category keeps it out of their film library.
+#[test]
+fn a_category_filter_keeps_adult_films_out_of_a_movie_search() {
+    let mut adult = movie("Lanternwick.Nocturne.2021");
+    adult.source = MediaSource::Whisparr;
+    let film = movie("Harborlight.2019");
+
+    let radarr = SearchQuery {
+        t: "movie".to_owned(),
+        tmdbid: Some(555),
+        cat: Some("2000,2040".to_owned()),
+        ..Default::default()
+    };
+    assert!(radarr.matches(&film));
+    assert!(!radarr.matches(&adult));
+
+    let whisparr = SearchQuery {
+        cat: Some("6000".to_owned()),
+        ..radarr
+    };
+    assert!(whisparr.matches(&adult));
+    assert!(!whisparr.matches(&film));
+}
+
+/// Sonarr asks for subcategories (`5030,5040`) by default while sharerr files
+/// TV under 5000, so matching is by top-level group; a `cat` naming nothing
+/// usable filters nothing rather than everything.
+#[test]
+fn a_category_filter_matches_by_top_level_group() {
+    let show = episode("Lanternwick", 1, 1);
+    let query = |cat: &str| SearchQuery {
+        t: "tvsearch".to_owned(),
+        cat: Some(cat.to_owned()),
+        ..Default::default()
+    };
+    assert!(query("5030,5040").matches(&show));
+    assert!(query(" 5000 ").matches(&show));
+    assert!(!query("2000").matches(&show));
+    assert!(query("").matches(&show));
+    assert!(query("tv,").matches(&show));
+}
+
 #[test]
 fn an_episode_filter_that_matches_the_season_but_not_the_episode_excludes() {
     let query = SearchQuery {

@@ -101,6 +101,23 @@ pub(crate) struct Series {
     pub imdb_id: Option<String>,
     #[serde(default)]
     pub tags: Vec<i64>,
+    /// The episode order the series is numbered in, from Sonarr v5 on:
+    /// `official` (the default) or an alternate such as `dvd`. Absent before
+    /// v5, which only ever numbered in the official order.
+    #[serde(default)]
+    pub season_type: Option<String>,
+}
+
+impl Series {
+    /// Whether this series is numbered in an order other than the official one,
+    /// which is the order a friend's Sonarr reads `SxxEyy` in unless they chose
+    /// the same alternate.
+    pub(crate) fn uses_alternate_order(&self) -> bool {
+        self.season_type
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty() && !t.eq_ignore_ascii_case("official"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

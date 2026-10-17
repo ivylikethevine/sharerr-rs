@@ -414,7 +414,10 @@ async fn check_arr(
         } => {
             report.ok(format!("{} responded ({app_name} {version})", service.url));
             report.ok(format!("{} file(s) tagged {:?}", items.len(), config.tag));
-            if kind.has_coarse_tagging() {
+            // Whisparr v3 tags per movie or scene, like Radarr.
+            let per_item =
+                kind == MediaSource::Whisparr && sharerr_arr::whisparr_walks_like_radarr(&version);
+            if kind.has_coarse_tagging() && !per_item {
                 // Not a defect, but it surprises people: these apps have no
                 // per-item tags, so tagging one thing shares its whole run.
                 report.info(format!(

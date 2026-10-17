@@ -311,7 +311,7 @@ pub struct Config {
     pub lidarr: Option<ServiceConfig>,
     /// Books. Also v1.
     pub readarr: Option<ServiceConfig>,
-    /// Adult content. Whisparr is Sonarr's codebase, so it walks identically.
+    /// Adult content. Whisparr v2 walks like Sonarr and v3 like Radarr.
     pub whisparr: Option<ServiceConfig>,
     /// Which torrent client actually seeds. See [`TorrentBackend`].
     pub torrent_backend: TorrentBackend,

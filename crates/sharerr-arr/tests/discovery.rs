@@ -1225,12 +1225,19 @@ async fn readarr_carries_media_info_for_an_audiobook_and_none_for_an_ebook() {
     assert_eq!(by_file(62).media, None, "an ebook has nothing to report");
 }
 
-/// Whisparr is Sonarr's codebase, so it walks series and episode files with the
-/// same code and the same v3 prefix — the difference is only what it catalogues.
+/// Whisparr v2 is Sonarr's codebase, so it walks series and episode files with
+/// the same code and the same v3 prefix — the difference is only what it
+/// catalogues.
 #[tokio::test]
-async fn whisparr_walks_like_sonarr() {
+async fn whisparr_v2_walks_like_sonarr() {
     let server = MockServer::start().await;
     mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/system/status",
+        json!({ "appName": "Whisparr", "version": "2.0.0.548" }),
+    )
+    .await;
     mount_json(
         &server,
         "/api/v3/series",
@@ -1257,6 +1264,107 @@ async fn whisparr_walks_like_sonarr() {
 
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].source, MediaSource::Whisparr);
+}
+
+/// Whisparr v3 is Radarr's codebase on the same prefix: movies and scenes,
+/// tagged per item, with the file embedded. Walking it as Sonarr would ask for
+/// `/series`, which v3 does not have.
+#[tokio::test]
+async fn whisparr_v3_walks_like_radarr() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/system/status",
+        json!({ "appName": "Whisparr", "version": "3.6.6.1913" }),
+    )
+    .await;
+    mount_json(
+        &server,
+        "/api/v3/movie",
+        json!([
+            {
+                "id": 91,
+                "title": "Lanternwick Nocturne",
+                "year": 2021,
+                "tmdbId": 778_899,
+                "itemType": "scene",
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": {
+                    "id": 92,
+                    "movieId": 91,
+                    "path": "/xxx/Lanternwick Studio/nocturne.mkv",
+                    "size": 2048_u64,
+                },
+            },
+            { "id": 93, "title": "Untagged Scene", "tags": [1], "hasFile": true },
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Whisparr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    let item = &found[0];
+    assert_eq!(item.source, MediaSource::Whisparr, "never labelled Radarr");
+    assert_eq!(item.file_id, 92);
+    assert_eq!(item.ids.tmdb, Some(778_899));
+    assert!(
+        matches!(&item.spec, MediaSpec::Movie { title, .. } if title == "Lanternwick Nocturne")
+    );
+}
+
+/// Sonarr v5 can number a series in an alternate order. A release title says
+/// `SxxEyy` with no order attached, so a friend on the official order would
+/// import the file as the wrong episode: such a series is skipped, while one
+/// on the official order (or a pre-v5 Sonarr sending no order at all) is not.
+#[tokio::test]
+async fn sonarr_skips_a_series_numbered_in_an_alternate_order() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/series",
+        json!([
+            { "id": 11, "title": "Lanternwick Hollow", "tags": [TAG_ID], "seasonType": "official" },
+            { "id": 12, "title": "Copper Vale Station", "tags": [TAG_ID], "seasonType": "dvd" },
+        ]),
+    )
+    .await;
+    for (series, file) in [(11, 501), (12, 502)] {
+        Mock::given(method("GET"))
+            .and(path("/api/v3/episodefile"))
+            .and(query_param("seriesId", series.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "id": file, "path": format!("/tv/{series}/a.mkv"), "size": 1024_u64 },
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/episode"))
+            .and(query_param("seriesId", series.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": file },
+            ])))
+            .mount(&server)
+            .await;
+    }
+
+    let found = client(MediaSource::Sonarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+
+    let series: Vec<i64> = found.iter().map(|d| d.source_id).collect();
+    assert_eq!(
+        series,
+        vec![11],
+        "the dvd-ordered series must not be shared"
+    );
 }
 
 // ------------------------------------------- tagged but nothing on disk
