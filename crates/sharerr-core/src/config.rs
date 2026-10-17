@@ -1795,4 +1795,19 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn public_base_url_is_the_advertised_address_when_one_is_set() {
+        let mut config = Config::default();
+        config.tracker.advertised_host = Some("seed.example".to_owned());
+        config.tracker.port = Some(8478);
+        assert_eq!(config.public_base_url(), "http://seed.example:8478");
+    }
+
+    #[test]
+    fn every_backend_has_a_display_name_with_its_own_capitalisation() {
+        assert_eq!(TorrentBackend::Qbittorrent.display_name(), "qBittorrent");
+        assert_eq!(TorrentBackend::Transmission.display_name(), "Transmission");
+        assert_eq!(TorrentBackend::Rtorrent.display_name(), "rTorrent");
+    }
 }

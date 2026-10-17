@@ -784,4 +784,21 @@ mod tests {
         std::fs::write(&path, b"not a container").unwrap();
         assert_eq!(probe(&path), None);
     }
+
+    #[test]
+    fn a_zero_channel_count_renders_rather_than_underflowing() {
+        assert_eq!(channel_layout(0), "0.0");
+    }
+
+    #[test]
+    fn only_the_three_formats_this_crate_decodes_get_a_codec_name() {
+        use symphonia::core::codecs::audio::CODEC_ID_NULL_AUDIO;
+        use symphonia::core::codecs::audio::well_known::{
+            CODEC_ID_FLAC, CODEC_ID_MP3, CODEC_ID_OPUS,
+        };
+        assert_eq!(audio_codec_name(CODEC_ID_FLAC).as_deref(), Some("FLAC"));
+        assert_eq!(audio_codec_name(CODEC_ID_MP3).as_deref(), Some("MP3"));
+        assert_eq!(audio_codec_name(CODEC_ID_OPUS).as_deref(), Some("Opus"));
+        assert_eq!(audio_codec_name(CODEC_ID_NULL_AUDIO), None);
+    }
 }

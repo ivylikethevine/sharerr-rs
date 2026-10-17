@@ -367,4 +367,12 @@ mod tests {
             Err(BencodeError::Truncated)
         );
     }
+
+    #[test]
+    fn accessors_answer_none_for_the_wrong_variant() {
+        assert_eq!(Value::Bytes(b"x".to_vec()).as_int(), None);
+        assert!(Value::Int(1).as_dict().is_none());
+        assert!(Value::Int(1).as_list().is_none());
+        assert!(Value::Int(1).as_bytes().is_none());
+    }
 }

@@ -1232,4 +1232,37 @@ mod tests {
 
         assert!(matches!(outcome, QbitOutcome::Failed(_)), "{outcome:?}");
     }
+
+    /// An address that cannot be dialled at all is "unusable", not
+    /// "refused": nothing was tried, and the message says what is missing.
+    #[tokio::test]
+    async fn an_address_without_a_host_or_port_is_unusable() {
+        let no_host = Url::parse("unix:/run/sharerr.sock").unwrap();
+        let outcome = check_reachable(Some(&no_host)).await;
+        assert!(
+            matches!(&outcome, ReachOutcome::Unusable(reason) if reason.contains("no host")),
+            "got {outcome:?}"
+        );
+        assert!(!outcome.is_reachable());
+
+        let no_port = Url::parse("sharerr://seed.example").unwrap();
+        let outcome = check_reachable(Some(&no_port)).await;
+        assert!(
+            matches!(&outcome, ReachOutcome::Unusable(reason) if reason.contains("no port")),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_relative_library_path_is_unreadable_and_says_why() {
+        use sharerr_core::config::{LibraryConfig, LibraryKind};
+        let outcome = check_library(&LibraryConfig {
+            path: std::path::PathBuf::from("relative/movies"),
+            kind: LibraryKind::Movie,
+        });
+        assert!(
+            matches!(&outcome, DirOutcome::Unreadable(reason) if reason.contains("absolute")),
+            "got {outcome:?}"
+        );
+    }
 }

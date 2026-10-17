@@ -1433,4 +1433,16 @@ mod tests {
         assert!(view.last_pass.is_none());
         assert_eq!(view.lookups_attempted, 0);
     }
+
+    #[test]
+    fn run_chart_titles_a_quiet_run_with_its_time_alone() {
+        let quiet = RunRow {
+            summary: String::new(),
+            ..row(0, false, false)
+        };
+        // Rows arrive newest first and the strip draws oldest first.
+        let chart = run_chart(&[quiet, row(3, true, false)]).unwrap();
+        assert_eq!(chart.bars[0].title, "3 ago — 3 discovered");
+        assert_eq!(chart.bars[1].title, "0 ago");
+    }
 }

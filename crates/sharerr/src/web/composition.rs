@@ -504,4 +504,17 @@ mod tests {
         let source = find(&composition, "Source");
         assert_eq!(source.rows.iter().map(|r| r.count).sum::<usize>(), 3);
     }
+
+    /// A seeding item of zero bytes (a placeholder the client has not sized
+    /// yet) must not divide by zero: every share is simply nothing.
+    #[test]
+    fn a_library_with_no_bytes_composes_without_dividing_by_zero() {
+        let composition =
+            compose(&[item(MediaSource::Radarr, ShareState::Seeding, 0, None)]).unwrap();
+        for breakdown in &composition.breakdowns {
+            for row in &breakdown.rows {
+                assert_eq!(row.share, "<1%", "{breakdown:?}");
+            }
+        }
+    }
 }

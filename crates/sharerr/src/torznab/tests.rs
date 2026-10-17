@@ -1304,3 +1304,18 @@ async fn collect_reports_an_unready_store_and_a_release_without_a_torrent_has_no
     item.info_hash = None;
     assert_eq!(matched.magnet_url(&item), "");
 }
+
+#[test]
+fn a_season_filter_alone_rejects_another_season() {
+    let item = episode("X.S02E04", 2, 4);
+    let wrong_season = SearchQuery {
+        season: Some(3),
+        ..Default::default()
+    };
+    assert!(!wrong_season.matches(&item));
+    let right_season = SearchQuery {
+        season: Some(2),
+        ..Default::default()
+    };
+    assert!(right_season.matches(&item));
+}

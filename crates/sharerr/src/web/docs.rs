@@ -260,4 +260,13 @@ mod tests {
         );
         assert_eq!(slug("What's left"), "whats-left");
     }
+
+    #[test]
+    fn every_arr_source_has_a_wiki_and_a_plain_directory_has_none() {
+        use sharerr_core::MediaSource;
+        for source in MediaSource::ARRS {
+            assert!(super::for_source(*source).is_some(), "{source:?}");
+        }
+        assert_eq!(super::for_source(MediaSource::Directory), None);
+    }
 }

@@ -1036,4 +1036,24 @@ mod tests {
             "{err}"
         );
     }
+
+    /// Through the trait, the way the binary calls it: `login` is the
+    /// version probe (rTorrent has no session), and `kind` says which
+    /// client this is.
+    #[tokio::test]
+    async fn login_through_the_trait_is_a_version_probe() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(scalar_response("<string>0.9.8</string>")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client: &dyn TorrentClient = &client(&server);
+        assert_eq!(client.kind(), KIND);
+        client.login().await.unwrap();
+    }
 }

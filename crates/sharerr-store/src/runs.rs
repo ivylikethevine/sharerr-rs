@@ -163,4 +163,39 @@ mod tests {
         }
         assert_eq!(store.recent_runs(2).await.unwrap().len(), 2);
     }
+
+    #[test]
+    fn describe_names_each_non_zero_count_and_flags_a_failure() {
+        let quiet = RunSummary {
+            discovered: 3,
+            added: 0,
+            unshared: 0,
+            failed: 0,
+            error: None,
+        };
+        assert_eq!(quiet.describe(false), (String::new(), false));
+        assert_eq!(quiet.describe(true), ("3 discovered".to_owned(), false));
+
+        let busy = RunSummary {
+            discovered: 3,
+            added: 1,
+            unshared: 2,
+            failed: 1,
+            error: None,
+        };
+        assert_eq!(
+            busy.describe(false),
+            ("1 added, 2 unshared, 1 failed".to_owned(), true)
+        );
+
+        let broken = RunSummary {
+            error: Some("sonarr unreachable".to_owned()),
+            ..quiet
+        };
+        assert_eq!(
+            broken.describe(true),
+            ("sonarr unreachable".to_owned(), true),
+            "an outright error replaces the counts"
+        );
+    }
 }

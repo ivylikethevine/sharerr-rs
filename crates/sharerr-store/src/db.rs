@@ -1574,4 +1574,15 @@ mod tests {
         a.unwrap();
         b.unwrap();
     }
+
+    #[test]
+    fn a_name_over_sixty_four_characters_is_refused_with_the_callers_message() {
+        let err = validate_name(&"x".repeat(65), "blank", "too long").unwrap_err();
+        assert!(matches!(err, StoreError::InvalidUser("too long")), "{err}");
+        // Exactly 64 is fine, and surrounding whitespace is not counted.
+        assert_eq!(
+            validate_name(&format!("  {}  ", "y".repeat(64)), "blank", "too long").unwrap(),
+            "y".repeat(64)
+        );
+    }
 }

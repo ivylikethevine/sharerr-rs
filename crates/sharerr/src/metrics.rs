@@ -1173,4 +1173,11 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn a_sample_with_several_labels_separates_them_with_commas() {
+        let mut out = String::new();
+        sample(&mut out, "x", &[("a", "1"), ("b", "2")], 3);
+        assert_eq!(out, "x{a=\"1\",b=\"2\"} 3\n");
+    }
 }

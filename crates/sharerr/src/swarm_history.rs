@@ -45,3 +45,32 @@ pub async fn poll_loop(state: Arc<ServeState>) {
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// One tick of the loop lands one sample; the loop is then abandoned
+    /// rather than waited out, since its interval is an hour.
+    #[tokio::test]
+    async fn the_poll_loop_records_a_sample_on_its_first_tick() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let task = tokio::spawn(poll_loop(serve));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while store.recent_swarm_samples(1).await.unwrap().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no sample within ten seconds"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+
+        let sample = store.recent_swarm_samples(1).await.unwrap()[0];
+        assert_eq!((sample.swarms, sample.peers, sample.seeders), (0, 0, 0));
+    }
+}

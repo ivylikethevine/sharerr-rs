@@ -1194,3 +1194,25 @@ async fn retry_redirects_with_the_passes_outcome_when_it_completes() {
     let location = location(&response);
     assert!(location.starts_with("/items/sonarr/1?ok="), "{location}");
 }
+
+/// The announce URL the detail page shows: the live endpoint, with a
+/// `<token>` placeholder when the instance requires one.
+#[test]
+fn the_current_announce_url_marks_where_a_token_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = sharerr_core::Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.tracker.advertised_host = Some("seed.example".to_owned());
+    let serve = crate::state::ServeState::new(config, dir.path().join("sharerr.toml"), None);
+
+    assert_eq!(
+        super::current_announce_url(&serve, false).as_deref(),
+        Some("http://seed.example:8477/announce")
+    );
+    assert_eq!(
+        super::current_announce_url(&serve, true).as_deref(),
+        Some("http://seed.example:8477/announce/<token>")
+    );
+}

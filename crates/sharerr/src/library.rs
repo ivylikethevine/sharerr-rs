@@ -473,6 +473,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn library(root: &Path, kind: LibraryKind) -> LibraryConfig {
+        crate::test_support::trace();
         LibraryConfig {
             path: root.to_path_buf(),
             kind,

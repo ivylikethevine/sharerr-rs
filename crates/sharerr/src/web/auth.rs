@@ -1465,4 +1465,17 @@ mod tests {
         let response = internal("something broke");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    #[tokio::test]
+    async fn login_page_sends_a_signed_in_visitor_home() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let token = state.sessions.create("operator").await.unwrap();
+        let sent = format!("{COOKIE_NAME}={token}");
+        let jar = CookieJar::from_headers(&headers(&[("cookie", &sent)]));
+
+        let response = login_page(State(state), jar).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(super::super::location(&response), "/");
+    }
 }

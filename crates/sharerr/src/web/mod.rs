@@ -275,6 +275,7 @@ pub(crate) fn toml_download(filename: &str, text: String) -> Response {
 /// web modules — one definition rather than a copy per test module.
 #[cfg(test)]
 pub(crate) fn web_state(serve: Arc<ServeState>) -> WebState {
+    crate::test_support::trace();
     WebState {
         serve,
         sessions: Arc::new(Sessions::default()),
@@ -1027,5 +1028,56 @@ mod tests {
 
         let response = send(app, request).await;
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Every wording the "next sync" estimate can take, driven by moving the
+    /// last run's finish time rather than by waiting.
+    #[tokio::test]
+    async fn next_sync_is_worded_by_how_far_off_it_is() {
+        let (_dir, serve) = unconfigured();
+        let store = serve.store().await.unwrap();
+        let run = store.begin_run().await.unwrap();
+        store
+            .finish_run(run, &sharerr_store::RunSummary::default())
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        // The run just finished, so the interval alone decides the bucket.
+        let next = |every: u64| {
+            let state = state.clone();
+            async move { glance(&state, Some(every)).await.unwrap().next_sync }
+        };
+        assert_eq!(next(60).await, "in under 2 min");
+        assert_eq!(next(600).await, "in ~10 min");
+        assert_eq!(next(7200).await, "in ~2 h");
+        assert_eq!(next(0).await, "due now");
+    }
+
+    /// With a peer announcing right now there is no "quiet since": the tile
+    /// shows the live count instead.
+    #[tokio::test]
+    async fn a_live_swarm_has_no_quiet_since() {
+        let (_dir, serve) = unconfigured();
+        let request = sharerr_torrent::AnnounceRequest {
+            info_hash: [7; 20],
+            peer_id: [1; 20],
+            port: 6881,
+            left: 0,
+            uploaded: 0,
+            downloaded: 0,
+            event: sharerr_torrent::Event::None,
+            compact: true,
+            numwant: 50,
+            declared_ip: None,
+        };
+        serve
+            .swarms()
+            .announce(&request, "203.0.113.5:6881".parse().unwrap())
+            .await;
+
+        let glance = glance(&web_state(serve), None).await.unwrap();
+        assert_eq!(glance.swarm_peers, 1);
+        assert_eq!(glance.swarm_quiet_since, None);
     }
 }

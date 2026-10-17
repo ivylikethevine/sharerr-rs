@@ -150,13 +150,18 @@ layout change.
 
 ```bash
 scripts/check.sh coverage                             # measure, then enforce the floor
-cargo llvm-cov report --html --output-dir coverage-html
+scripts/check.sh coverage-html                        # render target/../coverage-html from that run
 ```
 
 `coverage` is `coverage-run` (`cargo llvm-cov --workspace --all-features
 --locked --no-report`) followed by `coverage-floor`, which fails when line
 coverage is under `COVERAGE_FLOOR_LINES` in `scripts/check.sh`, currently
-**94%**. The floor sits a few points under the measured figure, so an
+**94%**. Every reader of the profile (`coverage-floor`, `coverage-html`,
+`coverage-summary`) goes through the script, which leaves test scaffolding
+out of the report with one `--ignore-filename-regex`: `sharerr-testkit` and
+`crates/sharerr/src/test_support.rs`, where the trait doubles live. A stub
+method no test reaches is not an uncovered product line, so a new double
+belongs in `test_support.rs`, not beside the tests that use it. The floor sits a few points under the measured figure, so an
 ordinary change does not trip it and a real drop does; raise it as coverage
 rises, and write down the reason in the PR that ever lowers it.
 

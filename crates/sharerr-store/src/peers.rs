@@ -701,4 +701,24 @@ mod tests {
         assert_eq!(stored.len(), 64, "hex SHA-256 is 64 characters");
         assert!(stored.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    /// The middle outcome: a sighting past the five-minute window moves
+    /// `last_seen_at` and says so, without being mistaken for first contact.
+    #[tokio::test]
+    async fn a_touch_after_the_throttle_window_refreshes_last_seen() {
+        let store = store().await;
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::First);
+
+        sqlx::query("UPDATE peers SET last_seen_at = last_seen_at - 600 WHERE id = ?1")
+            .bind(sam.id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::Refreshed);
+        assert_eq!(store.touch_peer(sam.id).await.unwrap(), Touch::Throttled);
+    }
 }

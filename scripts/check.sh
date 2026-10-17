@@ -37,7 +37,9 @@
 #   markdown links (lychee offline)          links
 #   docs (markdownlint + prettier + typos)   typos, markdownlint, prettier
 #   secrets (gitleaks)                       gitleaks
-#   coverage.yml, after merge                coverage = coverage-run + coverage-floor
+#   coverage.yml, after merge                coverage = coverage-run + coverage-floor;
+#                                            coverage-html and coverage-summary
+#                                            render the same profile
 #
 # Not here, because they have no local equivalent: CI's dependency review (a
 # PR-diff API) and the advisory hadolint job.
@@ -54,6 +56,13 @@ source .github/actions/setup-tool/lib.sh
 # does not trip it and a real drop does. Raise it as coverage rises; lowering
 # it is a decision to write down in the PR that does it.
 COVERAGE_FLOOR_LINES=94
+
+# Files the report leaves out, as one llvm-cov regex: test scaffolding that
+# is compiled into the suite but is not product code. A trait double's
+# `unimplemented!()` arm or `Debug` impl that no test reaches would otherwise
+# count as an uncovered product line. Files named `tests.rs` and the `tests/`
+# directories are already outside the report by cargo-llvm-cov's default.
+COVERAGE_IGNORE='(^|/)(crates/sharerr-testkit/|crates/sharerr/src/test_support\.rs$)'
 
 # Markdown tools come from .github/package-lock.json, not a global install.
 node_bin=.github/node_modules/.bin
@@ -260,10 +269,24 @@ check_coverage-run() {
   cargo llvm-cov --workspace --all-features --locked --no-report
 }
 
-# Reads the profile coverage-run left behind; no second test run.
+# The three readers of the profile coverage-run left behind; none reruns
+# the suite. Every `cargo llvm-cov report` lives here so the ignore regex
+# cannot differ between the floor, the HTML and the badge figure.
 check_coverage-floor() {
   _need cargo-llvm-cov || return
-  cargo llvm-cov report --summary-only --fail-under-lines "$COVERAGE_FLOOR_LINES"
+  cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE" \
+    --fail-under-lines "$COVERAGE_FLOOR_LINES"
+}
+
+check_coverage-html() {
+  _need cargo-llvm-cov || return
+  cargo llvm-cov report --html --output-dir coverage-html --ignore-filename-regex "$COVERAGE_IGNORE"
+}
+
+# Stdout is the summary table alone, for a caller that keeps it in a file.
+check_coverage-summary() {
+  _need cargo-llvm-cov || return
+  cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE"
 }
 
 check_coverage() {

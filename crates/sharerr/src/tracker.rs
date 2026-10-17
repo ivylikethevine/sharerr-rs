@@ -1487,6 +1487,52 @@ mod tests {
         });
     }
 
+    /// A rotation in progress: the previous token still admits an announce,
+    /// unattributed, and the fact that it was used is noted for the
+    /// operator deciding when to finalize.
+    #[test]
+    fn an_announce_on_the_previous_token_is_admitted_and_noted() {
+        with_open_vault(|state| async move {
+            use sharerr_core::config::secret_keys::{TRACKER_TOKEN, TRACKER_TOKEN_PREVIOUS};
+            use sharerr_core::model::MediaSource;
+            let mut vault = state.open_vault().await.unwrap();
+            vault
+                .put(TRACKER_TOKEN, &SecretString::from("new-token"))
+                .unwrap();
+            vault
+                .put(TRACKER_TOKEN_PREVIOUS, &SecretString::from("old-token"))
+                .unwrap();
+            let store = state.store().await.unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            store
+                .set_seeding(
+                    MediaSource::Sonarr,
+                    1,
+                    &"00".repeat(20),
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+            assert!(state.legacy_token_status().snapshot().await.is_none());
+
+            let hash = "%00".repeat(20);
+            let uri = format!("/announce/old-token?info_hash={hash}&peer_id={hash}&port=6881");
+            // Twice: the second announce reads both tokens from the cache
+            // rather than the vault, and must come to the same answer.
+            for _ in 0..2 {
+                let (status, body) = get(&state, &uri).await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(!body.contains("failure reason"), "{body}");
+            }
+            assert!(
+                state.legacy_token_status().snapshot().await.is_some(),
+                "using the previous token must be recorded"
+            );
+        });
+    }
+
     /// The accounting half of attribution: a friend's second announce
     /// reports what moved since their first, and that delta lands on their
     /// row and on the instance total. An announce on the shared instance

@@ -467,3 +467,22 @@ fn the_double_underscore_convention_survives_a_round_trip() {
     let vars = [("SHARERR_SYNC__INTERVAL_SECS".to_owned(), "600".to_owned())];
     assert!(collect_overrides(vars.into_iter()).contains_key("sync.interval_secs"));
 }
+
+#[test]
+fn library_rows_must_be_absolute_and_must_not_overlap() {
+    let rows = |paths: &[&str]| -> Vec<(String, String)> {
+        paths
+            .iter()
+            .map(|p| ((*p).to_owned(), "movie".to_owned()))
+            .collect()
+    };
+
+    let err = super::parse_libraries(&rows(&["relative/movies"])).unwrap_err();
+    assert!(err.to_string().contains("absolute"), "{err}");
+
+    let err = super::parse_libraries(&rows(&["/media", "/media/movies"])).unwrap_err();
+    assert!(err.to_string().contains("overlap"), "{err}");
+
+    let ok = super::parse_libraries(&rows(&["/media/tv", "", "/media/movies"])).unwrap();
+    assert_eq!(ok.len(), 2, "a blank row is skipped");
+}

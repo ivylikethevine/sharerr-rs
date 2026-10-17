@@ -671,96 +671,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use async_trait::async_trait;
-    use sharerr_client::{ClientError, ClientKind};
+    use crate::test_support::StubClient;
+    use sharerr_client::ClientError;
     use url::Url;
-
-    /// An in-process `TorrentClient` double — no HTTP, so `Seeder`'s own logic
-    /// (as opposed to any one client's wire format) can be exercised alone.
-    /// `files_result` is a closure so a test can fail for one hash and succeed
-    /// for another, the way `find_existing`'s multi-candidate loop needs.
-    type FilesFn = dyn Fn(&str) -> sharerr_client::Result<Vec<TorrentFileEntry>> + Send + Sync;
-
-    #[derive(Default)]
-    struct StubClient {
-        files_result: Option<Box<FilesFn>>,
-        set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
-        add_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
-        add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
-        set_limits_calls: std::sync::Mutex<Vec<(String, sharerr_client::SeedingLimits)>>,
-        /// `.torrent` bytes `export` hands back, or `None` for a client that
-        /// has no such call — the Transmission and rTorrent case.
-        export_result: Option<Vec<u8>>,
-    }
-
-    impl std::fmt::Debug for StubClient {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("StubClient").finish_non_exhaustive()
-        }
-    }
-
-    #[async_trait]
-    impl TorrentClient for StubClient {
-        fn kind(&self) -> ClientKind {
-            ClientKind::QBittorrent
-        }
-        async fn login(&self) -> sharerr_client::Result<()> {
-            Ok(())
-        }
-        async fn version(&self) -> sharerr_client::Result<String> {
-            Ok("stub".to_owned())
-        }
-        async fn list(
-            &self,
-            _category: Option<&str>,
-        ) -> sharerr_client::Result<Vec<TorrentSummary>> {
-            Ok(Vec::new())
-        }
-        async fn files(&self, hash: &str) -> sharerr_client::Result<Vec<TorrentFileEntry>> {
-            match &self.files_result {
-                Some(f) => f(hash),
-                None => Ok(Vec::new()),
-            }
-        }
-        async fn add(&self, request: &AddRequest<'_>) -> sharerr_client::Result<()> {
-            self.add_calls
-                .lock()
-                .unwrap()
-                .push((request.info_hash.to_owned(), request.data.to_vec()));
-            Ok(())
-        }
-        async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
-            Ok(())
-        }
-        async fn set_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
-            self.set_trackers_calls
-                .lock()
-                .unwrap()
-                .push((hash.to_owned(), urls.to_vec()));
-            Ok(())
-        }
-        async fn add_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
-            self.add_trackers_calls
-                .lock()
-                .unwrap()
-                .push((hash.to_owned(), urls.to_vec()));
-            Ok(())
-        }
-        async fn set_limits(
-            &self,
-            hash: &str,
-            limits: &sharerr_client::SeedingLimits,
-        ) -> sharerr_client::Result<()> {
-            self.set_limits_calls
-                .lock()
-                .unwrap()
-                .push((hash.to_owned(), *limits));
-            Ok(())
-        }
-        async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
-            Ok(self.export_result.clone())
-        }
-    }
 
     fn seeder(qbit: Arc<dyn TorrentClient>, torrent_dir: PathBuf) -> Seeder {
         crate::test_support::trace();

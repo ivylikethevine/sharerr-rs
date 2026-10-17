@@ -1064,4 +1064,62 @@ mod tests {
         assert_eq!(info_hash_from_hex("abc"), None, "wrong length");
         assert_eq!(info_hash_from_hex(&"zz".repeat(20)), None, "not hex");
     }
+
+    #[test]
+    fn an_unknown_event_is_a_plain_reannounce() {
+        let r = AnnounceRequest::parse(&query(hash(1), hash(2), "&event=paused")).unwrap();
+        assert_eq!(r.event, Event::None);
+    }
+
+    /// The shapes real clients send that a strict parser would choke on: a
+    /// bare key with no `=`, a key that is not UTF-8, a repeated key.
+    #[test]
+    fn query_parsing_tolerates_what_clients_actually_send() {
+        let params = parse_query(b"compact&left=5&\xff=x&left=7");
+        assert_eq!(params.get("compact").map(AsRef::as_ref), Some(&b""[..]));
+        assert_eq!(
+            params.get("left").map(AsRef::as_ref),
+            Some(&b"7"[..]),
+            "last value wins"
+        );
+        assert_eq!(params.len(), 2, "a non-UTF-8 key is skipped, not an error");
+    }
+
+    #[test]
+    fn percent_decoding_keeps_a_stray_percent_and_turns_plus_into_space() {
+        // `%zz` is not a hex pair: kept verbatim rather than dropped, so a
+        // mangled hash fails on length with the bytes still visible.
+        assert_eq!(percent_decode(b"a%zzb").as_ref(), b"a%zzb");
+        assert_eq!(percent_decode(b"a+b").as_ref(), b"a b");
+        // Upper- and lower-case hex digits are the same byte.
+        assert_eq!(percent_decode(b"%4A%4a").as_ref(), b"JJ");
+    }
+
+    #[tokio::test]
+    async fn stats_total_the_live_peers_across_every_swarm() {
+        let swarms = Swarms::default();
+        let seeder = AnnounceRequest::parse(&query(hash(9), hash(1), "")).unwrap();
+        let mut leecher = AnnounceRequest::parse(&query(hash(9), hash(2), "")).unwrap();
+        leecher.left = 10;
+        let elsewhere = AnnounceRequest::parse(&query(hash(8), hash(3), "")).unwrap();
+        swarms
+            .announce(&seeder, "203.0.113.1:6881".parse().unwrap())
+            .await;
+        swarms
+            .announce(&leecher, "203.0.113.2:6881".parse().unwrap())
+            .await;
+        swarms
+            .announce(&elsewhere, "203.0.113.3:6881".parse().unwrap())
+            .await;
+
+        assert_eq!(
+            swarms.stats().await,
+            SwarmStats {
+                swarms: 2,
+                peers: 3,
+                seeders: 2
+            }
+        );
+        assert_eq!(swarms.snapshots().await.len(), 2);
+    }
 }

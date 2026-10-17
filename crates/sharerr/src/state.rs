@@ -814,6 +814,7 @@ pub(crate) mod fixtures {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::test_support::{AlwaysEmptyQbit, AlwaysReadyTracker};
 
     /// A config pointing at an empty directory: no vault, no credentials. This is a
     /// fresh container's first start, and it is independent of whether a master key
@@ -859,91 +860,6 @@ pub(crate) mod fixtures {
         };
         let path = dir.path().join("sharerr.toml");
         (dir, Arc::new(ServeState::new(config, path, None)))
-    }
-
-    /// A tracker that always reports ready, standing in for the real one a
-    /// syncer built by [`ready`] has no use for — nothing here ever runs a
-    /// sync pass, so it only has to satisfy the trait.
-    #[derive(Debug, Default)]
-    struct AlwaysReadyTracker;
-
-    #[async_trait::async_trait]
-    impl sharerr_torrent::TrackerProvider for AlwaysReadyTracker {
-        async fn ensure_ready(&self) -> sharerr_torrent::Result<()> {
-            Ok(())
-        }
-        async fn announce_set(&self) -> sharerr_torrent::Result<sharerr_torrent::AnnounceSet> {
-            Ok(sharerr_torrent::AnnounceSet::single(
-                url::Url::parse("http://sharerr.example/announce").unwrap(),
-            ))
-        }
-    }
-
-    /// A qBittorrent stand-in that answers `list` with nothing and never
-    /// dials out — standing in for the real client neither [`ready`] nor
-    /// [`ready_with_source`] has a live qBittorrent to reach. Everything
-    /// besides `kind`/`list` is `unimplemented!()`: a pass with no discovered
-    /// items never calls them, and a test that starts needing one is a sign
-    /// this stub has outgrown its purpose, not a reason to fill them in blind.
-    #[derive(Debug, Default)]
-    struct AlwaysEmptyQbit;
-
-    #[async_trait::async_trait]
-    impl sharerr_client::TorrentClient for AlwaysEmptyQbit {
-        fn kind(&self) -> sharerr_client::ClientKind {
-            sharerr_client::ClientKind::QBittorrent
-        }
-        async fn login(&self) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn version(&self) -> sharerr_client::Result<String> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn list(
-            &self,
-            _category: Option<&str>,
-        ) -> sharerr_client::Result<Vec<sharerr_client::TorrentSummary>> {
-            Ok(Vec::new())
-        }
-        async fn files(
-            &self,
-            _hash: &str,
-        ) -> sharerr_client::Result<Vec<sharerr_client::TorrentFileEntry>> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn add(
-            &self,
-            _request: &sharerr_client::AddRequest<'_>,
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn set_trackers(
-            &self,
-            _hash: &str,
-            _urls: &[url::Url],
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn add_trackers(
-            &self,
-            _hash: &str,
-            _urls: &[url::Url],
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn set_limits(
-            &self,
-            _hash: &str,
-            _limits: &sharerr_client::SeedingLimits,
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
     }
 
     /// Builds the config/qbit/seeder/syncer plumbing [`ready`] and

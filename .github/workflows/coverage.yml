@@ -100,13 +100,13 @@ jobs:
           scripts/check.sh coverage-run 2>&1 | tee test-run.log
 
       - name: Render the HTML report
-        run: cargo llvm-cov report --html --output-dir coverage-html
+        run: scripts/check.sh coverage-html
 
       # Kept in a file for the badge step below, rather than rendered twice.
       - name: Summarize
         run: |
           set -euo pipefail
-          cargo llvm-cov report --summary-only >"$RUNNER_TEMP/coverage-summary.txt"
+          scripts/check.sh coverage-summary >"$RUNNER_TEMP/coverage-summary.txt"
           {
             echo "### Coverage (tier 1 suite only)"
             echo
