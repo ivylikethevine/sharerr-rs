@@ -160,6 +160,7 @@ one. `ci.yml`'s header comment keeps the same list.
 | `terraform (fmt + validate)`                                           | `ci.yml`           | Yes, once added to the ruleset                      |
 | `dependency review` (pull requests only)                               | `ci.yml`           | Yes, once added to the ruleset                      |
 | `advisory (hadolint)`                                                  | `ci.yml`           | No, reports only in its step summary                |
+| `advisory (semver)` (cargo-semver-checks against the last `v*` tag)    | `ci.yml`           | No, until a crate is published with a real version  |
 | `release note (pr body)`                                               | `release-note.yml` | No; warns on a missing note, never fails            |
 | CodeQL (`rust`, `actions`)                                             | `codeql.yml`       | Yes, as code scanning; alerts are diff-scoped       |
 | `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml`       | Yes; also the de-facto MSRV check and a smoke test  |
@@ -200,8 +201,9 @@ same way. `codeql.yml` runs on every push to `main` and weekly as well as on
 PRs.
 
 The third-party tools these jobs run that dependabot cannot see (zizmor,
-actionlint, cargo-llvm-cov, lychee, typos, shellcheck, hadolint, trivy,
-cargo-deny, gitleaks, terraform and yq) each install from a sha256-pinned row
+actionlint, cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck,
+hadolint, trivy, cargo-deny, gitleaks, terraform and yq) each install from a
+sha256-pinned row
 in `.github/actions/setup-tool/tools.txt`. markdownlint and prettier come
 from `.github/package-lock.json`. Dependabot opens no version-update pull
 request (`.github/dependabot.yml` sets each ecosystem's limit to 0):

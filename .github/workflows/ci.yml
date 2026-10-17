@@ -31,7 +31,8 @@
 #   terraform (fmt + validate)
 #   dependency review                        (pull requests only)
 #
-# Never required: `advisory (hadolint)`, which only reports.
+# Never required: `advisory (hadolint)` and `advisory (semver)`, which only
+# report.
 
 name: CI
 
@@ -747,3 +748,83 @@ jobs:
             Advisory only: this job never blocks a merge. `.hadolint.yaml` carries a
             reason per silenced rule; anything reaching here is deliberately left visible.
           report-file: ${{ runner.temp }}/hadolint-summary.out
+
+  # cargo-semver-checks, advisory only: every public API change that needs a
+  # bump since the last `v*` tag, named with that bump. The workspace version is a
+  # placeholder (Cargo.toml), so no bump can be read off it and a red here
+  # would mean nothing yet; it becomes a blocking check once a crate is
+  # published with a real version (scripts/check.sh's check_semver).
+  advisory-semver:
+    name: advisory (semver)
+    needs: [prepare, reuse]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    runs-on: ${{ needs.prepare.outputs.label }}
+    timeout-minutes: 30
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The baseline is the last v* tag, which a shallow clone lacks.
+          fetch-depth: 0
+          # Nothing here pushes back to GitHub; a lingering token in .git/config is
+          # a credential with no job left to use it.
+          persist-credentials: false
+
+      - name: Install the stable toolchain (rustdoc)
+        uses: ./.github/actions/rust-toolchain
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # continue-on-error like every other step on this path: a failed
+      # download must surface as an advisory note below, not a red job.
+      - id: semver-install
+        continue-on-error: true
+        uses: ./.github/actions/setup-tool
+        with:
+          tool: cargo-semver-checks
+
+      - if: steps.semver-install.outcome == 'failure'
+        uses: ./.github/actions/advisory-note
+        with:
+          title: cargo-semver-checks
+          warning-body: cargo-semver-checks could not be installed - the public API was not compared
+          heading: cargo-semver-checks did not run
+          body: >-
+            Advisory only: this job never blocks a merge. The install step above
+            failed, so this run says nothing about the public API either way.
+
+      - id: semver
+        name: Compare the public API with the last release tag
+        if: steps.semver-install.outcome == 'success'
+        run: |
+          set -uo pipefail
+          scripts/check.sh semver >"$RUNNER_TEMP/semver.out" 2>&1
+          status=$?
+          cat "$RUNNER_TEMP/semver.out"
+          if [ "$status" -ne 0 ]; then
+            # truncated before it goes in the summary
+            sed -n '1,120p' "$RUNNER_TEMP/semver.out" >"$RUNNER_TEMP/semver-summary.out"
+            echo "found=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "found=0" >>"$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+        continue-on-error: true
+
+      - if: steps.semver.outputs.found == '1'
+        uses: ./.github/actions/advisory-note
+        with:
+          title: cargo-semver-checks
+          warning-body: public API changes since the last release tag above - advisory, not blocking
+          heading: cargo-semver-checks found something
+          body: >-
+            Advisory only: this job never blocks a merge. Each finding names the
+            bump a release would need; the workspace version is a placeholder, so
+            none is required until a crate is published.
+          report-file: ${{ runner.temp }}/semver-summary.out
