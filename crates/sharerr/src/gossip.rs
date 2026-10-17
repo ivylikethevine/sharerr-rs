@@ -1254,4 +1254,19 @@ mod tests {
             Ok(())
         });
     }
+
+    /// A store that cannot list peers accepts nothing: there is nobody to
+    /// match a record against, and the summary says so by staying empty.
+    #[tokio::test]
+    async fn ingest_accepts_nothing_when_peers_cannot_be_listed() {
+        let (store, ids) = store_with(&["Alex"]).await;
+        let alex = identity(1);
+        let record = record_for(&alex, "http://203.0.113.9:41234", 1000);
+        store.pool().close().await;
+
+        let summary = ingest(&store, ids[0], vec![record]).await;
+
+        assert_eq!(summary.accepted, 0);
+        assert_eq!(summary, IngestSummary::default());
+    }
 }

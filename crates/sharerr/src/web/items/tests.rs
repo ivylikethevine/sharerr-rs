@@ -1216,3 +1216,88 @@ fn the_current_announce_url_marks_where_a_token_goes() {
         Some("http://seed.example:8477/announce/<token>")
     );
 }
+
+// ------------------------------------------- the store stops answering
+
+/// The listing survives a database that opened and then stopped answering:
+/// it renders with the failure named rather than erroring out.
+#[tokio::test]
+async fn the_page_names_a_listing_that_failed_and_answers_503_when_it_cannot_open() {
+    let (_dir, serve) = crate::state::fixtures::store_closed().await;
+    let response = page(State(web_state(serve)), Query(ItemsQuery::default())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_of(response).await.contains("could not list items"));
+
+    let (_dir, serve) = crate::state::fixtures::store_unopenable();
+    let response = page(State(web_state(serve)), Query(ItemsQuery::default())).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Every action loads its item through `fetch`, so one closed store proves
+/// the 500 arm for all of them.
+#[tokio::test]
+async fn every_item_action_answers_500_when_the_item_cannot_be_loaded() {
+    let (_dir, serve) = crate::state::fixtures::store_closed().await;
+    let state = web_state(serve);
+    let at = || Path((MediaSource::Radarr, 1));
+
+    let response = detail(State(state.clone()), at(), Query(DetailQuery::default())).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body_of(response).await.contains("could not load that item"));
+    let response = retry(State(state.clone()), at()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response = rebuild(State(state.clone()), at()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response = unshare(State(state), at()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// An item that loads on an instance whose syncer never built: the action
+/// redirects back to the item with the syncer's own reason.
+#[tokio::test]
+async fn rebuild_and_unshare_redirect_with_an_error_when_the_syncer_is_not_ready() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+    let state = web_state(serve);
+
+    for response in [
+        rebuild(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+        unshare(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?error="), "{location}");
+    }
+}
+
+/// The syncer holds its own store handle over the same file (see
+/// `fixtures::ready_state`). Closing that one leaves the handler's lookup
+/// working and fails the write behind `prepare_rebuild` / `unshare_one`, so
+/// the redirect carries the store's error.
+#[tokio::test]
+async fn rebuild_and_unshare_redirect_with_the_stores_error_when_the_write_fails() {
+    let (_dir, serve) = crate::state::fixtures::ready().await;
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+    serve.syncer().await.unwrap().store().pool().close().await;
+    let state = web_state(serve);
+
+    for response in [
+        rebuild(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+        unshare(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?error="), "{location}");
+        assert!(location.contains("closed"), "{location}");
+    }
+    let got = store.get(MediaSource::Sonarr, 1).await.unwrap().unwrap();
+    assert_eq!(got.state, ShareState::Seeding, "nothing was written");
+}

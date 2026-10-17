@@ -862,6 +862,28 @@ pub(crate) mod fixtures {
         (dir, Arc::new(ServeState::new(config, path, None)))
     }
 
+    /// [`unconfigured`], with its store opened and then closed: `ServeState::store`
+    /// keeps handing out the cached handle, and every query on it fails. This
+    /// is the fault [`store_unopenable`] cannot inject — a database that
+    /// answered at startup and stopped mid-operation — and it reaches the
+    /// `Err` arm behind a store call that follows a successful open. The
+    /// `TempDir` must outlive the test, as with every other fixture here.
+    pub(crate) async fn store_closed() -> (tempfile::TempDir, Arc<ServeState>) {
+        let (dir, state) = unconfigured();
+        close_store(&state).await;
+        (dir, state)
+    }
+
+    /// Close `state`'s store pool after a test has seeded it, so the rows
+    /// written so far stay readable up to the point the fault is injected.
+    /// Every clone of that `Store` shares the pool and stops answering with
+    /// it. The syncer [`ready`] builds holds a second pool over the same
+    /// file, which this leaves open; close it through `Syncer::store` when
+    /// the arm under test sits behind the syncer's own handle.
+    pub(crate) async fn close_store(state: &ServeState) {
+        state.store().await.unwrap().pool().close().await;
+    }
+
     /// Builds the config/qbit/seeder/syncer plumbing [`ready`] and
     /// [`ready_with_source`] both need, differing only in which library
     /// sources the syncer gets.
@@ -1364,5 +1386,19 @@ mod tests {
             });
             Ok(())
         });
+    }
+
+    /// An advertised host that does not parse is treated as unset: `serve`
+    /// must come up either way, and the tracker provider is what names the fix.
+    #[test]
+    fn an_unusable_advertised_host_reads_as_no_static_base() {
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("not a host".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        assert!(static_base(&config).is_none());
     }
 }

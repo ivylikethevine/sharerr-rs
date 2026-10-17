@@ -1319,3 +1319,56 @@ fn a_season_filter_alone_rejects_another_season() {
     };
     assert!(right_season.matches(&item));
 }
+
+// ------------------------------------------- the store stops answering
+
+/// A database that answered at startup and stopped: the feed reports it as
+/// unavailable, never as bad credentials, and a search over it is a 500
+/// rather than an empty feed that claims nothing is shared.
+#[tokio::test]
+async fn a_store_that_stops_answering_is_a_503_on_auth_and_a_500_on_search() {
+    let (_dir, state) = crate::state::fixtures::store_closed().await;
+
+    assert_eq!(
+        caps_with_key(&state, Some("sam-key")).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let Err((status, reason)) =
+        collect(&state, &SearchQuery::default(), PeerScope::All, "token").await
+    else {
+        panic!("a closed store cannot answer a search");
+    };
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(reason.contains("could not read"), "{reason}");
+
+    let (_dir, state) = crate::state::fixtures::store_unopenable();
+    let Err((status, reason)) =
+        collect(&state, &SearchQuery::default(), PeerScope::All, "token").await
+    else {
+        panic!("an unopenable store cannot answer a search");
+    };
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(reason.contains("not ready"), "{reason}");
+}
+
+/// Recording a sighting is best-effort: a store that will not take the
+/// touch returns without panicking and without reaching the notification.
+#[tokio::test]
+async fn a_sighting_that_cannot_be_recorded_is_dropped_quietly() {
+    let (_dir, state) = unconfigured();
+    let store = state.store().await.unwrap();
+    let sam = store
+        .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+        .await
+        .unwrap();
+    store.pool().close().await;
+
+    record_sighting(
+        &state,
+        &store,
+        sam.id,
+        sharerr_store::EndpointKind::Api,
+        Some("203.0.113.9"),
+    )
+    .await;
+}

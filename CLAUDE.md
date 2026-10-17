@@ -68,10 +68,16 @@ still reaches them, same as any other config key.
 
 Fixtures worth knowing by name: `state::fixtures::{unconfigured, unloadable}`
 (a fresh container, with or without a loadable `sharerr.toml`; keep the
-returned `TempDir` alive), `web::web_state(serve)` for a `WebState` around
-one of those, and `sharerr_testkit::mock::{base_url, mount_json, mount_ok,
-mount_text, multipart_field, QBIT_API_KEY, ARR_API_KEY}` for wiremock-backed
-service clients.
+returned `TempDir` alive), `store_unopenable` and `store_closed` (a database
+that never opens, or one that opened and then stops answering every query;
+`close_store(&state)` injects the second after a test has seeded rows, and
+a syncer's own handle is closed through `Syncer::store().pool()`),
+`web::web_state(serve)` for a `WebState` around one of those,
+`test_support::StubClient`'s `fail_remove` / `fail_set_limits` /
+`fail_add_trackers` for a torrent client that refuses one call, and
+`sharerr_testkit::mock::{base_url, mount_json, mount_ok, mount_text,
+multipart_field, QBIT_API_KEY, ARR_API_KEY}` for wiremock-backed service
+clients.
 
 **No tier-1 fixture opens a real vault.** `fixtures::unconfigured()` has no
 master key, so `ServeState::open_vault`/`tracker_token`/`gossip_identity`

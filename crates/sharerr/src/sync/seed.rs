@@ -1526,4 +1526,95 @@ mod tests {
             .unwrap();
         assert!(found.is_none());
     }
+
+    fn paths_for(media: &Path) -> ResolvedPaths {
+        ResolvedPaths {
+            arr: media.to_path_buf(),
+            sharerr: media.to_path_buf(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        }
+    }
+
+    /// The client is corrected before the cache is written, so a tracker the
+    /// client refuses to add fails the item and leaves nothing cached.
+    #[tokio::test]
+    async fn an_adoption_fails_when_the_client_refuses_the_tracker() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let theirs = built(&media, "http://their-tracker.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            fail_add_trackers: true,
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, torrent_dir.clone());
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let existing = [summary(
+            &theirs.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+
+        let err = seeder
+            .seed(
+                &paths_for(&media),
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("adding sharerr's tracker"), "{text}");
+        assert!(!torrent_file_path(&torrent_dir, &theirs.info_hash).exists());
+    }
+
+    /// A cached `.torrent` that exists but cannot be read — a directory
+    /// squatting on its path — is an error naming the path, not the
+    /// "nothing cached" case, on both the refresh and the adoption paths.
+    #[tokio::test]
+    async fn an_unreadable_cached_torrent_is_an_error_not_an_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let theirs = built(&media, "http://their-tracker.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let squatter = torrent_file_path(&torrent_dir, &theirs.info_hash);
+        std::fs::create_dir_all(&squatter).unwrap();
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, torrent_dir);
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+
+        let err = seeder
+            .refresh_announce(&theirs.info_hash, &announce)
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("reading"), "{text}");
+        assert!(text.contains(&theirs.info_hash), "{text}");
+
+        let existing = [summary(
+            &theirs.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+        let err = seeder
+            .seed(
+                &paths_for(&media),
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("reading"), "{err:#}");
+    }
 }

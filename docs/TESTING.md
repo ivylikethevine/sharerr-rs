@@ -156,7 +156,7 @@ scripts/check.sh coverage-html                        # render target/../coverag
 `coverage` is `coverage-run` (`cargo llvm-cov --workspace --all-features
 --locked --no-report`) followed by `coverage-floor`, which fails when line
 coverage is under `COVERAGE_FLOOR_LINES` in `scripts/check.sh`, currently
-**94%**. Every reader of the profile (`coverage-floor`, `coverage-html`,
+**95%**. Every reader of the profile (`coverage-floor`, `coverage-html`,
 `coverage-summary`) goes through the script, which leaves test scaffolding
 out of the report with one `--ignore-filename-regex`: `sharerr-testkit` and
 `crates/sharerr/src/test_support.rs`, where the trait doubles live. A stub

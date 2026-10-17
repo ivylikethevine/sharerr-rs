@@ -580,13 +580,14 @@ attached.
 
 Smallest first, by how much each item touches:
 
-- **Fault injection for the store and the clients.** Nearly every remaining
-  uncovered line is an error arm behind a dependency that never fails in
-  tests: a store or vault call that errors mid-operation, a password hash
-  that reports `TooBusy`, an unshare that cannot be recorded. The fixtures
-  can make a store refuse to open, not fail after it has. A store or client
-  wrapper that fails on cue would reach them one test per arm, and would
-  let the coverage floor move up.
+- **Fault injection past the first failing call.** The fixtures can make a
+  store refuse to open or stop answering after it has, and the client double
+  can refuse a removal, a limit or a tracker, which reached most of the
+  error arms. What is left is the arm behind a call that follows one that
+  succeeded on the same store (a password verified, then not written), a
+  vault that fails mid-write, and a password hash that reports `TooBusy`,
+  whose semaphore is process-wide. A wrapper that fails on the nth call
+  would reach them one test per arm.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
 - **Request flow.** Discovery is one-way today. An inbound request queue

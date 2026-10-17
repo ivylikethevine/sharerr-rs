@@ -801,4 +801,14 @@ mod tests {
         assert_eq!(audio_codec_name(CODEC_ID_OPUS).as_deref(), Some("Opus"));
         assert_eq!(audio_codec_name(CODEC_ID_NULL_AUDIO), None);
     }
+
+    /// A file that cannot be opened yields nothing, on every backend that
+    /// opens the file itself: a probe never fails the item it describes.
+    #[test]
+    fn an_unreadable_file_probes_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["gone.mp4", "gone.m4a", "gone.flac", "gone.mkv"] {
+            assert_eq!(probe(&dir.path().join(name)), None, "{name}");
+        }
+    }
 }

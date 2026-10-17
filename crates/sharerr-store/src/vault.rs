@@ -1039,4 +1039,48 @@ mod tests {
         let err = restrict_permissions(Path::new("/nonexistent/definitely-not-here")).unwrap_err();
         assert!(matches!(err, VaultError::Io { .. }), "got {err:?}");
     }
+
+    /// A mutation re-reads the file first; a file that exists but cannot be
+    /// read — a directory squatting on its path — is an I/O error naming the
+    /// path, not the "never written" case.
+    #[test]
+    fn a_mutation_fails_when_the_vault_file_cannot_be_reread() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = vault_in(&dir, "master");
+        vault.put("sonarr.api_key", &secret("abc123")).unwrap();
+
+        let path = dir.path().join("vault.bin");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        let err = vault.put("radarr.api_key", &secret("def456")).unwrap_err();
+        match err {
+            VaultError::Io { path: reported, .. } => assert_eq!(reported, path),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// A different vault put at the same path since `open` has a different
+    /// salt: its records would not decrypt under this handle's key, so the
+    /// mutation is refused rather than written over it.
+    #[test]
+    fn a_mutation_fails_when_another_vault_replaced_the_file() {
+        let ours = TempDir::new().unwrap();
+        let mut vault = vault_in(&ours, "master");
+        vault.put("sonarr.api_key", &secret("abc123")).unwrap();
+
+        let theirs = TempDir::new().unwrap();
+        vault_in(&theirs, "someone else")
+            .put("sonarr.api_key", &secret("zzz"))
+            .unwrap();
+        std::fs::copy(
+            theirs.path().join("vault.bin"),
+            ours.path().join("vault.bin"),
+        )
+        .unwrap();
+
+        let err = vault.put("radarr.api_key", &secret("def456")).unwrap_err();
+        assert!(matches!(err, VaultError::Corrupt(_)), "got {err:?}");
+        assert!(err.to_string().contains("replaced"), "{err}");
+    }
 }

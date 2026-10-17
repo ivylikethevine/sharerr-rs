@@ -1316,3 +1316,14 @@ async fn gather_labels_the_path_edge_once_a_library_has_been_scanned() {
         page.edges
     );
 }
+
+/// No friends are drawn when the database cannot list them — whether it
+/// never opened or stopped answering — rather than the page failing.
+#[tokio::test]
+async fn friend_nodes_are_empty_when_the_store_fails() {
+    let (_dir, serve) = crate::state::fixtures::store_closed().await;
+    assert!(friend_nodes(&web_state(serve)).await.is_empty());
+
+    let (_dir, serve) = crate::state::fixtures::store_unopenable();
+    assert!(friend_nodes(&web_state(serve)).await.is_empty());
+}

@@ -1258,3 +1258,79 @@ async fn whisparr_walks_like_sonarr() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].source, MediaSource::Whisparr);
 }
+
+// ------------------------------------------- tagged but nothing on disk
+
+/// A tagged entity with no files is skipped, not an error and not an item
+/// with nothing behind it — the same rule for every *arr shape.
+#[tokio::test]
+async fn a_tagged_entity_with_no_files_is_skipped() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/series",
+        json!([{ "id": 11, "title": "Lanternwick Hollow", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(&server, "/api/v3/episodefile", json!([])).await;
+    mount_json(&server, "/api/v3/episode", json!([])).await;
+    let found = client(MediaSource::Sonarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+    assert!(found.is_empty());
+
+    let server = MockServer::start().await;
+    mount_lidarr(&server).await;
+    mount_json(&server, "/api/v1/trackfile", json!([])).await;
+    mount_json(&server, "/api/v1/track", json!([])).await;
+    let found = client(MediaSource::Lidarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+    assert!(found.is_empty());
+
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v1").await;
+    mount_json(
+        &server,
+        "/api/v1/author",
+        json!([{ "id": 41, "authorName": "Marisol Vane", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(&server, "/api/v1/book", json!([])).await;
+    mount_json(&server, "/api/v1/bookfile", json!([])).await;
+    let found = client(MediaSource::Readarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap();
+    assert!(found.is_empty());
+}
+
+/// The per-entity lookups run as one `try_join`: a failure on either half
+/// fails the discovery, naming the endpoint, rather than yielding a series
+/// with files but no numbering.
+#[tokio::test]
+async fn a_failed_per_entity_lookup_fails_the_discovery() {
+    let server = MockServer::start().await;
+    mount_tags(&server, "/api/v3").await;
+    mount_json(
+        &server,
+        "/api/v3/series",
+        json!([{ "id": 11, "title": "Lanternwick Hollow", "tags": [TAG_ID] }]),
+    )
+    .await;
+    mount_json(&server, "/api/v3/episodefile", json!([])).await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/episode"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let err = client(MediaSource::Sonarr, &server)
+        .discover("sharerr")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("episode"), "{err}");
+}

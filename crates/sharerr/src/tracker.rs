@@ -1660,4 +1660,37 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&sam.key_hash), "{body}");
     }
+
+    // ------------------------------------------- the store stops answering
+
+    /// Every store-backed decision fails closed where it guards admission
+    /// and open where it only narrows attribution: a torrent the database
+    /// cannot vouch for is not served, a token it cannot check is a bad
+    /// token, and a download it cannot attribute is served as cached. Both
+    /// the database that never opened and the one that stopped answering.
+    #[tokio::test]
+    async fn store_failures_refuse_announces_and_serve_downloads_unattributed() {
+        let bytes = b"cached bytes".to_vec();
+
+        let (_dir, state) = crate::state::fixtures::store_closed().await;
+        let store = state.store().await.unwrap();
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+        assert!(!is_served(&tracker_state, &[0u8; 20]).await);
+        assert_eq!(
+            authenticate_token(&store, Some("s3cret"), None, Some("not-the-token")).await,
+            Err(AnnounceError::BadToken)
+        );
+        assert_eq!(
+            attributed_bytes(&tracker_state, bytes.clone(), "any-token").await,
+            bytes
+        );
+
+        let (_dir, state) = crate::state::fixtures::store_unopenable();
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+        assert!(!is_served(&tracker_state, &[0u8; 20]).await);
+        assert_eq!(
+            attributed_bytes(&tracker_state, bytes.clone(), "any-token").await,
+            bytes
+        );
+    }
 }

@@ -1265,4 +1265,56 @@ mod tests {
             "got {outcome:?}"
         );
     }
+
+    /// A source that is not an *arr app cannot have a client built for it;
+    /// the refusal is reported as a bad URL, since that is the only input.
+    #[tokio::test]
+    async fn a_source_with_no_api_is_reported_as_a_bad_url() {
+        let url = Url::parse("http://127.0.0.1:9/").unwrap();
+        let outcome = check_arr(MediaSource::Directory, Some(&url), key(), "sharerr").await;
+        assert!(matches!(outcome, ArrOutcome::BadUrl(_)), "got {outcome:?}");
+    }
+
+    /// A status answer with no `appName` falls back to the source's own name,
+    /// and a tag walk that fails after the status answered is a failure
+    /// naming the cause, not a missing tag.
+    #[tokio::test]
+    async fn a_nameless_status_falls_back_and_a_failed_walk_is_a_failure() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/v3/system/status",
+            200,
+            json!({ "version": "4.0.0.0" }),
+        )
+        .await;
+        mount(
+            &server,
+            "/api/v3/tag",
+            200,
+            json!([{ "id": 3, "label": "sharerr" }]),
+        )
+        .await;
+        mount(&server, "/api/v3/series", 500, json!({ "message": "boom" })).await;
+
+        let outcome = check_arr(MediaSource::Sonarr, Some(&base(&server)), key(), "sharerr").await;
+
+        let ArrOutcome::Failed(reason) = outcome else {
+            panic!("got {outcome:?}");
+        };
+        assert!(reason.contains("series"), "{reason}");
+    }
+
+    #[test]
+    fn build_torrent_client_builds_an_rtorrent_client_from_a_password() {
+        let url = Url::parse("http://localhost:8000/RPC2").unwrap();
+        let client = build_torrent_client(
+            TorrentBackend::Rtorrent,
+            &url,
+            Some("operator"),
+            TorrentCredential::Password(SecretString::from("hunter2")),
+        )
+        .unwrap();
+        assert_eq!(client.kind(), sharerr_client::ClientKind::Rtorrent);
+    }
 }

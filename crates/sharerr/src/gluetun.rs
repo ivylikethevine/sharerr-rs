@@ -1000,4 +1000,94 @@ mod tests {
             Ok(())
         });
     }
+
+    /// An HTTP client that never built is reported on every poll as the
+    /// reason, and a poll that succeeds after one that failed clears the
+    /// recorded error and says so.
+    #[test]
+    fn poll_once_reports_a_missing_http_client_and_a_recovery() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = MockServer::start().await;
+                let config = Config {
+                    data_dir: jail.directory().to_path_buf(),
+                    gluetun: GluetunConfig {
+                        control_url: Some(server.uri().parse().unwrap()),
+                        ..GluetunConfig::default()
+                    },
+                    ..Config::default()
+                };
+                let target = GluetunTarget::Tracker;
+
+                let mut vault = sharerr_store::Vault::open(
+                    config.vault_path(),
+                    &SecretString::from("a-master-key"),
+                )
+                .unwrap();
+                vault
+                    .put(target.credential_key(), &SecretString::from("a-key"))
+                    .unwrap();
+                drop(vault);
+
+                let state = crate::state::ServeState::new(
+                    config,
+                    jail.directory().join("sharerr.toml"),
+                    None,
+                );
+                let status = state.gluetun_status(target);
+                let endpoint = state.endpoint_for(target);
+                let mut last_error = None;
+
+                let no_client: std::result::Result<reqwest::Client, String> =
+                    Err("no TLS backend".to_owned());
+                poll_once(
+                    &state,
+                    target,
+                    &no_client,
+                    &status,
+                    &endpoint,
+                    &mut last_error,
+                )
+                .await;
+                assert!(
+                    last_error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("no TLS backend")),
+                    "{last_error:?}"
+                );
+                assert!(endpoint.current().is_none());
+
+                // The control server now answers: the next poll recovers.
+                Mock::given(method("GET"))
+                    .and(path("/v1/publicip/ip"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(serde_json::json!({ "public_ip": "203.0.113.9" })),
+                    )
+                    .mount(&server)
+                    .await;
+                Mock::given(method("GET"))
+                    .and(path("/v1/openvpn/portforwarded"))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .set_body_json(serde_json::json!({ "port": 41234 })),
+                    )
+                    .mount(&server)
+                    .await;
+                let http = GluetunClient::http_client().map_err(|e| e.to_string());
+                poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+
+                assert!(last_error.is_none());
+                assert!(status.snapshot().await.last_error.is_none());
+                assert_eq!(
+                    endpoint.current().map(|u| u.to_string()).as_deref(),
+                    Some("http://203.0.113.9:41234/")
+                );
+            });
+            Ok(())
+        });
+    }
 }

@@ -52,10 +52,10 @@ cd "$root"
 source .github/actions/setup-tool/lib.sh
 
 # The line-coverage floor, in percent, for the tier-1 suite. A few points
-# under the measured figure (97.2% when this was set), so an ordinary change
+# under the measured figure (98.2% when this was set), so an ordinary change
 # does not trip it and a real drop does. Raise it as coverage rises; lowering
 # it is a decision to write down in the PR that does it.
-COVERAGE_FLOOR_LINES=94
+COVERAGE_FLOOR_LINES=95
 
 # Files the report leaves out, as one llvm-cov regex: test scaffolding that
 # is compiled into the suite but is not product code. A trait double's

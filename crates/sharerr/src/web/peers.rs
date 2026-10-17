@@ -1463,4 +1463,103 @@ mod tests {
             Ok(())
         });
     }
+
+    // ------------------------------------------- the store stops answering
+
+    /// A store that opened and then went away: every query fails, which is
+    /// the arm behind each handler's own store call rather than the 503 the
+    /// unopenable fixture reaches before any of them run.
+    async fn web_state_with_closed_store() -> (tempfile::TempDir, WebState) {
+        let (dir, serve) = crate::state::fixtures::store_closed().await;
+        (dir, web_state(serve))
+    }
+
+    #[tokio::test]
+    async fn the_page_reports_when_friends_cannot_be_listed() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let page = build(&state, None, None).await;
+        assert!(page.peers.is_empty());
+        let error = page.error.expect("the failure must be named on the page");
+        assert!(error.contains("could not list friends"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn add_reports_a_store_failure_rather_than_a_duplicate() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not add that friend")
+        );
+    }
+
+    #[tokio::test]
+    async fn every_mutation_reports_what_it_could_not_do() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = revoke(State(state.clone()), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not revoke that key")
+        );
+
+        let response = set_scope(
+            State(state.clone()),
+            Path(1),
+            Form(ScopeForm {
+                scope: PeerScope::Tv,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not change that"));
+
+        let response = set_gossip(
+            State(state.clone()),
+            Path(1),
+            Form(GossipForm {
+                url: "http://friend.example:8477".to_owned(),
+                key: String::new(),
+                clear_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not save that"));
+
+        let response = delete(State(state), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not delete that friend")
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_preview_and_export_report_when_friends_cannot_be_listed() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = feed_preview(State(state.clone()), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not list friends"));
+
+        let response = export(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not list friends"));
+    }
 }

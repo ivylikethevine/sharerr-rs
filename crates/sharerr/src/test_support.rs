@@ -134,6 +134,18 @@ pub(crate) struct StubClient {
     /// `.torrent` bytes `export` hands back, or `None` for a client that
     /// has no such call — the Transmission and rTorrent case.
     pub(crate) export_result: Option<Vec<u8>>,
+    /// Refuse the named call with a `ClientError`: the arms behind a client
+    /// that will not remove a torrent, apply limits or add a tracker, which
+    /// a client that answers never reaches.
+    pub(crate) fail_remove: bool,
+    pub(crate) fail_set_limits: bool,
+    pub(crate) fail_add_trackers: bool,
+}
+
+fn refused(call: &str) -> sharerr_client::Result<()> {
+    Err(sharerr_client::ClientError::Config(format!(
+        "{call} refused by the stub"
+    )))
 }
 
 impl std::fmt::Debug for StubClient {
@@ -170,6 +182,9 @@ impl TorrentClient for StubClient {
         Ok(())
     }
     async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
+        if self.fail_remove {
+            return refused("remove");
+        }
         Ok(())
     }
     async fn set_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
@@ -180,6 +195,9 @@ impl TorrentClient for StubClient {
         Ok(())
     }
     async fn add_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
+        if self.fail_add_trackers {
+            return refused("add_trackers");
+        }
         self.add_trackers_calls
             .lock()
             .unwrap()
@@ -191,6 +209,9 @@ impl TorrentClient for StubClient {
         hash: &str,
         limits: &sharerr_client::SeedingLimits,
     ) -> sharerr_client::Result<()> {
+        if self.fail_set_limits {
+            return refused("set_limits");
+        }
         self.set_limits_calls
             .lock()
             .unwrap()
