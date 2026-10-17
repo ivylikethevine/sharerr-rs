@@ -2618,3 +2618,32 @@ fn the_report_mentions_sources_that_could_not_be_scanned() {
             .contains("could not be scanned")
     );
 }
+
+/// A run whose record cannot be closed still reports its own outcome: the
+/// failure to write the row is a warning, and the pass's result is what the
+/// caller sees.
+#[tokio::test]
+async fn a_run_whose_record_cannot_be_closed_still_reports_its_outcome() {
+    let syncer = stub_syncer(Arc::new(StubClient::default())).await;
+    // `begin_run` answers; nothing after it does.
+    syncer.store().fail_after(1).await.unwrap();
+
+    let err = syncer.run(false).await.unwrap_err();
+    assert!(format!("{err:#}").contains("no library source"), "{err:#}");
+}
+
+/// A seeding item whose confirmation cannot be written stays unchanged and
+/// the pass still completes: the next pass confirms it instead.
+#[tokio::test]
+async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let known_before = known(&h).await;
+    // `begin_run` and `all_items` answer; every confirmation after fails.
+    h.syncer.store().fail_after(2).await.unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.failed, 0, "{report}");
+    assert_eq!(report.unchanged, known_before.len(), "{report}");
+}

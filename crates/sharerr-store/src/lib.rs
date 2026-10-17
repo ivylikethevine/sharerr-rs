@@ -9,6 +9,8 @@ pub mod transfers;
 pub mod users;
 pub mod vault;
 
+#[cfg(feature = "fault-injection")]
+mod fault;
 #[cfg(test)]
 mod upgrade;
 

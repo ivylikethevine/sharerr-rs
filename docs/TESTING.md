@@ -53,6 +53,17 @@ needs the master key _absent_, wrap it in `figment::Jail::expect_with`; see
 for why a bare `std::env::set_var` races the parallel runner, and the fixture
 names worth knowing.
 
+**Dependencies that fail on cue.** `state::fixtures::store_unopenable` is
+a database that never opens; `store_closed` (and `close_store`) one that
+opened and then stops answering. For the arm behind a call that follows a
+successful one on the same store, `Store::fail_after(n)` answers n more
+queries and then fails every later one, and `busy_after(n)` grants n more
+password hashes and then reports `TooBusy`; both come from `sharerr-store`'s
+`fault-injection` feature, which only `sharerr`'s dev-dependency turns on.
+`test_support::StubClient` refuses one torrent-client call per `fail_*`
+flag. A vault that opens but cannot be written is a directory on its
+`.lock` path.
+
 ## Tier 2: the compose stacks
 
 ```bash

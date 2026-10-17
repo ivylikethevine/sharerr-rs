@@ -1562,4 +1562,48 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
         assert!(body_of(response).await.contains("could not list friends"));
     }
+
+    /// A vault that opens but cannot be written — its lock file is a
+    /// directory — fails a key store with the reason, and is only a warning
+    /// on a delete that has already happened.
+    #[test]
+    fn a_vault_that_cannot_be_written_rejects_a_key_and_does_not_undo_a_delete() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "peers-tests-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Default::default()
+            };
+            std::fs::create_dir(config.vault_path().with_extension("lock")).unwrap();
+            let path = jail.directory().join("sharerr.toml");
+            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+            let state = web_state(serve.clone());
+
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+
+                let response = set_gossip(
+                    State(state.clone()),
+                    Path(sam.id),
+                    Form(GossipForm {
+                        url: "https://sams-sharerr.example".to_owned(),
+                        key: "a-key-sam-issued-us".to_owned(),
+                        clear_key: None,
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(body_of(response).await.contains("could not store the key"));
+
+                let response = delete(State(state), Path(sam.id)).await;
+                assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+                assert!(store.list_peers().await.unwrap().is_empty());
+            });
+            Ok(())
+        });
+    }
 }

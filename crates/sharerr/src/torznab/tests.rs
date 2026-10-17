@@ -1372,3 +1372,26 @@ async fn a_sighting_that_cannot_be_recorded_is_dropped_quietly() {
     )
     .await;
 }
+
+/// The touch landed but the address could not be recorded: the sighting
+/// is kept as far as it got, and nothing propagates to the caller.
+#[tokio::test]
+async fn a_sighting_whose_address_cannot_be_recorded_keeps_the_touch() {
+    let (_dir, state) = unconfigured();
+    let store = state.store().await.unwrap();
+    let sam = store
+        .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+        .await
+        .unwrap();
+    // `touch_peer` answers; `record_peer_endpoint` does not.
+    store.fail_after(1).await.unwrap();
+
+    record_sighting(
+        &state,
+        &store,
+        sam.id,
+        sharerr_store::EndpointKind::Api,
+        Some("203.0.113.9"),
+    )
+    .await;
+}

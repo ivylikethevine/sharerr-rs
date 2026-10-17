@@ -1083,4 +1083,32 @@ mod tests {
         assert!(matches!(err, VaultError::Corrupt(_)), "got {err:?}");
         assert!(err.to_string().contains("replaced"), "{err}");
     }
+
+    /// The cross-process lock is taken before any write: a lock file that
+    /// cannot be opened, or a parent that cannot be created, fails the
+    /// mutation naming that path and leaves the records untouched.
+    #[test]
+    fn a_mutation_fails_when_the_lock_file_cannot_be_taken() {
+        let dir = TempDir::new().unwrap();
+        let mut vault = vault_in(&dir, "master");
+        std::fs::create_dir(dir.path().join("vault.lock")).unwrap();
+
+        let err = vault.put("sonarr.api_key", &secret("abc123")).unwrap_err();
+        match err {
+            VaultError::Io { path, .. } => assert_eq!(path, dir.path().join("vault.lock")),
+            other => panic!("got {other:?}"),
+        }
+        assert!(vault.is_empty());
+
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("sub");
+        let mut vault = Vault::open(nested.join("vault.bin"), &secret("master")).unwrap();
+        std::fs::write(&nested, b"a file where the directory should be").unwrap();
+
+        let err = vault.put("sonarr.api_key", &secret("abc123")).unwrap_err();
+        match err {
+            VaultError::Io { path, .. } => assert_eq!(path, nested),
+            other => panic!("got {other:?}"),
+        }
+    }
 }

@@ -10,6 +10,11 @@ description = "Persistence for sharerr: the Argon2/ChaCha20-Poly1305 credential 
 [lints]
 workspace = true
 
+[features]
+# Test-only hooks that make a `Store` fail on cue: see `src/fault.rs`.
+# Enabled by sharerr's dev-dependency on this crate, never by a release build.
+fault-injection = []
+
 [dependencies]
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }

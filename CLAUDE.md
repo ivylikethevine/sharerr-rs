@@ -72,6 +72,10 @@ returned `TempDir` alive), `store_unopenable` and `store_closed` (a database
 that never opens, or one that opened and then stops answering every query;
 `close_store(&state)` injects the second after a test has seeded rows, and
 a syncer's own handle is closed through `Syncer::store().pool()`),
+`Store::fail_after(n)` and `busy_after(n)` for a store that answers n more
+queries (or grants n more password hashes) and then fails every later one
+(sharerr-store's `fault-injection` feature, on only through sharerr's
+dev-dependency; every clone of a `Store` shares the fault),
 `web::web_state(serve)` for a `WebState` around one of those,
 `test_support::StubClient`'s `fail_remove` / `fail_set_limits` /
 `fail_add_trackers` for a torrent client that refuses one call, and

@@ -1693,4 +1693,38 @@ mod tests {
             bytes
         );
     }
+
+    /// The announce already succeeded when its transfer delta is recorded;
+    /// a store that will not take the delta is an undercount, not a refusal
+    /// sent to the client.
+    #[test]
+    fn a_transfer_that_cannot_be_recorded_does_not_fail_the_announce() {
+        with_open_vault(|state| async move {
+            let store = state.store().await.unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            let hash_hex = "00".repeat(20);
+            store
+                .set_seeding(
+                    sharerr_core::model::MediaSource::Sonarr,
+                    1,
+                    &hash_hex,
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+            // `is_shared` answers; `record_transfer` does not.
+            store.fail_after(1).await.unwrap();
+
+            let hash_query = "%00".repeat(20);
+            let (status, body) = get(
+                &state,
+                &format!("/announce?info_hash={hash_query}&peer_id={hash_query}&port=6881"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "body was: {body}");
+        });
+    }
 }

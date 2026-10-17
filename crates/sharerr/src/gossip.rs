@@ -1269,4 +1269,21 @@ mod tests {
         assert_eq!(summary.accepted, 0);
         assert_eq!(summary, IngestSummary::default());
     }
+
+    /// A record is still counted as accepted when its endpoints and its
+    /// stored copy cannot be written: the identity was bound, which is the
+    /// part that matters for the next exchange, and the next push retries
+    /// the rest.
+    #[tokio::test]
+    async fn ingest_counts_a_record_whose_writes_fail_after_the_identity_was_bound() {
+        let (store, ids) = store_with(&["Sam"]).await;
+        let sam = identity(1);
+        // `list_peers` and `bind_peer_pubkey` answer; everything after fails.
+        store.fail_after(2).await.unwrap();
+
+        let summary = ingest(&store, ids[0], vec![record_for(&sam, "http://a:1", 1000)]).await;
+
+        assert_eq!(summary.accepted, 1);
+        assert_eq!(summary.invalid, 0);
+    }
 }
