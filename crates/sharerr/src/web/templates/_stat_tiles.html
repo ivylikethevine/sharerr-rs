@@ -55,6 +55,9 @@
       <strong>{{ glance.swarm_peers }}</strong> peer(s) connected, {{ glance.swarm_seeders }} seeding
       <br><span class="hint">across {{ glance.swarm_torrents }} torrent(s)</span>
       {% endif %}
+      {% if !glance.bytes_served.is_empty() %}
+      <br><span class="hint" title="What clients announcing to this tracker report having downloaded, all-time — first-hand, from the announces themselves">{{ glance.bytes_served }} served so far</span>
+      {% endif %}
     </dd>
   </div>
   <div class="stat">

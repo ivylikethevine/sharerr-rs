@@ -29,6 +29,13 @@
 //! works, unattributed, so a magnet or `.torrent` carrying it stays valid
 //! whether or not attribution is in play. See [`authenticate_token`].
 //!
+//! **Accounting.** Every announce carries the client's cumulative `uploaded`
+//! and `downloaded`; [`Swarms`](sharerr_torrent::announce::Swarms) turns them
+//! into a delta since that peer's previous announce, and a non-zero delta is
+//! added to the store (`Store::record_transfer`): to the friend's own row
+//! when the announce was attributed, and to the instance total either way.
+//! The reasoning is in `migrations/0013_transfer_totals.sql`.
+//!
 //! **Rotating the shared token.** Overwriting `tracker.token` outright would
 //! instantly lock out everyone still relying on the old value. Instead a
 //! rotation (`crate::web::settings::rotate_tracker_token`) keeps the previous
@@ -167,6 +174,13 @@ pub struct AnnounceParams {
     /// Bytes still to download. `0` means a seeder.
     #[param(required = true)]
     left: u64,
+    /// Bytes uploaded for this torrent since the client started it. Cumulative;
+    /// the tracker keeps only the change since this peer's previous announce.
+    uploaded: Option<u64>,
+    /// Bytes downloaded for this torrent since the client started it, read the
+    /// same way. This is what the status page's "served" figure and a friend's
+    /// own served figure are built from.
+    downloaded: Option<u64>,
     /// `started`, `stopped`, `completed`, or absent for a periodic re-announce.
     event: Option<String>,
     /// `1` for the compact peer list. Anything else returns the dictionary form.
@@ -297,6 +311,18 @@ async fn handle_announce(
             Some(&addr.to_string()),
         )
         .await;
+    }
+    // After the sighting, so a friend's first-ever announce is recorded as
+    // contact before its bytes are. `record_transfer` is a no-op on an empty
+    // delta, the common case for a seeded torrent nobody is pulling.
+    let moved = response.transferred;
+    if let Err(err) = store
+        .record_transfer(auth.attributed_to, moved.downloaded, moved.uploaded)
+        .await
+    {
+        // The announce already succeeded; a lost delta is an undercount, not
+        // a reason to fail the client.
+        tracing::warn!(error = %err, "could not record an announce's transfer");
     }
 
     tracing::debug!(
@@ -1457,6 +1483,84 @@ mod tests {
             assert!(
                 endpoints[0].addr.starts_with("203.0.113.7:"),
                 "{endpoints:?}"
+            );
+        });
+    }
+
+    /// The accounting half of attribution: a friend's second announce
+    /// reports what moved since their first, and that delta lands on their
+    /// row and on the instance total. An announce on the shared instance
+    /// token moves only the total.
+    #[test]
+    fn announces_account_their_transfer_to_the_friend_and_the_instance() {
+        with_open_vault(|state| async move {
+            use sharerr_core::model::MediaSource;
+            state
+                .open_vault()
+                .await
+                .unwrap()
+                .put(
+                    sharerr_core::config::secret_keys::TRACKER_TOKEN,
+                    &SecretString::from("instance-token"),
+                )
+                .unwrap();
+            let store = state.store().await.unwrap();
+            let sam = store
+                .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                .await
+                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            store
+                .set_seeding(
+                    MediaSource::Sonarr,
+                    1,
+                    &"00".repeat(20),
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+
+            let hash = "%00".repeat(20);
+            let sam_announce = |downloaded: u64| {
+                format!(
+                    "/announce/{}?info_hash={hash}&peer_id={hash}&port=6881&uploaded=0&downloaded={downloaded}",
+                    sam.key_hash
+                )
+            };
+            // First sight is a baseline, not a delta.
+            let (status, body) = get(&state, &sam_announce(1_000)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(store.peer(sam.id).await.unwrap().unwrap().downloaded, 0);
+            assert_eq!(store.transfer_totals().await.unwrap().downloaded, 0);
+
+            let (status, body) = get(&state, &sam_announce(6_000)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                store.peer(sam.id).await.unwrap().unwrap().downloaded,
+                5_000,
+                "the delta, not the cumulative figure"
+            );
+            assert_eq!(store.transfer_totals().await.unwrap().downloaded, 5_000);
+
+            // The operator's own client, on the shared token: a different
+            // peer_id, so its own baseline, then a delta that is nobody's.
+            let own = "%01".repeat(20);
+            let own_announce = |uploaded: u64| {
+                format!(
+                    "/announce/instance-token?info_hash={hash}&peer_id={own}&port=6882&uploaded={uploaded}&downloaded=0&left=0"
+                )
+            };
+            get(&state, &own_announce(0)).await;
+            let (status, body) = get(&state, &own_announce(7_000)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let totals = store.transfer_totals().await.unwrap();
+            assert_eq!((totals.downloaded, totals.uploaded), (5_000, 7_000));
+            assert_eq!(
+                store.peer(sam.id).await.unwrap().unwrap().uploaded,
+                0,
+                "an unattributed announce reaches no friend's row"
             );
         });
     }

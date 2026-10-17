@@ -260,6 +260,10 @@ pub struct Glance {
     /// which otherwise read identically. `None` when no sample has ever seen
     /// a peer, including before the sampler's first hour has passed.
     pub swarm_quiet_since: Option<String>,
+    /// Bytes friends' clients report having downloaded from this tracker's
+    /// swarms, all-time, pre-rendered ("1.2 TiB") -- the first-hand figure
+    /// for bytes out, from `transfer_totals`. Empty while nothing has moved.
+    pub bytes_served: String,
     /// When the next periodic sync is due, rendered relative ("in ~4 min",
     /// "due now") — derived from the last finished run plus the configured
     /// interval, since the sync loop stores no deadline of its own. Empty when
@@ -849,6 +853,14 @@ pub struct PeerRow {
     /// The combined size of those items, pre-rendered ("41 GiB"). Empty
     /// when `sharing` is `None` or nothing is admitted.
     pub sharing_size: String,
+    /// Bytes this friend's client reports having downloaded from this
+    /// tracker, pre-rendered ("3.2 GiB") -- the answer to "has sharing
+    /// with them actually delivered anything". Empty until it has.
+    pub served: String,
+    /// Bytes that client reports having passed on to others, pre-rendered.
+    /// Empty until it has; tells a friend who seeds back from one who only
+    /// pulls.
+    pub shared_on: String,
     /// When the key was revoked, rendered relative — stored all along and never
     /// shown, so "(revoked)" gave no clue whether it happened today or a year
     /// ago. Empty for a friend who is not revoked.

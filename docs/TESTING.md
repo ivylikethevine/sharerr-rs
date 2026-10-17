@@ -33,6 +33,17 @@ against `sqlite::memory:`, and migrations are embedded at compile time by
 reliable. `--all-features` compiles the tier-2 suite too, so it cannot
 silently rot, without running it.
 
+**Every migration is rehearsed as an upgrade, not just applied to an empty
+database.** `sharerr-store`'s `upgrade` test module builds a file-backed
+database at each migration level that has ever existed, fills it with rows
+written in that level's columns (literal SQL and literal JSON, the shapes an
+older release actually wrote), opens it through `Store::open` so the newer
+migrations run over populated tables, and reads everything back through the
+store's own API. A migration that only works on an empty table, or a decoder
+that assumes a column every row has, fails there. A new migration needs its
+rows added to that module's `seed` and its expectations to `check`; the
+level loop picks the new version up by itself.
+
 **No tier-1 fixture opens a real vault.** `state::fixtures::unconfigured()`
 has no master key, so vault-backed accessors resolve to "unavailable" there.
 Prefer testing store-backed logic directly, with the store and the resolved

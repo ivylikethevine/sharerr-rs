@@ -406,6 +406,13 @@ async fn glance(
         None
     };
 
+    // All-time, from the announces themselves. Zero reads as "nothing to
+    // say yet" rather than "0 B": a figure only appears once it is one.
+    let bytes_served = match store.transfer_totals().await {
+        Ok(totals) if totals.downloaded > 0 => items::human_size(totals.downloaded.unsigned_abs()),
+        _ => String::new(),
+    };
+
     let (cpu_percent, memory_usage, disk_usage) = match state.serve.system_status().snapshot().await
     {
         Some(sample) => {
@@ -427,6 +434,7 @@ async fn glance(
         swarm_seeders: swarm.seeders,
         swarm_torrents: swarm.swarms,
         swarm_quiet_since,
+        bytes_served,
         next_sync,
         cpu_percent,
         memory_usage,
@@ -610,6 +618,21 @@ mod tests {
             glance.swarm_quiet_since, None,
             "no swarm sample has ever been recorded"
         );
+        assert_eq!(glance.bytes_served, "", "nothing has moved yet");
+    }
+
+    #[tokio::test]
+    async fn bytes_served_reads_the_instance_total_once_something_has_moved() {
+        let (_dir, serve) = unconfigured();
+        let store = serve.store().await.unwrap();
+        store
+            .record_transfer(None, 5 * 1024 * 1024 * 1024, 0)
+            .await
+            .unwrap();
+
+        let state = web_state(serve);
+        let glance = glance(&state, None).await.expect("the store is available");
+        assert_eq!(glance.bytes_served, "5.0 GiB");
     }
 
     /// The tile's "quiet since" wording depends on the swarm-history sampler

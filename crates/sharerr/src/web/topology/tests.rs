@@ -816,6 +816,8 @@ fn announce_request(hash: &str, peer_id: [u8; 20]) -> sharerr_torrent::AnnounceR
         peer_id,
         port: 6881,
         left: 0,
+        uploaded: 0,
+        downloaded: 0,
         event: sharerr_torrent::Event::None,
         compact: true,
         numwant: 50,

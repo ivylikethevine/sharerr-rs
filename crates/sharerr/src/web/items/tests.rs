@@ -38,6 +38,8 @@ fn peer(label: &str, scope: PeerScope) -> Peer {
         pubkey: None,
         gossip_url: None,
         key_hash: "hash".to_owned(),
+        downloaded: 0,
+        uploaded: 0,
     }
 }
 
@@ -665,6 +667,8 @@ async fn a_live_swarm_is_counted_on_its_row() {
         peer_id: [1; 20],
         port: 6881,
         left: 0,
+        uploaded: 0,
+        downloaded: 0,
         event: sharerr_torrent::Event::None,
         compact: true,
         numwant: 50,
@@ -1066,6 +1070,8 @@ async fn detail_lists_the_live_swarm_with_masked_peer_addresses() {
         peer_id: [1; 20],
         port: 6881,
         left: 0,
+        uploaded: 0,
+        downloaded: 0,
         event: sharerr_torrent::Event::None,
         compact: true,
         numwant: 50,

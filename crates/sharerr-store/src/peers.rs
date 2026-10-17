@@ -148,6 +148,13 @@ pub struct Peer {
     /// friend holding the raw key would hash to look us up. Not the key
     /// itself, and not rendered anywhere in the web UI or API.
     pub key_hash: String,
+    /// Bytes this friend's client reports having downloaded from swarms this
+    /// tracker serves, summed over every announce attributed to them -- the
+    /// "served" figure. Only an announce carrying their own token counts;
+    /// see `migrations/0013_transfer_totals.sql`.
+    pub downloaded: i64,
+    /// Bytes that same client reports having uploaded on to others.
+    pub uploaded: i64,
 }
 
 impl Peer {
@@ -201,7 +208,7 @@ impl Touch {
 }
 
 const PEER_COLUMNS: &str = "id, label, created_at, last_seen_at, revoked_at, scope, pubkey, \
-     gossip_url, key_hash";
+     gossip_url, key_hash, downloaded, uploaded";
 
 fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
     Ok(Peer {
@@ -214,6 +221,8 @@ fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
         pubkey: row.try_get("pubkey")?,
         gossip_url: row.try_get("gossip_url")?,
         key_hash: row.try_get("key_hash")?,
+        downloaded: row.try_get("downloaded")?,
+        uploaded: row.try_get("uploaded")?,
     })
 }
 

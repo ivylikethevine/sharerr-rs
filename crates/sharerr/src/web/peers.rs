@@ -480,6 +480,8 @@ fn row(
             .filter(|summary| summary.size > 0)
             .map(|summary| super::items::human_size(summary.size.unsigned_abs()))
             .unwrap_or_default(),
+        served: bytes_or_empty(peer.downloaded),
+        shared_on: bytes_or_empty(peer.uploaded),
         id: peer.id,
         label: peer.label.clone(),
         scope: peer.scope.as_str(),
@@ -512,6 +514,16 @@ fn row(
                 via: e.via.as_str(),
             })
             .collect(),
+    }
+}
+
+/// A byte count rendered for a cell, or empty for zero so the template can
+/// show a dash: "0 B served" reads as a measurement, and it is not one yet.
+fn bytes_or_empty(bytes: i64) -> String {
+    if bytes > 0 {
+        super::items::human_size(bytes.unsigned_abs())
+    } else {
+        String::new()
     }
 }
 
@@ -651,10 +663,42 @@ mod tests {
             pubkey: None,
             gossip_url: None,
             key_hash: "hash".to_owned(),
+            downloaded: 0,
+            uploaded: 0,
         };
 
         assert_eq!(row(&peer, &[], false, None).last_seen, "never");
         assert!(!row(&peer, &[], false, None).revoked);
+        assert_eq!(
+            row(&peer, &[], false, None).served,
+            "",
+            "nothing served renders as nothing, not as 0 B"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_has_pulled_something_shows_how_much() {
+        let peer = Peer {
+            downloaded: 3 * 1024 * 1024 * 1024 + 200 * 1024 * 1024,
+            uploaded: 512,
+            ..Peer {
+                id: 1,
+                label: "Sam".to_owned(),
+                created_at: 0,
+                last_seen_at: Some(0),
+                revoked_at: None,
+                scope: PeerScope::All,
+                pubkey: None,
+                gossip_url: None,
+                key_hash: "hash".to_owned(),
+                downloaded: 0,
+                uploaded: 0,
+            }
+        };
+
+        let rendered = row(&peer, &[], false, None);
+        assert_eq!(rendered.served, "3.2 GiB");
+        assert_eq!(rendered.shared_on, "512 B");
     }
 
     #[test]
@@ -669,6 +713,8 @@ mod tests {
             pubkey: None,
             gossip_url: None,
             key_hash: "hash".to_owned(),
+            downloaded: 0,
+            uploaded: 0,
         };
 
         assert!(row(&peer, &[], false, None).revoked);

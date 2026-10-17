@@ -17,7 +17,7 @@ use sharerr_core::model::{ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareS
 /// takes, spelled out once rather than at every call site.
 type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Serialises [`Store::from_options`] within this process.
 ///

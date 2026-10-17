@@ -63,7 +63,6 @@ whole design is built around.
 - [Getting help and contributing](#getting-help-and-contributing)
 - [AI usage](#ai-usage)
 - [Roadmap](#roadmap)
-  - [Before v1](#before-v1)
   - [Open work](#open-work)
 - [Licence](#licence)
 
@@ -211,6 +210,20 @@ anything has used the old token since, so you can wait until nothing has.
 This is a safety net for the _shared_ token, not a substitute for per-friend
 revocation above.
 
+The tracker also keeps count. Every announce carries the client's cumulative
+`uploaded` and `downloaded` for that torrent; sharerr turns each into the
+change since that peer's previous announce and adds it up, so the Status
+page's Swarms tile shows how much has been served all-time and the Friends
+page shows it per friend. Three things to know when reading those figures.
+They are what clients report, nothing is measured on the wire. The per-friend
+figure counts only announces carrying that friend's own key, so a torrent
+they fetched before their key existed, or one carrying the shared instance
+token, lands in the instance total but not on their row. And a restart of
+`sharerr serve` loses at most one announce interval per peer, since the first
+announce afterwards is taken as a baseline rather than counted in full. The
+same totals are exposed as `sharerr_transfer_bytes_total` on the metrics
+endpoint.
+
 One caveat: the announce endpoint is part of `sharerr serve`, so a one-shot
 `sharerr sync` produces correct torrents whose announces fail until `serve`
 is running. Field reference: [`[tracker]`](docs/SETTINGS.md#tracker).
@@ -235,7 +248,7 @@ nothing for it, so a limit you want gone comes off in the client. rTorrent
 honours the cap but not the ratio; see
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
-The same panel also holds two settled "Before v1" roadmap questions, since an
+The same panel also holds two settled roadmap questions, since an
 operator reasons about them together:
 
 ```toml
@@ -563,31 +576,12 @@ moment it ships. An idea that gets declined instead moves to
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#not-supported), with the reason
 attached.
 
-### Before v1
-
-Operational tasks that stand between the current 0.1.x releases and a 1.0,
-not features:
-
-- **Rehearse one real upgrade across a migration.** Twelve forward-only
-  sqlx migrations exist, all only ever run against a fresh database.
-
 ### Open work
 
 Smallest first, by how much each item touches:
 
-- **A blocked upstream shows as drift.** `check_tool_versions.sh` prints
-  `(could not read upstream releases)` for a row it cannot read and counts no
-  problem, while `tool-versions.yml` blocks egress to a fixed host list, so a
-  pin whose upstream lives on a host missing from that list reads as fine
-  forever. Counting a problem when every row one host serves went unread (a
-  blocked host rather than a one-off rate limit) would name it in the tracking
-  issue.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
-- **Transfer accounting.** The tracker resolves which friend an announce
-  belongs to but discards the `uploaded`/`downloaded` totals it carries.
-  Keeping them would unlock a per-friend "served" indicator and a real
-  bytes-out figure on the status page.
 - **Request flow.** Discovery is one-way today. An inbound request queue
   with an approve step is the other half of the original idea.
 
