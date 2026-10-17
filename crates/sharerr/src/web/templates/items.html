@@ -19,6 +19,9 @@
 {% if let Some(message) = error %}
 <p class="error" role="alert">{{ message }}</p>
 {% endif %}
+{% if let Some(message) = ok %}
+<p class="ok" role="status">{{ message }}</p>
+{% endif %}
 
 {% if let Some(composition) = composition %}
 {# Folded shut by default. The summary carries the headline on its own, so the
@@ -127,10 +130,31 @@
   {% if items.is_empty() %}
   {% call ui::empty("Nothing matches", "Widen the filters above, or wait for a sync — items appear here once a source has tagged content sharerr can read.") %}{% endcall %}
   {% else %}
+  {# The row checkboxes join this form through their `form` attribute, so it
+     can sit above the table rather than wrap it. None of these move, rename,
+     re-link or delete a file. #}
+  <form method="post" action="/items/bulk" id="bulk" class="bulk-bar">
+    <input type="hidden" name="q" value="{{ filters.q }}">
+    <input type="hidden" name="source" value="{{ filters.source }}">
+    <input type="hidden" name="state" value="{{ filters.state }}">
+    <input type="hidden" name="kind" value="{{ filters.kind }}">
+    <input type="hidden" name="sort" value="{{ filters.sort }}">
+    <input type="hidden" name="dir" value="{{ filters.dir }}">
+    <span class="hint">With the selected items:</span>
+    <button type="submit" name="action" value="retry"
+            title="Runs one sync pass now, which retries every failed item">Retry now</button>
+    <button type="submit" name="action" value="rebuild" class="secondary"
+            title="Removes each selected torrent (never the file) and builds a fresh one in one sync pass">Force rebuild</button>
+    <button type="submit" name="action" value="unshare" class="link"
+            data-confirm="Stop sharing every selected item? The files themselves are not touched."
+            title="Stops seeding each selected item without deleting its file">Unshare</button>
+  </form>
   <div class="table-scroll">
   <table>
     <thead>
       <tr>
+        <th class="select"><input type="checkbox" data-select-all="item" form="bulk"
+              aria-label="Select every item shown" title="Select every item shown"></th>
         {% for link in sort_links %}
         <th title="{{ link.hint }}"><a href="{{ link.href }}">{{ link.label }}{% if link.active %}
           {% if link.dir == "desc" %} &#9660;{% else %} &#9650;{% endif %}
@@ -147,6 +171,8 @@
     <tbody>
       {% for item in items %}
       <tr>
+        <td class="select"><input type="checkbox" name="item" value="{{ item.source }}:{{ item.file_id }}"
+              form="bulk" aria-label="Select {{ item.title }}"></td>
         <td class="nowrap"{% if !item.since_absolute.is_empty() %} title="{{ item.since_absolute }}"{% endif %}>{{ item.since }}</td>
         <td class="title">
           <a href="/items/{{ item.source }}/{{ item.file_id }}">{{ item.title }}</a>

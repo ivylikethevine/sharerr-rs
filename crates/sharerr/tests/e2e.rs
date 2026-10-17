@@ -45,7 +45,7 @@ fn compose_file() -> String {
 
 /// Whether the running stack tags music through a Lidarr container.
 ///
-/// Only the plain stack carries one — Transmission, rTorrent, and VPN exist to
+/// Only the plain stack carries one (and a Readarr; see [`readarr_configured`]) — Transmission, rTorrent, and VPN exist to
 /// prove a client/topology concern, not indexer coverage, and duplicating the
 /// Lidarr flow into all three would triple that cost for no additional
 /// coverage of what those stacks are actually for; see `LIDARR` in
@@ -54,6 +54,15 @@ fn compose_file() -> String {
 /// today's assumption.
 fn lidarr_configured() -> bool {
     std::env::var("SHARERR_E2E_LIDARR")
+        .ok()
+        .is_none_or(|v| v != "0")
+}
+
+/// Whether the running stack tags books through a Readarr (Bookshelf)
+/// container: on the same stacks as Lidarr, read from `SHARERR_E2E_READARR`
+/// with the same default.
+fn readarr_configured() -> bool {
+    std::env::var("SHARERR_E2E_READARR")
         .ok()
         .is_none_or(|v| v != "0")
 }
@@ -178,15 +187,20 @@ fn a_real_sync_never_moves_or_rewrites_the_library() {
 
     // Without this the test passes vacuously: a sync that discovers nothing also
     // moves nothing. The count comes from the same fixtures `seed-arr` tags, so it
-    // cannot drift from what Sonarr and Radarr were told about — except for music,
-    // which only the plain stack's Lidarr container tags at all; every other stack
-    // (Transmission, rTorrent, VPN) exists to prove a client/topology concern, not
-    // indexer coverage, and carries no Lidarr — see `LIDARR` in
+    // cannot drift from what Sonarr and Radarr were told about — except for music
+    // and books, which only the plain stack's Lidarr and Readarr containers tag;
+    // every other stack (Transmission, rTorrent, VPN) exists to prove a
+    // client/topology concern and carries neither — see `LIDARR` in
     // `run_docker_tests.sh`.
     let expected = sharerr_testkit::library::tv_files(&media).len()
         + sharerr_testkit::library::movie_files(&media).len()
         + if lidarr_configured() {
             sharerr_testkit::library::music_files(&media).len()
+        } else {
+            0
+        }
+        + if readarr_configured() {
+            sharerr_testkit::library::book_files(&media).len()
         } else {
             0
         };

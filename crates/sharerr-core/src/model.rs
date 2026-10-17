@@ -75,8 +75,9 @@ impl MediaSource {
     ];
 
     /// Whether this app's tags apply above the level of one shared item —
-    /// series-level for Sonarr and Whisparr (Whisparr is Sonarr's codebase, see
-    /// [`Self::api_version`]), artist-level for Lidarr, author-level for
+    /// series-level for Sonarr and site-level for Whisparr v2 (Sonarr's
+    /// codebase; v3 is Radarr's and tags per item, which only its reported
+    /// version reveals), artist-level for Lidarr, author-level for
     /// Readarr — so tagging one thing shares its whole run at once. Radarr's
     /// tags are movie-level, which is naturally per-item, and a directory
     /// library has no tags to begin with.
@@ -108,10 +109,13 @@ pub struct ExternalIds {
     /// because MusicBrainz ids are UUIDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub musicbrainz: Option<String>,
-    /// Goodreads work id, for books.
+    /// Goodreads work id, for books from Readarr or Bookshelf's `softcover` images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goodreads: Option<String>,
-    /// ISBN, for books. Kept alongside Goodreads because indexers match on either.
+    /// Hardcover book id, for books from Bookshelf's `hardcover` images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardcover: Option<String>,
+    /// ISBN, for books. Kept alongside the work id because indexers match on either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,
 }

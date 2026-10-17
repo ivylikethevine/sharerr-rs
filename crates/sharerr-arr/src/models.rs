@@ -101,6 +101,23 @@ pub(crate) struct Series {
     pub imdb_id: Option<String>,
     #[serde(default)]
     pub tags: Vec<i64>,
+    /// The episode order the series is numbered in, from Sonarr v5 on:
+    /// `official` (the default) or an alternate such as `dvd`. Absent before
+    /// v5, which only ever numbered in the official order.
+    #[serde(default)]
+    pub season_type: Option<String>,
+}
+
+impl Series {
+    /// Whether this series is numbered in an order other than the official one,
+    /// which is the order a friend's Sonarr reads `SxxEyy` in unless they chose
+    /// the same alternate.
+    pub(crate) fn uses_alternate_order(&self) -> bool {
+        self.season_type
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty() && !t.eq_ignore_ascii_case("official"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,4 +227,39 @@ where
         // arrived through a float-shaped JSON number reads back as an integer.
         Some(Either::Number(number)) => (number != 0.0).then(|| format!("{number}")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// Every spelling the *arr apps have used for a sample rate, through the
+    /// one field that reads it.
+    #[test]
+    fn a_sample_rate_reads_as_number_string_or_absent() {
+        let read = |json: &str| -> Option<String> {
+            serde_json::from_str::<MediaInfo>(json)
+                .unwrap()
+                .audio_sample_rate
+        };
+        assert_eq!(
+            read(r#"{"audioSampleRate": 44100}"#).as_deref(),
+            Some("44100")
+        );
+        assert_eq!(
+            read(r#"{"audioSampleRate": "48000"}"#).as_deref(),
+            Some("48000")
+        );
+        assert_eq!(read(r#"{"audioSampleRate": null}"#), None);
+        assert_eq!(read(r#"{}"#), None);
+        assert_eq!(
+            read(r#"{"audioSampleRate": 0}"#),
+            None,
+            "0 Hz is not a rate"
+        );
+        assert_eq!(read(r#"{"audioSampleRate": "0"}"#), None);
+        assert_eq!(read(r#"{"audioSampleRate": ""}"#), None);
+    }
 }

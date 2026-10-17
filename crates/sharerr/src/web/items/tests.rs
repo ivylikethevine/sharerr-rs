@@ -38,6 +38,8 @@ fn peer(label: &str, scope: PeerScope) -> Peer {
         pubkey: None,
         gossip_url: None,
         key_hash: "hash".to_owned(),
+        downloaded: 0,
+        uploaded: 0,
     }
 }
 
@@ -665,6 +667,8 @@ async fn a_live_swarm_is_counted_on_its_row() {
         peer_id: [1; 20],
         port: 6881,
         left: 0,
+        uploaded: 0,
+        downloaded: 0,
         event: sharerr_torrent::Event::None,
         compact: true,
         numwant: 50,
@@ -949,6 +953,156 @@ async fn unsharing_an_adopted_torrent_leaves_it_in_the_client() {
     assert_eq!(got.state, ShareState::Unshared);
 }
 
+// ------------------------------------------------------------- bulk
+
+fn bulk_form(action: &str, items: &[&str]) -> BulkForm {
+    BulkForm {
+        action: action.to_owned(),
+        item: items.iter().map(|i| (*i).to_owned()).collect(),
+        state: "pending".to_owned(),
+        q: "lantern wick".to_owned(),
+        ..BulkForm::default()
+    }
+}
+
+#[tokio::test]
+async fn bulk_refuses_an_unknown_action() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let response = bulk(
+        State(web_state(serve)),
+        Form(bulk_form("delete", &["sonarr:1"])),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn bulk_with_nothing_selected_returns_to_the_same_view_with_an_error() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let response = bulk(State(web_state(serve)), Form(bulk_form("unshare", &[]))).await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = location(&response);
+    assert!(
+        location.starts_with("/items?q=lantern+wick&source=&state=pending"),
+        "{location}"
+    );
+    assert!(location.contains("&error=Nothing"), "{location}");
+}
+
+#[tokio::test]
+async fn bulk_unshare_marks_every_selected_item_and_counts_the_missing() {
+    let (_dir, serve) = crate::state::fixtures::ready().await;
+    let store = serve.store().await.unwrap();
+    for id in [1, 2, 3] {
+        store
+            .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", id))
+            .await
+            .unwrap();
+    }
+
+    let response = bulk(
+        State(web_state(serve)),
+        Form(bulk_form(
+            "unshare",
+            &["sonarr:1", "sonarr:2", "sonarr:99", "nonsense"],
+        )),
+    )
+    .await;
+
+    let location = location(&response);
+    assert!(location.contains("&ok=Unshared+2+item"), "{location}");
+    assert!(
+        location.contains("2+selected+item%28s%29+no+longer+exist"),
+        "{location}"
+    );
+    for id in [1, 2] {
+        let got = store.get(MediaSource::Sonarr, id).await.unwrap().unwrap();
+        assert_eq!(got.state, ShareState::Unshared, "item {id}");
+    }
+    let untouched = store.get(MediaSource::Sonarr, 3).await.unwrap().unwrap();
+    assert_ne!(
+        untouched.state,
+        ShareState::Unshared,
+        "an unselected item stays shared"
+    );
+}
+
+/// The identity clears before the pass runs, so a pass that then fails
+/// (nothing to scan here) still leaves every selected torrent cleared.
+#[tokio::test]
+async fn bulk_rebuild_clears_each_selected_torrent_and_skips_those_without_one() {
+    let (_dir, serve) = crate::state::fixtures::ready().await;
+    let store = serve.store().await.unwrap();
+    for id in [1, 2] {
+        let mut item = named(MediaSource::Sonarr, "Lanternwick Hollow", id);
+        item.info_hash = Some(format!("{id:02}").repeat(20));
+        item.created_by_sharerr = false;
+        item.state = ShareState::Seeding;
+        store.upsert(&item).await.unwrap();
+    }
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 3))
+        .await
+        .unwrap();
+
+    let response = bulk(
+        State(web_state(serve)),
+        Form(bulk_form("rebuild", &["sonarr:1", "sonarr:2", "sonarr:3"])),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    for id in [1, 2] {
+        let got = store.get(MediaSource::Sonarr, id).await.unwrap().unwrap();
+        assert_eq!(got.info_hash, None, "item {id}");
+        assert_eq!(got.state, ShareState::Pending, "item {id}");
+    }
+}
+
+#[tokio::test]
+async fn bulk_retry_says_so_when_nothing_selected_has_failed() {
+    let (_dir, serve) = crate::state::fixtures::ready().await;
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+
+    let response = bulk(
+        State(web_state(serve)),
+        Form(bulk_form("retry", &["sonarr:1"])),
+    )
+    .await;
+
+    let location = location(&response);
+    assert!(
+        location.contains("&error=None+of+the+selected"),
+        "{location}"
+    );
+}
+
+#[tokio::test]
+async fn the_page_shows_a_bulk_outcome_and_echoes_its_filters_into_the_form() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+    let query = ItemsQuery {
+        source: "sonarr".to_owned(),
+        ok: "Unshared 2 item(s)".to_owned(),
+        ..ItemsQuery::default()
+    };
+
+    let html = body_of(page(State(web_state(serve)), Query(query)).await).await;
+
+    assert!(html.contains("Unshared 2 item(s)"), "{html}");
+    assert!(html.contains(r#"name="source" value="sonarr""#), "{html}");
+    assert!(html.contains(r#"value="sonarr:1""#), "{html}");
+}
+
 // ------------------------------------------------------- the long tail
 
 #[test]
@@ -987,6 +1141,7 @@ async fn a_row_lists_every_external_id_in_lookup_order() {
                 imdb: Some("tt4".to_owned()),
                 musicbrainz: Some("mb5".to_owned()),
                 goodreads: Some("gr6".to_owned()),
+                hardcover: Some("hc8".to_owned()),
                 isbn: Some("9787".to_owned()),
             },
             ..named(MediaSource::Radarr, "Harborlight", 1)
@@ -1004,6 +1159,7 @@ async fn a_row_lists_every_external_id_in_lookup_order() {
         "imdb tt4",
         "musicbrainz mb5",
         "goodreads gr6",
+        "hardcover hc8",
         "isbn 9787",
     ] {
         assert!(html.contains(id), "missing {id} in:\n{html}");
@@ -1066,6 +1222,8 @@ async fn detail_lists_the_live_swarm_with_masked_peer_addresses() {
         peer_id: [1; 20],
         port: 6881,
         left: 0,
+        uploaded: 0,
+        downloaded: 0,
         event: sharerr_torrent::Event::None,
         compact: true,
         numwant: 50,
@@ -1187,4 +1345,111 @@ async fn retry_redirects_with_the_passes_outcome_when_it_completes() {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = location(&response);
     assert!(location.starts_with("/items/sonarr/1?ok="), "{location}");
+}
+
+/// The announce URL the detail page shows: the live endpoint, with a
+/// `<token>` placeholder when the instance requires one.
+#[test]
+fn the_current_announce_url_marks_where_a_token_goes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = sharerr_core::Config {
+        data_dir: dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    config.tracker.advertised_host = Some("seed.example".to_owned());
+    let serve = crate::state::ServeState::new(config, dir.path().join("sharerr.toml"), None);
+
+    assert_eq!(
+        super::current_announce_url(&serve, false).as_deref(),
+        Some("http://seed.example:8477/announce")
+    );
+    assert_eq!(
+        super::current_announce_url(&serve, true).as_deref(),
+        Some("http://seed.example:8477/announce/<token>")
+    );
+}
+
+// ------------------------------------------- the store stops answering
+
+/// The listing survives a database that opened and then stopped answering:
+/// it renders with the failure named rather than erroring out.
+#[tokio::test]
+async fn the_page_names_a_listing_that_failed_and_answers_503_when_it_cannot_open() {
+    let (_dir, serve) = crate::state::fixtures::store_closed().await;
+    let response = page(State(web_state(serve)), Query(ItemsQuery::default())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_of(response).await.contains("could not list items"));
+
+    let (_dir, serve) = crate::state::fixtures::store_unopenable();
+    let response = page(State(web_state(serve)), Query(ItemsQuery::default())).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Every action loads its item through `fetch`, so one closed store proves
+/// the 500 arm for all of them.
+#[tokio::test]
+async fn every_item_action_answers_500_when_the_item_cannot_be_loaded() {
+    let (_dir, serve) = crate::state::fixtures::store_closed().await;
+    let state = web_state(serve);
+    let at = || Path((MediaSource::Radarr, 1));
+
+    let response = detail(State(state.clone()), at(), Query(DetailQuery::default())).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body_of(response).await.contains("could not load that item"));
+    let response = retry(State(state.clone()), at()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response = rebuild(State(state.clone()), at()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response = unshare(State(state), at()).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// An item that loads on an instance whose syncer never built: the action
+/// redirects back to the item with the syncer's own reason.
+#[tokio::test]
+async fn rebuild_and_unshare_redirect_with_an_error_when_the_syncer_is_not_ready() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+    let state = web_state(serve);
+
+    for response in [
+        rebuild(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+        unshare(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?error="), "{location}");
+    }
+}
+
+/// The syncer holds its own store handle over the same file (see
+/// `fixtures::ready_state`). Closing that one leaves the handler's lookup
+/// working and fails the write behind `prepare_rebuild` / `unshare_one`, so
+/// the redirect carries the store's error.
+#[tokio::test]
+async fn rebuild_and_unshare_redirect_with_the_stores_error_when_the_write_fails() {
+    let (_dir, serve) = crate::state::fixtures::ready().await;
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+    serve.syncer().await.unwrap().store().pool().close().await;
+    let state = web_state(serve);
+
+    for response in [
+        rebuild(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+        unshare(State(state.clone()), Path((MediaSource::Sonarr, 1))).await,
+    ] {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = location(&response);
+        assert!(location.starts_with("/items/sonarr/1?error="), "{location}");
+        assert!(location.contains("closed"), "{location}");
+    }
+    let got = store.get(MediaSource::Sonarr, 1).await.unwrap().unwrap();
+    assert_eq!(got.state, ShareState::Seeding, "nothing was written");
 }

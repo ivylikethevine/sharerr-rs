@@ -664,6 +664,27 @@ pub async fn check_qbit(
     }
 }
 
+/// The oldest qBittorrent without the WebUI's redirect-handling SSRF, fixed in
+/// 5.2.1.
+pub const QBIT_SECURITY_FLOOR: [u32; 3] = [5, 2, 1];
+
+/// Whether a qBittorrent `app/version` string (`v5.2.0`, `5.1.4beta1`) is
+/// older than [`QBIT_SECURITY_FLOOR`]. A version that does not parse is not
+/// called old.
+pub fn qbit_below_security_floor(version: &str) -> bool {
+    let mut parts = [0u32; 3];
+    let mut fields = version.trim().trim_start_matches(['v', 'V']).split('.');
+    for part in &mut parts {
+        let Some(field) = fields.next() else { break };
+        let digits = field.split(|c: char| !c.is_ascii_digit()).next();
+        match digits.and_then(|d| d.parse().ok()) {
+            Some(n) => *part = n,
+            None => return false,
+        }
+    }
+    parts < QBIT_SECURITY_FLOOR
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1185,6 +1206,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn qbit_versions_before_5_2_1_are_below_the_security_floor() {
+        for old in ["v5.2.0", "5.1.4", "v4.6.7", "v5.2.0beta1", "v5.2"] {
+            assert!(qbit_below_security_floor(old), "{old}");
+        }
+        for current in ["v5.2.1", "v5.2.3", "5.3.0", "v6.0.0rc1", " v5.2.1 "] {
+            assert!(!qbit_below_security_floor(current), "{current}");
+        }
+        for unparsed in ["", "unknown", "vx.y"] {
+            assert!(!qbit_below_security_floor(unparsed), "{unparsed}");
+        }
+    }
+
     /// BUG (pre-existing, not fixed here): `check_qbit` only classifies
     /// `login()`'s error into `AuthRejected`/`Unreachable`/`Failed` — the
     /// `version()` call right after it maps *any* error to `Failed`
@@ -1231,5 +1265,92 @@ mod tests {
         let outcome = check_qbit(TorrentBackend::Qbittorrent, &url, None, credential).await;
 
         assert!(matches!(outcome, QbitOutcome::Failed(_)), "{outcome:?}");
+    }
+
+    /// An address that cannot be dialled at all is "unusable", not
+    /// "refused": nothing was tried, and the message says what is missing.
+    #[tokio::test]
+    async fn an_address_without_a_host_or_port_is_unusable() {
+        let no_host = Url::parse("unix:/run/sharerr.sock").unwrap();
+        let outcome = check_reachable(Some(&no_host)).await;
+        assert!(
+            matches!(&outcome, ReachOutcome::Unusable(reason) if reason.contains("no host")),
+            "got {outcome:?}"
+        );
+        assert!(!outcome.is_reachable());
+
+        let no_port = Url::parse("sharerr://seed.example").unwrap();
+        let outcome = check_reachable(Some(&no_port)).await;
+        assert!(
+            matches!(&outcome, ReachOutcome::Unusable(reason) if reason.contains("no port")),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_relative_library_path_is_unreadable_and_says_why() {
+        use sharerr_core::config::{LibraryConfig, LibraryKind};
+        let outcome = check_library(&LibraryConfig {
+            path: std::path::PathBuf::from("relative/movies"),
+            kind: LibraryKind::Movie,
+        });
+        assert!(
+            matches!(&outcome, DirOutcome::Unreadable(reason) if reason.contains("absolute")),
+            "got {outcome:?}"
+        );
+    }
+
+    /// A source that is not an *arr app cannot have a client built for it;
+    /// the refusal is reported as a bad URL, since that is the only input.
+    #[tokio::test]
+    async fn a_source_with_no_api_is_reported_as_a_bad_url() {
+        let url = Url::parse("http://127.0.0.1:9/").unwrap();
+        let outcome = check_arr(MediaSource::Directory, Some(&url), key(), "sharerr").await;
+        assert!(matches!(outcome, ArrOutcome::BadUrl(_)), "got {outcome:?}");
+    }
+
+    /// A status answer with no `appName` falls back to the source's own name,
+    /// and a tag walk that fails after the status answered is a failure
+    /// naming the cause, not a missing tag.
+    #[tokio::test]
+    async fn a_nameless_status_falls_back_and_a_failed_walk_is_a_failure() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/api/v3/system/status",
+            200,
+            json!({ "version": "4.0.0.0" }),
+        )
+        .await;
+        mount(
+            &server,
+            "/api/v3/tag",
+            200,
+            json!([{ "id": 3, "label": "sharerr" }]),
+        )
+        .await;
+        mount(&server, "/api/v3/series", 500, json!({ "message": "boom" })).await;
+
+        let outcome = check_arr(MediaSource::Sonarr, Some(&base(&server)), key(), "sharerr").await;
+
+        let ArrOutcome::Failed(reason) = outcome else {
+            panic!("got {outcome:?}");
+        };
+        assert!(reason.contains("series"), "{reason}");
+    }
+
+    #[test]
+    fn build_torrent_client_builds_an_rtorrent_client_from_a_password() {
+        let url = Url::parse("http://localhost:8000/RPC2").unwrap();
+        let client = build_torrent_client(
+            TorrentBackend::Rtorrent,
+            &url,
+            Some("operator"),
+            TorrentCredential::Password(SecretString::from(
+                sharerr_testkit::secrets::fresh_password(),
+            )),
+        )
+        .unwrap();
+        assert_eq!(client.kind(), sharerr_client::ClientKind::Rtorrent);
     }
 }

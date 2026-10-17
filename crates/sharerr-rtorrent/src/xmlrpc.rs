@@ -531,4 +531,28 @@ mod tests {
         let err = expect_end(&mut reader, "value").unwrap_err();
         assert!(err.contains("</value>"), "{err}");
     }
+
+    /// Text split by an entity reference, or wrapped in CDATA, is still one
+    /// string — the shapes a real rTorrent produces for a path with `&` in it.
+    #[test]
+    fn entities_and_cdata_inside_a_value_read_as_text() {
+        assert_eq!(
+            parse_response(&scalar_response("&amp;x")).unwrap(),
+            XmlValue::Str("&x".to_owned())
+        );
+        assert_eq!(
+            parse_response(&scalar_response("<string><![CDATA[a&b]]></string>")).unwrap(),
+            XmlValue::Str("a&b".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_value_or_array_of_the_wrong_shape_is_an_error_naming_what_was_seen() {
+        let err = parse_response(&scalar_response("<![CDATA[x]]>")).unwrap_err();
+        assert!(err.contains("unexpected event inside <value>"), "{err}");
+
+        let err =
+            parse_response(&scalar_response("<array><string>x</string></array>")).unwrap_err();
+        assert!(err.contains("expected <data>"), "{err}");
+    }
 }

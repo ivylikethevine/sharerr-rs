@@ -62,7 +62,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
                 )
             }),
         )
-        .route("/assets/{file}", get(crate::web::asset));
+        .route("/assets/{file}", get(crate::web::asset))
+        .layer(axum::middleware::map_response(
+            crate::web::add_security_headers,
+        ));
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -98,6 +101,7 @@ fn glance() -> Glance {
         friends_total: 3,
         swarm_peers: 5,
         swarm_seeders: 3,
+        bytes_served: "1.8 TiB".to_owned(),
         swarm_torrents: 4,
         swarm_quiet_since: None,
         next_sync: "in ~11 min".to_owned(),
@@ -739,6 +743,8 @@ fn peers_page() -> PeersPage {
                 revoked: false,
                 sharing: Some(41),
                 sharing_size: "412.6 GiB".to_owned(),
+                served: "96.4 GiB".to_owned(),
+                shared_on: "4.1 GiB".to_owned(),
                 revoked_when: String::new(),
                 pubkey_short: Some("a1b2c3d4…e5f6".to_owned()),
                 gossip_url: "https://sams-sharerr.example:8477".to_owned(),
@@ -770,6 +776,8 @@ fn peers_page() -> PeersPage {
                 revoked: false,
                 sharing: Some(128),
                 sharing_size: "298.1 GiB".to_owned(),
+                served: String::new(),
+                shared_on: String::new(),
                 revoked_when: String::new(),
                 pubkey_short: None,
                 gossip_url: String::new(),
@@ -788,6 +796,8 @@ fn peers_page() -> PeersPage {
                 revoked: true,
                 sharing: None,
                 sharing_size: String::new(),
+                served: "12.0 GiB".to_owned(),
+                shared_on: String::new(),
                 revoked_when: "5 months ago".to_owned(),
                 pubkey_short: Some("9f8e7d6c…1a2b".to_owned()),
                 gossip_url: String::new(),
@@ -919,6 +929,8 @@ fn items_page() -> ItemsPage {
     ItemsPage {
         signed_in: true,
         error: None,
+        ok: None,
+        filters: crate::web::templates::FilterState::default(),
         state_counts: vec![
             StateCount {
                 label: "Seeding".to_owned(),

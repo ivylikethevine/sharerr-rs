@@ -8,6 +8,8 @@
 //! choice sharerr makes: **tags apply to a series, not an episode.** Tagging a
 //! series shares every episode file it has. Per-episode selection has to come from
 //! sharerr's own UI later, not from *arr tags.
+//!
+//! Whisparr v2 is Sonarr's codebase and walks here too; v3 walks with Radarr.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,7 +42,22 @@ async fn fetch_series(client: &ArrClient, series: &Series) -> Result<SeriesPaylo
 }
 
 pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
-    let series: Vec<Series> = client.get("series", &()).await?;
+    let mut series: Vec<Series> = client.get("series", &()).await?;
+    // A release title carries `SxxEyy` and nothing saying which order it counts
+    // in, so a friend's Sonarr would read an alternate order's numbers as the
+    // official ones and import the file as the wrong episode.
+    series.retain(|show| {
+        let skip = show.tags.contains(&tag_id) && show.uses_alternate_order();
+        if skip {
+            tracing::warn!(
+                series = %show.title,
+                order = show.season_type.as_deref().unwrap_or_default(),
+                "tagged series is numbered in an alternate episode order — skipping; \
+                 switch it to the official order in Sonarr to share it"
+            );
+        }
+        !skip
+    });
     // The per-series lookups run concurrently across series as well as within
     // one — see `fetch_tagged`.
     let fetched = fetch_tagged(client, &series, tag_id, "sonarr series", fetch_series).await?;

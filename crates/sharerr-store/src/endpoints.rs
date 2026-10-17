@@ -755,4 +755,10 @@ mod tests {
         assert_eq!(bulk[&alex.id], "alex-record");
         assert!(!bulk.contains_key(&blair.id));
     }
+
+    #[tokio::test]
+    async fn gossip_records_for_no_peers_is_an_empty_map_without_a_query() {
+        let store = Store::open_in_memory().await.unwrap();
+        assert!(store.peer_gossip_records(&[]).await.unwrap().is_empty());
+    }
 }

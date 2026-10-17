@@ -732,4 +732,32 @@ mod tests {
         let path = torrent_file_path(Path::new("/data/torrents"), "abc123");
         assert_eq!(path, Path::new("/data/torrents/abc123.torrent"));
     }
+
+    /// A name the torrent cannot carry — bytes that are not UTF-8 — is
+    /// refused before any hashing starts, naming the path.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_whose_name_is_not_utf8_is_refused() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"movie-\xff.mkv"));
+        std::fs::write(&path, b"pretend media bytes").unwrap();
+        let announce =
+            crate::AnnounceSet::single(url::Url::parse("http://sharerr.example/announce").unwrap());
+
+        let err = TorrentFactory
+            .create(&TorrentRequest {
+                path: &path,
+                announce: &announce,
+                media: None,
+                private: true,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, TorrentError::NoFileName { .. }),
+            "got {err:?}"
+        );
+    }
 }

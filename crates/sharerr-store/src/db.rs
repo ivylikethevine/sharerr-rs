@@ -17,7 +17,7 @@ use sharerr_core::model::{ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareS
 /// takes, spelled out once rather than at every call site.
 type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Serialises [`Store::from_options`] within this process.
 ///
@@ -92,6 +92,8 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// Cheap to clone — it is a connection pool handle, not a connection.
 pub struct Store {
     pool: SqlitePool,
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fault: std::sync::Arc<crate::fault::Fault>,
 }
 
 impl Store {
@@ -143,17 +145,29 @@ impl Store {
             .connect_with(opts)
             .await?;
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            #[cfg(feature = "fault-injection")]
+            fault: std::sync::Arc::new(crate::fault::Fault::new()),
+        })
     }
 
-    /// The underlying pool, for queries that live in sibling modules.
+    /// The underlying pool, for queries that live in sibling modules. Every
+    /// query on this type goes through here, so a fault plan sees each one.
     pub fn pool(&self) -> &SqlitePool {
-        &self.pool
+        #[cfg(feature = "fault-injection")]
+        {
+            self.fault.pool(&self.pool)
+        }
+        #[cfg(not(feature = "fault-injection"))]
+        {
+            &self.pool
+        }
     }
 
     /// Every item sharerr knows about, in any state.
     pub async fn all_items(&self) -> Result<Vec<SharedItem>> {
-        let rows = sqlx::query(SELECT_COLUMNS).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(SELECT_COLUMNS).fetch_all(self.pool()).await?;
         rows.iter().map(row_to_item).collect()
     }
 
@@ -164,7 +178,7 @@ impl Store {
     /// is in.
     pub async fn counts_by_state(&self) -> Result<Vec<(ShareState, i64)>> {
         let rows = sqlx::query("SELECT state, COUNT(*) AS count FROM shared_items GROUP BY state")
-            .fetch_all(&self.pool)
+            .fetch_all(self.pool())
             .await?;
         let raw = rows
             .iter()
@@ -205,7 +219,7 @@ impl Store {
         .bind(info_hash)
         .bind(ShareState::Seeding.as_str())
         .bind(ShareState::Pending.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.pool())
         .await?;
         Ok(row.is_some())
     }
@@ -231,7 +245,7 @@ impl Store {
         for value in filter.binds() {
             query = query.bind(value);
         }
-        let rows = query.fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(self.pool()).await?;
         rows.iter().map(row_to_item).collect()
     }
 
@@ -250,7 +264,7 @@ impl Store {
         for value in filter.binds() {
             query = query.bind(value);
         }
-        let (count, size): (i64, i64) = query.fetch_one(&self.pool).await?;
+        let (count, size): (i64, i64) = query.fetch_one(self.pool()).await?;
         Ok(SeedingSummary { count, size })
     }
 
@@ -262,7 +276,7 @@ impl Store {
         )))
         .bind(source.as_str())
         .bind(file_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(self.pool())
         .await?;
         row.as_ref().map(row_to_item).transpose()
     }
@@ -350,7 +364,7 @@ impl Store {
         .bind(item.achieved_ratio)
         .bind(item.ratio_limit_reported)
         .bind(i64::from(item.private))
-        .fetch_one(&self.pool)
+        .fetch_one(self.pool())
         .await?;
 
         Ok(row.try_get::<i64, _>("id")?)
@@ -377,7 +391,7 @@ impl Store {
             .bind(now_epoch())
             .bind(source.as_str())
             .bind(file_id)
-            .execute(&self.pool)
+            .execute(self.pool())
             .await?;
         Ok(())
     }
@@ -1573,5 +1587,16 @@ mod tests {
         let (a, b) = tokio::join!(Store::open(&path), Store::open(&path));
         a.unwrap();
         b.unwrap();
+    }
+
+    #[test]
+    fn a_name_over_sixty_four_characters_is_refused_with_the_callers_message() {
+        let err = validate_name(&"x".repeat(65), "blank", "too long").unwrap_err();
+        assert!(matches!(err, StoreError::InvalidUser("too long")), "{err}");
+        // Exactly 64 is fine, and surrounding whitespace is not counted.
+        assert_eq!(
+            validate_name(&format!("  {}  ", "y".repeat(64)), "blank", "too long").unwrap(),
+            "y".repeat(64)
+        );
     }
 }

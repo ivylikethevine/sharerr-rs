@@ -1101,4 +1101,102 @@ mod tests {
         assert!(!rendered.contains(&pw), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
     }
+
+    /// A 409 is only a handshake when it carries the token; without one,
+    /// retrying would loop against a proxy that strips the header.
+    #[tokio::test]
+    async fn a_409_without_a_session_header_is_reported_not_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .respond_with(ResponseTemplate::new(409))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client(&server).version().await.unwrap_err();
+        assert!(err.to_string().contains("no session id header"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_json_is_reported_as_malformed() {
+        let server = MockServer::start().await;
+        mount_handshake(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>nope</html>"))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).version().await.unwrap_err();
+        assert!(matches!(err, ClientError::Malformed { .. }), "{err:?}");
+        assert!(err.to_string().contains("session-get"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn arguments_of_the_wrong_shape_are_malformed_and_name_the_call() {
+        let server = MockServer::start().await;
+        mount_handshake_then(&server, ok_body(json!({ "torrents": "not a list" }))).await;
+
+        let err = client(&server).list(None).await.unwrap_err();
+        assert!(matches!(err, ClientError::Malformed { .. }), "{err:?}");
+        assert!(err.to_string().contains("torrent-get"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn files_lists_each_entry_with_its_length() {
+        let server = MockServer::start().await;
+        mount_handshake_then(
+            &server,
+            ok_body(json!({ "torrents": [{ "files": [
+                { "name": "Show/S01E01.mkv", "length": 1024 },
+                { "name": "Show/S01E01.srt", "length": 12 },
+            ] }] })),
+        )
+        .await;
+
+        let files = client(&server).files("abc123").await.unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].name, "Show/S01E01.mkv");
+        assert_eq!(files[0].size, 1024);
+        assert_eq!(files[1].size, 12);
+
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        assert_eq!(body["arguments"]["ids"][0], "abc123");
+    }
+
+    /// Transmission answers a re-add of a known torrent with
+    /// `torrent-duplicate` instead of `torrent-added`; the follow-up limits
+    /// must still find the hash there.
+    #[tokio::test]
+    async fn a_duplicate_add_still_gets_its_seeding_limits() {
+        let server = MockServer::start().await;
+        mount_handshake(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .and(wiremock::matchers::body_string_contains("torrent-add"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(
+                json!({ "torrent-duplicate": { "id": 7, "hashString": "abc123" } }),
+            )))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/transmission/rpc"))
+            .and(header_exists(SESSION_HEADER))
+            .and(wiremock::matchers::body_string_contains("torrent-set"))
+            .and(wiremock::matchers::body_string_contains("abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body(json!({}))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let request = AddRequest::new(b"d8:announce0:e", "abc123", "x.torrent", "/downloads")
+            .ratio_limit(1.5);
+        client(&server).add(&request).await.unwrap();
+    }
 }

@@ -102,8 +102,9 @@ flowchart LR
 ## Where state lives
 
 - **`sharerr-store`**: one SQLite database under `data_dir` (`shared_items`,
-  `sync_runs`, `users`, `peers`, `peer_endpoints`, `swarm_samples`) plus the
-  encrypted vault file and the generated `.torrent` files.
+  `sync_runs`, `users`, `peers`, `peer_endpoints`, `swarm_samples`,
+  `transfer_totals`) plus the encrypted vault file and the generated
+  `.torrent` files.
 - **`sharerr.toml`**: non-secret configuration only. Rewritten in place by
   the web UI via `toml_edit`, comments and all.
 - **In memory only**: session tokens (a restart revokes every session).

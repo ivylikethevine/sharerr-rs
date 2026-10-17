@@ -879,4 +879,22 @@ mod tests {
             "The.Gilded.Ferry.2019.1080p.WEB-DL.x264-SHARERR"
         );
     }
+
+    #[test]
+    fn an_album_level_track_carries_no_track_number() {
+        let album = MediaSpec::Track {
+            artist: "Copper Vale".to_owned(),
+            album: "Harrowmere".to_owned(),
+            track: None,
+        };
+        assert_eq!(
+            synthesize(&album, None),
+            "Copper.Vale-Harrowmere-FLAC-SHARERR"
+        );
+    }
+
+    #[test]
+    fn a_year_with_nothing_but_separators_before_it_names_no_film() {
+        assert_eq!(parse("- 2020"), ParsedTitle::Unparseable);
+    }
 }

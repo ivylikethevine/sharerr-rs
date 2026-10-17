@@ -29,6 +29,13 @@
 //! works, unattributed, so a magnet or `.torrent` carrying it stays valid
 //! whether or not attribution is in play. See [`authenticate_token`].
 //!
+//! **Accounting.** Every announce carries the client's cumulative `uploaded`
+//! and `downloaded`; [`Swarms`](sharerr_torrent::announce::Swarms) turns them
+//! into a delta since that peer's previous announce, and a non-zero delta is
+//! added to the store (`Store::record_transfer`): to the friend's own row
+//! when the announce was attributed, and to the instance total either way.
+//! The reasoning is in `migrations/0013_transfer_totals.sql`.
+//!
 //! **Rotating the shared token.** Overwriting `tracker.token` outright would
 //! instantly lock out everyone still relying on the old value. Instead a
 //! rotation (`crate::web::settings::rotate_tracker_token`) keeps the previous
@@ -167,6 +174,13 @@ pub struct AnnounceParams {
     /// Bytes still to download. `0` means a seeder.
     #[param(required = true)]
     left: u64,
+    /// Bytes uploaded for this torrent since the client started it. Cumulative;
+    /// the tracker keeps only the change since this peer's previous announce.
+    uploaded: Option<u64>,
+    /// Bytes downloaded for this torrent since the client started it, read the
+    /// same way. This is what the status page's "served" figure and a friend's
+    /// own served figure are built from.
+    downloaded: Option<u64>,
     /// `started`, `stopped`, `completed`, or absent for a periodic re-announce.
     event: Option<String>,
     /// `1` for the compact peer list. Anything else returns the dictionary form.
@@ -297,6 +311,18 @@ async fn handle_announce(
             Some(&addr.to_string()),
         )
         .await;
+    }
+    // After the sighting, so a friend's first-ever announce is recorded as
+    // contact before its bytes are. `record_transfer` is a no-op on an empty
+    // delta, the common case for a seeded torrent nobody is pulling.
+    let moved = response.transferred;
+    if let Err(err) = store
+        .record_transfer(auth.attributed_to, moved.downloaded, moved.uploaded)
+        .await
+    {
+        // The announce already succeeded; a lost delta is an undercount, not
+        // a reason to fail the client.
+        tracing::warn!(error = %err, "could not record an announce's transfer");
     }
 
     tracing::debug!(
@@ -1461,6 +1487,130 @@ mod tests {
         });
     }
 
+    /// A rotation in progress: the previous token still admits an announce,
+    /// unattributed, and the fact that it was used is noted for the
+    /// operator deciding when to finalize.
+    #[test]
+    fn an_announce_on_the_previous_token_is_admitted_and_noted() {
+        with_open_vault(|state| async move {
+            use sharerr_core::config::secret_keys::{TRACKER_TOKEN, TRACKER_TOKEN_PREVIOUS};
+            use sharerr_core::model::MediaSource;
+            let mut vault = state.open_vault().await.unwrap();
+            vault
+                .put(TRACKER_TOKEN, &SecretString::from("new-token"))
+                .unwrap();
+            vault
+                .put(TRACKER_TOKEN_PREVIOUS, &SecretString::from("old-token"))
+                .unwrap();
+            let store = state.store().await.unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            store
+                .set_seeding(
+                    MediaSource::Sonarr,
+                    1,
+                    &"00".repeat(20),
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+            assert!(state.legacy_token_status().snapshot().await.is_none());
+
+            let hash = "%00".repeat(20);
+            let uri = format!("/announce/old-token?info_hash={hash}&peer_id={hash}&port=6881");
+            // Twice: the second announce reads both tokens from the cache
+            // rather than the vault, and must come to the same answer.
+            for _ in 0..2 {
+                let (status, body) = get(&state, &uri).await;
+                assert_eq!(status, StatusCode::OK);
+                assert!(!body.contains("failure reason"), "{body}");
+            }
+            assert!(
+                state.legacy_token_status().snapshot().await.is_some(),
+                "using the previous token must be recorded"
+            );
+        });
+    }
+
+    /// The accounting half of attribution: a friend's second announce
+    /// reports what moved since their first, and that delta lands on their
+    /// row and on the instance total. An announce on the shared instance
+    /// token moves only the total.
+    #[test]
+    fn announces_account_their_transfer_to_the_friend_and_the_instance() {
+        with_open_vault(|state| async move {
+            use sharerr_core::model::MediaSource;
+            state
+                .open_vault()
+                .await
+                .unwrap()
+                .put(
+                    sharerr_core::config::secret_keys::TRACKER_TOKEN,
+                    &SecretString::from("instance-token"),
+                )
+                .unwrap();
+            let store = state.store().await.unwrap();
+            let sam = store
+                .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                .await
+                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            store
+                .set_seeding(
+                    MediaSource::Sonarr,
+                    1,
+                    &"00".repeat(20),
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+
+            let hash = "%00".repeat(20);
+            let sam_announce = |downloaded: u64| {
+                format!(
+                    "/announce/{}?info_hash={hash}&peer_id={hash}&port=6881&uploaded=0&downloaded={downloaded}",
+                    sam.key_hash
+                )
+            };
+            // First sight is a baseline, not a delta.
+            let (status, body) = get(&state, &sam_announce(1_000)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(store.peer(sam.id).await.unwrap().unwrap().downloaded, 0);
+            assert_eq!(store.transfer_totals().await.unwrap().downloaded, 0);
+
+            let (status, body) = get(&state, &sam_announce(6_000)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                store.peer(sam.id).await.unwrap().unwrap().downloaded,
+                5_000,
+                "the delta, not the cumulative figure"
+            );
+            assert_eq!(store.transfer_totals().await.unwrap().downloaded, 5_000);
+
+            // The operator's own client, on the shared token: a different
+            // peer_id, so its own baseline, then a delta that is nobody's.
+            let own = "%01".repeat(20);
+            let own_announce = |uploaded: u64| {
+                format!(
+                    "/announce/instance-token?info_hash={hash}&peer_id={own}&port=6882&uploaded={uploaded}&downloaded=0&left=0"
+                )
+            };
+            get(&state, &own_announce(0)).await;
+            let (status, body) = get(&state, &own_announce(7_000)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let totals = store.transfer_totals().await.unwrap();
+            assert_eq!((totals.downloaded, totals.uploaded), (5_000, 7_000));
+            assert_eq!(
+                store.peer(sam.id).await.unwrap().unwrap().uploaded,
+                0,
+                "an unattributed announce reaches no friend's row"
+            );
+        });
+    }
+
     /// The row says seeding but the cached file is gone (a wiped data
     /// directory with an intact database): a 404 that says so, not a 500.
     /// And with the file present, a `?token=` download is rewritten for the
@@ -1509,5 +1659,72 @@ mod tests {
         let (status, body) = get(&state, &format!("{uri}?token={}", sam.key_hash)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains(&sam.key_hash), "{body}");
+    }
+
+    // ------------------------------------------- the store stops answering
+
+    /// Every store-backed decision fails closed where it guards admission
+    /// and open where it only narrows attribution: a torrent the database
+    /// cannot vouch for is not served, a token it cannot check is a bad
+    /// token, and a download it cannot attribute is served as cached. Both
+    /// the database that never opened and the one that stopped answering.
+    #[tokio::test]
+    async fn store_failures_refuse_announces_and_serve_downloads_unattributed() {
+        let bytes = b"cached bytes".to_vec();
+
+        let (_dir, state) = crate::state::fixtures::store_closed().await;
+        let store = state.store().await.unwrap();
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+        assert!(!is_served(&tracker_state, &[0u8; 20]).await);
+        assert_eq!(
+            authenticate_token(&store, Some("s3cret"), None, Some("not-the-token")).await,
+            Err(AnnounceError::BadToken)
+        );
+        assert_eq!(
+            attributed_bytes(&tracker_state, bytes.clone(), "any-token").await,
+            bytes
+        );
+
+        let (_dir, state) = crate::state::fixtures::store_unopenable();
+        let tracker_state = TrackerState::new(Arc::clone(&state));
+        assert!(!is_served(&tracker_state, &[0u8; 20]).await);
+        assert_eq!(
+            attributed_bytes(&tracker_state, bytes.clone(), "any-token").await,
+            bytes
+        );
+    }
+
+    /// The announce already succeeded when its transfer delta is recorded;
+    /// a store that will not take the delta is an undercount, not a refusal
+    /// sent to the client.
+    #[test]
+    fn a_transfer_that_cannot_be_recorded_does_not_fail_the_announce() {
+        with_open_vault(|state| async move {
+            let store = state.store().await.unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            let hash_hex = "00".repeat(20);
+            store
+                .set_seeding(
+                    sharerr_core::model::MediaSource::Sonarr,
+                    1,
+                    &hash_hex,
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+            // `is_shared` answers; `record_transfer` does not.
+            store.fail_after(1).await.unwrap();
+
+            let hash_query = "%00".repeat(20);
+            let (status, body) = get(
+                &state,
+                &format!("/announce?info_hash={hash_query}&peer_id={hash_query}&port=6881"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "body was: {body}");
+        });
     }
 }

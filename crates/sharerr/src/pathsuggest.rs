@@ -301,4 +301,31 @@ mod tests {
             None
         );
     }
+
+    /// Symlinks are not followed (a loop would never end), and the walk
+    /// stops below `MAX_DEPTH` rather than descending forever.
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_skipped_and_the_walk_stops_at_max_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        fs::create_dir_all(media.join("real")).unwrap();
+        fs::write(media.join("real/ep.mkv"), b"hello world").unwrap();
+        std::os::unix::fs::symlink(media.join("real"), media.join("link")).unwrap();
+
+        let mut deep = media.clone();
+        for level in 0..(MAX_DEPTH + 2) {
+            deep.push(format!("d{level}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("ep.mkv"), b"hello world").unwrap();
+
+        let items = vec![discovered("/tv/ep.mkv", "hello world".len() as u64)];
+        let suggestions = suggest(&items, &media);
+
+        // One candidate: the real directory. The symlinked copy and the
+        // too-deep copy are both invisible to the index.
+        assert_eq!(suggestions.len(), 1, "{suggestions:?}");
+        assert_eq!(suggestions[0].sharerr, media.join("real"));
+    }
 }

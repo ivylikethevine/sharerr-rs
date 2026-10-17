@@ -2114,3 +2114,68 @@ async fn build_page_lists_each_configured_library_before_the_spare_row() {
     assert_eq!(rendered.libraries[0].kind, "tv");
     assert!(rendered.libraries[1].path.is_empty());
 }
+
+// ------------------------------------------- writes that fail mid-way
+
+/// The temporary file every save writes first is a directory: the write
+/// fails, the page says so, and the config file is left as it was.
+#[tokio::test]
+async fn a_save_and_an_import_report_a_config_file_that_cannot_be_written() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let config_path = serve.config_path().to_path_buf();
+    std::fs::create_dir(config_path.with_extension("toml.tmp")).unwrap();
+    let state = web_state(serve);
+
+    let response = save_general(
+        State(state.clone()),
+        Query(NextQuery::default()),
+        Form(GeneralForm {
+            tag: "sharerr".to_owned(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert!(!config_path.exists());
+
+    let response = import_config(
+        State(state),
+        Form(ImportConfigForm {
+            toml_text: "tag = \"restored-tag\"\n".to_owned(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert!(!config_path.exists());
+}
+
+/// The heartbeat URL is written to the vault before the config: a vault
+/// that opens but cannot be written rejects the save with that reason.
+#[test]
+fn save_notifications_reports_a_heartbeat_url_the_vault_cannot_store() {
+    figment::Jail::expect_with(|jail| {
+        jail.set_env("SHARERR_MASTER_KEY", "settings-tests-master-key");
+        let config = sharerr_core::Config {
+            data_dir: jail.directory().to_path_buf(),
+            ..Default::default()
+        };
+        std::fs::create_dir(config.vault_path().with_extension("lock")).unwrap();
+        let path = jail.directory().join("sharerr.toml");
+        let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+        let state = web_state(serve);
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let response = save_notifications(
+                State(state),
+                Form(NotificationsForm {
+                    kind: "generic".to_owned(),
+                    heartbeat_url: "https://push.example/beat".to_owned(),
+                    ..Default::default()
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+            assert!(crate::web::body_of(response).await.contains("storing"));
+        });
+        Ok(())
+    });
+}

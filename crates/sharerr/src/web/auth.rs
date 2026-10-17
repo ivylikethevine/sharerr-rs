@@ -736,7 +736,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use axum::http::HeaderValue;
+    use axum::http::{HeaderValue, Request};
     use sharerr_testkit::secrets::fresh_password;
 
     fn loopback() -> std::net::IpAddr {
@@ -1464,5 +1464,350 @@ mod tests {
     fn internal_reports_the_message_as_a_500() {
         let response = internal("something broke");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn login_page_sends_a_signed_in_visitor_home() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let token = state.sessions.create("operator").await.unwrap();
+        let sent = format!("{COOKIE_NAME}={token}");
+        let jar = CookieJar::from_headers(&headers(&[("cookie", &sent)]));
+
+        let response = login_page(State(state), jar).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(super::super::location(&response), "/");
+    }
+
+    // ------------------------------------------- the store stops answering
+
+    /// A `WebState` whose store opened and then went away — the fault
+    /// `store_unopenable` cannot inject. Every account query fails on it.
+    async fn web_state_with_closed_store() -> (tempfile::TempDir, WebState) {
+        let (dir, serve) = crate::state::fixtures::store_closed().await;
+        (dir, web_state(serve))
+    }
+
+    /// A session for `operator` on `state`, as the cookie jar a request carries.
+    async fn signed_in(state: &WebState) -> CookieJar {
+        let token = state.sessions.create("operator").await.unwrap();
+        CookieJar::new().add(session_cookie(token, false))
+    }
+
+    fn setup_form(password: &str) -> Form<SetupForm> {
+        Form(SetupForm {
+            username: "operator".to_owned(),
+            password: password.to_owned(),
+            confirm: password.to_owned(),
+        })
+    }
+
+    fn login_form(password: &str) -> Form<LoginForm> {
+        Form(LoginForm {
+            username: "operator".to_owned(),
+            password: password.to_owned(),
+        })
+    }
+
+    fn change_form(current: &str, new: &str, confirm: &str) -> Form<ChangePasswordForm> {
+        Form(ChangePasswordForm {
+            current_password: current.to_owned(),
+            new_password: new.to_owned(),
+            confirm_password: confirm.to_owned(),
+        })
+    }
+
+    #[tokio::test]
+    async fn the_setup_and_login_pages_answer_503_when_accounts_cannot_be_read() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = setup_page(State(state.clone())).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body_of(response).await.contains("reading accounts"));
+
+        let response = login_page(State(state), CookieJar::new()).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn every_account_form_answers_503_when_the_store_will_not_open() {
+        let (_dir, serve) = crate::state::fixtures::store_unopenable();
+        let state = web_state(serve);
+        let password = fresh_password();
+
+        let response = setup_submit(
+            State(state.clone()),
+            CookieJar::new(),
+            HeaderMap::new(),
+            setup_form(&password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let response = login_submit(
+            State(state.clone()),
+            CookieJar::new(),
+            HeaderMap::new(),
+            login_form(&password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let jar = signed_in(&state).await;
+        let response = change_password(
+            State(state),
+            jar,
+            change_form(&password, &password, &password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The forms that read or write an account after the store opened report
+    /// the failure as a 500 naming the step, never as a password problem.
+    #[tokio::test]
+    async fn every_account_form_answers_500_when_the_store_stops_answering() {
+        let (_dir, state) = web_state_with_closed_store().await;
+        let password = fresh_password();
+
+        let response = setup_submit(
+            State(state.clone()),
+            CookieJar::new(),
+            HeaderMap::new(),
+            setup_form(&password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_of(response).await.contains("reading accounts"));
+
+        let response = login_submit(
+            State(state.clone()),
+            CookieJar::new(),
+            HeaderMap::new(),
+            login_form(&password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_of(response).await.contains("checking the password"));
+
+        let jar = signed_in(&state).await;
+        let response = change_password(
+            State(state),
+            jar,
+            change_form(&password, &password, &password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_of(response).await.contains("checking the password"));
+    }
+
+    /// Mismatched or short new passwords are rejected onto the settings page
+    /// before the current one is even checked.
+    #[tokio::test]
+    async fn change_password_rejects_a_bad_new_password_before_touching_the_store() {
+        let (_dir, state) = web_state_with_closed_store().await;
+        let jar = signed_in(&state).await;
+
+        let response = change_password(
+            State(state),
+            jar,
+            change_form(&fresh_password(), &fresh_password(), &fresh_password()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("do not match"));
+    }
+
+    /// `require_auth` through a router, the way `web::routes` mounts it: a
+    /// session passes straight through, no session is sent to `/login` on a
+    /// claimed instance, and a store that will not answer is a 503 rather than
+    /// a login form the visitor could never satisfy.
+    async fn guarded(state: WebState, jar: Option<CookieJar>) -> Response {
+        use axum::routing::get;
+        let app = axum::Router::new()
+            .route("/", get(|| async { "inside" }))
+            .route_layer(axum::middleware::from_fn_with_state(state, require_auth));
+        let mut request = Request::builder().uri("/");
+        if let Some(jar) = jar {
+            let cookie = jar.get(COOKIE_NAME).unwrap();
+            request = request.header("cookie", format!("{COOKIE_NAME}={}", cookie.value()));
+        }
+        tower::ServiceExt::oneshot(app, request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_guard_lets_a_session_through_and_bounces_a_visitor_to_login() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        seeded_user(&serve).await;
+        let state = web_state(serve);
+
+        let jar = signed_in(&state).await;
+        let response = guarded(state.clone(), Some(jar)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "inside");
+
+        let response = guarded(state, None).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(super::super::location(&response), "/login");
+    }
+
+    #[tokio::test]
+    async fn the_guard_answers_503_when_the_store_stops_answering() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = guarded(state, None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A POST with no connection address fails open: every real listener
+    /// supplies one, and refusing every sign-in over its absence would turn a
+    /// wiring mistake into a lockout.
+    #[tokio::test]
+    async fn the_throttle_fails_open_without_a_connection_address() {
+        use axum::routing::post;
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let state = web_state(serve);
+        let app = axum::Router::new()
+            .route("/login", post(|| async { "reached" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state,
+                throttle_unauthenticated_posts,
+            ));
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/login")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "reached");
+    }
+
+    #[test]
+    fn an_origin_without_a_host_is_a_server_error_not_a_refusal() {
+        let response = cross_origin_refusal(&headers(&[("origin", "http://box.lan:8477")]))
+            .expect("a request with an Origin but no Host cannot be checked");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ------------------------------------- the store fails after it answered
+
+    /// The write behind a read that succeeded: accounts counted, then the
+    /// account not created; the current password verified, then the new one
+    /// not written. Each is a 500 naming the step.
+    #[tokio::test]
+    async fn setup_reports_an_account_that_could_not_be_created_after_the_count() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+        store.fail_after(1).await.unwrap();
+
+        let response = setup_submit(
+            State(state),
+            CookieJar::new(),
+            HeaderMap::new(),
+            setup_form(&fresh_password()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_of(response).await.contains("creating the account"));
+    }
+
+    #[tokio::test]
+    async fn change_password_reports_a_password_that_could_not_be_written_after_verifying() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let current = seeded_user(&serve).await;
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+        let jar = signed_in(&state).await;
+        store.fail_after(1).await.unwrap();
+
+        let new = fresh_password();
+        let response = change_password(State(state), jar, change_form(&current, &new, &new)).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body_of(response).await.contains("changing the password"));
+    }
+
+    /// Every Argon2 slot taken is load, not a wrong password: a 503 that
+    /// says to retry, on every form that hashes.
+    #[tokio::test]
+    async fn every_password_check_answers_503_when_the_hash_slots_are_all_busy() {
+        let password = fresh_password();
+
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve.store().await.unwrap().busy_after(0);
+        let response = setup_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            HeaderMap::new(),
+            setup_form(&password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body_of(response).await.contains("Try again shortly"));
+
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        seeded_user(&serve).await;
+        serve.store().await.unwrap().busy_after(0);
+        let response = login_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            HeaderMap::new(),
+            login_form(&password),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Busy on the check of the current password, then busy only on the
+        // hash of the new one.
+        for granted in [0, 1] {
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let current = seeded_user(&serve).await;
+            let store = serve.store().await.unwrap();
+            let state = web_state(serve);
+            let jar = signed_in(&state).await;
+            store.busy_after(granted);
+            let response = change_password(
+                State(state),
+                jar,
+                change_form(&current, &password, &password),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "with {granted} hash(es) granted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_rejects_a_blank_username_with_the_stores_own_reason() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let password = fresh_password();
+
+        let response = setup_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            HeaderMap::new(),
+            Form(SetupForm {
+                username: "   ".to_owned(),
+                password: password.clone(),
+                confirm: password,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_of(response).await.contains("must not be blank"));
+        assert_eq!(store.user_count().await.unwrap(), 0);
     }
 }

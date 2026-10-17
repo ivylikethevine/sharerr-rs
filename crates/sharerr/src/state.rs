@@ -814,6 +814,7 @@ pub(crate) mod fixtures {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::test_support::{AlwaysEmptyQbit, AlwaysReadyTracker};
 
     /// A config pointing at an empty directory: no vault, no credentials. This is a
     /// fresh container's first start, and it is independent of whether a master key
@@ -861,89 +862,26 @@ pub(crate) mod fixtures {
         (dir, Arc::new(ServeState::new(config, path, None)))
     }
 
-    /// A tracker that always reports ready, standing in for the real one a
-    /// syncer built by [`ready`] has no use for — nothing here ever runs a
-    /// sync pass, so it only has to satisfy the trait.
-    #[derive(Debug, Default)]
-    struct AlwaysReadyTracker;
-
-    #[async_trait::async_trait]
-    impl sharerr_torrent::TrackerProvider for AlwaysReadyTracker {
-        async fn ensure_ready(&self) -> sharerr_torrent::Result<()> {
-            Ok(())
-        }
-        async fn announce_set(&self) -> sharerr_torrent::Result<sharerr_torrent::AnnounceSet> {
-            Ok(sharerr_torrent::AnnounceSet::single(
-                url::Url::parse("http://sharerr.example/announce").unwrap(),
-            ))
-        }
+    /// [`unconfigured`], with its store opened and then closed: `ServeState::store`
+    /// keeps handing out the cached handle, and every query on it fails. This
+    /// is the fault [`store_unopenable`] cannot inject — a database that
+    /// answered at startup and stopped mid-operation — and it reaches the
+    /// `Err` arm behind a store call that follows a successful open. The
+    /// `TempDir` must outlive the test, as with every other fixture here.
+    pub(crate) async fn store_closed() -> (tempfile::TempDir, Arc<ServeState>) {
+        let (dir, state) = unconfigured();
+        close_store(&state).await;
+        (dir, state)
     }
 
-    /// A qBittorrent stand-in that answers `list` with nothing and never
-    /// dials out — standing in for the real client neither [`ready`] nor
-    /// [`ready_with_source`] has a live qBittorrent to reach. Everything
-    /// besides `kind`/`list` is `unimplemented!()`: a pass with no discovered
-    /// items never calls them, and a test that starts needing one is a sign
-    /// this stub has outgrown its purpose, not a reason to fill them in blind.
-    #[derive(Debug, Default)]
-    struct AlwaysEmptyQbit;
-
-    #[async_trait::async_trait]
-    impl sharerr_client::TorrentClient for AlwaysEmptyQbit {
-        fn kind(&self) -> sharerr_client::ClientKind {
-            sharerr_client::ClientKind::QBittorrent
-        }
-        async fn login(&self) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn version(&self) -> sharerr_client::Result<String> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn list(
-            &self,
-            _category: Option<&str>,
-        ) -> sharerr_client::Result<Vec<sharerr_client::TorrentSummary>> {
-            Ok(Vec::new())
-        }
-        async fn files(
-            &self,
-            _hash: &str,
-        ) -> sharerr_client::Result<Vec<sharerr_client::TorrentFileEntry>> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn add(
-            &self,
-            _request: &sharerr_client::AddRequest<'_>,
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn set_trackers(
-            &self,
-            _hash: &str,
-            _urls: &[url::Url],
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn add_trackers(
-            &self,
-            _hash: &str,
-            _urls: &[url::Url],
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn set_limits(
-            &self,
-            _hash: &str,
-            _limits: &sharerr_client::SeedingLimits,
-        ) -> sharerr_client::Result<()> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
-        async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
-            unimplemented!("not needed by the fixtures that use this stub")
-        }
+    /// Close `state`'s store pool after a test has seeded it, so the rows
+    /// written so far stay readable up to the point the fault is injected.
+    /// Every clone of that `Store` shares the pool and stops answering with
+    /// it. The syncer [`ready`] builds holds a second pool over the same
+    /// file, which this leaves open; close it through `Syncer::store` when
+    /// the arm under test sits behind the syncer's own handle.
+    pub(crate) async fn close_store(state: &ServeState) {
+        state.store().await.unwrap().pool().close().await;
     }
 
     /// Builds the config/qbit/seeder/syncer plumbing [`ready`] and
@@ -1448,5 +1386,19 @@ mod tests {
             });
             Ok(())
         });
+    }
+
+    /// An advertised host that does not parse is treated as unset: `serve`
+    /// must come up either way, and the tracker provider is what names the fix.
+    #[test]
+    fn an_unusable_advertised_host_reads_as_no_static_base() {
+        let config = Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("not a host".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
+        };
+        assert!(static_base(&config).is_none());
     }
 }

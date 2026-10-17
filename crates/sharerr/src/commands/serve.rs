@@ -1058,6 +1058,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             server: sharerr_core::config::ServerConfig {
                 bind: "127.0.0.1:0".parse().unwrap(),
+                ..Default::default()
             },
             ..Config::default()
         };
@@ -1081,6 +1082,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             server: sharerr_core::config::ServerConfig {
                 bind: "127.0.0.1:0".parse().unwrap(),
+                ..Default::default()
             },
             tracker: sharerr_core::config::TrackerConfig {
                 bind: Some("127.0.0.1:0".parse().unwrap()),

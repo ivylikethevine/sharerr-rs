@@ -7,6 +7,7 @@
 #   ./scripts/run_docker_tests.sh --vpn          qBittorrent behind gluetun
 #   ./scripts/run_docker_tests.sh --transmission Transmission instead of qBittorrent
 #   ./scripts/run_docker_tests.sh --rtorrent     rTorrent instead of qBittorrent
+#   ./scripts/run_docker_tests.sh --sonarr-v5    the plain stack on Sonarr v5
 #
 # The --vpn variant is the same suite against a genuinely different topology: the
 # torrent client has no address of its own, its ports belong to the VPN container,
@@ -41,13 +42,15 @@ curl() { command curl -q "$@"; }
 VPN=0
 TM=0
 RT=0
+SV5=0
 case "${1:-}" in
     --vpn) VPN=1 ;;
     --transmission) TM=1 ;;
     --rtorrent) RT=1 ;;
+    --sonarr-v5) SV5=1 ;;
     "") ;;
     *)
-        echo "usage: $0 [--vpn|--transmission|--rtorrent]" >&2
+        echo "usage: $0 [--vpn|--transmission|--rtorrent|--sonarr-v5]" >&2
         exit 2
         ;;
 esac
@@ -57,7 +60,7 @@ if ((TM)); then
     STATE=docker/state-tm
     SONARR_PORT=38989 RADARR_PORT=37878 QBIT_PORT=39091 SHARERR_PORT=38477
     QBIT_SERVICE=transmission
-    LIDARR=0
+    LIDARR=0 READARR=0
 elif ((RT)); then
     COMPOSE=(docker compose -f docker/compose.rtorrent.yml)
     STATE=docker/state-rt
@@ -69,7 +72,7 @@ elif ((RT)); then
     # rTorrent's RPC are ready, which makes it the honest readiness signal.
     QBIT_PORT=48080
     QBIT_SERVICE=rtorrent
-    LIDARR=0
+    LIDARR=0 READARR=0
 elif ((VPN)); then
     COMPOSE=(docker compose -f docker/compose.vpn.yml)
     STATE=docker/state-vpn
@@ -77,23 +80,29 @@ elif ((VPN)); then
     # qBittorrent's WebUI is published by gluetun, because qBittorrent has no
     # network of its own. Waiting on the gluetun service is waiting on both.
     QBIT_SERVICE=gluetun
-    LIDARR=0
+    LIDARR=0 READARR=0
 else
     COMPOSE=(docker compose -f docker/compose.test.yml)
+    # The same stack with v5's image swapped in for Sonarr's; see the header
+    # of docker/compose.sonarr-v5.yml.
+    ((SV5)) && COMPOSE+=(-f docker/compose.sonarr-v5.yml)
     STATE=docker/state
     SONARR_PORT=18989 RADARR_PORT=17878 QBIT_PORT=18080 SHARERR_PORT=18477
     QBIT_SERVICE=qbittorrent
-    # Only the plain stack carries a Lidarr container — the VPN and Transmission
-    # variants exist to prove client/topology concerns, not indexer coverage, and
-    # duplicating the Lidarr indexer-test flow into both would triple the cost for
+    # Only the plain stack carries Lidarr and Readarr (Bookshelf) containers —
+    # the VPN and client variants exist to prove client/topology concerns, not
+    # library-source coverage, and duplicating them would multiply the cost for
     # no additional coverage of what those stacks are actually for.
-    LIDARR_PORT=18686
-    LIDARR=1
+    LIDARR_PORT=18686 READARR_PORT=18787
+    LIDARR=1 READARR=1
 fi
 
 SONARR_DB=$STATE/sonarr/sonarr.db
 RADARR_DB=$STATE/radarr/radarr.db
 LIDARR_DB=$STATE/lidarr/lidarr.db
+READARR_DB=$STATE/readarr/readarr.db
+# sharerr_testkit::library::BOOK_FOREIGN_ID, what seed-arr gives the book.
+BOOK_FOREIGN_ID=428113
 
 # Remove `docker/state`, falling back to a root-owned delete.
 #
@@ -243,34 +252,40 @@ cargo run -q -p sharerr-testkit --bin gen-fixtures -- tests/fixtures/media
 remove_state
 mkdir -p "$STATE/sonarr" "$STATE/radarr"
 ((LIDARR)) && mkdir -p "$STATE/lidarr"
+((READARR)) && mkdir -p "$STATE/readarr"
 "${COMPOSE[@]}" up -d --build
 
 wait_for sonarr "$SONARR_PORT" /ping
 wait_for radarr "$RADARR_PORT" /ping
 ((LIDARR)) && wait_for lidarr "$LIDARR_PORT" /ping
+((READARR)) && wait_for readarr "$READARR_PORT" /ping
 
-# 3. Give Sonarr, Radarr, and (on the plain stack) Lidarr something tagged to
-#    find.
+# 3. Give Sonarr, Radarr, and (on the plain stack) Lidarr and Readarr something
+#    tagged to find.
 #
 #    Written straight into their databases rather than added through the API: the
 #    add path does a metadata lookup against services.sonarr.tv / api.radarr.video
-#    / MusicBrainz, and every fixture title is invented, so the lookup would find
-#    nothing. Every app seeded this way must be stopped first; each holds its
-#    database open and ignores external writes.
+#    / MusicBrainz / the book metadata server, and every fixture title is
+#    invented, so the lookup would find nothing. Every app seeded this way must
+#    be stopped first; each holds its database open and ignores external writes.
+seeded=(sonarr radarr)
+seed_args=(--sonarr "$SONARR_DB" --radarr "$RADARR_DB")
 if ((LIDARR)); then
-    "${COMPOSE[@]}" stop sonarr radarr lidarr
-    cargo run -q -p sharerr-testkit --bin seed-arr -- \
-        --sonarr "$SONARR_DB" --radarr "$RADARR_DB" --lidarr "$LIDARR_DB"
-    "${COMPOSE[@]}" start sonarr radarr lidarr
-else
-    "${COMPOSE[@]}" stop sonarr radarr
-    cargo run -q -p sharerr-testkit --bin seed-arr -- --sonarr "$SONARR_DB" --radarr "$RADARR_DB"
-    "${COMPOSE[@]}" start sonarr radarr
+    seeded+=(lidarr)
+    seed_args+=(--lidarr "$LIDARR_DB")
 fi
+if ((READARR)); then
+    seeded+=(readarr)
+    seed_args+=(--readarr "$READARR_DB")
+fi
+"${COMPOSE[@]}" stop "${seeded[@]}"
+cargo run -q -p sharerr-testkit --bin seed-arr -- "${seed_args[@]}"
+"${COMPOSE[@]}" start "${seeded[@]}"
 
 wait_for sonarr "$SONARR_PORT" /ping
 wait_for radarr "$RADARR_PORT" /ping
 ((LIDARR)) && wait_for lidarr "$LIDARR_PORT" /ping
+((READARR)) && wait_for readarr "$READARR_PORT" /ping
 # Waited on too: step 5 execs into sharerr and the step below greps
 # qBittorrent's log, so both have to be up. Omitting them here just pushes
 # the problem onto fixed sleeps.
@@ -283,6 +298,7 @@ wait_for sharerr "$SHARERR_PORT" /health
 SONARR_KEY=$(api_key sonarr)
 RADARR_KEY=$(api_key radarr)
 ((LIDARR)) && LIDARR_KEY=$(api_key lidarr)
+((READARR)) && READARR_KEY=$(api_key readarr)
 
 # qBittorrent prints a temporary admin password to its log on first start. It only
 # does so when it has no stored password, so a miss means the config volume
@@ -320,6 +336,7 @@ fi
 vault_set sonarr.api_key "$SONARR_KEY"
 vault_set radarr.api_key "$RADARR_KEY"
 ((LIDARR)) && vault_set lidarr.api_key "$LIDARR_KEY"
+((READARR)) && vault_set readarr.api_key "$READARR_KEY"
 if ((TM)); then
     vault_set transmission.password "$QBITTORRENT_PW"
 elif ((RT)); then
@@ -511,6 +528,19 @@ JSON
     echo "lidarr accepts sharerr as an indexer ok"
 fi
 
+# 6h. What only a real Bookshelf can prove: its `hardcover` image's book ids
+#     are Hardcover's, and discovery reads that from the metadata server it
+#     reports. The Items page names the id it shows.
+if ((READARR)); then
+    items_body=$(curl -sf -b "$COOKIES" "http://127.0.0.1:$SHARERR_PORT/items" || true)
+    if ! grep -q "hardcover $BOOK_FOREIGN_ID" <<<"$items_body"; then
+        echo "error: the Bookshelf book is not listed with its Hardcover id" >&2
+        grep -o '[a-z]* [0-9][0-9]*' <<<"$items_body" | grep -E '^(goodreads|hardcover|isbn) ' >&2 || true
+        exit 1
+    fi
+    echo "bookshelf: the book carries its Hardcover id ok"
+fi
+
 # 6f. What only the Transmission stack can prove.
 if ((TM)); then
     # The client actually in use must be the configured one. `doctor` names it, so
@@ -647,6 +677,7 @@ fi
 # above — so only it tags music. Without this, the suite's discovered-file
 # count assumes music was tagged on every stack and fails on the other three.
 export SHARERR_E2E_LIDARR=$LIDARR
+export SHARERR_E2E_READARR=$READARR
 # `--test e2e`, not every test binary: `e2e_two_instance.rs` and `e2e_mesh.rs`
 # carry `--ignored` tests too, which need their own stacks and fail here.
 cargo test -p sharerr --features e2e --test e2e -- --ignored --test-threads=1

@@ -58,6 +58,7 @@ utoipa-axum = { workspace = true }
 [dev-dependencies]
 figment = { workspace = true, features = ["toml", "env", "test"] }
 serde_json = { workspace = true }
+sharerr-store = { workspace = true, features = ["fault-injection"] }
 sharerr-testkit = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }

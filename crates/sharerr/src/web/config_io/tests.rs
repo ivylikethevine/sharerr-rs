@@ -467,3 +467,39 @@ fn the_double_underscore_convention_survives_a_round_trip() {
     let vars = [("SHARERR_SYNC__INTERVAL_SECS".to_owned(), "600".to_owned())];
     assert!(collect_overrides(vars.into_iter()).contains_key("sync.interval_secs"));
 }
+
+#[test]
+fn library_rows_must_be_absolute_and_must_not_overlap() {
+    let rows = |paths: &[&str]| -> Vec<(String, String)> {
+        paths
+            .iter()
+            .map(|p| ((*p).to_owned(), "movie".to_owned()))
+            .collect()
+    };
+
+    let err = super::parse_libraries(&rows(&["relative/movies"])).unwrap_err();
+    assert!(err.to_string().contains("absolute"), "{err}");
+
+    let err = super::parse_libraries(&rows(&["/media", "/media/movies"])).unwrap_err();
+    assert!(err.to_string().contains("overlap"), "{err}");
+
+    let ok = super::parse_libraries(&rows(&["/media/tv", "", "/media/movies"])).unwrap();
+    assert_eq!(ok.len(), 2, "a blank row is skipped");
+}
+
+/// Only "not there" reads as empty; a path that exists but cannot be read —
+/// a directory — is an error naming it, since treating it as empty would
+/// write a fresh config over whatever is actually there.
+#[test]
+fn read_or_empty_treats_an_unreadable_path_as_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        super::read_or_empty(&dir.path().join("absent.toml")).unwrap(),
+        ""
+    );
+
+    let err = super::read_or_empty(dir.path()).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("reading"), "{text}");
+    assert!(text.contains(&dir.path().display().to_string()), "{text}");
+}

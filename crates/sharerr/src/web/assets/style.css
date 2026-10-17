@@ -574,6 +574,19 @@ form.inline { display: inline; }
   margin-left: auto;
 }
 
+/* The items page's bulk actions, above the table its checkboxes live in. */
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  margin: 0 0 var(--sp-3);
+}
+.bulk-bar > * { margin: 0; }
+/* `button`'s own `align-self: flex-start` again; see `.filter-bar button`. */
+.bulk-bar button { align-self: center; }
+th.select, td.select { width: 1%; }
+
 /* Color only here: this class also lands on a `<span>`/`<dd>` marking one word
    or one table cell red or green inline (a revoked friend, a failed sync row),
    and the boxed treatment below is sized for a paragraph, not a word — put on
@@ -1224,7 +1237,7 @@ table { border-collapse: collapse; width: 100%; }
    div sits on (`--panel` in a `.card`, `--panel-2` in a nested table) and
    drift out of sync with it; a mask just reveals less of the real content,
    so it is correct on any background in both themes for free. `data-edge` is
-   set by the delegated scroll listener in layout.html. */
+   set by the delegated scroll listener in layout.js. */
 .table-scroll[data-edge="right"] { -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent); mask-image: linear-gradient(to right, black calc(100% - 28px), transparent); }
 .table-scroll[data-edge="left"] { -webkit-mask-image: linear-gradient(to left, black calc(100% - 28px), transparent); mask-image: linear-gradient(to left, black calc(100% - 28px), transparent); }
 .table-scroll[data-edge="both"] { -webkit-mask-image: linear-gradient(to right, transparent, black 28px, black calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, black 28px, black calc(100% - 28px), transparent); }

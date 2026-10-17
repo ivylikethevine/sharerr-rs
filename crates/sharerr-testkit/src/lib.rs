@@ -17,5 +17,5 @@ pub mod mock;
 pub mod net;
 pub mod secrets;
 
-pub use library::{Library, movie_library, music_library, tv_library};
+pub use library::{Library, book_library, movie_library, music_library, tv_library};
 pub use media::{deterministic_bytes, write_media_file};

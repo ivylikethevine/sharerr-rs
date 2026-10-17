@@ -1004,4 +1004,47 @@ mod tests {
         assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
         assert!(status.snapshot().await.last_recovery_at.is_none());
     }
+
+    /// With lighthouses configured, a database that never opened or one
+    /// that stopped answering ends the pass before any lighthouse is
+    /// contacted — the vault opens here, so the store is what stops it.
+    #[test]
+    fn run_returns_when_the_store_fails_even_with_lighthouses_configured() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                lighthouse: sharerr_core::config::LighthouseConfig {
+                    urls: vec![Url::parse("http://lighthouse.example.invalid/").unwrap()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+
+            // Opened, then closed: `list_peers` is the call that fails.
+            let state = Arc::new(ServeState::new(config.clone(), path.clone(), None));
+            runtime.block_on(async {
+                crate::state::fixtures::close_store(&state).await;
+                assert!(state.open_vault().await.is_ok());
+                run(&state, &reqwest::Client::new()).await;
+            });
+
+            // Never opened: a directory squats on the database path.
+            let second = jail.directory().join("second");
+            std::fs::create_dir_all(second.join("sharerr.db")).unwrap();
+            let config = sharerr_core::Config {
+                data_dir: second,
+                ..config
+            };
+            let state = Arc::new(ServeState::new(config, path, None));
+            runtime.block_on(async {
+                assert!(state.store().await.is_err());
+                run(&state, &reqwest::Client::new()).await;
+            });
+            Ok(())
+        });
+    }
 }

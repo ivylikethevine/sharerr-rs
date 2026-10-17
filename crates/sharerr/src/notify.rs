@@ -1079,4 +1079,48 @@ mod tests {
         // returns before ever touching the (nonexistent) database either.
         assert_eq!(check_quiet_peers(&state).await, Ok(()));
     }
+
+    /// A peer the store can no longer describe is still announced, under
+    /// its id: the sighting happened whether or not the label can be read.
+    #[test]
+    fn peer_first_contact_falls_back_to_the_peers_id_when_the_store_fails() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_json(serde_json::json!({
+                        "event": "friend made first contact",
+                        "message": "friend #42 announced to the tracker for the first time"
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let store = state.store().await.unwrap();
+                store.pool().close().await;
+
+                peer_first_contact(&state, &store, 42, sharerr_store::EndpointKind::Client).await;
+            });
+            Ok(())
+        });
+    }
 }

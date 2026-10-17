@@ -1433,4 +1433,41 @@ mod tests {
         assert!(view.last_pass.is_none());
         assert_eq!(view.lookups_attempted, 0);
     }
+
+    #[test]
+    fn run_chart_titles_a_quiet_run_with_its_time_alone() {
+        let quiet = RunRow {
+            summary: String::new(),
+            ..row(0, false, false)
+        };
+        // Rows arrive newest first and the strip draws oldest first.
+        let chart = run_chart(&[quiet, row(3, true, false)]).unwrap();
+        assert_eq!(chart.bars[0].title, "3 ago — 3 discovered");
+        assert_eq!(chart.bars[1].title, "0 ago");
+    }
+
+    /// The history strips are empty, not an error, whether the database
+    /// never opened or stopped answering: the rest of the page still has a
+    /// useful answer without them.
+    #[tokio::test]
+    async fn run_history_and_swarm_samples_are_empty_when_the_store_fails() {
+        let (_dir, serve) = crate::state::fixtures::store_closed().await;
+        let state = crate::web::web_state(serve);
+        assert!(recent_run_rows(&state).await.is_empty());
+        assert!(swarm_sample_rows(&state).await.is_empty());
+
+        let (_dir, serve) = crate::state::fixtures::store_unopenable();
+        let state = crate::web::web_state(serve);
+        assert!(recent_run_rows(&state).await.is_empty());
+        assert!(swarm_sample_rows(&state).await.is_empty());
+    }
+
+    /// A vault that would not open answers every key with the one reason.
+    #[test]
+    fn secret_reader_relays_a_failed_vault_open_for_every_key() {
+        let read = secret_reader(Err("no master key".to_owned()));
+        for key in ["sonarr.api_key", "radarr.api_key"] {
+            assert_eq!(read(key).err().as_deref(), Some("no master key"));
+        }
+    }
 }

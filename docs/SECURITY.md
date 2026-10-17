@@ -76,8 +76,10 @@ A few things are **by design**, not a vulnerability report waiting to happen:
   the response to their own request. Nothing else trusts either header; see
   `arrived_over_https` in `crates/sharerr/src/web/auth.rs`. If your network
   is not a trusted LAN, put a TLS-terminating proxy in front.
-- **No account lockout, and no security response headers** (CSP,
-  `X-Frame-Options`, and so on). A per-source-address throttle on `/login`
+- **No account lockout, and security response headers only on request.**
+  `server.security_headers` adds a strict CSP, `X-Frame-Options`,
+  `Referrer-Policy` and `nosniff` to the web UI; it is off by default, as
+  nothing on a trusted LAN frames or injects into it. A per-source-address throttle on `/login`
   and `/setup` (5 attempts/minute, 429 past it — see `Throttle` in
   `crates/sharerr/src/web/auth.rs`) and a store-level cap on concurrent
   Argon2 operations (`HASH_SLOTS` in `crates/sharerr-store/src/users.rs`)
@@ -167,8 +169,9 @@ The assurance case follows from [the threat model](#threat-model):
   egress, blocking it outright in the two release jobs that hold write
   tokens. The detail is in [`RELEASING.md`](RELEASING.md) and
   [`CONTRIBUTING.md`](CONTRIBUTING.md#what-ci-runs).
-- **What this does not cover, by design**: no account lockout, no security
-  response headers, no recovery from a lost master key. Anyone deploying
+- **What this does not cover, by design**: no account lockout, security
+  response headers off unless `server.security_headers` is set, no recovery
+  from a lost master key. Anyone deploying
   outside the model (a public-facing instance, an untrusted network) should
   treat this section as the boundary of what sharerr defends against and put
   a reverse proxy with its own rate limiting and headers in front — the

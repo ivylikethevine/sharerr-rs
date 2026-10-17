@@ -671,96 +671,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use async_trait::async_trait;
-    use sharerr_client::{ClientError, ClientKind};
+    use crate::test_support::StubClient;
+    use sharerr_client::ClientError;
     use url::Url;
-
-    /// An in-process `TorrentClient` double — no HTTP, so `Seeder`'s own logic
-    /// (as opposed to any one client's wire format) can be exercised alone.
-    /// `files_result` is a closure so a test can fail for one hash and succeed
-    /// for another, the way `find_existing`'s multi-candidate loop needs.
-    type FilesFn = dyn Fn(&str) -> sharerr_client::Result<Vec<TorrentFileEntry>> + Send + Sync;
-
-    #[derive(Default)]
-    struct StubClient {
-        files_result: Option<Box<FilesFn>>,
-        set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
-        add_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
-        add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
-        set_limits_calls: std::sync::Mutex<Vec<(String, sharerr_client::SeedingLimits)>>,
-        /// `.torrent` bytes `export` hands back, or `None` for a client that
-        /// has no such call — the Transmission and rTorrent case.
-        export_result: Option<Vec<u8>>,
-    }
-
-    impl std::fmt::Debug for StubClient {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("StubClient").finish_non_exhaustive()
-        }
-    }
-
-    #[async_trait]
-    impl TorrentClient for StubClient {
-        fn kind(&self) -> ClientKind {
-            ClientKind::QBittorrent
-        }
-        async fn login(&self) -> sharerr_client::Result<()> {
-            Ok(())
-        }
-        async fn version(&self) -> sharerr_client::Result<String> {
-            Ok("stub".to_owned())
-        }
-        async fn list(
-            &self,
-            _category: Option<&str>,
-        ) -> sharerr_client::Result<Vec<TorrentSummary>> {
-            Ok(Vec::new())
-        }
-        async fn files(&self, hash: &str) -> sharerr_client::Result<Vec<TorrentFileEntry>> {
-            match &self.files_result {
-                Some(f) => f(hash),
-                None => Ok(Vec::new()),
-            }
-        }
-        async fn add(&self, request: &AddRequest<'_>) -> sharerr_client::Result<()> {
-            self.add_calls
-                .lock()
-                .unwrap()
-                .push((request.info_hash.to_owned(), request.data.to_vec()));
-            Ok(())
-        }
-        async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
-            Ok(())
-        }
-        async fn set_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
-            self.set_trackers_calls
-                .lock()
-                .unwrap()
-                .push((hash.to_owned(), urls.to_vec()));
-            Ok(())
-        }
-        async fn add_trackers(&self, hash: &str, urls: &[Url]) -> sharerr_client::Result<()> {
-            self.add_trackers_calls
-                .lock()
-                .unwrap()
-                .push((hash.to_owned(), urls.to_vec()));
-            Ok(())
-        }
-        async fn set_limits(
-            &self,
-            hash: &str,
-            limits: &sharerr_client::SeedingLimits,
-        ) -> sharerr_client::Result<()> {
-            self.set_limits_calls
-                .lock()
-                .unwrap()
-                .push((hash.to_owned(), *limits));
-            Ok(())
-        }
-        async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
-            Ok(self.export_result.clone())
-        }
-    }
 
     fn seeder(qbit: Arc<dyn TorrentClient>, torrent_dir: PathBuf) -> Seeder {
         crate::test_support::trace();
@@ -1612,5 +1525,96 @@ mod tests {
             .await
             .unwrap();
         assert!(found.is_none());
+    }
+
+    fn paths_for(media: &Path) -> ResolvedPaths {
+        ResolvedPaths {
+            arr: media.to_path_buf(),
+            sharerr: media.to_path_buf(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        }
+    }
+
+    /// The client is corrected before the cache is written, so a tracker the
+    /// client refuses to add fails the item and leaves nothing cached.
+    #[tokio::test]
+    async fn an_adoption_fails_when_the_client_refuses_the_tracker() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let theirs = built(&media, "http://their-tracker.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            fail_add_trackers: true,
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, torrent_dir.clone());
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let existing = [summary(
+            &theirs.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+
+        let err = seeder
+            .seed(
+                &paths_for(&media),
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("adding sharerr's tracker"), "{text}");
+        assert!(!torrent_file_path(&torrent_dir, &theirs.info_hash).exists());
+    }
+
+    /// A cached `.torrent` that exists but cannot be read — a directory
+    /// squatting on its path — is an error naming the path, not the
+    /// "nothing cached" case, on both the refresh and the adoption paths.
+    #[tokio::test]
+    async fn an_unreadable_cached_torrent_is_an_error_not_an_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+        let theirs = built(&media, "http://their-tracker.example/announce");
+        let torrent_dir = dir.path().join("torrents");
+        let squatter = torrent_file_path(&torrent_dir, &theirs.info_hash);
+        std::fs::create_dir_all(&squatter).unwrap();
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, torrent_dir);
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+
+        let err = seeder
+            .refresh_announce(&theirs.info_hash, &announce)
+            .await
+            .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("reading"), "{text}");
+        assert!(text.contains(&theirs.info_hash), "{text}");
+
+        let existing = [summary(
+            &theirs.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+        let err = seeder
+            .seed(
+                &paths_for(&media),
+                &announce,
+                &KnownTorrents::index(&existing),
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("reading"), "{err:#}");
     }
 }

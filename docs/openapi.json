@@ -59,6 +59,28 @@
             }
           },
           {
+            "name": "uploaded",
+            "in": "query",
+            "description": "Bytes uploaded for this torrent since the client started it. Cumulative;\nthe tracker keeps only the change since this peer's previous announce.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "downloaded",
+            "in": "query",
+            "description": "Bytes downloaded for this torrent since the client started it, read the\nsame way. This is what the status page's \"served\" figure and a friend's\nown served figure are built from.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
             "name": "event",
             "in": "query",
             "description": "`started`, `stopped`, `completed`, or absent for a periodic re-announce.",
@@ -164,6 +186,28 @@
             "in": "query",
             "description": "Bytes still to download. `0` means a seeder.",
             "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "uploaded",
+            "in": "query",
+            "description": "Bytes uploaded for this torrent since the client started it. Cumulative;\nthe tracker keeps only the change since this peer's previous announce.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "downloaded",
+            "in": "query",
+            "description": "Bytes downloaded for this torrent since the client started it, read the\nsame way. This is what the status page's \"served\" figure and a friend's\nown served figure are built from.",
+            "required": false,
             "schema": {
               "type": "integer",
               "format": "int64",
@@ -293,6 +337,15 @@
           {
             "name": "imdbid",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cat",
+            "in": "query",
+            "description": "Comma-separated category ids. An item matches when its category is in\nthe same top-level group as any of them, so Sonarr's default `5030,5040`\nfinds TV filed under 5000, and adult content (6000) never reaches a\nRadarr asking for 2000 even when a TMDb id matches.",
             "required": false,
             "schema": {
               "type": "string"
@@ -593,6 +646,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cat",
+            "in": "query",
+            "description": "Comma-separated category ids. An item matches when its category is in\nthe same top-level group as any of them, so Sonarr's default `5030,5040`\nfinds TV filed under 5000, and adult content (6000) never reaches a\nRadarr asking for 2000 even when a TMDb id matches.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -703,6 +765,15 @@
           {
             "name": "imdbid",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cat",
+            "in": "query",
+            "description": "Comma-separated category ids. An item matches when its category is in\nthe same top-level group as any of them, so Sonarr's default `5030,5040`\nfinds TV filed under 5000, and adult content (6000) never reaches a\nRadarr asking for 2000 even when a TMDb id matches.",
             "required": false,
             "schema": {
               "type": "string"
@@ -1595,7 +1666,8 @@
           "friends_recent",
           "swarm_torrents",
           "swarm_peers",
-          "swarm_seeders"
+          "swarm_seeders",
+          "served_bytes"
         ],
         "properties": {
           "items_shared": {
@@ -1638,6 +1710,11 @@
           "swarm_seeders": {
             "type": "integer",
             "minimum": 0
+          },
+          "served_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "All-time bytes clients report having downloaded from this tracker."
           }
         }
       },

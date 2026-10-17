@@ -1085,4 +1085,58 @@ mod tests {
         let record: EndpointRecord = serde_json::from_slice(&bodies[0]).unwrap();
         assert!(verify(&record).is_err(), "a decoy never verifies");
     }
+
+    /// At capacity, a report under a new key hash sweeps expired records once
+    /// per interval and is refused when the sweep frees nothing; the next
+    /// report inside the interval is refused without sweeping again. A
+    /// report under a key hash already held is never subject to the cap.
+    #[tokio::test]
+    async fn a_full_lighthouse_refuses_new_reporters_and_sweeps_once_per_interval() {
+        let state = state();
+        let now = now_epoch();
+        let record = signed_record(1, "http://203.0.113.9:41234", now);
+        // Filled directly: ten thousand reports through `report` would mean
+        // ten thousand signature checks, most of a minute in a debug build,
+        // to reach the one branch under test.
+        {
+            let mut records = state
+                .records
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            for i in 0..MAX_RECORDS {
+                records.map.insert(format!("{i:064x}"), record.clone());
+            }
+        }
+
+        let newcomer = format!("{MAX_RECORDS:064x}");
+        assert_eq!(
+            state.report(&newcomer, record.clone()).await,
+            Err(ReportError::Full),
+            "nothing has expired, so the sweep frees nothing"
+        );
+        assert_eq!(
+            state.report(&newcomer, record.clone()).await,
+            Err(ReportError::Full),
+            "inside the sweep interval the table is not swept again"
+        );
+        assert_eq!(
+            state
+                .records
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .map
+                .len(),
+            MAX_RECORDS
+        );
+
+        let newer = signed_record(1, "http://203.0.113.9:41234", now + 1);
+        assert_eq!(
+            state.report(&format!("{:064x}", 0), newer).await,
+            Ok(ReportOutcome::Accepted),
+            "a reporter already held updates in place regardless of the cap"
+        );
+
+        let (status, _) = post_report(state, &newcomer, &record).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

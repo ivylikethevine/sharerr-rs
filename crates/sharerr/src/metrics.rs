@@ -61,6 +61,8 @@ pub(crate) struct MetricsSnapshot {
     /// applies: an in-flight run has no outcome yet.
     last_run: Option<sharerr_store::RunRecord>,
     swarm: sharerr_torrent::announce::SwarmStats,
+    /// All-time bytes the tracker's announces have accounted for.
+    transfer: sharerr_store::TransferTotals,
     peers_total: usize,
     peers_recent: usize,
     gluetun_tracker: GluetunSnapshot,
@@ -87,14 +89,15 @@ fn items_by_state(items: &[sharerr_core::SharedItem]) -> Vec<(ShareState, i64)> 
 /// the endpoint down, the same tolerance `crate::web::glance` gives a
 /// briefly-unavailable database.
 pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
-    let (items_by_state_vec, seeding, last_run, peers_total, peers_recent) =
+    let (items_by_state_vec, seeding, last_run, peers_total, peers_recent, transfer) =
         match state.store().await {
             Ok(store) => {
-                let (counts, seeding_summary, runs, peers) = tokio::join!(
+                let (counts, seeding_summary, runs, peers, transfer) = tokio::join!(
                     store.counts_by_state(),
                     store.seeding_summary(sharerr_store::PeerScope::All),
                     store.recent_runs(1),
                     store.list_peers(),
+                    store.transfer_totals(),
                 );
                 let last_run = runs
                     .unwrap_or_default()
@@ -114,6 +117,7 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
                     last_run,
                     active.len(),
                     recent,
+                    transfer.unwrap_or_default(),
                 )
             }
             Err(_) => (
@@ -122,6 +126,7 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
                 None,
                 0,
                 0,
+                sharerr_store::TransferTotals::default(),
             ),
         };
 
@@ -131,6 +136,7 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
         seeding_bytes: seeding.size,
         last_run,
         swarm: state.swarms().stats().await,
+        transfer,
         peers_total,
         peers_recent,
         gluetun_tracker: state
@@ -167,8 +173,25 @@ fn sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: impl std
 /// exposition order, which OpenMetrics does not mandate but every real
 /// scraper expects.
 fn family(out: &mut String, name: &str, help: &str, samples: impl FnOnce(&mut String)) {
+    typed_family(out, name, "gauge", help, samples);
+}
+
+/// A monotonically increasing family. OpenMetrics wants a counter's samples
+/// suffixed `_total` with the family named without it, which the one
+/// caller spells out.
+fn counter(out: &mut String, name: &str, help: &str, samples: impl FnOnce(&mut String)) {
+    typed_family(out, name, "counter", help, samples);
+}
+
+fn typed_family(
+    out: &mut String,
+    name: &str,
+    kind: &str,
+    help: &str,
+    samples: impl FnOnce(&mut String),
+) {
     let _ = writeln!(out, "# HELP {name} {help}");
-    let _ = writeln!(out, "# TYPE {name} gauge");
+    let _ = writeln!(out, "# TYPE {name} {kind}");
     samples(out);
 }
 
@@ -270,6 +293,26 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
         "sharerr_swarm_seeders",
         "The subset of sharerr_swarm_peers with the whole thing.",
         |out| sample(out, "sharerr_swarm_seeders", &[], snapshot.swarm.seeders),
+    );
+
+    counter(
+        &mut out,
+        "sharerr_transfer_bytes",
+        "All-time bytes the tracker's announces report moved, by direction as the \
+         announcing client saw it: downloaded is what left this instance.",
+        |out| {
+            for (direction, value) in [
+                ("downloaded", snapshot.transfer.downloaded),
+                ("uploaded", snapshot.transfer.uploaded),
+            ] {
+                sample(
+                    out,
+                    "sharerr_transfer_bytes_total",
+                    &[("direction", direction)],
+                    value,
+                );
+            }
+        },
     );
 
     family(
@@ -425,6 +468,8 @@ pub(crate) struct DashboardWidget {
     swarm_torrents: usize,
     swarm_peers: usize,
     swarm_seeders: usize,
+    /// All-time bytes clients report having downloaded from this tracker.
+    served_bytes: i64,
 }
 
 impl From<&MetricsSnapshot> for DashboardWidget {
@@ -438,6 +483,7 @@ impl From<&MetricsSnapshot> for DashboardWidget {
                 .as_ref()
                 .map(|run| run.summary.error.is_none()),
             friends_total: snapshot.peers_total,
+            served_bytes: snapshot.transfer.downloaded,
             friends_recent: snapshot.peers_recent,
             swarm_torrents: snapshot.swarm.swarms,
             swarm_peers: snapshot.swarm.peers,
@@ -573,6 +619,7 @@ mod tests {
             seeding_bytes: 0,
             last_run: None,
             swarm: sharerr_torrent::announce::SwarmStats::default(),
+            transfer: sharerr_store::TransferTotals::default(),
             peers_total: 0,
             peers_recent: 0,
             gluetun_tracker: GluetunSnapshot::default(),
@@ -662,12 +709,34 @@ mod tests {
         snapshot.seeding_bytes = 4096;
         snapshot.peers_total = 3;
         snapshot.peers_recent = 1;
+        snapshot.transfer.downloaded = 99;
         let widget = DashboardWidget::from(&snapshot);
         assert_eq!(widget.items_shared, 12);
         assert_eq!(widget.shared_bytes, 4096);
         assert_eq!(widget.friends_total, 3);
         assert_eq!(widget.friends_recent, 1);
         assert_eq!(widget.last_sync_at, None);
+        assert_eq!(widget.served_bytes, 99);
+    }
+
+    #[test]
+    fn transfer_renders_as_a_counter_with_the_total_suffix() {
+        let mut snapshot = empty_snapshot();
+        snapshot.transfer.downloaded = 1_024;
+        snapshot.transfer.uploaded = 8;
+        let text = render(&snapshot);
+        assert!(
+            text.contains("# TYPE sharerr_transfer_bytes counter"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sharerr_transfer_bytes_total{direction=\"downloaded\"} 1024"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sharerr_transfer_bytes_total{direction=\"uploaded\"} 8"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -865,6 +934,10 @@ mod tests {
             .await
             .unwrap();
         assert!(store.revoke_peer(gone.id).await.unwrap());
+        store
+            .record_transfer(Some(seen.id), 3_000, 0)
+            .await
+            .unwrap();
 
         let run = store.begin_run().await.unwrap();
         store
@@ -895,6 +968,7 @@ mod tests {
         assert_eq!(snapshot.seeding_count, 1);
         assert_eq!(snapshot.seeding_bytes, 1_000);
         assert_eq!(snapshot.peers_total, 2, "revoked friends do not count");
+        assert_eq!(snapshot.transfer.downloaded, 3_000);
         assert_eq!(
             snapshot.peers_recent, 1,
             "only the touched friend is recent"
@@ -1098,5 +1172,12 @@ mod tests {
                 assert_eq!(widget["last_sync_ok"], serde_json::Value::Null);
             },
         );
+    }
+
+    #[test]
+    fn a_sample_with_several_labels_separates_them_with_commas() {
+        let mut out = String::new();
+        sample(&mut out, "x", &[("a", "1"), ("b", "2")], 3);
+        assert_eq!(out, "x{a=\"1\",b=\"2\"} 3\n");
     }
 }

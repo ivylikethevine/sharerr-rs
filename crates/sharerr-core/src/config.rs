@@ -311,7 +311,7 @@ pub struct Config {
     pub lidarr: Option<ServiceConfig>,
     /// Books. Also v1.
     pub readarr: Option<ServiceConfig>,
-    /// Adult content. Whisparr is Sonarr's codebase, so it walks identically.
+    /// Adult content. Whisparr v2 walks like Sonarr and v3 like Radarr.
     pub whisparr: Option<ServiceConfig>,
     /// Which torrent client actually seeds. See [`TorrentBackend`].
     pub torrent_backend: TorrentBackend,
@@ -611,12 +611,18 @@ pub struct TorrentClientConfig<'a> {
 /// the Torznab feed.
 pub struct ServerConfig {
     pub bind: SocketAddr,
+    /// Send a strict `Content-Security-Policy`, `X-Frame-Options`,
+    /// `Referrer-Policy` and `X-Content-Type-Options` with every web UI
+    /// response. Off by default, for the trusted LAN `docs/SECURITY.md`
+    /// assumes; turn it on for an instance reachable from anywhere else.
+    pub security_headers: bool,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8477),
+            security_headers: false,
         }
     }
 }
@@ -1794,5 +1800,20 @@ mod tests {
             label: label.to_owned(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn public_base_url_is_the_advertised_address_when_one_is_set() {
+        let mut config = Config::default();
+        config.tracker.advertised_host = Some("seed.example".to_owned());
+        config.tracker.port = Some(8478);
+        assert_eq!(config.public_base_url(), "http://seed.example:8478");
+    }
+
+    #[test]
+    fn every_backend_has_a_display_name_with_its_own_capitalisation() {
+        assert_eq!(TorrentBackend::Qbittorrent.display_name(), "qBittorrent");
+        assert_eq!(TorrentBackend::Transmission.display_name(), "Transmission");
+        assert_eq!(TorrentBackend::Rtorrent.display_name(), "rTorrent");
     }
 }

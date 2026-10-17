@@ -2459,3 +2459,191 @@ fn a_configured_arr_app_without_its_key_in_the_vault_names_the_key() {
             .is_none()
     );
 }
+
+// --------------------------------- failures behind the client and the store
+
+use crate::test_support::{AlwaysReadyTracker, StubClient};
+
+/// A syncer over an in-process client double and an in-memory store, for the
+/// actions that need no source: `unshare_one` and `prepare_rebuild`. The
+/// torrent directory is never written to.
+async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
+    crate::test_support::trace();
+    let seeder = Seeder {
+        qbit: client,
+        category: "sharerr".to_owned(),
+        tag: "sharerr".to_owned(),
+        skip_checking: false,
+        upload_limit_kib: None,
+        ratio_limit: None,
+        private: true,
+        torrent_dir: PathBuf::from("/torrents"),
+    };
+    Syncer::new(
+        Config::default(),
+        Store::open_in_memory().await.unwrap(),
+        Vec::new(),
+        Arc::new(AlwaysReadyTracker) as Arc<dyn TrackerProvider>,
+        seeder,
+    )
+}
+
+/// A row for a torrent this instance added and is seeding.
+fn seeding_item() -> sharerr_core::SharedItem {
+    use sharerr_core::model::{ExternalIds, MediaSpec, SharedItem};
+    SharedItem {
+        id: None,
+        source: MediaSource::Sonarr,
+        source_id: 1,
+        file_id: 1,
+        spec: MediaSpec::Episode {
+            series_title: "Lanternwick Hollow".to_owned(),
+            season: 1,
+            episode: 1,
+        },
+        release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+        arr_path: PathBuf::from("/tv/s01e01.mkv"),
+        size: 1,
+        ids: ExternalIds::default(),
+        media: None,
+        info_hash: Some("ab".repeat(20)),
+        announce_token_fp: None,
+        created_by_sharerr: true,
+        private: true,
+        state: ShareState::Seeding,
+        last_error: None,
+        created_at: None,
+        achieved_ratio: None,
+        ratio_limit_reported: None,
+    }
+}
+
+/// A client that will not remove the torrent is a warning: the row is still
+/// marked unshared, since that is what is true of the share, and the torrent
+/// is left for the operator to clean up.
+#[tokio::test]
+async fn unshare_one_still_marks_the_row_when_the_client_refuses_the_removal() {
+    let syncer = stub_syncer(Arc::new(StubClient {
+        fail_remove: true,
+        ..StubClient::default()
+    }))
+    .await;
+    let item = seeding_item();
+    syncer.store().upsert(&item).await.unwrap();
+
+    syncer.unshare_one(&item).await.unwrap();
+
+    let got = syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.state, ShareState::Unshared);
+}
+
+#[tokio::test]
+async fn unshare_one_reports_a_store_that_will_not_record_it() {
+    let syncer = stub_syncer(Arc::new(StubClient::default())).await;
+    let item = seeding_item();
+    syncer.store().upsert(&item).await.unwrap();
+    syncer.store().pool().close().await;
+
+    let err = syncer.unshare_one(&item).await.unwrap_err();
+    assert!(err.to_string().contains("closed"), "{err}");
+}
+
+#[tokio::test]
+async fn prepare_rebuild_still_clears_the_identity_when_the_client_refuses_the_removal() {
+    let syncer = stub_syncer(Arc::new(StubClient {
+        fail_remove: true,
+        ..StubClient::default()
+    }))
+    .await;
+    let item = seeding_item();
+    syncer.store().upsert(&item).await.unwrap();
+
+    syncer.prepare_rebuild(&item).await.unwrap();
+
+    let got = syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.info_hash, None);
+    assert_eq!(got.state, ShareState::Pending);
+}
+
+/// An announce refresh that fails — the cached `.torrent` is unreadable — is
+/// a warning on an otherwise unchanged item: the pass completes, nothing is
+/// counted as failed, and the item stays seeding.
+#[tokio::test]
+async fn a_failed_announce_refresh_leaves_the_item_unchanged_and_the_pass_green() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let known_before = known(&h).await;
+    let item = known_before.values().next().expect("one item was shared");
+    let hash = item.info_hash.clone().expect("it has a torrent");
+    let cached = sharerr_torrent::torrent_file_path(h.torrents.path(), &hash);
+    std::fs::remove_file(&cached).unwrap();
+    std::fs::create_dir(&cached).unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.failed, 0, "{report}");
+    assert_eq!(report.unchanged, known_before.len(), "{report}");
+    let got = h
+        .syncer
+        .store()
+        .get(item.source, item.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.state, ShareState::Seeding);
+}
+
+#[test]
+fn the_report_mentions_sources_that_could_not_be_scanned() {
+    let report = SyncReport {
+        discovered: 1,
+        sources_failed: 2,
+        ..SyncReport::default()
+    };
+    let text = report.to_string();
+    assert!(text.contains("2 source(s) could not be scanned"), "{text}");
+    assert!(
+        !SyncReport::default()
+            .to_string()
+            .contains("could not be scanned")
+    );
+}
+
+/// A run whose record cannot be closed still reports its own outcome: the
+/// failure to write the row is a warning, and the pass's result is what the
+/// caller sees.
+#[tokio::test]
+async fn a_run_whose_record_cannot_be_closed_still_reports_its_outcome() {
+    let syncer = stub_syncer(Arc::new(StubClient::default())).await;
+    // `begin_run` answers; nothing after it does.
+    syncer.store().fail_after(1).await.unwrap();
+
+    let err = syncer.run(false).await.unwrap_err();
+    assert!(format!("{err:#}").contains("no library source"), "{err:#}");
+}
+
+/// A seeding item whose confirmation cannot be written stays unchanged and
+/// the pass still completes: the next pass confirms it instead.
+#[tokio::test]
+async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let known_before = known(&h).await;
+    // `begin_run` and `all_items` answer; every confirmation after fails.
+    h.syncer.store().fail_after(2).await.unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+
+    assert_eq!(report.failed, 0, "{report}");
+    assert_eq!(report.unchanged, known_before.len(), "{report}");
+}

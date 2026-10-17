@@ -135,6 +135,12 @@ pub(crate) fn category_for(item: &SharedItem) -> u32 {
     }
 }
 
+/// Whether an item's category falls in one of `groups`, from
+/// [`SearchQuery::category_groups`]; no groups means no filter.
+fn in_category_groups(groups: Option<&[u32]>, item: &SharedItem) -> bool {
+    groups.is_none_or(|groups| groups.contains(&(category_for(item) / 1000 * 1000)))
+}
+
 /// Torznab's own error format. Prowlarr surfaces the description verbatim, which
 /// makes it the only place a misconfiguration can be explained to the person
 /// holding the other end.
@@ -442,6 +448,11 @@ pub struct SearchQuery {
     pub tvdbid: Option<i64>,
     pub tmdbid: Option<i64>,
     pub imdbid: Option<String>,
+    /// Comma-separated category ids. An item matches when its category is in
+    /// the same top-level group as any of them, so Sonarr's default `5030,5040`
+    /// finds TV filed under 5000, and adult content (6000) never reaches a
+    /// Radarr asking for 2000 even when a TMDb id matches.
+    pub cat: Option<String>,
 }
 
 // The `ep` field's own doc comment above becomes its description in the
@@ -471,6 +482,21 @@ impl SearchQuery {
     #[cfg(test)]
     fn matches(&self, item: &SharedItem) -> bool {
         self.matches_with(self.needle().as_deref(), item)
+            && in_category_groups(self.category_groups().as_deref(), item)
+    }
+
+    /// The top-level category groups `cat` asks for (`5030` → `5000`), or
+    /// `None` when it names none, which filters nothing. Computed once per
+    /// request by [`collect`], like [`Self::needle`].
+    pub fn category_groups(&self) -> Option<Vec<u32>> {
+        let groups: Vec<u32> = self
+            .cat
+            .as_deref()?
+            .split(',')
+            .filter_map(|id| id.trim().parse::<u32>().ok())
+            .map(|id| id / 1000 * 1000)
+            .collect();
+        (!groups.is_empty()).then_some(groups)
     }
 
     /// Whether an item satisfies every constraint the query set, given the
@@ -725,9 +751,13 @@ pub(crate) async fn collect(
     // The needle is constant across the whole request, so it is normalised once
     // here rather than once per candidate item.
     let needle = query.needle();
+    let groups = query.category_groups();
     let matched = items
         .into_iter()
-        .filter(|item| query.matches_with(needle.as_deref(), item))
+        .filter(|item| {
+            query.matches_with(needle.as_deref(), item)
+                && in_category_groups(groups.as_deref(), item)
+        })
         .collect();
 
     let magnet_links_enabled = state.config().await.feed.magnet_links;

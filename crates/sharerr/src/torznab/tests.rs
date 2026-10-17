@@ -1249,6 +1249,49 @@ fn category_follows_the_source_first_and_the_spec_second() {
     assert_eq!(category_for(&book), CAT_BOOKS);
 }
 
+/// A Whisparr v3 film carries a real TMDb id, so an id search from a friend's
+/// Radarr matches it; only the category keeps it out of their film library.
+#[test]
+fn a_category_filter_keeps_adult_films_out_of_a_movie_search() {
+    let mut adult = movie("Lanternwick.Nocturne.2021");
+    adult.source = MediaSource::Whisparr;
+    let film = movie("Harborlight.2019");
+
+    let radarr = SearchQuery {
+        t: "movie".to_owned(),
+        tmdbid: Some(555),
+        cat: Some("2000,2040".to_owned()),
+        ..Default::default()
+    };
+    assert!(radarr.matches(&film));
+    assert!(!radarr.matches(&adult));
+
+    let whisparr = SearchQuery {
+        cat: Some("6000".to_owned()),
+        ..radarr
+    };
+    assert!(whisparr.matches(&adult));
+    assert!(!whisparr.matches(&film));
+}
+
+/// Sonarr asks for subcategories (`5030,5040`) by default while sharerr files
+/// TV under 5000, so matching is by top-level group; a `cat` naming nothing
+/// usable filters nothing rather than everything.
+#[test]
+fn a_category_filter_matches_by_top_level_group() {
+    let show = episode("Lanternwick", 1, 1);
+    let query = |cat: &str| SearchQuery {
+        t: "tvsearch".to_owned(),
+        cat: Some(cat.to_owned()),
+        ..Default::default()
+    };
+    assert!(query("5030,5040").matches(&show));
+    assert!(query(" 5000 ").matches(&show));
+    assert!(!query("2000").matches(&show));
+    assert!(query("").matches(&show));
+    assert!(query("tv,").matches(&show));
+}
+
 #[test]
 fn an_episode_filter_that_matches_the_season_but_not_the_episode_excludes() {
     let query = SearchQuery {
@@ -1303,4 +1346,95 @@ async fn collect_reports_an_unready_store_and_a_release_without_a_torrent_has_no
     // nothing a magnet could name.
     item.info_hash = None;
     assert_eq!(matched.magnet_url(&item), "");
+}
+
+#[test]
+fn a_season_filter_alone_rejects_another_season() {
+    let item = episode("X.S02E04", 2, 4);
+    let wrong_season = SearchQuery {
+        season: Some(3),
+        ..Default::default()
+    };
+    assert!(!wrong_season.matches(&item));
+    let right_season = SearchQuery {
+        season: Some(2),
+        ..Default::default()
+    };
+    assert!(right_season.matches(&item));
+}
+
+// ------------------------------------------- the store stops answering
+
+/// A database that answered at startup and stopped: the feed reports it as
+/// unavailable, never as bad credentials, and a search over it is a 500
+/// rather than an empty feed that claims nothing is shared.
+#[tokio::test]
+async fn a_store_that_stops_answering_is_a_503_on_auth_and_a_500_on_search() {
+    let (_dir, state) = crate::state::fixtures::store_closed().await;
+
+    assert_eq!(
+        caps_with_key(&state, Some("sam-key")).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let Err((status, reason)) =
+        collect(&state, &SearchQuery::default(), PeerScope::All, "token").await
+    else {
+        panic!("a closed store cannot answer a search");
+    };
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(reason.contains("could not read"), "{reason}");
+
+    let (_dir, state) = crate::state::fixtures::store_unopenable();
+    let Err((status, reason)) =
+        collect(&state, &SearchQuery::default(), PeerScope::All, "token").await
+    else {
+        panic!("an unopenable store cannot answer a search");
+    };
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(reason.contains("not ready"), "{reason}");
+}
+
+/// Recording a sighting is best-effort: a store that will not take the
+/// touch returns without panicking and without reaching the notification.
+#[tokio::test]
+async fn a_sighting_that_cannot_be_recorded_is_dropped_quietly() {
+    let (_dir, state) = unconfigured();
+    let store = state.store().await.unwrap();
+    let sam = store
+        .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+        .await
+        .unwrap();
+    store.pool().close().await;
+
+    record_sighting(
+        &state,
+        &store,
+        sam.id,
+        sharerr_store::EndpointKind::Api,
+        Some("203.0.113.9"),
+    )
+    .await;
+}
+
+/// The touch landed but the address could not be recorded: the sighting
+/// is kept as far as it got, and nothing propagates to the caller.
+#[tokio::test]
+async fn a_sighting_whose_address_cannot_be_recorded_keeps_the_touch() {
+    let (_dir, state) = unconfigured();
+    let store = state.store().await.unwrap();
+    let sam = store
+        .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+        .await
+        .unwrap();
+    // `touch_peer` answers; `record_peer_endpoint` does not.
+    store.fail_after(1).await.unwrap();
+
+    record_sighting(
+        &state,
+        &store,
+        sam.id,
+        sharerr_store::EndpointKind::Api,
+        Some("203.0.113.9"),
+    )
+    .await;
 }

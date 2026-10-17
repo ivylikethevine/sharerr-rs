@@ -480,6 +480,8 @@ fn row(
             .filter(|summary| summary.size > 0)
             .map(|summary| super::items::human_size(summary.size.unsigned_abs()))
             .unwrap_or_default(),
+        served: bytes_or_empty(peer.downloaded),
+        shared_on: bytes_or_empty(peer.uploaded),
         id: peer.id,
         label: peer.label.clone(),
         scope: peer.scope.as_str(),
@@ -512,6 +514,16 @@ fn row(
                 via: e.via.as_str(),
             })
             .collect(),
+    }
+}
+
+/// A byte count rendered for a cell, or empty for zero so the template can
+/// show a dash: "0 B served" reads as a measurement, and it is not one yet.
+fn bytes_or_empty(bytes: i64) -> String {
+    if bytes > 0 {
+        super::items::human_size(bytes.unsigned_abs())
+    } else {
+        String::new()
     }
 }
 
@@ -651,10 +663,42 @@ mod tests {
             pubkey: None,
             gossip_url: None,
             key_hash: "hash".to_owned(),
+            downloaded: 0,
+            uploaded: 0,
         };
 
         assert_eq!(row(&peer, &[], false, None).last_seen, "never");
         assert!(!row(&peer, &[], false, None).revoked);
+        assert_eq!(
+            row(&peer, &[], false, None).served,
+            "",
+            "nothing served renders as nothing, not as 0 B"
+        );
+    }
+
+    #[test]
+    fn a_peer_that_has_pulled_something_shows_how_much() {
+        let peer = Peer {
+            downloaded: 3 * 1024 * 1024 * 1024 + 200 * 1024 * 1024,
+            uploaded: 512,
+            ..Peer {
+                id: 1,
+                label: "Sam".to_owned(),
+                created_at: 0,
+                last_seen_at: Some(0),
+                revoked_at: None,
+                scope: PeerScope::All,
+                pubkey: None,
+                gossip_url: None,
+                key_hash: "hash".to_owned(),
+                downloaded: 0,
+                uploaded: 0,
+            }
+        };
+
+        let rendered = row(&peer, &[], false, None);
+        assert_eq!(rendered.served, "3.2 GiB");
+        assert_eq!(rendered.shared_on, "512 B");
     }
 
     #[test]
@@ -669,6 +713,8 @@ mod tests {
             pubkey: None,
             gossip_url: None,
             key_hash: "hash".to_owned(),
+            downloaded: 0,
+            uploaded: 0,
         };
 
         assert!(row(&peer, &[], false, None).revoked);
@@ -1413,6 +1459,149 @@ mod tests {
                     !stored(&serve, &vault_key).await,
                     "deleting the friend removes the key"
                 );
+            });
+            Ok(())
+        });
+    }
+
+    // ------------------------------------------- the store stops answering
+
+    /// A store that opened and then went away: every query fails, which is
+    /// the arm behind each handler's own store call rather than the 503 the
+    /// unopenable fixture reaches before any of them run.
+    async fn web_state_with_closed_store() -> (tempfile::TempDir, WebState) {
+        let (dir, serve) = crate::state::fixtures::store_closed().await;
+        (dir, web_state(serve))
+    }
+
+    #[tokio::test]
+    async fn the_page_reports_when_friends_cannot_be_listed() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let page = build(&state, None, None).await;
+        assert!(page.peers.is_empty());
+        let error = page.error.expect("the failure must be named on the page");
+        assert!(error.contains("could not list friends"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn add_reports_a_store_failure_rather_than_a_duplicate() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not add that friend")
+        );
+    }
+
+    #[tokio::test]
+    async fn every_mutation_reports_what_it_could_not_do() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = revoke(State(state.clone()), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not revoke that key")
+        );
+
+        let response = set_scope(
+            State(state.clone()),
+            Path(1),
+            Form(ScopeForm {
+                scope: PeerScope::Tv,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not change that"));
+
+        let response = set_gossip(
+            State(state.clone()),
+            Path(1),
+            Form(GossipForm {
+                url: "http://friend.example:8477".to_owned(),
+                key: String::new(),
+                clear_key: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not save that"));
+
+        let response = delete(State(state), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not delete that friend")
+        );
+    }
+
+    #[tokio::test]
+    async fn feed_preview_and_export_report_when_friends_cannot_be_listed() {
+        let (_dir, state) = web_state_with_closed_store().await;
+
+        let response = feed_preview(State(state.clone()), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not list friends"));
+
+        let response = export(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("could not list friends"));
+    }
+
+    /// A vault that opens but cannot be written — its lock file is a
+    /// directory — fails a key store with the reason, and is only a warning
+    /// on a delete that has already happened.
+    #[test]
+    fn a_vault_that_cannot_be_written_rejects_a_key_and_does_not_undo_a_delete() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "peers-tests-master-key");
+            let config = sharerr_core::Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..Default::default()
+            };
+            std::fs::create_dir(config.vault_path().with_extension("lock")).unwrap();
+            let path = jail.directory().join("sharerr.toml");
+            let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path, None));
+            let state = web_state(serve.clone());
+
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+                    .await
+                    .unwrap();
+
+                let response = set_gossip(
+                    State(state.clone()),
+                    Path(sam.id),
+                    Form(GossipForm {
+                        url: "https://sams-sharerr.example".to_owned(),
+                        key: "a-key-sam-issued-us".to_owned(),
+                        clear_key: None,
+                    }),
+                )
+                .await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(body_of(response).await.contains("could not store the key"));
+
+                let response = delete(State(state), Path(sam.id)).await;
+                assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+                assert!(store.list_peers().await.unwrap().is_empty());
             });
             Ok(())
         });

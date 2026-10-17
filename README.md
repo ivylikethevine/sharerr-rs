@@ -63,7 +63,6 @@ whole design is built around.
 - [Getting help and contributing](#getting-help-and-contributing)
 - [AI usage](#ai-usage)
 - [Roadmap](#roadmap)
-  - [Before v1](#before-v1)
   - [Open work](#open-work)
 - [Licence](#licence)
 
@@ -87,8 +86,8 @@ whole design is built around.
   friends in one picture, a live per-torrent swarm view with hourly history,
   and a reachability script for checking from outside your network.
 - **The web UI**: first-run wizard, settings with connection tests, an Items
-  page with per-item detail and manual retry/rebuild/unshare, library
-  composition, sync history, self-refreshing status tiles, and path-mapping
+  page with per-item detail and manual retry/rebuild/unshare, one at a time
+  or over a selection, library composition, sync history, self-refreshing status tiles, and path-mapping
   diagnostics.
 - **Operations**: webhook notifications (generic, Discord, Apprise) on nine
   triggers plus an Uptime-Kuma-style heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
@@ -211,6 +210,20 @@ anything has used the old token since, so you can wait until nothing has.
 This is a safety net for the _shared_ token, not a substitute for per-friend
 revocation above.
 
+The tracker also keeps count. Every announce carries the client's cumulative
+`uploaded` and `downloaded` for that torrent; sharerr turns each into the
+change since that peer's previous announce and adds it up, so the Status
+page's Swarms tile shows how much has been served all-time and the Friends
+page shows it per friend. Three things to know when reading those figures.
+They are what clients report, nothing is measured on the wire. The per-friend
+figure counts only announces carrying that friend's own key, so a torrent
+they fetched before their key existed, or one carrying the shared instance
+token, lands in the instance total but not on their row. And a restart of
+`sharerr serve` loses at most one announce interval per peer, since the first
+announce afterwards is taken as a baseline rather than counted in full. The
+same totals are exposed as `sharerr_transfer_bytes_total` on the metrics
+endpoint.
+
 One caveat: the announce endpoint is part of `sharerr serve`, so a one-shot
 `sharerr sync` produces correct torrents whose announces fail until `serve`
 is running. Field reference: [`[tracker]`](docs/SETTINGS.md#tracker).
@@ -235,7 +248,7 @@ nothing for it, so a limit you want gone comes off in the client. rTorrent
 honours the cap but not the ratio; see
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
-The same panel also holds two settled "Before v1" roadmap questions, since an
+The same panel also holds two settled roadmap questions, since an
 operator reasons about them together:
 
 ```toml
@@ -338,8 +351,14 @@ Then store each key: `printf %s "$KEY" | sharerr vault set lidarr.api_key`.
   tagging a Sonarr series shares every episode.
 - **Lidarr and Readarr are on API v1**, Sonarr/Radarr/Whisparr on v3. sharerr
   picks the right one per app; you only supply the base URL.
-- **Whisparr content is categorised as XXX**, not TV, and a friend scoped to
-  "TV only" does **not** receive it. Only an unscoped friend does.
+- **Whisparr content is categorised as XXX**, not TV or Movies, and a friend
+  scoped to "TV only" or "Movies only" does **not** receive it. Only an
+  unscoped friend does. Whisparr v2 tags per site and v3 per movie or scene;
+  sharerr tells them apart by version.
+- **Readarr is retired upstream**; its maintained fork Bookshelf works as
+  `[readarr]` unchanged. See
+  [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#library-sources-where-tagged-content-comes-from)
+  for this and for Sonarr v5's alternate episode orders.
 
 ## Friends finding each other
 
@@ -440,7 +459,8 @@ printf %s "$KEY" | sharerr vault set qbittorrent.api_key
 ```
 
 Rotating the key in qBittorrent invalidates the old one immediately, so
-store the new one at the same time. Older builds without the API key feature
+store the new one at the same time. `sharerr doctor` warns below 5.2.1,
+which fixed a high-severity SSRF in the WebUI's redirect handling. Older builds without the API key feature
 are not supported.
 
 ### If a correct key is rejected
@@ -563,33 +583,41 @@ moment it ships. An idea that gets declined instead moves to
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#not-supported), with the reason
 attached.
 
-### Before v1
-
-Operational tasks that stand between the current 0.1.x releases and a 1.0,
-not features:
-
-- **Rehearse one real upgrade across a migration.** Twelve forward-only
-  sqlx migrations exist, all only ever run against a fresh database.
-
 ### Open work
 
 Smallest first, by how much each item touches:
 
-- **A blocked upstream shows as drift.** `check_tool_versions.sh` prints
-  `(could not read upstream releases)` for a row it cannot read and counts no
-  problem, while `tool-versions.yml` blocks egress to a fixed host list, so a
-  pin whose upstream lives on a host missing from that list reads as fine
-  forever. Counting a problem when every row one host serves went unread (a
-  blocked host rather than a one-off rate limit) would name it in the tracking
-  issue.
+- **A cap on bulk item selections.** The items page's bulk action looks up
+  every submitted key in turn, so one oversized form is one oversized pass
+  over the store; refuse a selection past a fixed count.
+- **Native ntfy, Gotify, Telegram and Pushover payloads.** Apprise reaches
+  them today; each would be one more `notifications.kind`.
+- **A friend's-eye feed preview.** The feed as one chosen friend's scope
+  renders it, to check scoping before handing over a key.
+- **A setup checklist on Status.** Tag created, path mapping resolved,
+  friend added, first pull seen, built from the `doctor` checks.
+- **Scene-style titles for Whisparr v3 scenes.** A scene without a scene
+  name is titled like a film (`Title.Year`), where Whisparr's parser expects
+  `Studio.YY.MM.DD.Title`; synthesising that needs the studio and release
+  date carried through discovery.
+- **Sign-in through a forward-auth proxy.** Trust a `Remote-User` header from
+  a configured proxy address (Authelia, Authentik), which also fixes the
+  login throttle collapsing to one global limit behind a proxy.
+- **Unraid and TrueNAS app listings.** Where much of the *arr audience
+  installs from; a Community Applications template and a TrueNAS app.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
-- **Transfer accounting.** The tracker resolves which friend an announce
-  belongs to but discards the `uploaded`/`downloaded` totals it carries.
-  Keeping them would unlock a per-friend "served" indicator and a real
-  bytes-out figure on the status page.
+- **Deluge as a fourth client.** The main client still missing; its Web
+  JSON-RPC API covers add-without-moving, labels and per-torrent limits.
+- **Season packs and albums as one torrent.** One file per torrent means a
+  friend's season search returns single episodes; a multi-file torrent over
+  the existing folder still moves nothing.
+- **Hybrid v1/v2 torrents (BEP 52).** Weighed but low value while
+  Transmission's and rTorrent's v2 support stays partial.
 - **Request flow.** Discovery is one-way today. An inbound request queue
-  with an approve step is the other half of the original idea.
+  with an approve step is the other half of the original idea. Seerr (the
+  merged Overseerr and Jellyseerr) is the request app most friends already
+  run, so its request model is the one to fit.
 
 ## Licence
 

@@ -33,6 +33,17 @@ against `sqlite::memory:`, and migrations are embedded at compile time by
 reliable. `--all-features` compiles the tier-2 suite too, so it cannot
 silently rot, without running it.
 
+**Every migration is rehearsed as an upgrade, not just applied to an empty
+database.** `sharerr-store`'s `upgrade` test module builds a file-backed
+database at each migration level that has ever existed, fills it with rows
+written in that level's columns (literal SQL and literal JSON, the shapes an
+older release actually wrote), opens it through `Store::open` so the newer
+migrations run over populated tables, and reads everything back through the
+store's own API. A migration that only works on an empty table, or a decoder
+that assumes a column every row has, fails there. A new migration needs its
+rows added to that module's `seed` and its expectations to `check`; the
+level loop picks the new version up by itself.
+
 **No tier-1 fixture opens a real vault.** `state::fixtures::unconfigured()`
 has no master key, so vault-backed accessors resolve to "unavailable" there.
 Prefer testing store-backed logic directly, with the store and the resolved
@@ -42,6 +53,17 @@ needs the master key _absent_, wrap it in `figment::Jail::expect_with`; see
 for why a bare `std::env::set_var` races the parallel runner, and the fixture
 names worth knowing.
 
+**Dependencies that fail on cue.** `state::fixtures::store_unopenable` is
+a database that never opens; `store_closed` (and `close_store`) one that
+opened and then stops answering. For the arm behind a call that follows a
+successful one on the same store, `Store::fail_after(n)` answers n more
+queries and then fails every later one, and `busy_after(n)` grants n more
+password hashes and then reports `TooBusy`; both come from `sharerr-store`'s
+`fault-injection` feature, which only `sharerr`'s dev-dependency turns on.
+`test_support::StubClient` refuses one torrent-client call per `fail_*`
+flag. A vault that opens but cannot be written is a directory on its
+`.lock` path.
+
 ## Tier 2: the compose stacks
 
 ```bash
@@ -49,6 +71,7 @@ names worth knowing.
 ./scripts/run_docker_tests.sh --vpn           # qBittorrent behind gluetun
 ./scripts/run_docker_tests.sh --transmission
 ./scripts/run_docker_tests.sh --rtorrent
+./scripts/run_docker_tests.sh --sonarr-v5     # the plain stack on Sonarr v5
 ./scripts/run_docker_tests_two_instance.sh    # two friend-to-friend instances
 ```
 
@@ -56,7 +79,8 @@ Opt-in locally; `ci.yml` compiles it but never runs it, and
 [`integration.yml`](#in-ci-integrationyml) runs it weekly. One flag at a
 time. The script
 brings up `docker/compose.test.yml` (or the `--vpn`, `--transmission`,
-`--rtorrent` sibling), seeds Sonarr, Radarr and Lidarr with tagged synthetic
+`--rtorrent` sibling, or with `--sonarr-v5` the same stack on Sonarr v5),
+seeds Sonarr, Radarr, Lidarr and Readarr (Bookshelf) with tagged synthetic
 content via `sharerr-testkit`'s `seed-arr` binary, runs the suite behind the
 `e2e` feature and `#[ignore]` (`cargo test -p sharerr --features e2e --
 --ignored --test-threads=1`), and tears the stack down on exit whether the
@@ -116,8 +140,8 @@ own Docker daemon, on a weekly schedule rather than per PR: a stack takes
 minutes to boot and pulls real third-party images, and a flake in one of
 those must not block a merge. The schedule runs the default tier
 (`run_docker_tests.sh` with no flag). A manual dispatch picks one tier
-(`default`, `vpn`, `transmission`, `rtorrent`, `two-instance`, `mesh`) or
-`all`, which runs every tier as a matrix. No tier needs a secret.
+(`default`, `vpn`, `transmission`, `rtorrent`, `sonarr-v5`, `two-instance`,
+`mesh`) or `all`, which runs every tier as a matrix. No tier needs a secret.
 
 It is advisory, and reports by keeping one `integration` tracking issue
 current: a failing scheduled run opens or rewrites it, the next passing
@@ -139,13 +163,18 @@ layout change.
 
 ```bash
 scripts/check.sh coverage                             # measure, then enforce the floor
-cargo llvm-cov report --html --output-dir coverage-html
+scripts/check.sh coverage-html                        # render target/../coverage-html from that run
 ```
 
 `coverage` is `coverage-run` (`cargo llvm-cov --workspace --all-features
 --locked --no-report`) followed by `coverage-floor`, which fails when line
 coverage is under `COVERAGE_FLOOR_LINES` in `scripts/check.sh`, currently
-**94%**. The floor sits a few points under the measured figure, so an
+**95%**. Every reader of the profile (`coverage-floor`, `coverage-html`,
+`coverage-summary`) goes through the script, which leaves test scaffolding
+out of the report with one `--ignore-filename-regex`: `sharerr-testkit` and
+`crates/sharerr/src/test_support.rs`, where the trait doubles live. A stub
+method no test reaches is not an uncovered product line, so a new double
+belongs in `test_support.rs`, not beside the tests that use it. The floor sits a few points under the measured figure, so an
 ordinary change does not trip it and a real drop does; raise it as coverage
 rises, and write down the reason in the PR that ever lowers it.
 

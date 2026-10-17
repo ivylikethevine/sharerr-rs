@@ -74,6 +74,11 @@ pub struct AnnounceRequest {
     pub port: u16,
     /// Bytes still to download. Zero means a seeder.
     pub left: u64,
+    /// The client's cumulative totals for this torrent, as it reports them.
+    /// Cumulative since the client last started the torrent, not since the
+    /// swarm formed: [`Swarms::announce`] turns them into a delta.
+    pub uploaded: u64,
+    pub downloaded: u64,
     pub event: Event,
     pub compact: bool,
     pub numwant: usize,
@@ -136,6 +141,8 @@ impl AnnounceRequest {
             peer_id: hash("peer_id")?,
             port,
             left: number("left", 0)?,
+            uploaded: number("uploaded", 0)?,
+            downloaded: number("downloaded", 0)?,
             event: params.get("event").map_or(Event::None, |e| Event::parse(e)),
             // Compact is the default: virtually every client sets `compact=1`;
             // the non-compact form is only a fallback.
@@ -187,6 +194,10 @@ struct Peer {
     addr: SocketAddr,
     /// Zero means a seeder, which is what `complete` counts.
     left: u64,
+    /// The cumulative counters from this peer's most recent announce, so the
+    /// next one can be turned into a delta.
+    uploaded: u64,
+    downloaded: u64,
     last_seen: Instant,
 }
 
@@ -248,6 +259,39 @@ pub struct SwarmView {
     pub incomplete: usize,
 }
 
+/// Bytes one announce says moved since the same peer's previous announce in
+/// that swarm.
+///
+/// Zero on a peer's first announce after the tracker (re)started: the
+/// client's counters are cumulative since *it* started the torrent, and
+/// nothing says how much of that was already counted before the restart.
+/// Taking the whole figure would double-count; taking none loses at most one
+/// interval, which is the honest direction to be wrong in. A counter that
+/// went backwards means the client restarted the torrent, so its new value
+/// is all fresh transfer and is counted in full.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Transfer {
+    pub uploaded: u64,
+    pub downloaded: u64,
+}
+
+impl Transfer {
+    /// Whether anything moved at all. Most re-announces of a seeded torrent
+    /// carry no change, and the store only writes when this is `true`.
+    pub fn is_empty(self) -> bool {
+        self.uploaded == 0 && self.downloaded == 0
+    }
+
+    /// The delta from `previous` to `current`, per [`Transfer`]'s rules.
+    fn since(previous: (u64, u64), current: (u64, u64)) -> Self {
+        let step = |before: u64, now: u64| now.checked_sub(before).unwrap_or(now);
+        Self {
+            uploaded: step(previous.0, current.0),
+            downloaded: step(previous.1, current.1),
+        }
+    }
+}
+
 /// The answer to one announce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnounceResponse {
@@ -256,6 +300,9 @@ pub struct AnnounceResponse {
     pub complete: usize,
     /// Peers still downloading.
     pub incomplete: usize,
+    /// What this announce says moved since the peer's last one. Not part of
+    /// the wire response; the caller accounts for it.
+    pub transferred: Transfer,
 }
 
 impl Swarms {
@@ -269,6 +316,15 @@ impl Swarms {
         // is a swarm nobody is asking about, and sweeping it costs nothing to defer.
         swarm.retain(|_, peer| peer.is_live(now));
 
+        // Against the entry that survived the sweep, so a peer back from past
+        // its TTL baselines afresh exactly as one the tracker never saw does.
+        let current = (request.uploaded, request.downloaded);
+        let transferred = swarm
+            .get(&request.peer_id)
+            .map_or(Transfer::default(), |previous| {
+                Transfer::since((previous.uploaded, previous.downloaded), current)
+            });
+
         if request.event == Event::Stopped {
             swarm.remove(&request.peer_id);
         } else {
@@ -277,6 +333,8 @@ impl Swarms {
                 Peer {
                     addr,
                     left: request.left,
+                    uploaded: request.uploaded,
+                    downloaded: request.downloaded,
                     last_seen: now,
                 },
             );
@@ -302,6 +360,7 @@ impl Swarms {
             peers,
             complete,
             incomplete,
+            transferred,
         }
     }
 
@@ -785,6 +844,92 @@ mod tests {
         );
     }
 
+    /// The four cases [`Transfer`]'s doc promises: first sight is a
+    /// baseline, growth is the difference, a counter that went backwards is
+    /// counted in full, and a `stopped` still settles its final figures.
+    #[tokio::test]
+    async fn transfer_is_the_delta_between_consecutive_announces() {
+        let swarms = Swarms::default();
+        let addr: SocketAddr = "203.0.113.5:6881".parse().unwrap();
+        let announce = |uploaded: u64, downloaded: u64, extra: &str| {
+            let mut r = AnnounceRequest::parse(&query(hash(9), hash(1), extra)).unwrap();
+            r.uploaded = uploaded;
+            r.downloaded = downloaded;
+            r
+        };
+
+        let first = swarms.announce(&announce(500, 4_000, ""), addr).await;
+        assert_eq!(
+            first.transferred,
+            Transfer::default(),
+            "a first announce says nothing about what was counted before a restart"
+        );
+
+        let grew = swarms.announce(&announce(600, 9_000, ""), addr).await;
+        assert_eq!(
+            grew.transferred,
+            Transfer {
+                uploaded: 100,
+                downloaded: 5_000
+            }
+        );
+        assert!(!grew.transferred.is_empty());
+
+        let same = swarms.announce(&announce(600, 9_000, ""), addr).await;
+        assert!(
+            same.transferred.is_empty(),
+            "nothing moved, nothing counted"
+        );
+
+        let reset = swarms.announce(&announce(0, 250, ""), addr).await;
+        assert_eq!(
+            reset.transferred,
+            Transfer {
+                uploaded: 0,
+                downloaded: 250
+            },
+            "a counter that went backwards restarted at zero, so its value is all new"
+        );
+
+        let stopped = swarms
+            .announce(&announce(10, 300, "&event=stopped"), addr)
+            .await;
+        assert_eq!(
+            stopped.transferred,
+            Transfer {
+                uploaded: 10,
+                downloaded: 50
+            },
+            "a stopped announce settles the final figures before the peer is dropped"
+        );
+        assert_eq!(swarms.len().await, 0);
+    }
+
+    #[test]
+    fn uploaded_and_downloaded_are_read_and_default_to_zero() {
+        let r = AnnounceRequest::parse(&query(hash(1), hash(2), "")).unwrap();
+        assert_eq!((r.uploaded, r.downloaded), (0, 0));
+
+        let no_counters = format!(
+            "info_hash={}&peer_id={}&port=1",
+            percent_encode(&hash(1)),
+            percent_encode(&hash(2))
+        );
+        let r = AnnounceRequest::parse(no_counters.as_bytes()).unwrap();
+        assert_eq!((r.uploaded, r.downloaded), (0, 0));
+
+        let r =
+            AnnounceRequest::parse(&query(hash(1), hash(2), "&uploaded=12&downloaded=34")).unwrap();
+        assert_eq!((r.uploaded, r.downloaded), (12, 34));
+
+        assert_eq!(
+            AnnounceRequest::parse(&query(hash(1), hash(2), "&downloaded=lots")),
+            Err(AnnounceError::NotANumber {
+                field: "downloaded"
+            })
+        );
+    }
+
     #[tokio::test]
     async fn scrape_counts_seeders_and_leechers() {
         let swarms = Swarms::default();
@@ -813,6 +958,7 @@ mod tests {
             peers: vec!["203.0.113.5:6881".parse().unwrap()],
             complete: 1,
             incomplete: 0,
+            transferred: Transfer::default(),
         };
 
         let encoded = response.to_bencode(true);
@@ -835,6 +981,7 @@ mod tests {
             peers: vec!["203.0.113.5:6881".parse().unwrap()],
             complete: 1,
             incomplete: 0,
+            transferred: Transfer::default(),
         };
 
         let encoded = String::from_utf8(response.to_bencode(false)).unwrap();
@@ -853,6 +1000,7 @@ mod tests {
             ],
             complete: 2,
             incomplete: 0,
+            transferred: Transfer::default(),
         };
 
         let encoded = response.to_bencode(true);
@@ -915,5 +1063,63 @@ mod tests {
         assert_eq!(info_hash_from_hex(&hex), Some(raw));
         assert_eq!(info_hash_from_hex("abc"), None, "wrong length");
         assert_eq!(info_hash_from_hex(&"zz".repeat(20)), None, "not hex");
+    }
+
+    #[test]
+    fn an_unknown_event_is_a_plain_reannounce() {
+        let r = AnnounceRequest::parse(&query(hash(1), hash(2), "&event=paused")).unwrap();
+        assert_eq!(r.event, Event::None);
+    }
+
+    /// The shapes real clients send that a strict parser would choke on: a
+    /// bare key with no `=`, a key that is not UTF-8, a repeated key.
+    #[test]
+    fn query_parsing_tolerates_what_clients_actually_send() {
+        let params = parse_query(b"compact&left=5&\xff=x&left=7");
+        assert_eq!(params.get("compact").map(AsRef::as_ref), Some(&b""[..]));
+        assert_eq!(
+            params.get("left").map(AsRef::as_ref),
+            Some(&b"7"[..]),
+            "last value wins"
+        );
+        assert_eq!(params.len(), 2, "a non-UTF-8 key is skipped, not an error");
+    }
+
+    #[test]
+    fn percent_decoding_keeps_a_stray_percent_and_turns_plus_into_space() {
+        // `%zz` is not a hex pair: kept verbatim rather than dropped, so a
+        // mangled hash fails on length with the bytes still visible.
+        assert_eq!(percent_decode(b"a%zzb").as_ref(), b"a%zzb");
+        assert_eq!(percent_decode(b"a+b").as_ref(), b"a b");
+        // Upper- and lower-case hex digits are the same byte.
+        assert_eq!(percent_decode(b"%4A%4a").as_ref(), b"JJ");
+    }
+
+    #[tokio::test]
+    async fn stats_total_the_live_peers_across_every_swarm() {
+        let swarms = Swarms::default();
+        let seeder = AnnounceRequest::parse(&query(hash(9), hash(1), "")).unwrap();
+        let mut leecher = AnnounceRequest::parse(&query(hash(9), hash(2), "")).unwrap();
+        leecher.left = 10;
+        let elsewhere = AnnounceRequest::parse(&query(hash(8), hash(3), "")).unwrap();
+        swarms
+            .announce(&seeder, "203.0.113.1:6881".parse().unwrap())
+            .await;
+        swarms
+            .announce(&leecher, "203.0.113.2:6881".parse().unwrap())
+            .await;
+        swarms
+            .announce(&elsewhere, "203.0.113.3:6881".parse().unwrap())
+            .await;
+
+        assert_eq!(
+            swarms.stats().await,
+            SwarmStats {
+                swarms: 2,
+                peers: 3,
+                seeders: 2
+            }
+        );
+        assert_eq!(swarms.snapshots().await.len(), 2);
     }
 }

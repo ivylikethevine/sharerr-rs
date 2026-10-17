@@ -816,6 +816,8 @@ fn announce_request(hash: &str, peer_id: [u8; 20]) -> sharerr_torrent::AnnounceR
         peer_id,
         port: 6881,
         left: 0,
+        uploaded: 0,
+        downloaded: 0,
         event: sharerr_torrent::Event::None,
         compact: true,
         numwant: 50,
@@ -1226,6 +1228,7 @@ async fn instance_lines_dials_the_tracker_and_the_feed_when_reachability_is_on()
         // the bind port when nothing is advertised statically.
         server: sharerr_core::config::ServerConfig {
             bind: format!("127.0.0.1:{closed}").parse().unwrap(),
+            ..Default::default()
         },
         ..Config::default()
     };
@@ -1256,6 +1259,7 @@ async fn instance_lines_has_no_tracker_address_to_dial_before_one_is_advertised(
         checks: sharerr_core::config::ChecksConfig { reachability: true },
         server: sharerr_core::config::ServerConfig {
             bind: format!("127.0.0.1:{closed}").parse().unwrap(),
+            ..Default::default()
         },
         ..Config::default()
     };
@@ -1313,4 +1317,15 @@ async fn gather_labels_the_path_edge_once_a_library_has_been_scanned() {
         "{:?}",
         page.edges
     );
+}
+
+/// No friends are drawn when the database cannot list them — whether it
+/// never opened or stopped answering — rather than the page failing.
+#[tokio::test]
+async fn friend_nodes_are_empty_when_the_store_fails() {
+    let (_dir, serve) = crate::state::fixtures::store_closed().await;
+    assert!(friend_nodes(&web_state(serve)).await.is_empty());
+
+    let (_dir, serve) = crate::state::fixtures::store_unopenable();
+    assert!(friend_nodes(&web_state(serve)).await.is_empty());
 }

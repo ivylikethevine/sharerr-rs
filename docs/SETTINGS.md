@@ -70,9 +70,10 @@ field's _presence_ is still readable from `sharerr.toml` or the environment
 
 ## `[server]`
 
-| TOML key      | Type        | Default        | Notes                                                                                                                                |
-| ------------- | ----------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `server.bind` | socket addr | `0.0.0.0:8477` | Carries the web UI, the tracker, and the Torznab feed on one port, unless [`[tracker]`](#tracker) opens a second dedicated listener. |
+| TOML key                  | Type        | Default        | Notes                                                                                                                                                                                                              |
+| ------------------------- | ----------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `server.bind`             | socket addr | `0.0.0.0:8477` | Carries the web UI, the tracker, and the Torznab feed on one port, unless [`[tracker]`](#tracker) opens a second dedicated listener.                                                                               |
+| `server.security_headers` | bool        | `false`        | Sends a strict CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `nosniff` with every web UI response, for an instance reachable outside a trusted LAN. Applies on the next request. File/env only. |
 
 ## \*arr apps
 

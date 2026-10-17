@@ -127,7 +127,7 @@ pub(crate) fn join_by_parent<'a, C, F>(
         .collect()
 }
 
-pub use client::ArrClient;
+pub use client::{ArrClient, whisparr_walks_like_radarr};
 pub use error::{ArrError, Result};
 pub use models::SystemStatus;
 // Re-exported from core (it moved there for the directory source, which is not

@@ -69,7 +69,7 @@ impl Store {
     pub async fn create_user(&self, username: &str, password: &SecretString) -> Result<i64> {
         let username = validate_username(username)?;
         validate_password(password)?;
-        let hash = hash_password(password).await?;
+        let hash = hash_password(self, password).await?;
         let now = now_epoch();
 
         // The UNIQUE constraint is what actually decides this, not a prior SELECT:
@@ -112,14 +112,14 @@ impl Store {
         // faster than "wrong password", which turns the login form into a way to
         // enumerate account names. The decoy is substituted inside the blocking
         // task, so forcing it never costs the runtime worker a hash.
-        let verified = verify_password(password, stored).await?;
+        let verified = verify_password(self, password, stored).await?;
         Ok(verified && row.is_some())
     }
 
     /// Replace an account's password. Returns whether the account existed.
     pub async fn set_password(&self, username: &str, password: &SecretString) -> Result<bool> {
         validate_password(password)?;
-        let hash = hash_password(password).await?;
+        let hash = hash_password(self, password).await?;
 
         let affected =
             sqlx::query("UPDATE users SET password_hash = ?1, updated_at = ?2 WHERE username = ?3")
@@ -213,8 +213,19 @@ async fn acquire_hash_slot() -> Result<tokio::sync::SemaphorePermit<'static>> {
     acquire_slot(&HASH_SLOTS, HASH_SLOT_WAIT).await
 }
 
-async fn hash_password(password: &SecretString) -> Result<String> {
-    let _permit = acquire_hash_slot().await?;
+impl Store {
+    /// A slot for one Argon2 run, or `TooBusy`; a fault plan can refuse it.
+    async fn hash_slot(&self) -> Result<tokio::sync::SemaphorePermit<'static>> {
+        #[cfg(feature = "fault-injection")]
+        if self.fault.hash_slot_refused() {
+            return Err(StoreError::TooBusy);
+        }
+        acquire_hash_slot().await
+    }
+}
+
+async fn hash_password(store: &Store, password: &SecretString) -> Result<String> {
+    let _permit = store.hash_slot().await?;
     let password = clone_secret(password);
     tokio::task::spawn_blocking(move || blocking_hash(&password))
         .await
@@ -222,8 +233,12 @@ async fn hash_password(password: &SecretString) -> Result<String> {
 }
 
 /// `None` means no such account: a decoy hash is substituted so the cost matches.
-async fn verify_password(password: &SecretString, stored: Option<String>) -> Result<bool> {
-    let _permit = acquire_hash_slot().await?;
+async fn verify_password(
+    store: &Store,
+    password: &SecretString,
+    stored: Option<String>,
+) -> Result<bool> {
+    let _permit = store.hash_slot().await?;
     let password = clone_secret(password);
     tokio::task::spawn_blocking(move || {
         let stored = stored.unwrap_or_else(|| DECOY_HASH.clone());

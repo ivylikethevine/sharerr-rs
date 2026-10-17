@@ -5,14 +5,21 @@ pub mod endpoints;
 pub mod peers;
 pub mod runs;
 pub mod swarm;
+pub mod transfers;
 pub mod users;
 pub mod vault;
+
+#[cfg(feature = "fault-injection")]
+mod fault;
+#[cfg(test)]
+mod upgrade;
 
 pub use db::{SeedingSummary, Store, StoreError};
 pub use endpoints::{EndpointKind, ObservedVia, PeerEndpoint};
 pub use peers::{Peer, PeerScope, Touch};
 pub use runs::{RunRecord, RunSummary};
 pub use swarm::SwarmSample;
+pub use transfers::TransferTotals;
 
 pub use vault::{Vault, VaultError, master_key_from_env};
 
