@@ -4,8 +4,8 @@ name: Image scan
 # Advisory trivy scans; nothing here blocks a merge.
 # - trivy: each published image's :latest (one matrix row per image), which
 #   goes stale between releases as advisories land; findings go to code
-#   scanning (category image-scan-<name>) and a warning. docker.yml's
-#   scan job is the release gate.
+#   scanning (category image-scan-<name>) and a warning. The release
+#   workflow's scan job is the release gate.
 # - pins: the digest-pinned images in the Dockerfiles and compose files.
 #   tool-versions.yml reports a moved tag, not its severity, so this scans
 #   each pinned digest and what its tag points at now, and keeps one
