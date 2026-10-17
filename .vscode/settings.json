@@ -3,9 +3,9 @@
   "editor.insertSpaces": true,
   "editor.detectIndentation": false,
   "[rust]": {
-    "editor.tabSize": 4,
+    "editor.tabSize": 4
   },
   "[markdown]": {
-    "editor.inlineSuggest.enabled": false,
-  },
+    "editor.inlineSuggest.enabled": false
+  }
 }

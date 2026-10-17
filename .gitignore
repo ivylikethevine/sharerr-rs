@@ -1,30 +1,76 @@
-# Secrets and local environment. `.env.example` files are templates with no
-# real values (docker/deploy/*/), so they stay tracked.
-.env
-.env.*
-!.env.example
-*.key
-*.pem
-*.pfx
-*.crt
-.direnv/
-.envrc
+# SPDX-License-Identifier: MIT
 
-# A local Jekyll build of the docs site (_config.yml); CI builds the real one.
-.jekyll-cache/
-_site/
+# Everything generated on this machine (scratch, tool caches, local builds).
+local/
+
+# npm installs, the pinned CI Markdown tools' (.github/package.json) included.
+node_modules/
 
 # Claude Code: .claude/settings.json is shared and tracked; personal overrides,
 # agent worktrees and host-specific agent notes stay local.
 .claude/settings.local.json
 .claude/worktrees/
 CLAUDE.local.md
+# Claude Code's sandbox bind-mounts /dev/null over these denied paths while a
+# session runs; none is a file of this repo
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.idea
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc
+/.claude/agents
+/.claude/commands
+/.claude/hooks
+/.claude/launch.json
+/.claude/loop.md
+/.claude/output-styles
+/.claude/routines
+/.claude/scheduled_tasks.json
+/.claude/skills
+/.claude/workflows
+/.claude/.cc-writes
+
+# Secrets and local environment. A .env.example is a template with no real
+# values, so it stays tracked.
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+*.key
+*.pem
+*.pfx
+*.crt
+*.cert
+*.pub
+*.rsa
+*.priv
+secret/
+secrets/
+private/
+keys/
+
+# Editor and OS droppings, and the backups merge tools leave beside a conflict.
+.DS_Store
+*.swp
+*.swo
+*~
+*.orig
+
+# Logs.
+*.log
 
 # Rust build output.
 /target
 **/*.rs.bk
-
-# Local runtime state — vault, sqlite db, generated torrents.
+# A local Jekyll build of the docs site; CI builds the real one.
+_site/
+.jekyll-cache/
+# Local runtime state: vault, sqlite db, generated torrents.
 /data
 /config/sharerr.toml
 
@@ -38,11 +84,10 @@ CLAUDE.local.md
 /docker/state-tm
 /docker/state-rt
 /docker/state-two-instance
-# The mesh stack's own live config copies — see run_docker_tests_mesh.sh for
-# why these are scratch copies of docker/config-mesh-*/sharerr.toml rather
-# than that checked-in directory itself: one scenario rewrites a node's
-# config in place through a real settings POST, the same way an operator's
-# browser would, and that must never land on the tracked template.
+# The mesh stack's own live config copies: scratch copies of
+# docker/config-mesh-*/sharerr.toml (run_docker_tests_mesh.sh says why), since
+# one scenario rewrites a node's config in place through a real settings POST
+# and that must never land on the tracked template.
 /docker/state-mesh
 
 # Terraform working state for the hosted-lighthouse modules under
@@ -54,6 +99,3 @@ CLAUDE.local.md
 *.tfvars
 .terraform.lock.hcl
 docker/deploy/lighthouse/terraform/fly/.generated/
-
-# npm installs of the pinned CI Markdown tools (.github/package.json)
-node_modules/
