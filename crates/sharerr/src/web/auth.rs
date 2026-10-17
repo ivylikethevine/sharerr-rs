@@ -1611,7 +1611,7 @@ mod tests {
         let response = change_password(
             State(state),
             jar,
-            change_form(&fresh_password(), "new-password-one", "new-password-two"),
+            change_form(&fresh_password(), &fresh_password(), &fresh_password()),
         )
         .await;
 

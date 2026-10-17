@@ -1346,7 +1346,9 @@ mod tests {
             TorrentBackend::Rtorrent,
             &url,
             Some("operator"),
-            TorrentCredential::Password(SecretString::from("hunter2")),
+            TorrentCredential::Password(SecretString::from(
+                sharerr_testkit::secrets::fresh_password(),
+            )),
         )
         .unwrap();
         assert_eq!(client.kind(), sharerr_client::ClientKind::Rtorrent);

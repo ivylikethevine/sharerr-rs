@@ -748,7 +748,7 @@ pub async fn bulk(State(state): State<WebState>, Form(form): Form<BulkForm>) -> 
         Err(response) => return *response,
     };
 
-    let mut selected = Vec::with_capacity(form.item.len());
+    let mut selected = Vec::new();
     let mut missing = 0;
     for key in &form.item {
         let parsed = key

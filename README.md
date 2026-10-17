@@ -587,6 +587,9 @@ attached.
 
 Smallest first, by how much each item touches:
 
+- **A cap on bulk item selections.** The items page's bulk action looks up
+  every submitted key in turn, so one oversized form is one oversized pass
+  over the store; refuse a selection past a fixed count.
 - **Native ntfy, Gotify, Telegram and Pushover payloads.** Apprise reaches
   them today; each would be one more `notifications.kind`.
 - **A friend's-eye feed preview.** The feed as one chosen friend's scope
