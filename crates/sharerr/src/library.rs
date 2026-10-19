@@ -236,6 +236,7 @@ fn walk(
                 // The sync pass probes the file, which is the one path that also
                 // covers an *arr file the *arr itself never analysed.
                 media: None,
+                scene: None,
             }),
             None => {
                 outcome.skipped += 1;

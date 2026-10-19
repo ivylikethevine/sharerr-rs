@@ -397,8 +397,8 @@ tracking issue, reading the compose files `CI_IMAGE_GLOBS` in
 ### Pinned tools
 
 **Pinned tool versions that dependabot cannot see** are zizmor, actionlint,
-cargo-llvm-cov, lychee, typos, shellcheck, hadolint, trivy, cargo-deny,
-gitleaks, terraform and yq, each installed from a cached, pinned,
+cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck, hadolint,
+trivy, cargo-deny, gitleaks, terraform and yq, each installed from a cached, pinned,
 sha256-verified release asset by `.github/actions/setup-tool`.
 `.github/actions/setup-tool/tools.txt` is the one roster (version, URL,
 archive kind, verify flag, sha256, per platform where the asset differs),

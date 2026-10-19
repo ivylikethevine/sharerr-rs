@@ -24,6 +24,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 ed25519-dalek = { workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
 futures = { workspace = true }
+base64 = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
 # For the gluetun control-server client — the one HTTP client the binary owns

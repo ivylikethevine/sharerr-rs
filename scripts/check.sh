@@ -37,6 +37,8 @@
 #   markdown links (lychee offline)          links
 #   docs (markdownlint + prettier + typos)   typos, markdownlint, prettier
 #   secrets (gitleaks)                       gitleaks
+#   advisory (semver)                        semver (in no group: advisory until a
+#                                            crate is published)
 #   coverage.yml, after merge                coverage = coverage-run + coverage-floor;
 #                                            coverage-html and coverage-summary
 #                                            render the same profile
@@ -75,7 +77,7 @@ lint=("${fast[@]}" clippy doc deny terraform gitleaks)
 all=("${lint[@]}" test msrv coverage)
 
 # Every tools.txt row some check below runs, for --install.
-pinned=(shellcheck lychee typos zizmor actionlint yq cargo-deny gitleaks terraform cargo-llvm-cov)
+pinned=(shellcheck lychee typos zizmor actionlint yq cargo-deny gitleaks terraform cargo-llvm-cov cargo-semver-checks)
 
 in_ci() { [ "${GITHUB_ACTIONS:-}" = true ]; }
 
@@ -177,6 +179,24 @@ check_msrv() {
 check_deny() {
   _need cargo-deny || return
   cargo deny --all-features check advisories licenses bans sources
+}
+
+# Public API changes since the last release tag, for the crates publishing
+# would ship. The workspace version is a placeholder (Cargo.toml), so the bump
+# a change needs cannot be read off a version change: --release-type patch
+# reports every change that needs a minor or major bump, each named with it
+# (a purely additive item needs neither and is not reported). Advisory (ci.yml's `advisory (semver)`) and in no group here until a
+# crate is published with a real version; then drop --release-type and move
+# it into lint.
+check_semver() {
+  _need cargo-semver-checks || return
+  local base
+  base="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)" || {
+    _skip "no v* tag to compare against (git fetch --tags)"
+    return
+  }
+  echo "semver: public API against $base"
+  cargo semver-checks --workspace --all-features --baseline-rev "$base" --release-type patch
 }
 
 # Every tracked shell script, composite-action helpers included, rather than

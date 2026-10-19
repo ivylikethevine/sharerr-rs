@@ -168,6 +168,16 @@ pub(crate) struct Movie {
     /// trimmed responses omit it, hence the `moviefile` fallback in [`crate::radarr`].
     #[serde(default)]
     pub movie_file: Option<MovieFile>,
+    /// Whisparr v3 only: `movie` or `scene`.
+    #[serde(default)]
+    pub item_type: Option<String>,
+    /// Whisparr v3 only, for a scene's release title.
+    #[serde(default)]
+    pub studio_title: Option<String>,
+    /// Whisparr v3 only: an ISO 8601 timestamp. Radarr v5 sends one too, which
+    /// is ignored without `item_type: scene`.
+    #[serde(default)]
+    pub release_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

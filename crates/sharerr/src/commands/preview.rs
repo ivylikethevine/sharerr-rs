@@ -24,9 +24,9 @@ use crate::gluetun::GluetunTarget;
 use crate::web::templates::{
     ArrSection, ClientCheck, ClientMismatch, DiagnosticsData, EdgeStyle, EndpointStatus,
     FilterOption, Glance, GluetunSection, ItemRow, ItemsPage, LibraryRow, LighthouseRow,
-    LighthouseView, NodeStatus, PathRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer,
-    RunRow, SampleRow, ScopeOption, SettingsPage, SortLink, StateCount, StatusPage, TokenStatus,
-    TopologyPage,
+    LighthouseView, NodeStatus, PairedPeer, PathRow, PeerEndpointView, PeerRow, PeersPage,
+    RevealedPeer, RunRow, SampleRow, ScopeOption, SettingsPage, SetupStep, SortLink, StateCount,
+    StatusPage, TokenStatus, TopologyPage,
 };
 use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, SourceNode, layout};
 
@@ -330,6 +330,21 @@ fn status_page() -> StatusPage {
                 last_recovery_peer: Some("Riley".to_owned()),
                 lookups_attempted: 1,
             }),
+            // Open on the path step, matching the two missing files above.
+            setup: vec![
+                setup_step("Torrent client reachable", true, "/settings"),
+                setup_step("Something tagged to share", true, ""),
+                SetupStep {
+                    hint: "4 of 132 tagged file(s) do not resolve; see Path mapping below."
+                        .to_owned(),
+                    ..setup_step("Path mapping resolves", false, "")
+                },
+                setup_step("A friend added", true, "/peers"),
+                SetupStep {
+                    hint: "Marked the first time a friend's Prowlarr uses their key.".to_owned(),
+                    ..setup_step("Their first pull seen", false, "/peers")
+                },
+            ],
         },
     }
 }
@@ -347,6 +362,15 @@ fn service_line(
         message: message.to_owned(),
         ok,
         url: url.to_owned(),
+    }
+}
+
+fn setup_step(label: &'static str, done: bool, href: &'static str) -> SetupStep {
+    SetupStep {
+        label,
+        done,
+        hint: String::new(),
+        href,
     }
 }
 
@@ -809,6 +833,18 @@ fn peers_page() -> PeersPage {
         revealed: Some(RevealedPeer {
             label: "Sam".to_owned(),
             key: "sam-9f2a7c4e1b6d3f80".to_owned(),
+            invite: Some(
+                crate::pairing::Invite::new(
+                    "http://seed.example.com:8477".to_owned(),
+                    "sam-9f2a7c4e1b6d3f80".to_owned(),
+                    Some("a1b2c3d4".repeat(8)),
+                )
+                .encode(),
+            ),
+        }),
+        paired: Some(PairedPeer {
+            label: "Alex".to_owned(),
+            return_failure: Some("could not reach their sharerr: connection refused".to_owned()),
         }),
         feed_url: "http://seed.example.com:8477/api?t=caps&apikey=<their key>".to_owned(),
     }

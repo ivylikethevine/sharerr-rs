@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # The pinned CI tools, one row per tool - installed by ./install.sh (through
 # ./action.yml or ../setup-tools) and drift-checked by
 # ../../scripts/check_tool_versions.sh. Both read it through ./lib.sh, so a
@@ -89,6 +90,10 @@ cargo-llvm-cov|0.9.1|tar.gz|https://github.com/taiki-e/cargo-llvm-cov/releases/d
 # Tags have no "v" (0.20.2); the blank tag-prefix accepts that. Like trivy, the
 # advisory database is fetched fresh on every run, whatever this pin is.
 cargo-deny|0.20.2|tar.gz|https://github.com/EmbarkStudios/cargo-deny/releases/download/%v/cargo-deny-%v-x86_64-unknown-linux-musl.tar.gz|--version|github:EmbarkStudios/cargo-deny||9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+# A cargo subcommand plugin like cargo-llvm-cov: verify names its own
+# subcommand first. Advisory in ci.yml until a crate is published; see
+# scripts/check.sh's check_semver.
+cargo-semver-checks|0.51.0|tar.gz|https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v%v/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz|semver-checks --version|github:obi1kenobi/cargo-semver-checks||cacadafaa5cd27ae6d05a74a103266917ebab4c5e43c898360e177d4fbf06a65
 # `fmt -check` and `validate` over the hosted-lighthouse modules (ci.yml's
 # `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
 # zipped, not as GitHub release assets; its GitHub releases still carry the

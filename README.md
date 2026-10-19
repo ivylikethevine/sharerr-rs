@@ -78,19 +78,21 @@ whole design is built around.
   runtime; sample rate, bit depth and real format for audio).
 - **Friends**: per-friend keys with revoke and last-seen; per-friend scoping
   (this friend sees TV, that one films); revoking a friend cuts tracker
-  access too; safe rotation of the shared announce token; peer endpoint
-  memory, signed endpoint gossip between friends, and the lighthouse for a
-  friend whose address rotated while nobody was watching.
+  access too; safe rotation of the shared announce token; one-string
+  pairing with a friend who also runs sharerr; peer endpoint memory, signed
+  endpoint gossip between friends, and the lighthouse for a friend whose
+  address rotated while nobody was watching.
 - **Networking**: a dynamic endpoint from gluetun (rotating exit IP and
   forwarded port), a Topology page drawing sources, this instance and
   friends in one picture, a live per-torrent swarm view with hourly history,
   and a reachability script for checking from outside your network.
 - **The web UI**: first-run wizard, settings with connection tests, an Items
   page with per-item detail and manual retry/rebuild/unshare, one at a time
-  or over a selection, library composition, sync history, self-refreshing status tiles, and path-mapping
-  diagnostics.
-- **Operations**: webhook notifications (generic, Discord, Apprise) on nine
-  triggers plus an Uptime-Kuma-style heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
+  or over a selection, library composition, sync history, self-refreshing
+  status tiles, a setup checklist, and path-mapping diagnostics.
+- **Operations**: webhook notifications (generic, Discord, Apprise, ntfy,
+  Gotify, Telegram, Pushover) on nine triggers plus an Uptime-Kuma-style
+  heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
   dashboard-widget JSON endpoint behind a bearer token, and an OpenAPI 3.1
   document for the machine-facing API.
 
@@ -154,7 +156,9 @@ Three things to know before going further:
   can reach it can reach the login page, and on a plain-HTTP LAN the session
   cookie travels in the clear. See
   [the security policy](docs/SECURITY.md#what-is-in-scope) for what a
-  TLS-terminating proxy in front changes.
+  TLS-terminating proxy in front changes, and
+  [forward-auth sign-in](docs/SETTINGS.md#signing-in-through-a-forward-auth-proxy)
+  to let Authelia or Authentik sign you in.
 
 ## Sharing with a friend
 
@@ -171,7 +175,8 @@ revoking a friend cuts their access to sharerr's tracker too, instantly, with
 no effect on anyone else. You can also scope what each friend sees:
 everything, or only TV, films, music or books. Content outside a friend's
 scope is never listed and never offered, and they cannot search their way
-around it.
+around it. The add form previews the feed a chosen scope would serve before
+any key exists, and each friend's row links to the feed their key is served.
 
 > There is no shared feed key. A single `torznab.api_key` would open the
 > feed for everybody and make revoking one friend meaningless, so a
@@ -381,16 +386,31 @@ Set it up per friend on the Friends page: their sharerr's URL, and the key
 they issued you. Leave both empty and your instance still answers their
 pulls and accepts their pushes; it just never initiates.
 
+**Or pair with one string.** When you add a friend, the key is shown next to
+an _invite_: one string carrying the key, your address and your gossip
+identity. A friend who runs sharerr pastes it under _Paste a friend's
+invite_ on their Friends page. That adds you, stores the key you issued
+them, pins your identity, and then their sharerr sends its own side (its
+address and a key minted for you) back to yours over HTTP, authenticated by
+the key the invite carried, so both directions are set with nobody typing a
+second thing. If their sharerr cannot reach yours at that moment, their page
+shows a _reply_ invite instead; paste that on your Friends page and it fills
+in the friend it answers rather than adding a new one. The return call only
+ever fills an empty friendship: it never overwrites an address, key or
+identity already set. An invite is refused seven days after it was made, so
+a string left in a chat stops being a credential; a fresh one means deleting
+and re-adding the friend, since the key inside it is shown only once.
+
 A friend who stops showing up can be reported rather than noticed: with a
 webhook URL stored as `notifications.webhook_url`, sharerr POSTs there on
 whichever of nine triggers are enabled (a sync failing, a friend going quiet
 or making first contact, the advertised endpoint rotating or the tracker
-behind it going unreachable, items newly shared or failing to share, a
-library path becoming unreadable, a friend's key being revoked), as generic
-JSON, a Discord webhook, or an Apprise `/notify`. A tenth, the heartbeat,
-goes the other way: a push to an Uptime-Kuma-style URL while the instance is
-ready, so a monitor notices the silence. Field reference:
-[`[notifications]`](docs/SETTINGS.md#notifications).
+behind it going unreachable, items newly shared or failing to share, a library
+path becoming unreadable, a friend's key being revoked), as generic JSON or in
+Discord's, Apprise's, ntfy's, Gotify's, Telegram's or Pushover's own shape. A
+tenth, the heartbeat, goes the other way: a push to an Uptime-Kuma-style URL
+while the instance is ready, so a monitor notices the silence. Field
+reference: [`[notifications]`](docs/SETTINGS.md#notifications).
 
 ## Topology
 
@@ -587,26 +607,66 @@ attached.
 
 Smallest first, by how much each item touches:
 
-- **A cap on bulk item selections.** The items page's bulk action looks up
-  every submitted key in turn, so one oversized form is one oversized pass
-  over the store; refuse a selection past a fixed count.
-- **Native ntfy, Gotify, Telegram and Pushover payloads.** Apprise reaches
-  them today; each would be one more `notifications.kind`.
-- **A friend's-eye feed preview.** The feed as one chosen friend's scope
-  renders it, to check scoping before handing over a key.
-- **A setup checklist on Status.** Tag created, path mapping resolved,
-  friend added, first pull seen, built from the `doctor` checks.
-- **Scene-style titles for Whisparr v3 scenes.** A scene without a scene
-  name is titled like a film (`Title.Year`), where Whisparr's parser expects
-  `Studio.YY.MM.DD.Title`; synthesising that needs the studio and release
-  date carried through discovery.
-- **Sign-in through a forward-auth proxy.** Trust a `Remote-User` header from
-  a configured proxy address (Authelia, Authentik), which also fixes the
-  login throttle collapsing to one global limit behind a proxy.
+- **A theme toggle.** The UI follows `prefers-color-scheme` and nothing
+  else; a light/dark switch remembered per browser, like Topology's
+  redaction checkbox.
+- **Ubuntu 26.04 runners.** Every job runs on `ubuntu-latest`; pin the
+  workflows to `ubuntu-26.04` once GitHub ships the image, so a toolchain
+  change lands when chosen rather than when the alias moves.
+- **A "send test notification" button.** Settings → Notifications saves a
+  webhook without proving it; one button that fires a test event and shows
+  the response.
+- **`sharerr doctor --json`.** The same checks as machine-readable output,
+  for scripts and monitors.
+- **A JSON log format.** A `--log-format json` flag (or `SHARERR_LOG_FORMAT`)
+  for Loki and Docker log drivers.
+- **Docker secrets.** `SHARERR_MASTER_KEY_FILE`, and a `_FILE` variant of
+  every environment override, read from a mounted secret the way Compose and
+  Swarm expect.
+- **Dashboard snippets.** A Grafana dashboard for `/metrics` shipped in the
+  repository, and Homepage and Home Assistant snippets for `/dashboard`.
+- **Retention settings.** Swarm samples, endpoint history and sync runs are
+  pruned to fixed constants; expose each as a config key.
+- **Event-driven sync.** A "Sync now" button on Status, and an *arr webhook
+  receiver (On Import, On Series Add) that runs one pass at once instead of
+  waiting out `sync.interval_secs`.
 - **Unraid and TrueNAS app listings.** Where much of the *arr audience
   installs from; a Community Applications template and a TrueNAS app.
+- **A tailnet deployment layout.** A `docker/deploy/` recipe with the
+  advertised host on a Tailscale or WireGuard network: no port forwarding
+  and no gluetun, for the friend who cannot open a port.
+- **Two more notification triggers.** A torrent sharerr created paused or
+  removed behind its back, which Topology shows but nobody is told about, and
+  a shared file whose inode or mtime changed since its torrent was built.
+- **A Prowlarr indexer definition.** A Cardigann definition contributed
+  upstream, so a friend picks "sharerr" from Prowlarr's list and types one
+  key, instead of configuring Generic Torznab by hand.
+- **TOTP on login.** One user and a cookie session; forward auth covers the
+  proxied case but not the plain LAN one the quickstart warns about.
+- **Release-name lint for directory sources.** Item detail shows how a
+  friend's Sonarr or Radarr would parse the title, and flags a name that will
+  not match before the friend's search fails.
+- **Per-friend setup progress.** Replace "last seen: never" with a
+  checklist (key issued, feed pulled, first announce, gossip paired) and a
+  printable per-friend guide carrying their key and the Prowlarr steps, for a
+  friend who does not run sharerr.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
+- **A read-only management API.** Items, friends, sync status and doctor
+  results behind a bearer token and in the OpenAPI document; scripts and
+  dashboards have only `/dashboard` today.
+- **Time-boxed shares and quiet hours.** Unshare on a date, and a seeding
+  window that lowers the upload cap by hour through the existing
+  `set_limits` path.
+- **Per-friend tags and quality scope.** A tag such as `sharerr-alice`
+  shares one item with one friend, the control *arr users already reach
+  for; and a scope by resolution or size cap, from the media metadata the
+  feed already carries, for a friend on a metered line.
+- **Settings in sections.** One page shown in four screenshots is the tell:
+  a sticky section nav, per-section save, and an unsaved-changes guard.
+- **Sidecar files.** The directory source skips subtitles and `.nfo` files
+  on purpose. An opt-in multi-file torrent over an episode and its subtitle
+  files, still moving nothing, is narrower than season packs below.
 - **Deluge as a fourth client.** The main client still missing; its Web
   JSON-RPC API covers add-without-moving, labels and per-torrent limits.
 - **Season packs and albums as one torrent.** One file per torrent means a
@@ -614,6 +674,10 @@ Smallest first, by how much each item touches:
   the existing folder still moves nothing.
 - **Hybrid v1/v2 torrents (BEP 52).** Weighed but low value while
   Transmission's and rTorrent's v2 support stays partial.
+- **Adopting a friend's torrent.** When a friend's Sonarr imports a release
+  and they tag it, their sharerr builds a second info hash for the same data.
+  Gossip carrying info hash → item would let the second instance adopt the
+  original torrent, so both seed one swarm.
 - **Request flow.** Discovery is one-way today. An inbound request queue
   with an approve step is the other half of the original idea. Seerr (the
   merged Overseerr and Jellyseerr) is the request app most friends already

@@ -702,6 +702,10 @@ pub async fn unshare(
     }
 }
 
+/// The most rows one bulk action takes. Each is a store lookup, and a rebuild
+/// a client call and a fresh hash, so an oversized form is refused outright.
+pub(crate) const BULK_MAX: usize = 500;
+
 /// The bulk form: which action, the checked rows as `source:file_id`, and the
 /// filters to return to.
 #[derive(Debug, Default, Deserialize)]
@@ -742,6 +746,16 @@ pub async fn bulk(State(state): State<WebState>, Form(form): Form<BulkForm>) -> 
     }
     if form.item.is_empty() {
         return back("error", "Nothing was selected.");
+    }
+    if form.item.len() > BULK_MAX {
+        return back(
+            "error",
+            &format!(
+                "{} items were selected; a bulk action takes at most {BULK_MAX}. \
+                 Narrow the filters and run it in parts.",
+                form.item.len()
+            ),
+        );
     }
     let store = match state.store_or_503().await {
         Ok(store) => store,

@@ -708,6 +708,26 @@ pub struct DiagnosticsData {
     /// What the lighthouse poller is doing, or `None` when none is configured
     /// — the section is omitted entirely in that case.
     pub lighthouse: Option<LighthouseView>,
+    /// The setup checklist, in the order a new install meets each step.
+    pub setup: Vec<SetupStep>,
+}
+
+impl DiagnosticsData {
+    /// Whether any setup step is still open; the checklist is hidden once none is.
+    pub fn setup_pending(&self) -> bool {
+        self.setup.iter().any(|step| !step.done)
+    }
+}
+
+/// One step of the status page's setup checklist.
+#[derive(Debug)]
+pub struct SetupStep {
+    pub label: &'static str,
+    pub done: bool,
+    /// What to do next; only rendered while the step is open.
+    pub hint: String,
+    /// The page the fix is made on, or empty when it is this one.
+    pub href: &'static str,
 }
 
 /// One past sync run, pre-rendered for display.
@@ -904,6 +924,8 @@ pub struct PeersPage {
     /// reason: it has to be copied into someone else's Prowlarr, but it is never
     /// readable again.
     pub revealed: Option<RevealedPeer>,
+    /// The outcome of pasting an invite, shown on the response that applied it.
+    pub paired: Option<PairedPeer>,
     /// The feed URL a friend pastes alongside their key.
     pub feed_url: String,
 }
@@ -912,6 +934,18 @@ pub struct PeersPage {
 pub struct RevealedPeer {
     pub label: String,
     pub key: String,
+    /// The same key, address and identity as one invite string for a friend
+    /// who also runs sharerr. `None` when no instance address could be built.
+    pub invite: Option<String>,
+}
+
+/// A friend just paired from an invite. `return_failure` is why their sharerr
+/// could not be told our side automatically; the page then also carries a
+/// [`RevealedPeer`] holding the reply to send by hand.
+#[derive(Debug)]
+pub struct PairedPeer {
+    pub label: String,
+    pub return_failure: Option<String>,
 }
 
 /// One `<option>` in the items page's source/state filters.

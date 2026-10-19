@@ -2521,6 +2521,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
+ "base64 0.23.1",
  "clap",
  "ed25519-dalek",
  "figment",

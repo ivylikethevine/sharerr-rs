@@ -206,6 +206,7 @@ mod tests {
             media: None,
             scene_name: None,
             original_path: None,
+            scene: None,
         }
     }
 

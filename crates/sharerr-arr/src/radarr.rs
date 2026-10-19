@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use sharerr_core::{ExternalIds, MediaSpec};
+use sharerr_core::{ExternalIds, MediaSpec, SceneMeta};
 
 use crate::client::ArrClient;
 use crate::error::Result;
@@ -54,10 +54,23 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             scene_name: non_empty(file.scene_name.clone()),
             original_path: non_empty(file.original_file_path.clone()).map(PathBuf::from),
             media: file.media_info.clone().and_then(MediaInfo::into_meta),
+            scene: scene(movie),
         });
     }
 
     Ok(discovered)
+}
+
+/// A Whisparr v3 scene's studio and date, or `None` for a film, a Radarr movie,
+/// or a scene missing either.
+fn scene(movie: &Movie) -> Option<SceneMeta> {
+    if movie.item_type.as_deref() != Some("scene") {
+        return None;
+    }
+    SceneMeta::new(
+        movie.studio_title.as_deref()?,
+        movie.release_date.as_deref()?,
+    )
 }
 
 /// Look up `/moviefile?movieId=` only when Radarr claims a file exists but did

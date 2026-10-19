@@ -601,6 +601,7 @@ pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
         // Gossip rides the same per-peer-key authentication as the feed — the
         // whole point of putting it under /api rather than a second surface.
         .routes(routes!(crate::gossip::pull, crate::gossip::push))
+        .routes(routes!(crate::pairing::pair))
         // Jackett's URL shapes, both the Torznab one and the admin surface.
         .merge(crate::jackett::api_router())
 }

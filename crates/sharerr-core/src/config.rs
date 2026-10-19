@@ -616,6 +616,16 @@ pub struct ServerConfig {
     /// response. Off by default, for the trusted LAN `docs/SECURITY.md`
     /// assumes; turn it on for an instance reachable from anywhere else.
     pub security_headers: bool,
+    /// Reverse proxies whose forwarded headers are believed: an address or a
+    /// CIDR block each. A connection from one of these is throttled by the
+    /// client address its `X-Forwarded-For` names, and may sign in through
+    /// [`Self::auth_header`]. Empty by default: no header is believed.
+    pub trusted_proxies: Vec<IpRange>,
+    /// The header a forward-auth proxy (Authelia, Authentik) names the signed-in
+    /// user in, such as `Remote-User`. Read only on a connection from
+    /// [`Self::trusted_proxies`], and the proxy must overwrite whatever a client
+    /// sent in it. Empty by default: off.
+    pub auth_header: String,
 }
 
 impl Default for ServerConfig {
@@ -623,7 +633,93 @@ impl Default for ServerConfig {
         Self {
             bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8477),
             security_headers: false,
+            trusted_proxies: Vec::new(),
+            auth_header: String::new(),
         }
+    }
+}
+
+impl ServerConfig {
+    /// Whether `ip` is one of [`Self::trusted_proxies`].
+    pub fn trusts(&self, ip: IpAddr) -> bool {
+        self.trusted_proxies.iter().any(|range| range.contains(ip))
+    }
+}
+
+/// One address or CIDR block: `172.18.0.2`, `10.0.0.0/8`, `fd00::/8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpRange {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl IpRange {
+    /// Whether `ip` falls inside the block. An IPv4-mapped IPv6 address (what a
+    /// dual-stack listener reports for an IPv4 client) is compared as IPv4.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip.to_canonical()) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let shift = 32 - u32::from(self.prefix);
+                u32::from(net).checked_shr(shift).unwrap_or(0)
+                    == u32::from(ip).checked_shr(shift).unwrap_or(0)
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let shift = 128 - u32::from(self.prefix);
+                u128::from(net).checked_shr(shift).unwrap_or(0)
+                    == u128::from(ip).checked_shr(shift).unwrap_or(0)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl std::str::FromStr for IpRange {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let (addr, prefix) = match raw.trim().split_once('/') {
+            Some((addr, prefix)) => (addr, Some(prefix)),
+            None => (raw.trim(), None),
+        };
+        let network = addr
+            .parse::<IpAddr>()
+            .map_err(|_| format!("{raw:?} is not an IP address or CIDR block"))?
+            .to_canonical();
+        let max = if network.is_ipv4() { 32 } else { 128 };
+        let prefix = match prefix {
+            None => max,
+            Some(prefix) => prefix
+                .parse::<u8>()
+                .ok()
+                .filter(|prefix| *prefix <= max)
+                .ok_or_else(|| format!("{raw:?} has a prefix length outside 0-{max}"))?,
+        };
+        Ok(Self { network, prefix })
+    }
+}
+
+impl std::fmt::Display for IpRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let max = if self.network.is_ipv4() { 32 } else { 128 };
+        if self.prefix == max {
+            write!(f, "{}", self.network)
+        } else {
+            write!(f, "{}/{}", self.network, self.prefix)
+        }
+    }
+}
+
+impl Serialize for IpRange {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for IpRange {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1271,12 +1367,31 @@ pub enum NotifyKind {
     /// endpoint, which fans a single call out to whatever Apprise itself is
     /// configured to reach.
     Apprise,
+    /// `{"topic": ..., "title": ..., "message": ...}` — the URL is the
+    /// topic's own (`https://ntfy.sh/<topic>`), and the post goes to the
+    /// server root, as ntfy's JSON publishing expects.
+    Ntfy,
+    /// `{"title": ..., "message": ...}` — a Gotify `/message?token=<app
+    /// token>` URL.
+    Gotify,
+    /// `{"chat_id": ..., "text": ...}` — a Bot API
+    /// `/bot<token>/sendMessage?chat_id=<chat>` URL; the chat id moves from
+    /// the query into the body.
+    Telegram,
+    /// `{"token": ..., "user": ..., "title": ..., "message": ...}` — a
+    /// `/1/messages.json?token=<app>&user=<user>` URL; both keys move from
+    /// the query into the body.
+    Pushover,
 }
 
 crate::str_enum!(NotifyKind {
     Generic => "generic",
     Discord => "discord",
     Apprise => "apprise",
+    Ntfy => "ntfy",
+    Gotify => "gotify",
+    Telegram => "telegram",
+    Pushover => "pushover",
 });
 
 /// What a `[[library]]` directory holds, declared by the operator.
@@ -1815,5 +1930,48 @@ mod tests {
         assert_eq!(TorrentBackend::Qbittorrent.display_name(), "qBittorrent");
         assert_eq!(TorrentBackend::Transmission.display_name(), "Transmission");
         assert_eq!(TorrentBackend::Rtorrent.display_name(), "rTorrent");
+    }
+
+    #[test]
+    fn ip_range_matches_its_block_and_nothing_else() {
+        let block: IpRange = "172.18.0.0/16".parse().unwrap();
+        assert!(block.contains("172.18.4.9".parse().unwrap()));
+        assert!(!block.contains("172.19.0.1".parse().unwrap()));
+        // A dual-stack listener reports an IPv4 client in IPv6 form.
+        assert!(block.contains("::ffff:172.18.0.2".parse().unwrap()));
+        assert!(!block.contains("fd00::1".parse().unwrap()));
+
+        let single: IpRange = "10.0.0.5".parse().unwrap();
+        assert!(single.contains("10.0.0.5".parse().unwrap()));
+        assert!(!single.contains("10.0.0.6".parse().unwrap()));
+
+        let everything: IpRange = "::/0".parse().unwrap();
+        assert!(everything.contains("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ip_range_refuses_what_is_not_one_and_round_trips_what_is() {
+        for bad in ["proxy", "10.0.0.0/33", "fd00::/129", "10.0.0.0/x"] {
+            assert!(bad.parse::<IpRange>().is_err(), "{bad} parsed");
+        }
+        for good in ["10.0.0.0/8", "172.18.0.2", "fd00::/8"] {
+            assert_eq!(good.parse::<IpRange>().unwrap().to_string(), good);
+        }
+    }
+
+    #[test]
+    fn trusted_proxies_and_the_auth_header_load_from_toml() {
+        let config: Config = toml_edit::de::from_str(
+            "[server]\ntrusted_proxies = [\"172.18.0.0/16\"]\nauth_header = \"Remote-User\"\n",
+        )
+        .unwrap();
+        assert!(config.server.trusts("172.18.0.3".parse().unwrap()));
+        assert!(!config.server.trusts("192.168.1.2".parse().unwrap()));
+        assert_eq!(config.server.auth_header, "Remote-User");
+        assert!(
+            !Config::default()
+                .server
+                .trusts("127.0.0.1".parse().unwrap())
+        );
     }
 }

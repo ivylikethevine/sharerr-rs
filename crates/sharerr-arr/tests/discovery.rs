@@ -10,7 +10,7 @@
 use secrecy::SecretString;
 use serde_json::json;
 use sharerr_arr::{ArrClient, ArrError};
-use sharerr_core::{MediaSource, MediaSpec};
+use sharerr_core::{MediaSource, MediaSpec, SceneMeta};
 use sharerr_testkit::library::TAG_ID;
 use sharerr_testkit::mock::{ARR_API_KEY as API_KEY, base_url, mount_json};
 use url::Url;
@@ -1328,6 +1328,8 @@ async fn whisparr_v3_walks_like_radarr() {
                 "year": 2021,
                 "tmdbId": 778_899,
                 "itemType": "scene",
+                "studioTitle": "Lanternwick Studio",
+                "releaseDate": "2021-03-05T00:00:00Z",
                 "tags": [TAG_ID],
                 "hasFile": true,
                 "movieFile": {
@@ -1338,6 +1340,17 @@ async fn whisparr_v3_walks_like_radarr() {
                 },
             },
             { "id": 93, "title": "Untagged Scene", "tags": [1], "hasFile": true },
+            {
+                "id": 94,
+                "title": "Copper Vale",
+                "year": 2001,
+                "itemType": "movie",
+                "studioTitle": "Lanternwick Studio",
+                "releaseDate": "2001-06-01T00:00:00Z",
+                "tags": [TAG_ID],
+                "hasFile": true,
+                "movieFile": { "id": 95, "movieId": 94, "path": "/xxx/Copper Vale.mkv" },
+            },
         ]),
     )
     .await;
@@ -1347,7 +1360,7 @@ async fn whisparr_v3_walks_like_radarr() {
         .await
         .unwrap();
 
-    assert_eq!(found.len(), 1);
+    assert_eq!(found.len(), 2);
     let item = &found[0];
     assert_eq!(item.source, MediaSource::Whisparr, "never labelled Radarr");
     assert_eq!(item.file_id, 92);
@@ -1355,6 +1368,12 @@ async fn whisparr_v3_walks_like_radarr() {
     assert!(
         matches!(&item.spec, MediaSpec::Movie { title, .. } if title == "Lanternwick Nocturne")
     );
+    assert_eq!(
+        item.scene,
+        SceneMeta::new("Lanternwick Studio", "2021-03-05"),
+        "a scene carries what its title leads with"
+    );
+    assert_eq!(found[1].scene, None, "a film is titled like one");
 }
 
 /// Sonarr v5 can number a series in an alternate order. A release title says

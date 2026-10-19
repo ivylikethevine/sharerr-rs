@@ -143,6 +143,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 // Lidarr has already analysed the file, so this costs nothing:
                 // it arrives in the same JSON as everything else above.
                 media: file.media_info.and_then(MediaInfo::into_meta),
+                scene: None,
             });
         }
     }

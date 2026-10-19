@@ -967,6 +967,10 @@ td.title .hint:not(:has(code)) { overflow-wrap: anywhere; }
   stroke-linejoin: round;
 }
 
+/* The status page's setup checklist: each step's mark is in its text. */
+.checklist { list-style: none; }
+.checklist li + li { margin-top: var(--sp-2); }
+
 /* No `margin`: the flow rule spaces this like any other block, which is what
    stops the Friends page's last fact colliding with the form below it. */
 .facts {

@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use sharerr_core::{MediaMeta, MediaSpec};
+use sharerr_core::{MediaMeta, MediaSpec, SceneMeta};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
@@ -99,18 +99,27 @@ impl ParsedTitle {
 /// Steps 2 and 3 share the parse gate for the same reason: neither name is known
 /// to describe this file. Only step 1 is trusted unconditionally, because the
 /// scene name is one an indexer published and an *arr already parsed.
+///
+/// A Whisparr scene (`scene` is `Some`) skips steps 2 and 3: the parse gate
+/// only knows film and episode shapes, and a film-shaped name is the wrong
+/// one for a scene, which Whisparr matches by studio and date.
 pub fn resolve(
     spec: &MediaSpec,
     scene_name: Option<&str>,
     original_path: Option<&Path>,
     media: Option<&MediaMeta>,
     path: &Path,
+    scene: Option<&SceneMeta>,
 ) -> String {
-    if let Some(scene) = scene_name {
-        let cleaned = strip_extension(scene.trim());
+    if let Some(name) = scene_name {
+        let cleaned = strip_extension(name.trim());
         if !cleaned.is_empty() {
             return cleaned.to_owned();
         }
+    }
+
+    if let (Some(scene), MediaSpec::Movie { title, .. }) = (scene, spec) {
+        return synthesize_scene(scene, title, media);
     }
 
     for candidate in [original_path, Some(path)].into_iter().flatten() {
@@ -145,13 +154,7 @@ pub fn resolve(
 /// identical. It stays `WEB-DL` because that is the least restrictive assumption
 /// a downstream quality profile can be handed.
 pub fn synthesize(spec: &MediaSpec, media: Option<&MediaMeta>) -> String {
-    // Real values where they are known, the historical guess where they are not.
-    let resolution = media
-        .and_then(MediaMeta::scene_resolution)
-        .unwrap_or("1080p");
-    let codec = media
-        .and_then(MediaMeta::scene_video_codec)
-        .unwrap_or("x264");
+    let (resolution, codec) = video_tokens(media);
     let audio = media
         .and_then(MediaMeta::scene_audio_format)
         .unwrap_or("FLAC");
@@ -196,6 +199,36 @@ pub fn synthesize(spec: &MediaSpec, media: Option<&MediaMeta>) -> String {
             format!("{}-{}-EPUB-{GROUP}", dotted(author), dotted(title))
         }
     }
+}
+
+/// `Studio.YY.MM.DD.Title.XXX.<quality>-SHARERR`, the shape Whisparr parses a
+/// scene release by. The studio is run together, as scene releases write it
+/// (`LanternwickStudio`), so a digit in its name cannot be read as the date;
+/// Whisparr drops spaces before comparing studios either way. `XXX` is where
+/// Whisparr's parser expects the title to end and the quality to begin.
+fn synthesize_scene(scene: &SceneMeta, title: &str, media: Option<&MediaMeta>) -> String {
+    let (resolution, codec) = video_tokens(media);
+    format!(
+        "{}.{:02}.{:02}.{:02}.{}.XXX.{resolution}.WEB-DL.{codec}-{GROUP}",
+        dotted(&scene.studio).replace('.', ""),
+        scene.year % 100,
+        scene.month,
+        scene.day,
+        dotted(title)
+    )
+}
+
+/// The resolution and video codec tokens: the file's real ones where they are
+/// known, the historical guess (`1080p`, `x264`) where they are not.
+fn video_tokens(media: Option<&MediaMeta>) -> (&'static str, &'static str) {
+    (
+        media
+            .and_then(MediaMeta::scene_resolution)
+            .unwrap_or("1080p"),
+        media
+            .and_then(MediaMeta::scene_video_codec)
+            .unwrap_or("x264"),
+    )
 }
 
 /// Parse a release title the way a downstream *arr app would.
@@ -700,8 +733,78 @@ mod tests {
             None,
             Some(&full_meta()),
             &PathBuf::from("/tv/whatever.mkv"),
+            None,
         );
         assert_eq!(resolved, scene, "a published name is not ours to improve");
+    }
+
+    // -------------------------------------------------------------- scenes
+
+    fn lanternwick() -> SceneMeta {
+        SceneMeta::new("Lanternwick Studio", "2021-03-05T00:00:00Z").unwrap()
+    }
+
+    #[test]
+    fn a_whisparr_scene_is_titled_by_studio_and_date() {
+        let resolved = resolve(
+            &movie(),
+            None,
+            None,
+            None,
+            &PathBuf::from("/xxx/Lanternwick Studio/nocturne.mkv"),
+            Some(&lanternwick()),
+        );
+        assert_eq!(
+            resolved,
+            "LanternwickStudio.21.03.05.The.Gilded.Ferry.XXX.1080p.WEB-DL.x264-SHARERR"
+        );
+    }
+
+    /// A film-shaped filename parses as the film, which is the wrong shape for
+    /// a scene, and a real scene name still wins.
+    #[test]
+    fn a_scene_skips_the_filename_but_not_its_scene_name() {
+        let film_shaped = PathBuf::from("/xxx/The.Gilded.Ferry.2019.mkv");
+        let resolved = resolve(
+            &movie(),
+            None,
+            Some(&film_shaped),
+            None,
+            &film_shaped,
+            Some(&lanternwick()),
+        );
+        assert!(
+            resolved.starts_with("LanternwickStudio.21.03.05."),
+            "{resolved}"
+        );
+
+        let published = "LanternwickStudio.21.03.05.Nocturne.XXX.2160p.MP4-GRP";
+        let resolved = resolve(
+            &movie(),
+            Some(published),
+            None,
+            None,
+            &film_shaped,
+            Some(&lanternwick()),
+        );
+        assert_eq!(resolved, published);
+    }
+
+    #[test]
+    fn scene_meta_needs_a_studio_and_a_real_date() {
+        let scene = SceneMeta::new(" Lanternwick ", "2021-03-05").unwrap();
+        assert_eq!(
+            (scene.studio.as_str(), scene.year, scene.month, scene.day),
+            ("Lanternwick", 2021, 3, 5)
+        );
+        for (studio, date) in [
+            ("", "2021-03-05"),
+            ("Lanternwick", "2021-13-05"),
+            ("Lanternwick", "soon"),
+            ("Lanternwick", ""),
+        ] {
+            assert_eq!(SceneMeta::new(studio, date), None, "{studio:?} {date:?}");
+        }
     }
 
     // ---------------------------------------------------------- resolution
@@ -715,6 +818,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/tv/Lanternwick Hollow/Season 02/whatever.mkv"),
+            None,
         );
         assert_eq!(resolved, scene);
     }
@@ -727,6 +831,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/tv/x.mkv"),
+            None,
         );
         assert_eq!(
             resolved,
@@ -744,6 +849,7 @@ mod tests {
             &PathBuf::from(
                 "/tv/Lanternwick Hollow/Season 02/Lanternwick Hollow - S02E01 - Pilot.mkv",
             ),
+            None,
         );
         assert_eq!(resolved, "Lanternwick Hollow - S02E01 - Pilot");
     }
@@ -756,6 +862,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/tv/Lanternwick Hollow/Season 02/01.mkv"),
+            None,
         );
         assert_eq!(
             resolved,
@@ -773,6 +880,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/tv/Copper Vale/Copper.Vale.S05E09.WEB-DL.mkv"),
+            None,
         );
         assert_eq!(
             resolved,
@@ -788,6 +896,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/tv/Lanternwick/01.mkv"),
+            None,
         );
         assert_eq!(
             resolved,
@@ -808,6 +917,7 @@ mod tests {
             )),
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+            None,
         );
         assert_eq!(resolved, "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP");
     }
@@ -823,6 +933,7 @@ mod tests {
             Some(&PathBuf::from("/downloads/rrqx7z1p/file1.mkv")),
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/The Gilded Ferry (2019).mkv"),
+            None,
         );
         assert_eq!(resolved, "The Gilded Ferry (2019)");
     }
@@ -838,6 +949,7 @@ mod tests {
             )),
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+            None,
         );
         assert_eq!(resolved, "The.Gilded.Ferry.2019.1080p.WEB-DL.x264-SHARERR");
     }
@@ -852,6 +964,7 @@ mod tests {
             )),
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+            None,
         );
         assert_eq!(resolved, "The.Gilded.Ferry.2019.2160p.UHD.BluRay-SCENEGRP");
     }
@@ -864,6 +977,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/The Gilded Ferry (2019).mkv"),
+            None,
         );
         assert_eq!(parseable, "The Gilded Ferry (2019)");
 
@@ -873,6 +987,7 @@ mod tests {
             None,
             None,
             &PathBuf::from("/movies/The Gilded Ferry (2019)/movie.mkv"),
+            None,
         );
         assert_eq!(
             unparseable,

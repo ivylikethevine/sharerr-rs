@@ -60,6 +60,12 @@ What is already there, so a report can say which layer it gets past:
 - Gossip records are Ed25519-signed by the peer they describe, with a
   `signed_at` that blocks replaying an older record, and a pull only returns
   the intersection with keys the caller already proved it knows.
+- The pairing endpoint (`/api/gossip/pair`) rides the same per-peer key and
+  only fills a friendship whose outbound half is empty: a second call, or one
+  whose signed record names an identity other than the pinned one, is refused.
+  A pasted invite pins the identity it carries at pairing time, by the
+  operator, instead of trusting the first record a friend later signs, and
+  is refused seven days after it was issued.
 - The gluetun hook endpoints are unauthenticated by design (gluetun's hooks
   are bare `wget`s) but answer only private source addresses.
 
@@ -76,6 +82,14 @@ A few things are **by design**, not a vulnerability report waiting to happen:
   the response to their own request. Nothing else trusts either header; see
   `arrived_over_https` in `crates/sharerr/src/web/auth.rs`. If your network
   is not a trusted LAN, put a TLS-terminating proxy in front.
+- **A forward-auth header is believed only from a listed proxy.**
+  `server.auth_header` signs a request in as the user it names, and
+  `X-Forwarded-For` keys the login throttle, only when the connection itself
+  comes from `server.trusted_proxies`; both are off until that list is set.
+  Whoever controls a listed address can sign in as anyone, so it should name
+  the proxy alone, and the proxy must overwrite the header rather than pass a
+  client's through. See `vouched_user` and `client_address` in
+  `crates/sharerr/src/web/auth.rs`.
 - **No account lockout, and security response headers only on request.**
   `server.security_headers` adds a strict CSP, `X-Frame-Options`,
   `Referrer-Policy` and `nosniff` to the web UI; it is off by default, as
@@ -174,11 +188,10 @@ The assurance case follows from [the threat model](#threat-model):
   from a lost master key. Anyone deploying
   outside the model (a public-facing instance, an untrusted network) should
   treat this section as the boundary of what sharerr defends against and put
-  a reverse proxy with its own rate limiting and headers in front — the
-  built-in login throttle (see above) is keyed on the connecting socket's own
-  address and never a forwarded-for header, so behind such a proxy every
-  request collapses to one address and the throttle degrades to a global
-  limit across every visitor.
+  a reverse proxy with its own rate limiting and headers in front, listed in
+  `server.trusted_proxies` so the built-in login throttle (see above) keys on
+  each client rather than collapsing to one global limit at the proxy's
+  address.
 
 ## Supported versions
 

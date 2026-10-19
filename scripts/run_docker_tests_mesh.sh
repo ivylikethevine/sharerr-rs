@@ -112,7 +112,9 @@ sign_in_again() {
 }
 
 # Add a friend labelled $label on $node, and reveal the key this node just
-# issued them. Prints "<peer-id> <key>" on success.
+# issued them. Prints "<peer-id> <key> <invite>" on success; the invite is
+# the one-string form of the same key plus this node's address and identity
+# (`crates/sharerr/src/pairing.rs`), which step 4 pastes on the other side.
 #
 # The id is scraped from the *same* response `add()` renders — the "Where
 # friends are" section's `<h3>{label}</h3>` heading is immediately followed
@@ -121,18 +123,66 @@ sign_in_again() {
 # duplicate label (400), which is the one way this can fail against a fresh
 # stack: a leftover peer from a previous, uncleanly-torn-down run.
 add_peer() {
-    local node=$1 port=$2 label=$3 body key id
+    local node=$1 port=$2 label=$3 body key id invite
     body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
         --data-urlencode "label=$label" \
         --data-urlencode "scope=all" \
         "http://127.0.0.1:$port/peers")
     key=$(sed -n 's/.*<code>\([^<]*\)<\/code>.*/\1/p' <<<"$body" | head -n1)
     id=$(grep -A10 "<h3>$label</h3>" <<<"$body" | grep -oP '/peers/\K[0-9]+(?=/gossip)' | head -n1)
-    if [[ -z $key || -z $id ]]; then
-        echo "error: node $node could not add friend $label (key=${key:-<none>} id=${id:-<none>})" >&2
+    invite=$(grep -oP '<code class="invite">\K[^<]+' <<<"$body" | head -n1)
+    if [[ -z $key || -z $id || -z $invite ]]; then
+        echo "error: node $node could not add friend $label (key=${key:-<none>} id=${id:-<none>} invite=${invite:-<none>})" >&2
         return 1
     fi
-    echo "$id $key"
+    echo "$id $key $invite"
+}
+
+# Paste a friend's invite on $node under the name $label: the one-string
+# pairing path. Adds the friend with their side stored, then POSTs this
+# node's own side to theirs, so the response must say both halves are set
+# — a "reply" invite in it would mean the return call failed, which here,
+# on one bridge network, is a bug rather than a flaky link. Prints the new
+# peer's id.
+pair_peer() {
+    local node=$1 port=$2 label=$3 invite=$4 body id
+    body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
+        --data-urlencode "invite=$invite" \
+        --data-urlencode "label=$label" \
+        --data-urlencode "scope=all" \
+        "http://127.0.0.1:$port/peers/pair")
+    if ! grep -q "Paired with $label" <<<"$body" || ! grep -q "nothing to send back" <<<"$body"; then
+        echo "error: node $node could not pair with $label from an invite" >&2
+        grep -oE '<p class="(error|warn)"[^>]*>[^<]*' <<<"$body" | head -n3 >&2
+        return 1
+    fi
+    id=$(grep -A30 "<h3>$label</h3>" <<<"$body" | grep -oP '/peers/\K[0-9]+(?=/gossip)' | head -n1)
+    if [[ -z $id ]]; then
+        echo "error: node $node paired with $label but shows no row for them" >&2
+        return 1
+    fi
+    echo "$id"
+}
+
+# The gossip URL this node's peers page holds for $label — the value in
+# their card's "Their sharerr URL" field — or nothing if unset.
+peer_gossip_url() {
+    local node=$1 port=$2 label=$3
+    curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers" \
+        | grep -A30 "<h3>$label</h3>" \
+        | grep -oP 'name="url" value="\K[^"]*' | head -n1
+}
+
+# Whether this node's peers page shows $label's sharerr as having
+# introduced itself — the "Runs sharerr" tick, rendered once a pubkey is
+# bound to their row. The table row spans many lines, so the page is
+# flattened first and the row matched from its name cell to its `</tr>`.
+peer_runs_sharerr() {
+    local node=$1 port=$2 label=$3
+    curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers" \
+        | tr -d '\n' \
+        | grep -oP "class=\"peer-name\">\s*$label\s*</td>.*?</tr>" \
+        | grep -q '✓'
 }
 
 # Configure the outbound half of a friendship: where their sharerr is, and
@@ -200,16 +250,37 @@ claim C "$PORT_C"
 #    again after their direct link is gone — needs A and C to have already
 #    gossiped directly at least once. A permanent line topology could never
 #    reach that state; a temporarily-full mesh that gets one edge cut can.
-echo "meshing all three pairs"
-read -r ID_B_FOR_A KEY_B_FOR_A <<<"$(add_peer B "$PORT_B" A)"
-read -r ID_B_FOR_C KEY_B_FOR_C <<<"$(add_peer B "$PORT_B" C)"
-read -r ID_A_FOR_B KEY_A_FOR_B <<<"$(add_peer A "$PORT_A" B)"
-read -r ID_C_FOR_B KEY_C_FOR_B <<<"$(add_peer C "$PORT_C" B)"
-read -r ID_A_FOR_C KEY_A_FOR_C <<<"$(add_peer A "$PORT_A" C)"
-read -r ID_C_FOR_A KEY_C_FOR_A <<<"$(add_peer C "$PORT_C" A)"
+#
+#    A<->B is wired the one-string way: B adds A and hands over the invite
+#    its reveal carries; A pastes it, which stores B's side on A and makes
+#    A's sharerr return its own side to B over `/api/gossip/pair`. The two
+#    assertions after it are what the pairing path promises beyond the
+#    manual one — both rows complete, and both identities pinned, *before*
+#    a single gossip pass has run (the first exchange is 3s away, and TOFU
+#    would otherwise be what bound them). B<->C and A<->C are wired by hand
+#    through `set_gossip`, so the script still covers the typed path too.
+echo "pairing A<->B from B's invite"
+read -r ID_B_FOR_A KEY_B_FOR_A INVITE_B_FOR_A <<<"$(add_peer B "$PORT_B" A)"
+ID_A_FOR_B=$(pair_peer A "$PORT_A" B "$INVITE_B_FOR_A")
+a_holds_b=$(peer_gossip_url A "$PORT_A" B)
+b_holds_a=$(peer_gossip_url B "$PORT_B" A)
+if [[ $a_holds_b != "http://sharerr-b:8477/" || $b_holds_a != "http://sharerr-a:8477/" ]]; then
+    echo "error: pairing left a side unset (A holds [$a_holds_b] for B, B holds [$b_holds_a] for A)" >&2
+    exit 1
+fi
+if ! peer_runs_sharerr A "$PORT_A" B || ! peer_runs_sharerr B "$PORT_B" A; then
+    echo "error: pairing did not pin both identities before the first gossip pass" >&2
+    exit 1
+fi
+echo "A<->B paired: both sides stored, both identities pinned, no gossip pass yet"
+: "$ID_B_FOR_A" "$KEY_B_FOR_A" "$ID_A_FOR_B" # wired by the pairing; kept for symmetry with the pairs below
 
-set_gossip A "$PORT_A" "$ID_A_FOR_B" "http://sharerr-b:8477" "$KEY_B_FOR_A"
-set_gossip B "$PORT_B" "$ID_B_FOR_A" "http://sharerr-a:8477" "$KEY_A_FOR_B"
+echo "meshing B<->C and A<->C by hand"
+read -r ID_B_FOR_C KEY_B_FOR_C _ <<<"$(add_peer B "$PORT_B" C)"
+read -r ID_C_FOR_B KEY_C_FOR_B _ <<<"$(add_peer C "$PORT_C" B)"
+read -r ID_A_FOR_C KEY_A_FOR_C _ <<<"$(add_peer A "$PORT_A" C)"
+read -r ID_C_FOR_A KEY_C_FOR_A _ <<<"$(add_peer C "$PORT_C" A)"
+
 set_gossip B "$PORT_B" "$ID_B_FOR_C" "http://sharerr-c:8477" "$KEY_C_FOR_B"
 set_gossip C "$PORT_C" "$ID_C_FOR_B" "http://sharerr-b:8477" "$KEY_B_FOR_C"
 set_gossip A "$PORT_A" "$ID_A_FOR_C" "http://sharerr-c:8477" "$KEY_C_FOR_A"
@@ -327,7 +398,7 @@ done
 echo " ok"
 
 echo
-echo "bash-side scenarios passed: mesh convergence, endpoint change, restart/rejoin"
+echo "bash-side scenarios passed: one-string pairing, mesh convergence, endpoint change, restart/rejoin"
 
 # 10. Hand off "lighthouse discovery" — the one property that needs a real
 #    Ed25519 verification, not a string match — to the Rust assertion. The

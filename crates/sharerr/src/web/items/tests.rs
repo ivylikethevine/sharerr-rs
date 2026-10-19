@@ -991,6 +991,25 @@ async fn bulk_with_nothing_selected_returns_to_the_same_view_with_an_error() {
 }
 
 #[tokio::test]
+async fn bulk_refuses_a_selection_past_the_cap_before_touching_the_store() {
+    // An unopenable store would fail the first lookup, so a redirect naming
+    // the cap proves the selection was refused before any lookup ran.
+    let (_dir, serve) = crate::state::fixtures::store_unopenable();
+    let keys: Vec<String> = (0..=super::BULK_MAX)
+        .map(|i| format!("sonarr:{i}"))
+        .collect();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let response = bulk(State(web_state(serve)), Form(bulk_form("unshare", &keys))).await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = location(&response);
+    assert!(
+        location.contains(&format!("at+most+{}", super::BULK_MAX)),
+        "{location}"
+    );
+}
+
+#[tokio::test]
 async fn bulk_unshare_marks_every_selected_item_and_counts_the_missing() {
     let (_dir, serve) = crate::state::fixtures::ready().await;
     let store = serve.store().await.unwrap();

@@ -512,6 +512,75 @@
         ]
       }
     },
+    "/api/gossip/pair": {
+      "post": {
+        "tags": [
+          "gossip"
+        ],
+        "summary": "`POST /api/gossip/pair` — a friend who just pasted this instance's invite\nhanding back their side.",
+        "operationId": "gossipPair",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GossipPairRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The caller's address and key are stored for the peer the `apikey` belongs to, and their identity is pinned from the signed record if one was sent. Nothing is returned: the caller already holds everything this instance knows about it."
+          },
+          "400": {
+            "description": "The address does not parse, the key is empty or oversized, or the record's signature does not verify.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This peer's outbound half is already set, or the record names a different identity from the one pinned. Pairing fills an empty row and never overwrites one; the operator clears it from Friends.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database or the vault is not open.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
     "/api/v2.0/indexers": {
       "get": {
         "tags": [
@@ -1746,6 +1815,35 @@
             "type": "integer",
             "description": "Valid records no newer than what is already stored.",
             "minimum": 0
+          }
+        }
+      },
+      "GossipPairRequest": {
+        "type": "object",
+        "description": "What a pasting instance sends back to the inviter: where it is, the key it\nminted for them, and its signed self-record so its identity is pinned\nfrom proof rather than from a bare claim.",
+        "required": [
+          "url",
+          "key"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The base URL the caller's own sharerr is reached on."
+          },
+          "key": {
+            "type": "string",
+            "description": "The key the caller issued this instance."
+          },
+          "record": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LighthouseEndpointRecord",
+                "description": "The caller's signed self-record, when it has a gossip identity."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
