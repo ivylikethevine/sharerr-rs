@@ -15,7 +15,7 @@
 //! a SHA-256 is stored, so sharerr genuinely cannot show it again. Losing one means
 //! issuing another, which is the correct behaviour for a bearer credential.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
@@ -239,11 +239,29 @@ pub async fn feed_preview(State(state): State<WebState>, Path(id): Path<i64>) ->
         return (StatusCode::NOT_FOUND, "no such friend").into_response();
     };
 
+    render_preview(&state, peer.scope, &peer.key_hash).await
+}
+
+/// Stands in for a friend's `key_hash` on the links of a scope preview, where
+/// no friend, and so no key, exists yet.
+const PREVIEW_TOKEN: &str = "preview";
+
+/// What a friend with a given scope would be served, before one is added: the
+/// same render as [`feed_preview`], so scoping can be checked before a key is
+/// handed over. Its links carry a placeholder token the tracker refuses.
+pub async fn scope_preview(
+    State(state): State<WebState>,
+    Query(form): Query<ScopeForm>,
+) -> Response {
+    render_preview(&state, form.scope, PREVIEW_TOKEN).await
+}
+
+async fn render_preview(state: &WebState, scope: PeerScope, token: &str) -> Response {
     let matched = match crate::torznab::collect(
         &state.serve,
         &crate::torznab::SearchQuery::default(),
-        peer.scope,
-        &peer.key_hash,
+        scope,
+        token,
     )
     .await
     {
@@ -1149,6 +1167,71 @@ mod tests {
         let response = feed_preview(State(state), Path(sam.id)).await;
 
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn scope_preview_serves_only_what_that_scope_admits() {
+        use sharerr_core::{MediaSource, ShareState};
+
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        for (source, file_id, hash) in [
+            (MediaSource::Sonarr, 1, "aa"),
+            (MediaSource::Radarr, 2, "bb"),
+        ] {
+            let hash = hash.repeat(20);
+            let item = sharerr_core::SharedItem {
+                id: None,
+                source,
+                source_id: 1,
+                file_id,
+                spec: sharerr_core::MediaSpec::Movie {
+                    title: "Something".to_owned(),
+                    year: None,
+                },
+                release_title: "Something".to_owned(),
+                arr_path: "/x".into(),
+                size: 1,
+                ids: sharerr_core::ExternalIds::default(),
+                media: None,
+                info_hash: None,
+                announce_token_fp: None,
+                created_by_sharerr: true,
+                private: true,
+                state: ShareState::Pending,
+                last_error: None,
+                created_at: None,
+                achieved_ratio: None,
+                ratio_limit_reported: None,
+            };
+            store.upsert(&item).await.unwrap();
+            store.set_info_hash(source, file_id, &hash).await.unwrap();
+            store
+                .set_state(source, file_id, ShareState::Seeding, None)
+                .await
+                .unwrap();
+            store
+                .set_seeding(source, file_id, &hash, None, true, Some(true))
+                .await
+                .unwrap();
+        }
+        let state = web_state(serve);
+
+        let response = scope_preview(
+            State(state),
+            Query(ScopeForm {
+                scope: PeerScope::Tv,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let feed = String::from_utf8_lossy(&bytes);
+        assert!(feed.contains(&"aa".repeat(20)), "{feed}");
+        assert!(!feed.contains(&"bb".repeat(20)), "{feed}");
     }
 
     // -------------------------------------------------------------- export()

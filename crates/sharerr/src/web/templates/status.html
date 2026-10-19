@@ -48,6 +48,26 @@
 </p>
 {% endif %}
 
+{# Built from the checks below, and gone once every step is done. #}
+{% if diag.setup_pending() %}
+<section>
+<h2>Getting started</h2>
+<ol class="panel checklist">
+  {% for step in diag.setup %}
+  <li>
+    {% if step.done %}
+    <span class="ok" aria-hidden="true">&#10003;</span><span class="visually-hidden">Done:</span>
+    {% else %}
+    <span class="hint" aria-hidden="true">&#9675;</span><span class="visually-hidden">To do:</span>
+    {% endif %}
+    {% if step.href.is_empty() %}{{ step.label }}{% else %}<a href="{{ step.href }}">{{ step.label }}</a>{% endif %}
+    {% if !step.done %}<br><span class="hint">{{ step.hint }}</span>{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+</section>
+{% endif %}
+
 {% if diag.scanned %}
 {% if diag.healthy %}
 <p class="ok" role="status">

@@ -69,6 +69,11 @@
   </p>
 
   <button type="submit">Generate a key</button>
+  {# Submits the chosen scope as a GET to a new tab: the feed a friend with it
+     would be served, before any key exists. #}
+  <button type="submit" class="link" formaction="/peers/preview" formmethod="get"
+          formtarget="_blank" formnovalidate
+          title="Opens the feed XML a friend with this scope would be served">Preview their feed</button>
 </form>
 
 <section class="wide">

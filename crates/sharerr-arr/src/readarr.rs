@@ -178,6 +178,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 original_path: None,
                 // Populated for an audiobook, `None` for an ebook.
                 media: file.media_info.and_then(MediaInfo::into_meta),
+                scene: None,
             });
         }
     }

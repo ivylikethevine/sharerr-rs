@@ -35,7 +35,10 @@ version changes what discovery reads:
 - **Whisparr v2** is Sonarr's codebase and **v3** is Radarr's, on the same
   `/api/v3` prefix, so sharerr reads the version from `/system/status` on
   every pass and walks sites and episodes or movies and scenes to match. v3
-  tags per movie or scene, not per site. Both land in the XXX category.
+  tags per movie or scene, not per site. Both land in the XXX category. A v3
+  scene imported without a scene name is titled from its studio and release
+  date (`Studio.YY.MM.DD.Title.XXX...`), the shape Whisparr matches scenes
+  by; a film is titled like a Radarr one.
 - **Sonarr v5** still serves the v3 API sharerr reads, unchanged. It can
   number a series in an alternate episode order (`seasonType`, such as
   `dvd`); a release title's `SxxEyy` carries no order, so a friend's Sonarr

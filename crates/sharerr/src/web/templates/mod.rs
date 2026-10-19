@@ -708,6 +708,26 @@ pub struct DiagnosticsData {
     /// What the lighthouse poller is doing, or `None` when none is configured
     /// — the section is omitted entirely in that case.
     pub lighthouse: Option<LighthouseView>,
+    /// The setup checklist, in the order a new install meets each step.
+    pub setup: Vec<SetupStep>,
+}
+
+impl DiagnosticsData {
+    /// Whether any setup step is still open; the checklist is hidden once none is.
+    pub fn setup_pending(&self) -> bool {
+        self.setup.iter().any(|step| !step.done)
+    }
+}
+
+/// One step of the status page's setup checklist.
+#[derive(Debug)]
+pub struct SetupStep {
+    pub label: &'static str,
+    pub done: bool,
+    /// What to do next; only rendered while the step is open.
+    pub hint: String,
+    /// The page the fix is made on, or empty when it is this one.
+    pub href: &'static str,
 }
 
 /// One past sync run, pre-rendered for display.

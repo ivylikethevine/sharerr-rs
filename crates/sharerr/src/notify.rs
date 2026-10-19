@@ -159,23 +159,74 @@ async fn trigger_enabled(state: &ServeState, trigger: NotificationTrigger) -> bo
 }
 
 impl Webhook {
-    async fn post(&self, event: &str, message: &str) {
-        let body = match self.kind {
-            NotifyKind::Generic => serde_json::json!({ "event": event, "message": message }),
+    /// Where to POST and what, in this kind's shape; `Err` when the stored URL
+    /// lacks a part the kind needs.
+    fn request(&self, event: &str, message: &str) -> Result<(url::Url, serde_json::Value), String> {
+        use serde_json::json;
+
+        let title = format!("sharerr — {event}");
+        Ok(match self.kind {
+            NotifyKind::Generic => (
+                self.url.clone(),
+                json!({ "event": event, "message": message }),
+            ),
             // Discord's own webhook shape: a single "content" field, Markdown-ish.
-            NotifyKind::Discord => serde_json::json!({
-                "content": format!("**sharerr** — {event}\n{message}")
-            }),
+            NotifyKind::Discord => (
+                self.url.clone(),
+                json!({ "content": format!("**sharerr** — {event}\n{message}") }),
+            ),
             // Apprise's API server shape: POST to its own /notify endpoint, which
             // fans this one call out to whatever Apprise itself is configured to
             // reach.
-            NotifyKind::Apprise => serde_json::json!({
-                "title": format!("sharerr — {event}"),
-                "body": message,
-            }),
+            NotifyKind::Apprise => (self.url.clone(), json!({ "title": title, "body": message })),
+            // The topic's URL is what ntfy's apps show, so that is what is
+            // stored; JSON publishing wants the server root with the topic in
+            // the body. The query (an `auth=` token) stays on the root.
+            NotifyKind::Ntfy => {
+                let path = self.url.path().trim_end_matches('/');
+                let (parent, topic) = path.rsplit_once('/').unwrap_or(("", path));
+                if topic.is_empty() {
+                    return Err("the ntfy URL names no topic".to_owned());
+                }
+                let mut root = self.url.clone();
+                root.set_path(&format!("{parent}/"));
+                (
+                    root,
+                    json!({ "topic": topic, "title": title, "message": message }),
+                )
+            }
+            NotifyKind::Gotify => (
+                self.url.clone(),
+                json!({ "title": title, "message": message }),
+            ),
+            NotifyKind::Telegram => {
+                let (url, mut body) = take_params(&self.url, &["chat_id"])?;
+                body.insert("text".to_owned(), format!("{title}\n{message}").into());
+                (url, body.into())
+            }
+            // Pushover reads its keys from the body only.
+            NotifyKind::Pushover => {
+                let (url, mut body) = take_params(&self.url, &["token", "user"])?;
+                body.insert("title".to_owned(), title.into());
+                body.insert("message".to_owned(), message.into());
+                (url, body.into())
+            }
+        })
+    }
+
+    async fn post(&self, event: &str, message: &str) {
+        let (url, body) = match self.request(event, message) {
+            Ok(request) => request,
+            Err(reason) => {
+                tracing::warn!(
+                    event,
+                    "not sending a notification: {reason} — check Settings"
+                );
+                return;
+            }
         };
 
-        match self.client.post(self.url.clone()).json(&body).send().await {
+        match self.client.post(url).json(&body).send().await {
             Ok(response) if response.status().is_success() => {
                 tracing::debug!(event, "sent a notification");
             }
@@ -184,11 +235,42 @@ impl Webhook {
                 event,
                 "the notification webhook responded with an error"
             ),
+            // `without_url`: every kind's URL carries a credential.
             Err(err) => {
+                let err = err.without_url();
                 tracing::warn!(error = %err, event, "could not reach the notification webhook");
             }
         }
     }
+}
+
+/// `url` without the query parameters `names`, and their values as a JSON
+/// object; `Err` names the first one missing.
+fn take_params(
+    url: &url::Url,
+    names: &[&str],
+) -> Result<(url::Url, serde_json::Map<String, serde_json::Value>), String> {
+    let mut taken = serde_json::Map::new();
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter_map(|(key, value)| {
+            if names.contains(&key.as_ref()) {
+                taken.insert(key.into_owned(), value.into_owned().into());
+                None
+            } else {
+                Some((key.into_owned(), value.into_owned()))
+            }
+        })
+        .collect();
+    if let Some(missing) = names.iter().find(|name| !taken.contains_key(**name)) {
+        return Err(format!("the URL has no {missing}= parameter"));
+    }
+    let mut stripped = url.clone();
+    stripped.set_query(None);
+    if !kept.is_empty() {
+        stripped.query_pairs_mut().extend_pairs(kept);
+    }
+    Ok((stripped, taken))
 }
 
 /// A friend was just seen for the first time — `torznab::record_sighting`
@@ -371,7 +453,9 @@ async fn push_heartbeat(client: &reqwest::Client, url: &url::Url) {
             status = %response.status(),
             "the heartbeat push URL responded with an error"
         ),
+        // `without_url`: the push URL carries the monitor's token.
         Err(err) => {
+            let err = err.without_url();
             tracing::warn!(error = %err, "could not reach the heartbeat push URL");
         }
     }
@@ -542,6 +626,153 @@ mod tests {
         webhook_to(&server, NotifyKind::Apprise)
             .post("sync failed", "could not reach qBittorrent")
             .await;
+    }
+
+    /// A [`webhook_to`] whose stored URL has `path_and_query` on the server.
+    fn webhook_at(
+        server: &wiremock::MockServer,
+        path_and_query: &str,
+        kind: NotifyKind,
+    ) -> Webhook {
+        Webhook {
+            url: url::Url::parse(&format!("{}{path_and_query}", server.uri())).unwrap(),
+            ..webhook_to(server, kind)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ntfy_webhook_posts_to_the_server_root_naming_the_topic() {
+        use wiremock::matchers::{body_json, method, path, query_param};
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/"))
+            .and(query_param("auth", "tk"))
+            .and(body_json(serde_json::json!({
+                "topic": "sharerr-alerts",
+                "title": "sharerr — sync failed",
+                "message": "could not reach qBittorrent"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        webhook_at(&server, "/sharerr-alerts?auth=tk", NotifyKind::Ntfy)
+            .post("sync failed", "could not reach qBittorrent")
+            .await;
+    }
+
+    #[test]
+    fn an_ntfy_url_without_a_topic_is_refused() {
+        let webhook = Webhook {
+            url: url::Url::parse("https://ntfy.sh/").unwrap(),
+            kind: NotifyKind::Ntfy,
+            client: reqwest::Client::new(),
+        };
+        assert!(webhook.request("sync failed", "x").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_gotify_webhook_posts_title_and_message_to_the_stored_url() {
+        use wiremock::matchers::{body_json, method, path, query_param};
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/message"))
+            .and(query_param("token", "app"))
+            .and(body_json(serde_json::json!({
+                "title": "sharerr — sync failed",
+                "message": "could not reach qBittorrent"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        webhook_at(&server, "/message?token=app", NotifyKind::Gotify)
+            .post("sync failed", "could not reach qBittorrent")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_telegram_webhook_moves_the_chat_id_into_the_body() {
+        use wiremock::matchers::{body_json, method, path};
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/bot123:abc/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "-10042",
+                "text": "sharerr — sync failed\ncould not reach qBittorrent"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let webhook = webhook_at(
+            &server,
+            "/bot123:abc/sendMessage?chat_id=-10042",
+            NotifyKind::Telegram,
+        );
+        let (url, _) = webhook.request("sync failed", "x").unwrap();
+        assert_eq!(url.query(), None);
+        webhook
+            .post("sync failed", "could not reach qBittorrent")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_pushover_webhook_moves_both_keys_into_the_body() {
+        use wiremock::matchers::{body_json, method, path};
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/1/messages.json"))
+            .and(body_json(serde_json::json!({
+                "token": "app",
+                "user": "me",
+                "title": "sharerr — sync failed",
+                "message": "could not reach qBittorrent"
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        webhook_at(
+            &server,
+            "/1/messages.json?token=app&user=me",
+            NotifyKind::Pushover,
+        )
+        .post("sync failed", "could not reach qBittorrent")
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_pushover_url_missing_a_key_sends_nothing() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let webhook = webhook_at(&server, "/1/messages.json?token=app", NotifyKind::Pushover);
+        assert_eq!(
+            webhook.request("sync failed", "x").unwrap_err(),
+            "the URL has no user= parameter"
+        );
+        webhook.post("sync failed", "x").await;
+    }
+
+    #[test]
+    fn take_params_keeps_every_other_query_parameter() {
+        let url = url::Url::parse("https://example.test/p?a=1&chat_id=7&b=2").unwrap();
+        let (stripped, taken) = take_params(&url, &["chat_id"]).unwrap();
+        assert_eq!(stripped.as_str(), "https://example.test/p?a=1&b=2");
+        assert_eq!(taken["chat_id"], "7");
     }
 
     /// `post` must never panic or propagate an error outward — a notification

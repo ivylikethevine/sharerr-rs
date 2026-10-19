@@ -911,8 +911,20 @@
     <option value="generic" {% if notifications_kind == "generic" %}selected{% endif %}>Generic JSON webhook</option>
     <option value="discord" {% if notifications_kind == "discord" %}selected{% endif %}>Discord</option>
     <option value="apprise" {% if notifications_kind == "apprise" %}selected{% endif %}>Apprise API server</option>
+    <option value="ntfy" {% if notifications_kind == "ntfy" %}selected{% endif %}>ntfy</option>
+    <option value="gotify" {% if notifications_kind == "gotify" %}selected{% endif %}>Gotify</option>
+    <option value="telegram" {% if notifications_kind == "telegram" %}selected{% endif %}>Telegram</option>
+    <option value="pushover" {% if notifications_kind == "pushover" %}selected{% endif %}>Pushover</option>
   </select>
   {% call locked("notifications.kind") %}{% endcall %}
+  <p class="hint">
+    The URL carries everything the service needs. ntfy: the topic's URL, with
+    <code>?auth=</code> for a protected one. Gotify:
+    <code>/message?token=</code> an app token. Telegram:
+    <code>https://api.telegram.org/bot&lt;token&gt;/sendMessage?chat_id=</code>.
+    Pushover: <code>https://api.pushover.net/1/messages.json?token=</code> the
+    app token <code>&amp;user=</code> your user key.
+  </p>
 
   <label for="notifications_peer_quiet_secs">Peer-quiet threshold (seconds)</label>
   <input id="notifications_peer_quiet_secs" name="peer_quiet_secs" value="{{ notifications_peer_quiet_secs }}" inputmode="numeric"

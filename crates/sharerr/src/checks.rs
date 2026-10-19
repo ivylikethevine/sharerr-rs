@@ -919,6 +919,7 @@ mod tests {
             media: None,
             scene_name: None,
             original_path: None,
+            scene: None,
         };
 
         let report = check_paths(&config, &[item]);
@@ -973,6 +974,7 @@ mod tests {
             media: None,
             original_path: None,
             scene_name: None,
+            scene: None,
         };
         let ready = ArrOutcome::Ready {
             version: "4.0".to_owned(),
@@ -1001,6 +1003,7 @@ mod tests {
             ids: sharerr_core::ExternalIds::default(),
             media: None,
             scene_name: None,
+            scene: None,
         };
         let ready = DirOutcome::Ready {
             skipped: 3,
@@ -1058,6 +1061,7 @@ mod tests {
             ids: sharerr_core::ExternalIds::default(),
             media: None,
             scene_name: None,
+            scene: None,
         };
 
         let report = check_paths(&config, &[item]);
@@ -1086,6 +1090,7 @@ mod tests {
             ids: sharerr_core::ExternalIds::default(),
             media: None,
             scene_name: None,
+            scene: None,
         };
 
         let report = check_paths(&Config::default(), &[item]);

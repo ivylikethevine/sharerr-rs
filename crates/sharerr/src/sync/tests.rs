@@ -1385,6 +1385,7 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
         media: None,
         scene_name: None,
         original_path: None,
+        scene: None,
     };
 
     let result = h

@@ -140,7 +140,7 @@
     <input type="hidden" name="kind" value="{{ filters.kind }}">
     <input type="hidden" name="sort" value="{{ filters.sort }}">
     <input type="hidden" name="dir" value="{{ filters.dir }}">
-    <span class="hint">With the selected items:</span>
+    <span class="hint">With the selected items (at most {{ crate::web::items::BULK_MAX }}):</span>
     <button type="submit" name="action" value="retry"
             title="Runs one sync pass now, which retries every failed item">Retry now</button>
     <button type="submit" name="action" value="rebuild" class="secondary"

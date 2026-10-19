@@ -111,6 +111,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 // Sonarr's `EpisodeFileResource` has no `originalFilePath`; only
                 // Radarr records where the file was before the import rename.
                 original_path: None,
+                scene: None,
             });
         }
     }

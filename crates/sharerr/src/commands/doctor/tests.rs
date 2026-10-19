@@ -1087,6 +1087,7 @@ fn discovered(arr_path: impl Into<std::path::PathBuf>, size: u64) -> Discovered 
         media: None,
         scene_name: None,
         original_path: None,
+        scene: None,
     }
 }
 

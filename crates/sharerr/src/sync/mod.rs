@@ -763,6 +763,7 @@ impl Syncer {
             item.original_path.as_deref(),
             item.media.as_ref(),
             &item.arr_path,
+            item.scene.as_ref(),
         );
 
         if !dry_run {

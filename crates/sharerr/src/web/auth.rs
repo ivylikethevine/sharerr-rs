@@ -29,16 +29,18 @@
 //! not trusted.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Form, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, Form, State};
+use axum::http::{Extensions, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use secrecy::SecretString;
 use serde::Deserialize;
+use sharerr_core::config::ServerConfig;
 use sharerr_store::StoreError;
 use tokio::sync::RwLock;
 
@@ -224,18 +226,15 @@ impl Throttle {
 /// once one source address has made too many attempts inside the window —
 /// see [`Throttle`].
 ///
-/// Keyed on [`std::net::SocketAddr`] from the connection itself, **never**
-/// `X-Forwarded-For` or any other client-supplied header — the same rule
-/// `arrived_over_https`'s doc comment states for the `Secure` cookie flag,
-/// for the same reason: a spoofable header must never buy a privilege, and
-/// a rate-limit exemption is exactly that. Behind a reverse proxy every
-/// request therefore collapses to one address and this degrades to a global
-/// limit across every visitor — acceptable, since the store-level
-/// concurrency cap (`sharerr_store::users`) is what actually bounds the
-/// damage, and `docs/SECURITY.md` already tells such a deployment to bring
-/// its own limiter.
+/// Keyed on the connection's own address, and on `X-Forwarded-For` only when
+/// that connection is a listed `server.trusted_proxies` entry (see
+/// [`client_address`]): a spoofable header must never buy a privilege, and a
+/// rate-limit exemption is exactly that. Behind an unlisted proxy every
+/// request collapses to the proxy's address and this degrades to a global
+/// limit, which the store-level concurrency cap (`sharerr_store::users`)
+/// still bounds.
 ///
-/// Deliberately reads [`ConnectInfo`](axum::extract::ConnectInfo) out of the
+/// Deliberately reads [`ConnectInfo`] out of the
 /// request's own extensions rather than taking it as an extractor argument:
 /// an extractor argument is resolved for *every* method before this
 /// function's body runs at all, so a GET here would need it present too.
@@ -252,12 +251,7 @@ pub async fn throttle_unauthenticated_posts(
         return next.run(request).await;
     }
 
-    let remote = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|axum::extract::ConnectInfo(addr)| addr.ip());
-
-    let Some(remote) = remote else {
+    let Some(peer) = connection_address(request.extensions()) else {
         // Only reachable if this listener was not bound with
         // `into_make_service_with_connect_info` — every real one is (see
         // `commands::serve`) — or a test exercises a POST without supplying
@@ -266,6 +260,13 @@ pub async fn throttle_unauthenticated_posts(
         tracing::error!("no connection address available; skipping the login throttle");
         return next.run(request).await;
     };
+    // Cloned out rather than read inside `with_config`: a borrow of the
+    // request held across that await would make this future `!Send`.
+    let server = state
+        .serve
+        .with_config(|config| config.server.clone())
+        .await;
+    let remote = client_address(&server, peer, request.headers());
 
     match state.throttle.check(remote).await {
         Ok(()) => next.run(request).await,
@@ -312,9 +313,11 @@ pub async fn current_user(state: &WebState, jar: &CookieJar) -> Option<String> {
 /// Gate for every page that is not `/login`, `/setup`, `/assets/*`, `/health`, or
 /// `/ready`.
 ///
-/// An unauthenticated visitor is sent to `/setup` when the instance has no account
-/// yet and to `/login` when it does — the two states need different pages, and
-/// guessing wrong strands a first-time user on a form they cannot satisfy.
+/// A session cookie or a user named by a trusted forward-auth proxy (see
+/// [`vouched_user`]) lets the request through. Anyone else is sent to `/setup`
+/// when the instance has no account yet and to `/login` when it does — the two
+/// states need different pages, and guessing wrong strands a first-time user on
+/// a form they cannot satisfy.
 pub async fn require_auth(
     State(state): State<WebState>,
     jar: CookieJar,
@@ -322,6 +325,16 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     if current_user(&state, &jar).await.is_some() {
+        return next.run(request).await;
+    }
+
+    let server = state
+        .serve
+        .with_config(|config| config.server.clone())
+        .await;
+    let peer = connection_address(request.extensions());
+    if let Some(username) = vouched_user(&server, peer, request.headers()) {
+        tracing::debug!(%username, "signed in by the forward-auth proxy");
         return next.run(request).await;
     }
 
@@ -517,8 +530,9 @@ pub async fn change_password(
     Form(form): Form<ChangePasswordForm>,
 ) -> Response {
     let Some(username) = current_user(&state, &jar).await else {
-        // The guard should have caught this; treat it as a session that expired
-        // between rendering the form and submitting it.
+        // Past the guard without a session: a forward-auth proxy let this
+        // request in, and the proxy's user has no sharerr password to check.
+        // `/login` is where to get a session that has one.
         return Redirect::to("/login").into_response();
     };
 
@@ -711,6 +725,70 @@ fn forwarded_proto(element: &str) -> Option<&str> {
             .eq_ignore_ascii_case("proto")
             .then_some(value.trim().trim_matches('"'))
     })
+}
+
+/// The connection's own address, which `serve` supplies through
+/// `into_make_service_with_connect_info`.
+fn connection_address(extensions: &Extensions) -> Option<IpAddr> {
+    extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip())
+}
+
+/// The address a request is throttled as: the connection's own, unless that
+/// is a trusted proxy, in which case the nearest `X-Forwarded-For` hop that is
+/// not one.
+///
+/// Read right to left: each proxy appends the address it heard from, so the
+/// entries a trusted proxy wrote are believable and everything left of the
+/// first untrusted one is that client's own claim. A missing or unparseable
+/// hop stops the walk at the last address that could be believed.
+fn client_address(server: &ServerConfig, peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+    if !server.trusts(peer) {
+        return peer;
+    }
+    let hops: Vec<&str> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .collect();
+
+    let mut client = peer;
+    for hop in hops.iter().rev() {
+        let Ok(ip) = hop.trim().parse::<IpAddr>() else {
+            break;
+        };
+        client = ip;
+        if !server.trusts(ip) {
+            break;
+        }
+    }
+    client
+}
+
+/// The user a forward-auth proxy (Authelia, Authentik) signed in, from the
+/// `server.auth_header` it sets.
+///
+/// Believed only from a connection that is itself a `server.trusted_proxies`
+/// entry: anyone can send a `Remote-User` header, so the header is the
+/// proxy's word only when the proxy is the one sending it. That also makes a
+/// test or listener with no connection address fail closed. The proxy's own
+/// access policy decides who gets in; whatever name it passes is accepted.
+fn vouched_user(
+    server: &ServerConfig,
+    peer: Option<IpAddr>,
+    headers: &HeaderMap,
+) -> Option<String> {
+    if server.auth_header.is_empty() || !server.trusts(peer?) {
+        return None;
+    }
+    let name = headers
+        .get(server.auth_header.as_str())?
+        .to_str()
+        .ok()?
+        .trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 pub fn internal(message: &str) -> Response {
@@ -1686,6 +1764,179 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_of(response).await, "reached");
+    }
+
+    // ------------------------------------------------- trusted proxies
+
+    /// Server settings trusting `172.18.0.0/16`, signing in by `Remote-User`.
+    fn behind_proxy() -> ServerConfig {
+        ServerConfig {
+            trusted_proxies: vec!["172.18.0.0/16".parse().unwrap()],
+            auth_header: "Remote-User".to_owned(),
+            ..ServerConfig::default()
+        }
+    }
+
+    fn ip(raw: &str) -> IpAddr {
+        raw.parse().unwrap()
+    }
+
+    #[test]
+    fn the_client_address_is_the_connection_unless_a_trusted_proxy_forwarded_it() {
+        let server = behind_proxy();
+        let forwarded = headers(&[("x-forwarded-for", "203.0.113.9")]);
+
+        assert_eq!(
+            client_address(&server, ip("198.51.100.4"), &forwarded),
+            ip("198.51.100.4"),
+            "an untrusted connection's own header is never read"
+        );
+        assert_eq!(
+            client_address(&server, ip("172.18.0.2"), &forwarded),
+            ip("203.0.113.9")
+        );
+        assert_eq!(
+            client_address(&server, ip("172.18.0.2"), &HeaderMap::new()),
+            ip("172.18.0.2"),
+            "no header leaves the proxy's own address"
+        );
+    }
+
+    #[test]
+    fn the_client_address_stops_at_the_first_hop_no_trusted_proxy_wrote() {
+        let server = behind_proxy();
+        // The client claimed 10.9.9.9; the outer proxy (172.18.0.3) heard
+        // 203.0.113.9 and the inner one heard the outer one.
+        let chain = headers(&[("x-forwarded-for", "10.9.9.9, 203.0.113.9, 172.18.0.3")]);
+        assert_eq!(
+            client_address(&server, ip("172.18.0.2"), &chain),
+            ip("203.0.113.9")
+        );
+
+        let garbled = headers(&[("x-forwarded-for", "203.0.113.9, unknown")]);
+        assert_eq!(
+            client_address(&server, ip("172.18.0.2"), &garbled),
+            ip("172.18.0.2")
+        );
+    }
+
+    #[test]
+    fn only_a_trusted_proxy_can_name_the_user() {
+        let server = behind_proxy();
+        let named = headers(&[("remote-user", " ivy ")]);
+
+        assert_eq!(
+            vouched_user(&server, Some(ip("172.18.0.2")), &named).as_deref(),
+            Some("ivy")
+        );
+        assert_eq!(
+            vouched_user(&server, Some(ip("198.51.100.4")), &named),
+            None
+        );
+        assert_eq!(vouched_user(&server, None, &named), None);
+        assert_eq!(
+            vouched_user(
+                &server,
+                Some(ip("172.18.0.2")),
+                &headers(&[("remote-user", "  ")])
+            ),
+            None
+        );
+
+        let header_unset = ServerConfig {
+            auth_header: String::new(),
+            ..behind_proxy()
+        };
+        assert_eq!(
+            vouched_user(&header_unset, Some(ip("172.18.0.2")), &named),
+            None,
+            "trusting a proxy for its addresses does not turn on sign-in"
+        );
+    }
+
+    /// A `WebState` whose config trusts [`behind_proxy`]'s range.
+    fn web_state_behind_proxy(dir: &tempfile::TempDir) -> WebState {
+        let config = sharerr_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            server: behind_proxy(),
+            ..sharerr_core::Config::default()
+        };
+        web_state(std::sync::Arc::new(crate::state::ServeState::new(
+            config,
+            dir.path().join("sharerr.toml"),
+            None,
+        )))
+    }
+
+    fn from(addr: &str, request: axum::http::request::Builder) -> Request<axum::body::Body> {
+        request
+            .extension(ConnectInfo(SocketAddr::new(ip(addr), 40000)))
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_guard_lets_in_a_user_the_trusted_proxy_names_and_nobody_else() {
+        use axum::routing::get;
+        let dir = tempfile::tempdir().unwrap();
+        let state = web_state_behind_proxy(&dir);
+        seeded_user(&state.serve).await;
+        let app = axum::Router::new()
+            .route("/", get(|| async { "inside" }))
+            .route_layer(axum::middleware::from_fn_with_state(state, require_auth));
+        let named = || Request::builder().uri("/").header("remote-user", "ivy");
+
+        let response = tower::ServiceExt::oneshot(app.clone(), from("172.18.0.2", named()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = tower::ServiceExt::oneshot(app, from("198.51.100.4", named()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(super::super::location(&response), "/login");
+    }
+
+    #[tokio::test]
+    async fn behind_a_trusted_proxy_each_client_has_its_own_budget() {
+        use axum::routing::post;
+        let dir = tempfile::tempdir().unwrap();
+        let app = axum::Router::new()
+            .route("/login", post(|| async { "reached" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                web_state_behind_proxy(&dir),
+                throttle_unauthenticated_posts,
+            ));
+        let attempt = |client: &str| {
+            from(
+                "172.18.0.2",
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header("x-forwarded-for", client),
+            )
+        };
+
+        for _ in 0..THROTTLE_MAX_ATTEMPTS {
+            let response = tower::ServiceExt::oneshot(app.clone(), attempt("203.0.113.9"))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = tower::ServiceExt::oneshot(app.clone(), attempt("203.0.113.9"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let response = tower::ServiceExt::oneshot(app, attempt("203.0.113.10"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "another client behind the same proxy is not caught in the first one's limit"
+        );
     }
 
     #[test]

@@ -589,6 +589,40 @@ pub struct Discovered {
     /// "unknown for good": the sync pass probes the file itself for anything that
     /// arrives without it. See [`MediaMeta`].
     pub media: Option<MediaMeta>,
+    /// A Whisparr v3 scene's studio and release date, which its release title
+    /// leads with. `None` for everything else, Whisparr's films included.
+    pub scene: Option<SceneMeta>,
+}
+
+/// What a scene's release title is built from besides its own title:
+/// `Studio.YY.MM.DD.Title`, the shape Whisparr's parser expects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneMeta {
+    pub studio: String,
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+}
+
+impl SceneMeta {
+    /// From a studio name and an ISO 8601 date or timestamp
+    /// (`2021-03-15T00:00:00Z`), or `None` when either is missing or the date
+    /// does not parse.
+    pub fn new(studio: &str, released: &str) -> Option<Self> {
+        let studio = studio.trim();
+        let date = released.get(..10)?;
+        let mut parts = date.splitn(3, '-');
+        let year: u16 = parts.next()?.parse().ok()?;
+        let month: u8 = parts.next()?.parse().ok()?;
+        let day: u8 = parts.next()?.parse().ok()?;
+        let valid = !studio.is_empty() && (1..=12).contains(&month) && (1..=31).contains(&day);
+        valid.then(|| Self {
+            studio: studio.to_owned(),
+            year,
+            month,
+            day,
+        })
+    }
 }
 
 impl Discovered {
@@ -985,6 +1019,7 @@ mod tests {
             media: None,
             scene_name: Some("Copper.Vale.2001.mkv".to_owned()),
             original_path: None,
+            scene: None,
         }
     }
 

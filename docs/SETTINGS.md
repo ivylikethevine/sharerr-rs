@@ -70,10 +70,37 @@ field's _presence_ is still readable from `sharerr.toml` or the environment
 
 ## `[server]`
 
-| TOML key                  | Type        | Default        | Notes                                                                                                                                                                                                              |
-| ------------------------- | ----------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `server.bind`             | socket addr | `0.0.0.0:8477` | Carries the web UI, the tracker, and the Torznab feed on one port, unless [`[tracker]`](#tracker) opens a second dedicated listener.                                                                               |
-| `server.security_headers` | bool        | `false`        | Sends a strict CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `nosniff` with every web UI response, for an instance reachable outside a trusted LAN. Applies on the next request. File/env only. |
+| TOML key                  | Type            | Default        | Notes                                                                                                                                                                                                              |
+| ------------------------- | --------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `server.bind`             | socket addr     | `0.0.0.0:8477` | Carries the web UI, the tracker, and the Torznab feed on one port, unless [`[tracker]`](#tracker) opens a second dedicated listener.                                                                               |
+| `server.security_headers` | bool            | `false`        | Sends a strict CSP, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` and `nosniff` with every web UI response, for an instance reachable outside a trusted LAN. Applies on the next request. File/env only. |
+| `server.trusted_proxies`  | list of strings | `[]`           | Addresses or CIDR blocks (`172.18.0.5`, `10.0.0.0/8`) of reverse proxies whose `X-Forwarded-For` the login throttle believes, so each client behind the proxy gets its own limit. File/env only.                   |
+| `server.auth_header`      | string          | `""` (off)     | The header a forward-auth proxy names the signed-in user in, such as `Remote-User` (Authelia) or `X-authentik-username` (Authentik). Believed only on a connection from `server.trusted_proxies`. File/env only.   |
+
+### Signing in through a forward-auth proxy
+
+With Authelia, Authentik or another forward-auth proxy in front, sharerr can
+take the proxy's sign-in instead of asking for its own password:
+
+```toml
+[server]
+trusted_proxies = ["172.18.0.5"]
+auth_header = "Remote-User"
+```
+
+A request from a listed proxy that carries a non-empty `auth_header` is
+signed in as the user it names; the proxy's own access policy decides who
+gets that far. Any other request still meets the login page, so a direct
+connection to port 8477 keeps working with the sharerr password, and
+**Sign out** ends only a sharerr session, not the proxy's.
+
+Two things make this safe, and both are yours to check:
+
+- **List the proxy's own address, not its network.** Every address listed
+  can name any user, so a Docker subnet trusts every container on it.
+- **The proxy must replace the header a client sent, not pass it through.**
+  A proxy that forwards a client's own `Remote-User` signs in anyone who
+  types one.
 
 ## \*arr apps
 
@@ -309,12 +336,12 @@ See the README's
 A webhook fired on whichever triggers below are enabled — see the README's
 mentions under ["Friends finding each other"](../README.md#friends-finding-each-other).
 
-| TOML key                        | Type                                | Default           | Notes                                                                                                                                                          |
-| ------------------------------- | ----------------------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `notifications.kind`            | `generic` \| `discord` \| `apprise` | `generic`         | Which payload shape to send.                                                                                                                                   |
-| `notifications.peer_quiet_secs` | int                                 | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.                                                                                           |
-| `notifications.heartbeat_secs`  | int                                 | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                               |
-| `notifications.triggers`        | array of strings                    | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
+| TOML key                        | Type             | Default           | Notes                                                                                                                                                          |
+| ------------------------------- | ---------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `notifications.kind`            | string           | `generic`         | Which payload shape to send: `generic`, `discord`, `apprise`, `ntfy`, `gotify`, `telegram` or `pushover`. Each one's webhook URL is below.                     |
+| `notifications.peer_quiet_secs` | int              | `604800` (7 days) | `0` turns the peer-quiet check off, independent of `triggers` below.                                                                                           |
+| `notifications.heartbeat_secs`  | int              | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                               |
+| `notifications.triggers`        | array of strings | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
 The ten triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
 `endpoint_rotated` (the gluetun-resolved advertised address changing —
@@ -337,10 +364,28 @@ Uptime-Kuma-style push — a plain GET to `notifications.heartbeat_url`, every
 the monitor on the other end notices when the pushes _stop_. Paste the
 monitor's push URL whole, query string included.
 
+The webhook URL carries everything a kind needs:
+
+- `generic`: any URL that takes `{"event": ..., "message": ...}`.
+- `discord`: the channel's webhook URL.
+- `apprise`: the API server's `/notify` (or `/notify/<key>`) URL.
+- `ntfy`: the topic's own URL, `https://ntfy.sh/<topic>`, with `?auth=` for a
+  protected topic. sharerr publishes to the server root with the topic in the
+  body.
+- `gotify`: `https://<server>/message?token=<app token>`.
+- `telegram`: `https://api.telegram.org/bot<token>/sendMessage?chat_id=<chat>`.
+- `pushover`:
+  `https://api.pushover.net/1/messages.json?token=<app token>&user=<user key>`.
+
+For `telegram` and `pushover` those parameters move from the query into the
+request body, where the service reads them. A URL missing one sends nothing
+and logs which.
+
 Vault secrets: `notifications.webhook_url` and `notifications.heartbeat_url`
 — in the vault rather than `sharerr.toml` even though neither is
 credential-shaped at a glance, because a Discord webhook URL embeds its own
-bearer token in the path, and a push URL embeds the monitor's.
+bearer token in the path, as most kinds above carry one somewhere, and a
+push URL embeds the monitor's.
 
 ## `[metrics]`
 

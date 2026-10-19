@@ -16,12 +16,13 @@
 use secrecy::SecretString;
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::{Config, MediaSource};
+use sharerr_store::Peer;
 
 use super::WebState;
 use super::peers::ago;
 use super::templates::{
     DiagnosticsData, EndpointStatus, LighthouseRow, LighthouseView, RunBar, RunChart, RunRow,
-    SampleRow, ServiceLine, SwarmBar, SwarmChart,
+    SampleRow, ServiceLine, SetupStep, SwarmBar, SwarmChart,
 };
 use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use crate::gluetun::GluetunTarget;
@@ -55,11 +56,12 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     let config = &config;
     let tracker_endpoint = state.serve.endpoint_for(GluetunTarget::Tracker);
     let client_endpoint = state.serve.endpoint_for(GluetunTarget::Client);
-    let (snapshot, torrent_client, runs, swarm_samples, tracker, client) = tokio::join!(
+    let (snapshot, torrent_client, runs, swarm_samples, friends, tracker, client) = tokio::join!(
         checks::snapshot(config, &api_key),
         torrent_client_line(config, &api_key),
         recent_run_rows(state),
         swarm_sample_rows(state),
+        active_friends(state),
         endpoint_status(
             display_label(GluetunTarget::Tracker),
             GluetunTarget::Tracker.config(config),
@@ -79,6 +81,8 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         libraries,
         paths,
     } = snapshot;
+
+    let setup = setup_steps(&config.tag, torrent_client.ok, &sources, &paths, &friends);
 
     // The client leads: it is the one service every install has, and the
     // one whose absence stops everything else from mattering.
@@ -140,7 +144,99 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
         runs,
         swarm_chart: swarm_chart(&swarm_samples),
         lighthouse: lighthouse_view(state, config).await,
+        setup,
     }
+}
+
+/// Unrevoked friends, or none when the store will not answer — same
+/// empty-on-error tolerance as [`recent_run_rows`].
+async fn active_friends(state: &WebState) -> Vec<Peer> {
+    let Ok(store) = state.serve.store().await else {
+        return Vec::new();
+    };
+    store
+        .list_peers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|peer| !peer.is_revoked())
+        .collect()
+}
+
+/// The setup checklist, read off checks this page already ran rather than
+/// probing anything again.
+fn setup_steps(
+    tag: &str,
+    client_ok: bool,
+    sources: &[(MediaSource, ArrOutcome)],
+    paths: &checks::PathReport,
+    friends: &[Peer],
+) -> Vec<SetupStep> {
+    // A tag that is missing or unused names the app to fix; otherwise the
+    // hint covers every way content reaches sharerr.
+    let tag_hint = sources
+        .iter()
+        .find_map(|(kind, outcome)| {
+            let app = super::settings::title_case(kind.as_str());
+            match outcome {
+                ArrOutcome::TagMissing { .. } => Some(format!(
+                    "Create a tag named {tag:?} in {app} and apply it to what you want to share."
+                )),
+                ArrOutcome::TagUnused { .. } => Some(format!(
+                    "Apply the {tag:?} tag in {app} to what you want to share."
+                )),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "Tag something {tag:?} in a connected *arr app, or add a [[library]] directory."
+            )
+        });
+
+    let broken = paths.missing.len() + paths.invalid.len();
+    let paths_hint = if paths.checked == 0 {
+        "Checked once something is tagged.".to_owned()
+    } else {
+        format!(
+            "{broken} of {} tagged file(s) do not resolve; see Path mapping below.",
+            paths.checked
+        )
+    };
+
+    vec![
+        SetupStep {
+            label: "Torrent client reachable",
+            done: client_ok,
+            hint: "See Services below; its address and credential are saved under Settings."
+                .to_owned(),
+            href: "/settings",
+        },
+        SetupStep {
+            label: "Something tagged to share",
+            done: paths.checked > 0,
+            hint: tag_hint,
+            href: "",
+        },
+        SetupStep {
+            label: "Path mapping resolves",
+            done: paths.checked > 0 && !paths.is_failure(),
+            hint: paths_hint,
+            href: "",
+        },
+        SetupStep {
+            label: "A friend added",
+            done: !friends.is_empty(),
+            hint: "Add one and hand them the feed URL and their key.".to_owned(),
+            href: "/peers",
+        },
+        SetupStep {
+            label: "Their first pull seen",
+            done: friends.iter().any(|peer| peer.last_seen_at.is_some()),
+            hint: "Marked the first time a friend's Prowlarr uses their key.".to_owned(),
+            href: "/peers",
+        },
+    ]
 }
 
 /// The row heading for one gluetun poller, as the status page words it.
@@ -581,6 +677,80 @@ mod tests {
     use super::*;
 
     use super::super::web_state;
+
+    // ------------------------------------------------------- setup_steps()
+
+    fn friend(last_seen_at: Option<i64>) -> Peer {
+        Peer {
+            id: 1,
+            label: "Sam".to_owned(),
+            created_at: 0,
+            last_seen_at,
+            revoked_at: None,
+            scope: sharerr_store::PeerScope::All,
+            pubkey: None,
+            gossip_url: None,
+            key_hash: "hash".to_owned(),
+            downloaded: 0,
+            uploaded: 0,
+        }
+    }
+
+    fn open_steps(steps: &[SetupStep]) -> Vec<&'static str> {
+        steps
+            .iter()
+            .filter(|step| !step.done)
+            .map(|step| step.label)
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_install_has_every_step_open_and_names_the_app_missing_the_tag() {
+        let sources = [(
+            MediaSource::Sonarr,
+            ArrOutcome::TagMissing {
+                version: "4.0".to_owned(),
+            },
+        )];
+        let steps = setup_steps(
+            "sharerr",
+            false,
+            &sources,
+            &checks::PathReport::default(),
+            &[],
+        );
+
+        assert_eq!(open_steps(&steps).len(), steps.len());
+        assert!(steps[1].hint.contains("in Sonarr"), "{}", steps[1].hint);
+        assert_eq!(steps[2].hint, "Checked once something is tagged.");
+    }
+
+    #[test]
+    fn a_broken_mapping_and_an_unseen_friend_are_the_only_open_steps() {
+        let paths = checks::PathReport {
+            checked: 10,
+            missing: vec!["/tv/a.mkv".into()],
+            ..checks::PathReport::default()
+        };
+        let steps = setup_steps("sharerr", true, &[], &paths, &[friend(None)]);
+
+        assert_eq!(
+            open_steps(&steps),
+            ["Path mapping resolves", "Their first pull seen"]
+        );
+        assert!(steps[2].hint.starts_with("1 of 10"), "{}", steps[2].hint);
+    }
+
+    #[test]
+    fn every_step_closes_once_a_friend_has_pulled_from_a_resolving_library() {
+        let paths = checks::PathReport {
+            checked: 10,
+            ..checks::PathReport::default()
+        };
+        let steps = setup_steps("sharerr", true, &[], &paths, &[friend(Some(1))]);
+
+        assert!(open_steps(&steps).is_empty());
+    }
 
     /// A `RunRow` at the given scale, with only the fields the strip reads set
     /// to anything meaningful.
@@ -1172,6 +1342,7 @@ mod tests {
             media: None,
             scene_name: None,
             original_path: None,
+            scene: None,
         }
     }
 
