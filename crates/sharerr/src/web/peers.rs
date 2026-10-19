@@ -27,7 +27,10 @@ use sharerr_store::{EndpointKind, Peer, PeerScope, SeedingSummary};
 
 use super::WebState;
 use super::settings::title_case;
-use super::templates::{PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render};
+use super::templates::{
+    PairedPeer, PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render,
+};
+use crate::pairing::Invite;
 
 pub async fn page(State(state): State<WebState>) -> Response {
     render(&build(&state, None, None).await)
@@ -67,10 +70,12 @@ pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Re
     {
         Ok(peer) => {
             tracing::info!(peer = %peer.label, scope = peer.scope.as_str(), "added a friend");
+            let invite = own_invite(&state, &key, None).await;
             let mut page = build(&state, None, None).await;
             page.revealed = Some(RevealedPeer {
                 label: peer.label,
                 key,
+                invite,
             });
             render(&page)
         }
@@ -84,6 +89,140 @@ pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Re
         Err(sharerr_store::StoreError::InvalidUser(message)) => rejected(&state, message).await,
         Err(err) => rejected(&state, &format!("could not add that friend: {err}")).await,
     }
+}
+
+/// This instance's side of a friendship as one string: where it is, the key
+/// it issued, and its gossip identity when the vault is open. `in_reply_to`
+/// names the friend's key the string answers, on a reply.
+async fn own_invite(state: &WebState, key: &str, in_reply_to: Option<String>) -> Option<String> {
+    let pubkey = state
+        .serve
+        .gossip_identity()
+        .await
+        .map(|identity| identity.pubkey_hex());
+    let mut invite = Invite::new(state.serve.public_base_url().await, key.to_owned(), pubkey);
+    invite.in_reply_to = in_reply_to;
+    Some(invite.encode())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PairForm {
+    invite: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    scope: PeerScope,
+}
+
+/// Paste a friend's invite. A fresh invite adds them, stores their side, and
+/// returns ours to their sharerr over HTTP; a reply fills the row its
+/// `in_reply_to` names instead. See [`crate::pairing`].
+pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    let invite = match Invite::decode(&form.invite) {
+        Ok(invite) => invite,
+        Err(reason) => return rejected(&state, &reason).await,
+    };
+    // The key they issued has to land in the vault, so a vault that will not
+    // open stops this before a row exists that nothing could complete.
+    let mut vault = match state.serve.open_vault().await {
+        Ok(vault) => vault,
+        Err(reason) => {
+            return rejected(
+                &state,
+                &format!("the vault must be open to store the key they issued: {reason}"),
+            )
+            .await;
+        }
+    };
+
+    if let Some(hash) = &invite.in_reply_to {
+        let peer = match store.peer_by_key_hash(hash).await {
+            Ok(Some(peer)) => peer,
+            Ok(None) => {
+                return rejected(
+                    &state,
+                    "that reply answers a key this instance never issued, or one since revoked",
+                )
+                .await;
+            }
+            Err(err) => return rejected(&state, &format!("could not look that up: {err}")).await,
+        };
+        if let Err(reason) = crate::pairing::apply_invite(&store, &mut vault, &peer, &invite).await
+        {
+            return rejected(&state, &reason).await;
+        }
+        tracing::info!(peer = %peer.label, "paired: applied a friend's reply");
+        let mut page = build(&state, None, None).await;
+        page.paired = Some(PairedPeer {
+            label: peer.label,
+            return_failure: None,
+        });
+        return render(&page);
+    }
+
+    let label = form.label.trim().to_owned();
+    if label.is_empty() {
+        return rejected(&state, "give this friend a name before pairing").await;
+    }
+    let key = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
+        Ok(key) => key,
+        Err(reason) => return rejected(&state, &reason).await,
+    };
+    let peer = match store
+        .create_peer(&label, &SecretString::from(key.clone()), form.scope)
+        .await
+    {
+        Ok(peer) => peer,
+        Err(sharerr_store::StoreError::UserExists { username }) => {
+            return rejected(
+                &state,
+                &format!("There is already a friend called {username:?}."),
+            )
+            .await;
+        }
+        Err(sharerr_store::StoreError::InvalidUser(message)) => {
+            return rejected(&state, message).await;
+        }
+        Err(err) => return rejected(&state, &format!("could not add that friend: {err}")).await,
+    };
+    if let Err(reason) = crate::pairing::apply_invite(&store, &mut vault, &peer, &invite).await {
+        return rejected(&state, &reason).await;
+    }
+    tracing::info!(peer = %peer.label, scope = peer.scope.as_str(), "added a friend from an invite");
+
+    // Our side goes back to them over HTTP under the key they just gave us;
+    // if that cannot reach them, the same facts become a reply to send by hand.
+    let request = crate::pairing::PairRequest {
+        url: state.serve.public_base_url().await,
+        key: key.clone(),
+        record: crate::gossip::self_record(&state.serve).await,
+    };
+    let return_failure = crate::pairing::send_pair(&invite, &request).await.err();
+    let reply = match &return_failure {
+        Some(reason) => {
+            tracing::info!(peer = %peer.label, reason, "paired: could not return our side automatically");
+            own_invite(&state, &key, Some(crate::pairing::key_hash(&invite.key))).await
+        }
+        None => None,
+    };
+
+    let mut page = build(&state, None, None).await;
+    if return_failure.is_some() {
+        page.revealed = Some(RevealedPeer {
+            label: peer.label.clone(),
+            key,
+            invite: reply,
+        });
+    }
+    page.paired = Some(PairedPeer {
+        label: peer.label,
+        return_failure,
+    });
+    render(&page)
 }
 
 /// Stop honouring a friend's key, keeping the row so the operator can see it
@@ -479,6 +618,7 @@ async fn build(
             .collect(),
         error: error.or(list_error),
         revealed,
+        paired: None,
         // The live endpoint, not `config.public_base_url()` — see
         // `ServeState::public_base_url`'s docs: a gluetun-only deployment
         // must advertise the resolved address here too.
@@ -1688,5 +1828,373 @@ mod tests {
             });
             Ok(())
         });
+    }
+    // ------------------------------------------------------------- pairing
+
+    /// The invite string the reveal box shows, if any — found by its element,
+    /// since the paste form's placeholder also starts with the prefix.
+    fn invite_in(body: &str) -> Option<crate::pairing::Invite> {
+        let marker = "<code class=\"invite\">";
+        let start = body.find(marker)? + marker.len();
+        let end = body[start..].find('<')?;
+        Some(crate::pairing::Invite::decode(&body[start..start + end]).unwrap())
+    }
+
+    fn sams_invite(url: &str) -> crate::pairing::Invite {
+        crate::pairing::Invite::new(
+            url.to_owned(),
+            "the-key-sam-issued-us".to_owned(),
+            Some("ab".repeat(32)),
+        )
+    }
+
+    fn pair_form(invite: &crate::pairing::Invite, label: &str) -> Form<PairForm> {
+        Form(PairForm {
+            invite: invite.encode(),
+            label: label.to_owned(),
+            scope: PeerScope::Tv,
+        })
+    }
+
+    #[tokio::test]
+    async fn pair_refuses_something_that_is_not_an_invite() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+
+        let response = pair(
+            State(state),
+            Form(PairForm {
+                invite: "definitely not".to_owned(),
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("not a sharerr invite"));
+        assert!(store.list_peers().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pair_answers_503_when_the_store_will_not_open() {
+        let (_dir, state) = web_state_with_unopenable_store();
+        let response = pair(
+            State(state),
+            pair_form(&sams_invite("http://sam.example"), "Sam"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// The key they issued has nowhere to go without the vault, so no row is
+    /// created either — `Jail` with `clear_env`, per CLAUDE.md, so another
+    /// Jail test's master key cannot leak in and flip this to success.
+    #[test]
+    fn pair_without_a_vault_creates_nothing() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let response = pair(
+                    State(state),
+                    pair_form(&sams_invite("http://sam.example"), "Sam"),
+                )
+                .await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(body_of(response).await.contains("vault must be open"));
+                let store = serve.store().await.unwrap();
+                assert!(store.list_peers().await.unwrap().is_empty());
+            });
+            Ok(())
+        });
+    }
+
+    /// The whole fresh-invite path against a stand-in for Sam's sharerr:
+    /// Sam's row is created with their side stored and their identity
+    /// pinned, and the return `POST` carries our freshly minted key under the
+    /// key Sam's invite held.
+    #[test]
+    fn pair_adds_the_friend_and_returns_our_side_to_their_sharerr() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let sam = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::path("/api/gossip/pair"))
+                    .and(wiremock::matchers::query_param(
+                        "apikey",
+                        "the-key-sam-issued-us",
+                    ))
+                    .respond_with(wiremock::ResponseTemplate::new(204))
+                    .mount(&sam)
+                    .await;
+                let invite = sams_invite(&sam.uri());
+
+                let response = pair(State(state), pair_form(&invite, "Sam")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                let body = body_of(response).await;
+                assert!(body.contains("Paired with Sam"), "{body}");
+                assert!(body.contains("nothing to send back"), "{body}");
+                assert!(invite_in(&body).is_none(), "no reply to show: {body}");
+
+                let store = serve.store().await.unwrap();
+                let peers = store.list_peers().await.unwrap();
+                assert_eq!(peers.len(), 1);
+                let peer = &peers[0];
+                assert_eq!(peer.label, "Sam");
+                assert_eq!(peer.scope, PeerScope::Tv);
+                assert_eq!(
+                    peer.gossip_url.as_deref(),
+                    Some(format!("{}/", sam.uri()).as_str())
+                );
+                assert_eq!(peer.pubkey.as_deref(), Some("ab".repeat(32).as_str()));
+                let vault = serve.open_vault().await.unwrap();
+                let stored = vault
+                    .get(&secret_keys::peer_gossip_key(peer.id))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(stored.expose_secret(), "the-key-sam-issued-us");
+
+                let received = sam.received_requests().await.unwrap();
+                assert_eq!(received.len(), 1);
+                let sent: crate::pairing::PairRequest =
+                    serde_json::from_slice(&received[0].body).unwrap();
+                assert_eq!(
+                    crate::pairing::key_hash(&sent.key),
+                    peer.key_hash,
+                    "the key sent back is the one Sam's row was created under"
+                );
+                assert_eq!(sent.url, serve.public_base_url().await);
+            });
+            Ok(())
+        });
+    }
+
+    /// When their sharerr cannot be reached the friend is still added, and the
+    /// page hands over a reply naming the key their invite carried.
+    #[test]
+    fn pair_shows_a_reply_when_their_sharerr_is_unreachable() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let invite = sams_invite("http://127.0.0.1:9");
+
+                let response = pair(State(state), pair_form(&invite, "Sam")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                let body = body_of(response).await;
+                assert!(body.contains("could not reach their sharerr"), "{body}");
+
+                let store = serve.store().await.unwrap();
+                let peer = store.list_peers().await.unwrap().remove(0);
+                let reply = invite_in(&body).expect("a reply is shown");
+                assert_eq!(
+                    reply.in_reply_to.as_deref(),
+                    Some(crate::pairing::key_hash("the-key-sam-issued-us").as_str())
+                );
+                assert_eq!(crate::pairing::key_hash(&reply.key), peer.key_hash);
+                assert!(body.contains(&reply.key), "the key itself is revealed too");
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pair_with_a_reply_fills_the_friend_it_answers_and_adds_nobody() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer(
+                        "Sam",
+                        &SecretString::from("key-we-issued-sam"),
+                        PeerScope::All,
+                    )
+                    .await
+                    .unwrap();
+                let mut reply = sams_invite("http://sam.example:8477");
+                reply.in_reply_to = Some(crate::pairing::key_hash("key-we-issued-sam"));
+
+                let response = pair(State(state), pair_form(&reply, "ignored")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                assert!(body_of(response).await.contains("Paired with Sam"));
+
+                let peers = store.list_peers().await.unwrap();
+                assert_eq!(peers.len(), 1, "a reply never adds a friend");
+                let peer = &peers[0];
+                assert_eq!(peer.id, sam.id);
+                assert_eq!(peer.gossip_url.as_deref(), Some("http://sam.example:8477/"));
+                assert_eq!(peer.pubkey.as_deref(), Some("ab".repeat(32).as_str()));
+                let vault = serve.open_vault().await.unwrap();
+                assert!(
+                    vault
+                        .get(&secret_keys::peer_gossip_key(sam.id))
+                        .unwrap()
+                        .is_some()
+                );
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pair_with_a_reply_to_an_unknown_or_revoked_key_is_refused() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer(
+                        "Sam",
+                        &SecretString::from("key-we-issued-sam"),
+                        PeerScope::All,
+                    )
+                    .await
+                    .unwrap();
+                store.revoke_peer(sam.id).await.unwrap();
+                let mut reply = sams_invite("http://sam.example:8477");
+                reply.in_reply_to = Some(crate::pairing::key_hash("key-we-issued-sam"));
+
+                let response = pair(State(state), pair_form(&reply, "")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(
+                    body_of(response)
+                        .await
+                        .contains("never issued, or one since revoked")
+                );
+                assert!(
+                    store
+                        .peer(sam.id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .gossip_url
+                        .is_none()
+                );
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pair_with_a_reply_refuses_an_identity_other_than_the_pinned_one() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let sam = store
+                    .create_peer(
+                        "Sam",
+                        &SecretString::from("key-we-issued-sam"),
+                        PeerScope::All,
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    store
+                        .bind_peer_pubkey(sam.id, &"cd".repeat(32))
+                        .await
+                        .unwrap()
+                );
+                let mut reply = sams_invite("http://sam.example:8477");
+                reply.in_reply_to = Some(crate::pairing::key_hash("key-we-issued-sam"));
+
+                let response = pair(State(state), pair_form(&reply, "")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(body_of(response).await.contains("different identity"));
+                assert!(
+                    store
+                        .peer(sam.id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .gossip_url
+                        .is_none()
+                );
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pair_needs_a_name_for_a_fresh_invite_and_refuses_a_taken_one() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve.clone());
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let store = serve.store().await.unwrap();
+                let invite = sams_invite("http://sam.example:8477");
+
+                let response = pair(State(state.clone()), pair_form(&invite, "  ")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(body_of(response).await.contains("give this friend a name"));
+                assert!(store.list_peers().await.unwrap().is_empty());
+
+                store
+                    .create_peer("Sam", &SecretString::from("first"), PeerScope::All)
+                    .await
+                    .unwrap();
+                let response = pair(State(state), pair_form(&invite, "Sam")).await;
+                assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(body_of(response).await.contains("already a friend called"));
+                assert_eq!(store.list_peers().await.unwrap().len(), 1);
+            });
+            Ok(())
+        });
+    }
+
+    /// `add`'s reveal carries the invite for a friend who runs sharerr, built
+    /// from the same live address the feed URL is.
+    #[tokio::test]
+    async fn add_reveals_an_invite_carrying_the_key_and_the_live_address() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve
+            .endpoint()
+            .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
+        let store = serve.store().await.unwrap();
+        let state = web_state(serve);
+
+        let response = add(
+            State(state),
+            Form(AddForm {
+                label: "Sam".to_owned(),
+                scope: PeerScope::All,
+            }),
+        )
+        .await;
+        let body = body_of(response).await;
+
+        let invite = invite_in(&body).expect("the invite is shown");
+        assert_eq!(invite.url, "http://203.0.113.9:41234");
+        assert!(invite.in_reply_to.is_none());
+        // Whether a pubkey rides along depends on the vault opening, which a
+        // `Jail` test elsewhere in the binary can flip under a bare
+        // `#[tokio::test]` (see CLAUDE.md); not asserted either way.
+        let peer = store.list_peers().await.unwrap().remove(0);
+        assert_eq!(crate::pairing::key_hash(&invite.key), peer.key_hash);
     }
 }

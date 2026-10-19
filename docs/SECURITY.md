@@ -60,6 +60,12 @@ What is already there, so a report can say which layer it gets past:
 - Gossip records are Ed25519-signed by the peer they describe, with a
   `signed_at` that blocks replaying an older record, and a pull only returns
   the intersection with keys the caller already proved it knows.
+- The pairing endpoint (`/api/gossip/pair`) rides the same per-peer key and
+  only fills a friendship whose outbound half is empty: a second call, or one
+  whose signed record names an identity other than the pinned one, is refused.
+  A pasted invite pins the identity it carries at pairing time, by the
+  operator, instead of trusting the first record a friend later signs, and
+  is refused seven days after it was issued.
 - The gluetun hook endpoints are unauthenticated by design (gluetun's hooks
   are bare `wget`s) but answer only private source addresses.
 

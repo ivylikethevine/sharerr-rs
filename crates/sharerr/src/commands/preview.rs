@@ -24,9 +24,9 @@ use crate::gluetun::GluetunTarget;
 use crate::web::templates::{
     ArrSection, ClientCheck, ClientMismatch, DiagnosticsData, EdgeStyle, EndpointStatus,
     FilterOption, Glance, GluetunSection, ItemRow, ItemsPage, LibraryRow, LighthouseRow,
-    LighthouseView, NodeStatus, PathRow, PeerEndpointView, PeerRow, PeersPage, RevealedPeer,
-    RunRow, SampleRow, ScopeOption, SettingsPage, SetupStep, SortLink, StateCount, StatusPage,
-    TokenStatus, TopologyPage,
+    LighthouseView, NodeStatus, PairedPeer, PathRow, PeerEndpointView, PeerRow, PeersPage,
+    RevealedPeer, RunRow, SampleRow, ScopeOption, SettingsPage, SetupStep, SortLink, StateCount,
+    StatusPage, TokenStatus, TopologyPage,
 };
 use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, SourceNode, layout};
 
@@ -833,6 +833,18 @@ fn peers_page() -> PeersPage {
         revealed: Some(RevealedPeer {
             label: "Sam".to_owned(),
             key: "sam-9f2a7c4e1b6d3f80".to_owned(),
+            invite: Some(
+                crate::pairing::Invite::new(
+                    "http://seed.example.com:8477".to_owned(),
+                    "sam-9f2a7c4e1b6d3f80".to_owned(),
+                    Some("a1b2c3d4".repeat(8)),
+                )
+                .encode(),
+            ),
+        }),
+        paired: Some(PairedPeer {
+            label: "Alex".to_owned(),
+            return_failure: Some("could not reach their sharerr: connection refused".to_owned()),
         }),
         feed_url: "http://seed.example.com:8477/api?t=caps&apikey=<their key>".to_owned(),
     }

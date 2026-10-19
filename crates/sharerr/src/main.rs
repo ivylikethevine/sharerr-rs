@@ -9,6 +9,7 @@ mod lighthouse_client;
 mod metrics;
 mod notify;
 mod openapi;
+mod pairing;
 mod pathsuggest;
 mod secrets;
 mod settings;

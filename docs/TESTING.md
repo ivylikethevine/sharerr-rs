@@ -114,10 +114,13 @@ existed: no other compose stack sets `gossip_url` or `lighthouse.urls`, and
 the lighthouse appears in no other test stack.
 
 Three independent sharerr nodes and one independent lighthouse. The script
-meshes every pair (not just a line) so trust-on-first-use binds every
-identity, then severs the direct link between two of them and rotates one
-node's advertised endpoint — the one event the whole reconnection system
-exists to survive. Bash asserts the mechanical outcomes by reading each
+meshes every pair (not just a line) so every identity is bound, then severs
+the direct link between two of them and rotates one node's advertised
+endpoint — the one event the whole reconnection system exists to survive.
+One pair is wired from an invite string: B adds A and A pastes the invite,
+whose return call over `/api/gossip/pair` must leave both rows complete and
+both identities pinned before the first gossip pass; the other two pairs
+are typed in by hand, so the manual path stays covered too. Bash asserts the mechanical outcomes by reading each
 node's own peers page: the still-linked pair updates directly, the severed
 pair recovers only through the third node's relay or the lighthouse, and a
 restarted node rejoins and re-converges. `crates/sharerr/tests/e2e_mesh.rs`

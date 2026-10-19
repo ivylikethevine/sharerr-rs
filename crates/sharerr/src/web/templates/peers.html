@@ -20,6 +20,24 @@
 <p class="error" role="alert">{{ message }}</p>
 {% endif %}
 
+{% if let Some(done) = paired %}
+<div class="ok" role="status">
+  {% if let Some(reason) = done.return_failure %}
+  <p><strong>Paired with {{ done.label }}</strong> — their side is stored here.</p>
+  <p class="warn">
+    Your side could not be sent to their sharerr ({{ reason }}), so send them the
+    reply below instead. Pasting it on their Friends page completes the pairing.
+  </p>
+  {% else %}
+  <p><strong>Paired with {{ done.label }}</strong> — both sides are set.</p>
+  <p class="hint">
+    Their sharerr now holds your address and the key made for them; there is
+    nothing to send back.
+  </p>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if let Some(new) = revealed %}
 <div class="ok key-reveal" role="status">
   <p><strong>{{ new.label }}'s key</strong></p>
@@ -46,6 +64,21 @@
               aria-label="Copy the feed URL">copy</button>
       <span class="hint" data-copy-note></span>
     </dd>
+    {% if let Some(invite) = new.invite %}
+    <dt>Invite</dt>
+    <dd>
+      <code class="invite">{{ invite }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ invite }}"
+              aria-label="Copy the invite">copy</button>
+      <span class="hint" data-copy-note></span>
+      <p class="hint">
+        If they run sharerr too, send them this one string instead: it carries
+        the key, your address and your identity. Pasted on their Friends page it
+        adds you, and their sharerr sends its side back here on its own. It is
+        refused after seven days; a fresh one means deleting and re-adding them.
+      </p>
+    </dd>
+    {% endif %}
   </dl>
 </div>
 {% endif %}
@@ -74,6 +107,34 @@
   <button type="submit" class="link" formaction="/peers/preview" formmethod="get"
           formtarget="_blank" formnovalidate
           title="Opens the feed XML a friend with this scope would be served">Preview their feed</button>
+</form>
+
+<h2>Paste a friend's invite</h2>
+<form method="post" action="/peers/pair" class="panel">
+  <p class="hint">
+    A friend who runs sharerr can send you one string from their Friends page
+    instead of a key and two addresses. Pasting it adds them, stores the key
+    they issued you, pins their identity, and sends your side back to their
+    sharerr. A <em>reply</em> they send after pasting yours completes a
+    friendship you started; the name and scope below are ignored for one.
+  </p>
+  <label for="invite">Invite</label>
+  <textarea id="invite" name="invite" rows="3" required spellcheck="false"
+            autocomplete="off" placeholder="sharerr-invite:…"></textarea>
+
+  <label for="pair_label">Name</label>
+  <input id="pair_label" name="label" maxlength="64" autocomplete="off"
+         placeholder="Sam">
+  <p class="hint">Just for you — the same as adding a friend above.</p>
+
+  <label for="pair_scope">Can see</label>
+  <select id="pair_scope" name="scope">
+    {% for option in scope_options %}
+    <option value="{{ option.value }}">{{ option.label }}</option>
+    {% endfor %}
+  </select>
+
+  <button type="submit">Pair</button>
 </form>
 
 <section class="wide">

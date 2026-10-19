@@ -239,6 +239,7 @@ mod tests {
         for expected in [
             "/api",
             "/api/gossip/endpoints",
+            "/api/gossip/pair",
             "/api/v2.0/indexers",
             "/api/v2.0/server/config",
             "/api/v2.0/indexers/{indexer}/results",

@@ -924,6 +924,8 @@ pub struct PeersPage {
     /// reason: it has to be copied into someone else's Prowlarr, but it is never
     /// readable again.
     pub revealed: Option<RevealedPeer>,
+    /// The outcome of pasting an invite, shown on the response that applied it.
+    pub paired: Option<PairedPeer>,
     /// The feed URL a friend pastes alongside their key.
     pub feed_url: String,
 }
@@ -932,6 +934,18 @@ pub struct PeersPage {
 pub struct RevealedPeer {
     pub label: String,
     pub key: String,
+    /// The same key, address and identity as one invite string for a friend
+    /// who also runs sharerr. `None` when no instance address could be built.
+    pub invite: Option<String>,
+}
+
+/// A friend just paired from an invite. `return_failure` is why their sharerr
+/// could not be told our side automatically; the page then also carries a
+/// [`RevealedPeer`] holding the reply to send by hand.
+#[derive(Debug)]
+pub struct PairedPeer {
+    pub label: String,
+    pub return_failure: Option<String>,
 }
 
 /// One `<option>` in the items page's source/state filters.
