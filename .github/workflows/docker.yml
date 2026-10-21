@@ -94,7 +94,7 @@ jobs:
     # `publish` and `release` carry the same condition, so a rehearsal can
     # never reach them whatever the `release` environment's settings say.
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Room for the CI wait in the last step.
     timeout-minutes: 30
     permissions:
@@ -323,7 +323,7 @@ jobs:
     if: >-
       (startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push') ||
       github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -409,7 +409,7 @@ jobs:
     needs: [gate, docker, lighthouse, scan]
     # See `gate`'s `if:` for why the event check is here as well as the ref.
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment: release
     # One group, not two: both images are promoted by this one job, so
@@ -493,7 +493,7 @@ jobs:
     name: create the github release (gh)
     needs: [gate, publish]
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     # `contents: write` for `gh release create` and the generate-notes
     # endpoint; `pull-requests: read` for each merged PR's body;

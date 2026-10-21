@@ -610,9 +610,6 @@ Smallest first, by how much each item touches:
 - **A theme toggle.** The UI follows `prefers-color-scheme` and nothing
   else; a light/dark switch remembered per browser, like Topology's
   redaction checkbox.
-- **Ubuntu 26.04 runners.** Every job runs on `ubuntu-latest`; pin the
-  workflows to `ubuntu-26.04` once GitHub ships the image, so a toolchain
-  change lands when chosen rather than when the alias moves.
 - **A "send test notification" button.** Settings → Notifications saves a
   webhook without proving it; one button that fires a test event and shows
   the response.

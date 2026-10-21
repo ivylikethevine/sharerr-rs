@@ -51,7 +51,7 @@ env:
 jobs:
   plan:
     name: plan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
@@ -87,7 +87,7 @@ jobs:
     needs: plan
     # Hosted: the stacks need a Docker daemon, /dev/net/tun (vpn) and
     # nothing else from the self-hosted box.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -128,7 +128,7 @@ jobs:
     if: >-
       !cancelled() &&
       (github.event_name == 'schedule' || needs.tier.result == 'failure')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read

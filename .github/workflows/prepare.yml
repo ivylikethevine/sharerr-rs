@@ -13,7 +13,7 @@
 # secrets that way. ci.yml and docker.yml both trigger on `pull_request`, and for
 # that event the workflow file that actually runs is the one on the fork's own
 # branch, not this repo's — so a fork PR that simply read
-# `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}` in `runs-on:` would still resolve
+# `${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}` in `runs-on:` would still resolve
 # to the real label and get its own job steps scheduled on it. This job is the
 # fix: it is the one place that checks whether the run is a fork PR, and every
 # other job reads its output instead of the raw variable.
@@ -77,7 +77,7 @@ jobs:
     # Always hosted, deliberately: this decides whether anything else in the
     # calling workflow reaches the self-hosted box, so it cannot be the thing a
     # fork PR could already redirect.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 2
     outputs:
       label: ${{ steps.pick.outputs.label }}
@@ -98,10 +98,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$FORK" = "true" ]; then
-            echo "label=ubuntu-latest" >>"$GITHUB_OUTPUT"
+            echo "label=ubuntu-26.04" >>"$GITHUB_OUTPUT"
             echo "::notice title=runner::fork PR - GitHub-hosted only, ignoring RUNNER_LABEL"
           else
-            echo "label=${LABEL:-ubuntu-latest}" >>"$GITHUB_OUTPUT"
+            echo "label=${LABEL:-ubuntu-26.04}" >>"$GITHUB_OUTPUT"
           fi
 
       - if: github.event_name == 'push' || github.event_name == 'pull_request'

@@ -72,7 +72,7 @@ rpassword = "7.5.4"
 quick-xml = "0.42.0"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 # Peer API keys are hashed with SHA-256, not Argon2 — they are 160 bits of CSPRNG
 # output rather than a human password, and the lookup has to be an indexed
 # equality on every Torznab request. See migrations/0003_peers.sql.
@@ -93,7 +93,7 @@ symphonia = { version = "0.6.1", default-features = false, features = ["flac", "
 # BitTorrent's info hash is SHA-1 by protocol (BEP 3); it is an identifier here,
 # never a security decision. See `sharerr-torrent`'s `metainfo` module.
 sha1 = "0.11.0"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
