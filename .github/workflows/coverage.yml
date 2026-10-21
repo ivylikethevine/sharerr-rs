@@ -51,7 +51,7 @@ env:
 jobs:
   coverage:
     name: coverage (cargo-llvm-cov)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     # only a green push to main gets a fresh run; a manual dispatch passes
     # the first clause
@@ -184,7 +184,7 @@ jobs:
       github.event_name == 'pull_request' &&
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     # Advisory: a figure on a PR is information, not a gate. The main leg's
     # floor is what fails.
@@ -297,7 +297,7 @@ jobs:
       !cancelled() &&
       github.event_name == 'pull_request' &&
       needs.pr.result != 'skipped'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     continue-on-error: true
     permissions:

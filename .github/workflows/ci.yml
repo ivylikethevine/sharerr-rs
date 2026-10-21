@@ -139,7 +139,7 @@ jobs:
   reuse:
     name: reuse a green pr run (tree match)
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -180,7 +180,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository &&
           !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') &&
           !contains(needs.*.result, 'skipped') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       # the tree sha of the merge commit this run tested
@@ -200,7 +200,7 @@ jobs:
     name: carry forward the pr run's checks
     needs: reuse
     if: needs.reuse.outputs.run != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       # the PR run's job list
@@ -375,7 +375,7 @@ jobs:
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     # Hosted, like `scripts` below: ./setup-tool may need sudo for
     # /usr/local/bin, and cargo-deny reads files and the advisory database only.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -410,7 +410,7 @@ jobs:
     name: shell + compose
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -454,7 +454,7 @@ jobs:
     name: terraform (fmt + validate)
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
       TERRAFORM_CHANGED: ${{ contains(fromJSON(needs.prepare.outputs.changes), 'terraform') }}
@@ -502,7 +502,7 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -546,7 +546,7 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -581,7 +581,7 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -638,7 +638,7 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -667,7 +667,7 @@ jobs:
   dependency-review:
     name: dependency review
     if: github.event_name == 'pull_request' && !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
@@ -687,7 +687,7 @@ jobs:
     name: advisory (hadolint)
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
