@@ -20,7 +20,14 @@ targets = [
 version = 2
 # No blanket ignores. An advisory that cannot be acted on gets its id listed here
 # with a comment saying why — never a silent global downgrade.
-ignore = []
+ignore = [
+    # `basic-toml` is archived; askama_derive's `config` feature reads
+    # `askama.toml` through it, and that feature is what points the template
+    # search at `crates/sharerr/src/web/templates`. The replacement with `toml`
+    # is merged upstream (askama-rs/askama#771, 2026-10-20) and unreleased;
+    # drop this entry when the `askama` bump past 0.16.1 lands.
+    { id = "RUSTSEC-2026-0374", reason = "unmaintained parser behind askama's `config` feature; fix merged upstream, no release yet" },
+]
 
 # `RUSTSEC-2023-0071` (the `rsa` Marvin Attack) needs no `ignore` entry:
 # `sqlx-mysql` is a lock entry `sqlx`'s manifest hands out regardless of
