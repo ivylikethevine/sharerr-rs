@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: MIT
 name: Advisories
 
 # The tracking-issue half of ci.yml's dependency audit, over Cargo.lock

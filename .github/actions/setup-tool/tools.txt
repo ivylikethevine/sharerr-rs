@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: MIT
 # The pinned CI tools, one row per tool - installed by ./install.sh (through
 # ./action.yml or ../setup-tools) and drift-checked by
 # ../../scripts/check_tool_versions.sh. Both read it through ./lib.sh, so a
@@ -65,13 +64,13 @@
 # image does and would change what shellcheck reports with no commit here.
 shellcheck|0.11.0|tar.xz|https://github.com/koalaman/shellcheck/releases/download/v%v/shellcheck-v%v.%a.tar.xz|--version|github:koalaman/shellcheck||linux-x86_64:linux.x86_64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198,darwin-aarch64:darwin.aarch64=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
 actionlint|1.7.12|tar.gz|https://github.com/rhysd/actionlint/releases/download/v%v/actionlint_%v_linux_amd64.tar.gz|--version|github:rhysd/actionlint||8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-zizmor|1.30.1|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
+zizmor|1.31.1|tar.gz|https://github.com/zizmorcore/zizmor/releases/download/v%v/zizmor-x86_64-unknown-linux-gnu.tar.gz|--version|github:zizmorcore/zizmor||d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
 # A pin, not `releases/latest`: new rules arrive as a reviewed bump instead of
 # changing what an unrelated PR's lint reports.
 hadolint|2.15.1|raw|https://github.com/hadolint/hadolint/releases/download/v%v/hadolint-linux-x86_64|--version|github:hadolint/hadolint||c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
 # Pinning the binary does not stale the scan: trivy downloads its vulnerability
 # database on every run, whatever this pin is.
-trivy|0.75.0|tar.gz|https://github.com/aquasecurity/trivy/releases/download/v%v/trivy_%v_Linux-64bit.tar.gz|--version|github:aquasecurity/trivy||c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f
+trivy|0.76.0|tar.gz|https://github.com/aquasecurity/trivy/releases/download/v%v/trivy_%v_Linux-64bit.tar.gz|--version|github:aquasecurity/trivy||e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7
 # Tags are "lychee-v<version>"; the tag-prefix column strips that so the drift
 # check compares versions, not strings.
 lychee|0.24.2|tar.gz|https://github.com/lycheeverse/lychee/releases/download/lychee-v%v/lychee-x86_64-unknown-linux-gnu.tar.gz|--version|github:lycheeverse/lychee|lychee-v|1f4e0ef7f6554a6ed33dd7ac144fb2e1bbed98598e7af973042fc5cd43951c9a
@@ -98,7 +97,7 @@ cargo-semver-checks|0.51.0|tar.gz|https://github.com/obi1kenobi/cargo-semver-che
 # `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
 # zipped, not as GitHub release assets; its GitHub releases still carry the
 # tags the drift check reads.
-terraform|1.16.5|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||2bc2fcfff033265c9e02ca0351f01794eb122f62a9b2a49a3294b9e49eaab5e4
+terraform|1.16.6|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||38034b38d03096399a7a1264a14561a8029b2b496fd1f169452656e53968f1b7
 # mikefarah's Go yq, for .github/scripts/lint_workflows.sh (which also accepts
 # the Python yq, but CI pins this one).
 # Installed rather than taken from the runner image, and several distros ship
