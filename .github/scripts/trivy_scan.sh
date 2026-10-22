@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
 # One scan of a pushed image for fixable HIGH/CRITICAL vulnerabilities, shared by the release gate and
 # the scheduled scan of the published image so the two cannot drift apart on flags. One JSON scan,
 # converted to the table and the SARIF so they can't disagree: <out-dir>/trivy.json, trivy.txt (also
