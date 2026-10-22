@@ -613,6 +613,10 @@ attached.
 
 Smallest first, by how much each item touches:
 
+- **Mutation testing.** `cargo-mutants` over the workspace, the next signal
+  past the 95% line-coverage floor: a mutant the suite survives marks a line
+  that runs without being checked. A `scripts/check.sh mutants` target run by
+  hand, then tests for the survivors worth killing.
 - **Event-driven sync.** A "Sync now" button on Status, and an *arr webhook
   receiver (On Import, On Series Add) that runs one pass at once instead of
   waiting out `sync.interval_secs`.
