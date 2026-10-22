@@ -28,7 +28,8 @@ use sharerr_store::{EndpointKind, Peer, PeerScope, SeedingSummary};
 use super::WebState;
 use super::settings::title_case;
 use super::templates::{
-    PairedPeer, PeerEndpointView, PeerRow, PeersPage, RevealedPeer, ScopeOption, render,
+    PairedPeer, PeerEndpointView, PeerGuidePage, PeerRow, PeersPage, RevealedPeer, ScopeOption,
+    SetupStep, render,
 };
 use crate::pairing::Invite;
 
@@ -73,6 +74,7 @@ pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Re
             let invite = own_invite(&state, &key, None).await;
             let mut page = build(&state, None, None).await;
             page.revealed = Some(RevealedPeer {
+                id: peer.id,
                 label: peer.label,
                 key,
                 invite,
@@ -213,6 +215,7 @@ pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> 
     let mut page = build(&state, None, None).await;
     if return_failure.is_some() {
         page.revealed = Some(RevealedPeer {
+            id: peer.id,
             label: peer.label.clone(),
             key,
             invite: reply,
@@ -672,7 +675,95 @@ fn row(
                 via: e.via.as_str(),
             })
             .collect(),
+        setup_done: setup_steps(peer, endpoints)
+            .iter()
+            .filter(|step| step.done)
+            .count(),
+        setup: setup_steps(peer, endpoints),
     }
+}
+
+/// The four things that happen, in order, as a friend sets up, and what the
+/// row can prove about each. "Feed pulled" is any authenticated use of the
+/// key, the feed or gossip: a friend who runs sharerr pairs through gossip
+/// before Prowlarr ever pulls, and either shows the key works. "First
+/// announce" is their torrent client reaching the tracker with the key,
+/// which the tracker records as a `client` address seen directly.
+pub(crate) fn setup_steps(
+    peer: &Peer,
+    endpoints: &[sharerr_store::PeerEndpoint],
+) -> Vec<SetupStep> {
+    let announced = endpoints
+        .iter()
+        .any(|e| e.kind == EndpointKind::Client && e.via == sharerr_store::ObservedVia::Direct);
+    let step = |label, done, hint: &str| SetupStep {
+        label,
+        done,
+        hint: hint.to_owned(),
+        href: "",
+    };
+    vec![
+        step("Key issued", true, ""),
+        step(
+            "Feed pulled",
+            peer.last_seen_at.is_some(),
+            "Their Prowlarr has not used the key yet: the indexer is not added, or its test failed.",
+        ),
+        step(
+            "First announce",
+            announced,
+            "Their torrent client has not reached the tracker yet: nothing grabbed from the feed, \
+             or the advertised address is not reachable from their side.",
+        ),
+        step(
+            "Runs sharerr (optional)",
+            peer.pubkey.is_some(),
+            "Only for a friend who runs sharerr: their instance has not introduced itself yet.",
+        ),
+    ]
+}
+
+/// `GET /peers/{id}/guide`: the printable setup guide, with a blank for
+/// the key, since the one the friend holds is never readable again.
+pub async fn guide(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
+    render_guide(&state, id, None).await
+}
+
+/// `POST /peers/{id}/guide`: the same guide with the key filled in, from
+/// the reveal block of the response that minted it. A POST rather than a
+/// query parameter so the key never lands in a URL, a history or a log.
+pub async fn guide_with_key(
+    State(state): State<WebState>,
+    Path(id): Path<i64>,
+    Form(form): Form<GuideForm>,
+) -> Response {
+    let key = form.key.trim();
+    render_guide(&state, id, (!key.is_empty()).then(|| key.to_owned())).await
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct GuideForm {
+    key: String,
+}
+
+async fn render_guide(state: &WebState, id: i64, key: Option<String>) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    let peer = match store.peer(id).await {
+        Ok(Some(peer)) => peer,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such friend").into_response(),
+        Err(err) => return rejected_response(&format!("could not load that friend: {err}")),
+    };
+    render(&PeerGuidePage {
+        signed_in: true,
+        label: peer.label,
+        scope_label: peer.scope.label(),
+        feed_url: format!("{}/api", state.serve.public_base_url().await),
+        key,
+    })
 }
 
 /// A byte count rendered for a cell, or empty for zero so the template can
@@ -832,6 +923,59 @@ mod tests {
             "",
             "nothing served renders as nothing, not as 0 B"
         );
+        let rendered = row(&peer, &[], false, None);
+        assert_eq!(rendered.setup_done, 1, "only the key has been issued");
+        assert_eq!(rendered.setup.len(), 4);
+        assert!(rendered.setup[0].done);
+        assert!(!rendered.setup[1].done);
+    }
+
+    /// Each step reads one fact off the row: the key used at all, the
+    /// tracker seeing their client first-hand (a client address relayed by
+    /// gossip is not an announce), and a bound gossip identity.
+    #[test]
+    fn setup_steps_track_what_the_row_can_prove() {
+        let endpoint = |kind, via| sharerr_store::PeerEndpoint {
+            kind,
+            addr: "203.0.113.5:51413".to_owned(),
+            observed_at: 0,
+            via,
+        };
+        let mut peer = Peer {
+            id: 1,
+            label: "Sam".to_owned(),
+            created_at: 0,
+            last_seen_at: Some(0),
+            revoked_at: None,
+            scope: PeerScope::All,
+            pubkey: None,
+            gossip_url: None,
+            key_hash: "hash".to_owned(),
+            downloaded: 0,
+            uploaded: 0,
+        };
+
+        let relayed = [endpoint(
+            EndpointKind::Client,
+            sharerr_store::ObservedVia::Gossip,
+        )];
+        let rendered = row(&peer, &relayed, false, None);
+        assert_eq!(rendered.setup_done, 2, "feed pulled, but no announce yet");
+        assert!(!rendered.setup[2].done);
+
+        let direct = [
+            endpoint(EndpointKind::Api, sharerr_store::ObservedVia::Direct),
+            endpoint(EndpointKind::Client, sharerr_store::ObservedVia::Direct),
+        ];
+        let rendered = row(&peer, &direct, false, None);
+        assert_eq!(rendered.setup_done, 3);
+        assert!(rendered.setup[2].done);
+        assert!(!rendered.setup[3].done, "no gossip identity bound yet");
+
+        peer.pubkey = Some("aa11".to_owned());
+        let rendered = row(&peer, &direct, true, None);
+        assert_eq!(rendered.setup_done, 4);
+        assert!(rendered.setup.iter().all(|step| step.done));
     }
 
     #[test]
@@ -902,6 +1046,81 @@ mod tests {
 
         let response = page(State(state)).await;
         assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// Printed later, the guide carries the feed URL and a blank for the key;
+    /// posted from the reveal, it carries the key itself. Either way it is
+    /// the friend's own page: their name, their scope.
+    #[tokio::test]
+    async fn the_guide_renders_with_and_without_the_key() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::Tv)
+            .await
+            .unwrap();
+        let state = web_state(serve);
+
+        let response = guide(State(state.clone()), Path(sam.id)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let html = body_of(response).await;
+        assert!(html.contains("Sam"), "{html}");
+        assert!(html.contains("TV only"), "{html}");
+        assert!(html.contains("/api</code>"), "{html}");
+        assert!(
+            html.contains("key-line"),
+            "a blank line for the key: {html}"
+        );
+        assert!(!html.contains("sam-key"), "{html}");
+
+        let response = guide_with_key(
+            State(state.clone()),
+            Path(sam.id),
+            Form(GuideForm {
+                key: " sam-key ".to_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let html = body_of(response).await;
+        assert!(html.contains("<code>sam-key</code>"), "{html}");
+        assert!(!html.contains("key-line"), "{html}");
+
+        let response = guide_with_key(
+            State(state),
+            Path(sam.id),
+            Form(GuideForm { key: String::new() }),
+        )
+        .await;
+        assert!(
+            body_of(response).await.contains("key-line"),
+            "a blank key is no key"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guide_answers_not_found_for_an_unknown_peer_and_503_without_a_store() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let response = guide(State(web_state(serve)), Path(404)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let (_dir, state) = web_state_with_unopenable_store();
+        let response = guide(State(state), Path(1)).await;
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// A store that opened and then stopped answering is the `Err` arm of the
+    /// peer lookup, distinct from one that never opened.
+    #[tokio::test]
+    async fn the_guide_reports_a_store_that_stops_answering() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        serve.store().await.unwrap();
+        crate::state::fixtures::close_store(&serve).await;
+        let response = guide(State(web_state(serve)), Path(1)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     /// On a gluetun-only deployment (no static `tracker.advertised_host`),

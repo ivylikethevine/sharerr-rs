@@ -110,9 +110,10 @@ docker run -d --name sharerr-lighthouse -p 7878:7878 -v lighthouse-data:/data sh
 ```
 
 `/data` holds nothing but the decoy secret; losing it reshuffles fabricated
-answers after a restart, not a credential. The binary reads two environment
-variables: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`) and
-`LIGHTHOUSE_SECRET_FILE` (default `/data/lighthouse.secret`). A compose version of the
+answers after a restart, not a credential. The binary reads three environment
+variables: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`),
+`LIGHTHOUSE_SECRET_FILE` (default `/data/lighthouse.secret`) and
+`LIGHTHOUSE_LOG_FORMAT` (`text`, or `json` for one object per line). A compose version of the
 same one-liner is at
 [`docker/deploy/lighthouse/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse),
 with a `compose.tls.yaml` override that puts Caddy in front for a domain you

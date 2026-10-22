@@ -114,3 +114,9 @@ document.addEventListener("click", function (event) {
   var button = event.target.closest && event.target.closest("[data-confirm]");
   if (button && !window.confirm(button.getAttribute("data-confirm"))) event.preventDefault();
 });
+
+// A `[data-print]` button opens the print dialog for the page it is on.
+document.addEventListener("click", function (event) {
+  var button = event.target.closest && event.target.closest("[data-print]");
+  if (button) window.print();
+});

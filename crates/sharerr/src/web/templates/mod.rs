@@ -719,8 +719,9 @@ impl DiagnosticsData {
     }
 }
 
-/// One step of the status page's setup checklist.
-#[derive(Debug)]
+/// One step of the status page's setup checklist, and of each friend's on
+/// the Friends page.
+#[derive(Debug, Clone)]
 pub struct SetupStep {
     pub label: &'static str,
     pub done: bool,
@@ -894,6 +895,26 @@ pub struct PeerRow {
     pub gossip_key_set: bool,
     /// Recently observed addresses, newest first.
     pub endpoints: Vec<PeerEndpointView>,
+    /// Key issued, feed pulled, first announce, gossip paired — in that
+    /// order, each with whether it has happened. The answer to "is my friend
+    /// actually set up", step by step, where "last seen: never" only said no.
+    pub setup: Vec<SetupStep>,
+    /// How many of `setup` are done, for the "2/4" the table shows.
+    pub setup_done: usize,
+}
+
+/// The printable per-friend guide: the Prowlarr steps with the feed URL
+/// filled in and, on the response that minted it, the key itself.
+#[derive(Debug, Template)]
+#[template(path = "peer_guide.html")]
+pub struct PeerGuidePage {
+    pub signed_in: bool,
+    pub label: String,
+    pub scope_label: &'static str,
+    pub feed_url: String,
+    /// `None` after the reveal: sharerr holds only a hash, so a guide
+    /// printed later leaves a line for the key the friend already has.
+    pub key: Option<String>,
 }
 
 /// One observed address, rendered for the friends page.
@@ -932,6 +953,7 @@ pub struct PeersPage {
 
 #[derive(Debug)]
 pub struct RevealedPeer {
+    pub id: i64,
     pub label: String,
     pub key: String,
     /// The same key, address and identity as one invite string for a friend

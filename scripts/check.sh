@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
 # Run locally what CI's blocking jobs run, by the same commands. Every check
 # step in ci.yml (and coverage.yml's floor) calls `scripts/check.sh <check>`,
 # so this file is the one place a command lives and the two cannot drift.
@@ -39,6 +38,9 @@
 #   secrets (gitleaks)                       gitleaks
 #   advisory (semver)                        semver (in no group: advisory until a
 #                                            crate is published)
+#   scorecard.yml, after merge               osv (osv-scanner over every lockfile,
+#                                            as Scorecard's Vulnerabilities check
+#                                            reads them; needs the network)
 #   coverage.yml, after merge                coverage = coverage-run + coverage-floor;
 #                                            coverage-html and coverage-summary
 #                                            render the same profile
@@ -73,7 +75,7 @@ tool_dir="$root/target/ci-tools"
 export PATH="$tool_dir:$PATH"
 
 fast=(fmt shellcheck compose zizmor actionlint workflows links typos markdownlint prettier)
-lint=("${fast[@]}" clippy doc deny terraform gitleaks)
+lint=("${fast[@]}" clippy doc deny terraform gitleaks osv)
 all=("${lint[@]}" test msrv coverage)
 
 # Every tools.txt row some check below runs, for --install.
@@ -282,6 +284,14 @@ check_prettier() {
 check_gitleaks() {
   _need gitleaks || return
   gitleaks git --redact --no-banner --config .gitleaks.toml .
+}
+
+# Cargo.lock and .github/package-lock.json as Scorecard reads them after a
+# merge, run before one. An osv-scanner.toml beside a lockfile (.github's)
+# accepts the advisories it lists for that lockfile alone.
+check_osv() {
+  _need osv-scanner || return
+  osv-scanner scan source --recursive .
 }
 
 check_coverage-run() {

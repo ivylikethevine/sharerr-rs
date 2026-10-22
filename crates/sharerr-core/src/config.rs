@@ -328,6 +328,8 @@ pub struct Config {
     pub seeding: SeedingConfig,
     /// Endpoint gossip with friends — see [`GossipConfig`].
     pub gossip: GossipConfig,
+    /// How much history the database keeps — see [`RetentionConfig`].
+    pub retention: RetentionConfig,
     /// Embedding the lighthouse rendezvous service on one of this instance's
     /// own listeners. Off by default — see [`LighthouseConfig`].
     pub lighthouse: LighthouseConfig,
@@ -393,6 +395,7 @@ impl Default for Config {
             tracker: TrackerConfig::default(),
             seeding: SeedingConfig::default(),
             gossip: GossipConfig::default(),
+            retention: RetentionConfig::default(),
             lighthouse: LighthouseConfig::default(),
             gluetun: GluetunConfig::default(),
             gluetun_client: GluetunConfig::default(),
@@ -1019,6 +1022,37 @@ pub struct GossipConfig {
 impl Default for GossipConfig {
     fn default() -> Self {
         Self { exchange_secs: 900 }
+    }
+}
+
+/// How much history the database keeps of the three tables that grow on
+/// their own. Config-file only, like [`GossipConfig`]: no settings-page field
+/// and no [`config_paths`] entry, since the defaults suit every ordinary
+/// deployment and the one reason to change them is a host short of disk or
+/// a dashboard that wants a longer chart. `sharerr.toml` or a
+/// `SHARERR_RETENTION__*` override reaches them; a saved config applies at
+/// the next write to each table, no restart needed.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RetentionConfig {
+    /// Hourly swarm samples kept in total, behind the Diagnostics chart.
+    /// 336 is a fortnight.
+    pub swarm_samples: u64,
+    /// Addresses kept per friend and endpoint kind. Enough to span a few
+    /// reconnects; more would be a location log.
+    pub endpoint_history: u64,
+    /// Sync runs kept, newest first. `0` keeps every run, which is what
+    /// happened before this key existed.
+    pub sync_runs: u64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            swarm_samples: 336,
+            endpoint_history: 5,
+            sync_runs: 0,
+        }
     }
 }
 

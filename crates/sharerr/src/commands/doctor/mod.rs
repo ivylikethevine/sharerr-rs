@@ -25,33 +25,106 @@ use url::Url;
 /// buries the advice that would fix it.
 const MAX_LISTED: usize = 5;
 
+/// Every line the run produced, grouped by section, plus the counts the exit
+/// code rests on. Text mode prints each line as it lands, so a slow check
+/// (an unreachable host waiting out its timeout) still shows progress; JSON
+/// mode prints nothing until [`Report::json`] renders the whole thing, since a
+/// document cannot stream.
 #[derive(Default)]
 struct Report {
     failures: usize,
     warnings: usize,
+    json: bool,
+    sections: Vec<Section>,
+}
+
+/// One titled group of lines, as `--json` renders it.
+#[derive(Default, serde::Serialize)]
+struct Section {
+    title: String,
+    lines: Vec<Line>,
+}
+
+#[derive(serde::Serialize)]
+struct Line {
+    level: Level,
+    message: String,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Level {
+    Ok,
+    Info,
+    Warn,
+    Fail,
 }
 
 impl Report {
-    fn section(&self, title: &str) {
-        println!("\n{title}");
+    fn for_json() -> Self {
+        Self {
+            json: true,
+            ..Self::default()
+        }
     }
 
-    fn ok(&self, message: impl std::fmt::Display) {
-        println!("  [ok]   {message}");
+    fn section(&mut self, title: &str) {
+        self.sections.push(Section {
+            title: title.to_owned(),
+            lines: Vec::new(),
+        });
+        if !self.json {
+            println!("\n{title}");
+        }
     }
 
-    fn info(&self, message: impl std::fmt::Display) {
-        println!("         {message}");
+    fn ok(&mut self, message: impl std::fmt::Display) {
+        self.push(Level::Ok, message, "  [ok]   ");
+    }
+
+    fn info(&mut self, message: impl std::fmt::Display) {
+        self.push(Level::Info, message, "         ");
+    }
+
+    /// A configuration summary line: `info` in JSON, flush with the section's
+    /// margin in text, where the aligned `key:  value` columns do the work.
+    fn line(&mut self, message: impl std::fmt::Display) {
+        self.push(Level::Info, message, "  ");
     }
 
     fn warn(&mut self, message: impl std::fmt::Display) {
         self.warnings += 1;
-        println!("  [warn] {message}");
+        self.push(Level::Warn, message, "  [warn] ");
     }
 
     fn fail(&mut self, message: impl std::fmt::Display) {
         self.failures += 1;
-        println!("  [FAIL] {message}");
+        self.push(Level::Fail, message, "  [FAIL] ");
+    }
+
+    fn push(&mut self, level: Level, message: impl std::fmt::Display, prefix: &str) {
+        let message = message.to_string();
+        if !self.json {
+            println!("{prefix}{message}");
+        }
+        if self.sections.is_empty() {
+            self.sections.push(Section::default());
+        }
+        if let Some(section) = self.sections.last_mut() {
+            section.lines.push(Line { level, message });
+        }
+    }
+
+    /// The whole run as one document: the verdict and counts first, then
+    /// every section in the order it ran. Pretty-printed, since the usual
+    /// reader is a person piping it through `jq` once before scripting it.
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ok": self.failures == 0,
+            "failures": self.failures,
+            "warnings": self.warnings,
+            "sections": self.sections,
+        })
     }
 }
 
@@ -81,7 +154,11 @@ pub async fn run(
     args: &crate::cli::DoctorArgs,
 ) -> Result<()> {
     let fix = args.fix;
-    let mut report = Report::default();
+    let mut report = if args.json {
+        Report::for_json()
+    } else {
+        Report::default()
+    };
 
     report.section("configuration");
     // Reported as a check rather than bailing, so the rest of the picture is still
@@ -91,7 +168,7 @@ pub async fn run(
         report.fail(error);
         report.info("everything below reflects built-in defaults, not this file");
     }
-    print_config_summary(config);
+    config_summary(config, &mut report);
 
     report.section("vault");
     let (vault, torrent_credential) = check_vault(config, &mut report);
@@ -164,20 +241,30 @@ pub async fn run(
         );
     }
 
-    println!();
-    summarize(report.failures, report.warnings)
+    if report.json {
+        println!("{}", serde_json::to_string_pretty(&report.json())?);
+    } else {
+        println!();
+    }
+    summarize(report.failures, report.warnings, report.json)
 }
 
 /// The exit-code decision, split out from [`run`] so the three outcomes can be
-/// checked without driving a full check pass.
-fn summarize(failures: usize, warnings: usize) -> Result<()> {
+/// checked without driving a full check pass. `quiet` is JSON mode: the
+/// document already carries the verdict, and a trailing line would break it
+/// for whatever is parsing stdout.
+fn summarize(failures: usize, warnings: usize, quiet: bool) -> Result<()> {
     match (failures, warnings) {
         (0, 0) => {
-            println!("all checks passed");
+            if !quiet {
+                println!("all checks passed");
+            }
             Ok(())
         }
         (0, warnings) => {
-            println!("all checks passed, {warnings} warning(s)");
+            if !quiet {
+                println!("all checks passed, {warnings} warning(s)");
+            }
             Ok(())
         }
         (failures, warnings) => {
@@ -1018,55 +1105,55 @@ fn suggest_paths(
 
 // ------------------------------------------------------------------ summary
 
-fn print_config_summary(config: &Config) {
-    println!("  data dir:  {}", config.data_dir.display());
-    println!("  tag:       {}", config.tag);
-    println!("  bind:      {}", config.server.bind);
+fn config_summary(config: &Config, report: &mut Report) {
+    report.line(format!("data dir:  {}", config.data_dir.display()));
+    report.line(format!("tag:       {}", config.tag));
+    report.line(format!("bind:      {}", config.server.bind));
     for kind in MediaSource::ARRS.iter().copied() {
-        println!(
-            "  {:<11}{}",
+        report.line(format!(
+            "{:<11}{}",
             format!("{kind}:"),
             config
                 .service(kind)
                 .map_or("(not configured)", |s| s.url.as_str())
-        );
+        ));
     }
     for library in &config.library {
-        println!(
-            "  library:   {} ({})",
+        report.line(format!(
+            "library:   {} ({})",
             library.path.display(),
             library.kind.as_str()
-        );
+        ));
     }
     // The configured client, not always qBittorrent's — printing the unused
     // section's URL is how an operator ends up debugging the wrong service.
     let client = config.torrent_client();
     match client.login {
-        Some(login) => println!(
-            "  client:    {} {} (user {login})",
+        Some(login) => report.line(format!(
+            "client:    {} {} (user {login})",
             config.torrent_backend.as_str(),
             client.url,
-        ),
-        None => println!(
-            "  client:    {} {}",
+        )),
+        None => report.line(format!(
+            "client:    {} {}",
             config.torrent_backend.as_str(),
             client.url,
-        ),
+        )),
     }
-    println!(
-        "  tracker:   builtin, advertised as {}",
+    report.line(format!(
+        "tracker:   builtin, advertised as {}",
         describe_advertised(config)
-    );
+    ));
     if config.path_map.is_empty() {
-        println!("  path map:  (none — all three views assumed identical)");
+        report.line("path map:  (none — all three views assumed identical)");
     } else {
         for m in &config.path_map {
-            println!(
-                "  path map:  arr {} -> sharerr {} -> qbit {}",
+            report.line(format!(
+                "path map:  arr {} -> sharerr {} -> qbit {}",
                 m.arr.display(),
                 m.sharerr.display(),
                 m.qbit.as_ref().unwrap_or(&m.sharerr).display()
-            );
+            ));
         }
     }
 }

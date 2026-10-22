@@ -1,0 +1,53 @@
+# Home Assistant REST sensors over sharerr's /dashboard JSON. Paste into
+# configuration.yaml (or a package) and set the token as a secret:
+# the vault's metrics.token, from Settings → Metrics. The endpoint answers
+# 404 until metrics.enabled is on and the token matches, which the first
+# sensor turns into "unavailable" rather than a wrong number.
+rest:
+  - resource: http://sharerr:8477/dashboard
+    scan_interval: 300
+    headers:
+      Authorization: !secret sharerr_metrics_token
+    sensor:
+      - name: sharerr items shared
+        unique_id: sharerr_items_shared
+        value_template: "{{ value_json.items_shared }}"
+        state_class: measurement
+        icon: mdi:share-variant
+      - name: sharerr shared size
+        unique_id: sharerr_shared_bytes
+        value_template: "{{ value_json.shared_bytes }}"
+        unit_of_measurement: B
+        device_class: data_size
+        state_class: measurement
+      - name: sharerr friends total
+        unique_id: sharerr_friends_total
+        value_template: "{{ value_json.friends_total }}"
+        state_class: measurement
+        icon: mdi:account-group
+      - name: sharerr friends active
+        unique_id: sharerr_friends_recent
+        value_template: "{{ value_json.friends_recent }}"
+        state_class: measurement
+        icon: mdi:account-check
+      - name: sharerr swarm peers
+        unique_id: sharerr_swarm_peers
+        value_template: "{{ value_json.swarm_peers }}"
+        state_class: measurement
+      - name: sharerr served
+        unique_id: sharerr_served_bytes
+        value_template: "{{ value_json.served_bytes }}"
+        unit_of_measurement: B
+        device_class: data_size
+        state_class: total_increasing
+      - name: sharerr last sync
+        unique_id: sharerr_last_sync_at
+        value_template: "{{ value_json.last_sync_at | as_datetime if value_json.last_sync_at else none }}"
+        device_class: timestamp
+    binary_sensor:
+      - name: sharerr last sync ok
+        unique_id: sharerr_last_sync_ok
+        # `problem` reads true as a fault: on only when a pass finished and
+        # errored, off while none has run yet.
+        value_template: "{{ value_json.last_sync_ok is false }}"
+        device_class: problem

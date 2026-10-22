@@ -370,9 +370,13 @@ impl ServeState {
             return Ok(store.clone());
         }
 
-        let path = self.config.read().await.database_path();
+        let (path, retention) = {
+            let config = self.config.read().await;
+            (config.database_path(), (&config.retention).into())
+        };
         match Store::open(&path).await {
             Ok(store) => {
+                store.set_retention(retention);
                 *self.store.write().await = Some(store.clone());
                 Ok(store)
             }
@@ -624,6 +628,11 @@ impl ServeState {
         // Only the static half is refreshed: the poller's observed endpoints are
         // still true regardless of what the operator just typed.
         self.tracker.endpoint.set_static(static_base(&config));
+        // The open store keeps its own copy of the limits, so a saved
+        // `[retention]` reaches the next prune without a restart.
+        if let Some(store) = &*self.store.read().await {
+            store.set_retention((&config.retention).into());
+        }
         *self.config.write().await = config;
         *self.config_error.write().await = None;
         self.invalidate("configuration changed").await;

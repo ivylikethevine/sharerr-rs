@@ -34,6 +34,8 @@ pub const NON_CONFIG_ENV: &[&str] = &[
     // test fails with "unknown field `version`" under `cargo test`, and a
     // developer who sets it for a local build gets the same from `cargo run`.
     "VERSION",
+    // The CLI's own `--log-format`, read by clap before the config loads.
+    "LOG_FORMAT",
     "E2E_COMPOSE",
     "E2E_LIDARR",
     // Read by the opt-in mesh suite (crates/sharerr/tests/e2e_mesh.rs) —
@@ -136,13 +138,91 @@ pub fn validate(toml_text: &str) -> Result<Config> {
         .context("the edited configuration is not valid")
 }
 
+/// `SHARERR_<PATH>_FILE`: the value `SHARERR_<PATH>` would carry, read from
+/// the file the variable names instead, the way Compose and Swarm mount a
+/// secret under `/run/secrets`. Any config field takes the suffix; the
+/// plain variable wins when both are set, as `SHARERR_MASTER_KEY` does over
+/// its own `_FILE` form. Surrounding whitespace is trimmed, so a file written
+/// with `echo` works.
+struct FileEnv {
+    /// `(dotted config path, variable name, file path)`, from [`file_overrides`].
+    entries: Vec<(String, String, PathBuf)>,
+}
+
+impl FileEnv {
+    fn from_process_env() -> Self {
+        Self {
+            entries: file_overrides(std::env::vars()),
+        }
+    }
+}
+
+/// `(dotted config path, variable name, file path)` for every `_FILE`
+/// variable in `vars`, split out so the scan is testable without touching
+/// the process environment.
+fn file_overrides(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String, PathBuf)> {
+    vars.filter_map(|(name, file)| {
+        let upper = name.to_uppercase();
+        let rest = upper.strip_prefix("SHARERR_")?;
+        if NON_CONFIG_ENV.contains(&rest) {
+            return None;
+        }
+        let path = rest.strip_suffix("_FILE")?;
+        if path.is_empty() {
+            return None;
+        }
+        Some((
+            path.to_lowercase().replace("__", "."),
+            name,
+            PathBuf::from(file),
+        ))
+    })
+    .collect()
+}
+
+impl figment::Provider for FileEnv {
+    fn metadata(&self) -> figment::Metadata {
+        figment::Metadata::named("SHARERR_*_FILE environment variables")
+    }
+
+    fn data(
+        &self,
+    ) -> std::result::Result<
+        figment::value::Map<figment::Profile, figment::value::Dict>,
+        figment::Error,
+    > {
+        let mut layered = Figment::new();
+        for (path, var, file) in &self.entries {
+            let raw = std::fs::read_to_string(file).map_err(|err| {
+                figment::Error::from(format!("{var}: could not read {}: {err}", file.display()))
+            })?;
+            // The same parse `Env` applies, so `"42"` and `"true"` reach a
+            // numeric or boolean field the way they do from the plain variable.
+            let value: figment::value::Value = raw
+                .trim()
+                .parse()
+                .map_err(|err| figment::Error::from(format!("{var}: {err}")))?;
+            layered = layered.merge(Serialized::default(path, value));
+        }
+        layered.data()
+    }
+}
+
 /// The one definition of how the layers stack: defaults, then the document, then
-/// `SHARERR_*`. Both entry points share it so validation can never drift from
-/// what startup actually does.
+/// `SHARERR_*_FILE`, then `SHARERR_*`. Both entry points share it so validation
+/// can never drift from what startup actually does.
 fn layered<P: figment::Provider>(document: P) -> Figment {
     Figment::from(Serialized::defaults(Config::default()))
         .merge(document)
-        .merge(Env::prefixed("SHARERR_").ignore(NON_CONFIG_ENV).split("__"))
+        .merge(FileEnv::from_process_env())
+        .merge(
+            Env::prefixed("SHARERR_")
+                .ignore(NON_CONFIG_ENV)
+                // The `_FILE` forms are `FileEnv`'s; read as plain variables
+                // they would be unknown fields.
+                .filter(|key| !key.as_str().to_uppercase().ends_with("_FILE"))
+                .split("__"),
+        )
 }
 
 #[cfg(test)]
@@ -249,6 +329,7 @@ mod tests {
             jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
             jail.set_env("SHARERR_MASTER_KEY_FILE", "/run/secrets/key");
             jail.set_env("SHARERR_VERSION", "1.2.3");
+            jail.set_env("SHARERR_LOG_FORMAT", "json");
             jail.set_env("SHARERR_TAG", "still-works");
 
             let cfg = load(&jail.directory().join("absent.toml"))
@@ -256,6 +337,94 @@ mod tests {
             assert_eq!(cfg.tag, "still-works");
             Ok(())
         });
+    }
+
+    /// The Docker-secret form: the value comes from the named file, trimmed,
+    /// and reaches a string, a number and a boolean field alike.
+    #[test]
+    fn a_file_variable_supplies_the_field_from_its_file() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("url", "http://qbit:8080\n")?;
+            jail.create_file("secs", " 600\n")?;
+            jail.create_file("skip", "false\n")?;
+            let dir = jail.directory().to_path_buf();
+            jail.set_env(
+                "SHARERR_QBITTORRENT__URL_FILE",
+                dir.join("url").display().to_string(),
+            );
+            jail.set_env(
+                "SHARERR_SYNC__INTERVAL_SECS_FILE",
+                dir.join("secs").display().to_string(),
+            );
+            jail.set_env(
+                "sharerr_qbittorrent__skip_checking_file",
+                dir.join("skip").display().to_string(),
+            );
+
+            let cfg = load(&dir.join("absent.toml")).expect("file-backed overrides load");
+            assert_eq!(cfg.qbittorrent.url.as_str(), "http://qbit:8080/");
+            assert_eq!(cfg.sync.interval_secs, 600);
+            assert!(!cfg.qbittorrent.skip_checking);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_plain_variable_wins_over_its_file_form() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("tag", "from-file\n")?;
+            jail.set_env(
+                "SHARERR_TAG_FILE",
+                jail.directory().join("tag").display().to_string(),
+            );
+            jail.set_env("SHARERR_TAG", "inline");
+
+            let cfg = load(&jail.directory().join("absent.toml")).expect("both forms load");
+            assert_eq!(cfg.tag, "inline");
+            Ok(())
+        });
+    }
+
+    /// A secret that is not mounted is a startup error naming the variable,
+    /// not a silently defaulted field. Driven with explicit entries rather
+    /// than through a `Jail`: every `load` in this binary reads the process
+    /// environment, and a variable naming a missing file would fail whichever
+    /// non-Jail test loads a config in the same instant.
+    #[test]
+    fn a_file_variable_naming_a_missing_file_fails_to_load() {
+        let provider = FileEnv {
+            entries: vec![(
+                "tag".to_owned(),
+                "SHARERR_TAG_FILE".to_owned(),
+                PathBuf::from("/nonexistent/sharerr-tag"),
+            )],
+        };
+        let err = Figment::from(Serialized::defaults(Config::default()))
+            .merge(provider)
+            .extract::<Config>()
+            .expect_err("unreadable");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("SHARERR_TAG_FILE"), "{rendered}");
+    }
+
+    #[test]
+    fn file_overrides_skip_non_config_names_and_a_bare_suffix() {
+        let vars = [
+            (
+                "SHARERR_MASTER_KEY_FILE".to_owned(),
+                "/run/secrets/key".to_owned(),
+            ),
+            ("SHARERR__FILE".to_owned(), "/nowhere".to_owned()),
+            ("SHARERR_TAG".to_owned(), "inline".to_owned()),
+            (
+                "SHARERR_SERVER__BIND_FILE".to_owned(),
+                "/run/secrets/bind".to_owned(),
+            ),
+        ];
+        let found = file_overrides(vars.into_iter());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "server.bind");
+        assert_eq!(found[0].1, "SHARERR_SERVER__BIND_FILE");
     }
 
     #[test]

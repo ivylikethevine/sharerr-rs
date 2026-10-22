@@ -28,12 +28,40 @@ struct Cli {
         default_value = "/data/lighthouse.secret"
     )]
     secret_file: PathBuf,
+    /// How log lines are written: `text` for a terminal, `json` (one object
+    /// per line) for Loki or a Docker logging driver.
+    #[arg(
+        long,
+        env = "LIGHTHOUSE_LOG_FORMAT",
+        default_value = "text",
+        value_enum
+    )]
+    log_format: LogFormat,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+/// What `tracing_subscriber::fmt::init()` builds, with the shape chosen;
+/// built apart from installing it so both shapes can be exercised in a test.
+fn log_subscriber(format: LogFormat) -> Box<dyn tracing::Subscriber + Send + Sync> {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    match format {
+        LogFormat::Text => Box::new(builder.finish()),
+        LogFormat::Json => Box::new(builder.json().finish()),
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    use tracing_subscriber::util::SubscriberInitExt as _;
     let cli = Cli::parse();
+    log_subscriber(cli.log_format).init();
 
     let secret = load_or_create_secret(&cli.secret_file)?;
     let state = Arc::new(LighthouseState::new(secret));
@@ -85,6 +113,13 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn both_log_shapes_build() {
+        for format in [LogFormat::Text, LogFormat::Json] {
+            let _subscriber = log_subscriber(format);
+        }
+    }
 
     /// A path with no parent at all (the root itself) must skip trying to
     /// create one rather than panic on `Option::unwrap` — this only asks

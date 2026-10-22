@@ -40,6 +40,8 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
         torrent_client_badge(&state, &config, backend).await
     } else if service == "library" {
         library_badge(&config).await
+    } else if service == "notifications" {
+        notifications_badge(&state).await
     } else if let Some(kind) = MediaSource::parse(&service) {
         // "directory" parses as a MediaSource but is not a probeable service;
         // its button is the "library" one above.
@@ -78,6 +80,15 @@ impl Outcome {
                 .map_or_else(|_| String::from("(unprintable)"), |e| e.to_string())
         ))
         .into_response()
+    }
+}
+
+/// The settings page's "send a test notification" button: one real POST
+/// through the stored webhook, and whatever came back, in words.
+async fn notifications_badge(state: &WebState) -> Outcome {
+    match crate::notify::send_test(&state.serve).await {
+        Ok(message) => Outcome::Good(message),
+        Err(message) => Outcome::Bad(message),
     }
 }
 
@@ -508,6 +519,51 @@ mod tests {
             sharerr_testkit::library::system_status_json("Sonarr"),
         )
         .await;
+    }
+
+    /// The route reaches the notifications sender; what it says without a
+    /// vault is `notify::send_test`'s own business and tested there, under a
+    /// `Jail`, so this only checks the wiring and the badge class.
+    #[test]
+    fn the_notifications_service_is_routed_to_a_test_notification() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, serve) = crate::state::fixtures::unconfigured();
+            let state = web_state(serve);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let html = runtime.block_on(async {
+                let response = test(State(state), Path("notifications".to_owned())).await;
+                let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+                String::from_utf8(bytes.to_vec()).unwrap()
+            });
+            assert!(html.contains(r#"class="error""#), "{html}");
+            assert!(html.contains("vault"), "{html}");
+            Ok(())
+        });
+    }
+
+    /// With a webhook stored and a service answering, the badge is the good
+    /// one and names the status the service gave.
+    #[test]
+    fn the_notifications_badge_reports_an_accepted_test_post() {
+        with_open_vault(Config::default(), |state| async move {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+            store(
+                &state,
+                secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                &server.uri(),
+            )
+            .await;
+
+            let html = body_of(notifications_badge(&state).await).await;
+            assert!(html.contains(r#"class="ok""#), "{html}");
+            assert!(html.contains("204"), "{html}");
+        });
     }
 
     #[tokio::test]

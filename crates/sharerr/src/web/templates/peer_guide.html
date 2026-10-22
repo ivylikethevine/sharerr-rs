@@ -1,0 +1,53 @@
+{% extends "layout.html" %}
+{% block title %}Setting up {{ label }}'s feed — sharerr{% endblock %}
+
+{% block content %}
+{# Printable: the header bar and footer drop out under `@media print`, and
+   the operator hands this page, on paper or as a PDF, to a friend who does
+   not run sharerr. Second person throughout: the friend is the reader. #}
+<div class="print-actions">
+  <button type="button" class="secondary" data-print>Print</button>
+  <a href="/peers" class="link">Back to Friends</a>
+</div>
+
+<h1>Setting up the sharerr feed for {{ label }}</h1>
+<p class="hint">
+  Someone is sharing part of their library with you. This page is everything
+  your Prowlarr needs; it takes about two minutes.
+</p>
+
+<div class="panel">
+  <dl class="facts">
+    <dt>Feed URL</dt>
+    <dd><code>{{ feed_url }}</code></dd>
+    <dt>Your key</dt>
+    <dd>
+      {% if let Some(key) = key %}
+      <code>{{ key }}</code>
+      {% else %}
+      <span class="key-line" aria-label="Write the key here"></span>
+      <p class="hint">The key you were given when this was set up. It cannot be shown again; if it is lost, ask for a new one.</p>
+      {% endif %}
+    </dd>
+    <dt>You can see</dt>
+    <dd>{{ scope_label }}</dd>
+  </dl>
+</div>
+
+<h2>In Prowlarr</h2>
+<ol class="panel checklist">
+  <li>Open <strong>Indexers</strong>, press <strong>+</strong>, and pick <strong>Generic Torznab</strong>.</li>
+  <li>Name it <strong>sharerr</strong> (or the name of whoever is sharing with you).</li>
+  <li>Set <strong>URL</strong> to the feed URL above, exactly as written. Leave <strong>API Path</strong> as <code>/api</code>.</li>
+  <li>Paste your key into <strong>API Key</strong>.</li>
+  <li>Press <strong>Test</strong>, then <strong>Save</strong>. Prowlarr syncs the indexer to your Sonarr, Radarr, Lidarr or Readarr on its own.</li>
+</ol>
+
+<h2>Good to know</h2>
+<ul class="panel checklist">
+  <li>The key is yours alone. It also lets your torrent client reach their tracker, so there is nothing else to configure.</li>
+  <li>The feed lists only what they are seeding right now. An empty feed fails Prowlarr's test, so if it fails right after setup, wait for them to share something and test again.</li>
+  <li>Their sharerr can see that your key was used and when your client first connected, but never what you search for.</li>
+  <li>If you run sharerr too, ask for their invite instead: pasted on your Friends page, it does all of this and pairs the two instances.</li>
+</ul>
+{% endblock %}

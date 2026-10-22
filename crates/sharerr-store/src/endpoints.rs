@@ -18,7 +18,7 @@ type Result<T> = std::result::Result<T, StoreError>;
 ///
 /// Enough to span a few of the friend's reconnects; more would be a location
 /// log, which is precisely what this table must not become.
-const MAX_HISTORY: usize = 5;
+pub(crate) const MAX_HISTORY: usize = 5;
 
 /// Which of a friend's addresses an observation describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +166,8 @@ impl Store {
             .rows_affected(),
         };
 
-        // Prune beyond the newest MAX_HISTORY. Done here rather than on a timer:
+        // Prune beyond the newest `retention.endpoint_history` (MAX_HISTORY
+        // unless `[retention]` says otherwise). Done here rather than on a timer:
         // inserts are the only thing that grows the table — so an upsert that
         // changed nothing (an older sighting of a known address) has nothing
         // to prune either.
@@ -178,7 +179,7 @@ impl Store {
             )
             .bind(peer_id)
             .bind(kind.as_str())
-            .bind(MAX_HISTORY as i64)
+            .bind(self.retention().endpoint_history)
             .execute(&mut *tx)
             .await?;
         }
@@ -583,6 +584,32 @@ mod tests {
         let endpoints = store.peer_endpoints(peer).await.unwrap();
         assert_eq!(endpoints.len(), MAX_HISTORY);
         assert_eq!(endpoints[0].observed_at, 19, "the newest must survive");
+    }
+
+    #[tokio::test]
+    async fn the_per_kind_history_follows_the_retention_setting() {
+        let (store, peer) = store_with_peer().await;
+        store.set_retention(crate::Retention {
+            endpoint_history: 2,
+            ..crate::Retention::default()
+        });
+
+        for i in 0..6i64 {
+            store
+                .record_peer_endpoint(
+                    peer,
+                    EndpointKind::Api,
+                    &format!("203.0.113.5:{}", 1000 + i),
+                    Some(i),
+                    ObservedVia::Direct,
+                )
+                .await
+                .unwrap();
+        }
+
+        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].observed_at, 5);
     }
 
     /// TOFU: the first pubkey binds, the same one re-binds harmlessly, a

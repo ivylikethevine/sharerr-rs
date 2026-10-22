@@ -468,6 +468,33 @@ fn the_double_underscore_convention_survives_a_round_trip() {
     assert!(collect_overrides(vars.into_iter()).contains_key("sync.interval_secs"));
 }
 
+/// A field read from a mounted secret is just as pinned as one set inline,
+/// and the lock names the variable the operator actually set.
+#[test]
+fn a_file_variable_pins_the_same_field_under_its_own_name() {
+    let vars = [
+        (
+            "SHARERR_QBITTORRENT__URL_FILE".to_owned(),
+            "/run/secrets/qbit".to_owned(),
+        ),
+        (
+            "SHARERR_MASTER_KEY_FILE".to_owned(),
+            "/run/secrets/key".to_owned(),
+        ),
+        ("SHARERR__FILE".to_owned(), "/nowhere".to_owned()),
+    ];
+    let found = collect_overrides(vars.into_iter());
+    assert_eq!(
+        found.get("qbittorrent.url").map(String::as_str),
+        Some("SHARERR_QBITTORRENT__URL_FILE")
+    );
+    assert_eq!(
+        found.len(),
+        1,
+        "the master key file and a bare suffix are not settings"
+    );
+}
+
 #[test]
 fn library_rows_must_be_absolute_and_must_not_overlap() {
     let rows = |paths: &[&str]| -> Vec<(String, String)> {

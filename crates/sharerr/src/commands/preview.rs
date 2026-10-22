@@ -24,9 +24,9 @@ use crate::gluetun::GluetunTarget;
 use crate::web::templates::{
     ArrSection, ClientCheck, ClientMismatch, DiagnosticsData, EdgeStyle, EndpointStatus,
     FilterOption, Glance, GluetunSection, ItemRow, ItemsPage, LibraryRow, LighthouseRow,
-    LighthouseView, NodeStatus, PairedPeer, PathRow, PeerEndpointView, PeerRow, PeersPage,
-    RevealedPeer, RunRow, SampleRow, ScopeOption, SettingsPage, SetupStep, SortLink, StateCount,
-    StatusPage, TokenStatus, TopologyPage,
+    LighthouseView, NodeStatus, PairedPeer, PathRow, PeerEndpointView, PeerGuidePage, PeerRow,
+    PeersPage, RevealedPeer, RunRow, SampleRow, ScopeOption, SettingsPage, SetupStep, SortLink,
+    StateCount, StatusPage, TokenStatus, TopologyPage,
 };
 use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, SourceNode, layout};
 
@@ -44,6 +44,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .route("/", get(|| async { Html(page(status_page())) }))
         .route("/settings", get(|| async { Html(page(settings_page())) }))
         .route("/peers", get(|| async { Html(page(peers_page())) }))
+        .route(
+            "/peers/1/guide",
+            get(|| async { Html(page(peer_guide_page())) }),
+        )
         .route("/items", get(|| async { Html(page(items_page())) }))
         .route("/topology", get(|| async { Html(page(topology_page())) }))
         .route("/debug", get(|| async { Html(page(debug_page())) }))
@@ -371,6 +375,45 @@ fn setup_step(label: &'static str, done: bool, href: &'static str) -> SetupStep 
         done,
         hint: String::new(),
         href,
+    }
+}
+
+/// A friend's four setup steps with the first `done` of them ticked, the
+/// same labels and order `web::peers::setup_steps` produces.
+fn mock_setup(done: usize) -> Vec<SetupStep> {
+    [
+        ("Key issued", ""),
+        (
+            "Feed pulled",
+            "Their Prowlarr has not used the key yet: the indexer is not added, or its test failed.",
+        ),
+        (
+            "First announce",
+            "Their torrent client has not reached the tracker yet.",
+        ),
+        (
+            "Runs sharerr (optional)",
+            "Only for a friend who runs sharerr: their instance has not introduced itself yet.",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (label, hint))| SetupStep {
+        label,
+        done: index < done,
+        hint: hint.to_owned(),
+        href: "",
+    })
+    .collect()
+}
+
+fn peer_guide_page() -> PeerGuidePage {
+    PeerGuidePage {
+        signed_in: true,
+        label: "Sam".to_owned(),
+        scope_label: "everything",
+        feed_url: "http://seed.example.com:8477/api".to_owned(),
+        key: Some("sam-9f2a7c4e1b6d3f80".to_owned()),
     }
 }
 
@@ -787,6 +830,8 @@ fn peers_page() -> PeersPage {
                         via: "direct",
                     },
                 ],
+                setup: mock_setup(4),
+                setup_done: 4,
             },
             PeerRow {
                 id: 2,
@@ -807,6 +852,8 @@ fn peers_page() -> PeersPage {
                 gossip_url: String::new(),
                 gossip_key_set: false,
                 endpoints: vec![],
+                setup: mock_setup(1),
+                setup_done: 1,
             },
             PeerRow {
                 id: 3,
@@ -827,10 +874,13 @@ fn peers_page() -> PeersPage {
                 gossip_url: String::new(),
                 gossip_key_set: false,
                 endpoints: vec![],
+                setup: mock_setup(3),
+                setup_done: 3,
             },
         ],
         error: None,
         revealed: Some(RevealedPeer {
+            id: 1,
             label: "Sam".to_owned(),
             key: "sam-9f2a7c4e1b6d3f80".to_owned(),
             invite: Some(
@@ -1223,6 +1273,7 @@ mod tests {
             ("status", status_page().render().unwrap()),
             ("settings", settings_page().render().unwrap()),
             ("peers", peers_page().render().unwrap()),
+            ("peer_guide", peer_guide_page().render().unwrap()),
             ("items", items_page().render().unwrap()),
         ] {
             assert!(html.contains("<!DOCTYPE html>"), "{name}: {html}");

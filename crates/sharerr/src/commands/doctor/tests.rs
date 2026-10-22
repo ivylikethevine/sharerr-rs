@@ -719,14 +719,14 @@ fn suggest_paths_with_nothing_discovered_has_nothing_to_match() {
     assert_eq!(report.failures, 0);
 }
 
-// ---------------------------------------------------------- print_config_summary
+// --------------------------------------------------------------- config_summary
 
 /// Not a behavioural assertion — `println!` output is not worth capturing —
 /// but a guard against a panic in any of its branches (services configured
 /// or not, libraries present, a path map with and without a distinct qbit
 /// view) as this function changes.
 #[test]
-fn print_config_summary_does_not_panic_on_a_populated_config() {
+fn config_summary_does_not_panic_on_a_populated_config() {
     let config = Config {
         library: vec![sharerr_core::config::LibraryConfig {
             path: "/data/tv".into(),
@@ -740,48 +740,109 @@ fn print_config_summary_does_not_panic_on_a_populated_config() {
         ..Config::default()
     };
 
-    print_config_summary(&config);
-    print_config_summary(&Config::default());
+    config_summary(&config, &mut Report::default());
+    config_summary(&Config::default(), &mut Report::default());
 }
 
 #[test]
-fn print_config_summary_reports_a_client_username_when_the_backend_has_one() {
+fn config_summary_reports_a_client_username_when_the_backend_has_one() {
     // Only Transmission/rtorrent carry a username; qBittorrent (the
     // default) never does, so the `Some` arm needs a different backend.
-    print_config_summary(&Config {
-        torrent_backend: TorrentBackend::Transmission,
-        ..Config::default()
-    });
+    config_summary(
+        &Config {
+            torrent_backend: TorrentBackend::Transmission,
+            ..Config::default()
+        },
+        &mut Report::default(),
+    );
 }
 
 #[test]
-fn print_config_summary_reports_an_unparseable_advertised_host() {
-    print_config_summary(&Config {
-        tracker: sharerr_core::config::TrackerConfig {
-            advertised_host: Some("not a host".to_owned()),
-            ..Config::default().tracker
+fn config_summary_reports_an_unparseable_advertised_host() {
+    config_summary(
+        &Config {
+            tracker: sharerr_core::config::TrackerConfig {
+                advertised_host: Some("not a host".to_owned()),
+                ..Config::default().tracker
+            },
+            ..Config::default()
         },
-        ..Config::default()
-    });
+        &mut Report::default(),
+    );
 }
 
 // -------------------------------------------------------------- summarize
 
 #[test]
 fn summarize_with_nothing_wrong_says_so() {
-    assert!(summarize(0, 0).is_ok());
+    assert!(summarize(0, 0, false).is_ok());
 }
 
 #[test]
 fn summarize_with_only_warnings_still_succeeds() {
-    assert!(summarize(0, 3).is_ok());
+    assert!(summarize(0, 3, false).is_ok());
 }
 
 #[test]
 fn summarize_with_any_failure_is_an_error_naming_both_counts() {
-    let err = summarize(2, 1).unwrap_err();
+    let err = summarize(2, 1, false).unwrap_err();
     assert!(err.to_string().contains("2 check(s) failed"));
     assert!(err.to_string().contains("1 warning(s)"));
+}
+
+// ----------------------------------------------------------------- json
+
+/// JSON mode collects what text mode would have printed, section by section,
+/// with the counts the exit code rests on.
+#[test]
+fn a_json_report_carries_every_section_and_line_with_its_level() {
+    let mut report = Report::for_json();
+    report.section("vault");
+    report.ok("opened");
+    report.section("configuration");
+    report.line("data dir:  /data");
+    report.warn("one thing");
+    report.fail("another");
+    report.info("about that");
+
+    let json = report.json();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["failures"], 1);
+    assert_eq!(json["warnings"], 1);
+    assert_eq!(json["sections"][0]["title"], "vault");
+    assert_eq!(json["sections"][0]["lines"][0]["level"], "ok");
+    assert_eq!(json["sections"][0]["lines"][0]["message"], "opened");
+    let lines = &json["sections"][1]["lines"];
+    assert_eq!(lines[0]["level"], "info");
+    assert_eq!(lines[1]["level"], "warn");
+    assert_eq!(lines[2]["level"], "fail");
+    assert_eq!(lines[2]["message"], "another");
+    assert_eq!(lines[3]["level"], "info");
+}
+
+#[test]
+fn a_clean_json_report_says_ok() {
+    let mut report = Report::for_json();
+    report.section("vault");
+    report.ok("opened");
+    assert_eq!(report.json()["ok"], true);
+}
+
+/// A line pushed before any section still lands somewhere a parser can find.
+#[test]
+fn a_line_before_any_section_opens_an_untitled_one() {
+    let mut report = Report::for_json();
+    report.fail("early");
+    let json = report.json();
+    assert_eq!(json["sections"][0]["title"], "");
+    assert_eq!(json["sections"][0]["lines"][0]["message"], "early");
+}
+
+#[test]
+fn summarize_in_quiet_mode_keeps_the_exit_code() {
+    assert!(summarize(0, 0, true).is_ok());
+    assert!(summarize(0, 2, true).is_ok());
+    assert!(summarize(1, 0, true).is_err());
 }
 
 // ------------------------------------------------------------------- run
@@ -791,6 +852,7 @@ fn doctor_args() -> crate::cli::DoctorArgs {
         fix: false,
         suggest_paths: false,
         search_root: None,
+        json: false,
     }
 }
 
@@ -820,6 +882,12 @@ fn run_reports_every_failure_on_an_empty_config() {
         let result = runtime.block_on(run(&config, Some("bad config file"), &doctor_args()));
 
         assert!(result.is_err(), "an unconfigured instance cannot pass");
+        let json_args = crate::cli::DoctorArgs {
+            json: true,
+            ..doctor_args()
+        };
+        let result = runtime.block_on(run(&config, Some("bad config file"), &json_args));
+        assert!(result.is_err(), "JSON mode keeps the exit code");
         Ok(())
     });
 }
@@ -1852,6 +1920,7 @@ fn run_visits_every_optional_section_when_they_are_configured() {
                 fix: false,
                 suggest_paths: true,
                 search_root: Some(media.path().to_path_buf()),
+                json: false,
             };
             run(&config, None, &args).await
         });

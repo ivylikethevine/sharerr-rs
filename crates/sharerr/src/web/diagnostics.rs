@@ -350,14 +350,14 @@ async fn recent_run_rows(state: &WebState) -> Vec<RunRow> {
         .collect()
 }
 
-/// Up to a fortnight of hourly swarm-activity samples, oldest first — same
-/// empty-on-error tolerance as [`recent_run_rows`].
+/// Every kept hourly swarm-activity sample (a fortnight by default), oldest
+/// first — same empty-on-error tolerance as [`recent_run_rows`].
 async fn swarm_sample_rows(state: &WebState) -> Vec<sharerr_store::SwarmSample> {
     let Ok(store) = state.serve.store().await else {
         return Vec::new();
     };
     store
-        .recent_swarm_samples(sharerr_store::swarm::MAX_SAMPLES)
+        .recent_swarm_samples(store.retention().swarm_samples)
         .await
         .unwrap_or_default()
 }

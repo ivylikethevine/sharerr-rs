@@ -327,6 +327,9 @@ impl Syncer {
         let store = Store::open(&config.database_path())
             .await
             .with_context(|| format!("opening {}", config.database_path().display()))?;
+        // This handle closes the runs it records, so it is the one that prunes
+        // them; `ServeState::store()` sets the same limits on its own.
+        store.set_retention((&config.retention).into());
 
         Ok(Self::new(config.clone(), store, sources, tracker, seeder))
     }

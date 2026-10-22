@@ -92,6 +92,8 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// Cheap to clone — it is a connection pool handle, not a connection.
 pub struct Store {
     pool: SqlitePool,
+    /// How much history each self-growing table keeps — see [`crate::retention`].
+    pub(crate) retention: std::sync::Arc<crate::retention::RetentionCell>,
     #[cfg(feature = "fault-injection")]
     pub(crate) fault: std::sync::Arc<crate::fault::Fault>,
 }
@@ -147,6 +149,7 @@ impl Store {
         MIGRATOR.run(&pool).await?;
         Ok(Self {
             pool,
+            retention: crate::retention::RetentionCell::new(crate::Retention::default()),
             #[cfg(feature = "fault-injection")]
             fault: std::sync::Arc::new(crate::fault::Fault::new()),
         })

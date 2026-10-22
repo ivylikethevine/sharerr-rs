@@ -130,6 +130,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/peers/{id}/revoke", post(peers::revoke))
         .route("/peers/{id}/delete", post(peers::delete))
         .route("/peers/{id}/feed", get(peers::feed_preview))
+        .route(
+            "/peers/{id}/guide",
+            get(peers::guide).post(peers::guide_with_key),
+        )
         .route("/wizard", get(wizard::welcome))
         .route("/wizard/services", get(wizard::services))
         .route("/wizard/paths", get(wizard::paths))
@@ -505,6 +509,7 @@ pub(crate) async fn asset(axum::extract::Path(file): axum::extract::Path<String>
         "style.css" => (include_str!("assets/style.css"), "text/css; charset=utf-8"),
         "htmx.min.js" => (include_str!("assets/htmx.min.js"), JS),
         "layout.js" => (include_str!("assets/layout.js"), JS),
+        "theme.js" => (include_str!("assets/theme.js"), JS),
         "settings.js" => (include_str!("assets/settings.js"), JS),
         "topology.js" => (include_str!("assets/topology.js"), JS),
         "favicon.svg" => (include_str!("assets/favicon.svg"), "image/svg+xml"),
@@ -1027,6 +1032,21 @@ mod tests {
         let (_dir, app) = router();
         let response = send(app, get("/assets/style.css")).await;
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The toggle script is on every page, the sign-in page included, so it
+    /// has to be served without a session like the stylesheet.
+    #[tokio::test]
+    async fn the_theme_script_is_served_without_a_session() {
+        let (_dir, app) = router();
+        let response = send(app, get("/assets/theme.js")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/javascript"),
+        );
     }
 
     #[tokio::test]

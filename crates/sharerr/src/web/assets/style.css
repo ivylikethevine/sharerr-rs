@@ -99,8 +99,10 @@
   --text-2xl: 1.625rem;   /* 26px — h1 */
 }
 
+/* Dark follows the system preference unless the toggle has pinned `light`;
+   the forced-dark copy of these tokens sits right after this block. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #131417;
     --panel: #1c1e22;
     --panel-2: #202226;
@@ -134,6 +136,45 @@
     --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
   }
 }
+
+/* The forced-dark block: the same tokens as the media block above, applied
+   when the toggle (assets/theme.js) has pinned `data-theme="dark"` on <html>
+   regardless of the system preference. Change a token in both blocks. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131417;
+  --panel: #1c1e22;
+  --panel-2: #202226;
+  --ink: #e8e9ec;
+  --muted: #a0a4ae;
+  /* Lightened for the same reason as its light-mode counterpart -- 3.5:1
+     against a node box fill, against the 4.5:1 that text needs. */
+  --faint: #858a96;
+  --line: #303339;
+  --line-strong: #43474f;
+  --accent: #4c9a72;
+  --accent-hover: #5cae83;
+  --accent-ink: #0e1512;
+  --accent-wash: #4c9a721c;
+  --ok-bg: #16302322;
+  --ok-ink: #7fcda3;
+  --warn-bg: #3a2f1a44;
+  --warn-ink: #e2b96b;
+  --error-bg: #3a1e1e55;
+  --error-ink: #e79595;
+  --topo-arr: #6f9fdb;
+  --topo-library: #ab8bd6;
+  --topo-client: #d99a5c;
+  --topo-peer-1: #5fc4c4;
+  --topo-peer-2: #e07fb3;
+  --topo-peer-3: #9092e0;
+  --topo-peer-4: #c7a074;
+  --topo-peer-5: #74bfe8;
+  --topo-peer-6: #c98fe0;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
+}
+:root[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 
@@ -1607,4 +1648,30 @@ td.peer-name .error { display: block; }
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* The theme toggle cycles system → light → dark (assets/theme.js); one glyph
+   shows per choice, the system one when nothing is pinned. */
+.theme-toggle svg { margin-right: 0; }
+.theme-toggle svg + svg { display: none; }
+.theme-toggle[data-theme-choice="light"] svg { display: none; }
+.theme-toggle[data-theme-choice="light"] .theme-glyph-light { display: inline-block; }
+.theme-toggle[data-theme-choice="dark"] svg { display: none; }
+.theme-toggle[data-theme-choice="dark"] .theme-glyph-dark { display: inline-block; }
+
+/* A friend's setup guide (templates/peer_guide.html) is made to be printed:
+   the chrome drops out, the steps stay. */
+.print-actions { display: flex; gap: var(--sp-3); align-items: center; margin-bottom: var(--sp-4); }
+.key-line {
+  display: inline-block;
+  width: 100%;
+  max-width: 28rem;
+  height: 1.6em;
+  border-bottom: 1px solid var(--ink);
+  vertical-align: bottom;
+}
+@media print {
+  .bar, .foot, .skip-link, .print-actions { display: none !important; }
+  main { padding: 0; }
+  .panel { box-shadow: none; border: 1px solid var(--line); }
 }
