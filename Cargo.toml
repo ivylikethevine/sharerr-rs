@@ -111,7 +111,7 @@ toml_edit = "0.25.15"
 # guard and the cross-origin layer — rather than the handlers in isolation.
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # NFKD decomposition for synthesized release titles: pulls the base letter out
 # of an accented character (`é` -> `e` + combining accent) before the ASCII
 # filter runs, so e.g. `Amélie` transliterates to `Amelie` instead of `Am.lie`.

@@ -93,8 +93,9 @@ whole design is built around.
 - **Operations**: webhook notifications (generic, Discord, Apprise, ntfy,
   Gotify, Telegram, Pushover) on nine triggers plus an Uptime-Kuma-style
   heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
-  dashboard-widget JSON endpoint behind a bearer token, and an OpenAPI 3.1
-  document for the machine-facing API.
+  dashboard-widget JSON endpoint behind a bearer token with
+  [ready-made Grafana, Homepage and Home Assistant views](docs/dashboards/README.md),
+  and an OpenAPI 3.1 document for the machine-facing API.
 
 Which apps, clients and indexers are supported, how the three clients differ,
 and what was tried and deliberately left out is in
@@ -168,9 +169,12 @@ generates a key just for them, shown once, alongside the feed URL. They add a
 _Generic Torznab_ indexer in their Prowlarr using those two values.
 
 Because each friend has their own key, the Friends page can tell you when
-each of them last used the feed ("never" means they have the key but have
-not finished setting up), and revoking one person leaves everybody else
-working. That key is also what the feed embeds as the announce token, so
+each of them last used the feed, and until they have, which setup step they
+are on: key issued, feed pulled, first announce, and (for a friend who runs
+sharerr) paired. Each friend's card carries that checklist and a printable
+setup guide with the feed URL and the Prowlarr steps; printed from the key
+reveal, the guide carries the key too. Revoking one person leaves everybody
+else working. That key is also what the feed embeds as the announce token, so
 revoking a friend cuts their access to sharerr's tracker too, instantly, with
 no effect on anyone else. You can also scope what each friend sees:
 everything, or only TV, films, music or books. Content outside a friend's
@@ -535,18 +539,20 @@ cannot replace a stale tracker in place; see
 
 The UI covers everything, but each verb has a headless equivalent, which is
 what a scripted deployment or a secrets manager wants. Every command takes
-`--config <path>` (or `SHARERR_CONFIG`) and `--verbose`.
+`--config <path>` (or `SHARERR_CONFIG`), `--verbose`, and `--log-format json`
+(or `SHARERR_LOG_FORMAT=json`) for one JSON object per log line, the shape
+Loki and the Docker logging drivers parse.
 
-| Command                      | What it does                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                  |
-| `sharerr sync`               | One reconciliation pass, then exit. `--dry-run` reports what it would do without touching the client.                                                                                                                                                                                                                                                                                                      |
-| `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution**, the check most likely to explain "nothing is shared". The same checks back the web UI's Status page. `--fix` creates a missing tag or category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (`--search-root`, default `/media`), never written automatically. |
-| `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                        |
-| `sharerr vault list`         | Lists which secret keys are set, without their values.                                                                                                                                                                                                                                                                                                                                                     |
-| `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                           |
-| `sharerr openapi`            | Prints the OpenAPI 3.1 document for the machine-facing API (`--output` writes it to a file). See [`docs/API.md`](docs/API.md).                                                                                                                                                                                                                                                                             |
-| `sharerr preview`            | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout with no instance behind it. A development aid.                                                                                                                                                                                                                                |
+| Command                      | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sharerr serve`              | The long-running mode: HTTP, the tracker, the feed, and the reconciliation loop. What the container runs.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `sharerr sync`               | One reconciliation pass, then exit. `--dry-run` reports what it would do without touching the client.                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `sharerr doctor`             | Checks credentials, service reachability, the tag, and **path mapping resolution**, the check most likely to explain "nothing is shared". The same checks back the web UI's Status page. `--fix` creates a missing tag or category; `--suggest-paths` proposes `[[path_map]]` rules by matching tagged files against a mounted directory (`--search-root`, default `/media`), never written automatically. `--json` prints the same report as one document for a script or a monitor; the exit code is unchanged. |
+| `sharerr vault set <key>`    | Reads a secret from stdin into the encrypted vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `sharerr vault list`         | Lists which secret keys are set, without their values.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `sharerr vault remove <key>` | Deletes a secret from the vault.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `sharerr openapi`            | Prints the OpenAPI 3.1 document for the machine-facing API (`--output` writes it to a file). See [`docs/API.md`](docs/API.md).                                                                                                                                                                                                                                                                                                                                                                                    |
+| `sharerr preview`            | Serves every authenticated page with invented data on `127.0.0.1:4877` (`--bind` to change it), for checking the UI's layout with no instance behind it. A development aid.                                                                                                                                                                                                                                                                                                                                       |
 
 ```bash
 printf %s "$SONARR_API_KEY" | docker exec -i sharerr sharerr vault set sonarr.api_key
@@ -607,23 +613,10 @@ attached.
 
 Smallest first, by how much each item touches:
 
-- **A theme toggle.** The UI follows `prefers-color-scheme` and nothing
-  else; a light/dark switch remembered per browser, like Topology's
-  redaction checkbox.
-- **A "send test notification" button.** Settings → Notifications saves a
-  webhook without proving it; one button that fires a test event and shows
-  the response.
-- **`sharerr doctor --json`.** The same checks as machine-readable output,
-  for scripts and monitors.
-- **A JSON log format.** A `--log-format json` flag (or `SHARERR_LOG_FORMAT`)
-  for Loki and Docker log drivers.
-- **Docker secrets.** `SHARERR_MASTER_KEY_FILE`, and a `_FILE` variant of
-  every environment override, read from a mounted secret the way Compose and
-  Swarm expect.
-- **Dashboard snippets.** A Grafana dashboard for `/metrics` shipped in the
-  repository, and Homepage and Home Assistant snippets for `/dashboard`.
-- **Retention settings.** Swarm samples, endpoint history and sync runs are
-  pruned to fixed constants; expose each as a config key.
+- **Mutation testing.** `cargo-mutants` over the workspace, the next signal
+  past the 95% line-coverage floor: a mutant the suite survives marks a line
+  that runs without being checked. A `scripts/check.sh mutants` target run by
+  hand, then tests for the survivors worth killing.
 - **Event-driven sync.** A "Sync now" button on Status, and an *arr webhook
   receiver (On Import, On Series Add) that runs one pass at once instead of
   waiting out `sync.interval_secs`.
@@ -643,10 +636,6 @@ Smallest first, by how much each item touches:
 - **Release-name lint for directory sources.** Item detail shows how a
   friend's Sonarr or Radarr would parse the title, and flags a name that will
   not match before the friend's search fails.
-- **Per-friend setup progress.** Replace "last seen: never" with a
-  checklist (key issued, feed pulled, first announce, gossip paired) and a
-  printable per-friend guide carrying their key and the Prowlarr steps, for a
-  friend who does not run sharerr.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
 - **A read-only management API.** Items, friends, sync status and doctor

@@ -19,7 +19,9 @@ impl Store {
         Ok(row.try_get::<i64, _>("id")?)
     }
 
-    /// Close a run and record what it did.
+    /// Close a run and record what it did, then prune to the newest
+    /// `retention.sync_runs` when that is set: every run is kept otherwise,
+    /// as it always was.
     pub async fn finish_run(&self, run_id: i64, summary: &RunSummary) -> Result<()> {
         sqlx::query(
             "UPDATE sync_runs SET finished_at = ?1, discovered = ?2, added = ?3, \
@@ -34,6 +36,17 @@ impl Store {
         .bind(run_id)
         .execute(self.pool())
         .await?;
+
+        let keep = self.retention().sync_runs;
+        if keep > 0 {
+            sqlx::query(
+                "DELETE FROM sync_runs WHERE id NOT IN \
+                 (SELECT id FROM sync_runs ORDER BY id DESC LIMIT ?1)",
+            )
+            .bind(keep)
+            .execute(self.pool())
+            .await?;
+        }
         Ok(())
     }
 
@@ -153,6 +166,36 @@ mod tests {
         assert_eq!(runs[1].id, first);
         assert!(runs[1].finished_at.is_some());
         assert_eq!(runs[1].summary, summary);
+    }
+
+    /// Runs are kept forever unless `[retention] sync_runs` says otherwise;
+    /// with it set, finishing a run drops the oldest beyond the limit.
+    #[tokio::test]
+    async fn finishing_a_run_prunes_to_the_retention_when_one_is_set() {
+        let store = Store::open_in_memory().await.unwrap();
+        for _ in 0..5 {
+            let id = store.begin_run().await.unwrap();
+            store.finish_run(id, &RunSummary::default()).await.unwrap();
+        }
+        assert_eq!(
+            store.recent_runs(100).await.unwrap().len(),
+            5,
+            "unbounded by default"
+        );
+
+        store.set_retention(crate::Retention {
+            sync_runs: 2,
+            ..crate::Retention::default()
+        });
+        let newest = store.begin_run().await.unwrap();
+        store
+            .finish_run(newest, &RunSummary::default())
+            .await
+            .unwrap();
+
+        let runs = store.recent_runs(100).await.unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, newest, "the newest survives");
     }
 
     #[tokio::test]

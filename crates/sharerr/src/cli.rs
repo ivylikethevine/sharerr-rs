@@ -32,8 +32,29 @@ pub struct Cli {
     #[arg(long, short, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// How log lines are written: `text` for a terminal, `json` (one object
+    /// per line) for Loki, a Docker logging driver, or anything else that
+    /// parses them.
+    #[arg(
+        long,
+        env = "SHARERR_LOG_FORMAT",
+        default_value = "text",
+        value_enum,
+        global = true
+    )]
+    pub log_format: LogFormat,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// The two shapes `--log-format` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable lines, the default.
+    Text,
+    /// One JSON object per line, with the fields as keys.
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -106,6 +127,13 @@ pub struct DoctorArgs {
     /// repository uses for sharerr's own view of the library.
     #[arg(long)]
     pub search_root: Option<PathBuf>,
+
+    /// Print the same checks as one JSON document instead of text, for a
+    /// script or a monitor: `{"ok", "failures", "warnings", "sections"}`, each
+    /// section its title and lines of `{"level", "message"}`. The exit code
+    /// is unchanged, so a healthcheck can keep reading that alone.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

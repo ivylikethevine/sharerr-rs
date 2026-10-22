@@ -73,7 +73,8 @@ jobs:
           {
             echo "Known advisories affect locked dependencies. The fix is usually a bump or a"
             echo "\`cargo update -p <crate>\`; with no patched version yet, an \`[advisories] ignore\` entry in"
-            echo "\`deny.toml\` or an \`[[IgnoredVulns]]\` entry in \`.github/osv-scanner.toml\`, **with a comment saying why**."
+            echo "\`deny.toml\`, **with a comment saying why**, and the same id as an \`[[IgnoredVulns]]\` entry in an"
+            echo "\`osv-scanner.toml\` beside \`Cargo.lock\` for Scorecard; \`.github/osv-scanner.toml\` covers only \`.github/package-lock.json\`."
           } >"$report"
 
           rc=0

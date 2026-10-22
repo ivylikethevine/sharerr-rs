@@ -56,6 +56,12 @@
     In their Prowlarr: add a <em>Generic Torznab</em> indexer with this URL and
     this key.
   </p>
+  {# A POST so the key rides in the body, never in a URL that would land in
+     a history or a proxy log; opens in a new tab, ready to print or save. #}
+  <form method="post" action="/peers/{{ new.id }}/guide" target="_blank" class="inline">
+    <input type="hidden" name="key" value="{{ new.key }}">
+    <button type="submit" class="secondary">Print a setup guide with this key</button>
+  </form>
   <dl class="facts">
     <dt>Feed URL</dt>
     <dd>
@@ -185,7 +191,8 @@
         </td>
         <td class="nowrap">{% if let Some(n) = peer.sharing %}{{ n }} item(s){% if !peer.sharing_size.is_empty() %} <span class="hint">· {{ peer.sharing_size }}</span>{% endif %}{% else %}<span class="hint">—</span>{% endif %}</td>
         <td class="nowrap" title="{{ peer.created_absolute }}">{{ peer.created }}</td>
-        <td class="nowrap"{% if !peer.last_seen_absolute.is_empty() %} title="{{ peer.last_seen_absolute }}"{% endif %}>{{ peer.last_seen }}</td>
+        {# Never seen: the step they are on, linking to the checklist on their card, instead of a bare "never". #}
+        <td class="nowrap"{% if !peer.last_seen_absolute.is_empty() %} title="{{ peer.last_seen_absolute }}"{% endif %}>{% if peer.last_seen_absolute.is_empty() && !peer.revoked %}<a href="#friend-{{ peer.id }}" title="They have the key but have not used it yet; the card below says which step is next">setting up, {{ peer.setup_done }}/{{ peer.setup.len() }}</a>{% else %}{{ peer.last_seen }}{% endif %}</td>
         <td class="nowrap">{% if !peer.served.is_empty() %}{{ peer.served }}{% if !peer.shared_on.is_empty() %} <span class="hint" title="What their client reports having passed on to other peers">· {{ peer.shared_on }} on</span>{% endif %}{% else %}<span class="hint">—</span>{% endif %}</td>
         <td class="nowrap">
           {% if let Some(pubkey) = peer.pubkey_short %}
@@ -247,9 +254,27 @@
 
 {% for peer in peers %}
 {% if !peer.revoked %}
-<div class="panel">
+<div class="panel" id="friend-{{ peer.id }}">
   <h3>{{ peer.label }}</h3>
   <dl class="facts">
+    <dt>Setup</dt>
+    <dd>
+      <ul class="checklist">
+        {% for step in peer.setup %}
+        <li>
+          {% if step.done %}
+          <span class="ok" aria-hidden="true">&#10003;</span><span class="visually-hidden">Done:</span>
+          {% else %}
+          <span class="hint" aria-hidden="true">&#9675;</span><span class="visually-hidden">To do:</span>
+          {% endif %}
+          {{ step.label }}
+          {% if !step.done %}<br><span class="hint">{{ step.hint }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      <a href="/peers/{{ peer.id }}/guide" target="_blank" rel="noopener" class="link micro"
+         title="A printable page with the feed URL and the Prowlarr steps, for a friend who does not run sharerr">Print a setup guide</a>
+    </dd>
     <dt>Seen at</dt>
     <dd>
       {% if peer.endpoints.is_empty() %}

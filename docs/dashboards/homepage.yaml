@@ -1,0 +1,27 @@
+# A Homepage (gethomepage.dev) service entry reading sharerr's /dashboard
+# JSON through the Custom API widget. Paste under a group in services.yaml;
+# the token is the vault's metrics.token (Settings → Metrics), and the
+# endpoint answers 404 until metrics.enabled is on and the token matches.
+- sharerr:
+    icon: mdi-share-variant
+    href: http://sharerr:8477/
+    description: What this instance shares, and with whom
+    widget:
+      type: customapi
+      url: http://sharerr:8477/dashboard
+      refreshInterval: 60000
+      headers:
+        Authorization: Bearer {{HOMEPAGE_VAR_SHARERR_TOKEN}}
+      mappings:
+        - field: items_shared
+          label: Sharing
+          format: number
+        - field: shared_bytes
+          label: On disk
+          format: bytes
+        - field: friends_recent
+          label: Friends active
+          format: number
+        - field: served_bytes
+          label: Served
+          format: bytes

@@ -17,7 +17,8 @@ use crate::state::ServeState;
 
 /// How often the background loop samples. An hour, not `system_stats`'
 /// five seconds — this feeds a fortnight-scale chart, not a live gauge, and
-/// `sharerr_store::swarm::MAX_SAMPLES` is sized against this exact interval.
+/// `sharerr_store::swarm::MAX_SAMPLES` (the `retention.swarm_samples`
+/// default) is sized against this exact interval.
 const POLL_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Sample the live swarms and record the result, forever. Never returns.

@@ -1002,6 +1002,12 @@
   </p>
 
   <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/notifications" hx-target="#test-notifications" hx-swap="innerHTML">Send a test notification</button>
+  <span id="test-notifications"></span>
+  <p class="hint">
+    Posts one "test" event through the stored URL and shape as saved, whatever
+    the triggers above say, and shows what the service answered.
+  </p>
 </form>
 </details>
 

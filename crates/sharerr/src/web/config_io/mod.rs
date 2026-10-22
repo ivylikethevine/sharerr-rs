@@ -448,6 +448,12 @@ fn collect_overrides(vars: impl Iterator<Item = (String, String)>) -> BTreeMap<S
         if rest.is_empty() || crate::settings::NON_CONFIG_ENV.contains(&rest) {
             continue;
         }
+        // `SHARERR_<PATH>_FILE` pins the same field as `SHARERR_<PATH>`; the
+        // variable is reported under the name the operator set.
+        let rest = rest.strip_suffix("_FILE").unwrap_or(rest);
+        if rest.is_empty() {
+            continue;
+        }
 
         // The inverse of figment's `.split("__")`: `QBITTORRENT__URL` addresses
         // `qbittorrent.url`.

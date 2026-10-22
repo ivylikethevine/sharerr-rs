@@ -32,7 +32,8 @@ pub struct SwarmSample {
 }
 
 impl Store {
-    /// Record one sample, then prune to the newest [`MAX_SAMPLES`].
+    /// Record one sample, then prune to the newest `retention.swarm_samples`
+    /// ([`MAX_SAMPLES`] unless `[retention]` says otherwise).
     ///
     /// Pruning on every insert rather than gating it on "did this change
     /// anything" — [`Self::record_peer_endpoint`] gates because an upsert
@@ -55,7 +56,7 @@ impl Store {
             "DELETE FROM swarm_samples WHERE id NOT IN \
              (SELECT id FROM swarm_samples ORDER BY sampled_at DESC, id DESC LIMIT ?1)",
         )
-        .bind(MAX_SAMPLES)
+        .bind(self.retention().swarm_samples)
         .execute(&mut *tx)
         .await?;
 
@@ -135,6 +136,25 @@ mod tests {
         let recent = store.recent_swarm_samples(10).await.unwrap();
         let times: Vec<i64> = recent.iter().map(|s| s.sampled_at).collect();
         assert_eq!(times, vec![100, 200, 300]);
+    }
+
+    /// `[retention] swarm_samples` replaces the compiled cap at the next
+    /// write, on every clone of the handle.
+    #[tokio::test]
+    async fn a_lower_retention_prunes_to_it_on_the_next_write() {
+        let store = Store::open_in_memory().await.unwrap();
+        for at in 0..10 {
+            store.record_swarm_sample(sample(at, 0)).await.unwrap();
+        }
+        store.clone().set_retention(crate::Retention {
+            swarm_samples: 3,
+            ..crate::Retention::default()
+        });
+        store.record_swarm_sample(sample(10, 0)).await.unwrap();
+
+        let recent = store.recent_swarm_samples(100).await.unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent.last().unwrap().sampled_at, 10);
     }
 
     #[tokio::test]

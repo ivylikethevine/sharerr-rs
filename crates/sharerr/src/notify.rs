@@ -146,6 +146,36 @@ pub async fn send(state: &ServeState, trigger: NotificationTrigger, message: &st
     webhook.post(trigger.label(), message).await;
 }
 
+/// Send one notification on request, for the settings page's test button,
+/// and say what happened. Unlike [`send`] this ignores the trigger list (the
+/// operator asked) and reports every failure in words instead of logging it,
+/// since for once there is someone to tell.
+pub async fn send_test(state: &ServeState) -> Result<String, String> {
+    let vault = state
+        .open_vault()
+        .await
+        .map_err(|err| format!("The vault could not be opened: {err}"))?;
+    let configured = vault
+        .get(secret_keys::NOTIFICATIONS_WEBHOOK_URL)
+        .map_err(|err| format!("The stored webhook URL could not be read: {err}"))?
+        .ok_or_else(|| "No webhook URL is stored. Save one first.".to_owned())?;
+    let url = url::Url::parse(configured.expose_secret())
+        .map_err(|_| "The stored webhook URL is not a valid URL.".to_owned())?;
+    let client = http_client()
+        .cloned()
+        .ok_or_else(|| "The notification HTTP client could not be built.".to_owned())?;
+    let kind = state.with_config(|c| c.notifications.kind).await;
+    let webhook = Webhook { url, kind, client };
+    let status = webhook
+        .try_post("test", "A test notification from the Settings page.")
+        .await
+        .map_err(|reason| format!("Not sent: {reason}."))?;
+    Ok(format!(
+        "Sent. The {} endpoint answered {status}.",
+        kind.as_str()
+    ))
+}
+
 /// Whether `trigger` is in [`sharerr_core::config::NotificationsConfig::triggers`]
 /// — checked ahead of resolving the webhook itself, so a disabled trigger
 /// costs nothing beyond reading the in-memory config.
@@ -214,32 +244,32 @@ impl Webhook {
         })
     }
 
+    /// Fire-and-log: the shape every background caller wants, since none of
+    /// them has anyone to report a failure to.
     async fn post(&self, event: &str, message: &str) {
-        let (url, body) = match self.request(event, message) {
-            Ok(request) => request,
+        match self.try_post(event, message).await {
+            Ok(_) => tracing::debug!(event, "sent a notification"),
             Err(reason) => {
                 tracing::warn!(
                     event,
-                    "not sending a notification: {reason} — check Settings"
+                    "could not send a notification: {reason} — check Settings"
                 );
-                return;
             }
-        };
+        }
+    }
 
+    /// One POST, with the outcome as data: the status the endpoint answered,
+    /// or why nothing was accepted, in words the settings page can show.
+    async fn try_post(&self, event: &str, message: &str) -> Result<reqwest::StatusCode, String> {
+        let (url, body) = self.request(event, message)?;
         match self.client.post(url).json(&body).send().await {
-            Ok(response) if response.status().is_success() => {
-                tracing::debug!(event, "sent a notification");
-            }
-            Ok(response) => tracing::warn!(
-                status = %response.status(),
-                event,
-                "the notification webhook responded with an error"
-            ),
+            Ok(response) if response.status().is_success() => Ok(response.status()),
+            Ok(response) => Err(format!("the webhook responded with {}", response.status())),
             // `without_url`: every kind's URL carries a credential.
-            Err(err) => {
-                let err = err.without_url();
-                tracing::warn!(error = %err, event, "could not reach the notification webhook");
-            }
+            Err(err) => Err(format!(
+                "could not reach the webhook: {}",
+                err.without_url()
+            )),
         }
     }
 }
@@ -893,6 +923,92 @@ mod tests {
                 )
                 .await;
             });
+            Ok(())
+        });
+    }
+
+    /// The settings page's test button: one POST regardless of the trigger
+    /// list (none is ticked here), and the answer in words.
+    #[test]
+    fn send_test_posts_whatever_the_triggers_say_and_reports_the_status() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let mut config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            config.notifications.triggers.clear();
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_json(serde_json::json!({
+                        "event": "test",
+                        "message": "A test notification from the Settings page."
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(204))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let outcome = send_test(&state).await.expect("the POST was accepted");
+                assert!(outcome.contains("204"), "{outcome}");
+
+                server.reset().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .respond_with(wiremock::ResponseTemplate::new(401))
+                    .mount(&server)
+                    .await;
+                let outcome = send_test(&state)
+                    .await
+                    .expect_err("a rejection is reported");
+                assert!(outcome.contains("401"), "{outcome}");
+            });
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn send_test_with_no_stored_url_says_to_save_one() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = sharerr_core::Config {
+                data_dir: dir.clone(),
+                ..sharerr_core::Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let reason = runtime
+                .block_on(send_test(&state))
+                .expect_err("nothing stored");
+            assert!(reason.contains("Save one first"), "{reason}");
+            Ok(())
+        });
+    }
+
+    /// `Jail` with the key cleared, per CLAUDE.md: a bare test asserting on the
+    /// vault failing to open races the Jail tests above.
+    #[test]
+    fn send_test_without_a_master_key_names_the_vault() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            let (_dir, state) = crate::state::fixtures::unconfigured();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let reason = runtime.block_on(send_test(&state)).expect_err("no vault");
+            assert!(reason.contains("vault"), "{reason}");
             Ok(())
         });
     }

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
 # Smoke test for a built image: does the binary run, and does the container
 # report healthy by its own HEALTHCHECK?
 #

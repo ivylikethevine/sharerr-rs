@@ -21,6 +21,7 @@ default, and what sets it.
 - [`[tracker]`](#tracker)
 - [`[[path_map]]`](#path_map)
 - [`[gossip]`](#gossip)
+- [`[retention]`](#retention)
 - [`[lighthouse]`](#lighthouse)
 - [`[gluetun]` and `[gluetun_client]`](#gluetun-and-gluetun_client)
 - [`[sync]`](#sync)
@@ -271,6 +272,22 @@ still reaches it.
 | ---------------------- | ---- | ------- | ----------------------------------------------------------------------------------- |
 | `gossip.exchange_secs` | int  | `900`   | How often the outbound exchange runs against friends with a `gossip_url`. No floor. |
 
+## `[retention]`
+
+How much history the database keeps of the three tables that grow on their
+own. Each is pruned on write to its limit, so a lowered value takes effect at
+the next write to that table, a saved config included, with no restart.
+Config-file only, like `[gossip]`: no settings-page field, since the
+defaults suit every ordinary deployment and the one reason to change them is
+a host short of disk or a Diagnostics chart that should span longer than a
+fortnight. `SHARERR_RETENTION__*` reaches them too.
+
+| TOML key                     | Type | Default | Notes                                                                                                       |
+| ---------------------------- | ---- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `retention.swarm_samples`    | int  | `336`   | Hourly swarm samples kept in total, behind the Diagnostics chart. 336 is a fortnight.                       |
+| `retention.endpoint_history` | int  | `5`     | Addresses kept per friend and endpoint kind. Enough to span a few reconnects; more would be a location log. |
+| `retention.sync_runs`        | int  | `0`     | Sync runs kept, newest first. `0` keeps every run.                                                          |
+
 ## `[lighthouse]`
 
 See [`LIGHTHOUSE.md`](LIGHTHOUSE.md) for the design and for running one. `enabled`
@@ -335,6 +352,9 @@ See the README's
 
 A webhook fired on whichever triggers below are enabled — see the README's
 mentions under ["Friends finding each other"](../README.md#friends-finding-each-other).
+Settings → Notifications has a _Send a test notification_ button that posts
+one `test` event through the stored URL and shape, whatever the triggers
+say, and shows what the service answered.
 
 | TOML key                        | Type             | Default           | Notes                                                                                                                                                          |
 | ------------------------------- | ---------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -541,15 +561,25 @@ tracker.advertised_host -> SHARERR_TRACKER__ADVERTISED_HOST
 These take precedence over `sharerr.toml`, so a field pinned by a variable
 cannot be changed from the web UI — its input renders disabled, naming the
 variable, rather than accepting a save that would be silently discarded.
+
+Every variable also takes a `_FILE` suffix, for a value mounted as a Docker
+or Swarm secret: `SHARERR_QBITTORRENT__URL_FILE=/run/secrets/qbit_url` reads
+the value from that file, surrounding whitespace trimmed, so a file written
+with `echo` works. A file that cannot be read is a startup error naming the
+variable. When both forms are set the plain variable wins, and a `_FILE`
+form pins its field in the UI just as the plain one does.
+
 `SHARERR_MASTER_KEY` (and `SHARERR_MASTER_KEY_FILE`, pointing at a Docker
 secret) is the one setting that has no `sharerr.toml` equivalent at all,
 since it is what encrypts the vault the file's own secrets would otherwise
-need to unlock. It, `SHARERR_CONFIG`, and the opt-in test suites' own
-`SHARERR_E2E_*` variables (tiers 2 and 3) are the only `SHARERR_*` names
+need to unlock. It, `SHARERR_CONFIG`, `SHARERR_LOG_FORMAT` (the CLI's
+`--log-format`, read before the config loads), and the opt-in test suites'
+own `SHARERR_E2E_*` variables (tiers 2 and 3) are the only `SHARERR_*` names
 that are not config fields; any other unrecognised `SHARERR_*` variable is
 a startup error, same as an unknown key in the file.
 
-The `sharerr-lighthouse` binary reads no `sharerr.toml` and has two
-variables of its own: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`) and
-`LIGHTHOUSE_SECRET_FILE` (default `/data/lighthouse.secret`). See
+The `sharerr-lighthouse` binary reads no `sharerr.toml` and has three
+variables of its own: `LIGHTHOUSE_BIND` (default `0.0.0.0:7878`),
+`LIGHTHOUSE_SECRET_FILE` (default `/data/lighthouse.secret`) and
+`LIGHTHOUSE_LOG_FORMAT` (`text` or `json`). See
 [`LIGHTHOUSE.md`](LIGHTHOUSE.md#running-one).
