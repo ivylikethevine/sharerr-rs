@@ -607,6 +607,13 @@ attached.
 
 Smallest first, by how much each item touches:
 
+- **The per-file SPDX headers come out.** `REUSE.toml` (`path = "**"`) and
+  `LICENSES/MIT.txt` arrive with the next sync of the shared CI files and
+  cover every file, and Scorecard's License check reads only `LICENSE.md`, so
+  the `SPDX-License-Identifier` comment at the top of each file is redundant:
+  strip it from this repository's own files and stop adding it. The synced CI
+  files change in their source, which the sync carries. Done when
+  `git grep -l SPDX-License-Identifier` lists `REUSE.toml` alone.
 - **A theme toggle.** The UI follows `prefers-color-scheme` and nothing
   else; a light/dark switch remembered per browser, like Topology's
   redaction checkbox.
