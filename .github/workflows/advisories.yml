@@ -13,8 +13,8 @@ name: Advisories
 # already-published advisory), weekly (advisories land with no push here), and
 # on dispatch. workflow_run is safe here: the job runs only after a green push
 # to main.
-on: # zizmor: ignore[dangerous-triggers]
-  workflow_run:
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types: [completed]
     branches: [main]
