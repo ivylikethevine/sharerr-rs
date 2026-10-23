@@ -24,8 +24,8 @@ name: Coverage
 # can write (the comment) checks nothing out and only reads that run's own
 # artifact. A fork PR's token cannot write to the PR at all, so forks skip
 # both jobs rather than measure a figure nobody would see.
-on: # zizmor: ignore[dangerous-triggers]
-  workflow_run:
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types: [completed]
     branches: [main]
