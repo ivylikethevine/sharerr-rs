@@ -12,8 +12,8 @@ name: Pages
 # build refuses a Coverage run that failed or came from a pull request, checks
 # out the default branch, and reads the badges through an API query for main's
 # newest green Coverage run rather than the triggering run's payload.
-on: # zizmor: ignore[dangerous-triggers]
-  workflow_run:
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [Coverage]
     types: [completed]
     branches: [main]
