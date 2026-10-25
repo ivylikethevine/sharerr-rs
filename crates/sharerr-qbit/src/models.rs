@@ -53,6 +53,15 @@ impl TorrentInfo {
         )
     }
 
+    /// Whether someone stopped it: `paused*` up to qBittorrent 4, `stopped*`
+    /// from 5.
+    pub fn is_stopped(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "pausedUP" | "pausedDL" | "stoppedUP" | "stoppedDL"
+        )
+    }
+
     /// The actual per-torrent limit, resolving qBittorrent's `-2`
     /// (use-global-default) and `-1` (unlimited) sentinels to `None` — neither is
     /// a fixed number this specific torrent is held to.

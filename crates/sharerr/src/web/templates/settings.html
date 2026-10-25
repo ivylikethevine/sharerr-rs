@@ -974,6 +974,14 @@
     A library path cannot be read (once per reason, not per pass)
   </label>
   <label class="hint">
+    <input type="checkbox" name="trigger_torrent_interrupted" value="1" {% if notifications_trigger_torrent_interrupted %}checked{% endif %}>
+    A torrent sharerr built is stopped in the client, or removed from it (once per torrent)
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_file_changed" value="1" {% if notifications_trigger_file_changed %}checked{% endif %}>
+    A shared file changes on disk after its torrent was built (once per torrent)
+  </label>
+  <label class="hint">
     <input type="checkbox" name="trigger_heartbeat" value="1" {% if notifications_trigger_heartbeat %}checked{% endif %}>
     Heartbeat (the push below, not the webhook)
   </label>

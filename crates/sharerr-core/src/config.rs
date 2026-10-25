@@ -1342,6 +1342,14 @@ pub enum NotificationTrigger {
     /// directory, permission-denied, or only partly listable. Fired once per
     /// distinct reason, not once per pass — see `commands::serve::background`.
     LibraryUnreadable,
+    /// A torrent sharerr built is stopped (paused) in the client, or was gone
+    /// from it and has been re-added. Fired once per torrent until it seeds
+    /// again — see `sync::Syncer::watch` and `commands::serve::background`.
+    TorrentInterrupted,
+    /// A shared file's inode or modification time changed since sharerr built
+    /// its torrent, so its pieces no longer match. Fired once per torrent, and
+    /// nothing is rebuilt — see `sync::Syncer::watch`.
+    FileChanged,
     /// An Uptime-Kuma-style push: a GET to
     /// [`secret_keys::NOTIFICATIONS_HEARTBEAT_URL`] every
     /// [`NotificationsConfig::heartbeat_secs`] while this instance would
@@ -1361,6 +1369,8 @@ crate::str_enum!(NotificationTrigger {
     PeerFirstContact => "peer_first_contact",
     TrackerUnreachable => "tracker_unreachable",
     LibraryUnreadable => "library_unreadable",
+    TorrentInterrupted => "torrent_interrupted",
+    FileChanged => "file_changed",
     Heartbeat => "heartbeat",
 });
 
@@ -1380,6 +1390,8 @@ impl NotificationTrigger {
             Self::PeerFirstContact => "friend made first contact",
             Self::TrackerUnreachable => "tracker unreachable",
             Self::LibraryUnreadable => "library path unreadable",
+            Self::TorrentInterrupted => "torrent stopped or removed",
+            Self::FileChanged => "shared file changed",
             Self::Heartbeat => "heartbeat push",
         }
     }

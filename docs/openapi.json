@@ -1399,6 +1399,49 @@
         }
       }
     },
+    "/hooks/arr": {
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`POST /hooks/arr` — a Sonarr, Radarr, Lidarr, Readarr or Whisparr Webhook\nconnection (On Import, On Series or Movie Add, and the like).",
+        "description": "Asks for a sync pass now, the way Status's \"Sync now\" does; the payload is\nnever trusted, since the pass reads every source itself. The *arr app's\n`Test` event is answered without one, so saving the connection does not run\na pass. Refused from non-private addresses, as `/gluetun/refresh` is: the\ncaller is an *arr app on the same host, Docker network or LAN.",
+        "operationId": "arrWebhook",
+        "requestBody": {
+          "description": "The *arr app's Webhook payload. Only `eventType` is read.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A sync pass was requested, or a `Test` event was acknowledged. Requests that arrive during a pass coalesce into one more pass after it.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the caller is not on a private address.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/lighthouse/v1/health": {
       "get": {
         "tags": [

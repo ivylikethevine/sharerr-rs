@@ -25,6 +25,7 @@ default, and what sets it.
 - [`[lighthouse]`](#lighthouse)
 - [`[gluetun]` and `[gluetun_client]`](#gluetun-and-gluetun_client)
 - [`[sync]`](#sync)
+  - [Syncing on import](#syncing-on-import)
 - [`[checks]`](#checks)
 - [`[notifications]`](#notifications)
 - [`[metrics]`](#metrics)
@@ -330,7 +331,7 @@ identical to one that is working. `sharerr doctor` names the missing key. How
 to mint the key on gluetun's side, and the three-route role a per-route
 config needs, is in
 [`docker/deploy/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md),
-which wires all of this up for four deployment shapes.
+which wires all of this up for five deployment shapes.
 
 ## `[sync]`
 
@@ -338,6 +339,23 @@ which wires all of this up for four deployment shapes.
 | -------------------- | ---- | ------- | ---------------------------------------------------------- |
 | `sync.enabled`       | bool | `true`  | Run the reconciliation loop on a timer while `serve` runs. |
 | `sync.interval_secs` | int  | `900`   | Floor of 60s.                                              |
+
+### Syncing on import
+
+A pass also runs at once, with or without the timer, from Status's **Sync
+now** button or from an \*arr Webhook connection. In Sonarr, Radarr, Lidarr,
+Readarr or Whisparr, add Settings → Connect → Webhook with:
+
+- **URL**: `http://<sharerr>:8477/hooks/arr`
+- **Method**: `POST`
+- **Triggers**: On Import (or On Release Import), and On Series, Movie,
+  Artist or Book Add; any other trigger runs a pass too
+
+The connection's Test sends an event sharerr answers without a pass. The
+payload is never trusted, so the route has no credential; it answers only
+private addresses (the same host, Docker network or LAN), like gluetun's
+hooks. Webhooks that arrive during a pass coalesce into one more pass after
+it.
 
 ## `[checks]`
 
@@ -363,7 +381,7 @@ say, and shows what the service answered.
 | `notifications.heartbeat_secs`  | int              | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                               |
 | `notifications.triggers`        | array of strings | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
-The ten triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
+The twelve triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
 `endpoint_rotated` (the gluetun-resolved advertised address changing —
 usually the one most likely to silently break a friend's downloads),
 `items_shared` and `item_failed` (each digested into one notification per
@@ -376,7 +394,15 @@ accepting connections after having been confirmed reachable; needs
 fires on an address that was never confirmed, so a router that refuses
 hairpinning stays silent), `library_unreadable` (a `[[library]]` path that
 could not be read or only partly listed this sync pass, once per distinct
-reason rather than once per pass), and `heartbeat`.
+reason rather than once per pass), `torrent_interrupted` (a torrent sharerr
+built is stopped in the client, or was removed from it and the pass added it
+back), `file_changed` (a shared file's inode or modification time differs
+from when sharerr built its torrent, so friends' downloads fail the piece
+checks; Force rebuild on the item page builds a new one), and `heartbeat`.
+Those two fire once per torrent, not once per pass, and only for torrents
+sharerr built; nothing is resumed or rebuilt for you. A mount whose inode
+numbers change on every remount (CIFS with `noserverino`) reads as a change
+after each remount.
 
 `heartbeat` is the odd one out: it never posts to the webhook. It is an
 Uptime-Kuma-style push — a plain GET to `notifications.heartbeat_url`, every

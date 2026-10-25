@@ -1469,6 +1469,8 @@ async fn save_notifications_writes_the_heartbeat_interval_and_new_triggers() {
             heartbeat_secs: "120".to_owned(),
             trigger_heartbeat: Some("1".to_owned()),
             trigger_library_unreadable: Some("1".to_owned()),
+            trigger_torrent_interrupted: Some("1".to_owned()),
+            trigger_file_changed: Some("1".to_owned()),
             ..Default::default()
         }),
     )
@@ -1480,6 +1482,8 @@ async fn save_notifications_writes_the_heartbeat_interval_and_new_triggers() {
     assert!(written.contains("heartbeat_secs = 120"), "{written}");
     assert!(written.contains(r#""heartbeat""#), "{written}");
     assert!(written.contains(r#""library_unreadable""#), "{written}");
+    assert!(written.contains(r#""torrent_interrupted""#), "{written}");
+    assert!(written.contains(r#""file_changed""#), "{written}");
     assert!(!written.contains(r#""sync_failed""#), "{written}");
 }
 

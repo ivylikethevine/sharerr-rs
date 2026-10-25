@@ -1,7 +1,7 @@
 # Deploying sharerr
 
-Four layouts for sharerr itself. They differ in one thing, where sharerr's
-traffic comes out, and everything else follows from that. A fifth directory,
+Five layouts for sharerr itself. They differ in one thing, where sharerr's
+traffic comes out, and everything else follows from that. A sixth directory,
 [`lighthouse/`](lighthouse/README.md), is not sharerr at all; see
 [A lighthouse of your own](#a-lighthouse-of-your-own).
 
@@ -24,12 +24,13 @@ These are deployment recipes. `docker/*.yml` one directory up are the
 
 ## Which one
 
-|                                       | Layout                                                        | Use it when                                                                                                               |
-| ------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **[`direct/`](direct/README.md)**     | One bridge network. sharerr, qBittorrent, Sonarr, Radarr.     | The exit address is already yours: a VPS, a seedbox, a static IP or dynamic-DNS name at home. Start here if unsure.       |
-| **[`vpn/`](vpn/README.md)**           | gluetun owns a namespace; qBittorrent and sharerr ride in it. | You want one commercial tunnel in front of everything, and one public address for both the swarm traffic and the tracker. |
-| **[`dual-vpn/`](dual-vpn/README.md)** | Two gluetuns, two compose projects.                           | qBittorrent on one subscription, sharerr's tracker/feed on another, each rotating independently.                          |
-| **[`sidecar/`](sidecar/README.md)**   | sharerr alone, joining a network you already have.            | You already run qBittorrent and the *arr apps and want to add exactly one container.                                      |
+|                                       | Layout                                                          | Use it when                                                                                                               |
+| ------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **[`direct/`](direct/README.md)**     | One bridge network. sharerr, qBittorrent, Sonarr, Radarr.       | The exit address is already yours: a VPS, a seedbox, a static IP or dynamic-DNS name at home. Start here if unsure.       |
+| **[`vpn/`](vpn/README.md)**           | gluetun owns a namespace; qBittorrent and sharerr ride in it.   | You want one commercial tunnel in front of everything, and one public address for both the swarm traffic and the tracker. |
+| **[`dual-vpn/`](dual-vpn/README.md)** | Two gluetuns, two compose projects.                             | qBittorrent on one subscription, sharerr's tracker/feed on another, each rotating independently.                          |
+| **[`sidecar/`](sidecar/README.md)**   | sharerr alone, joining a network you already have.              | You already run qBittorrent and the *arr apps and want to add exactly one container.                                      |
+| **[`tailnet/`](tailnet/README.md)**   | Tailscale owns a namespace; qBittorrent and sharerr ride in it. | Nobody can open a port: the friend group shares a Tailscale or Headscale tailnet instead.                                 |
 
 Each layout has a README that walks through bringing it up and the gotchas
 particular to it, and its compose file carries a header explaining the
@@ -162,7 +163,7 @@ stack's header covers what to give up if yours is a subscription instead.
 ## A lighthouse of your own
 
 [`lighthouse/`](lighthouse/README.md) runs `sharerr-lighthouse`, the rendezvous
-service. It is not one of the four layouts above and shares none of their
+service. It is not one of the five layouts above and shares none of their
 concerns: no library mount, no torrent client, no *arr apps, no path
 mappings, and no master key. It persists exactly one file (a decoy secret)
 and has no UI or config file, only the two environment variables its compose

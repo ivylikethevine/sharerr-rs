@@ -398,8 +398,9 @@ tracking issue, reading the compose files `CI_IMAGE_GLOBS` in
 
 **Pinned tool versions that dependabot cannot see** are zizmor, actionlint,
 cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck, hadolint,
-trivy, cargo-deny, gitleaks, terraform and yq, each installed from a cached, pinned,
-sha256-verified release asset by `.github/actions/setup-tool`.
+trivy, cargo-deny, gitleaks, terraform, yq and cargo-mutants, each installed from a cached, pinned,
+sha256-verified release asset by `.github/actions/setup-tool` (cargo-mutants
+only through `scripts/check.sh --install`: no job runs it).
 `.github/actions/setup-tool/tools.txt` is the one roster (version, URL,
 archive kind, verify flag, sha256, per platform where the asset differs),
 read by that action, by `check_tool_versions.sh`, and by

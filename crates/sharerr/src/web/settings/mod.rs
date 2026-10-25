@@ -255,6 +255,8 @@ pub struct NotificationsForm {
     trigger_peer_first_contact: Option<String>,
     trigger_tracker_unreachable: Option<String>,
     trigger_library_unreadable: Option<String>,
+    trigger_torrent_interrupted: Option<String>,
+    trigger_file_changed: Option<String>,
     trigger_heartbeat: Option<String>,
 }
 
@@ -898,6 +900,11 @@ pub async fn save_notifications(
                     form.trigger_library_unreadable.is_some(),
                     Trigger::LibraryUnreadable,
                 ),
+                (
+                    form.trigger_torrent_interrupted.is_some(),
+                    Trigger::TorrentInterrupted,
+                ),
+                (form.trigger_file_changed.is_some(), Trigger::FileChanged),
                 (form.trigger_heartbeat.is_some(), Trigger::Heartbeat),
             ]
             .into_iter()
@@ -1806,6 +1813,14 @@ async fn build_page(
             .notifications
             .triggers
             .contains(&sharerr_core::config::NotificationTrigger::LibraryUnreadable),
+        notifications_trigger_torrent_interrupted: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::TorrentInterrupted),
+        notifications_trigger_file_changed: config
+            .notifications
+            .triggers
+            .contains(&sharerr_core::config::NotificationTrigger::FileChanged),
         notifications_trigger_heartbeat: config
             .notifications
             .triggers

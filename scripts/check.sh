@@ -38,6 +38,7 @@
 #   secrets (gitleaks)                       gitleaks
 #   advisory (semver)                        semver (in no group: advisory until a
 #                                            crate is published)
+#   no workflow                              mutants (in no group: run by hand)
 #   scorecard.yml, after merge               osv (osv-scanner over every lockfile,
 #                                            as Scorecard's Vulnerabilities check
 #                                            reads them; needs the network)
@@ -79,7 +80,7 @@ lint=("${fast[@]}" clippy doc deny terraform gitleaks osv)
 all=("${lint[@]}" test msrv coverage)
 
 # Every tools.txt row some check below runs, for --install.
-pinned=(shellcheck lychee typos zizmor actionlint yq cargo-deny gitleaks terraform cargo-llvm-cov cargo-semver-checks)
+pinned=(shellcheck lychee typos zizmor actionlint yq cargo-deny gitleaks terraform cargo-llvm-cov cargo-semver-checks cargo-mutants)
 
 in_ci() { [ "${GITHUB_ACTIONS:-}" = true ]; }
 
@@ -199,6 +200,24 @@ check_semver() {
   }
   echo "semver: public API against $base"
   cargo semver-checks --workspace --all-features --baseline-rev "$base" --release-type patch
+}
+
+# Mutation testing, by hand only: the workspace is thousands of mutants, each
+# a build and a test run, so it is in no group and no workflow. .cargo/mutants.toml holds the excludes and the output
+# directory; MUTANTS_ARGS narrows a run (`MUTANTS_ARGS="-p sharerr-torrent"`,
+# `-j 4`, `--file crates/sharerr/src/library.rs`).
+#
+# Each job builds in its own copy of the tree, a few GB with its target, so
+# the copies go under target/ rather than a $TMPDIR that is often RAM-backed.
+check_mutants() {
+  _need cargo-mutants || return
+  local rc=0 scratch="$root/target/mutants-tmp"
+  mkdir -p "$scratch"
+  # shellcheck disable=SC2086 # MUTANTS_ARGS is flags, word-split on purpose
+  TMPDIR="$scratch" cargo mutants ${MUTANTS_ARGS:-} || rc=$?
+  # cargo-mutants exits 3 when a mutant timed out; here 3 means a skip.
+  [ "$rc" -ne 3 ] || rc=1
+  return "$rc"
 }
 
 # Every tracked shell script, composite-action helpers included, rather than

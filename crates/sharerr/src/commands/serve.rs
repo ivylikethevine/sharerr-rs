@@ -16,6 +16,8 @@
 //! the feed, and the web UI need it too, and they are general layers rather than
 //! CLI verbs.
 
+use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -88,7 +90,9 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // VPN_PORT_FORWARDING_DOWN_COMMAND are bare wgets with no cookie jar, and the
     // only value either takes is `?target=client` to nudge the second poller
     // instead of the first (the default) — so there is nothing to protect
-    // beyond the private-address check both handlers share.
+    // beyond the private-address check both handlers share. `/hooks/arr` is
+    // an *arr app's Webhook connection, which has no cookie either and can
+    // only ask for a pass sooner, under the same check.
     let (ops, _) = ops_router()
         .with_state(Arc::clone(&state))
         .split_for_parts();
@@ -447,7 +451,59 @@ async fn gluetun_down(
     (StatusCode::OK, "acknowledged")
 }
 
-/// Keeps the syncer alive and reconciles on a timer.
+/// The one field of an *arr webhook payload this reads.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ArrEvent {
+    #[serde(rename = "eventType")]
+    event_type: String,
+}
+
+/// `POST /hooks/arr` — a Sonarr, Radarr, Lidarr, Readarr or Whisparr Webhook
+/// connection (On Import, On Series or Movie Add, and the like).
+///
+/// Asks for a sync pass now, the way Status's "Sync now" does; the payload is
+/// never trusted, since the pass reads every source itself. The *arr app's
+/// `Test` event is answered without one, so saving the connection does not run
+/// a pass. Refused from non-private addresses, as `/gluetun/refresh` is: the
+/// caller is an *arr app on the same host, Docker network or LAN.
+#[utoipa::path(
+    post,
+    path = "/hooks/arr",
+    tag = "ops",
+    operation_id = "arrWebhook",
+    request_body(content = String, content_type = "application/json",
+        description = "The *arr app's Webhook payload. Only `eventType` is read."),
+    responses(
+        (status = 200, description = "A sync pass was requested, or a `Test` event was \
+            acknowledged. Requests that arrive during a pass coalesce into one more \
+            pass after it.", body = String),
+        (status = 403, description = "Refused: the caller is not on a private address.",
+         body = String),
+    ),
+)]
+async fn arr_webhook(
+    State(state): State<Arc<ServeState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    body: axum::body::Bytes,
+) -> (StatusCode, &'static str) {
+    if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
+        return (StatusCode::FORBIDDEN, "refused");
+    }
+    let event = serde_json::from_slice::<ArrEvent>(&body).unwrap_or_default();
+    if event.event_type == "Test" {
+        return (StatusCode::OK, "test received");
+    }
+    tracing::info!(
+        event = event.event_type,
+        "sync requested by an *arr webhook"
+    );
+    state.request_pass();
+    (StatusCode::OK, "sync requested")
+}
+
+/// Keeps the syncer alive and reconciles on a timer, or at once when
+/// [`ServeState::request_pass`] asks.
 ///
 /// Never returns, and never stops re-checking. It cannot simply build the syncer
 /// once and settle into a sync loop, because a settings or credential write calls
@@ -457,11 +513,11 @@ async fn gluetun_down(
 /// The retry runs even when periodic sync is disabled, because `/ready` should
 /// still start telling the truth once the configuration is repaired.
 async fn background(state: Arc<ServeState>) {
-    // Which library-unreadable reason was last notified, so a path that stays
-    // broken across passes is reported once, not every interval — see
-    // `notify_sync_report`. Loop-local on purpose: a restart re-notifying a
-    // still-broken path once is the right outcome, not a bug to persist away.
-    let mut library_notified: Option<String> = None;
+    // What has already been notified, so a condition that persists across
+    // passes is reported once, not every interval — see `notify_sync_report`.
+    // Loop-local on purpose: a restart re-notifying a still-broken thing once
+    // is the right outcome, not a bug to persist away.
+    let mut notified = Notified::default();
     loop {
         let Some(syncer) = state.ensure_ready().await else {
             // Still polling here, not purely waiting: a failed `Syncer::build` has
@@ -477,7 +533,10 @@ async fn background(state: Arc<ServeState>) {
         // Re-read every pass rather than once: the UI can enable sync, or change
         // the interval, without a restart.
         let sync = state.config().await.sync;
-        if !sync.enabled {
+        // Taken before the pass, so a request that lands during it asks for one
+        // more pass after it rather than being consumed by this one.
+        let requested = state.take_pass_request();
+        if !sync.enabled && !requested {
             // Parking on the notify alone would be wrong even here: `ensure_ready`
             // is what makes `/ready` start telling the truth, and it should keep
             // being retried on an instance that never syncs on a timer.
@@ -489,7 +548,7 @@ async fn background(state: Arc<ServeState>) {
             Ok(report) => {
                 tracing::info!(%report, "sync complete");
                 state.note_sync_success().await;
-                notify_sync_report(&state, &report, &mut library_notified).await;
+                notify_sync_report(&state, &report, &mut notified).await;
             }
             Err(err) => {
                 let reason = format!("{err:#}");
@@ -520,28 +579,59 @@ async fn background(state: Arc<ServeState>) {
 /// `background`'s match arm so the gating logic is testable against a
 /// synthetic [`crate::sync::SyncReport`] without driving a real sync pass.
 ///
-/// `library_notified` is the dedupe for
-/// [`NotificationTrigger::LibraryUnreadable`](sharerr_core::config::NotificationTrigger::LibraryUnreadable):
-/// the reason last sent, cleared the first pass the library reads cleanly
-/// again. A path that is still unreadable with the same reason is not
-/// repeated; a *different* reason (permission denied, then gone entirely) is.
+/// `notified` is the dedupe across passes; see [`Notified`].
 async fn notify_sync_report(
     state: &ServeState,
     report: &crate::sync::SyncReport,
-    library_notified: &mut Option<String>,
+    notified: &mut Notified,
 ) {
     match &report.library_unreadable {
-        Some(reason) if library_notified.as_ref() != Some(reason) => {
+        Some(reason) if notified.library.as_ref() != Some(reason) => {
             crate::notify::send(
                 state,
                 sharerr_core::config::NotificationTrigger::LibraryUnreadable,
                 reason,
             )
             .await;
-            *library_notified = Some(reason.clone());
+            notified.library = Some(reason.clone());
         }
         Some(_) => {}
-        None => *library_notified = None,
+        None => notified.library = None,
+    }
+    let interrupted: Vec<(&crate::sync::Flagged, &str)> = report
+        .stopped
+        .iter()
+        .map(|f| (f, "stopped in the client"))
+        .chain(
+            report
+                .removed
+                .iter()
+                .map(|f| (f, "gone from the client, added back")),
+        )
+        .collect();
+    if let Some(message) = fresh(&mut notified.interrupted, &interrupted) {
+        crate::notify::send(
+            state,
+            sharerr_core::config::NotificationTrigger::TorrentInterrupted,
+            &format!("{message} — friends cannot download from a torrent that is not seeding"),
+        )
+        .await;
+    }
+    let changed: Vec<(&crate::sync::Flagged, &str)> = report
+        .changed
+        .iter()
+        .map(|f| (f, "changed on disk"))
+        .collect();
+    if let Some(message) = fresh(&mut notified.changed, &changed) {
+        crate::notify::send(
+            state,
+            sharerr_core::config::NotificationTrigger::FileChanged,
+            &format!(
+                "{message} since its torrent was built — friends' downloads will fail \
+                 the piece checks; Force rebuild on the item page builds a new one"
+            ),
+        )
+        .await;
     }
     if report.added > 0 {
         crate::notify::send(
@@ -564,6 +654,49 @@ async fn notify_sync_report(
     }
 }
 
+/// What [`notify_sync_report`] has already said, so a condition that lasts
+/// several passes is one notification.
+#[derive(Debug, Default)]
+struct Notified {
+    /// The library-unreadable reason last sent, cleared the first pass the
+    /// library reads cleanly again. The same reason is not repeated; a
+    /// *different* one (permission denied, then gone entirely) is.
+    library: Option<String>,
+    /// Info hashes reported stopped or removed. One drops out once it seeds
+    /// again, so a second interruption speaks.
+    interrupted: HashSet<String>,
+    /// Info hashes reported changed on disk. One drops out once its item is
+    /// rebuilt under a new hash.
+    changed: HashSet<String>,
+}
+
+/// How many torrents a digest names before summing up the rest.
+const DIGEST_NAMES: usize = 5;
+
+/// A digest of the `flagged` items not already in `seen`, or `None` when
+/// every one was. `seen` becomes exactly this pass's set, so an item that
+/// recovers and breaks again is reported again.
+fn fresh(seen: &mut HashSet<String>, flagged: &[(&crate::sync::Flagged, &str)]) -> Option<String> {
+    let new: Vec<String> = flagged
+        .iter()
+        .filter(|(f, _)| !seen.contains(&f.hash))
+        .map(|(f, why)| format!("{} ({why})", f.title))
+        .collect();
+    *seen = flagged.iter().map(|(f, _)| f.hash.clone()).collect();
+    if new.is_empty() {
+        return None;
+    }
+    let mut message = format!(
+        "{} torrent(s): {}",
+        new.len(),
+        new[..new.len().min(DIGEST_NAMES)].join(", ")
+    );
+    if new.len() > DIGEST_NAMES {
+        let _ = write!(message, " and {} more", new.len() - DIGEST_NAMES);
+    }
+    Some(message)
+}
+
 /// Liveness, not correctness — this answers "should this container be restarted?",
 /// and the answer is no even when the vault is empty, because a restart cannot
 /// populate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional
@@ -575,6 +708,7 @@ pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
         .routes(routes!(ready))
         .routes(routes!(gluetun_refresh))
         .routes(routes!(gluetun_down))
+        .routes(routes!(arr_webhook))
         .merge(crate::metrics::routes())
 }
 
@@ -920,6 +1054,99 @@ mod tests {
         );
     }
 
+    /// `background` with periodic sync off, raced the same way as the test
+    /// above for `window`; whether a pass ran shows as a recorded failure.
+    async fn pass_ran_with_sync_disabled(request: bool, window: Duration) -> bool {
+        // `fixtures::ready`'s syncer with `[sync] enabled = false`, built in
+        // place: `replace_config` would drop the syncer, and no master key is
+        // here to rebuild it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Config::default()
+        };
+        config.sync.enabled = false;
+        let state = crate::state::fixtures::ready_state(config, &dir, Vec::new()).await;
+        let interval = Duration::from_secs(state.config().await.sync.effective_interval_secs());
+        if request {
+            state.request_pass();
+        }
+        let _ = tokio::time::timeout(window, async {
+            tokio::select! {
+                () = background(Arc::clone(&state)) => {}
+                () = async {
+                    while state.sync_retry_delay(interval).await >= interval {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await;
+        state.sync_retry_delay(interval).await < interval
+    }
+
+    #[tokio::test]
+    async fn a_requested_pass_runs_with_periodic_sync_disabled() {
+        assert!(pass_ran_with_sync_disabled(true, Duration::from_secs(5)).await);
+    }
+
+    /// The other half: with nothing requested, the loop runs nothing.
+    #[tokio::test]
+    async fn periodic_sync_disabled_runs_no_pass_unrequested() {
+        assert!(!pass_ran_with_sync_disabled(false, Duration::from_millis(300)).await);
+    }
+
+    fn arr_event(body: &str) -> axum::body::Bytes {
+        axum::body::Bytes::from(body.to_owned())
+    }
+
+    #[tokio::test]
+    async fn the_arr_webhook_requests_a_pass_from_a_private_address_only() {
+        let (_dir, state) = unconfigured();
+        let private = ConnectInfo(SocketAddr::from(([172, 18, 0, 5], 40000)));
+        let public = ConnectInfo(SocketAddr::from(([203, 0, 113, 9], 40000)));
+
+        let (status, _) = arr_webhook(
+            State(Arc::clone(&state)),
+            public,
+            arr_event(r#"{"eventType":"Download"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!state.take_pass_request());
+
+        let (status, body) = arr_webhook(
+            State(Arc::clone(&state)),
+            private,
+            arr_event(r#"{"eventType":"Download","series":{"id":1}}"#),
+        )
+        .await;
+        assert_eq!((status, body), (StatusCode::OK, "sync requested"));
+        assert!(state.take_pass_request());
+    }
+
+    /// Saving the connection in the *arr app sends `Test`, which must succeed
+    /// without running a pass; a body that is not JSON at all still asks for
+    /// one, since only the address is trusted.
+    #[tokio::test]
+    async fn the_arr_webhook_answers_a_test_event_without_a_pass() {
+        let (_dir, state) = unconfigured();
+        let private = ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000)));
+
+        let (status, body) = arr_webhook(
+            State(Arc::clone(&state)),
+            private,
+            arr_event(r#"{"eventType":"Test"}"#),
+        )
+        .await;
+        assert_eq!((status, body), (StatusCode::OK, "test received"));
+        assert!(!state.take_pass_request());
+
+        let (status, _) = arr_webhook(State(Arc::clone(&state)), private, arr_event("")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(state.take_pass_request());
+    }
+
     /// The digest notifications `background` fires on a successful pass —
     /// tested directly against a synthetic report rather than by driving a
     /// real share through a syncer, which `notify::send`'s own tests already
@@ -960,7 +1187,7 @@ mod tests {
                         failed: 1,
                         ..Default::default()
                     },
-                    &mut None,
+                    &mut Notified::default(),
                 )
                 .await;
                 // The mock's `expect(2)` — one for ItemsShared, one for
@@ -977,7 +1204,12 @@ mod tests {
         let (_dir, state) = crate::state::fixtures::unconfigured();
         // No master key, so a webhook lookup would fail anyway — this proves
         // the counts gate it before that, not incidentally.
-        notify_sync_report(&state, &crate::sync::SyncReport::default(), &mut None).await;
+        notify_sync_report(
+            &state,
+            &crate::sync::SyncReport::default(),
+            &mut Notified::default(),
+        )
+        .await;
     }
 
     /// The library-unreadable trigger is deduped on its reason: the same
@@ -1019,19 +1251,111 @@ mod tests {
                     library_unreadable: Some(reason.to_owned()),
                     ..Default::default()
                 };
-                let mut notified = None;
+                let mut notified = Notified::default();
                 // Same reason three times: one notification.
                 for _ in 0..3 {
                     notify_sync_report(&state, &broken("permission denied"), &mut notified).await;
                 }
-                assert_eq!(notified.as_deref(), Some("permission denied"));
+                assert_eq!(notified.library.as_deref(), Some("permission denied"));
                 // A different reason: a second.
                 notify_sync_report(&state, &broken("no such directory"), &mut notified).await;
                 // Clean pass resets; the original reason then fires a third time.
                 notify_sync_report(&state, &crate::sync::SyncReport::default(), &mut notified)
                     .await;
-                assert!(notified.is_none());
+                assert!(notified.library.is_none());
                 notify_sync_report(&state, &broken("permission denied"), &mut notified).await;
+            });
+            Ok(())
+        });
+    }
+
+    fn flagged(hash: &str) -> crate::sync::Flagged {
+        crate::sync::Flagged {
+            hash: hash.to_owned(),
+            title: format!("Title.{hash}"),
+        }
+    }
+
+    #[test]
+    fn a_digest_names_only_what_is_new_and_forgets_what_recovered() {
+        let (a, b) = (flagged("a"), flagged("b"));
+        let mut seen = HashSet::new();
+
+        let first = fresh(&mut seen, &[(&a, "stopped")]).unwrap();
+        assert_eq!(first, "1 torrent(s): Title.a (stopped)");
+        assert_eq!(fresh(&mut seen, &[(&a, "stopped")]), None, "repeated");
+
+        let second = fresh(&mut seen, &[(&a, "stopped"), (&b, "gone")]).unwrap();
+        assert_eq!(second, "1 torrent(s): Title.b (gone)");
+
+        // `a` recovers for a pass, then stops again: it speaks again.
+        assert_eq!(fresh(&mut seen, &[(&b, "gone")]), None);
+        assert!(fresh(&mut seen, &[(&a, "stopped"), (&b, "gone")]).is_some());
+    }
+
+    #[test]
+    fn a_long_digest_sums_up_past_the_named_few() {
+        let many: Vec<_> = (0..8).map(|n| flagged(&n.to_string())).collect();
+        let pairs: Vec<_> = many.iter().map(|f| (f, "stopped")).collect();
+        let message = fresh(&mut HashSet::new(), &pairs).unwrap();
+        assert!(
+            message.starts_with("8 torrent(s): Title.0 (stopped)"),
+            "{message}"
+        );
+        assert!(message.ends_with("and 3 more"), "{message}");
+    }
+
+    /// The pass reports a stopped torrent on every pass it stays stopped;
+    /// the webhook hears about it once, under its own trigger.
+    #[test]
+    fn a_stopped_torrent_notifies_once_while_it_stays_stopped() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "a-master-key");
+            let dir = jail.directory().to_path_buf();
+            let config = Config {
+                data_dir: dir.clone(),
+                ..Config::default()
+            };
+            let state = Arc::new(ServeState::new(config, dir.join("sharerr.toml"), None));
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                let server = wiremock::MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                        "event": "torrent stopped or removed"
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                wiremock::Mock::given(wiremock::matchers::method("POST"))
+                    .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                        "event": "shared file changed"
+                    })))
+                    .respond_with(wiremock::ResponseTemplate::new(200))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+
+                let mut vault = state.open_vault().await.unwrap();
+                vault
+                    .put(
+                        sharerr_core::config::secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+                        &secrecy::SecretString::from(server.uri()),
+                    )
+                    .unwrap();
+                drop(vault);
+
+                let report = crate::sync::SyncReport {
+                    stopped: vec![flagged("a")],
+                    changed: vec![flagged("b")],
+                    ..Default::default()
+                };
+                let mut notified = Notified::default();
+                for _ in 0..3 {
+                    notify_sync_report(&state, &report, &mut notified).await;
+                }
             });
             Ok(())
         });

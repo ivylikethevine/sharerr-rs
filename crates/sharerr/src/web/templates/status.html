@@ -97,6 +97,16 @@
 <section>
 <h2>Recent syncs</h2>
 <div class="panel">
+  {% if sync_requested %}
+  <p class="ok" role="status">Sync requested. The pass appears below when it finishes; reload to see it.</p>
+  {% endif %}
+  <form method="post" action="/sync" class="inline">
+    <button type="submit">Sync now</button>
+  </form>
+  <p class="hint">
+    Runs one pass now instead of waiting for the next interval, even with periodic sync
+    disabled. An *arr Webhook connection to <code>/hooks/arr</code> does the same on import.
+  </p>
   {% if diag.runs.is_empty() %}
   {% call ui::empty("No sync has finished yet", "The first pass runs shortly after startup, and again on every interval. Anything that stopped it appears here.") %}{% endcall %}
   {% else %}

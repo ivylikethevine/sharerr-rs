@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::middleware;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -109,6 +109,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     // endpoint that writes to the vault.
     let protected = Router::new()
         .route("/", get(status_page))
+        .route("/sync", post(sync_now))
         // Diagnostics merged into the page above; kept as a redirect so an old
         // bookmark or a link in an issue still lands somewhere useful.
         .route("/diagnostics", get(|| async { Redirect::to("/") }))
@@ -257,7 +258,7 @@ pub(crate) async fn add_security_headers(mut response: Response) -> Response {
 /// and why. The glance and Diagnostics' deeper checks live together here
 /// because both answer "is this instance healthy", and splitting them would
 /// make a person chasing a problem hunt for a second page.
-async fn status_page(State(state): State<WebState>) -> Response {
+async fn status_page(State(state): State<WebState>, Query(query): Query<StatusQuery>) -> Response {
     let config = state.serve.config().await;
     // Concurrently, because they share no data and `gather` is the expensive
     // half — it probes every *arr over HTTP and stats every discovered file,
@@ -280,9 +281,25 @@ async fn status_page(State(state): State<WebState>) -> Response {
         client_url: config.torrent_client().url.to_string(),
         sync_enabled: config.sync.enabled,
         sync_interval_secs: config.sync.interval_secs,
+        sync_requested: query.sync.as_deref() == Some("requested"),
         config_path: state.serve.config_path().display().to_string(),
         diag,
     })
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct StatusQuery {
+    /// `requested` after "Sync now", for the note that says so.
+    sync: Option<String>,
+}
+
+/// "Sync now": one pass through the background loop, whether or not periodic
+/// sync is on. Through the loop rather than run here, so it never overlaps a
+/// pass already running and the button does not wait out a long one.
+async fn sync_now(State(state): State<WebState>) -> Redirect {
+    state.serve.request_pass();
+    Redirect::to("/?sync=requested")
 }
 
 /// The status page's stat tiles on their own, for htmx to poll.
@@ -790,8 +807,32 @@ mod tests {
         let (_dir, serve) = unconfigured();
         let state = web_state(serve);
 
-        let response = status_page(State(state)).await;
+        let response = status_page(State(state), Query(StatusQuery::default())).await;
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn sync_now_requests_a_pass_and_says_so() {
+        let (_dir, serve) = unconfigured();
+        let state = web_state(Arc::clone(&serve));
+
+        let response = sync_now(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/?sync=requested");
+        assert!(serve.take_pass_request(), "the request must reach the loop");
+
+        let page = status_page(
+            State(state),
+            Query(StatusQuery {
+                sync: Some("requested".to_owned()),
+            }),
+        )
+        .await;
+        let body = axum::body::to_bytes(page.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Sync requested"), "{body}");
     }
 
     /// The polled fragment is the tiles and nothing else: no `<html>` around it

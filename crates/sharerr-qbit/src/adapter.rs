@@ -71,6 +71,7 @@ impl TorrentClient for QbitClient {
             .into_iter()
             .map(|t| TorrentSummary {
                 is_seeding: t.is_seeding(),
+                is_stopped: t.is_stopped(),
                 tags: t.tag_list().into_iter().map(str::to_owned).collect(),
                 ratio: Some(t.ratio),
                 ratio_limit: t.ratio_limit_reported(),

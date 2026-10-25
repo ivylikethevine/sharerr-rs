@@ -45,6 +45,23 @@ pub enum ParsedTitle {
 }
 
 impl ParsedTitle {
+    /// How the far end reads it, in a line: `Episode: Show S02E01`.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Episode {
+                title,
+                season,
+                episode,
+            } => format!("Episode: {title} S{season:02}E{episode:02}"),
+            Self::Movie {
+                title,
+                year: Some(year),
+            } => format!("Movie: {title} ({year})"),
+            Self::Movie { title, year: None } => format!("Movie: {title}"),
+            Self::Unparseable => "Nothing it can match".to_owned(),
+        }
+    }
+
     /// Whether this parse describes the same content as `spec`.
     ///
     /// Titles are compared loosely (case- and separator-insensitive) because a
@@ -229,6 +246,96 @@ fn video_tokens(media: Option<&MediaMeta>) -> (&'static str, &'static str) {
             .and_then(MediaMeta::scene_video_codec)
             .unwrap_or("x264"),
     )
+}
+
+/// Why a friend's Sonarr or Radarr may not take a release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleProblem {
+    /// An episode with no `SxxEyy`: nothing says which episode it is.
+    NoEpisodeNumber,
+    /// A movie with no release year.
+    NoYear,
+    /// It parses, but as different content from the item.
+    Mismatch,
+    /// No resolution or source token.
+    NoQuality,
+}
+
+impl TitleProblem {
+    /// The sentence the item page shows.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::NoEpisodeNumber => {
+                "No SxxEyy episode number: Sonarr cannot tell which episode this is and \
+                 ignores the release."
+            }
+            Self::NoYear => {
+                "No release year: Radarr can match on the title alone, but a remake or \
+                 another film of the same name can take the match."
+            }
+            Self::Mismatch => {
+                "It parses as something other than this item, so a search for this item \
+                 will not return it."
+            }
+            Self::NoQuality => {
+                "No resolution or source: the far end grades it Unknown, which most \
+                 quality profiles reject."
+            }
+        }
+    }
+}
+
+/// What [`check`] found: how the title reads, and what would stop it matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TitleCheck {
+    pub parsed: ParsedTitle,
+    pub problems: Vec<TitleProblem>,
+}
+
+/// Check a release title against the item it advertises, with the same
+/// subset [`parse`] knows plus the quality tokens a profile filters on.
+///
+/// `None` for music and books: Lidarr and Readarr parse releases by artist,
+/// album and author, which this does not model.
+pub fn check(title: &str, spec: &MediaSpec) -> Option<TitleCheck> {
+    let movie = match spec {
+        MediaSpec::Episode { .. } => false,
+        MediaSpec::Movie { .. } => true,
+        MediaSpec::Track { .. } | MediaSpec::Book { .. } => return None,
+    };
+    let parsed = parse(title);
+    let mut problems = Vec::new();
+    match &parsed {
+        ParsedTitle::Unparseable if movie => problems.push(TitleProblem::NoYear),
+        ParsedTitle::Unparseable => problems.push(TitleProblem::NoEpisodeNumber),
+        parsed if !parsed.describes(spec) => problems.push(TitleProblem::Mismatch),
+        _ => {}
+    }
+    if !has_quality(title) {
+        problems.push(TitleProblem::NoQuality);
+    }
+    Some(TitleCheck { parsed, problems })
+}
+
+/// Source tokens a quality definition is named after, lowercased.
+const SOURCES: &[&str] = &[
+    "web", "webdl", "webrip", "bluray", "bdrip", "brrip", "remux", "hdtv", "sdtv", "pdtv", "dvd",
+    "dvdrip", "hdrip",
+];
+
+/// Whether the title carries a resolution (`720p`, `2160p`, `4k`) or a
+/// source token, the two things a far end grades quality from.
+fn has_quality(title: &str) -> bool {
+    title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .any(|token| {
+            SOURCES.contains(&token.as_str())
+                || token == "4k"
+                || token.strip_suffix(['p', 'i']).is_some_and(|n| {
+                    (3..=4).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit())
+                })
+        })
 }
 
 /// Parse a release title the way a downstream *arr app would.
@@ -629,6 +736,142 @@ mod tests {
             "a release synthesised for one untransliterable title must not \
              describe an unrelated one: {a:?}"
         );
+    }
+
+    /// Every field of the parse has to agree, not any one of them.
+    #[test]
+    fn describes_requires_every_field_to_match() {
+        let spec = MediaSpec::Episode {
+            series_title: "Lanternwick Hollow".to_owned(),
+            season: 2,
+            episode: 1,
+        };
+        let episode = |title: &str, season, episode| ParsedTitle::Episode {
+            title: title.to_owned(),
+            season,
+            episode,
+        };
+        assert!(episode("lanternwick.hollow", 2, 1).describes(&spec));
+        assert!(!episode("Lanternwick Hollow", 3, 1).describes(&spec));
+        assert!(!episode("Lanternwick Hollow", 2, 9).describes(&spec));
+        assert!(!episode("Another Show", 2, 1).describes(&spec));
+
+        let film = MediaSpec::Movie {
+            title: "Quiet Harbour".to_owned(),
+            year: Some(2019),
+        };
+        let movie = |title: &str, year| ParsedTitle::Movie {
+            title: title.to_owned(),
+            year,
+        };
+        assert!(movie("Quiet Harbour", Some(2019)).describes(&film));
+        assert!(movie("Quiet Harbour", None).describes(&film));
+        assert!(!movie("Quiet Harbour", Some(2020)).describes(&film));
+        assert!(!movie("Loud Harbour", Some(2019)).describes(&film));
+        assert!(!movie("Loud Harbour", None).describes(&film));
+    }
+
+    fn problems(title: &str, spec: &MediaSpec) -> Vec<TitleProblem> {
+        check(title, spec).unwrap().problems
+    }
+
+    #[test]
+    fn a_complete_release_name_checks_clean() {
+        let checked = check(
+            "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-GRP",
+            &episode(),
+        )
+        .unwrap();
+        assert!(checked.problems.is_empty(), "{checked:?}");
+        assert_eq!(
+            checked.parsed.summary(),
+            "Episode: Lanternwick Hollow S02E01"
+        );
+        assert!(problems("The Gilded Ferry (2019) 2160p BluRay", &movie()).is_empty());
+    }
+
+    #[test]
+    fn a_name_with_no_quality_token_is_flagged() {
+        assert_eq!(
+            problems("Lanternwick Hollow S02E01", &episode()),
+            [TitleProblem::NoQuality]
+        );
+        // A codec alone grades nothing.
+        assert_eq!(
+            problems("Lanternwick.Hollow.S02E01.x265", &episode()),
+            [TitleProblem::NoQuality]
+        );
+        assert!(problems("Lanternwick.Hollow.S02E01.720p", &episode()).is_empty());
+        assert!(problems("Lanternwick.Hollow.S02E01.4K", &episode()).is_empty());
+        assert!(problems("Lanternwick.Hollow.S02E01.HDTV", &episode()).is_empty());
+        // Digits that are not a resolution.
+        assert_eq!(
+            problems("Lanternwick.Hollow.S02E01.12p.2p", &episode()),
+            [TitleProblem::NoQuality]
+        );
+    }
+
+    #[test]
+    fn a_missing_number_or_year_is_named_for_the_kind() {
+        assert_eq!(
+            problems("Lanternwick Hollow 1080p WEB-DL", &episode()),
+            [TitleProblem::NoEpisodeNumber]
+        );
+        let yearless = MediaSpec::Movie {
+            title: "Quiet Harbour".to_owned(),
+            year: None,
+        };
+        let checked = check("Quiet Harbour 1080p WEB-DL", &yearless).unwrap();
+        assert_eq!(checked.problems, [TitleProblem::NoYear]);
+        assert_eq!(checked.parsed.summary(), "Nothing it can match");
+    }
+
+    #[test]
+    fn a_name_that_parses_as_other_content_is_a_mismatch() {
+        assert_eq!(
+            problems("Lanternwick.Hollow.S02E02.1080p.WEB-DL", &episode()),
+            [TitleProblem::Mismatch]
+        );
+    }
+
+    #[test]
+    fn music_and_books_are_not_checked() {
+        let track = MediaSpec::Track {
+            artist: "A".to_owned(),
+            album: "B".to_owned(),
+            track: Some(1),
+        };
+        assert_eq!(check("A - B - 01", &track), None);
+        let book = MediaSpec::Book {
+            author: "A".to_owned(),
+            title: "B".to_owned(),
+        };
+        assert_eq!(check("A - B", &book), None);
+    }
+
+    #[test]
+    fn every_problem_and_summary_reads_as_a_sentence() {
+        for problem in [
+            TitleProblem::NoEpisodeNumber,
+            TitleProblem::NoYear,
+            TitleProblem::Mismatch,
+            TitleProblem::NoQuality,
+        ] {
+            assert!(problem.describe().ends_with('.'), "{problem:?}");
+        }
+        let movie = |year| ParsedTitle::Movie {
+            title: "Quiet Harbour".to_owned(),
+            year,
+        };
+        assert_eq!(movie(Some(2019)).summary(), "Movie: Quiet Harbour (2019)");
+        assert_eq!(movie(None).summary(), "Movie: Quiet Harbour");
+    }
+
+    /// A name that is only an extension has no stem to cut back to.
+    #[test]
+    fn a_bare_extension_is_not_stripped_to_nothing() {
+        assert_eq!(strip_extension(".mkv"), ".mkv");
+        assert_eq!(strip_extension("a.mkv"), "a");
     }
 
     // ------------------------------------------------------ synthesis + media

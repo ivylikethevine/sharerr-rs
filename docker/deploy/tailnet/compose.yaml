@@ -1,0 +1,182 @@
+# sharerr and qBittorrent on a tailnet: no forwarded port, no VPN provider.
+#
+#   cd docker/deploy/tailnet && cp .env.example .env && $EDITOR .env config/sharerr.toml
+#   docker compose up -d
+#
+# For the friend group where nobody can open a port: CGNAT, a landlord's router,
+# a mobile connection. Every friend's devices join the same tailnet (or have
+# this machine shared with them), and the swarm runs over it. Tailscale's
+# coordination server or a Headscale one of your own both work; see
+# TS_LOGIN_SERVER in .env.
+#
+# ## The topology
+#
+# The tailscale container owns the network namespace, as gluetun does in
+# ../vpn/. qBittorrent and sharerr join it with `network_mode: service:tailscale`,
+# so all three share one tailnet address and one flat port space:
+#
+#   * **They reach each other on `localhost`.** sharerr's config says
+#     `http://localhost:8080` for qBittorrent; `http://qbittorrent:8080` does not
+#     resolve, because qBittorrent has no network of its own.
+#   * **`ports:` belongs to tailscale.** A service with `network_mode: service:`
+#     cannot declare its own.
+#   * **Friends need both 6881 and 8477 on the tailnet.** 8477 is sharerr's
+#     tracker and feed; 6881 is qBittorrent's peer port, the address the
+#     tracker hands out. A friend's torrent client dials this machine directly,
+#     so the friend's client, not only their browser, has to be on the tailnet.
+#
+# Sonarr and Radarr stay on the compose network outside the namespace. sharerr
+# still reaches them by name through Docker's resolver, and their Webhook
+# connections reach sharerr at `http://tailscale:8477/hooks/arr`.
+#
+# ## The ports
+#
+# Published to the host's loopback (the two WebUIs); reach them over SSH
+# forwarding or a reverse proxy:
+#
+#   8080  qBittorrent WebUI
+#   8477  sharerr WebUI
+#
+# Reachable over the tailnet, and nowhere else, with nothing to forward:
+#
+#   6881  qBittorrent's peer listener
+#   8477  sharerr's tracker, Torznab feed and gossip
+#
+# A tailnet ACL or grant that limits ports must allow both to this machine.
+#
+# ## Plain WireGuard
+#
+# A WireGuard network you run yourself has the same shape: put a WireGuard
+# container in the namespace-owner's place and keep everything else.
+
+name: sharerr-tailnet
+
+services:
+  # ---------------------------------------------------------------- tailscale
+  #
+  # Kernel networking rather than tailscale's userspace default, so inbound
+  # peers reach qBittorrent's 6881 over TCP and UDP like any other interface.
+  # That needs /dev/net/tun and NET_ADMIN.
+  tailscale:
+    image: tailscale/tailscale:v1.104.2@sha256:b11583ad2e93e4671128538c88cf11f460444a5d7e449311dd1933a400ab849d
+    container_name: tailscale
+    # The machine name on the tailnet, and its MagicDNS name.
+    hostname: ${TS_HOSTNAME:-sharerr}
+    environment:
+      # A reusable or one-off auth key from the admin console (or `headscale
+      # preauthkeys create`). Only the first start uses it; the node's state
+      # persists in tailscale-state after that.
+      TS_AUTHKEY: ${TS_AUTHKEY:?set this in .env}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      # Empty for Tailscale's own coordination server.
+      TS_EXTRA_ARGS: ${TS_LOGIN_SERVER:+--login-server=${TS_LOGIN_SERVER}}
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8477:8477"
+    restart: unless-stopped
+
+  # -------------------------------------------------------------- qbittorrent
+  #
+  # 5.2 or newer, so sharerr can authenticate with an API key instead of a
+  # password. Generate one under Options -> Web UI -> API key once the stack is
+  # up.
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:caab2ebce30799ab342c374ea268fef4ec063a8ec3733a4e5d4a8e856ee32ce8
+    container_name: qbittorrent
+    # No `networks:` and no `ports:`. Both belong to tailscale.
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      WEBUI_PORT: "8080"
+      TORRENTING_PORT: "6881"
+    volumes:
+      - qbittorrent-config:/config
+      # Read-only on purpose: sharerr never moves, renames or re-links media,
+      # and seeding only reads.
+      - ${MEDIA_PATH:?set this in .env}:/downloads:ro
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------- sonarr
+  #
+  # Here so the file is a complete working example. Already running Sonarr and
+  # Radarr? Delete both services and set the `[sonarr]`/`[radarr]` URLs to
+  # wherever they live.
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.20@sha256:f247545d23ba8b233d6604575347e48a623fe6ad75dda02348bf81917f3b5c06
+    container_name: sonarr
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - sonarr-config:/config
+      - ${MEDIA_PATH}/tv:/tv
+    ports:
+      - "127.0.0.1:8989:8989"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------- radarr
+  radarr:
+    image: lscr.io/linuxserver/radarr:6.4.4@sha256:7dfd049e79c00b16fbc29c3f5d96a9e7b9e73a23930b4c5b3c4541d60b366814
+    container_name: radarr
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      - radarr-config:/config
+      - ${MEDIA_PATH}/movies:/movies
+    ports:
+      - "127.0.0.1:7878:7878"
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ sharerr
+  #
+  # In the namespace, so it announces from the same tailnet address as
+  # qBittorrent's peer traffic.
+  sharerr:
+    image: ghcr.io/ivylikethevine/sharerr-rs:latest
+    container_name: sharerr
+    network_mode: "service:tailscale"
+    depends_on:
+      - tailscale
+      - qbittorrent
+      - sonarr
+      - radarr
+    environment:
+      # The one thing that cannot come from the UI, because it encrypts the vault
+      # the UI writes into. Generate with `openssl rand -base64 32` and keep it.
+      #
+      # Nothing else belongs here: every other `SHARERR_*` variable pins its
+      # setting, and the Settings page then discards a save. Configure in
+      # config/sharerr.toml or the UI.
+      SHARERR_MASTER_KEY: ${SHARERR_MASTER_KEY:?set this in .env}
+      RUST_LOG: ${RUST_LOG:-sharerr=info,warn}
+      TZ: ${TZ:-Etc/UTC}
+    volumes:
+      # sharerr.toml, rewritten in place by the UI, so writable by uid 1000.
+      - ./config:/config
+      # The vault, the database, and the generated .torrent files.
+      - sharerr-data:/data
+      # The same media at sharerr's own path; the path mappings translate
+      # between this view and qBittorrent's /downloads.
+      - ${MEDIA_PATH}:/media:ro
+    restart: unless-stopped
+
+volumes:
+  tailscale-state:
+  qbittorrent-config:
+  sonarr-config:
+  radarr-config:
+  sharerr-data:

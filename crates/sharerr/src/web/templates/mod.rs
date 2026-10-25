@@ -181,6 +181,8 @@ pub struct StatusPage {
     pub client_url: String,
     pub sync_enabled: bool,
     pub sync_interval_secs: u64,
+    /// Arrived from "Sync now", so the page says the pass is on its way.
+    pub sync_requested: bool,
     pub config_path: String,
 
     // ------------------------------------------------------ diagnostics
@@ -515,6 +517,8 @@ pub struct SettingsPage {
     pub notifications_trigger_peer_first_contact: bool,
     pub notifications_trigger_tracker_unreachable: bool,
     pub notifications_trigger_library_unreadable: bool,
+    pub notifications_trigger_torrent_interrupted: bool,
+    pub notifications_trigger_file_changed: bool,
     pub notifications_trigger_heartbeat: bool,
     /// Whether an Uptime-Kuma-style push URL is stored — see
     /// `secret_keys::NOTIFICATIONS_HEARTBEAT_URL`.
@@ -1210,6 +1214,12 @@ pub struct ItemDetailPage {
 
     pub title: String,
     pub release_title: String,
+    /// How a friend's Sonarr or Radarr reads the release title, from
+    /// `sharerr_torrent::title::check`. `None` for music and books, which it
+    /// does not check.
+    pub title_reads_as: Option<String>,
+    /// What would stop that title matching, one sentence each.
+    pub title_problems: Vec<&'static str>,
     /// The file's actual name on disk, from `SharedItem::arr_path` — what a
     /// torrent sharerr built for this item is named, since the torrent's own
     /// name always describes the file where it sits. `None` only if the path

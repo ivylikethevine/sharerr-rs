@@ -235,6 +235,7 @@ fn status_page() -> StatusPage {
         client_url: "http://transmission.example:9091".to_owned(),
         sync_enabled: true,
         sync_interval_secs: 900,
+        sync_requested: false,
         config_path: "/config/sharerr.toml".to_owned(),
 
         diag: DiagnosticsData {
@@ -742,6 +743,8 @@ fn settings_page() -> SettingsPage {
         notifications_trigger_peer_first_contact: true,
         notifications_trigger_tracker_unreachable: true,
         notifications_trigger_library_unreadable: true,
+        notifications_trigger_torrent_interrupted: true,
+        notifications_trigger_file_changed: true,
         notifications_trigger_heartbeat: true,
         notifications_heartbeat_set: false,
         notifications_heartbeat_secs: 60,

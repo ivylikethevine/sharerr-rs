@@ -142,6 +142,8 @@ impl TorrentClient for RtorrentClient {
                 content_path: as_str(&base_path).to_owned(),
                 category: category.unwrap_or_default().to_owned(),
                 is_seeding: as_bool(&complete) && as_bool(&active),
+                // Stopped and paused downloads are both inactive.
+                is_stopped: !as_bool(&active),
                 tags: if tag.is_empty() {
                     Vec::new()
                 } else {

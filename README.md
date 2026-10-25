@@ -87,9 +87,11 @@ whole design is built around.
   friends in one picture, a live per-torrent swarm view with hourly history,
   and a reachability script for checking from outside your network.
 - **The web UI**: first-run wizard, settings with connection tests, an Items
-  page with per-item detail and manual retry/rebuild/unshare, one at a time
-  or over a selection, library composition, sync history, self-refreshing
-  status tiles, a setup checklist, and path-mapping diagnostics.
+  page with per-item detail (including how a friend's Sonarr or Radarr reads
+  the release title, and what would stop it matching) and manual
+  retry/rebuild/unshare, one at a time or over a selection, library
+  composition, sync history with a Sync now button, self-refreshing status
+  tiles, a setup checklist, and path-mapping diagnostics.
 - **Operations**: webhook notifications (generic, Discord, Apprise, ntfy,
   Gotify, Telegram, Pushover) on nine triggers plus an Uptime-Kuma-style
   heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
@@ -613,29 +615,22 @@ attached.
 
 Smallest first, by how much each item touches:
 
-- **Mutation testing.** `cargo-mutants` over the workspace, the next signal
-  past the 95% line-coverage floor: a mutant the suite survives marks a line
-  that runs without being checked. A `scripts/check.sh mutants` target run by
-  hand, then tests for the survivors worth killing.
-- **Event-driven sync.** A "Sync now" button on Status, and an *arr webhook
-  receiver (On Import, On Series Add) that runs one pass at once instead of
-  waiting out `sync.interval_secs`.
+- **Mutation survivors past `sharerr-torrent`.** `scripts/check.sh mutants`
+  exists and `sharerr-torrent`'s survivors worth killing are killed.
+  `sharerr-core` has had one package-scoped run (46 survivors, many likely
+  caught by the `sharerr` crate's tests) and the rest of the workspace none;
+  see [`docs/TESTING.md`](docs/TESTING.md#mutation-testing).
 - **Unraid and TrueNAS app listings.** Where much of the *arr audience
   installs from; a Community Applications template and a TrueNAS app.
-- **A tailnet deployment layout.** A `docker/deploy/` recipe with the
-  advertised host on a Tailscale or WireGuard network: no port forwarding
-  and no gluetun, for the friend who cannot open a port.
-- **Two more notification triggers.** A torrent sharerr created paused or
-  removed behind its back, which Topology shows but nobody is told about, and
-  a shared file whose inode or mtime changed since its torrent was built.
 - **A Prowlarr indexer definition.** A Cardigann definition contributed
   upstream, so a friend picks "sharerr" from Prowlarr's list and types one
-  key, instead of configuring Generic Torznab by hand.
+  key, instead of configuring Generic Torznab by hand. Blocked upstream:
+  Prowlarr offers a Cardigann indexer's base URL as a choice among the
+  definition's own `links`, and URL-encodes every variable templated into a
+  search path, so no definition can reach the host each friend runs sharerr
+  on. It needs Prowlarr to accept a custom base URL for Cardigann indexers.
 - **TOTP on login.** One user and a cookie session; forward auth covers the
   proxied case but not the plain LAN one the quickstart warns about.
-- **Release-name lint for directory sources.** Item detail shows how a
-  friend's Sonarr or Radarr would parse the title, and flags a name that will
-  not match before the friend's search fails.
 - **A public lighthouse.** The software is done; what is missing is a
   public instance for a friend group that would rather not run their own.
 - **A read-only management API.** Items, friends, sync status and doctor

@@ -2,7 +2,7 @@
 
 `sharerr-lighthouse`, the rendezvous service friends' sharerr instances use
 to find each other after an address changes, in its own compose project. It
-is not sharerr and not one of the four layouts: no library mount, no torrent
+is not sharerr and not one of the five layouts: no library mount, no torrent
 client, no \*arr apps, no path mappings, no master key. Why it exists and
 its privacy property are in [`docs/LIGHTHOUSE.md`](../../../docs/LIGHTHOUSE.md);
 this page is the walkthrough. The compose files' header comments are the

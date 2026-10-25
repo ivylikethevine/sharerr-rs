@@ -1,0 +1,24 @@
+# cargo-mutants, run by hand through `scripts/check.sh mutants`. See
+# docs/TESTING.md's "Mutation testing" for how to read a run.
+
+# The same features as `scripts/check.sh test`: the fault-injection store and
+# the compiled (ignored) tier-2 suite.
+all_features = true
+
+# Test scaffolding is compiled into the suite but is not product code; a
+# mutant in a fixture says nothing about what the suite checks.
+exclude_globs = [
+  "crates/sharerr-testkit/**",
+  "crates/sharerr/src/test_support.rs",
+  "crates/sharerr-store/src/fault.rs",
+  "**/tests.rs",
+  "**/tests/**",
+  "**/build.rs",
+]
+
+# Under the gitignored local/, not a mutants.out/ at the root.
+output = "local/mutants"
+
+# Each build directory is a copy of the tree; local/, the compose stacks'
+# state and generated fixtures have no place in it (only tier 2 reads those).
+gitignore = true

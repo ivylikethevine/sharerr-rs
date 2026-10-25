@@ -14,14 +14,14 @@ method names are stable.
 
 ## What it covers
 
-| Tag          | What it is                                                                      |
-| ------------ | ------------------------------------------------------------------------------- |
-| `torznab`    | The indexer feed a friend's Sonarr/Radarr/Lidarr/Prowlarr queries.              |
-| `jackett`    | The same feed at Jackett's URL shapes, plus its read-only admin routes.         |
-| `gossip`     | How friends tell each other where they have moved to.                           |
-| `tracker`    | The built-in BitTorrent tracker, and the `.torrent` files the feed links to.    |
-| `lighthouse` | Key-hash-to-endpoint rendezvous, when both friends' addresses rotated.          |
-| `ops`        | Liveness, readiness, gluetun's port-forward hooks, `/metrics` and `/dashboard`. |
+| Tag          | What it is                                                                             |
+| ------------ | -------------------------------------------------------------------------------------- |
+| `torznab`    | The indexer feed a friend's Sonarr/Radarr/Lidarr/Prowlarr queries.                     |
+| `jackett`    | The same feed at Jackett's URL shapes, plus its read-only admin routes.                |
+| `gossip`     | How friends tell each other where they have moved to.                                  |
+| `tracker`    | The built-in BitTorrent tracker, and the `.torrent` files the feed links to.           |
+| `lighthouse` | Key-hash-to-endpoint rendezvous, when both friends' addresses rotated.                 |
+| `ops`        | Liveness, readiness, gluetun's and the \*arr apps' hooks, `/metrics` and `/dashboard`. |
 
 Every feed and gossip operation is authenticated by a per-peer key in the
 query string (the `peerApiKey` scheme), with one exception: the Jackett
@@ -31,7 +31,7 @@ catch-all `/api/v2.0/{rest}`, which answers 501 to anyone. `/metrics` and
 (a trailing `/`, and a trailing `/api`) are mounted but left out of the
 document, so one operation does not read as three.
 
-The server-rendered web UI is deliberately **not** in it. Its `/`, `/items`,
+The server-rendered web UI is deliberately **not** in it. Its `/`, `/sync`, `/items`,
 `/topology`, `/debug`, `/status/tiles`, `/diagnostics`, `/settings/*`,
 `/peers/*` and `/wizard/*` routes (and the public `/setup`, `/login`,
 `/logout`, `/assets/*`) are HTML pages and form posts authenticated by a

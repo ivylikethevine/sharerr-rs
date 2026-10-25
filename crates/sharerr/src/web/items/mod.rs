@@ -1019,6 +1019,7 @@ async fn build_detail(
     };
 
     let swarm = swarm_for(state, &item).await;
+    let checked = sharerr_torrent::title::check(&item.release_title, &item.spec);
 
     ItemDetailPage {
         signed_in: true,
@@ -1026,6 +1027,10 @@ async fn build_detail(
         file_id: item.file_id,
         title: item.spec.title().to_owned(),
         release_title: item.release_title.clone(),
+        title_reads_as: checked.as_ref().map(|c| c.parsed.summary()),
+        title_problems: checked
+            .map(|c| c.problems.iter().map(|p| p.describe()).collect())
+            .unwrap_or_default(),
         // The torrent's own name always describes the file where it sits —
         // see `CLAUDE.md`'s first trap — so this and `release_title` are the
         // two strings worth showing side by side.
