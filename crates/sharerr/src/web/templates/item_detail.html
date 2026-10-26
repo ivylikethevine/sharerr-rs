@@ -207,14 +207,35 @@
     <button type="submit" class="link">Unshare</button>
   </form>
   <p class="hint">
-    Stops seeding without deleting the file — the same effect removing the
-    tag upstream has, without waiting for the next sync to notice.
+    Stops seeding without deleting the file. While the file keeps its tag the
+    next sync shares it again; to keep it unshared, set an end date below.
   </p>
   {% endif %}
 
   {% if !can_retry && !can_rebuild && !can_unshare %}
   <p class="hint">Nothing to do here — this item has never had a torrent and is not sharing.</p>
   {% endif %}
+</div>
+
+<div class="panel">
+  <form method="post" action="/items/{{ source }}/{{ file_id }}/until">
+    <label for="share_until">Share until</label>
+    <input id="share_until" name="date" type="date" value="{{ share_until }}">
+    <button type="submit" class="secondary">Set end date</button>
+    {% if !share_until.is_empty() %}
+    <button type="submit" name="clear" value="1" class="link">Clear</button>
+    {% endif %}
+  </form>
+  <p class="hint">
+    {% if share_ended %}
+    The share ended on {{ share_until }}. It stays unshared while the date stands, even
+    though the file is still tagged; clear the date to share it again.
+    {% else %}
+    From the start of this day (the container's time zone, <code>TZ</code>), sharerr
+    unshares the file and keeps it unshared while the date stands. The tag in the *arr app
+    is left alone.
+    {% endif %}
+  </p>
 </div>
 </section>
 {% endblock %}

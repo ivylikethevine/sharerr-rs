@@ -72,6 +72,10 @@ pub enum Command {
     #[command(subcommand)]
     Vault(VaultCommand),
 
+    /// Manage web UI accounts.
+    #[command(subcommand)]
+    Account(AccountCommand),
+
     /// Serve every authenticated page with fully populated mock data, for
     /// spot-checking the web UI's layout in a real browser without a real
     /// instance behind it.
@@ -154,4 +158,11 @@ pub enum VaultCommand {
     List,
     /// Remove a secret.
     Remove { key: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountCommand {
+    /// Turn off two-step sign-in for an account whose authenticator is lost.
+    /// Run inside the container: whoever can do that already holds the data.
+    DisableTotp { username: String },
 }

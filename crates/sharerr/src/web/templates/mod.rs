@@ -96,6 +96,31 @@ impl LoginPage {
     }
 }
 
+/// The sign-in step after the password, for an account with TOTP on.
+#[derive(Debug, Template)]
+#[template(path = "login_totp.html")]
+pub struct TotpLoginPage {
+    pub signed_in: bool,
+    pub error: Option<String>,
+}
+
+/// Settings → Account → two-step sign-in: the enrolment QR and key while it
+/// is off, the switch-off form while it is on.
+#[derive(Debug, Template)]
+#[template(path = "totp.html")]
+pub struct TotpPage {
+    pub signed_in: bool,
+    pub username: String,
+    pub enabled: bool,
+    /// The secret being enrolled, carried by the form; empty once enabled.
+    pub secret: String,
+    /// Inline SVG of the enrolment URI; empty once enabled.
+    pub qr_svg: String,
+    pub otpauth_uri: String,
+    pub saved: Option<String>,
+    pub error: Option<String>,
+}
+
 /// What the library is made of, three ways — see `web::composition`.
 #[derive(Debug)]
 pub struct Composition {
@@ -446,6 +471,11 @@ pub struct SettingsPage {
     /// Seed-ratio goal, applied at add time. Empty when unset — see
     /// [`sharerr_core::config::SeedingConfig::ratio_limit`].
     pub seeding_ratio_limit: String,
+    /// `HH:MM-HH:MM`, empty when unset — see
+    /// [`sharerr_core::config::SeedingConfig::quiet_hours`].
+    pub seeding_quiet_hours: String,
+    /// The cap inside quiet hours, empty when unset.
+    pub seeding_quiet_upload_limit_kib: String,
     /// Whether newly built torrents set BEP 27's private flag. On by default
     /// — see [`sharerr_core::config::SeedingConfig::private`].
     pub seeding_private: bool,
@@ -531,6 +561,10 @@ pub struct SettingsPage {
     /// Whether the bearer token they require is stored — see
     /// `secret_keys::METRICS_TOKEN`.
     pub metrics_token_set: bool,
+    /// `[api] enabled` — see [`sharerr_core::config::ApiConfig`].
+    pub api_enabled: bool,
+    /// Whether the vault holds `secret_keys::API_TOKEN`.
+    pub api_token_set: bool,
 
     /// One row per `[[library]]` directory, plus a spare blank row.
     pub libraries: Vec<LibraryRow>,
@@ -1220,6 +1254,10 @@ pub struct ItemDetailPage {
     pub title_reads_as: Option<String>,
     /// What would stop that title matching, one sentence each.
     pub title_problems: Vec<&'static str>,
+    /// The share-until date as `YYYY-MM-DD` in local time, empty when unset.
+    pub share_until: String,
+    /// Whether that date has passed, so the share has ended.
+    pub share_ended: bool,
     /// The file's actual name on disk, from `SharedItem::arr_path` — what a
     /// torrent sharerr built for this item is named, since the torrent's own
     /// name always describes the file where it sits. `None` only if the path

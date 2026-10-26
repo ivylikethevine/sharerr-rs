@@ -1,3 +1,4 @@
+mod api;
 mod checks;
 mod cli;
 mod commands;
@@ -6,6 +7,7 @@ mod gossip;
 mod jackett;
 mod library;
 mod lighthouse_client;
+mod localtime;
 mod metrics;
 mod notify;
 mod openapi;
@@ -20,6 +22,7 @@ mod system_stats;
 #[cfg(test)]
 mod test_support;
 mod torznab;
+mod totp;
 mod tracker;
 mod web;
 
@@ -27,7 +30,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use cli::{Cli, Command, LogFormat, VaultCommand};
+use cli::{AccountCommand, Cli, Command, LogFormat, VaultCommand};
 
 /// The version this binary reports, everywhere it reports one: `--version`,
 /// the web footer, the OpenAPI document, Jackett's `server_config`. Set by
@@ -69,6 +72,9 @@ async fn main() -> Result<()> {
         Command::Vault(VaultCommand::Set { key }) => commands::vault::set(&config, &key),
         Command::Vault(VaultCommand::List) => commands::vault::list(&config),
         Command::Vault(VaultCommand::Remove { key }) => commands::vault::remove(&config, &key),
+        Command::Account(AccountCommand::DisableTotp { username }) => {
+            commands::account::disable_totp(&config, &username).await
+        }
         Command::Preview(args) => commands::preview::run(args.bind).await,
         // Before the config is even consulted, in spirit: this reads nothing.
         Command::Openapi(args) => commands::openapi::run(args.output.as_deref()),

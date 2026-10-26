@@ -1,3 +1,4 @@
+pub mod account;
 pub mod doctor;
 pub mod openapi;
 pub mod preview;

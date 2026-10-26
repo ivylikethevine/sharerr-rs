@@ -169,6 +169,6 @@ mappings, and no master key. It persists exactly one file (a decoy secret)
 and has no UI or config file, only the two environment variables its compose
 file sets. `compose.tls.yaml` layers Caddy in front for a domain you own, and
 [`lighthouse/terraform/`](lighthouse/terraform/) stands the same layout up on
-an AWS, Azure or Fly.io free tier. Why it exists, how a peer points at one,
+AWS, Azure, Fly.io or Linode. Why it exists, how a peer points at one,
 and the embedded alternative are in
 [`docs/LIGHTHOUSE.md`](../../docs/LIGHTHOUSE.md).

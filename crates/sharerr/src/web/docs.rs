@@ -56,6 +56,8 @@ pub const CONFIG_NOTIFICATIONS: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#notifications";
 pub const CONFIG_METRICS: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#metrics";
+pub const CONFIG_API: &str =
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#api";
 pub const CONFIG_VAULT: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#vault-secrets";
 pub const CONFIG_ENV: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#environment-variable-overrides";
@@ -186,6 +188,7 @@ mod tests {
             ("CONFIG_CHECKS", super::CONFIG_CHECKS),
             ("CONFIG_NOTIFICATIONS", super::CONFIG_NOTIFICATIONS),
             ("CONFIG_METRICS", super::CONFIG_METRICS),
+            ("CONFIG_API", super::CONFIG_API),
             ("CONFIG_VAULT", super::CONFIG_VAULT),
             ("CONFIG_ENV", super::CONFIG_ENV),
             ("SUPPORTED", super::SUPPORTED),

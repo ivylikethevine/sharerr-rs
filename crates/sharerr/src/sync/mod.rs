@@ -174,6 +174,13 @@ pub struct Syncer {
     /// lifetime on purpose: a settings save rebuilds the syncer, which is
     /// exactly when the configured goal can have changed.
     limits_applied: std::sync::Mutex<HashSet<String>>,
+    /// The upload cap the last pass applied: the normal one, or the quiet
+    /// one inside `[seeding] quiet_hours`. A pass that lands on the other
+    /// side of a window edge clears `limits_applied`, so every torrent takes
+    /// the new cap once.
+    cap_in_force: std::sync::Mutex<Option<Option<u64>>>,
+    /// Minutes past local midnight; the system clock, or a fixed one in tests.
+    clock: fn() -> u16,
 }
 
 impl std::fmt::Debug for Syncer {
@@ -208,6 +215,8 @@ pub struct SyncReport {
     /// Carried as text so `commands::serve::background` can notify once per
     /// distinct reason rather than once per pass.
     pub library_unreadable: Option<String>,
+    /// Shares withdrawn this pass because their share-until date passed.
+    pub ended: usize,
     /// Torrents sharerr built that the client reports stopped (paused).
     pub stopped: Vec<Flagged>,
     /// Torrents sharerr built that were gone from the client this pass, and
@@ -231,7 +240,7 @@ impl SyncReport {
         RunSummary {
             discovered: self.discovered as i64,
             added: (self.added + self.reused) as i64,
-            unshared: self.unshared as i64,
+            unshared: (self.unshared + self.ended) as i64,
             failed: (self.failed + self.sources_failed) as i64,
             error: None,
         }
@@ -259,6 +268,9 @@ impl std::fmt::Display for SyncReport {
             "{} discovered, {} added, {} reused, {} unchanged, {} unshared, {} failed",
             self.discovered, self.added, self.reused, self.unchanged, self.unshared, self.failed
         )?;
+        if self.ended > 0 {
+            write!(f, " ({} share(s) ended on their date)", self.ended)?;
+        }
         if self.sources_failed > 0 {
             write!(
                 f,
@@ -370,7 +382,44 @@ impl Syncer {
             tracker,
             seeder,
             limits_applied: std::sync::Mutex::new(HashSet::new()),
+            cap_in_force: std::sync::Mutex::new(None),
+            clock: crate::localtime::minute_of_day,
         }
+    }
+
+    /// The same syncer on a fixed clock, for quiet-hours tests.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: fn() -> u16) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The upload cap for now: `[seeding] quiet_hours`' one inside the
+    /// window, the seeder's normal one outside it.
+    fn upload_cap_now(&self) -> Option<u64> {
+        sharerr_core::config::SeedingConfig {
+            upload_limit_kib: self.seeder.upload_limit_kib,
+            ..self.config.seeding
+        }
+        .upload_limit_at((self.clock)())
+    }
+
+    /// Note which cap this pass applies, and forget which torrents already
+    /// have one if it changed since the last pass.
+    fn track_cap_in_force(&self) -> Result<()> {
+        let cap = self.upload_cap_now();
+        let mut in_force = self
+            .cap_in_force
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cap_in_force lock poisoned"))?;
+        if in_force.is_some_and(|previous| previous != cap) {
+            self.limits_applied
+                .lock()
+                .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
+                .clear();
+        }
+        *in_force = Some(cap);
+        Ok(())
     }
 
     /// Bring one already-seeding torrent's limits into line with `[seeding]`,
@@ -410,7 +459,7 @@ impl Syncer {
             return Ok(false);
         }
         let goal = sharerr_client::SeedingLimits {
-            upload_limit_kib: self.seeder.upload_limit_kib,
+            upload_limit_kib: self.upload_cap_now(),
             ratio_limit: self.seeder.ratio_limit,
         };
         let applied = if goal.matches(reported) {
@@ -472,6 +521,9 @@ impl Syncer {
 
     async fn reconcile(&self, dry_run: bool) -> Result<SyncReport> {
         let mut report = SyncReport::default();
+        if !dry_run {
+            self.track_cap_in_force()?;
+        }
 
         // Refuse early rather than building torrents that announce into the void.
         self.tracker.ensure_ready().await?;
@@ -484,11 +536,12 @@ impl Syncer {
         // the seeder's cross-seed search without a refetch per item. This is
         // also what makes the loop self-healing: a torrent removed behind
         // sharerr's back is simply absent here and gets re-added.
-        let (discovery, torrents, known_items, stamps) = tokio::join!(
+        let (discovery, torrents, known_items, stamps, ends) = tokio::join!(
             self.discover(),
             self.seeder.qbit.list(None),
             self.store.all_items(),
-            self.store.file_stamps()
+            self.store.file_stamps(),
+            self.store.share_ends()
         );
         // Only the changed-file check reads these, and it is a notification,
         // not a reason to fail the pass.
@@ -508,6 +561,10 @@ impl Syncer {
         if discovery.scanned.is_empty() {
             bail!("no library source could be scanned — nothing was changed");
         }
+        // Unlike the stamps, a failure here stops the pass: carrying on would
+        // share again what an operator set to stop.
+        let ends = ends.context("reading share-until dates")?;
+        let now = sharerr_core::endpoint::now_epoch();
 
         let torrents =
             torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
@@ -540,6 +597,16 @@ impl Syncer {
         let torrents = seed::KnownTorrents::index(&torrents);
 
         for item in discovered {
+            if ends.get(&item.key()).is_some_and(|&until| until <= now) {
+                if let Some(known) = known.get(&item.key())
+                    && known.state != ShareState::Unshared
+                    && (dry_run || self.unshare_one(known).await.is_ok())
+                {
+                    tracing::info!(item = %item.spec, "share ended on its date");
+                    report.ended += 1;
+                }
+                continue;
+            }
             self.watch(
                 item,
                 known.get(&item.key()),

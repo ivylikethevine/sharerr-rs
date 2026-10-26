@@ -268,6 +268,15 @@ pub struct MetricsForm {
     clear_token: Option<String>,
 }
 
+/// The management API's switch and token, the same shape as [`MetricsForm`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ApiForm {
+    enabled: Option<String>,
+    token: String,
+    clear_token: Option<String>,
+}
+
 /// Repeated inputs, one entry per row. `axum_extra`'s `Form` is what makes this
 /// work — axum's own uses `serde_urlencoded`, which cannot decode repeated keys
 /// into a `Vec`.
@@ -618,6 +627,8 @@ pub struct SeedingForm {
     /// `CLAUDE.md`'s note on why every field here needs `#[serde(default)]`.
     private: Option<String>,
     magnet_links: Option<String>,
+    quiet_hours: String,
+    quiet_upload_limit_kib: String,
 }
 
 /// A blank field means no goal; anything else must be a whole number of
@@ -671,10 +682,34 @@ pub async fn save_seeding(
         Ok(v) => v,
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
+    let quiet_upload_limit_kib = match parse_upload_limit_kib(&form.quiet_upload_limit_kib) {
+        Ok(v) => v,
+        Err(err) => return reject(&state, &format!("quiet hours: {err:#}")).await,
+    };
+    let quiet_hours = match form.quiet_hours.trim() {
+        "" => None,
+        text => match text.parse::<sharerr_core::config::QuietHours>() {
+            Ok(window) => Some(window),
+            Err(err) => return reject(&state, &format!("quiet hours: {err}")).await,
+        },
+    };
     let private = form.private.is_some();
     let magnet_links = form.magnet_links.is_some();
 
     write_config(&state, "seeding", None, move |file| {
+        file.apply([
+            match quiet_hours {
+                Some(window) => Edit::str(config_paths::SEEDING_QUIET_HOURS, window.to_string()),
+                None => Edit::unset(config_paths::SEEDING_QUIET_HOURS),
+            },
+            match quiet_upload_limit_kib {
+                Some(kib) => Edit::int(
+                    config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB,
+                    i64::try_from(kib).unwrap_or(i64::MAX),
+                ),
+                None => Edit::unset(config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB),
+            },
+        ]);
         file.apply([
             match upload_limit_kib {
                 Some(kib) => Edit::int(
@@ -945,6 +980,25 @@ pub async fn save_metrics(
             Ok(())
         },
         secret_keys::METRICS_TOKEN,
+        form.token.trim(),
+        form.clear_token.is_some(),
+    )
+    .await
+}
+
+pub async fn save_api(State(state): State<WebState>, Form(form): Form<ApiForm>) -> Response {
+    write_config_and_secret(
+        &state,
+        "api",
+        None,
+        |file| {
+            file.apply([Edit::bool(
+                config_paths::API_ENABLED,
+                form.enabled.is_some(),
+            )]);
+            Ok(())
+        },
+        secret_keys::API_TOKEN,
         form.token.trim(),
         form.clear_token.is_some(),
     )
@@ -1720,6 +1774,16 @@ async fn build_page(
             .ratio_limit
             .map(|ratio| ratio.to_string())
             .unwrap_or_default(),
+        seeding_quiet_hours: config
+            .seeding
+            .quiet_hours
+            .map(|window| window.to_string())
+            .unwrap_or_default(),
+        seeding_quiet_upload_limit_kib: config
+            .seeding
+            .quiet_upload_limit_kib
+            .map(|kib| kib.to_string())
+            .unwrap_or_default(),
         seeding_private: config.seeding.private,
         feed_magnet_links: config.feed.magnet_links,
 
@@ -1830,6 +1894,8 @@ async fn build_page(
 
         metrics_enabled: config.metrics.enabled,
         metrics_token_set: is_set(secret_keys::METRICS_TOKEN),
+        api_enabled: config.api.enabled,
+        api_token_set: is_set(secret_keys::API_TOKEN),
 
         // A spare blank row so "add a library" needs no JavaScript, same as
         // the path map below.

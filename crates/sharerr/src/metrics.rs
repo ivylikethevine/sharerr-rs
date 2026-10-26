@@ -545,7 +545,7 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for MetricsAuth {
 }
 
 /// The `Authorization: Bearer <token>` header, if present and well-formed.
-fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()

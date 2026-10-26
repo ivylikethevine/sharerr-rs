@@ -90,8 +90,16 @@ serde_json = "1.0.154"
 matroska = "0.30"
 mp4 = "0.14"
 symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "ogg"] }
-# BitTorrent's info hash is SHA-1 by protocol (BEP 3); it is an identifier here,
-# never a security decision. See `sharerr-torrent`'s `metainfo` module.
+# Local time for quiet hours and share-until dates: TZ or /etc/localtime, with
+# the zone database bundled, since the slim runtime image may ship none.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-bundle-always"] }
+# The sign-in factor's enrolment QR code. SVG only: the default `image` feature
+# would pull in an image codec stack for one rendered string.
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+# BitTorrent's info hash is SHA-1 by protocol (BEP 3); it is an identifier there
+# (see `sharerr-torrent`'s `metainfo` module). The one keyed use is HMAC-SHA1 for
+# sign-in codes, which RFC 6238 specifies and SHA-1's collision weakness does not
+# reach (`sharerr`'s `totp` module).
 sha1 = "0.11.0"
 sha2 = "0.11.1"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the

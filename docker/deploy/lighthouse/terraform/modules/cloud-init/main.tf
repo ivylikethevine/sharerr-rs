@@ -1,5 +1,5 @@
-# Renders the cloud-init document both VM targets (aws/, azure/) hand to
-# their instance. One module rather than two copies of the template call, so
+# Renders the cloud-init document the VM targets (aws/, azure/, linode/) hand
+# to their instance. One module rather than two copies of the template call, so
 # the compose files it embeds are read from exactly one place: the standalone
 # lighthouse layout two directories up. What a VM runs is byte-for-byte what
 # `docker compose up -d` in `docker/deploy/lighthouse/` runs, TLS override
@@ -7,7 +7,7 @@
 # what is on the box.
 #
 # Plain `templatefile` rather than the cloudinit provider's MIME wrapper:
-# both clouds accept a bare `#cloud-config` document, and a bare document is
+# every cloud here accepts a bare `#cloud-config` document, and a bare document is
 # one you can read back out of the instance's metadata and diff.
 
 locals {

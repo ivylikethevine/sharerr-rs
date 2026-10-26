@@ -710,6 +710,7 @@ pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
         .routes(routes!(gluetun_down))
         .routes(routes!(arr_webhook))
         .merge(crate::metrics::routes())
+        .merge(crate::api::routes())
 }
 
 /// in this handler turns a fixable configuration gap into a restart loop.

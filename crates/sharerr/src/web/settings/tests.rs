@@ -1150,6 +1150,7 @@ async fn save_seeding_rejects_a_non_numeric_upload_limit() {
             ratio_limit: String::new(),
             private: None,
             magnet_links: None,
+            ..Default::default()
         }),
     )
     .await;
@@ -1169,6 +1170,7 @@ async fn save_seeding_rejects_a_negative_ratio() {
             ratio_limit: "-1".to_owned(),
             private: None,
             magnet_links: None,
+            ..Default::default()
         }),
     )
     .await;
@@ -1189,6 +1191,7 @@ async fn save_seeding_writes_the_limits() {
             ratio_limit: "2.5".to_owned(),
             private: None,
             magnet_links: None,
+            ..Default::default()
         }),
     )
     .await;
@@ -1219,6 +1222,7 @@ async fn save_seeding_writes_private_and_magnet_links() {
             ratio_limit: String::new(),
             private: Some("1".to_owned()),
             magnet_links: Some("1".to_owned()),
+            ..Default::default()
         }),
     )
     .await;
@@ -1245,6 +1249,7 @@ async fn save_seeding_writes_false_for_unticked_checkboxes() {
             ratio_limit: String::new(),
             private: None,
             magnet_links: None,
+            ..Default::default()
         }),
     )
     .await;
@@ -1957,6 +1962,42 @@ fn save_metrics_writes_the_flag_and_stores_then_clears_the_token() {
     });
 }
 
+#[test]
+fn save_api_writes_its_own_flag_and_token_and_leaves_metrics_alone() {
+    with_open_vault(|state, config_path| async move {
+        let response = save_api(
+            State(state.clone()),
+            Form(ApiForm {
+                enabled: Some("on".to_owned()),
+                token: "manage-me".to_owned(),
+                clear_token: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("[api]"), "{written}");
+        assert!(!written.contains("[metrics]"), "{written}");
+        assert_eq!(
+            stored(&state, secret_keys::API_TOKEN).await.as_deref(),
+            Some("manage-me")
+        );
+        assert!(stored(&state, secret_keys::METRICS_TOKEN).await.is_none());
+
+        let response = save_api(
+            State(state.clone()),
+            Form(ApiForm {
+                enabled: None,
+                token: String::new(),
+                clear_token: Some("on".to_owned()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        assert!(stored(&state, secret_keys::API_TOKEN).await.is_none());
+    });
+}
+
 // ------------------------------------------ the remaining plain saves
 
 #[tokio::test]
@@ -2012,6 +2053,7 @@ async fn save_seeding_with_blank_fields_unsets_both_limits() {
             ratio_limit: String::new(),
             private: None,
             magnet_links: None,
+            ..Default::default()
         }),
     )
     .await;

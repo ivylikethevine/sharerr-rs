@@ -2756,11 +2756,114 @@ async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
     let h = tagged_harness().await;
     h.syncer.run(false).await.unwrap();
     let known_before = known(&h).await;
-    // `begin_run` and `all_items` answer; every confirmation after fails.
-    h.syncer.store().fail_after(2).await.unwrap();
+    // `begin_run` and the pass's three reads (`all_items`, `file_stamps`,
+    // `share_ends`) answer; every confirmation after fails.
+    h.syncer.store().fail_after(4).await.unwrap();
 
     let report = h.syncer.run(false).await.unwrap();
 
     assert_eq!(report.failed, 0, "{report}");
     assert_eq!(report.unchanged, known_before.len(), "{report}");
+}
+
+// ------------------------------------------------------------ quiet hours
+
+/// The clock the quiet-hours test moves; a `fn` reads it, since a syncer's
+/// clock is a plain `fn() -> u16`.
+static QUIET_TEST_MINUTE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+fn quiet_test_clock() -> u16 {
+    QUIET_TEST_MINUTE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Inside the window every torrent sharerr built takes the quiet cap once;
+/// crossing back out puts the normal cap back, once.
+#[tokio::test]
+async fn quiet_hours_swap_the_upload_cap_at_each_edge() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let seeding = h.qbit.snapshot().live.len();
+
+    QUIET_TEST_MINUTE.store(2 * 60, std::sync::atomic::Ordering::SeqCst);
+    let syncer = h
+        .rebuilt_with_seeding(SeedingConfig {
+            upload_limit_kib: Some(100),
+            quiet_hours: Some("01:00-07:00".parse().unwrap()),
+            quiet_upload_limit_kib: Some(10),
+            ..SeedingConfig::default()
+        })
+        .with_clock(quiet_test_clock);
+
+    syncer.run(false).await.unwrap();
+    let set = h.qbit.snapshot().limits_set;
+    assert_eq!(set.len(), seeding, "{set:?}");
+    assert!(set.iter().all(|b| b.contains("limit=10240")), "{set:?}");
+
+    // Still inside: nothing more is sent.
+    syncer.run(false).await.unwrap();
+    assert_eq!(h.qbit.snapshot().limits_set.len(), seeding);
+
+    QUIET_TEST_MINUTE.store(8 * 60, std::sync::atomic::Ordering::SeqCst);
+    syncer.run(false).await.unwrap();
+    let set = h.qbit.snapshot().limits_set;
+    assert_eq!(set.len(), seeding * 2, "{set:?}");
+    assert!(
+        set[seeding..].iter().all(|b| b.contains("limit=102400")),
+        "{set:?}"
+    );
+}
+
+// ------------------------------------------------------------ share until
+
+#[tokio::test]
+async fn a_share_past_its_date_is_withdrawn_and_stays_withdrawn_until_cleared() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let store = h.syncer.store();
+    let item = store.all_items().await.unwrap().remove(0);
+    store
+        .set_share_until(
+            item.source,
+            item.file_id,
+            Some(sharerr_core::endpoint::now_epoch() - 10),
+        )
+        .await
+        .unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.ended, 1, "{report:?}");
+    assert!(report.to_string().contains("1 share(s) ended"), "{report}");
+    let after = store.get(item.source, item.file_id).await.unwrap().unwrap();
+    assert_eq!(after.state, ShareState::Unshared);
+    assert_eq!(h.qbit.snapshot().live.len(), 1, "its torrent was removed");
+
+    // Still tagged, but the date stands: left unshared, not re-added.
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!((report.ended, report.added), (0, 0), "{report:?}");
+    assert_eq!(h.qbit.snapshot().live.len(), 1);
+
+    store
+        .set_share_until(item.source, item.file_id, None)
+        .await
+        .unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.added, 1, "{report:?}");
+}
+
+#[tokio::test]
+async fn a_future_share_until_date_changes_nothing_yet() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let store = h.syncer.store();
+    let item = store.all_items().await.unwrap().remove(0);
+    store
+        .set_share_until(
+            item.source,
+            item.file_id,
+            Some(sharerr_core::endpoint::now_epoch() + 3600),
+        )
+        .await
+        .unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!((report.ended, report.unchanged), (0, 2), "{report:?}");
 }

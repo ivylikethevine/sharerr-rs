@@ -25,6 +25,7 @@ pub mod probe;
 pub mod settings;
 pub mod templates;
 pub mod topology;
+pub mod two_factor;
 pub mod wizard;
 
 use std::sync::Arc;
@@ -120,6 +121,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/items/{source}/{file_id}/retry", post(items::retry))
         .route("/items/{source}/{file_id}/rebuild", post(items::rebuild))
         .route("/items/{source}/{file_id}/unshare", post(items::unshare))
+        .route("/items/{source}/{file_id}/until", post(items::share_until))
         .route("/topology", get(topology::page))
         .route("/debug", get(debug::page))
         .route("/peers", get(peers::page).post(peers::add))
@@ -171,6 +173,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
             post(settings::save_notifications),
         )
         .route("/settings/metrics", post(settings::save_metrics))
+        .route("/settings/api", post(settings::save_api))
         .route("/settings/config/export", get(settings::export_config))
         .route("/settings/config/import", post(settings::import_config))
         .route(
@@ -179,6 +182,11 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         )
         .route("/settings/test/{service}", post(probe::test))
         .route("/settings/account/password", post(auth::change_password))
+        .route(
+            "/settings/account/totp",
+            get(two_factor::account_page).post(two_factor::enable),
+        )
+        .route("/settings/account/totp/disable", post(two_factor::disable))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -191,6 +199,10 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
     let public = Router::new()
         .route("/setup", get(auth::setup_page).post(auth::setup_submit))
         .route("/login", get(auth::login_page).post(auth::login_submit))
+        .route(
+            "/login/totp",
+            get(two_factor::login_page).post(two_factor::login_submit),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::throttle_unauthenticated_posts,

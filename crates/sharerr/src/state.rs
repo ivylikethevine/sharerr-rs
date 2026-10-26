@@ -105,6 +105,9 @@ pub struct ServeState {
     /// every 15 seconds. See [`Self::try_metrics_token`] for the fail-closed
     /// contract this cache exists to serve, not just to speed up.
     metrics_token: RwLock<Option<Option<String>>>,
+    /// The management API's bearer token, cached the same way and for the
+    /// same reason as `metrics_token`.
+    api_token: RwLock<Option<Option<String>>>,
     /// The embedded lighthouse's state, built lazily the first time
     /// `[lighthouse] enabled = true` is actually observed — see
     /// [`Self::lighthouse_state`]. Same `Option<Option<_>>` shape as
@@ -221,6 +224,7 @@ impl ServeState {
             tracker_token_previous: RwLock::new(None),
             gossip_identity: RwLock::new(None),
             metrics_token: RwLock::new(None),
+            api_token: RwLock::new(None),
             lighthouse_state: RwLock::new(None),
             wake: Notify::new(),
             pass_requested: std::sync::atomic::AtomicBool::new(false),
@@ -562,6 +566,13 @@ impl ServeState {
             .await
     }
 
+    /// The management API's bearer token, failing closed exactly as
+    /// [`Self::try_metrics_token`] does.
+    pub async fn try_api_token(&self) -> Result<Option<String>, String> {
+        self.try_vault_string(&self.api_token, secret_keys::API_TOKEN)
+            .await
+    }
+
     /// When the previous shared tracker token was last actually used.
     pub fn legacy_token_status(&self) -> Arc<LegacyTokenStatus> {
         Arc::clone(&self.legacy_token_status)
@@ -675,6 +686,7 @@ impl ServeState {
         *self.tracker_token_previous.write().await = None;
         *self.gossip_identity.write().await = None;
         *self.metrics_token.write().await = None;
+        *self.api_token.write().await = None;
         *self.tracker.api_key.write().await = None;
         *self.client.api_key.write().await = None;
         // `lighthouse_state` is not cleared here: its only vault input is the

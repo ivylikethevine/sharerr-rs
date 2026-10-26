@@ -28,12 +28,13 @@ lighthouse, the services sharerr drives) and what crosses it is in
 
 sharerr handles real credentials (*arr API keys, torrent-client credentials,
 the tracker's announce token, gluetun API keys, the notification webhook and
-heartbeat push URLs, and this instance's Ed25519 gossip signing key) in its
+heartbeat push URLs, the metrics and management API bearer tokens, and this
+instance's Ed25519 gossip signing key) in its
 encrypted vault, and exposes a web UI, a Torznab feed, gossip, and a
 BitTorrent tracker over HTTP.
 Anything that could read, write, or bypass authentication for any of those
 is in scope: vault or session handling, the auth guard in front of every UI
-page except `/setup`, `/login`, `/logout` and `/assets`, the per-peer key
+page except `/setup`, `/login`, `/login/totp`, `/logout` and `/assets`, the per-peer key
 model behind the feed, gossip and tracker, and the lighthouse's privacy
 properties (see [`LIGHTHOUSE.md`](LIGHTHOUSE.md)).
 
@@ -45,6 +46,17 @@ What is already there, so a report can say which layer it gets past:
 - Sessions are 256-bit tokens held only in memory (a restart revokes them
   all) with a 14-day idle expiry; a password change re-checks the current
   password and revokes every other session.
+- Two-step sign-in, when an account turns it on (Settings → Account), asks
+  for an RFC 6238 code after the password. The password step then grants
+  only a five-minute pending sign-in, five wrong codes end it, the
+  `/login/totp` step shares `/login`'s per-address throttle, and a code is
+  accepted once. Turning it on or off needs the password and a code;
+  turning it on revokes every other session. The secret sits beside the
+  password hash in SQLite, readable, so sign-in still works without the
+  master key (`migrations/0015_totp.sql`): it defends against a guessed or
+  reused password, not against a copy of the data directory.
+  `sharerr account disable-totp` inside the container is the recovery for a
+  lost authenticator.
 - The cookie is `HttpOnly` and `SameSite=Strict`, and a middleware over the
   whole router refuses any non-GET request whose `Origin` does not match
   `Host`, including on `/login` and `/setup`.
@@ -66,8 +78,10 @@ What is already there, so a report can say which layer it gets past:
   A pasted invite pins the identity it carries at pairing time, by the
   operator, instead of trusting the first record a friend later signs, and
   is refused seven days after it was issued.
-- The gluetun hook endpoints are unauthenticated by design (gluetun's hooks
-  are bare `wget`s) but answer only private source addresses.
+- The gluetun hook endpoints and `/hooks/arr` are unauthenticated by design
+  (gluetun's hooks are bare `wget`s, and an *arr Webhook connection has no
+  credential sharerr checks) but answer only private source addresses, and
+  can only ask for work sharerr would do anyway: a re-poll, or a sync pass.
 
 A few things are **by design**, not a vulnerability report waiting to happen:
 

@@ -101,7 +101,7 @@ All three are driven through the real tier-2 stack; see
 
 ### Indexers (what consumes the feed)
 
-**Prowlarr** (_Generic Torznab_), **Jackett**-shaped URLs, and
+**Prowlarr** (_Generic Torznab_, or [a per-host definition](prowlarr/README.md)), **Jackett**-shaped URLs, and
 **Sonarr/Radarr/Lidarr direct**. The tier-2 script adds sharerr as an indexer
 to a real Sonarr and Lidarr and drives its Jackett-shaped routes and Torznab
 caps by hand; Prowlarr is an opt-in container in the same stack, and

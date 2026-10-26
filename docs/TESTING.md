@@ -212,17 +212,22 @@ tests against each change; a mutant the suite survives (`MISSED`) is a line
 that runs without anything checking what it does. It is run by hand, in no
 `check.sh` group and no workflow: `sharerr-torrent`'s 393 mutants take 3
 minutes at `-j 4` (16CPU/60GB), but the workspace holds 3,521, 2,065 of
-them in the `sharerr` crate, whose build and suite are the slowest. `.cargo/mutants.toml` leaves out the same
-scaffolding the coverage report does, uses the tier-1 features, and writes
-to `local/mutants/mutants.out/` (`missed.txt` lists the survivors).
-`check.sh` puts the build copies under `target/mutants-tmp/` rather than
-`$TMPDIR`: each job copies the tree and builds it, a few GB apiece, which
-fills a RAM-backed `/tmp`.
+them in the `sharerr` crate, whose build and suite are the slowest.
+`.cargo/mutants.toml` leaves out the same scaffolding the coverage report
+does, uses the tier-1 features, and writes the report to the gitignored
+directory its `output` names (`missed.txt` there lists the survivors).
+`check.sh` puts the build copies under the cargo target directory rather
+than `$TMPDIR`: each job copies the tree and builds it, a few GB apiece,
+which fills a RAM-backed `/tmp`.
 
 Each mutant is tested against its own package's tests only, cargo-mutants'
 default. A mutant in `sharerr-core` that the `sharerr` crate's tests would
 catch reads as missed; `--test-workspace=true` asks the whole suite instead,
-at the cost of building every crate per mutant.
+at the cost of building every crate per mutant. Give that a `--timeout` of a
+few minutes: the timeout is set from a baseline that tests only the named
+package, so it lands on the 20-second floor and every mutant then times out
+against the whole suite (all 142 viable `sharerr-core` mutants did, at about
+two minutes of build each, 16CPU/60GB, `-j 4`).
 
 Kill a survivor with a test when the behaviour matters, and leave the rest.
 Three are known to be equivalent, with no observable difference to test:

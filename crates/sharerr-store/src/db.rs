@@ -583,6 +583,49 @@ impl Store {
         Ok(stamps)
     }
 
+    /// Set or clear when an item's share ends on its own — see
+    /// `migrations/0016_share_until.sql`. Returns whether the item existed.
+    pub async fn set_share_until(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        until: Option<i64>,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE shared_items SET share_until = ?, updated_at = ? \
+             WHERE source = ? AND file_id = ?",
+        )
+        .bind(until)
+        .bind(now_epoch())
+        .bind(source.as_str())
+        .bind(file_id)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Every set share-until date, keyed like [`SharedItem::key`], for one
+    /// read per sync pass.
+    pub async fn share_ends(&self) -> Result<HashMap<(MediaSource, i64), i64>> {
+        let rows = sqlx::query(
+            "SELECT source, file_id, share_until FROM shared_items WHERE share_until IS NOT NULL",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let mut ends = HashMap::with_capacity(rows.len());
+        for row in &rows {
+            let source: String = row.try_get("source")?;
+            let file_id: i64 = row.try_get("file_id")?;
+            let source = MediaSource::parse(&source).ok_or_else(|| StoreError::Malformed {
+                id: file_id,
+                detail: format!("unknown source {source:?}"),
+            })?;
+            ends.insert((source, file_id), row.try_get("share_until")?);
+        }
+        Ok(ends)
+    }
+
     /// Record the info hash of the torrent built for an item.
     ///
     /// A seeding item must have one: it is what the tracker admits announces against
@@ -1273,6 +1316,37 @@ mod tests {
             .await
             .unwrap();
         assert!(store.file_stamps().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_share_until_date_is_set_listed_and_cleared() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        assert!(store.share_ends().await.unwrap().is_empty());
+
+        assert!(
+            store
+                .set_share_until(MediaSource::Sonarr, 1001, Some(1_800_000_000))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.share_ends().await.unwrap()[&(MediaSource::Sonarr, 1001)],
+            1_800_000_000
+        );
+        assert!(
+            store
+                .set_share_until(MediaSource::Sonarr, 1001, None)
+                .await
+                .unwrap()
+        );
+        assert!(store.share_ends().await.unwrap().is_empty());
+        assert!(
+            !store
+                .set_share_until(MediaSource::Sonarr, 9999, None)
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

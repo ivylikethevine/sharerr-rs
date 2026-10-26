@@ -20,7 +20,7 @@ long form of everything here.
 Pick it to self-host a lighthouse on neutral ground for a friend group that
 would rather not each run one. Using a lighthouse and running one are
 independent choices; a sharerr instance does not need its own. To stand the
-same layout up on an AWS, Azure or Fly.io free tier instead, use
+same layout up on AWS, Azure, Fly.io or Linode instead, use
 [`terraform/`](terraform/README.md). For sharerr itself, see
 [the "Which one" table](../README.md#which-one).
 

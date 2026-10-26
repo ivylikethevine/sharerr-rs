@@ -29,6 +29,7 @@ default, and what sets it.
 - [`[checks]`](#checks)
 - [`[notifications]`](#notifications)
 - [`[metrics]`](#metrics)
+- [`[api]`](#api)
 - [Backup and restore](#backup-and-restore)
   - [Backing up `/data`](#backing-up-data)
   - [Restoring friends after a full data-directory loss](#restoring-friends-after-a-full-data-directory-loss)
@@ -199,11 +200,24 @@ done in the client. Torrents sharerr adopted rather than created are never
 touched. The client's own engine does the enforcing. See the README's
 ["Seeding limits"](../README.md#seeding-limits).
 
-| TOML key                   | Type  | Default | Notes                                                                                                                                                                                                                                                                                                                                                                 |
-| -------------------------- | ----- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seeding.upload_limit_kib` | int   | unset   | Per-torrent upload cap, KiB/s.                                                                                                                                                                                                                                                                                                                                        |
-| `seeding.ratio_limit`      | float | unset   | Seed-ratio goal. Not honoured by rTorrent — see above.                                                                                                                                                                                                                                                                                                                |
-| `seeding.private`          | bool  | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
+| TOML key                         | Type   | Default | Notes                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------- | ------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seeding.upload_limit_kib`       | int    | unset   | Per-torrent upload cap, KiB/s.                                                                                                                                                                                                                                                                                                                                        |
+| `seeding.ratio_limit`            | float  | unset   | Seed-ratio goal. Not honoured by rTorrent — see above.                                                                                                                                                                                                                                                                                                                |
+| `seeding.quiet_hours`            | string | unset   | A daily window, `HH:MM-HH:MM` in the container's time zone (`TZ`); `22:00-06:00` wraps past midnight.                                                                                                                                                                                                                                                                 |
+| `seeding.quiet_upload_limit_kib` | int    | unset   | The upload cap inside `quiet_hours`, KiB/s.                                                                                                                                                                                                                                                                                                                           |
+| `seeding.private`                | bool   | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
+
+Quiet hours take effect only with `upload_limit_kib`, `quiet_hours` and
+`quiet_upload_limit_kib` all set: inside the window sharerr's torrents take
+the quiet cap, and after it the normal one again, so without a normal cap
+there would be nothing to go back to. Each edge lands on the first sync pass
+past it, so within `sync.interval_secs`.
+
+A share can also end on a date: **Share until** on an item's page. From the
+start of that day (container time) each pass unshares the item and leaves it
+unshared while the date stands, even though the file is still tagged;
+clearing the date shares it again on the next pass.
 
 ## `[feed]`
 
@@ -450,6 +464,29 @@ either endpoint; a request with a missing or wrong token gets the same `404`
 as when `metrics.enabled` is `false`, so a probe cannot tell "off" from
 "wrong token" from "instance does not exist".
 
+## `[api]`
+
+The read-only management API: JSON for scripts and dashboards that need more
+than `/dashboard`'s counts. Off by default.
+
+| TOML key      | Type | Default | Notes                                   |
+| ------------- | ---- | ------- | --------------------------------------- |
+| `api.enabled` | bool | `false` | Serve the management API at `/api/v1/`. |
+
+| Route                 | Returns                                                                 |
+| --------------------- | ----------------------------------------------------------------------- |
+| `GET /api/v1/items`   | Every item: source, kind, titles, state, last error, size, info hash    |
+| `GET /api/v1/friends` | Every friend: label, scope, when created, last seen and revoked, totals |
+| `GET /api/v1/sync`    | Whether sync runs on a timer, what blocks it, the last 20 runs          |
+| `GET /api/v1/doctor`  | The `sharerr doctor --json` document, run on request, never `--fix`     |
+
+Vault secret: `api.token`, sent as `Authorization: Bearer <token>`. Its own
+token, never `metrics.token`: the API names every shared file and friend, the
+metrics none, so a Prometheus scrape token must not read it. A missing or
+wrong token gets the same `404` as `api.enabled = false`. Nothing here
+writes, and no friend's key or key hash is ever in a response. The schemas
+are in [the API document](API.md).
+
 ## Backup and restore
 
 The settings page's "Backup and restore" section downloads the _effective_
@@ -563,8 +600,9 @@ sharerr vault remove <key>
 | `notifications.webhook_url`   | Where every enabled trigger except `heartbeat` is POSTed (see [`[notifications]`](#notifications))  |
 | `notifications.heartbeat_url` | Uptime-Kuma-style push URL fetched on a timer while ready (see [`[notifications]`](#notifications)) |
 | `metrics.token`               | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics))              |
+| `api.token`                   | Bearer token the management API requires (see [`[api]`](#api))                                      |
 
-Those fourteen are the keys `sharerr vault set` accepts. `sharerr vault list`
+Those fifteen are the keys `sharerr vault set` accepts. `sharerr vault list`
 shows every key the vault holds, which includes a few sharerr manages
 itself and `vault set` refuses: `tracker.token_previous` (the rotated-out
 announce token, see [`[tracker]`](#tracker)), `identity.signing_key` (this

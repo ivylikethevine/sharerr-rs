@@ -1,0 +1,58 @@
+{% extends "layout.html" %}
+{% block title %}Two-step sign-in · sharerr{% endblock %}
+
+{% block content %}
+<h1>Two-step sign-in</h1>
+<p class="hint"><a href="/settings#your-account">Back to Settings</a></p>
+
+{% if let Some(message) = error %}
+<p class="error" role="alert">{{ message }}</p>
+{% endif %}
+{% if let Some(saved) = saved %}
+<p class="ok" role="status">{% if saved == "on" %}Two-step sign-in is on. Every other session was signed out.{% else %}Two-step sign-in is off.{% endif %}</p>
+{% endif %}
+
+{% if enabled %}
+<form method="post" action="/settings/account/totp/disable" class="panel">
+  <p>
+    Signing in as <code>{{ username }}</code> asks for a code from your authenticator app
+    after the password.
+  </p>
+  <p class="hint">
+    To turn it off, confirm with your password and a current code. Locked out without the
+    phone? <code>sharerr account disable-totp {{ username }}</code> inside the container
+    turns it off.
+  </p>
+
+  <label for="current_password">Current password</label>
+  <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+
+  <label for="code">Code</label>
+  <input id="code" name="code" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code" maxlength="7" required>
+
+  <button type="submit" class="secondary">Turn off two-step sign-in</button>
+</form>
+{% else %}
+<form method="post" action="/settings/account/totp" class="panel">
+  <p>
+    Scan this with an authenticator app (Aegis, 2FAS, FreeOTP, or any other), or type the
+    key into it by hand. Then confirm with the code it shows.
+  </p>
+  <figure class="qr">{{ qr_svg|safe }}</figure>
+  <p class="hint">Key: <code>{{ secret }}</code> · <a href="{{ otpauth_uri }}">Open in an app on this device</a></p>
+  <p class="hint">
+    The key is shown once. A copy of sharerr's database holds it too, so this guards
+    against a guessed or reused password, not against someone with the data directory.
+  </p>
+  <input type="hidden" name="secret" value="{{ secret }}">
+
+  <label for="code">Code</label>
+  <input id="code" name="code" inputmode="numeric" pattern="[0-9 ]*" autocomplete="one-time-code" maxlength="7" required autofocus>
+
+  <label for="current_password">Current password</label>
+  <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+
+  <button type="submit">Turn on two-step sign-in</button>
+</form>
+{% endif %}
+{% endblock %}
