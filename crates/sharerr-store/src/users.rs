@@ -132,6 +132,52 @@ impl Store {
 
         Ok(affected > 0)
     }
+
+    /// The account's base32 TOTP secret, or `None` when it has no second
+    /// factor (or does not exist). See `migrations/0015_totp.sql`.
+    pub async fn totp_secret(&self, username: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT totp_secret FROM users WHERE username = ?1")
+            .bind(username)
+            .fetch_optional(self.pool())
+            .await?;
+        match row {
+            Some(row) => Ok(row.try_get::<Option<String>, _>("totp_secret")?),
+            None => Ok(None),
+        }
+    }
+
+    /// Turn the second factor on with `secret`, or off with `None`. Either
+    /// way the replay guard starts over. Returns whether the account existed.
+    pub async fn set_totp_secret(&self, username: &str, secret: Option<&str>) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE users SET totp_secret = ?1, totp_last_step = NULL, updated_at = ?2 \
+             WHERE username = ?3",
+        )
+        .bind(secret)
+        .bind(now_epoch())
+        .bind(username)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Record `step` as used, if it is later than the last one accepted.
+    /// `false` means the code was already spent (or the account is gone), and
+    /// the caller must refuse it. One conditional `UPDATE`, so two requests
+    /// racing the same code cannot both win.
+    pub async fn claim_totp_step(&self, username: &str, step: i64) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE users SET totp_last_step = ?1 \
+             WHERE username = ?2 AND (totp_last_step IS NULL OR totp_last_step < ?1)",
+        )
+        .bind(step)
+        .bind(username)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
 }
 
 /// A valid Argon2 hash of a password nobody has. Verifying against it costs the
@@ -302,6 +348,53 @@ mod tests {
     async fn a_fresh_instance_has_no_users() {
         let store = store().await;
         assert_eq!(store.user_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_totp_secret_turns_on_and_off_and_each_step_is_claimed_once() {
+        let store = store().await;
+        store
+            .create_user("operator", &secret(&fresh_password()))
+            .await
+            .unwrap();
+        assert_eq!(store.totp_secret("operator").await.unwrap(), None);
+        assert_eq!(store.totp_secret("nobody").await.unwrap(), None);
+
+        assert!(
+            store
+                .set_totp_secret("operator", Some("JBSWY3DPEHPK3PXP"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.totp_secret("operator").await.unwrap().as_deref(),
+            Some("JBSWY3DPEHPK3PXP")
+        );
+
+        assert!(store.claim_totp_step("operator", 100).await.unwrap());
+        assert!(
+            !store.claim_totp_step("operator", 100).await.unwrap(),
+            "replayed"
+        );
+        assert!(
+            !store.claim_totp_step("operator", 99).await.unwrap(),
+            "older"
+        );
+        assert!(store.claim_totp_step("operator", 101).await.unwrap());
+
+        // Turning it off and on again starts the replay guard over.
+        assert!(store.set_totp_secret("operator", None).await.unwrap());
+        assert_eq!(store.totp_secret("operator").await.unwrap(), None);
+        assert!(
+            store
+                .set_totp_secret("operator", Some("JBSWY3DPEHPK3PXP"))
+                .await
+                .unwrap()
+        );
+        assert!(store.claim_totp_step("operator", 50).await.unwrap());
+
+        assert!(!store.set_totp_secret("nobody", None).await.unwrap());
+        assert!(!store.claim_totp_step("nobody", 1).await.unwrap());
     }
 
     #[tokio::test]

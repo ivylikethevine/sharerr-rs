@@ -581,6 +581,185 @@
         ]
       }
     },
+    "/api/v1/doctor": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "`GET /api/v1/doctor` — `sharerr doctor --json`, run now.",
+        "description": "The read-only checks only: no `--fix`, no path suggestions. It dials the\n*arr apps and the torrent client, so it takes as long as they do.",
+        "operationId": "doctor",
+        "responses": {
+          "200": {
+            "description": "`{\"ok\", \"failures\", \"warnings\", \"sections\"}`, each section its title and lines of `{\"level\", \"message\"}` — the same document `sharerr doctor --json` prints.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled, or the bearer token was missing or wrong.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiToken": []
+          }
+        ]
+      }
+    },
+    "/api/v1/friends": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "`GET /api/v1/friends` — every friend, revoked ones included.",
+        "operationId": "listFriends",
+        "responses": {
+          "200": {
+            "description": "Every friend. Keys are never included.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiFriend"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled, or the bearer token was missing or wrong.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database could not be read.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiToken": []
+          }
+        ]
+      }
+    },
+    "/api/v1/items": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "`GET /api/v1/items` — every item the store holds.",
+        "operationId": "listItems",
+        "responses": {
+          "200": {
+            "description": "Every item, in store order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiItem"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled, or the bearer token was missing or wrong — indistinguishable on purpose.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database could not be read.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiToken": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sync": {
+      "get": {
+        "tags": [
+          "management"
+        ],
+        "summary": "`GET /api/v1/sync` — the sync loop's state and its last passes.",
+        "operationId": "syncStatus",
+        "responses": {
+          "200": {
+            "description": "Sync settings, what blocks it, and recent runs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiSync"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Disabled, or the bearer token was missing or wrong.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database could not be read.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiToken": []
+          }
+        ]
+      }
+    },
     "/api/v2.0/indexers": {
       "get": {
         "tags": [
@@ -1399,6 +1578,49 @@
         }
       }
     },
+    "/hooks/arr": {
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "`POST /hooks/arr` — a Sonarr, Radarr, Lidarr, Readarr or Whisparr Webhook\nconnection (On Import, On Series or Movie Add, and the like).",
+        "description": "Asks for a sync pass now, the way Status's \"Sync now\" does; the payload is\nnever trusted, since the pass reads every source itself. The *arr app's\n`Test` event is answered without one, so saving the connection does not run\na pass. Refused from non-private addresses, as `/gluetun/refresh` is: the\ncaller is an *arr app on the same host, Docker network or LAN.",
+        "operationId": "arrWebhook",
+        "requestBody": {
+          "description": "The *arr app's Webhook payload. Only `eventType` is read.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A sync pass was requested, or a `Test` event was acknowledged. Requests that arrive during a pass coalesce into one more pass after it.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the caller is not on a private address.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/lighthouse/v1/health": {
       "get": {
         "tags": [
@@ -1725,6 +1947,219 @@
   },
   "components": {
     "schemas": {
+      "ApiFriend": {
+        "type": "object",
+        "description": "One friend.",
+        "required": [
+          "id",
+          "label",
+          "scope",
+          "created_at",
+          "downloaded",
+          "uploaded"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "label": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "description": "`all`, `tv`, `movies`, `music` or `books`."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Their last authenticated feed request or attributed announce."
+          },
+          "revoked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "downloaded": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes their clients reported downloading from this instance's swarms."
+          },
+          "uploaded": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes their clients reported passing on."
+          }
+        }
+      },
+      "ApiItem": {
+        "type": "object",
+        "description": "One shared or once-shared file.",
+        "required": [
+          "source",
+          "file_id",
+          "kind",
+          "title",
+          "release_title",
+          "state",
+          "size",
+          "created_by_sharerr"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "`sonarr`, `radarr`, `lidarr`, `readarr`, `whisparr` or `directory`."
+          },
+          "file_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`episode`, `movie`, `track` or `book`."
+          },
+          "title": {
+            "type": "string",
+            "description": "The series, film, album or book."
+          },
+          "release_title": {
+            "type": "string",
+            "description": "What the feed advertises."
+          },
+          "state": {
+            "type": "string",
+            "description": "`pending`, `seeding`, `failed` or `unshared`."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "info_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_by_sharerr": {
+            "type": "boolean",
+            "description": "Whether sharerr built the torrent, rather than adopting one already there."
+          },
+          "created_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When sharerr first recorded the file, Unix seconds."
+          },
+          "share_until": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the share ends on its own, Unix seconds (the start of a local\nday); `None` for a share with no end."
+          }
+        }
+      },
+      "ApiRun": {
+        "type": "object",
+        "description": "One sync pass.",
+        "required": [
+          "started_at",
+          "discovered",
+          "added",
+          "unshared",
+          "failed"
+        ],
+        "properties": {
+          "started_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`None` while the pass is still running."
+          },
+          "discovered": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "added": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "unshared": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the pass failed outright, when it did."
+          }
+        }
+      },
+      "ApiSync": {
+        "type": "object",
+        "description": "The sync loop's settings and recent history.",
+        "required": [
+          "enabled",
+          "interval_secs",
+          "runs"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether passes run on a timer (`[sync] enabled`)."
+          },
+          "interval_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "blocked": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why reconciliation cannot run right now, or `None` when it can."
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiRun"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
       "DashboardWidget": {
         "type": "object",
         "description": "The dashboard-widget payload — Homepage, Homarr, and Glance all read a\n\"custom API\" JSON endpoint shaped like this. Raw numbers, not the\npre-rendered strings the status page's tiles use: a dashboard widget does\nits own formatting, and the point of building this from [`MetricsSnapshot`]\nrather than the status page's `Glance` is that neither has to parse the\nother's prose.",
@@ -2266,6 +2701,10 @@
       }
     },
     "securitySchemes": {
+      "apiToken": {
+        "type": "http",
+        "scheme": "bearer"
+      },
       "metricsToken": {
         "type": "http",
         "scheme": "bearer"
@@ -2302,6 +2741,10 @@
     {
       "name": "ops",
       "description": "Liveness, readiness, and the two hooks gluetun calls when a forwarded port appears or goes away."
+    },
+    {
+      "name": "management",
+      "description": "The read-only management API: items, friends, sync runs and doctor results. Off until `[api] enabled = true`, and behind its own bearer token, never the metrics one."
     }
   ]
 }

@@ -105,6 +105,9 @@ pub struct ServeState {
     /// every 15 seconds. See [`Self::try_metrics_token`] for the fail-closed
     /// contract this cache exists to serve, not just to speed up.
     metrics_token: RwLock<Option<Option<String>>>,
+    /// The management API's bearer token, cached the same way and for the
+    /// same reason as `metrics_token`.
+    api_token: RwLock<Option<Option<String>>>,
     /// The embedded lighthouse's state, built lazily the first time
     /// `[lighthouse] enabled = true` is actually observed — see
     /// [`Self::lighthouse_state`]. Same `Option<Option<_>>` shape as
@@ -120,6 +123,11 @@ pub struct ServeState {
     /// fifteen seconds. `notify_one` stores a permit, so an invalidation that
     /// lands mid-sync is not lost.
     wake: Notify,
+    /// Set by [`Self::request_pass`]: the next wake runs a pass even with
+    /// periodic sync off. Separate from `wake` because an invalidation or an
+    /// endpoint change wakes the loop too, and neither asks for a pass on an
+    /// instance that does not sync on a timer.
+    pass_requested: std::sync::atomic::AtomicBool,
     /// The tracker-facing gluetun poller's slot. Its endpoint is the live
     /// externally reachable address a friend reaches this instance on — one
     /// value for the whole process: the syncer's tracker provider reads it,
@@ -216,8 +224,10 @@ impl ServeState {
             tracker_token_previous: RwLock::new(None),
             gossip_identity: RwLock::new(None),
             metrics_token: RwLock::new(None),
+            api_token: RwLock::new(None),
             lighthouse_state: RwLock::new(None),
             wake: Notify::new(),
+            pass_requested: std::sync::atomic::AtomicBool::new(false),
             tracker,
             client: GluetunSlot::new(None),
             lighthouse_status: Arc::new(crate::lighthouse_client::LighthouseStatus::default()),
@@ -305,6 +315,22 @@ impl ServeState {
     /// changed — the advertised endpoint above — so a rebuild would be waste.
     pub fn request_sync(&self) {
         self.wake.notify_one();
+    }
+
+    /// Ask the background loop for one pass now, whether or not periodic sync
+    /// is on: Status's "Sync now" and the *arr webhook. Requests that land
+    /// while a pass runs coalesce into one more pass after it, so a season
+    /// import's burst of webhooks never runs passes side by side.
+    pub fn request_pass(&self) {
+        self.pass_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.wake.notify_one();
+    }
+
+    /// Whether a pass was requested since the last call, clearing the request.
+    pub fn take_pass_request(&self) -> bool {
+        self.pass_requested
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Ask `target`'s gluetun poller to re-resolve its endpoint now.
@@ -540,6 +566,13 @@ impl ServeState {
             .await
     }
 
+    /// The management API's bearer token, failing closed exactly as
+    /// [`Self::try_metrics_token`] does.
+    pub async fn try_api_token(&self) -> Result<Option<String>, String> {
+        self.try_vault_string(&self.api_token, secret_keys::API_TOKEN)
+            .await
+    }
+
     /// When the previous shared tracker token was last actually used.
     pub fn legacy_token_status(&self) -> Arc<LegacyTokenStatus> {
         Arc::clone(&self.legacy_token_status)
@@ -653,6 +686,7 @@ impl ServeState {
         *self.tracker_token_previous.write().await = None;
         *self.gossip_identity.write().await = None;
         *self.metrics_token.write().await = None;
+        *self.api_token.write().await = None;
         *self.tracker.api_key.write().await = None;
         *self.client.api_key.write().await = None;
         // `lighthouse_state` is not cleared here: its only vault input is the
@@ -896,7 +930,7 @@ pub(crate) mod fixtures {
     /// Builds the config/qbit/seeder/syncer plumbing [`ready`] and
     /// [`ready_with_source`] both need, differing only in which library
     /// sources the syncer gets.
-    async fn ready_state(
+    pub(crate) async fn ready_state(
         config: Config,
         dir: &tempfile::TempDir,
         sources: Vec<Box<dyn crate::sync::LibrarySource>>,

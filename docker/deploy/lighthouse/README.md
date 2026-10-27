@@ -2,7 +2,7 @@
 
 `sharerr-lighthouse`, the rendezvous service friends' sharerr instances use
 to find each other after an address changes, in its own compose project. It
-is not sharerr and not one of the four layouts: no library mount, no torrent
+is not sharerr and not one of the five layouts: no library mount, no torrent
 client, no \*arr apps, no path mappings, no master key. Why it exists and
 its privacy property are in [`docs/LIGHTHOUSE.md`](../../../docs/LIGHTHOUSE.md);
 this page is the walkthrough. The compose files' header comments are the
@@ -20,7 +20,7 @@ long form of everything here.
 Pick it to self-host a lighthouse on neutral ground for a friend group that
 would rather not each run one. Using a lighthouse and running one are
 independent choices; a sharerr instance does not need its own. To stand the
-same layout up on an AWS, Azure or Fly.io free tier instead, use
+same layout up on AWS, Azure, Fly.io or Linode instead, use
 [`terraform/`](terraform/README.md). For sharerr itself, see
 [the "Which one" table](../README.md#which-one).
 

@@ -25,9 +25,11 @@ default, and what sets it.
 - [`[lighthouse]`](#lighthouse)
 - [`[gluetun]` and `[gluetun_client]`](#gluetun-and-gluetun_client)
 - [`[sync]`](#sync)
+  - [Syncing on import](#syncing-on-import)
 - [`[checks]`](#checks)
 - [`[notifications]`](#notifications)
 - [`[metrics]`](#metrics)
+- [`[api]`](#api)
 - [Backup and restore](#backup-and-restore)
   - [Backing up `/data`](#backing-up-data)
   - [Restoring friends after a full data-directory loss](#restoring-friends-after-a-full-data-directory-loss)
@@ -198,11 +200,24 @@ done in the client. Torrents sharerr adopted rather than created are never
 touched. The client's own engine does the enforcing. See the README's
 ["Seeding limits"](../README.md#seeding-limits).
 
-| TOML key                   | Type  | Default | Notes                                                                                                                                                                                                                                                                                                                                                                 |
-| -------------------------- | ----- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `seeding.upload_limit_kib` | int   | unset   | Per-torrent upload cap, KiB/s.                                                                                                                                                                                                                                                                                                                                        |
-| `seeding.ratio_limit`      | float | unset   | Seed-ratio goal. Not honoured by rTorrent — see above.                                                                                                                                                                                                                                                                                                                |
-| `seeding.private`          | bool  | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
+| TOML key                         | Type   | Default | Notes                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------- | ------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `seeding.upload_limit_kib`       | int    | unset   | Per-torrent upload cap, KiB/s.                                                                                                                                                                                                                                                                                                                                        |
+| `seeding.ratio_limit`            | float  | unset   | Seed-ratio goal. Not honoured by rTorrent — see above.                                                                                                                                                                                                                                                                                                                |
+| `seeding.quiet_hours`            | string | unset   | A daily window, `HH:MM-HH:MM` in the container's time zone (`TZ`); `22:00-06:00` wraps past midnight.                                                                                                                                                                                                                                                                 |
+| `seeding.quiet_upload_limit_kib` | int    | unset   | The upload cap inside `quiet_hours`, KiB/s.                                                                                                                                                                                                                                                                                                                           |
+| `seeding.private`                | bool   | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
+
+Quiet hours take effect only with `upload_limit_kib`, `quiet_hours` and
+`quiet_upload_limit_kib` all set: inside the window sharerr's torrents take
+the quiet cap, and after it the normal one again, so without a normal cap
+there would be nothing to go back to. Each edge lands on the first sync pass
+past it, so within `sync.interval_secs`.
+
+A share can also end on a date: **Share until** on an item's page. From the
+start of that day (container time) each pass unshares the item and leaves it
+unshared while the date stands, even though the file is still tagged;
+clearing the date shares it again on the next pass.
 
 ## `[feed]`
 
@@ -330,7 +345,7 @@ identical to one that is working. `sharerr doctor` names the missing key. How
 to mint the key on gluetun's side, and the three-route role a per-route
 config needs, is in
 [`docker/deploy/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/deploy/README.md),
-which wires all of this up for four deployment shapes.
+which wires all of this up for five deployment shapes.
 
 ## `[sync]`
 
@@ -338,6 +353,23 @@ which wires all of this up for four deployment shapes.
 | -------------------- | ---- | ------- | ---------------------------------------------------------- |
 | `sync.enabled`       | bool | `true`  | Run the reconciliation loop on a timer while `serve` runs. |
 | `sync.interval_secs` | int  | `900`   | Floor of 60s.                                              |
+
+### Syncing on import
+
+A pass also runs at once, with or without the timer, from Status's **Sync
+now** button or from an \*arr Webhook connection. In Sonarr, Radarr, Lidarr,
+Readarr or Whisparr, add Settings → Connect → Webhook with:
+
+- **URL**: `http://<sharerr>:8477/hooks/arr`
+- **Method**: `POST`
+- **Triggers**: On Import (or On Release Import), and On Series, Movie,
+  Artist or Book Add; any other trigger runs a pass too
+
+The connection's Test sends an event sharerr answers without a pass. The
+payload is never trusted, so the route has no credential; it answers only
+private addresses (the same host, Docker network or LAN), like gluetun's
+hooks. Webhooks that arrive during a pass coalesce into one more pass after
+it.
 
 ## `[checks]`
 
@@ -363,7 +395,7 @@ say, and shows what the service answered.
 | `notifications.heartbeat_secs`  | int              | `60`              | How often the heartbeat push fires. `0` turns it off without clearing the URL. Match the monitor's own interval.                                               |
 | `notifications.triggers`        | array of strings | all ten, below    | Which triggers actually fire. A webhook being configured is necessary but not sufficient — a trigger not listed here stays silent regardless of what fires it. |
 
-The ten triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
+The twelve triggers, by their TOML spelling: `sync_failed`, `peer_quiet`,
 `endpoint_rotated` (the gluetun-resolved advertised address changing —
 usually the one most likely to silently break a friend's downloads),
 `items_shared` and `item_failed` (each digested into one notification per
@@ -376,7 +408,15 @@ accepting connections after having been confirmed reachable; needs
 fires on an address that was never confirmed, so a router that refuses
 hairpinning stays silent), `library_unreadable` (a `[[library]]` path that
 could not be read or only partly listed this sync pass, once per distinct
-reason rather than once per pass), and `heartbeat`.
+reason rather than once per pass), `torrent_interrupted` (a torrent sharerr
+built is stopped in the client, or was removed from it and the pass added it
+back), `file_changed` (a shared file's inode or modification time differs
+from when sharerr built its torrent, so friends' downloads fail the piece
+checks; Force rebuild on the item page builds a new one), and `heartbeat`.
+Those two fire once per torrent, not once per pass, and only for torrents
+sharerr built; nothing is resumed or rebuilt for you. A mount whose inode
+numbers change on every remount (CIFS with `noserverino`) reads as a change
+after each remount.
 
 `heartbeat` is the odd one out: it never posts to the webhook. It is an
 Uptime-Kuma-style push — a plain GET to `notifications.heartbeat_url`, every
@@ -423,6 +463,29 @@ sent as `Authorization: Bearer <token>`. There is no unauthenticated form of
 either endpoint; a request with a missing or wrong token gets the same `404`
 as when `metrics.enabled` is `false`, so a probe cannot tell "off" from
 "wrong token" from "instance does not exist".
+
+## `[api]`
+
+The read-only management API: JSON for scripts and dashboards that need more
+than `/dashboard`'s counts. Off by default.
+
+| TOML key      | Type | Default | Notes                                   |
+| ------------- | ---- | ------- | --------------------------------------- |
+| `api.enabled` | bool | `false` | Serve the management API at `/api/v1/`. |
+
+| Route                 | Returns                                                                 |
+| --------------------- | ----------------------------------------------------------------------- |
+| `GET /api/v1/items`   | Every item: source, kind, titles, state, last error, size, info hash    |
+| `GET /api/v1/friends` | Every friend: label, scope, when created, last seen and revoked, totals |
+| `GET /api/v1/sync`    | Whether sync runs on a timer, what blocks it, the last 20 runs          |
+| `GET /api/v1/doctor`  | The `sharerr doctor --json` document, run on request, never `--fix`     |
+
+Vault secret: `api.token`, sent as `Authorization: Bearer <token>`. Its own
+token, never `metrics.token`: the API names every shared file and friend, the
+metrics none, so a Prometheus scrape token must not read it. A missing or
+wrong token gets the same `404` as `api.enabled = false`. Nothing here
+writes, and no friend's key or key hash is ever in a response. The schemas
+are in [the API document](API.md).
 
 ## Backup and restore
 
@@ -537,8 +600,9 @@ sharerr vault remove <key>
 | `notifications.webhook_url`   | Where every enabled trigger except `heartbeat` is POSTed (see [`[notifications]`](#notifications))  |
 | `notifications.heartbeat_url` | Uptime-Kuma-style push URL fetched on a timer while ready (see [`[notifications]`](#notifications)) |
 | `metrics.token`               | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics))              |
+| `api.token`                   | Bearer token the management API requires (see [`[api]`](#api))                                      |
 
-Those fourteen are the keys `sharerr vault set` accepts. `sharerr vault list`
+Those fifteen are the keys `sharerr vault set` accepts. `sharerr vault list`
 shows every key the vault holds, which includes a few sharerr manages
 itself and `vault set` refuses: `tracker.token_previous` (the rotated-out
 announce token, see [`[tracker]`](#tracker)), `identity.signing_key` (this

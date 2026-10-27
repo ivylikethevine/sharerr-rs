@@ -47,7 +47,7 @@ use tokio::sync::RwLock;
 use crate::web::WebState;
 use crate::web::templates::{LoginPage, SetupPage, render};
 
-const COOKIE_NAME: &str = "sharerr_session";
+pub(crate) const COOKIE_NAME: &str = "sharerr_session";
 
 /// How long a session lives without being used.
 ///
@@ -72,6 +72,27 @@ pub const MIN_PASSWORD_LEN: usize = 8;
 #[derive(Debug, Default)]
 pub struct Sessions {
     inner: RwLock<HashMap<String, Session>>,
+    /// Sign-ins whose password was right and whose second-factor code has
+    /// not arrived yet, keyed by the token in [`PENDING_COOKIE`]. In memory
+    /// for the same reasons sessions are.
+    pending: RwLock<HashMap<String, Pending>>,
+}
+
+/// How long the code step waits after the password step.
+const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Wrong codes one pending sign-in absorbs before the password has to be
+/// entered again. The per-address throttle still applies on top.
+const PENDING_FAILURES: u32 = 5;
+
+/// The cookie that carries a pending sign-in from `/login` to `/login/totp`.
+pub(crate) const PENDING_COOKIE: &str = "sharerr_pending";
+
+#[derive(Debug, Clone)]
+struct Pending {
+    username: String,
+    created: Instant,
+    failures: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -128,8 +149,54 @@ impl Sessions {
     /// would make the change cosmetic — sessions are bearer tokens and do not
     /// re-check the password. The current session is spared so the operator is not
     /// signed out of the page they just used.
-    async fn revoke_all_except(&self, keep: &str) {
+    pub(crate) async fn revoke_all_except(&self, keep: &str) {
         self.inner.write().await.retain(|token, _| token == keep);
+    }
+
+    /// Hold a sign-in whose password was right until its code arrives, and
+    /// return the token for [`PENDING_COOKIE`].
+    pub(crate) async fn begin_second_factor(&self, username: &str) -> Result<String, String> {
+        let token = crate::secrets::random_hex(32)?;
+        let mut pending = self.pending.write().await;
+        pending.retain(|_, p| p.created.elapsed() < PENDING_TTL);
+        pending.insert(
+            token.clone(),
+            Pending {
+                username: username.to_owned(),
+                created: Instant::now(),
+                failures: 0,
+            },
+        );
+        Ok(token)
+    }
+
+    /// Who a pending sign-in is for, while it is still fresh.
+    pub(crate) async fn pending_user(&self, token: &str) -> Option<String> {
+        self.pending
+            .read()
+            .await
+            .get(token)
+            .filter(|p| p.created.elapsed() < PENDING_TTL)
+            .map(|p| p.username.clone())
+    }
+
+    /// Count a wrong code. `false` once the pending sign-in is used up and
+    /// gone, so the password has to be entered again.
+    pub(crate) async fn fail_second_factor(&self, token: &str) -> bool {
+        let mut pending = self.pending.write().await;
+        let Some(entry) = pending.get_mut(token) else {
+            return false;
+        };
+        entry.failures += 1;
+        if entry.failures >= PENDING_FAILURES {
+            pending.remove(token);
+            return false;
+        }
+        true
+    }
+
+    pub(crate) async fn finish_second_factor(&self, token: &str) {
+        self.pending.write().await.remove(token);
     }
 }
 
@@ -464,7 +531,11 @@ pub async fn login_submit(
 
     let password = SecretString::from(form.password.clone());
     match store.verify_password(&form.username, &password).await {
-        Ok(true) => sign_in(&state, jar, &headers, &form.username, "/").await,
+        Ok(true) => match store.totp_secret(&form.username).await {
+            Ok(None) => sign_in(&state, jar, &headers, &form.username, "/").await,
+            Ok(Some(_)) => super::two_factor::begin(&state, jar, &headers, &form.username).await,
+            Err(err) => internal(&format!("reading the account: {err}")),
+        },
         Ok(false) => {
             // Deliberately one message for both a wrong password and an unknown
             // username. `Store::verify_password` already equalises the timing;
@@ -583,7 +654,7 @@ pub async fn change_password(
     Redirect::to("/settings?saved=account").into_response()
 }
 
-async fn sign_in(
+pub(crate) async fn sign_in(
     state: &WebState,
     jar: CookieJar,
     headers: &HeaderMap,
@@ -690,7 +761,7 @@ fn cross_origin_refusal(headers: &HeaderMap) -> Option<Response> {
 /// an authentication bypass for "internal" traffic, a redirect target, a
 /// rate-limit exemption. Each of those turns a free header into a free
 /// privilege.
-fn arrived_over_https(headers: &HeaderMap) -> bool {
+pub(crate) fn arrived_over_https(headers: &HeaderMap) -> bool {
     if let Some(value) = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -801,7 +872,7 @@ pub fn internal(message: &str) -> Response {
 /// is load, not a broken hash or a panicked task, and not something the
 /// per-source-address [`Throttle`] alone can prevent, since a flood spread
 /// across many addresses never trips it.
-fn too_busy() -> Response {
+pub(crate) fn too_busy() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many password checks in flight right now. Try again shortly.",
@@ -1267,6 +1338,54 @@ mod tests {
                 .get(axum::http::header::LOCATION)
                 .unwrap(),
             "/"
+        );
+    }
+
+    /// With two-step sign-in on, the right password grants no session yet:
+    /// only a pending sign-in, and the way to the code step.
+    #[tokio::test]
+    async fn login_submit_hands_over_to_the_code_step_when_two_step_is_on() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let password = seeded_user(&serve).await;
+        serve
+            .store()
+            .await
+            .unwrap()
+            .set_totp_secret("operator", Some(&crate::totp::generate_secret().unwrap()))
+            .await
+            .unwrap();
+
+        let response = login_submit(
+            State(web_state(serve)),
+            CookieJar::new(),
+            HeaderMap::new(),
+            Form(LoginForm {
+                username: "operator".to_owned(),
+                password,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::LOCATION)
+                .unwrap(),
+            "/login/totp"
+        );
+        assert!(session_set_cookie(&response).is_none(), "no session yet");
+        let cookies: Vec<_> = response
+            .headers()
+            .get_all(axum::http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with(PENDING_COOKIE) && c.contains("HttpOnly")),
+            "{cookies:?}"
         );
     }
 

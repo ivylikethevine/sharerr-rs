@@ -26,6 +26,7 @@ SHARERR_MASTER_KEY=placeholder
 MEDIA_PATH=/srv/media
 EXTERNAL_NETWORK=media_default
 DOMAIN=lighthouse.example.net
+TS_AUTHKEY=placeholder
 PLACEHOLDERS
 
 files=()

@@ -395,6 +395,8 @@ impl TorrentClient for TransmissionClient {
                 content_path,
                 category: category_owned.clone(),
                 is_seeding: is_seeding_status(torrent.status),
+                // 0 is `TR_STATUS_STOPPED`.
+                is_stopped: torrent.status == 0,
                 ratio: ratio_reported(torrent.upload_ratio),
                 ratio_limit,
                 upload_limit_kib,

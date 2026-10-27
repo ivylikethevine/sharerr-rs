@@ -13,6 +13,7 @@ fn summary(hash: &str, seeding: bool) -> sharerr_client::TorrentSummary {
         category: String::new(),
         tags: Vec::new(),
         is_seeding: seeding,
+        is_stopped: !seeding,
         ratio: None,
         ratio_limit: None,
         upload_limit_kib: None,

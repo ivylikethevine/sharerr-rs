@@ -72,6 +72,7 @@ body:
         - vpn (gluetun sidecar, one instance)
         - sidecar
         - dual-vpn (two independent stacks)
+        - tailnet (Tailscale or Headscale, no forwarded ports)
         - lighthouse (sharerr-lighthouse, the rendezvous service)
         - not using the compose deployment examples at all
         - not sure

@@ -29,6 +29,8 @@ getrandom = { workspace = true }
 hex = { workspace = true }
 # For the gluetun control-server client — the one HTTP client the binary owns
 # itself rather than through a service crate.
+jiff = { workspace = true }
+qrcode = { workspace = true }
 reqwest = { workspace = true }
 rpassword = { workspace = true }
 secrecy = { workspace = true }
@@ -45,6 +47,7 @@ sharerr-store = { workspace = true }
 sharerr-probe = { workspace = true }
 sharerr-torrent = { workspace = true }
 sharerr-transmission = { workspace = true }
+sha1 = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }

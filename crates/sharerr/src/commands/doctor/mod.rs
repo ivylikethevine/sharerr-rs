@@ -153,8 +153,32 @@ pub async fn run(
     config_error: Option<&str>,
     args: &crate::cli::DoctorArgs,
 ) -> Result<()> {
-    let fix = args.fix;
-    let mut report = if args.json {
+    let suggest = args.suggest_paths.then_some(args.search_root.as_deref());
+    let report = checks(config, config_error, args.fix, suggest, args.json).await;
+    if report.json {
+        println!("{}", serde_json::to_string_pretty(&report.json())?);
+    } else {
+        println!();
+    }
+    summarize(report.failures, report.warnings, report.json)
+}
+
+/// The same checks as `doctor --json`, read-only (no `--fix`, no path
+/// suggestions), for the management API's `GET /api/v1/doctor`.
+pub(crate) async fn json_report(config: &Config, config_error: Option<&str>) -> serde_json::Value {
+    checks(config, config_error, false, None, true).await.json()
+}
+
+/// Every check, in order. `suggest` is `--suggest-paths` and its
+/// `--search-root`; `json` holds the lines back instead of printing them.
+async fn checks(
+    config: &Config,
+    config_error: Option<&str>,
+    fix: bool,
+    suggest: Option<Option<&std::path::Path>>,
+    json: bool,
+) -> Report {
+    let mut report = if json {
         Report::for_json()
     } else {
         Report::default()
@@ -231,22 +255,12 @@ pub async fn run(
     report.section("paths");
     check_paths(config, &discovered, &mut report);
 
-    if args.suggest_paths {
+    if let Some(search_root) = suggest {
         report.section("path suggestions");
-        suggest_paths(
-            config,
-            &discovered,
-            args.search_root.as_deref(),
-            &mut report,
-        );
+        suggest_paths(config, &discovered, search_root, &mut report);
     }
 
-    if report.json {
-        println!("{}", serde_json::to_string_pretty(&report.json())?);
-    } else {
-        println!();
-    }
-    summarize(report.failures, report.warnings, report.json)
+    report
 }
 
 /// The exit-code decision, split out from [`run`] so the three outcomes can be

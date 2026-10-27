@@ -763,6 +763,112 @@ async fn detail_shows_the_release_title_and_the_file_name_side_by_side() {
     assert!(html.contains("S01E01.mkv"), "{html}");
 }
 
+/// The title above carries no quality token, which the lint names; a track
+/// is shown as not checked rather than as clean.
+#[tokio::test]
+async fn a_share_until_date_is_set_shown_as_ended_and_cleared() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Quiet Harbour", 1))
+        .await
+        .unwrap();
+    let state = web_state(serve);
+    let set = |date: &str, clear: Option<&str>| {
+        share_until(
+            State(state.clone()),
+            Path((MediaSource::Sonarr, 1)),
+            Form(ShareUntilForm {
+                date: date.to_owned(),
+                clear: clear.map(str::to_owned),
+            }),
+        )
+    };
+    let location = |response: &Response| {
+        response.headers()[axum::http::header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    let response = set("2020-01-02", None).await;
+    assert!(
+        location(&response).contains("ok="),
+        "{}",
+        location(&response)
+    );
+    let until = store.share_ends().await.unwrap()[&(MediaSource::Sonarr, 1)];
+    assert_eq!(crate::localtime::date_of(until), "2020-01-02");
+
+    let page = detail(
+        State(state.clone()),
+        Path((MediaSource::Sonarr, 1)),
+        Query(DetailQuery::default()),
+    )
+    .await;
+    assert!(
+        body_of(page)
+            .await
+            .contains("The share ended on 2020-01-02")
+    );
+
+    let response = set("someday", None).await;
+    assert!(
+        location(&response).contains("error="),
+        "{}",
+        location(&response)
+    );
+
+    set("", Some("1")).await;
+    assert!(store.share_ends().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn detail_shows_how_the_far_end_reads_the_title() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let store = serve.store().await.unwrap();
+    let mut episode = item(
+        MediaSource::Sonarr,
+        MediaSpec::Episode {
+            series_title: "Lanternwick Hollow".to_owned(),
+            season: 1,
+            episode: 1,
+        },
+        ShareState::Seeding,
+    );
+    episode.release_title = "Lanternwick.Hollow.S01E01.SYNTH".to_owned();
+    store.upsert(&episode).await.unwrap();
+    let mut track = item(
+        MediaSource::Directory,
+        MediaSpec::Track {
+            artist: "Artist".to_owned(),
+            album: "Album".to_owned(),
+            track: Some(1),
+        },
+        ShareState::Seeding,
+    );
+    track.file_id = 2;
+    store.upsert(&track).await.unwrap();
+    let state = web_state(serve);
+
+    let page = |source, file_id| {
+        detail(
+            State(state.clone()),
+            Path((source, file_id)),
+            Query(DetailQuery::default()),
+        )
+    };
+    let html = body_of(page(MediaSource::Sonarr, 1).await).await;
+    assert!(
+        html.contains("Episode: Lanternwick Hollow S01E01"),
+        "{html}"
+    );
+    assert!(html.contains("grades it Unknown"), "{html}");
+
+    let html = body_of(page(MediaSource::Directory, 2).await).await;
+    assert!(html.contains("Not checked"), "{html}");
+}
+
 #[tokio::test]
 async fn detail_answers_404_for_an_unknown_item() {
     let (_dir, serve) = crate::state::fixtures::unconfigured();

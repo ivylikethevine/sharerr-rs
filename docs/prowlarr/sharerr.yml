@@ -1,0 +1,110 @@
+---
+# A Prowlarr indexer definition for one friend's sharerr. Prowlarr only
+# offers a Cardigann indexer the base URLs its definition lists, so this file
+# is per host: replace the one URL under `links:` with the address of the
+# sharerr you were given a key for, ending in `/`. docs/prowlarr/README.md
+# says where the file goes.
+id: sharerr
+name: sharerr
+description: "A friend's sharerr instance: what they share from their own library"
+language: en-US
+type: private
+encoding: UTF-8
+links:
+  - https://sharerr.example.com/
+
+caps:
+  categorymappings:
+    - {id: 2000, cat: Movies, desc: "Movies"}
+    - {id: 3000, cat: Audio, desc: "Audio"}
+    - {id: 5000, cat: TV, desc: "TV"}
+    - {id: 6000, cat: XXX, desc: "XXX"}
+    - {id: 7000, cat: Books, desc: "Books"}
+
+  modes:
+    search: [q]
+    tv-search: [q, season, ep, tvdbid, imdbid]
+    movie-search: [q, imdbid, tmdbid]
+    music-search: [q]
+    book-search: [q]
+  allowrawsearch: true
+
+settings:
+  - name: apikey
+    type: text
+    label: API Key
+  - name: info_key
+    type: info
+    label: About your API key
+    default: "The key your friend gave you with their feed URL. It is yours alone, so they can revoke it without affecting anyone else."
+
+search:
+  paths:
+    - path: api
+      response:
+        type: xml
+
+  inputs:
+    apikey: "{{ .Config.apikey }}"
+    t: "{{ if .Query.Type }}{{ .Query.Type }}{{ else }}search{{ end }}"
+    q: "{{ .Keywords }}"
+    cat: "{{ join .Categories \",\" }}"
+    season: "{{ .Query.Season }}"
+    ep: "{{ .Query.Ep }}"
+    tvdbid: "{{ .Query.TVDBID }}"
+    imdbid: "{{ .Query.IMDBID }}"
+    tmdbid: "{{ .Query.TMDBID }}"
+
+  # A wrong or revoked key answers with Torznab's own error document.
+  error:
+    - selector: error
+      message:
+        selector: error
+        attribute: description
+
+  rows:
+    selector: rss > channel > item
+
+  fields:
+    category:
+      selector: "[name=category]"
+      attribute: value
+    title:
+      selector: title
+    details:
+      selector: link
+    download:
+      selector: enclosure
+      attribute: url
+    infohash:
+      selector: "[name=infohash]"
+      attribute: value
+    imdbid:
+      selector: "[name=imdbid]"
+      attribute: value
+      optional: true
+    tvdbid:
+      selector: "[name=tvdbid]"
+      attribute: value
+      optional: true
+    tmdbid:
+      selector: "[name=tmdbid]"
+      attribute: value
+      optional: true
+    date:
+      selector: pubDate
+    size:
+      selector: size
+    seeders:
+      selector: "[name=seeders]"
+      attribute: value
+    leechers:
+      selector: "[name=peers]"
+      attribute: value
+    downloadvolumefactor:
+      selector: "[name=downloadvolumefactor]"
+      attribute: value
+    uploadvolumefactor:
+      selector: "[name=uploadvolumefactor]"
+      attribute: value
+# torznab xml

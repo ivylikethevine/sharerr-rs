@@ -119,10 +119,10 @@ same one-liner is at
 with a `compose.tls.yaml` override that puts Caddy in front for a domain you
 own.
 
-**On a cloud free tier, by Terraform.**
+**On a cloud, by Terraform or OpenTofu.**
 [`docker/deploy/lighthouse/terraform/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse/terraform)
-holds three root modules — one t3.micro on AWS, one B1s VM on Azure, one
-small machine on Fly.io — that stand up the container above with a
+holds four root modules — one t3.micro on AWS, one B1s VM on Azure, one
+small machine on Fly.io, one Nanode on Linode — that stand up the container above with a
 persistent `/data`, a stable address, and TLS (Caddy with your domain on the
 VMs; built in on Fly). The README there says what each actually costs. This
 is how to run one on neutral ground for a friend group; it is not a public

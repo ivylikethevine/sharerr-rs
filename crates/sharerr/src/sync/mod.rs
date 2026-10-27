@@ -25,7 +25,7 @@ use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
-use sharerr_store::{RunSummary, Store, Vault};
+use sharerr_store::{FileStamp, RunSummary, Store, Vault};
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
@@ -174,6 +174,13 @@ pub struct Syncer {
     /// lifetime on purpose: a settings save rebuilds the syncer, which is
     /// exactly when the configured goal can have changed.
     limits_applied: std::sync::Mutex<HashSet<String>>,
+    /// The upload cap the last pass applied: the normal one, or the quiet
+    /// one inside `[seeding] quiet_hours`. A pass that lands on the other
+    /// side of a window edge clears `limits_applied`, so every torrent takes
+    /// the new cap once.
+    cap_in_force: std::sync::Mutex<Option<Option<u64>>>,
+    /// Minutes past local midnight; the system clock, or a fixed one in tests.
+    clock: fn() -> u16,
 }
 
 impl std::fmt::Debug for Syncer {
@@ -208,6 +215,24 @@ pub struct SyncReport {
     /// Carried as text so `commands::serve::background` can notify once per
     /// distinct reason rather than once per pass.
     pub library_unreadable: Option<String>,
+    /// Shares withdrawn this pass because their share-until date passed.
+    pub ended: usize,
+    /// Torrents sharerr built that the client reports stopped (paused).
+    pub stopped: Vec<Flagged>,
+    /// Torrents sharerr built that were gone from the client this pass, and
+    /// that the pass adds back.
+    pub removed: Vec<Flagged>,
+    /// Seeding items whose file changed on disk since sharerr built the
+    /// torrent, so its pieces no longer match.
+    pub changed: Vec<Flagged>,
+}
+
+/// One item a pass found something wrong with, for a notification to name.
+/// `commands::serve::background` dedupes on `hash` across passes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Flagged {
+    pub hash: String,
+    pub title: String,
 }
 
 impl SyncReport {
@@ -215,7 +240,7 @@ impl SyncReport {
         RunSummary {
             discovered: self.discovered as i64,
             added: (self.added + self.reused) as i64,
-            unshared: self.unshared as i64,
+            unshared: (self.unshared + self.ended) as i64,
             failed: (self.failed + self.sources_failed) as i64,
             error: None,
         }
@@ -243,6 +268,9 @@ impl std::fmt::Display for SyncReport {
             "{} discovered, {} added, {} reused, {} unchanged, {} unshared, {} failed",
             self.discovered, self.added, self.reused, self.unchanged, self.unshared, self.failed
         )?;
+        if self.ended > 0 {
+            write!(f, " ({} share(s) ended on their date)", self.ended)?;
+        }
         if self.sources_failed > 0 {
             write!(
                 f,
@@ -354,7 +382,44 @@ impl Syncer {
             tracker,
             seeder,
             limits_applied: std::sync::Mutex::new(HashSet::new()),
+            cap_in_force: std::sync::Mutex::new(None),
+            clock: crate::localtime::minute_of_day,
         }
+    }
+
+    /// The same syncer on a fixed clock, for quiet-hours tests.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: fn() -> u16) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The upload cap for now: `[seeding] quiet_hours`' one inside the
+    /// window, the seeder's normal one outside it.
+    fn upload_cap_now(&self) -> Option<u64> {
+        sharerr_core::config::SeedingConfig {
+            upload_limit_kib: self.seeder.upload_limit_kib,
+            ..self.config.seeding
+        }
+        .upload_limit_at((self.clock)())
+    }
+
+    /// Note which cap this pass applies, and forget which torrents already
+    /// have one if it changed since the last pass.
+    fn track_cap_in_force(&self) -> Result<()> {
+        let cap = self.upload_cap_now();
+        let mut in_force = self
+            .cap_in_force
+            .lock()
+            .map_err(|_| anyhow::anyhow!("cap_in_force lock poisoned"))?;
+        if in_force.is_some_and(|previous| previous != cap) {
+            self.limits_applied
+                .lock()
+                .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
+                .clear();
+        }
+        *in_force = Some(cap);
+        Ok(())
     }
 
     /// Bring one already-seeding torrent's limits into line with `[seeding]`,
@@ -394,7 +459,7 @@ impl Syncer {
             return Ok(false);
         }
         let goal = sharerr_client::SeedingLimits {
-            upload_limit_kib: self.seeder.upload_limit_kib,
+            upload_limit_kib: self.upload_cap_now(),
             ratio_limit: self.seeder.ratio_limit,
         };
         let applied = if goal.matches(reported) {
@@ -456,6 +521,9 @@ impl Syncer {
 
     async fn reconcile(&self, dry_run: bool) -> Result<SyncReport> {
         let mut report = SyncReport::default();
+        if !dry_run {
+            self.track_cap_in_force()?;
+        }
 
         // Refuse early rather than building torrents that announce into the void.
         self.tracker.ensure_ready().await?;
@@ -468,11 +536,19 @@ impl Syncer {
         // the seeder's cross-seed search without a refetch per item. This is
         // also what makes the loop self-healing: a torrent removed behind
         // sharerr's back is simply absent here and gets re-added.
-        let (discovery, torrents, known_items) = tokio::join!(
+        let (discovery, torrents, known_items, stamps, ends) = tokio::join!(
             self.discover(),
             self.seeder.qbit.list(None),
-            self.store.all_items()
+            self.store.all_items(),
+            self.store.file_stamps(),
+            self.store.share_ends()
         );
+        // Only the changed-file check reads these, and it is a notification,
+        // not a reason to fail the pass.
+        let stamps = stamps.unwrap_or_else(|err| {
+            tracing::warn!(%err, "could not read the recorded file stamps");
+            HashMap::new()
+        });
 
         let discovered = &discovery.items;
         report.discovered = discovered.len();
@@ -485,6 +561,10 @@ impl Syncer {
         if discovery.scanned.is_empty() {
             bail!("no library source could be scanned — nothing was changed");
         }
+        // Unlike the stamps, a failure here stops the pass: carrying on would
+        // share again what an operator set to stop.
+        let ends = ends.context("reading share-until dates")?;
+        let now = sharerr_core::endpoint::now_epoch();
 
         let torrents =
             torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
@@ -517,6 +597,25 @@ impl Syncer {
         let torrents = seed::KnownTorrents::index(&torrents);
 
         for item in discovered {
+            if ends.get(&item.key()).is_some_and(|&until| until <= now) {
+                if let Some(known) = known.get(&item.key())
+                    && known.state != ShareState::Unshared
+                    && (dry_run || self.unshare_one(known).await.is_ok())
+                {
+                    tracing::info!(item = %item.spec, "share ended on its date");
+                    report.ended += 1;
+                }
+                continue;
+            }
+            self.watch(
+                item,
+                known.get(&item.key()),
+                &live,
+                &stamps,
+                &mut report,
+                dry_run,
+            )
+            .await;
             match self
                 .share(
                     item,
@@ -623,6 +722,70 @@ impl Syncer {
         }
 
         discovery
+    }
+
+    /// Note what has happened to a torrent sharerr built since the last pass,
+    /// for the `torrent_interrupted` and `file_changed` notifications. Reports
+    /// only: a removed torrent is re-added by [`Self::share`] as it always
+    /// was, and a stopped one or a changed file is left for the operator.
+    ///
+    /// Adopted torrents are not sharerr's to watch, so only an item whose
+    /// torrent sharerr created is looked at.
+    async fn watch(
+        &self,
+        item: &Discovered,
+        known: Option<&SharedItem>,
+        live: &HashMap<String, &sharerr_client::TorrentSummary>,
+        stamps: &HashMap<(MediaSource, i64), FileStamp>,
+        report: &mut SyncReport,
+        dry_run: bool,
+    ) {
+        let Some(known) = known else { return };
+        let Some(hash) = &known.info_hash else { return };
+        if known.state != ShareState::Seeding || !known.created_by_sharerr {
+            return;
+        }
+        let flagged = || Flagged {
+            hash: hash.clone(),
+            title: known.release_title.clone(),
+        };
+        match live.get(hash) {
+            None => {
+                report.removed.push(flagged());
+                return;
+            }
+            Some(torrent) if torrent.is_stopped => report.stopped.push(flagged()),
+            Some(_) => {}
+        }
+
+        let Ok(paths) = self.resolver.resolve_for(item.source, &item.arr_path) else {
+            return;
+        };
+        // A file that cannot be read now is `share`'s to report, not this.
+        let Some(now) = tokio::fs::metadata(&paths.sharerr)
+            .await
+            .ok()
+            .as_ref()
+            .and_then(FileStamp::of)
+        else {
+            return;
+        };
+        match stamps.get(&known.key()) {
+            Some(built) if *built != now => report.changed.push(flagged()),
+            Some(_) => {}
+            // A row from before stamps were recorded: what is there now is
+            // the best baseline there is.
+            None if !dry_run => {
+                if let Err(err) = self
+                    .store
+                    .set_file_stamp(item.source, item.file_id, Some(now))
+                    .await
+                {
+                    tracing::warn!(item = %item.spec, %err, "could not record the file stamp");
+                }
+            }
+            None => {}
+        }
     }
 
     async fn share(
@@ -820,6 +983,13 @@ impl Syncer {
             return Ok(Step::Added);
         }
 
+        // Before hashing, so a file rewritten while it hashes reads as changed
+        // on the next pass rather than matching the stamp.
+        let stamp_before_seed = tokio::fs::metadata(&paths.sharerr)
+            .await
+            .ok()
+            .as_ref()
+            .and_then(FileStamp::of);
         let outcome = self
             .seeder
             .seed(
@@ -832,7 +1002,12 @@ impl Syncer {
             .await?;
         // `None` for `Reused`: an operator's own torrent or a cross-seed is not
         // sharerr's to characterise, so `set_seeding` leaves the stored
-        // `private` value exactly as it was rather than guessing.
+        // `private` value exactly as it was rather than guessing. The same
+        // goes for the file stamp, which only a torrent sharerr built has.
+        let stamp = match outcome {
+            SeedOutcome::Added { .. } => stamp_before_seed,
+            SeedOutcome::Reused { .. } => None,
+        };
         let private = match outcome {
             SeedOutcome::Added { private, .. } => Some(private),
             SeedOutcome::Reused { .. } => None,
@@ -847,6 +1022,13 @@ impl Syncer {
                 private,
             )
             .await?;
+        if let Err(err) = self
+            .store
+            .set_file_stamp(item.source, item.file_id, stamp)
+            .await
+        {
+            tracing::warn!(item = %item.spec, %err, "could not record the file stamp");
+        }
 
         Ok(match outcome {
             SeedOutcome::Added { .. } => Step::Added,

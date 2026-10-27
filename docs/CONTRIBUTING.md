@@ -57,7 +57,9 @@ place. `--fast` is formatting, shell, compose, workflow, link, spelling and
 Markdown checks; `--lint` adds clippy, rustdoc, cargo-deny, Terraform and
 gitleaks; the default (`--all`) adds the tests, the MSRV check and the
 coverage floor. `scripts/check.sh <check>...` runs just those, and `--list`
-names them all. `--install` fetches every tool the script uses from its
+names them all. Two checks are in no group: `semver`, and `mutants`, the
+by-hand mutation run [`docs/TESTING.md`](TESTING.md#mutation-testing)
+describes. `--install` fetches every tool the script uses from its
 sha256-pinned row in `.github/actions/setup-tool/tools.txt` into
 `target/ci-tools/` (no sudo), and runs `npm ci --prefix .github` for
 markdownlint and prettier.
@@ -204,7 +206,8 @@ The third-party tools these jobs run that dependabot cannot see (zizmor,
 actionlint, cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck,
 hadolint, trivy, cargo-deny, gitleaks, terraform and yq) each install from a
 sha256-pinned row
-in `.github/actions/setup-tool/tools.txt`. markdownlint and prettier come
+in `.github/actions/setup-tool/tools.txt`; so does cargo-mutants, which no
+job runs, for `scripts/check.sh --install`. markdownlint and prettier come
 from `.github/package-lock.json`. Dependabot opens no version-update pull
 request (`.github/dependabot.yml` sets each ecosystem's limit to 0):
 `tool-versions.yml` reports when a tool, an action SHA, an image digest, a

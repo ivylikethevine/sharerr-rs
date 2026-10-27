@@ -101,8 +101,12 @@ exists — verify the signature against the pubkey you expect."),
         (name = "ops", description = "\
 Liveness, readiness, and the two hooks gluetun calls when a forwarded port \
 appears or goes away."),
+        (name = "management", description = "\
+The read-only management API: items, friends, sync runs and doctor results. \
+Off until `[api] enabled = true`, and behind its own bearer token, never the \
+metrics one."),
     ),
-    modifiers(&PeerApiKey, &MetricsToken),
+    modifiers(&PeerApiKey, &MetricsToken, &ApiToken),
     paths(
         // See the module docs: mounted by hand, so listed by hand.
         crate::tracker::announce,
@@ -151,6 +155,21 @@ impl Modify for MetricsToken {
         let components = openapi.components.get_or_insert_with(Default::default);
         components.add_security_scheme(
             "metricsToken",
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+        );
+    }
+}
+
+/// The `Authorization: Bearer` token the management API requires — see
+/// [`crate::api`]. Its own scheme, because it is its own credential: set from
+/// Settings → Management API, and never the same secret as [`MetricsToken`].
+struct ApiToken;
+
+impl Modify for ApiToken {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "apiToken",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
         );
     }
@@ -370,7 +389,7 @@ mod tests {
                 sharerr_lighthouse::routes(std::sync::Arc::new(
                     sharerr_lighthouse::LighthouseState::new(random_secret()),
                 ))
-            } else if path.starts_with("/api") {
+            } else if path.starts_with("/api") && !path.starts_with("/api/v1/") {
                 crate::torznab::routes(serve.clone())
             } else {
                 let (ops, _) = crate::commands::serve::ops_router()

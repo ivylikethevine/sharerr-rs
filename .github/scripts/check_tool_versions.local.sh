@@ -27,7 +27,8 @@ CI_MANIFESTS='npm|.github/package.json
 cargo|Cargo.toml|sqlx@major
 terraform|docker/deploy/lighthouse/terraform/aws/versions.tf
 terraform|docker/deploy/lighthouse/terraform/azure/versions.tf
-terraform|docker/deploy/lighthouse/terraform/fly/versions.tf'
+terraform|docker/deploy/lighthouse/terraform/fly/versions.tf
+terraform|docker/deploy/lighthouse/terraform/linode/versions.tf'
 
 # ci_local_checks - the MSRV is one claim written in two places: Cargo.toml's
 # rust-version and the Dockerfile's `FROM rust:<x>` (what makes `docker build`

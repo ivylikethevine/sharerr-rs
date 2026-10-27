@@ -93,6 +93,10 @@ pub mod secret_keys {
             /// — unlike the generated keys below, nothing generates this on its own,
             /// so it belongs in [`ALL`].
             METRICS_TOKEN = "metrics.token";
+            /// The bearer token the management API requires when
+            /// `[api] enabled = true`. Separate from [`METRICS_TOKEN`]: the API
+            /// lists every shared file and friend, the metrics none.
+            API_TOKEN = "api.token";
         }
         generated {
             /// The previous value of [`TRACKER_TOKEN`], kept valid alongside the
@@ -220,6 +224,10 @@ pub mod config_paths {
         /// BEP 27's private flag on newly built torrents — see
         /// [`super::SeedingConfig::private`].
         SEEDING_PRIVATE = "seeding.private";
+        /// The quiet-hours window — see [`super::SeedingConfig::quiet_hours`].
+        SEEDING_QUIET_HOURS = "seeding.quiet_hours";
+        /// The cap inside it — see [`super::SeedingConfig::quiet_upload_limit_kib`].
+        SEEDING_QUIET_UPLOAD_LIMIT_KIB = "seeding.quiet_upload_limit_kib";
 
         /// Whether the lighthouse rendezvous service runs as extra routes on one
         /// of this instance's own listeners — see [`super::LighthouseConfig`].
@@ -266,6 +274,11 @@ pub mod config_paths {
         /// see [`super::MetricsConfig`]. The bearer token they require is a vault
         /// secret, [`super::secret_keys::METRICS_TOKEN`].
         METRICS_ENABLED = "metrics.enabled";
+
+        /// Whether the management API under `/api/v1/` answers at all — see
+        /// [`super::ApiConfig`]. Its bearer token is
+        /// [`super::secret_keys::API_TOKEN`].
+        API_ENABLED = "api.enabled";
 
         /// Whether the feeds advertise a magnet link per item — see
         /// [`super::FeedConfig::magnet_links`].
@@ -351,6 +364,8 @@ pub struct Config {
     /// `/metrics` and the dashboard-widget JSON endpoint. Off by default — see
     /// [`MetricsConfig`].
     pub metrics: MetricsConfig,
+    /// The read-only management API. Off by default — see [`ApiConfig`].
+    pub api: ApiConfig,
     /// What the feeds advertise alongside the `.torrent` enclosure — see
     /// [`FeedConfig`].
     pub feed: FeedConfig,
@@ -403,6 +418,7 @@ impl Default for Config {
             checks: ChecksConfig::default(),
             notifications: NotificationsConfig::default(),
             metrics: MetricsConfig::default(),
+            api: ApiConfig::default(),
             feed: FeedConfig::default(),
             path_map: Vec::new(),
             library: Vec::new(),
@@ -977,6 +993,99 @@ pub struct SeedingConfig {
     /// keep whatever they were built with (see `shared_items.private` in the
     /// store).
     pub private: bool,
+    /// A daily window, in the container's local time, during which
+    /// [`Self::quiet_upload_limit_kib`] replaces [`Self::upload_limit_kib`]
+    /// on every torrent sharerr created. Only in force while all three are
+    /// set: ending a window re-applies the normal cap, and with none there
+    /// would be nothing to go back to.
+    pub quiet_hours: Option<QuietHours>,
+    /// The upload cap in KiB/s inside [`Self::quiet_hours`].
+    pub quiet_upload_limit_kib: Option<u64>,
+}
+
+impl SeedingConfig {
+    /// The cap for minute `minute_of_day` (0..1440) of the local day: the
+    /// quiet one inside a complete quiet-hours setting, the normal one
+    /// otherwise.
+    pub fn upload_limit_at(&self, minute_of_day: u16) -> Option<u64> {
+        match (
+            self.quiet_hours,
+            self.quiet_upload_limit_kib,
+            self.upload_limit_kib,
+        ) {
+            (Some(window), Some(quiet), Some(_)) if window.contains(minute_of_day) => Some(quiet),
+            _ => self.upload_limit_kib,
+        }
+    }
+}
+
+/// `HH:MM-HH:MM`, local time. A start after the end wraps past midnight
+/// (`22:00-06:00`); equal ends are refused, since "all day" is just a lower
+/// `upload_limit_kib`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuietHours {
+    /// Minutes past midnight the window opens, inclusive.
+    pub start: u16,
+    /// Minutes past midnight it closes, exclusive.
+    pub end: u16,
+}
+
+impl QuietHours {
+    pub fn contains(self, minute_of_day: u16) -> bool {
+        if self.start < self.end {
+            (self.start..self.end).contains(&minute_of_day)
+        } else {
+            minute_of_day >= self.start || minute_of_day < self.end
+        }
+    }
+}
+
+impl std::str::FromStr for QuietHours {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let minutes = |part: &str| -> Option<u16> {
+            let (hours, mins) = part.trim().split_once(':')?;
+            let (hours, mins): (u16, u16) = (hours.parse().ok()?, mins.parse().ok()?);
+            (hours < 24 && mins < 60 && part.trim().len() == 5).then_some(hours * 60 + mins)
+        };
+        let bad = || format!("{text:?} is not HH:MM-HH:MM, e.g. 01:00-07:00");
+        let (start, end) = text.split_once('-').ok_or_else(bad)?;
+        let (start, end) = (
+            minutes(start).ok_or_else(bad)?,
+            minutes(end).ok_or_else(bad)?,
+        );
+        if start == end {
+            return Err(format!("{text:?} opens and closes at the same minute"));
+        }
+        Ok(Self { start, end })
+    }
+}
+
+impl std::fmt::Display for QuietHours {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02}:{:02}-{:02}:{:02}",
+            self.start / 60,
+            self.start % 60,
+            self.end / 60,
+            self.end % 60
+        )
+    }
+}
+
+impl Serialize for QuietHours {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for QuietHours {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 impl Default for SeedingConfig {
@@ -984,6 +1093,8 @@ impl Default for SeedingConfig {
         Self {
             upload_limit_kib: None,
             ratio_limit: None,
+            quiet_hours: None,
+            quiet_upload_limit_kib: None,
             // A bare `#[derive(Default)]` would make this `false` — public by
             // default — which is the one outcome that must never happen
             // silently. Spelled out so `#[serde(default)]` on `Config` fills
@@ -1204,6 +1315,19 @@ pub struct MetricsConfig {
     pub enabled: bool,
 }
 
+/// The read-only management API under `/api/v1/`: items, friends, sync runs
+/// and doctor results as JSON.
+///
+/// Off by default, and its own switch and token rather than `[metrics]`'s:
+/// this one names every shared file and every friend, which `/metrics`
+/// deliberately never does, so a Prometheus scrape token must not read it.
+/// The bearer token is [`secret_keys::API_TOKEN`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiConfig {
+    pub enabled: bool,
+}
+
 /// What the Torznab and Jackett feeds advertise alongside the `.torrent`
 /// enclosure every item already carries.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
@@ -1342,6 +1466,14 @@ pub enum NotificationTrigger {
     /// directory, permission-denied, or only partly listable. Fired once per
     /// distinct reason, not once per pass — see `commands::serve::background`.
     LibraryUnreadable,
+    /// A torrent sharerr built is stopped (paused) in the client, or was gone
+    /// from it and has been re-added. Fired once per torrent until it seeds
+    /// again — see `sync::Syncer::watch` and `commands::serve::background`.
+    TorrentInterrupted,
+    /// A shared file's inode or modification time changed since sharerr built
+    /// its torrent, so its pieces no longer match. Fired once per torrent, and
+    /// nothing is rebuilt — see `sync::Syncer::watch`.
+    FileChanged,
     /// An Uptime-Kuma-style push: a GET to
     /// [`secret_keys::NOTIFICATIONS_HEARTBEAT_URL`] every
     /// [`NotificationsConfig::heartbeat_secs`] while this instance would
@@ -1361,6 +1493,8 @@ crate::str_enum!(NotificationTrigger {
     PeerFirstContact => "peer_first_contact",
     TrackerUnreachable => "tracker_unreachable",
     LibraryUnreadable => "library_unreadable",
+    TorrentInterrupted => "torrent_interrupted",
+    FileChanged => "file_changed",
     Heartbeat => "heartbeat",
 });
 
@@ -1380,6 +1514,8 @@ impl NotificationTrigger {
             Self::PeerFirstContact => "friend made first contact",
             Self::TrackerUnreachable => "tracker unreachable",
             Self::LibraryUnreadable => "library path unreadable",
+            Self::TorrentInterrupted => "torrent stopped or removed",
+            Self::FileChanged => "shared file changed",
             Self::Heartbeat => "heartbeat push",
         }
     }
@@ -1576,6 +1712,69 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    #[test]
+    fn quiet_hours_parse_print_and_wrap_past_midnight() {
+        let day: QuietHours = "01:00-07:30".parse().unwrap();
+        assert_eq!(day.to_string(), "01:00-07:30");
+        assert!(day.contains(60) && day.contains(449));
+        assert!(!day.contains(59) && !day.contains(450));
+
+        let night: QuietHours = "22:00-06:00".parse().unwrap();
+        assert!(night.contains(23 * 60) && night.contains(0) && night.contains(359));
+        assert!(!night.contains(360) && !night.contains(21 * 60 + 59));
+
+        for bad in [
+            "",
+            "1:00-7:00",
+            "01:00",
+            "24:00-01:00",
+            "01:60-02:00",
+            "03:00-03:00",
+            "aa:bb-cc:dd",
+        ] {
+            assert!(bad.parse::<QuietHours>().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_quiet_cap_needs_a_window_a_quiet_cap_and_a_normal_cap() {
+        let full = SeedingConfig {
+            upload_limit_kib: Some(100),
+            quiet_hours: Some("01:00-07:00".parse().unwrap()),
+            quiet_upload_limit_kib: Some(10),
+            ..SeedingConfig::default()
+        };
+        assert_eq!(full.upload_limit_at(120), Some(10));
+        assert_eq!(full.upload_limit_at(8 * 60), Some(100));
+        let no_normal = SeedingConfig {
+            upload_limit_kib: None,
+            ..full
+        };
+        assert_eq!(
+            no_normal.upload_limit_at(120),
+            None,
+            "nothing to go back to"
+        );
+        let no_quiet_cap = SeedingConfig {
+            quiet_upload_limit_kib: None,
+            ..full
+        };
+        assert_eq!(no_quiet_cap.upload_limit_at(120), Some(100));
+    }
+
+    #[test]
+    fn quiet_hours_round_trip_through_toml() {
+        let config: Config = toml_edit::de::from_str(
+            "[seeding]\nupload_limit_kib = 100\nquiet_hours = \"23:30-06:00\"\nquiet_upload_limit_kib = 5\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.seeding.quiet_hours.unwrap().to_string(),
+            "23:30-06:00"
+        );
+        assert!(toml_edit::de::from_str::<Config>("[seeding]\nquiet_hours = \"soon\"\n").is_err());
+    }
 
     /// Every writable path must name a field that actually exists on `Config`.
     ///

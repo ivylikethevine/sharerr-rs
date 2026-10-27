@@ -1,0 +1,64 @@
+# sharerr, sharing a network namespace with qBittorrent on a tailnet.
+#
+# Secrets are deliberately absent. The qBittorrent API key (or password), the
+# *arr API keys, and the Torznab key live in the encrypted vault, not here — set
+# them in the web UI under Settings, or pipe them in:
+#
+#   printf %s "$KEY" | docker compose exec -T sharerr sharerr vault set qbittorrent.api_key
+#
+# The web UI rewrites this file in place, comments and all, when you save.
+
+data_dir = "/data"
+
+# Content carrying this tag in Sonarr/Radarr is what gets shared.
+tag = "sharerr"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[qbittorrent]
+# `localhost`, not `qbittorrent`: both containers are in tailscale's namespace.
+url = "http://localhost:8080"
+category = "sharerr"
+tag = "sharerr"
+# Set `false` while still proving the path mappings right, so qBittorrent
+# verifies the data instead of seeding a mismatch.
+skip_checking = true
+
+[tracker]
+# This machine's tailnet address, which every friend's client can reach:
+#
+#   docker compose exec tailscale tailscale ip -4
+#
+# The 100.x address rather than the MagicDNS name, because qBittorrent
+# announces to it from inside this namespace, which does not use MagicDNS.
+advertised_host = "100.64.0.1"
+
+# sharerr's own tracker, on its HTTP port. Nothing to forward: the tailnet
+# carries it.
+port = 8477
+
+[sync]
+enabled = true
+interval_secs = 900
+
+# The three views of one library. Sonarr reports /tv, sharerr reads /media/tv,
+# qBittorrent is told /downloads/tv. Check them with `sharerr doctor`; a wrong
+# mapping is the most common reason nothing is shared.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"
+
+# Outside the namespace, on the compose network, reached by service name.
+# Add the API keys in the UI.
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"

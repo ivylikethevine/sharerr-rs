@@ -51,6 +51,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .route("/items", get(|| async { Html(page(items_page())) }))
         .route("/topology", get(|| async { Html(page(topology_page())) }))
         .route("/debug", get(|| async { Html(page(debug_page())) }))
+        .route(
+            "/settings/account/totp",
+            get(|| async { Html(page(totp_page())) }),
+        )
         // The status page polls this every thirty seconds. Without it here the
         // preview's own status page would 404 on a timer, which contradicts what
         // this command promises: that everything renders as it would live.
@@ -75,7 +79,10 @@ pub async fn run(bind: SocketAddr) -> Result<()> {
         .await
         .with_context(|| format!("binding {bind}"))?;
 
-    println!("mock UI serving on http://{bind}/ — /settings, /peers, /items, /topology, /debug");
+    println!(
+        "mock UI serving on http://{bind}/ — /settings, /settings/account/totp, /peers, /items, \
+         /topology, /debug"
+    );
     println!(
         "htmx buttons (Test connection, revoke, delete) have nothing live to call \
          and will not do anything; everything else renders exactly as it would \
@@ -235,6 +242,7 @@ fn status_page() -> StatusPage {
         client_url: "http://transmission.example:9091".to_owned(),
         sync_enabled: true,
         sync_interval_secs: 900,
+        sync_requested: false,
         config_path: "/config/sharerr.toml".to_owned(),
 
         diag: DiagnosticsData {
@@ -594,6 +602,24 @@ fn debug_page() -> crate::web::templates::DebugPage {
     }
 }
 
+/// The enrolment view, with a real QR code so its sizing and the CSP's
+/// treatment of inline SVG show as they would live. The secret is a fixed
+/// example, never used anywhere.
+fn totp_page() -> crate::web::templates::TotpPage {
+    let secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_owned();
+    let otpauth_uri = crate::totp::otpauth_uri("operator", &secret);
+    crate::web::templates::TotpPage {
+        signed_in: true,
+        username: "operator".to_owned(),
+        enabled: false,
+        qr_svg: crate::totp::qr_svg(&otpauth_uri).unwrap_or_default(),
+        otpauth_uri,
+        secret,
+        saved: None,
+        error: None,
+    }
+}
+
 fn settings_page() -> SettingsPage {
     let mut locks = BTreeMap::new();
     locks.insert("data_dir".to_owned(), "SHARERR_DATA_DIR".to_owned());
@@ -687,6 +713,8 @@ fn settings_page() -> SettingsPage {
 
         seeding_upload_limit_kib: "2048".to_owned(),
         seeding_ratio_limit: "2.5".to_owned(),
+        seeding_quiet_hours: "01:00-07:00".to_owned(),
+        seeding_quiet_upload_limit_kib: "256".to_owned(),
         seeding_private: true,
         feed_magnet_links: false,
 
@@ -742,12 +770,16 @@ fn settings_page() -> SettingsPage {
         notifications_trigger_peer_first_contact: true,
         notifications_trigger_tracker_unreachable: true,
         notifications_trigger_library_unreadable: true,
+        notifications_trigger_torrent_interrupted: true,
+        notifications_trigger_file_changed: true,
         notifications_trigger_heartbeat: true,
         notifications_heartbeat_set: false,
         notifications_heartbeat_secs: 60,
 
         metrics_enabled: false,
         metrics_token_set: false,
+        api_enabled: true,
+        api_token_set: true,
 
         libraries: vec![
             LibraryRow {
@@ -1275,6 +1307,7 @@ mod tests {
             ("peers", peers_page().render().unwrap()),
             ("peer_guide", peer_guide_page().render().unwrap()),
             ("items", items_page().render().unwrap()),
+            ("totp", totp_page().render().unwrap()),
         ] {
             assert!(html.contains("<!DOCTYPE html>"), "{name}: {html}");
             assert!(

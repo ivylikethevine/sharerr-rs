@@ -1,7 +1,7 @@
 # Testing
 
 The runner, the three tiers, the compose stacks tiers 2 and 3 drive,
-fixtures, and coverage. [`docs/CONTRIBUTING.md`](CONTRIBUTING.md#the-verification-loop) has
+fixtures, coverage, and mutation testing. [`docs/CONTRIBUTING.md`](CONTRIBUTING.md#the-verification-loop) has
 the loop to run before opening a pull request; this page is the reference
 behind it.
 
@@ -13,6 +13,7 @@ behind it.
 - [In CI: integration.yml](#in-ci-integrationyml)
 - [Fixtures](#fixtures)
 - [Coverage](#coverage)
+- [Mutation testing](#mutation-testing)
 - [Benchmarks and fuzzing](#benchmarks-and-fuzzing)
 
 ## Tier 1: hermetic
@@ -198,6 +199,41 @@ rises, and write down the reason in the PR that ever lowers it.
 
 See the workflow's own comments for the column it reads out of
 `cargo-llvm-cov`'s summary (Lines, not Regions).
+
+## Mutation testing
+
+```bash
+MUTANTS_ARGS="-p sharerr-torrent -j 4" scripts/check.sh mutants
+MUTANTS_ARGS="--file crates/sharerr/src/library.rs" scripts/check.sh mutants
+```
+
+`cargo-mutants` changes one operator or return value at a time and runs the
+tests against each change; a mutant the suite survives (`MISSED`) is a line
+that runs without anything checking what it does. It is run by hand, in no
+`check.sh` group and no workflow: `sharerr-torrent`'s 393 mutants take 3
+minutes at `-j 4` (16CPU/60GB), but the workspace holds 3,521, 2,065 of
+them in the `sharerr` crate, whose build and suite are the slowest.
+`.cargo/mutants.toml` leaves out the same scaffolding the coverage report
+does, uses the tier-1 features, and writes the report to the gitignored
+directory its `output` names (`missed.txt` there lists the survivors).
+`check.sh` puts the build copies under the cargo target directory rather
+than `$TMPDIR`: each job copies the tree and builds it, a few GB apiece,
+which fills a RAM-backed `/tmp`.
+
+Each mutant is tested against its own package's tests only, cargo-mutants'
+default. A mutant in `sharerr-core` that the `sharerr` crate's tests would
+catch reads as missed; `--test-workspace=true` asks the whole suite instead,
+at the cost of building every crate per mutant. Give that a `--timeout` of a
+few minutes: the timeout is set from a baseline that tests only the named
+package, so it lands on the 20-second floor and every mutant then times out
+against the whole suite (all 142 viable `sharerr-core` mutants did, at about
+two minutes of build each, 16CPU/60GB, `-j 4`).
+
+Kill a survivor with a test when the behaviour matters, and leave the rest.
+Three are known to be equivalent, with no observable difference to test:
+`<` to `<=` and `<` to `>` in `factory::hash_pieces`'s read loop (it ends on
+a zero-length read either way), and `||` to `&&` in `title::season_episode`
+(an empty number fails the parse that follows).
 
 ## Benchmarks and fuzzing
 

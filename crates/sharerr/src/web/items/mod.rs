@@ -664,9 +664,50 @@ pub async fn rebuild(
     redirect_with_outcome(source, file_id, trigger_sync_now(&state).await)
 }
 
-/// Stop sharing one file on demand — the same effect a tag removal upstream
-/// has, without waiting for one. Never touches the file itself; see
-/// `Syncer::unshare_one`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ShareUntilForm {
+    /// `YYYY-MM-DD`, local; ignored when `clear` is present.
+    date: String,
+    clear: Option<String>,
+}
+
+/// Set or clear the day a share ends — see `migrations/0016_share_until.sql`.
+/// Asks for a pass either way, so a date already past (or a cleared one)
+/// takes effect now rather than at the next interval.
+pub async fn share_until(
+    State(state): State<WebState>,
+    Path((source, file_id)): Path<(MediaSource, i64)>,
+    Form(form): Form<ShareUntilForm>,
+) -> Response {
+    let store = match state.store_or_503().await {
+        Ok(store) => store,
+        Err(response) => return *response,
+    };
+    let until = if form.clear.is_some() || form.date.trim().is_empty() {
+        None
+    } else {
+        match crate::localtime::start_of_day(&form.date) {
+            Ok(start) => Some(start),
+            Err(err) => return redirect_with_error(source, file_id, &err),
+        }
+    };
+    match store.set_share_until(source, file_id, until).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "no such item").into_response(),
+        Err(err) => return redirect_with_error(source, file_id, &err.to_string()),
+    }
+    state.serve.request_pass();
+    let message = match until {
+        Some(start) => format!("shares until {}", crate::localtime::date_of(start)),
+        None => "end date cleared".to_owned(),
+    };
+    redirect_with_ok(source, file_id, &message)
+}
+
+/// Stop sharing one file on demand. Never touches the file itself; see
+/// `Syncer::unshare_one`. A file that is still tagged is shared again by the
+/// next pass; [`share_until`] is how to keep it unshared.
 pub async fn unshare(
     State(state): State<WebState>,
     Path((source, file_id)): Path<(MediaSource, i64)>,
@@ -1019,6 +1060,12 @@ async fn build_detail(
     };
 
     let swarm = swarm_for(state, &item).await;
+    let checked = sharerr_torrent::title::check(&item.release_title, &item.spec);
+    let until = store
+        .share_ends()
+        .await
+        .ok()
+        .and_then(|ends| ends.get(&item.key()).copied());
 
     ItemDetailPage {
         signed_in: true,
@@ -1026,6 +1073,12 @@ async fn build_detail(
         file_id: item.file_id,
         title: item.spec.title().to_owned(),
         release_title: item.release_title.clone(),
+        title_reads_as: checked.as_ref().map(|c| c.parsed.summary()),
+        title_problems: checked
+            .map(|c| c.problems.iter().map(|p| p.describe()).collect())
+            .unwrap_or_default(),
+        share_until: until.map(crate::localtime::date_of).unwrap_or_default(),
+        share_ended: until.is_some_and(|until| until <= sharerr_core::endpoint::now_epoch()),
         // The torrent's own name always describes the file where it sits —
         // see `CLAUDE.md`'s first trap — so this and `release_title` are the
         // two strings worth showing side by side.

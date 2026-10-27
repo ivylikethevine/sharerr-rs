@@ -49,6 +49,8 @@ struct QbitState {
     /// Bodies of `torrents/setUploadLimit` and `torrents/setShareLimits`
     /// calls, for the retroactive-limits assertions.
     limits_set: Vec<String>,
+    /// Hashes `torrents/info` reports as `stoppedUP`.
+    stopped: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +184,11 @@ impl FakeQbit {
                             "name": t.hash,
                             "save_path": t.save_path,
                             "content_path": t.content_path,
-                            "state": "stalledUP",
+                            "state": if state.stopped.contains(&t.hash) {
+                                "stoppedUP"
+                            } else {
+                                "stalledUP"
+                            },
                             "progress": 1.0,
                             "category": "sharerr",
                             "tags": "sharerr",
@@ -347,6 +353,21 @@ impl FakeQbit {
             torrent.ratio = ratio;
             torrent.ratio_limit = ratio_limit;
         }
+    }
+
+    /// Someone stops this torrent in the client.
+    fn stop(&self, hash: &str) {
+        self.state.lock().unwrap().stopped.push(hash.to_owned());
+    }
+
+    /// Someone deletes this torrent in the client, behind sharerr's back, so
+    /// a re-add under the same hash shows up again (unlike `removed`).
+    fn vanish(&self, hash: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .torrents
+            .retain(|t| t.hash != hash);
     }
 
     fn snapshot(&self) -> QbitSnapshot {
@@ -712,6 +733,7 @@ async fn a_first_sync_shares_every_tagged_file() {
             failed: 0,
             sources_failed: 0,
             library_unreadable: None,
+            ..SyncReport::default()
         }
     );
 
@@ -754,6 +776,8 @@ async fn running_sync_twice_changes_nothing_the_second_time() {
             failed: 0,
             sources_failed: 0,
             library_unreadable: None,
+            // The stamps recorded on the first pass still match.
+            ..SyncReport::default()
         }
     );
 
@@ -793,6 +817,98 @@ async fn sharing_never_touches_the_media_file() {
         before, after,
         "a media file was moved, rewritten, or replaced"
     );
+}
+
+/// The hashes of everything the first pass shared.
+async fn shared_hashes(h: &Harness) -> Vec<String> {
+    let mut hashes: Vec<String> = h
+        .syncer
+        .store()
+        .all_items()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|i| i.info_hash)
+        .collect();
+    hashes.sort();
+    hashes
+}
+
+#[tokio::test]
+async fn a_stopped_torrent_is_reported_and_left_stopped() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let hashes = shared_hashes(&h).await;
+    h.qbit.stop(&hashes[0]);
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.stopped.len(), 1, "{report:?}");
+    assert_eq!(report.stopped[0].hash, hashes[0]);
+    assert!(report.removed.is_empty() && report.changed.is_empty());
+    assert_eq!(
+        report.unchanged, 2,
+        "a stopped torrent is still not re-added"
+    );
+}
+
+#[tokio::test]
+async fn a_torrent_removed_behind_sharerrs_back_is_reported_and_added_back() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let hashes = shared_hashes(&h).await;
+    h.qbit.vanish(&hashes[1]);
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert_eq!(report.removed[0].hash, hashes[1]);
+    assert_eq!(report.added, 1, "the self-healing re-add still happens");
+
+    let again = h.syncer.run(false).await.unwrap();
+    assert!(again.removed.is_empty(), "{again:?}");
+}
+
+/// A rewrite in place keeps the path and the inode and moves the mtime.
+#[tokio::test]
+async fn a_file_changed_since_its_torrent_was_built_is_reported() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+
+    let path = &h.library.files[0].disk_path;
+    let later =
+        std::fs::metadata(path).unwrap().modified().unwrap() + std::time::Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.changed.len(), 1, "{report:?}");
+    assert_eq!(
+        report.unchanged, 2,
+        "a changed file is reported, not rebuilt"
+    );
+}
+
+/// A row from before stamps were recorded gets one on the next pass, and
+/// is not reported as changed for lacking one.
+#[tokio::test]
+async fn an_unstamped_row_is_stamped_rather_than_reported() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let store = h.syncer.store();
+    for item in store.all_items().await.unwrap() {
+        store
+            .set_file_stamp(item.source, item.file_id, None)
+            .await
+            .unwrap();
+    }
+    assert!(store.file_stamps().await.unwrap().is_empty());
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert!(report.changed.is_empty(), "{report:?}");
+    assert_eq!(store.file_stamps().await.unwrap().len(), 2);
 }
 
 /// Automatic Torrent Management is what would relocate the file. It must be off on
@@ -2640,11 +2756,114 @@ async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
     let h = tagged_harness().await;
     h.syncer.run(false).await.unwrap();
     let known_before = known(&h).await;
-    // `begin_run` and `all_items` answer; every confirmation after fails.
-    h.syncer.store().fail_after(2).await.unwrap();
+    // `begin_run` and the pass's three reads (`all_items`, `file_stamps`,
+    // `share_ends`) answer; every confirmation after fails.
+    h.syncer.store().fail_after(4).await.unwrap();
 
     let report = h.syncer.run(false).await.unwrap();
 
     assert_eq!(report.failed, 0, "{report}");
     assert_eq!(report.unchanged, known_before.len(), "{report}");
+}
+
+// ------------------------------------------------------------ quiet hours
+
+/// The clock the quiet-hours test moves; a `fn` reads it, since a syncer's
+/// clock is a plain `fn() -> u16`.
+static QUIET_TEST_MINUTE: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+fn quiet_test_clock() -> u16 {
+    QUIET_TEST_MINUTE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Inside the window every torrent sharerr built takes the quiet cap once;
+/// crossing back out puts the normal cap back, once.
+#[tokio::test]
+async fn quiet_hours_swap_the_upload_cap_at_each_edge() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let seeding = h.qbit.snapshot().live.len();
+
+    QUIET_TEST_MINUTE.store(2 * 60, std::sync::atomic::Ordering::SeqCst);
+    let syncer = h
+        .rebuilt_with_seeding(SeedingConfig {
+            upload_limit_kib: Some(100),
+            quiet_hours: Some("01:00-07:00".parse().unwrap()),
+            quiet_upload_limit_kib: Some(10),
+            ..SeedingConfig::default()
+        })
+        .with_clock(quiet_test_clock);
+
+    syncer.run(false).await.unwrap();
+    let set = h.qbit.snapshot().limits_set;
+    assert_eq!(set.len(), seeding, "{set:?}");
+    assert!(set.iter().all(|b| b.contains("limit=10240")), "{set:?}");
+
+    // Still inside: nothing more is sent.
+    syncer.run(false).await.unwrap();
+    assert_eq!(h.qbit.snapshot().limits_set.len(), seeding);
+
+    QUIET_TEST_MINUTE.store(8 * 60, std::sync::atomic::Ordering::SeqCst);
+    syncer.run(false).await.unwrap();
+    let set = h.qbit.snapshot().limits_set;
+    assert_eq!(set.len(), seeding * 2, "{set:?}");
+    assert!(
+        set[seeding..].iter().all(|b| b.contains("limit=102400")),
+        "{set:?}"
+    );
+}
+
+// ------------------------------------------------------------ share until
+
+#[tokio::test]
+async fn a_share_past_its_date_is_withdrawn_and_stays_withdrawn_until_cleared() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let store = h.syncer.store();
+    let item = store.all_items().await.unwrap().remove(0);
+    store
+        .set_share_until(
+            item.source,
+            item.file_id,
+            Some(sharerr_core::endpoint::now_epoch() - 10),
+        )
+        .await
+        .unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.ended, 1, "{report:?}");
+    assert!(report.to_string().contains("1 share(s) ended"), "{report}");
+    let after = store.get(item.source, item.file_id).await.unwrap().unwrap();
+    assert_eq!(after.state, ShareState::Unshared);
+    assert_eq!(h.qbit.snapshot().live.len(), 1, "its torrent was removed");
+
+    // Still tagged, but the date stands: left unshared, not re-added.
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!((report.ended, report.added), (0, 0), "{report:?}");
+    assert_eq!(h.qbit.snapshot().live.len(), 1);
+
+    store
+        .set_share_until(item.source, item.file_id, None)
+        .await
+        .unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(report.added, 1, "{report:?}");
+}
+
+#[tokio::test]
+async fn a_future_share_until_date_changes_nothing_yet() {
+    let h = tagged_harness().await;
+    h.syncer.run(false).await.unwrap();
+    let store = h.syncer.store();
+    let item = store.all_items().await.unwrap().remove(0);
+    store
+        .set_share_until(
+            item.source,
+            item.file_id,
+            Some(sharerr_core::endpoint::now_epoch() + 3600),
+        )
+        .await
+        .unwrap();
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!((report.ended, report.unchanged), (0, 2), "{report:?}");
 }

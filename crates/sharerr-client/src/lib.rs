@@ -295,6 +295,10 @@ pub struct TorrentSummary {
     pub tags: Vec<String>,
     /// Whether the client considers this complete and uploading.
     pub is_seeding: bool,
+    /// Whether someone stopped (paused) this torrent in the client, so it
+    /// neither uploads nor announces. Narrower than `!is_seeding`, which is
+    /// also true while a torrent is checking or downloading.
+    pub is_stopped: bool,
     /// Uploaded ÷ downloaded, as the client itself computes it for this specific
     /// torrent. `None` only on a genuine read/parse failure — every supported
     /// backend can report this, unlike [`Self::ratio_limit`].
@@ -695,6 +699,7 @@ mod tests {
             category: String::new(),
             tags: Vec::new(),
             is_seeding: true,
+            is_stopped: false,
             ratio: None,
             ratio_limit,
             upload_limit_kib,

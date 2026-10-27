@@ -1670,6 +1670,10 @@ td.peer-name .error { display: block; }
   border-bottom: 1px solid var(--ink);
   vertical-align: bottom;
 }
+/* The two-step enrolment QR. Its own white quiet zone stays light in the dark
+   theme on purpose: a scanner needs dark modules on a light ground. */
+.qr { margin: var(--sp-3) 0; }
+.qr svg { display: block; width: 12.5rem; height: auto; }
 @media print {
   .bar, .foot, .skip-link, .print-actions { display: none !important; }
   main { padding: 0; }

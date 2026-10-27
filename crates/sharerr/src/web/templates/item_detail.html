@@ -22,6 +22,13 @@
   <dl class="facts">
     <dt>Release title <span class="hint" title="What the feed advertises">(the feed)</span></dt>
     <dd><code>{{ release_title }}</code></dd>
+    <dt>Read as <span class="hint" title="SxxEyy, the year and the quality tokens: the parts every *arr parser agrees on, not Sonarr's or Radarr's whole parser">(a friend's *arr)</span></dt>
+    <dd>
+      {% if let Some(reads_as) = title_reads_as %}
+      {{ reads_as }}
+      {% for problem in title_problems %}<p class="warn">{{ problem }}</p>{% endfor %}
+      {% else %}<span class="hint">Not checked: Lidarr and Readarr match music and books by artist, album and author.</span>{% endif %}
+    </dd>
     <dt>File name <span class="hint" title="What the torrent is actually named — it always describes the file where it sits">(the torrent)</span></dt>
     <dd>
       {% if let Some(name) = file_name %}<code>{{ name }}</code>{% else %}<span class="hint">—</span>{% endif %}
@@ -200,14 +207,35 @@
     <button type="submit" class="link">Unshare</button>
   </form>
   <p class="hint">
-    Stops seeding without deleting the file — the same effect removing the
-    tag upstream has, without waiting for the next sync to notice.
+    Stops seeding without deleting the file. While the file keeps its tag the
+    next sync shares it again; to keep it unshared, set an end date below.
   </p>
   {% endif %}
 
   {% if !can_retry && !can_rebuild && !can_unshare %}
   <p class="hint">Nothing to do here — this item has never had a torrent and is not sharing.</p>
   {% endif %}
+</div>
+
+<div class="panel">
+  <form method="post" action="/items/{{ source }}/{{ file_id }}/until">
+    <label for="share_until">Share until</label>
+    <input id="share_until" name="date" type="date" value="{{ share_until }}">
+    <button type="submit" class="secondary">Set end date</button>
+    {% if !share_until.is_empty() %}
+    <button type="submit" name="clear" value="1" class="link">Clear</button>
+    {% endif %}
+  </form>
+  <p class="hint">
+    {% if share_ended %}
+    The share ended on {{ share_until }}. It stays unshared while the date stands, even
+    though the file is still tagged; clear the date to share it again.
+    {% else %}
+    From the start of this day (the container's time zone, <code>TZ</code>), sharerr
+    unshares the file and keeps it unshared while the date stands. The tag in the *arr app
+    is left alone.
+    {% endif %}
+  </p>
 </div>
 </section>
 {% endblock %}

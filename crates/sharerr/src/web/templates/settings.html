@@ -320,6 +320,7 @@
   <li><a href="#checks">Checks</a></li>
   <li><a href="#notifications">Notifications</a></li>
   <li><a href="#metrics">Metrics</a></li>
+  <li><a href="#api">API</a></li>
   <li><a href="#your-account">Account</a></li>
 </ul>
 
@@ -690,11 +691,10 @@
 </div>
 <form method="post" action="/settings/seeding" class="panel">
   <p class="hint">
-    Applied once, when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent —
-    not retroactively enforced on what is already seeding, and not policed by
-    sharerr afterward. From that point on, the client's own seeding engine
-    honours the goal the same way it would for any torrent added by hand.
-    Leave a field blank for no cap.
+    Applied when sharerr hands a torrent to qBittorrent, Transmission, or rTorrent,
+    and to every torrent sharerr created on the first sync pass after a change;
+    the client's own seeding engine then honours it as it would for any torrent
+    added by hand. Leave a field blank for no cap.
   </p>
 
   <label for="seeding_upload_limit_kib">Upload limit (KiB/s)</label>
@@ -708,6 +708,24 @@
          inputmode="decimal" placeholder="e.g. 2.0"
          {% call lock_attr("seeding.ratio_limit") %}{% endcall %}>
   {% call locked("seeding.ratio_limit") %}{% endcall %}
+
+  <label for="seeding_quiet_hours">Quiet hours (local time)</label>
+  <input id="seeding_quiet_hours" name="quiet_hours" value="{{ seeding_quiet_hours }}"
+         placeholder="e.g. 01:00-07:00"
+         {% call lock_attr("seeding.quiet_hours") %}{% endcall %}>
+  {% call locked("seeding.quiet_hours") %}{% endcall %}
+
+  <label for="seeding_quiet_upload_limit_kib">Upload limit during quiet hours (KiB/s)</label>
+  <input id="seeding_quiet_upload_limit_kib" name="quiet_upload_limit_kib"
+         value="{{ seeding_quiet_upload_limit_kib }}" inputmode="numeric"
+         {% call lock_attr("seeding.quiet_upload_limit_kib") %}{% endcall %}>
+  {% call locked("seeding.quiet_upload_limit_kib") %}{% endcall %}
+  <p class="hint">
+    Inside the window, sharerr's own torrents take this cap instead of the one above;
+    after it, they go back to the one above. Needs the upload limit above too, so there
+    is a cap to go back to. The switch lands on the first sync pass past each edge, in
+    the container's time zone (<code>TZ</code>).
+  </p>
 
   <label class="hint">
     <input type="checkbox" name="private" value="1" {% if seeding_private %}checked{% endif %}
@@ -974,6 +992,14 @@
     A library path cannot be read (once per reason, not per pass)
   </label>
   <label class="hint">
+    <input type="checkbox" name="trigger_torrent_interrupted" value="1" {% if notifications_trigger_torrent_interrupted %}checked{% endif %}>
+    A torrent sharerr built is stopped in the client, or removed from it (once per torrent)
+  </label>
+  <label class="hint">
+    <input type="checkbox" name="trigger_file_changed" value="1" {% if notifications_trigger_file_changed %}checked{% endif %}>
+    A shared file changes on disk after its torrent was built (once per torrent)
+  </label>
+  <label class="hint">
     <input type="checkbox" name="trigger_heartbeat" value="1" {% if notifications_trigger_heartbeat %}checked{% endif %}>
     Heartbeat (the push below, not the webhook)
   </label>
@@ -1051,6 +1077,44 @@
 </form>
 </details>
 
+<details class="fold" id="api">
+  <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 4L1.5 8 5 12M11 4l3.5 4-3.5 4M9.5 2.5l-3 11"/></svg>Management API
+    {%- if api_enabled %}{% call chip("set", "enabled") %}{% endcall %}
+    {%- else %}{% call chip("unset", "off") %}{% endcall %}{% endif %}</summary>
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_API, "Management API configuration") %}{% endcall %}
+</div>
+<form method="post" action="/settings/api" class="panel">
+  <p class="hint">
+    Read-only JSON under <code>/api/v1/</code>: items, friends, sync runs and
+    doctor results, for scripts and dashboards. It names every shared file and
+    every friend, so it has its own token, never the metrics one, and answers
+    <code>404</code> to a missing or wrong one, the same as when this is off.
+  </p>
+
+  <label class="hint">
+    <input type="checkbox" name="enabled" value="1" {% if api_enabled %}checked{% endif %}
+           {% call lock_attr("api.enabled") %}{% endcall %}>
+    Serve the management API
+  </label>
+  {% call locked("api.enabled") %}{% endcall %}
+
+  <label for="api_token">Bearer token {% call field_status(api_token_set) %}{% endcall %}</label>
+  <input id="api_token" name="token" type="password" autocomplete="off"
+         placeholder="{% call stored(api_token_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if api_token_set %}
+  <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
+  {% endif %}
+  <p class="hint">
+    Sent by the caller as <code>Authorization: Bearer &lt;token&gt;</code>.
+    Unset while enabled, the API never answers.
+  </p>
+
+  <button type="submit">Save</button>
+</form>
+</details>
+
 <details class="fold" id="config-backup">
   <summary><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v9M4.5 7L8 10.5 11.5 7M3 12.5h10v2H3z"/></svg>Backup and restore</summary>
 <div class="doclinks">
@@ -1107,6 +1171,12 @@
 
   <button type="submit">Change password</button>
 </form>
+<div class="panel">
+  <p>
+    <a href="/settings/account/totp">Two-step sign-in</a>: a code from an authenticator app
+    after the password. Signing in through a forward-auth proxy is the proxy's to protect.
+  </p>
+</div>
 </details>
 
 <details class="fold" id="fixed-at-startup">

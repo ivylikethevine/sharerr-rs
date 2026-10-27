@@ -3,6 +3,7 @@
 //! Queries are built at runtime rather than with `sqlx::query!`, so building the
 //! project never requires a live database or a checked-in `.sqlx` cache.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -532,6 +533,99 @@ impl Store {
         .await
     }
 
+    /// Record the file's identity on disk for the torrent sharerr just built
+    /// for it, or clear it for one sharerr did not build. See
+    /// `migrations/0014_file_stamp.sql`.
+    pub async fn set_file_stamp(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        stamp: Option<FileStamp>,
+    ) -> Result<()> {
+        self.update_item(
+            sqlx::query(
+                "UPDATE shared_items SET file_inode = ?, file_mtime_ns = ?, updated_at = ? \
+                 WHERE source = ? AND file_id = ?",
+            )
+            .bind(stamp.and_then(|s| s.inode).map(inode_to_sql))
+            .bind(stamp.map(|s| s.mtime_ns)),
+            source,
+            file_id,
+        )
+        .await
+    }
+
+    /// Every recorded [`FileStamp`], keyed like [`SharedItem::key`], for one
+    /// read per sync pass rather than one per item.
+    pub async fn file_stamps(&self) -> Result<HashMap<(MediaSource, i64), FileStamp>> {
+        let rows = sqlx::query(
+            "SELECT source, file_id, file_inode, file_mtime_ns FROM shared_items \
+             WHERE file_mtime_ns IS NOT NULL",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let mut stamps = HashMap::with_capacity(rows.len());
+        for row in &rows {
+            let source: String = row.try_get("source")?;
+            let file_id: i64 = row.try_get("file_id")?;
+            let source = MediaSource::parse(&source).ok_or_else(|| StoreError::Malformed {
+                id: file_id,
+                detail: format!("unknown source {source:?}"),
+            })?;
+            let stamp = FileStamp {
+                inode: row
+                    .try_get::<Option<i64>, _>("file_inode")?
+                    .map(|raw| u64::from_ne_bytes(raw.to_ne_bytes())),
+                mtime_ns: row.try_get("file_mtime_ns")?,
+            };
+            stamps.insert((source, file_id), stamp);
+        }
+        Ok(stamps)
+    }
+
+    /// Set or clear when an item's share ends on its own — see
+    /// `migrations/0016_share_until.sql`. Returns whether the item existed.
+    pub async fn set_share_until(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        until: Option<i64>,
+    ) -> Result<bool> {
+        let affected = sqlx::query(
+            "UPDATE shared_items SET share_until = ?, updated_at = ? \
+             WHERE source = ? AND file_id = ?",
+        )
+        .bind(until)
+        .bind(now_epoch())
+        .bind(source.as_str())
+        .bind(file_id)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Every set share-until date, keyed like [`SharedItem::key`], for one
+    /// read per sync pass.
+    pub async fn share_ends(&self) -> Result<HashMap<(MediaSource, i64), i64>> {
+        let rows = sqlx::query(
+            "SELECT source, file_id, share_until FROM shared_items WHERE share_until IS NOT NULL",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        let mut ends = HashMap::with_capacity(rows.len());
+        for row in &rows {
+            let source: String = row.try_get("source")?;
+            let file_id: i64 = row.try_get("file_id")?;
+            let source = MediaSource::parse(&source).ok_or_else(|| StoreError::Malformed {
+                id: file_id,
+                detail: format!("unknown source {source:?}"),
+            })?;
+            ends.insert((source, file_id), row.try_get("share_until")?);
+        }
+        Ok(ends)
+    }
+
     /// Record the info hash of the torrent built for an item.
     ///
     /// A seeding item must have one: it is what the tracker admits announces against
@@ -571,6 +665,39 @@ impl Store {
         )
         .await
     }
+}
+
+/// A shared file's identity on disk when sharerr built its torrent — see
+/// [`Store::set_file_stamp`]. A rewrite in place changes the mtime; a
+/// replacement under the same name changes the inode as well.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    /// `None` where the platform has no inodes.
+    pub inode: Option<u64>,
+    /// Modification time, in nanoseconds since the Unix epoch.
+    pub mtime_ns: i64,
+}
+
+impl FileStamp {
+    /// The stamp for a file's metadata, or `None` when the platform reports
+    /// no modification time.
+    pub fn of(metadata: &std::fs::Metadata) -> Option<Self> {
+        let mtime = metadata.modified().ok()?;
+        let since = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
+        #[cfg(unix)]
+        let inode = Some(std::os::unix::fs::MetadataExt::ino(metadata));
+        #[cfg(not(unix))]
+        let inode = None;
+        Some(Self {
+            inode,
+            mtime_ns: i64::try_from(since.as_nanos()).ok()?,
+        })
+    }
+}
+
+/// SQLite has no unsigned integer, so an inode is stored bit for bit.
+fn inode_to_sql(inode: u64) -> i64 {
+    i64::from_ne_bytes(inode.to_ne_bytes())
 }
 
 /// What is seeding within one scope, aggregated — see [`Store::seeding_summary`].
@@ -1163,6 +1290,76 @@ mod tests {
 
     /// The fast path's confirmed-refresh write: fingerprint and ratio move
     /// together, in one `UPDATE`, and nothing else does — proving
+    /// An inode past `i64::MAX` survives the trip through SQLite's signed
+    /// integer, and clearing a stamp drops the row from the map.
+    #[tokio::test]
+    async fn file_stamps_round_trip_and_clear() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        store.upsert(&episode(1002)).await.unwrap();
+        assert!(store.file_stamps().await.unwrap().is_empty());
+
+        let stamp = FileStamp {
+            inode: Some(u64::MAX - 7),
+            mtime_ns: 1_700_000_000_123_456_789,
+        };
+        store
+            .set_file_stamp(MediaSource::Sonarr, 1001, Some(stamp))
+            .await
+            .unwrap();
+        let stamps = store.file_stamps().await.unwrap();
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[&(MediaSource::Sonarr, 1001)], stamp);
+
+        store
+            .set_file_stamp(MediaSource::Sonarr, 1001, None)
+            .await
+            .unwrap();
+        assert!(store.file_stamps().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_share_until_date_is_set_listed_and_cleared() {
+        let store = Store::open_in_memory().await.unwrap();
+        store.upsert(&episode(1001)).await.unwrap();
+        assert!(store.share_ends().await.unwrap().is_empty());
+
+        assert!(
+            store
+                .set_share_until(MediaSource::Sonarr, 1001, Some(1_800_000_000))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.share_ends().await.unwrap()[&(MediaSource::Sonarr, 1001)],
+            1_800_000_000
+        );
+        assert!(
+            store
+                .set_share_until(MediaSource::Sonarr, 1001, None)
+                .await
+                .unwrap()
+        );
+        assert!(store.share_ends().await.unwrap().is_empty());
+        assert!(
+            !store
+                .set_share_until(MediaSource::Sonarr, 9999, None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_file_stamp_reads_the_files_inode_and_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        std::fs::write(&path, b"x").unwrap();
+        let stamp = FileStamp::of(&std::fs::metadata(&path).unwrap()).unwrap();
+        assert!(stamp.mtime_ns > 0);
+        #[cfg(unix)]
+        assert!(stamp.inode.is_some());
+    }
+
     /// `confirm_seeding` cannot be confused with `set_seeding` at the SQL
     /// layer.
     #[tokio::test]

@@ -87,14 +87,17 @@ whole design is built around.
   friends in one picture, a live per-torrent swarm view with hourly history,
   and a reachability script for checking from outside your network.
 - **The web UI**: first-run wizard, settings with connection tests, an Items
-  page with per-item detail and manual retry/rebuild/unshare, one at a time
-  or over a selection, library composition, sync history, self-refreshing
-  status tiles, a setup checklist, and path-mapping diagnostics.
+  page with per-item detail (including how a friend's Sonarr or Radarr reads
+  the release title, and what would stop it matching) and manual
+  retry/rebuild/unshare, one at a time or over a selection, library
+  composition, sync history with a Sync now button, self-refreshing status
+  tiles, a setup checklist, and path-mapping diagnostics.
 - **Operations**: webhook notifications (generic, Discord, Apprise, ntfy,
-  Gotify, Telegram, Pushover) on nine triggers plus an Uptime-Kuma-style
+  Gotify, Telegram, Pushover) on eleven triggers plus an Uptime-Kuma-style
   heartbeat, config backup and restore, `/metrics` (OpenMetrics) and a
   dashboard-widget JSON endpoint behind a bearer token with
   [ready-made Grafana, Homepage and Home Assistant views](docs/dashboards/README.md),
+  a read-only [management API](docs/SETTINGS.md#api) behind its own token,
   and an OpenAPI 3.1 document for the machine-facing API.
 
 Which apps, clients and indexers are supported, how the three clients differ,
@@ -159,14 +162,16 @@ Three things to know before going further:
   [the security policy](docs/SECURITY.md#what-is-in-scope) for what a
   TLS-terminating proxy in front changes, and
   [forward-auth sign-in](docs/SETTINGS.md#signing-in-through-a-forward-auth-proxy)
-  to let Authelia or Authentik sign you in.
+  to let Authelia or Authentik sign you in. Without a proxy, turn on two-step
+  sign-in under Settings → Account, so a password alone does not open it.
 
 ## Sharing with a friend
 
 sharerr publishes what it shares as a **Torznab** feed, which is what
 Prowlarr speaks. Open **Friends**, add your friend by name, and sharerr
 generates a key just for them, shown once, alongside the feed URL. They add a
-_Generic Torznab_ indexer in their Prowlarr using those two values.
+_Generic Torznab_ indexer in their Prowlarr using those two values, or install
+[a sharerr definition](docs/prowlarr/README.md) made for your address.
 
 Because each friend has their own key, the Friends page can tell you when
 each of them last used the feed, and until they have, which setup step they
@@ -256,6 +261,11 @@ it had. A blank field is no opinion rather than "no cap": sharerr sends
 nothing for it, so a limit you want gone comes off in the client. rTorrent
 honours the cap but not the ratio; see
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
+
+Quiet hours (`quiet_hours = "01:00-07:00"`, `quiet_upload_limit_kib`) lower
+that cap for a daily window in the container's time zone, and an item's page
+can set the day its share ends; both are in
+[`docs/SETTINGS.md`](docs/SETTINGS.md#seeding).
 
 The same panel also holds two settled roadmap questions, since an
 operator reasons about them together:
@@ -613,48 +623,35 @@ attached.
 
 Smallest first, by how much each item touches:
 
-- **Mutation testing.** `cargo-mutants` over the workspace, the next signal
-  past the 95% line-coverage floor: a mutant the suite survives marks a line
-  that runs without being checked. A `scripts/check.sh mutants` target run by
-  hand, then tests for the survivors worth killing.
-- **Event-driven sync.** A "Sync now" button on Status, and an *arr webhook
-  receiver (On Import, On Series Add) that runs one pass at once instead of
-  waiting out `sync.interval_secs`.
+- **Mutation survivors past `sharerr-torrent`.** `scripts/check.sh mutants`
+  exists and `sharerr-torrent`'s survivors worth killing are killed.
+  `sharerr-core` has had one package-scoped run (46 survivors, many likely
+  caught by the `sharerr` crate's tests) and the rest of the workspace none;
+  see [`docs/TESTING.md`](docs/TESTING.md#mutation-testing).
 - **Unraid and TrueNAS app listings.** Where much of the *arr audience
   installs from; a Community Applications template and a TrueNAS app.
-- **A tailnet deployment layout.** A `docker/deploy/` recipe with the
-  advertised host on a Tailscale or WireGuard network: no port forwarding
-  and no gluetun, for the friend who cannot open a port.
-- **Two more notification triggers.** A torrent sharerr created paused or
-  removed behind its back, which Topology shows but nobody is told about, and
-  a shared file whose inode or mtime changed since its torrent was built.
-- **A Prowlarr indexer definition.** A Cardigann definition contributed
-  upstream, so a friend picks "sharerr" from Prowlarr's list and types one
-  key, instead of configuring Generic Torznab by hand.
-- **TOTP on login.** One user and a cookie session; forward auth covers the
-  proxied case but not the plain LAN one the quickstart warns about.
-- **Release-name lint for directory sources.** Item detail shows how a
-  friend's Sonarr or Radarr would parse the title, and flags a name that will
-  not match before the friend's search fails.
-- **A public lighthouse.** The software is done; what is missing is a
-  public instance for a friend group that would rather not run their own.
-- **A read-only management API.** Items, friends, sync status and doctor
-  results behind a bearer token and in the OpenAPI document; scripts and
-  dashboards have only `/dashboard` today.
-- **Time-boxed shares and quiet hours.** Unshare on a date, and a seeding
-  window that lowers the upload cap by hour through the existing
-  `set_limits` path.
+- **A Prowlarr catalog listing.** A per-host definition friends install by
+  hand exists ([`docs/prowlarr/`](docs/prowlarr/README.md)); one listing in
+  Prowlarr's own catalog, so a friend picks "sharerr" and types one key, is
+  blocked upstream until Prowlarr accepts a custom base URL for Cardigann
+  indexers. That doc says why.
+- **A public lighthouse.** The software and a Linode module to host it
+  ([`docker/deploy/lighthouse/terraform/linode/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse/terraform/linode))
+  are done; what is missing is a running public instance, with its URL in
+  [`docs/LIGHTHOUSE.md`](docs/LIGHTHOUSE.md), for a friend group that would
+  rather not run their own.
 - **Per-friend tags and quality scope.** A tag such as `sharerr-alice`
   shares one item with one friend, the control *arr users already reach
   for; and a scope by resolution or size cap, from the media metadata the
   feed already carries, for a friend on a metered line.
 - **Settings in sections.** One page shown in four screenshots is the tell:
   a sticky section nav, per-section save, and an unsaved-changes guard.
-- **Sidecar files.** The directory source skips subtitles and `.nfo` files
-  on purpose. An opt-in multi-file torrent over an episode and its subtitle
-  files, still moving nothing, is narrower than season packs below.
 - **Deluge as a fourth client.** The main client still missing; its Web
   JSON-RPC API covers add-without-moving, labels and per-torrent limits.
+- **Sidecar files.** The directory source skips subtitles and `.nfo` files
+  on purpose. An opt-in multi-file torrent over an episode and its subtitle
+  files, still moving nothing, is narrower than season packs below, and
+  builds the multi-file torrent they also need.
 - **Season packs and albums as one torrent.** One file per torrent means a
   friend's season search returns single episodes; a multi-file torrent over
   the existing folder still moves nothing.

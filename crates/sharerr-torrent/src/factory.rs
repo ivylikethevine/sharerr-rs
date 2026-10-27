@@ -399,6 +399,30 @@ mod tests {
         }
     }
 
+    /// The ladder itself, at both sides of every step: a changed info hash
+    /// for an unchanged file is a new swarm, so the steps must not move.
+    #[test]
+    fn piece_lengths_step_exactly_at_each_threshold() {
+        const KIB: u64 = 1024;
+        const MIB: u64 = 1024 * KIB;
+        for (size, expected) in [
+            (512 * MIB, 256 * KIB),
+            (512 * MIB + 1, 512 * KIB),
+            (1024 * MIB, 512 * KIB),
+            (1024 * MIB + 1, MIB),
+            (2048 * MIB, MIB),
+            (2048 * MIB + 1, 2 * MIB),
+            (4096 * MIB, 2 * MIB),
+            (4096 * MIB + 1, 4 * MIB),
+            (8192 * MIB, 4 * MIB),
+            (8192 * MIB + 1, 8 * MIB),
+            (16384 * MIB, 8 * MIB),
+            (16384 * MIB + 1, 16 * MIB),
+        ] {
+            assert_eq!(piece_length_for(size), expected, "size {size}");
+        }
+    }
+
     #[test]
     fn piece_lengths_stay_within_the_documented_range() {
         for size in [0u64, 1 << 20, 1 << 30, 1 << 35, u64::MAX] {

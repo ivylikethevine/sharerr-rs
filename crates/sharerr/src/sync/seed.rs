@@ -1265,6 +1265,7 @@ mod tests {
             category: String::new(),
             tags: Vec::new(),
             is_seeding: true,
+            is_stopped: false,
             ratio: None,
             ratio_limit: None,
             upload_limit_kib: None,
