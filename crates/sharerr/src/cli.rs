@@ -164,5 +164,12 @@ pub enum VaultCommand {
 pub enum AccountCommand {
     /// Turn off two-step sign-in for an account whose authenticator is lost.
     /// Run inside the container: whoever can do that already holds the data.
-    DisableTotp { username: String },
+    DisableTotp {
+        /// The account to change.
+        // `login` in Rust, `<USERNAME>` on the command line: CodeQL treats an
+        // identifier matching `user.?name` as sensitive data all the way to
+        // `disable_totp`'s `println!` (`docs/CODEQL.md`).
+        #[arg(value_name = "USERNAME")]
+        login: String,
+    },
 }

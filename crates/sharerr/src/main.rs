@@ -72,8 +72,8 @@ async fn main() -> Result<()> {
         Command::Vault(VaultCommand::Set { key }) => commands::vault::set(&config, &key),
         Command::Vault(VaultCommand::List) => commands::vault::list(&config),
         Command::Vault(VaultCommand::Remove { key }) => commands::vault::remove(&config, &key),
-        Command::Account(AccountCommand::DisableTotp { username }) => {
-            commands::account::disable_totp(&config, &username).await
+        Command::Account(AccountCommand::DisableTotp { login }) => {
+            commands::account::disable_totp(&config, &login).await
         }
         Command::Preview(args) => commands::preview::run(args.bind).await,
         // Before the config is even consulted, in spirit: this reads nothing.

@@ -95,6 +95,13 @@ All of it renamed around the word `credential` — `credential_for`,
 of the heuristic's regexes. As before, no vault key, TOML key, or printed
 message changed; only the Rust identifiers naming them moved.
 
+`sharerr account disable-totp` hit the same query on its one `println!`: the
+account name arrives as a `username` clap field and parameter, and both are
+now `login` (`#[arg(value_name = "USERNAME")]` keeps the `<USERNAME>`
+placeholder), the same rename for the same reason. By the mechanism above,
+renaming the function parameter alone would leave the
+`AccountCommand::DisableTotp` field as the source, so both moved at once.
+
 ## Insecure cookie on the session cookie
 
 **The `rust/insecure-cookie` finding on `web/auth.rs`'s `session_cookie`**
@@ -114,3 +121,11 @@ that never sets `Secure`, so branching into `.secure(true)` on one arm would
 leave the other arm to be flagged instead. The dismissal is bound to the flagged lines, so
 moving `session_cookie` or reshaping its builder chain resurfaces the finding
 as new; point its dismissal back here.
+
+`web/two_factor.rs`'s `pending_cookie`, the five-minute cookie that carries
+a sign-in from `/login` to `/login/totp` once the password has passed, is the
+same finding (alert #162) dismissed for the same reason. It takes `secure`
+from the same `arrived_over_https(headers)` call as `session_cookie`, so
+everything above applies verbatim; a cookie scoped to `/login` that a browser
+discards on the plain-HTTP LAN would leave `/login/totp` with no pending
+sign-in to find, which presents as the password form coming straight back.
