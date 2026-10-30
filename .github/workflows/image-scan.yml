@@ -73,6 +73,7 @@ jobs:
           sparse-checkout: |
             ${{ matrix.trivyignore }}
             .github/scripts/trivy_scan.sh
+            .github/scripts/lib.sh
             .github/actions/setup-tool/
             .github/actions/advisory-note/
           sparse-checkout-cone-mode: false

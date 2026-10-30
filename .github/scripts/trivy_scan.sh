@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One scan of a pushed image for fixable HIGH/CRITICAL vulnerabilities, shared by the release gate and
-# the scheduled scan of the published image so the two cannot drift apart on flags. One JSON scan,
-# converted to the table and the SARIF so they can't disagree: <out-dir>/trivy.json, trivy.txt (also
-# printed) and trivy.sarif. `--ignore-unfixed`: a finding with no fix is one a rebuild cannot clear.
+# the scheduled scan of the published image; lib.sh holds the flags, so a sparse checkout lists it too.
+# One JSON scan, converted to the table and the SARIF so they can't disagree: <out-dir>/trivy.json,
+# trivy.txt (also printed) and trivy.sarif.
 # The accepted-risk list is trivy's own default, .trivyignore in the working directory, unless the
 # caller points TRIVY_IGNOREFILE elsewhere.
 #
@@ -17,9 +17,11 @@ set -uo pipefail
 image="${1:?usage: $0 <image-ref> <out-dir>}"
 out="${2:?usage: $0 <image-ref> <out-dir>}"
 
+# shellcheck source=./lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
 rc=0
-trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
-  --format json --output "$out/trivy.json" "$image" || rc=$?
+trivy image "${_CI_TRIVY_FLAGS[@]}" --exit-code 1 --output "$out/trivy.json" "$image" || rc=$?
 if ! jq -e .SchemaVersion "$out/trivy.json" >/dev/null 2>&1; then
   echo "::error title=trivy::the scan of $image did not run (exit $rc)"
   exit 1
