@@ -20,7 +20,7 @@ migration comment, say) now means
   [Open an issue](https://github.com/ivylikethevine/sharerr-rs/issues/new/choose)
   and pick the bug report or feature request form. Check
   [`COMPATIBILITY.md`](COMPATIBILITY.md) for what is supported today and
-  [the roadmap](../README.md#roadmap) for what is already planned or
+  [the roadmap](ROADMAP.md) for what is already planned or
   considered.
 - **Have a question, or want to show off your setup?**
   [Start a discussion](https://github.com/ivylikethevine/sharerr-rs/discussions).

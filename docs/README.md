@@ -30,6 +30,7 @@ the map.
 
 | Doc                                                                                                | Covers                                                                                                   |
 | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| [Roadmap](ROADMAP.md)                                                                              | Where sharerr is going next: candidates weighed and firm intentions, smallest first.                     |
 | [Contributing](CONTRIBUTING.md)                                                                    | The verification loop, lint and test policy, MSRV, what CI runs, and how to submit a change.             |
 | [Testing](TESTING.md)                                                                              | The test tiers, the compose stacks they drive, fixtures, coverage, and mutation testing.                 |
 | [CodeQL findings](CODEQL.md)                                                                       | Each CodeQL finding resolved by more than an obvious fix: what the query flagged, why, and what changed. |

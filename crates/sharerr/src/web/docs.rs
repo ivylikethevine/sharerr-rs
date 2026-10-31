@@ -74,8 +74,7 @@ pub const SECURITY: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md";
 pub const SECURITY_SCOPE: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-is-in-scope";
-pub const ROADMAP: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/README.md#roadmap";
+pub const ROADMAP: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md";
 pub const LIGHTHOUSE: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/LIGHTHOUSE.md";
 

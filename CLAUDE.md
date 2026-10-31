@@ -224,7 +224,7 @@ fact has one owning doc, listed in `docs/README.md`; link to it rather than
 restating it (this file included), and keep every heading that
 `crates/sharerr/src/web/docs.rs` links to verbatim.
 
-The roadmap is `README.md`'s own "Roadmap" section, and it holds candidates
+The roadmap is `docs/ROADMAP.md`, and it holds candidates
 that have been weighed but not committed to as well as firm intentions. An
 idea belongs there or in `docs/COMPATIBILITY.md`'s "Not supported" section,
 never in both. The design brief and the two premises the implementation
