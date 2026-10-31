@@ -7,19 +7,17 @@ name: Pages
 # artifact from its newest green run on main. Needs Settings > Pages > Source
 # set to GitHub Actions.
 #
-# Triggers: Coverage finishing on main (the badges move), a push to main that
-# changes the site's own sources, and dispatch. workflow_run is safe here: the
-# build refuses a Coverage run that failed or came from a pull request, checks
-# out the default branch, and reads the badges through an API query for main's
-# newest green Coverage run rather than the triggering run's payload.
+# Triggers: Coverage finishing on main, which every green push to main reaches,
+# so a change to the site's own sources deploys through it too, and dispatch.
+# workflow_run is safe here: the build refuses a Coverage run that failed or came
+# from a pull request, checks out the default branch, and reads the badges through
+# an API query for main's newest green Coverage run rather than the triggering
+# run's payload.
 on:
   workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [Coverage]
     types: [completed]
     branches: [main]
-  push:
-    branches: [main]
-    paths: [README.md, "docs/**", _config.yml, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:
@@ -46,17 +44,11 @@ jobs:
       contents: read
       actions: read # coverage.yml's artifact, from another workflow run
     steps:
+      # audit: this job holds no write token, and block leaves it open until
+      # its limit on a runner in the DNS experiment (lint_workflows.sh rule 6)
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
-          egress-policy: block
-          # the checkout, the API, the artifacts, and the theme tarball
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            codeload.github.com:443
-            release-assets.githubusercontent.com:443
-            objects.githubusercontent.com:443
-            results-receiver.actions.githubusercontent.com:443
+          egress-policy: audit
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +111,15 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # lint_workflows.sh rule 6 says why this comes first
+      - id: dns-experiment
+        name: Refuse a runner on the DNS experiment
+        run: |
+          if systemctl is-active --quiet egress-dns-resolver.service; then
+            echo "::error title=dns experiment::This runner is on the hosted-runner DNS experiment, where egress-policy block never finishes. Rerun the job."
+            exit 1
+          fi
+
       - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: block
