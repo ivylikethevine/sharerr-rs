@@ -185,7 +185,7 @@ jobs:
       !github.event.pull_request.draft &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     # Advisory: a figure on a PR is information, not a gate. The main leg's
     # floor is what fails.
     continue-on-error: true

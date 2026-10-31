@@ -235,7 +235,7 @@ jobs:
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ${{ needs.prepare.outputs.label }}
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -264,7 +264,7 @@ jobs:
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ${{ needs.prepare.outputs.label }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -376,7 +376,7 @@ jobs:
     # Hosted, like `scripts` below: ./setup-tool may need sudo for
     # /usr/local/bin, and cargo-deny reads files and the advisory database only.
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -411,7 +411,7 @@ jobs:
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -455,7 +455,7 @@ jobs:
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     env:
       TERRAFORM_CHANGED: ${{ contains(fromJSON(needs.prepare.outputs.changes), 'terraform') }}
     steps:
@@ -503,7 +503,7 @@ jobs:
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -582,7 +582,7 @@ jobs:
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -639,7 +639,7 @@ jobs:
       ${{ !cancelled() && needs.reuse.outputs.run == '' &&
           (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -688,7 +688,7 @@ jobs:
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -759,7 +759,7 @@ jobs:
     needs: [prepare, reuse]
     if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
     runs-on: ${{ needs.prepare.outputs.label }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
