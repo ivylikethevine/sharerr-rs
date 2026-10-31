@@ -5,7 +5,7 @@ tried and removed or considered and deliberately left out, with the reason
 attached so a decision already made is not re-litigated. For usage and config
 snippets see [the README](../README.md); for what has been considered without
 being either committed to or declined, see
-[the README's roadmap](../README.md#roadmap); for where to ask for help, see
+[the roadmap](ROADMAP.md); for where to ask for help, see
 [`SUPPORT.md`](SUPPORT.md).
 
 ## Contents
@@ -197,7 +197,7 @@ every `v*` tag with notes collected from the `## Release note` section of
 each PR merged since the last tag
 (see [`docs/RELEASING.md`](RELEASING.md#the-github-release)), which is
 exactly the surface a hand-maintained file would duplicate, and duplicate
-worse, since it can only drift from what shipped. The README's roadmap stays
+worse, since it can only drift from what shipped. The roadmap stays
 a to-do list, not a log: an entry is removed once it ships, not dated and
 kept. The Release attaches no binaries; the container image is the only
 distribution channel.
