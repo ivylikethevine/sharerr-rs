@@ -353,6 +353,7 @@ jobs:
           sparse-checkout: |
             docker/.trivyignore
             .github/scripts/trivy_scan.sh
+            .github/scripts/lib.sh
             .github/actions/setup-tool/
           sparse-checkout-cone-mode: false
 
