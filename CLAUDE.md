@@ -289,7 +289,8 @@ the first commit's queued run and leave that commit with no CI result for
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md#what-ci-runs)). Two things to
 know when editing it. Every job added to `ci.yml` needs
 `needs: [..., reuse]` and `needs.reuse.outputs.run == ''` (with
-`!cancelled()`, since `reuse` skips on a PR) in its `if:`, and a new blocking
+`!cancelled()`, since `reuse` skips on a PR) in its `if:`, a job that compiles
+waits on `lint` the same way, and a new blocking
 job belongs in `mark`'s `needs:` too, or a PR run that skipped or failed it
 can still vouch for the push. And the cost: `test` and `msrv` save their
 rust-cache only from `main`, so a reused push saves no rust-cache on `main`;
@@ -300,7 +301,8 @@ manual dispatch on `main`, which never reuses) wrote.
 `egress-policy` spelled out: `audit` everywhere except `docker.yml`'s
 `publish` and `release`, which hold write tokens and `block` to an allowlist.
 `lint_workflows.sh` rule 6 fails a job without it (the action's own default
-is `block`, which with no allowlist would cut a job off).
+is `block`, which with no allowlist would cut a job off); those two have a
+`dns-experiment` step before it, which the rule says why.
 
 **`image-scan.yml` runs two scans that answer different questions.** `trivy`
 scans both images the repo _publishes_ ("has what we shipped gone stale");

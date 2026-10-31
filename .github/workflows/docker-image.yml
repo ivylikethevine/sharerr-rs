@@ -99,8 +99,12 @@ on:
         description: The docker/Dockerfile build target — runtime-sharerr or runtime-lighthouse.
         type: string
         required: true
-      filters:
-        description: dorny/paths-filter rules (YAML), passed through to prepare.yml.
+      runner-label:
+        description: The runner to build on, from the caller's prepare.yml call.
+        type: string
+        required: true
+      changed:
+        description: Whether anything this image cares about changed, from the same call. Empty on a draft, when that call skips.
         type: string
         required: true
       cache-scope:
@@ -136,21 +140,11 @@ permissions:
   contents: read
 
 jobs:
-  # Which runner to use, and whether anything this image cares about changed —
-  # see prepare.yml. Tag pushes bypass the result entirely (`build`'s `if:`
-  # below): a release must build regardless of what the diff says.
+  # Tag pushes bypass `changed` entirely: a release must build regardless of
+  # what the diff says. A draft reaches here with `changed` empty and skips
+  # (see docker.yml's `pull_request:` trigger for why the skip is not on the
+  # caller).
   #
-  # Draft PRs skip here, which skips `build` with it (see docker.yml's
-  # `pull_request:` trigger for why the skip is not on the caller).
-  prepare:
-    name: prepare
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    permissions:
-      pull-requests: read
-    uses: ./.github/workflows/prepare.yml
-    with:
-      filters: ${{ inputs.filters }}
-
   # See prepare.yml: the one place that decides whether a run gets the
   # self-hosted box, so a fork's pull_request build — which compiles the
   # fork's own Dockerfile and Rust source — can never read vars.RUNNER_LABEL
@@ -160,11 +154,10 @@ jobs:
   # get to run wherever RUNNER_LABEL points.
   build:
     name: build
-    needs: prepare
     if: >-
       startsWith(github.ref, 'refs/tags/v') ||
-      needs.prepare.outputs.code == 'true'
-    runs-on: ${{ needs.prepare.outputs.label }}
+      inputs.changed == 'true'
+    runs-on: ${{ inputs.runner-label }}
     timeout-minutes: ${{ inputs.build-timeout }}
     permissions:
       contents: read

@@ -182,20 +182,20 @@ belongs in `test_support.rs`, not beside the tests that use it. The floor sits a
 ordinary change does not trip it and a real drop does; raise it as coverage
 rises, and write down the reason in the PR that ever lowers it.
 
-`coverage.yml` runs this over tier 1 only, on two paths:
+This covers tier 1 only, on two paths:
 
-- **After every green run of `ci.yml` on `main`** (and on dispatch): it
-  measures, uploads the figures that `pages.yml` publishes as shields.io
+- **After every green run of `ci.yml` on `main`** (and on dispatch):
+  `coverage.yml` measures, uploads the figures that `pages.yml` publishes as shields.io
   endpoint badges (no Codecov upload, no third-party account, no token), and
   enforces the floor post-merge. A run under the floor goes red after the
   upload, and `pages.yml` keeps serving the previous badge until coverage is
   back above it. The [badge on the README](../README.md) is the current
   figure.
-- **On a same-repo, non-draft pull request**: it measures the PR and keeps
-  one comment on it current, with the PR's line coverage, `main`'s latest
-  figure, the change, and whether the floor is met. Advisory: it never
-  blocks a merge, and a fork's PR gets no comment, since its token cannot
-  write one.
+- **On a same-repo, non-draft pull request**: `ci.yml`'s `clippy + tests`
+  runs the suite this way, and `coverage (comment)` keeps one comment on the
+  PR current, with its line coverage, `main`'s latest figure, the change, and
+  whether the floor is met. The figure never blocks a merge, and a fork's PR
+  gets no comment, since its token cannot write one.
 
 See the workflow's own comments for the column it reads out of
 `cargo-llvm-cov`'s summary (Lines, not Regions).

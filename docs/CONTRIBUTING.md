@@ -73,7 +73,7 @@ Four things about it are easy to get wrong:
   it compiles the tier-2 suite behind the `e2e` feature so that suite cannot
   silently rot. A plain `cargo test --workspace` passes locally and fails CI
   on a tier-2 compile break.
-- The `fmt` check is what CI's `rustfmt` job runs. A change that compiles and
+- The `fmt` check is a step of CI's `quick lint` job. A change that compiles and
   passes clippy but was never formatted fails CI on that step alone. If it
   fails, run `cargo fmt --all` and re-run.
 - `cargo test` builds the test harness, not `target/debug/sharerr`. A CLI
@@ -132,16 +132,17 @@ build the image before claiming the MSRV holds.
 
 ## What CI runs
 
-The jobs in `ci.yml` that compile, test or lint code wait on `prepare`,
-which decides whether anything besides workflow YAML and Markdown changed; a
-PR touching only those shows few checks, by design. `terraform` narrows it
-further: it passes without validating unless the modules, a
-`.github/actions/setup-tool` file or `scripts/check.sh` changed. The checks
-that read exactly the files that filter ignores (workflow lint, links, docs,
-secrets) run regardless. Everything runs on every push to `main` and every PR, except
-a draft PR: `ci.yml`, `codeql.yml`, `docker.yml`, `coverage.yml` and
-`release-note.yml` skip every job until the PR is marked ready for review,
-which starts a full run.
+`quick lint` runs every check that compiles nothing, one step after another,
+and always runs. The jobs that compile wait on it, and on `prepare`, which
+decides whether anything but Markdown and the shared CI files and lint configs
+changed; a PR touching only those shows
+few checks, by design. Inside `quick lint`, `cargo-deny` runs only when a
+manifest, `Cargo.lock` or `deny.toml` changed (`advisories.yml` reports a new
+advisory against a tree nobody touched), and terraform only when the modules, a
+`.github/actions/setup-tool` file or `scripts/check.sh` changed. Everything
+runs on every push to `main` and every PR, except a draft PR: `ci.yml`,
+`codeql.yml`, `docker.yml` and `release-note.yml` skip every job until the PR
+is marked ready for review, which starts a full run.
 
 The check names below are matched verbatim by `main`'s ruleset, so a job
 rename is also a ruleset edit; that is why `msrv` carries no version in its
@@ -150,34 +151,29 @@ one. `ci.yml`'s header comment keeps the same list.
 
 | Check                                                                  | Workflow           | Blocks a merge?                                     |
 | ---------------------------------------------------------------------- | ------------------ | --------------------------------------------------- |
-| `rustfmt`                                                              | `ci.yml`           | Yes                                                 |
+| `quick lint` (below)                                                   | `ci.yml`           | Yes                                                 |
 | `clippy + tests` (also rustdoc with `-D warnings`)                     | `ci.yml`           | Yes                                                 |
 | `msrv`                                                                 | `ci.yml`           | Yes                                                 |
-| `cargo-deny`                                                           | `ci.yml`           | Yes                                                 |
-| `shell + compose`                                                      | `ci.yml`           | Yes                                                 |
-| `workflow lint (zizmor + actionlint)` (also `lint_workflows.sh`)       | `ci.yml`           | Yes                                                 |
-| `markdown links (lychee offline)`                                      | `ci.yml`           | Yes                                                 |
-| `docs (markdownlint + prettier + typos)`                               | `ci.yml`           | Yes, once added to the ruleset                      |
-| `secrets (gitleaks)`                                                   | `ci.yml`           | Yes, once added to the ruleset                      |
-| `terraform (fmt + validate)`                                           | `ci.yml`           | Yes, once added to the ruleset                      |
-| `dependency review` (pull requests only)                               | `ci.yml`           | Yes, once added to the ruleset                      |
-| `advisory (hadolint)`                                                  | `ci.yml`           | No, reports only in its step summary                |
+| `dependency review` (pull requests only)                               | `ci.yml`           | Yes                                                 |
 | `advisory (semver)` (cargo-semver-checks against the last `v*` tag)    | `ci.yml`           | No, until a crate is published with a real version  |
+| `coverage (comment)`                                                   | `ci.yml`           | No; keeps one coverage comment on the PR up to date |
 | `release note (pr body)`                                               | `release-note.yml` | No; warns on a missing note, never fails            |
 | CodeQL (`rust`, `actions`)                                             | `codeql.yml`       | Yes, as code scanning; alerts are diff-scoped       |
 | `docker (sharerr) / build`, `docker (lighthouse) / build` (amd64 only) | `docker.yml`       | Yes; also the de-facto MSRV check and a smoke test  |
-| `coverage (pull request)`                                              | `coverage.yml`     | No; keeps one coverage comment on the PR up to date |
 
-The rows marked "once added to the ruleset" already fail red; they block a
-merge only once `main`'s ruleset lists them as required.
+`quick lint` holds rustfmt, cargo-deny, shellcheck, the compose files,
+terraform, zizmor, actionlint, `lint_workflows.sh`, lychee offline, typos,
+markdownlint, prettier and gitleaks, each of which runs even when an earlier
+one failed, and hadolint, which only reports, in its step summary.
 
 `gitleaks` scans the whole history, not the diff, with the known false
 positives in `.gitleaks.toml`. `dependency review` fails a PR that adds a
 dependency (a crate, an action, an npm package under `.github/`) with a known
-high or critical advisory; `cargo-deny` is the whole-tree check. The
-coverage comment compares the PR's line coverage with `main`'s and with the
-floor in `scripts/check.sh` ([`TESTING.md`](TESTING.md#coverage)); same-repo
-PRs only, since a fork's token cannot write the comment.
+high or critical advisory; `cargo-deny` is the whole-tree check. A same-repo
+PR's `clippy + tests` runs the suite under instrumentation, and the coverage
+comment compares the line coverage it measures with `main`'s and with the
+floor in `scripts/check.sh` ([`TESTING.md`](TESTING.md#coverage)); a fork's PR
+runs it plainly, since its token cannot write the comment.
 
 **A push to `main` whose tree a green PR run already tested is not tested
 twice.** When a same-repo PR run passes every blocking job, `ci.yml`'s `mark`
@@ -189,12 +185,12 @@ the pushed commit, linked back to that run. The push run still concludes
 run skipped jobs) runs in full, as does a manual dispatch. `docker.yml` does
 not dedupe: every push to `main` publishes its own image.
 
-Six more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
-`link-check.yml`, `coverage.yml`'s `main` leg, `scorecard.yml`) run weekly
-and after every green run of `ci.yml` on `main`, not on every push
+Five more workflows (`advisories.yml`, `image-scan.yml`, `tool-versions.yml`,
+`link-check.yml`, `scorecard.yml`) run weekly and after every green run of
+`ci.yml` on `main`, and `coverage.yml` after every such run, not on every push
 regardless of outcome, so a tree CI just rejected isn't also scanned,
-coverage-measured, or scored. `coverage.yml`'s `main` leg fails below the
-coverage floor; the others never block anything. `advisories.yml`,
+coverage-measured, or scored. `coverage.yml` fails below the coverage floor;
+the others never block anything. `advisories.yml`,
 `image-scan.yml`'s `pins` job, `tool-versions.yml` and `link-check.yml`
 report by keeping one tracking issue current rather than by failing.
 `integration.yml` runs the docker-backed tiers weekly (or one tier on manual
@@ -251,11 +247,10 @@ scripts/check.sh markdownlint prettier typos links
 `.prettierrc.yaml` pins the formatting (hand-wrapped prose, aligned tables)
 and `.markdownlint.yaml` the style; both tools come from
 `.github/package.json` (`npm ci --prefix .github`, which
-`scripts/check.sh --install` runs). markdownlint, prettier and typos make up
-CI's blocking `docs (markdownlint + prettier + typos)` check; a false
+`scripts/check.sh --install` runs). markdownlint, prettier and typos are steps
+of CI's blocking `quick lint` check; a false
 positive from typos goes in `.typos.toml` with a comment saying what the
-word is. The offline lychee run is CI's blocking
-`markdown links (lychee offline)` check: it catches a relative link to a
+word is. So is the offline lychee run: it catches a relative link to a
 moved file or a `#fragment` whose heading was renamed, without touching the
 network. `link-check.yml` covers external URLs weekly and after each green
 CI run on `main`, keeping a `link-check` tracking issue open while any link

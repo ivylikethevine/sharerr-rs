@@ -177,9 +177,10 @@ The assurance case follows from [the threat model](#threat-model):
 - **The gossip layer's integrity does not depend on transport security**: a
   compromised relay can at worst refuse to forward a record.
 - **Zero `unsafe` code** (`unsafe_code = "forbid"` at the workspace level)
-  removes the memory-safety class of bug, and static analysis (CodeQL,
-  clippy, cargo-deny) runs on every push and weekly against the dependency
-  graph, so a new advisory in a dependency is caught without anyone looking.
+  removes the memory-safety class of bug, static analysis (CodeQL, clippy)
+  runs on every code change, and cargo-deny on every dependency change and
+  weekly against the dependency graph, so a new advisory in a dependency is
+  caught without anyone looking.
 - **What ships is checked before and after it ships.** Before: a PR that
   adds a dependency with a known high or critical advisory fails
   `dependency review`, gitleaks scans the whole history for committed

@@ -15,23 +15,12 @@
 # carries a version, shard number, or matrix value, and renaming a job below
 # is also a ruleset edit:
 #
-#   rustfmt
+#   quick lint                               (every check that compiles nothing)
 #   clippy + tests                           (also runs rustdoc -D warnings)
 #   msrv
-#   cargo-deny
-#   shell + compose
-#   workflow lint (zizmor + actionlint)      (also runs lint_workflows.sh)
-#   markdown links (lychee offline)
-#
-# Blocking jobs added after the ruleset was last written, which need adding to
-# it to be enforced:
-#
-#   docs (markdownlint + prettier + typos)
-#   secrets (gitleaks)
-#   terraform (fmt + validate)
 #   dependency review                        (pull requests only)
 #
-# Never required: `advisory (hadolint)` and `advisory (semver)`, which only
+# Never required: `advisory (semver)` and `coverage (comment)`, which only
 # report.
 
 name: CI
@@ -57,8 +46,8 @@ on:
   # No weekly `schedule:` here. A new advisory against a dependency is not
   # something a commit to this repo causes, so advisories.yml asks that
   # question weekly and keeps one tracking issue current instead of turning a
-  # Monday-morning run red with no diff to point at; `audit` below is purely
-  # the per-PR gate.
+  # Monday-morning run red with no diff to point at; `cargo-deny` below gates
+  # only a pull request or push that changes a dependency, for the same reason.
 
 # A quick follow-up commit should not leave the previous run burning a
 # runner — but only on a PR: coverage.yml, advisories.yml, image-scan.yml,
@@ -82,20 +71,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Which runner to use, and whether anything besides workflow YAML changed —
+  # Which runner to use, and whether anything but CI's own files changed —
   # merged into one call (see prepare.yml) so every heavy job below waits on one
-  # VM boot instead of two. Editing this file (or pages.yml, ...) can't move a
-  # Rust lint, a test result, or a shellcheck finding, so there is nothing below
-  # for those jobs to re-check on a workflow-only change. The workflow, link,
-  # docs and secret checks are deliberately exempt from this gate: each reads
-  # files the filter ignores.
+  # VM boot instead of two. Editing this file (or pages.yml, or a shared action)
+  # can't move a Rust lint or a test result, so there is nothing below for those
+  # jobs to re-check on such a change; `quick lint` always runs, since it reads
+  # those files.
   #
   # `prepare` itself decides what a schedule or workflow_dispatch run means (see
   # its own header comment): a job below only ever checks
-  # `needs.prepare.outputs.code == 'true'` (plus `reuse`'s answer), and
-  # `terraform` reads its own key back from `changes` the same way. Shared
-  # with docker.yml, which wants the identical "anything outside
-  # .github/workflows/**" filter.
+  # `needs.prepare.outputs.code == 'true'` (plus `reuse`'s answer), and `quick
+  # lint` reads the `deps` and `terraform` keys back from `changes` the same way.
   prepare:
     name: prepare
     # Draft PRs skip; see the `pull_request:` trigger above.
@@ -105,15 +91,51 @@ jobs:
     uses: ./.github/workflows/prepare.yml
     with:
       filters: |
+        # What can move a Rust result: everything but Markdown, and the shared CI
+        # files and lint configs, which `quick lint` reads. By name, so
+        # a path this list misses runs the Rust jobs, the safe way round, and
+        # .github/actions/rust-toolchain, which they run on, still counts.
         code:
           - '**'
-          - '!.github/workflows/**'
           - '!**/*.md'
           - '!docs/screenshots/**'
           # NOT '!docs/**' wholesale: crates/sharerr/src/openapi.rs reads
           # ../../docs/openapi.json in a test, so that one file under docs/ is
           # genuinely code and must still trip this filter.
-        # What the `terraform` job reads: the modules, and what installs and
+          - '!.github/*'
+          - '!.github/ISSUE_TEMPLATE/**'
+          - '!.github/scripts/**'
+          - '!.github/workflows/**'
+          - '!.github/actions/advisory-note/**'
+          - '!.github/actions/apt/**'
+          - '!.github/actions/fetch-latest-artifact/**'
+          - '!.github/actions/mark-tree/**'
+          - '!.github/actions/setup-tool/**'
+          - '!.github/actions/setup-tools/**'
+          - '!.github/actions/upsert-tracking-issue/**'
+          - '!.editorconfig'
+          - '!.gitattributes'
+          - '!.gitignore'
+          - '!.markdownlint.yaml'
+          - '!.moxide.toml'
+          - '!.prettierrc.yaml'
+          - '!.scorecard.yml'
+          - '!.shellcheckrc'
+          - '!.vscode/**'
+          - '!.zed/**'
+          - '!LICENSE.md'
+          - '!LICENSES/**'
+          - '!REUSE.toml'
+          - '!_config.yml'
+          - '!lychee.toml'
+          - '!scratch/**'
+        # What `cargo-deny` reads: the dependency tree and its own policy.
+        deps:
+          - 'Cargo.lock'
+          - 'Cargo.toml'
+          - 'crates/*/Cargo.toml'
+          - 'deny.toml'
+        # What the terraform check reads: the modules, and what installs and
         # runs terraform (the tools.txt pin, the check itself).
         terraform:
           - 'docker/deploy/lighthouse/terraform/**'
@@ -170,11 +192,11 @@ jobs:
   # once every blocking job here passed. Not merely "the run was green": a
   # docs-only diff against `dev` skips the heavy jobs and still goes green,
   # and that must not vouch for a push to `main` whose diff is code. A fork's
-  # run never marks (find_tree_run.sh's header says why). `advisory` is not
-  # listed: it never fails.
+  # run never marks (find_tree_run.sh's header says why). `advisory-semver` is
+  # not listed: it never fails.
   mark:
     name: mark the tested tree
-    needs: [prepare, fmt, test, msrv, audit, scripts, terraform, workflow-lint, links, docs, gitleaks, dependency-review]
+    needs: [prepare, lint, test, msrv, dependency-review]
     if: >-
       ${{ !cancelled() && github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository &&
@@ -230,12 +252,33 @@ jobs:
               printf 'success  %s\n' "$name"
             done
 
-  fmt:
-    name: rustfmt
+  # Every check that compiles nothing, one job, one runner. Each runs even when
+  # an earlier one failed, so one push shows every finding, and the jobs that
+  # compile wait on this one, so a stray blank line costs seconds and not a full
+  # build.
+  #
+  # Not gated on `prepare`'s `code`: most of these read exactly the files its
+  # filter ignores (Markdown, .github/, shell scripts), and a typo or a secret can
+  # live anywhere. Only rustfmt, cargo-deny, terraform and hadolint have keys of
+  # their own, the first and last `code`.
+  #
+  # A gate on a commit's own diff, unlike link-check.yml's weekly sweep of
+  # external URLs: lychee is offline here, so it only reads the tree and cannot
+  # flake on someone else's server. Hosted, whatever RUNNER_LABEL says: this job
+  # must not be the one deciding, by its own runner, whether it trusts that box.
+  lint:
+    name: quick lint
     needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ${{ needs.prepare.outputs.label }}
-    timeout-minutes: 5
+    # Draft PRs skip; see the `pull_request:` trigger above.
+    if: >-
+      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
+          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      CODE_CHANGED: ${{ needs.prepare.outputs.code }}
+      DEPS_CHANGED: ${{ contains(needs.prepare.outputs.changes, '"deps"') }}
+      TERRAFORM_CHANGED: ${{ contains(needs.prepare.outputs.changes, '"terraform"') }}
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -243,28 +286,205 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
+          # the whole history, which gitleaks scans: a committed credential stays
+          # there after the commit that removes it
+          fetch-depth: 0
           persist-credentials: false
+
+      # The tools.txt pins, one shared actions/cache round trip.
+      - id: tools
+        uses: ./.github/actions/setup-tools
+        with:
+          tools: shellcheck zizmor actionlint yq lychee typos gitleaks
+
+      # zizmor catches expression injection, untrusted checkouts feeding
+      # privileged jobs, and cache/artifact poisoning; actionlint a bad `needs`,
+      # an invalid context, a step referencing an undefined output;
+      # lint_workflows.sh what neither does (timeouts, persist-credentials, SHA
+      # pins with version comments, workflow_run gating).
+      - name: Audit the workflows (zizmor)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check.sh zizmor
+
+      - name: Lint the workflows (actionlint)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh actionlint
+
+      - name: Check workflow invariants (lint_workflows.sh)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh workflows
+
+      # Every tracked *.sh, composite-action helpers included, from git rather
+      # than a hand-kept list.
+      - name: Lint every tracked shell script (shellcheck)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh shellcheck
+
+      # Schema, `${VAR:?}` interpolation and `extends` resolution for every
+      # tracked compose file, without images or a daemon. The script owns the
+      # file list and the reason for each file it does not validate alone.
+      - name: Validate every compose file
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh compose
+
+      # Tracked files only, so a local run matches CI regardless of what
+      # ignored Markdown sits in the checkout.
+      - name: Check relative links and anchors
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh links
+
+      # A false positive belongs in `.typos.toml` with a comment saying what
+      # the word is.
+      - name: Check spelling (typos)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh typos
+
+      # --redact: a real finding must not be reprinted into a public log.
+      - name: Scan the history for secrets (gitleaks)
+        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
+        run: scripts/check.sh gitleaks
+
+      # npm's download cache, not node_modules: `npm ci` still installs from
+      # the lockfile and checks every integrity hash, it just stops
+      # re-downloading the same tarballs. A new lockfile is a new key.
+      - name: Cache npm downloads
+        if: ${{ !cancelled() }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('.github/package-lock.json') }}
+
+      # --ignore-scripts: no install hook of any dependency runs here.
+      - id: npm
+        name: Install the locked Markdown tools
+        if: ${{ !cancelled() }}
+        run: npm ci --prefix .github --ignore-scripts --no-audit --no-fund
+
+      - name: Lint the Markdown (markdownlint)
+        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
+        run: scripts/check.sh markdownlint
+
+      # Fix with `.github/node_modules/.bin/prettier --write` over the files
+      # it names.
+      - name: Check the Markdown formatting (prettier)
+        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
+        run: scripts/check.sh prettier
 
       # rustfmt.toml sets only stable options, so the stable toolchain is
       # sufficient — this does not need nightly rustfmt. The action's header
       # says why rustup directly rather than dtolnay/rust-toolchain.
-      - name: Install the stable toolchain (rustfmt)
+      - id: rustfmt
+        name: Install the stable toolchain (rustfmt)
+        if: ${{ !cancelled() && env.CODE_CHANGED == 'true' }}
         uses: ./.github/actions/rust-toolchain
         with:
           components: rustfmt
 
-      # Its own job rather than a step in `test`: it takes seconds, and a stray
-      # blank line should not hide the test results behind a failed job.
-      - run: scripts/check.sh fmt
+      - name: Check the Rust formatting (rustfmt)
+        if: ${{ !cancelled() && steps.rustfmt.outcome == 'success' }}
+        run: scripts/check.sh fmt
 
+      # Advisories, licences, and duplicate/banned crates, on a change to the
+      # dependency tree or its policy: a new advisory on a tree nobody touched is
+      # advisories.yml's to report, not a reason to fail this commit.
+      - id: deny-install
+        if: ${{ !cancelled() && env.DEPS_CHANGED == 'true' }}
+        uses: ./.github/actions/setup-tool
+        with:
+          tool: cargo-deny
+
+      - name: Check advisories, licenses, bans and sources (cargo-deny)
+        if: ${{ !cancelled() && steps.deny-install.outcome == 'success' }}
+        run: scripts/check.sh deny
+
+      # The hosted-lighthouse Terraform modules are published recommendations
+      # that nothing in CI applies, so a syntax or provider-schema break would
+      # otherwise ship unnoticed. `init -backend=false` fetches provider schemas
+      # only; no credentials, no state.
+      - id: terraform-install
+        if: ${{ !cancelled() && env.TERRAFORM_CHANGED == 'true' }}
+        uses: ./.github/actions/setup-tool
+        with:
+          tool: terraform
+
+      - name: Check formatting and validate every module (terraform)
+        if: ${{ !cancelled() && steps.terraform-install.outcome == 'success' }}
+        run: scripts/check.sh terraform
+
+      # hadolint, advisory only: DL3008 (pin every apt package) and its
+      # neighbours are about a Debian mirror's churn, not a defect in this
+      # Dockerfile — worth seeing, never worth reddening a PR over.
+      # `.hadolint.yaml` documents the rules that do not apply here at all (a
+      # reason per entry); what is not in that list still surfaces below.
+      # continue-on-error on the install too: a failed download must surface as
+      # an advisory note, not a red job.
+      - id: hadolint-install
+        if: ${{ !cancelled() && env.CODE_CHANGED == 'true' }}
+        continue-on-error: true
+        uses: ./.github/actions/setup-tool
+        with:
+          tool: hadolint
+
+      - if: ${{ !cancelled() && steps.hadolint-install.outcome == 'failure' }}
+        uses: ./.github/actions/advisory-note
+        with:
+          title: hadolint
+          warning-body: hadolint could not be installed - the Dockerfile was not linted
+          heading: hadolint did not run
+          body: >-
+            Advisory only: this step never blocks a merge. The install step above
+            failed, so this run says nothing about the Dockerfile either way.
+
+      - id: hadolint
+        name: Lint the Dockerfile (hadolint, advisory)
+        if: ${{ !cancelled() && steps.hadolint-install.outcome == 'success' }}
+        run: |
+          set -uo pipefail
+          hadolint -c .hadolint.yaml docker/Dockerfile >"$RUNNER_TEMP/hadolint.out" 2>&1
+          status=$?
+          if [ -s "$RUNNER_TEMP/hadolint.out" ]; then
+            cat "$RUNNER_TEMP/hadolint.out"
+            # truncated before it goes in the summary
+            sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
+            echo "found=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "hadolint: clean"
+            echo "found=0" >>"$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+        continue-on-error: true
+
+      - if: ${{ !cancelled() && steps.hadolint.outputs.found == '1' }}
+        uses: ./.github/actions/advisory-note
+        with:
+          title: hadolint
+          warning-body: Dockerfile lint findings above - advisory, not blocking
+          heading: hadolint found something
+          body: >-
+            Advisory only: this step never blocks a merge. `.hadolint.yaml` carries a
+            reason per silenced rule; anything reaching here is deliberately left visible.
+          report-file: ${{ runner.temp }}/hadolint-summary.out
+
+  # A same-repo pull request measures coverage here rather than in a second job
+  # that would compile and run the same suite: `cargo llvm-cov` is `check_test`'s
+  # command under instrumentation, less the doctests, which run on their own
+  # below. A push, a dispatch or a fork runs the plain suite. The figure is
+  # advisory, so every step that only reports continues on error; coverage.yml's
+  # main leg holds the floor.
   test:
     name: clippy + tests
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    needs: [prepare, reuse, lint]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' && needs.lint.result == 'success' }}
     runs-on: ${{ needs.prepare.outputs.label }}
     timeout-minutes: 20
+    permissions:
+      contents: read
+      # the cross-run read of main's latest coverage-badge artifact
+      actions: read
+    env:
+      MEASURE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
         with:
@@ -276,10 +496,10 @@ jobs:
           # a credential with no job left to use it.
           persist-credentials: false
 
-      - name: Install the stable toolchain (clippy)
+      - name: Install the stable toolchain (clippy, and what coverage reads)
         uses: ./.github/actions/rust-toolchain
         with:
-          components: clippy
+          components: clippy,llvm-tools-preview
 
       # `cache-on-failure` because this job is *designed* to fail: it is the gate on
       # unwrap_used/expect_used. Without it, every lint failure throws away the
@@ -292,6 +512,13 @@ jobs:
           # cache sharing one 10 GB repo-wide budget, PR traffic writing here
           # would otherwise evict all of them continuously.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # The instrumented target/ tree, from coverage.yml's main leg; read only.
+      - if: env.MEASURE == 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: coverage
+          save-if: false
 
       # Clippy, the tests and rustdoc share a job because they share target/
       # and the registry, so splitting them would pay for the dependency build
@@ -311,13 +538,148 @@ jobs:
       # rot, while its #[ignore] keeps it from running. Never add
       # --include-ignored: those tests need a four-container *arr stack.
       - name: Test (tier 1)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.MEASURE != 'true' }}
         run: scripts/check.sh test
+
+      - if: ${{ !cancelled() && env.MEASURE == 'true' }}
+        uses: ./.github/actions/setup-tool
+        with:
+          tool: cargo-llvm-cov
+
+      - id: measured
+        name: Test (tier 1, under instrumentation)
+        if: ${{ !cancelled() && env.MEASURE == 'true' }}
+        run: scripts/check.sh coverage-run
+
+      - name: Test the doctests
+        if: ${{ !cancelled() && env.MEASURE == 'true' }}
+        run: scripts/check.sh doctest
 
       # A broken intra-doc link is otherwise a warning nobody reads.
       - name: Document (rustdoc -D warnings)
         if: ${{ !cancelled() }}
         run: scripts/check.sh doc
+
+      - id: floor
+        name: Check the line-coverage floor
+        if: ${{ !cancelled() && steps.measured.outcome == 'success' }}
+        continue-on-error: true
+        run: scripts/check.sh coverage-floor
+
+      # coverage.yml's own run on `main`, never a pull_request run (the action's
+      # `event` filter), so a PR's figure is never its own baseline.
+      - if: ${{ !cancelled() && steps.measured.outcome == 'success' }}
+        continue-on-error: true
+        uses: ./.github/actions/fetch-latest-artifact
+        with:
+          workflow: coverage.yml
+          artifact-name: coverage-badge
+          dest-subdir: main-coverage
+          event: workflow_run
+          found-message: comparing with main's coverage run
+          missing-message: no successful coverage run on main yet - the comment will show this PR's figure alone
+
+      - name: Write the coverage comment
+        if: ${{ !cancelled() && steps.measured.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          FLOOR_OUTCOME: ${{ steps.floor.outcome }}
+        run: |
+          set -euo pipefail
+          summary="$(scripts/check.sh coverage-summary)"
+          pr_pct="$(awk '/^TOTAL/ {print $10}' <<<"$summary")"
+          main_pct=""
+          f="$RUNNER_TEMP/main-coverage/coverage.json"
+          [ -f "$f" ] && main_pct="$(jq -r '.message // empty' "$f")"
+          if [ -n "$main_pct" ]; then
+            delta="$(awk -v a="${pr_pct%\%}" -v b="${main_pct%\%}" 'BEGIN { printf "%+.2f", a - b }')"
+          else
+            main_pct="unknown"
+            delta="n/a"
+          fi
+          floor="$(sed -n 's/^COVERAGE_FLOOR_LINES=\([0-9.]*\).*/\1/p' scripts/check.sh)"
+          if [ "$FLOOR_OUTCOME" = success ]; then met="met"; else met="**not met**"; fi
+          mkdir -p "$RUNNER_TEMP/coverage-comment"
+          {
+            echo "<!-- coverage-comment -->"
+            echo "### Line coverage (tier 1 suite)"
+            echo
+            echo "| | Lines |"
+            echo "| --- | --- |"
+            echo "| This PR | $pr_pct |"
+            echo "| \`main\` | $main_pct |"
+            echo "| Change | $delta |"
+            echo "| Floor | ${floor}% ($met) |"
+            echo
+            echo "<details><summary>Per-file summary</summary>"
+            echo
+            echo '```'
+            head -c 50000 <<<"$summary"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "Advisory: updated on every push to this PR; it never blocks a merge."
+          } >"$RUNNER_TEMP/coverage-comment/comment.md"
+          cat "$RUNNER_TEMP/coverage-comment/comment.md" >>"$GITHUB_STEP_SUMMARY"
+
+      - if: ${{ !cancelled() && steps.measured.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-comment
+          path: ${{ runner.temp }}/coverage-comment
+          retention-days: 1
+          if-no-files-found: error
+
+  # The only job with a write token, and it checks nothing out: it downloads
+  # the comment `test` wrote in this same run and posts or edits it. Keeps its
+  # own job for that token; `test` runs the pull request's code.
+  coverage-comment:
+    name: coverage (comment)
+    needs: test
+    if: >-
+      ${{ !cancelled() && needs.test.result != 'skipped' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - id: download
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-comment
+          path: ${{ runner.temp }}/coverage-comment
+
+      # One comment per PR, found by its marker and edited in place, so a
+      # busy PR does not collect one per push.
+      - name: Post or update the coverage comment
+        if: steps.download.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/coverage-comment/comment.md"
+          id="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- coverage-comment -->"))) | .id' |
+            head -1)"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" >/dev/null
+            echo "updated comment $id"
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -F body=@"$body" >/dev/null
+            echo "posted a new comment"
+          fi
 
   # Its own job so an MSRV break fails in about a minute with a name that says what
   # it is, rather than surfacing as a Docker build failure fifteen minutes into the
@@ -330,8 +692,8 @@ jobs:
   # docker/Dockerfile, the one other place it is written).
   msrv:
     name: msrv
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    needs: [prepare, reuse, lint]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' && needs.lint.result == 'success' }}
     runs-on: ${{ needs.prepare.outputs.label }}
     timeout-minutes: 20
     steps:
@@ -369,296 +731,6 @@ jobs:
       # `cargo check` on Cargo.toml's rust-version toolchain; see check.sh.
       - run: scripts/check.sh msrv
 
-  audit:
-    name: cargo-deny
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    # Hosted, like `scripts` below: ./setup-tool may need sudo for
-    # /usr/local/bin, and cargo-deny reads files and the advisory database only.
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      # The tools.txt pin, the same binary advisories.yml runs.
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: cargo-deny
-
-      # Advisories, licences, and duplicate/banned crates. Its own job because
-      # it is the one check that can start failing without anybody touching the
-      # repository; the weekly re-check for that case is advisories.yml.
-      - name: Check advisories, licenses, bans and sources
-        run: scripts/check.sh deny
-
-  # Neither of these compiles anything, and both guard files that no Rust check
-  # looks at. The test stack in particular has already shipped with its `networks:`
-  # block commented out and nothing noticed.
-  #
-  # Hosted rather than `needs.prepare.outputs.label`: ./setup-tool installs
-  # into /usr/local/bin with sudo, and neither check needs the self-hosted
-  # box's Docker daemon (`compose config` reads files only).
-  scripts:
-    name: shell + compose
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      # The tools.txt pin, not the runner image's shellcheck, so an image
-      # update cannot change what this gate reports.
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: shellcheck
-
-      # Every tracked *.sh, composite-action helpers included, from git rather
-      # than a hand-kept list.
-      - name: Lint every tracked shell script (shellcheck)
-        run: scripts/check.sh shellcheck
-
-      # Schema, `${VAR:?}` interpolation and `extends` resolution for every
-      # tracked compose file, without images or a daemon. The script owns the
-      # file list and the reason for each file it does not validate alone.
-      - name: Validate every compose file
-        if: ${{ !cancelled() }}
-        run: scripts/check.sh compose
-
-  # The hosted-lighthouse Terraform modules are published recommendations that
-  # nothing in CI applies, so a syntax or provider-schema break would otherwise
-  # ship unnoticed. `init -backend=false` fetches provider schemas only; no
-  # credentials, no state.
-  #
-  # A code change that touches none of `prepare`'s "terraform" paths skips the
-  # install and the check, not the job: a skipped job would stop `mark`
-  # recording the tree (it refuses any skipped need), and the job is a
-  # blocking check.
-  terraform:
-    name: terraform (fmt + validate)
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    env:
-      TERRAFORM_CHANGED: ${{ contains(fromJSON(needs.prepare.outputs.changes), 'terraform') }}
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - if: env.TERRAFORM_CHANGED == 'true'
-        uses: ./.github/actions/setup-tool
-        with:
-          tool: terraform
-
-      - name: Check formatting and validate every module
-        run: |
-          if [ "$TERRAFORM_CHANGED" = true ]; then
-            scripts/check.sh terraform
-          else
-            echo "No Terraform module, setup-tool or check.sh change - nothing to validate."
-          fi
-
-  # GitHub Actions security audit, workflow syntax checking, and this repo's
-  # structural invariants, in one job: zizmor catches expression injection,
-  # untrusted checkouts feeding privileged jobs, and cache/artifact poisoning;
-  # actionlint catches a bad `needs`, an invalid context, a step referencing an
-  # undefined output; lint_workflows.sh enforces what neither does (timeouts,
-  # persist-credentials, SHA pins with version comments, workflow_run gating).
-  # The job name predates the third and stays, since it is a required check.
-  #
-  # All three audit `.github/` itself, so a workflow-only change is exactly
-  # the case they exist to catch — none gates on `prepare`. Hosted rather than
-  # `needs.prepare.outputs.label`: this is exactly the job that should not be
-  # the one deciding, by its own runner, whether it trusts that box. One
-  # setup-tools call pays one shared actions/cache round trip for all three
-  # tools. Each check runs even when an earlier one failed, so one push shows
-  # every finding.
-  workflow-lint:
-    name: workflow lint (zizmor + actionlint)
-    needs: reuse
-    # Draft PRs skip; see the `pull_request:` trigger above.
-    if: >-
-      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
-          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      - id: tools
-        uses: ./.github/actions/setup-tools
-        with:
-          tools: zizmor actionlint yq
-
-      - name: Audit the workflows (zizmor)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: scripts/check.sh zizmor
-
-      - name: Lint the workflows (actionlint)
-        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
-        run: scripts/check.sh actionlint
-
-      - name: Check workflow invariants (lint_workflows.sh)
-        if: ${{ !cancelled() && steps.tools.outcome == 'success' }}
-        run: scripts/check.sh workflows
-
-  # A gate, unlike link-check.yml's weekly sweep of external URLs: this is
-  # offline, so it only reads the tree and cannot flake on someone else's
-  # server. It catches a relative link to a moved file or a `#fragment` whose
-  # heading was renamed, which is a defect a diff introduces. Not gated on
-  # `prepare`: its filter ignores **/*.md, exactly the files checked here,
-  # and a Rust-only change can still delete a file a doc links to.
-  links:
-    name: markdown links (lychee offline)
-    needs: reuse
-    # Draft PRs skip; see the `pull_request:` trigger above.
-    if: >-
-      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
-          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: lychee
-
-      # Tracked files only, so a local run matches CI regardless of what
-      # ignored Markdown sits in the checkout.
-      - name: Check relative links and anchors
-        run: scripts/check.sh links
-
-  # Markdown style and formatting, plus spelling across the whole tree. Not
-  # gated on `prepare`, for the same reason as `links`: the filter ignores
-  # **/*.md, and a typo can live in Rust source as easily as in a doc.
-  # markdownlint and prettier come from .github/package-lock.json (versions
-  # and integrity hashes, transitive dependencies included). All three run
-  # even when one fails.
-  docs:
-    name: docs (markdownlint + prettier + typos)
-    needs: reuse
-    # Draft PRs skip; see the `pull_request:` trigger above.
-    if: >-
-      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
-          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: typos
-
-      # A false positive belongs in `.typos.toml` with a comment saying what
-      # the word is.
-      - name: Check spelling (typos)
-        run: scripts/check.sh typos
-
-      # npm's download cache, not node_modules: `npm ci` still installs from
-      # the lockfile and checks every integrity hash, it just stops
-      # re-downloading the same tarballs. A new lockfile is a new key.
-      - name: Cache npm downloads
-        if: ${{ !cancelled() }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('.github/package-lock.json') }}
-
-      # --ignore-scripts: no install hook of any dependency runs here.
-      - id: npm
-        name: Install the locked Markdown tools
-        if: ${{ !cancelled() }}
-        run: npm ci --prefix .github --ignore-scripts --no-audit --no-fund
-
-      - name: Lint the Markdown (markdownlint)
-        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
-        run: scripts/check.sh markdownlint
-
-      # Fix with `.github/node_modules/.bin/prettier --write` over the files
-      # it names.
-      - name: Check the Markdown formatting (prettier)
-        if: ${{ !cancelled() && steps.npm.outcome == 'success' }}
-        run: scripts/check.sh prettier
-
-  # A committed credential stays in history after the commit that removes it,
-  # so the scan is over every commit, not the diff. `.gitleaks.toml` lists the
-  # known false positives (test-only keys), each pinned to its file and value.
-  # Not gated on `prepare`: a secret can land in a doc or a workflow.
-  gitleaks:
-    name: secrets (gitleaks)
-    needs: reuse
-    # Draft PRs skip; see the `pull_request:` trigger above.
-    if: >-
-      ${{ !cancelled() && needs.reuse.outputs.run == '' &&
-          (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # the whole history, not the one commit a shallow clone would scan
-          fetch-depth: 0
-          persist-credentials: false
-
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: gitleaks
-
-      # --redact: a real finding must not be reprinted into a public log.
-      - name: Scan the history for secrets
-        run: scripts/check.sh gitleaks
-
   # Blocks a PR that adds a dependency (a crate in Cargo.lock, an action, an
   # npm package in .github/) with a known high or critical advisory. This is
   # the diff-scoped gate; cargo-deny above checks the whole tree. PR-only,
@@ -678,77 +750,6 @@ jobs:
         with:
           fail-on-severity: high
 
-  # hadolint, advisory only: DL3008 (pin every apt package) and its
-  # neighbours are about a Debian mirror's churn, not a defect in this
-  # Dockerfile — worth seeing, never worth reddening a PR over.
-  # `.hadolint.yaml` documents the rules that do not apply here at all (a
-  # reason per entry); what is not in that list still surfaces below.
-  advisory:
-    name: advisory (hadolint)
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Nothing here pushes back to GitHub; a lingering token in .git/config is
-          # a credential with no job left to use it.
-          persist-credentials: false
-
-      # The tools.txt pin, so a new upstream rule arrives as a reviewed bump.
-      # continue-on-error like every other step on this path: a failed
-      # download must surface as an advisory note below, not a red job.
-      - id: hadolint-install
-        continue-on-error: true
-        uses: ./.github/actions/setup-tool
-        with:
-          tool: hadolint
-
-      - if: steps.hadolint-install.outcome == 'failure'
-        uses: ./.github/actions/advisory-note
-        with:
-          title: hadolint
-          warning-body: hadolint could not be installed - the Dockerfile was not linted
-          heading: hadolint did not run
-          body: >-
-            Advisory only: this job never blocks a merge. The install step above
-            failed, so this run says nothing about the Dockerfile either way.
-
-      - id: hadolint
-        name: Lint the Dockerfile
-        if: steps.hadolint-install.outcome == 'success'
-        run: |
-          set -uo pipefail
-          hadolint -c .hadolint.yaml docker/Dockerfile >"$RUNNER_TEMP/hadolint.out" 2>&1
-          status=$?
-          if [ -s "$RUNNER_TEMP/hadolint.out" ]; then
-            cat "$RUNNER_TEMP/hadolint.out"
-            # truncated before it goes in the summary
-            sed -n '1,80p' "$RUNNER_TEMP/hadolint.out" >"$RUNNER_TEMP/hadolint-summary.out"
-            echo "found=1" >>"$GITHUB_OUTPUT"
-          else
-            echo "hadolint: clean"
-            echo "found=0" >>"$GITHUB_OUTPUT"
-          fi
-          exit "$status"
-        continue-on-error: true
-
-      - if: steps.hadolint.outputs.found == '1'
-        uses: ./.github/actions/advisory-note
-        with:
-          title: hadolint
-          warning-body: Dockerfile lint findings above - advisory, not blocking
-          heading: hadolint found something
-          body: >-
-            Advisory only: this job never blocks a merge. `.hadolint.yaml` carries a
-            reason per silenced rule; anything reaching here is deliberately left visible.
-          report-file: ${{ runner.temp }}/hadolint-summary.out
-
   # cargo-semver-checks, advisory only: every public API change that needs a
   # bump since the last `v*` tag, named with that bump. The workspace version is a
   # placeholder (Cargo.toml), so no bump can be read off it and a red here
@@ -756,8 +757,8 @@ jobs:
   # published with a real version (scripts/check.sh's check_semver).
   advisory-semver:
     name: advisory (semver)
-    needs: [prepare, reuse]
-    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' }}
+    needs: [prepare, reuse, lint]
+    if: ${{ !cancelled() && needs.prepare.outputs.code == 'true' && needs.reuse.outputs.run == '' && needs.lint.result == 'success' }}
     runs-on: ${{ needs.prepare.outputs.label }}
     timeout-minutes: 20
     steps:

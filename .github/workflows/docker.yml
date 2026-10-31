@@ -51,10 +51,10 @@ on:
     branches: [main]
     tags: ["v*"]
   # Draft PRs build nothing until marked ready; ci.yml's `pull_request:`
-  # trigger explains the activity types. The skip lives on docker-image.yml's
-  # `prepare` job, not on the two caller jobs below: a skipped caller reports
-  # one check under its own name (`docker (sharerr)`), so the ruleset's
-  # required `docker (sharerr) / build` would never report and sit pending.
+  # trigger explains the activity types. The skip lives on the `prepare` job,
+  # not on the two caller jobs below: a skipped caller reports one check under
+  # its own name (`docker (sharerr)`), so the ruleset's required
+  # `docker (sharerr) / build` would never report and sit pending.
   pull_request:
     branches: [main] # PRs into dev run only CI and CodeQL
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
@@ -210,9 +210,55 @@ jobs:
             exit 1
           done
 
+  # Which runner to use, and what changed, once for both images (prepare.yml).
+  # Draft PRs skip here, which skips each `build` with it.
+  #
+  # `code`, the sharerr image: anything that can reach it. Nothing under .github
+  # does, nor the shared lint configs a sync pull request changes, so those build
+  # nothing; a path this list misses builds, the safe way round.
+  # `lighthouse`, narrower: this image is built from one crate that depends on
+  # nothing else in the workspace, so a change confined to, say,
+  # crates/sharerr-qbit cannot alter it. The lockfile and the root manifest are
+  # in the list because the build is `--locked` and resolves against both.
+  # Tag pushes bypass both (docker-image.yml's own `build` job `if:`).
+  prepare:
+    name: prepare
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    permissions:
+      pull-requests: read
+    uses: ./.github/workflows/prepare.yml
+    with:
+      filters: |
+        code:
+          - '**'
+          - '!.github/**'
+          - '!**/*.md'
+          - '!docs/screenshots/**'
+          - '!.editorconfig'
+          - '!.gitattributes'
+          - '!.gitignore'
+          - '!.markdownlint.yaml'
+          - '!.moxide.toml'
+          - '!.prettierrc.yaml'
+          - '!.scorecard.yml'
+          - '!.shellcheckrc'
+          - '!.vscode/**'
+          - '!.zed/**'
+          - '!LICENSE.md'
+          - '!LICENSES/**'
+          - '!REUSE.toml'
+          - '!_config.yml'
+          - '!lychee.toml'
+          - '!scratch/**'
+        lighthouse:
+          - 'crates/sharerr-lighthouse/**'
+          - 'docker/Dockerfile'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+
   # A called workflow's jobs cannot request a permission this job does not
-  # hold — every scope any job inside docker-image.yml needs (including the
-  # nested `prepare` call's `pull-requests: read`) has to be granted here.
+  # hold — every scope any job inside docker-image.yml needs has to be granted
+  # here.
   # Named after the image, not a bare `docker`: this and `lighthouse` below
   # both call docker-image.yml, and their `build` checks would otherwise both
   # report as `docker / build` — one name two checks share cannot be required
@@ -223,14 +269,19 @@ jobs:
   # reusable-workflow check is named `<this job's name> / <called job's
   # name>` regardless of which file the caller job lives in — so merging the
   # two callers into this file needs no ruleset edit.
+  #
+  # `!cancelled()`, not the default: `prepare` skips on a draft, and a skipped
+  # caller would report under its own name only. Running the caller lets `build`
+  # report its own skip under the required name.
   docker:
     name: docker (sharerr)
+    needs: prepare
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
-      pull-requests: read
     uses: ./.github/workflows/docker-image.yml
     with:
       # GHCR rejects uppercase paths. `github.repository` happens to be
@@ -240,15 +291,8 @@ jobs:
       image: ghcr.io/${{ github.repository }}
       target: runtime-sharerr
       cache-scope: sharerr
-      # Anything outside .github/workflows/** — a workflow-only change can't
-      # move what this image builds. Tag pushes bypass this filter entirely
-      # (docker-image.yml's own `build` job `if:`).
-      filters: |
-        code:
-          - '**'
-          - '!.github/workflows/**'
-          - '!**/*.md'
-          - '!docs/screenshots/**'
+      runner-label: ${{ needs.prepare.outputs.label }}
+      changed: ${{ needs.prepare.outputs.code }}
 
   # The lighthouse — a standalone rendezvous service meant to be self-hosted
   # by anyone, on neutral ground away from any particular library (see
@@ -259,12 +303,13 @@ jobs:
   # for why this job keeps the name `docker (lighthouse)`.
   lighthouse:
     name: docker (lighthouse)
+    needs: prepare
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       packages: write
       id-token: write
       attestations: write
-      pull-requests: read
     uses: ./.github/workflows/docker-image.yml
     with:
       # A second package in the owner's namespace rather than a suffix on
@@ -278,6 +323,8 @@ jobs:
       # *arr clients, no torrent clients and no sqlx, and its runtime stage
       # installs the same two packages.
       build-timeout: 15
+      runner-label: ${{ needs.prepare.outputs.label }}
+      changed: ${{ format('{0}', contains(needs.prepare.outputs.changes, '"lighthouse"')) }}
       # The sharerr image is named for the repository itself, so
       # docker/metadata-action's default OCI labels already link the GHCR
       # package back to it. This image is named for the crate instead, so
@@ -286,19 +333,6 @@ jobs:
         org.opencontainers.image.source=https://github.com/${{ github.repository }}
         org.opencontainers.image.title=sharerr-lighthouse
         org.opencontainers.image.description=The lighthouse — a standalone key-hash to endpoint rendezvous service for sharerr
-      # Narrower than the sharerr image's: this image is built from one
-      # crate that depends on nothing else in the workspace, so a change
-      # confined to, say, crates/sharerr-qbit cannot alter what this job
-      # would produce. The lockfile and the root manifest are in the list
-      # because the build is `--locked` and resolves against both. Tag
-      # pushes bypass this filter entirely (docker-image.yml's own `build`
-      # job `if:`).
-      filters: |
-        code:
-          - 'crates/sharerr-lighthouse/**'
-          - 'docker/Dockerfile'
-          - 'Cargo.toml'
-          - 'Cargo.lock'
 
   # The release's vulnerability gate: trivy against the exact digests the two
   # builds pushed to `pending-<sha>`, before `publish` can promote either. A
@@ -427,6 +461,15 @@ jobs:
     permissions:
       packages: write
     steps:
+      # lint_workflows.sh rule 6 says why this comes first
+      - id: dns-experiment
+        name: Refuse a runner on the DNS experiment
+        run: |
+          if systemctl is-active --quiet egress-dns-resolver.service; then
+            echo "::error title=dns experiment::This runner is on the hosted-runner DNS experiment, where egress-policy block never finishes. Rerun the job."
+            exit 1
+          fi
+
       # Block, not audit: this job holds `packages: write`. The allowlist
       # covers GitHub, GHCR and Sigstore; tighten it to what the audit
       # insights for this job actually show once a release has run under it.
@@ -505,6 +548,15 @@ jobs:
       pull-requests: read
       actions: read
     steps:
+      # lint_workflows.sh rule 6 says why this comes first
+      - id: dns-experiment
+        name: Refuse a runner on the DNS experiment
+        run: |
+          if systemctl is-active --quiet egress-dns-resolver.service; then
+            echo "::error title=dns experiment::This runner is on the hosted-runner DNS experiment, where egress-policy block never finishes. Rerun the job."
+            exit 1
+          fi
+
       # Block, not audit: this job holds `contents: write`. Same allowlist as
       # `publish`, and the same note: tighten it from the audit insights.
       - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
