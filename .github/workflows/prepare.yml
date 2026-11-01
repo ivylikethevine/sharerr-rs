@@ -1,6 +1,6 @@
-# Two questions every heavy job in ci.yml and docker.yml (both its `docker`
-# and `lighthouse` callers of docker-image.yml) needs answered before it can
-# start: which runner to use, and whether this event
+# Two questions every heavy job in ci.yml and docker.yml (one call there, for
+# both its `docker` and `lighthouse` callers of docker-image.yml) needs answered
+# before it can start: which runner to use, and whether this event
 # even touched anything that job cares about. Both used to be separate reusable
 # workflows (`runner.yml`, `changes.yml`) — two VM boots, sequentially `needs:`ed,
 # for what is together a fork check and a `git diff` against a filter. Merged here
@@ -20,13 +20,13 @@
 #
 # changed-files detection
 # ------------------------
-# Whether anything besides workflow YAML (or whatever `inputs.filters` names)
-# changed. A caller passes its own filter (ci.yml and docker.yml's `docker`
-# job want "anything except .github/workflows/**"; docker.yml's `lighthouse`
-# job wants only the paths that feed its image) so the "code" key means
+# Whether anything besides CI's own files (or whatever `inputs.filters` names)
+# changed. A caller passes its own filter (ci.yml wants what can move a Rust
+# result; docker.yml wants what can move an image, and a `lighthouse` key for
+# the paths that feed that image) so the "code" key means
 # something different per caller, same as it did in changes.yml. A caller
 # may add more keys and read them back from the `changes` output (ci.yml's
-# `terraform` job does).
+# `terraform` and `deps` keys, docker.yml's `lighthouse`).
 #
 # Deliberately no `if:` on the `changes` output's job here — whether this should
 # run at all (push/pull_request only, not schedule or workflow_dispatch) is each

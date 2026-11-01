@@ -60,7 +60,7 @@ services:
   # The far end of the tunnel. Not a service sharerr knows or cares about; it
   # exists so gluetun has something real to connect to.
   vpn:
-    image: lscr.io/linuxserver/wireguard:1.0.20260223@sha256:216ca1ce9da7bfe26fb752111d952487804bd18933bbd4794970d424bf8adfe9
+    image: lscr.io/linuxserver/wireguard:1.0.20260223@sha256:b677c3f46d524921c8a7c91873479eb7bab190d098fddbbd887ce333ec078c90
     container_name: sharerr-vpn-test-wg
     networks:
       vpn:
@@ -127,7 +127,7 @@ services:
       - ../tests/fixtures/media:/downloads:ro
 
   sonarr:
-    image: lscr.io/linuxserver/sonarr:4.0.20@sha256:f247545d23ba8b233d6604575347e48a623fe6ad75dda02348bf81917f3b5c06
+    image: lscr.io/linuxserver/sonarr:4.0.20@sha256:386c962ee6e260e3a5656b25df2ed056bcc9b6410e197d075f9547fd14c23bca
     container_name: sharerr-vpn-test-sonarr
     networks: [vpn]
     environment:
@@ -141,7 +141,7 @@ services:
       - "127.0.0.1:28989:8989"
 
   radarr:
-    image: lscr.io/linuxserver/radarr:6.4.4@sha256:7dfd049e79c00b16fbc29c3f5d96a9e7b9e73a23930b4c5b3c4541d60b366814
+    image: lscr.io/linuxserver/radarr:6.4.4@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: sharerr-vpn-test-radarr
     networks: [vpn]
     environment:

@@ -25,7 +25,8 @@ ignore = [
     # `askama.toml` through it, and that feature is what points the template
     # search at `crates/sharerr/src/web/templates`. The replacement with `toml`
     # is merged upstream (askama-rs/askama#771, 2026-10-20) and unreleased;
-    # drop this entry when the `askama` bump past 0.16.1 lands.
+    # drop this entry and its twin in `osv-scanner.toml` when the `askama` bump
+    # past 0.16.1 lands.
     { id = "RUSTSEC-2026-0374", reason = "unmaintained parser behind askama's `config` feature; fix merged upstream, no release yet" },
 ]
 

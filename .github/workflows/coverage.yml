@@ -1,49 +1,35 @@
 name: Coverage
 
 # Line/region coverage over the hermetic (tier 1) test suite, via
-# cargo-llvm-cov. Two paths:
-#
-#   * after every green CI run on `main` (and on dispatch): measure, publish
-#     the badge figures as an artifact for pages.yml, and fail below the
-#     floor in scripts/check.sh (COVERAGE_FLOOR_LINES)
-#   * on a same-repo pull request: measure the PR and keep one comment on it
-#     current, comparing with `main`'s latest figure. Advisory; never blocks.
+# cargo-llvm-cov, after every green CI run on `main` and on dispatch: measure,
+# publish the badge figures as an artifact for pages.yml, and fail below the
+# floor in scripts/check.sh (COVERAGE_FLOOR_LINES). A pull request's figure
+# comes from ci.yml's `test` job, which runs this suite this way already.
 #
 # Tier 1 only, deliberately: this runs the same suite ci.yml's `test` job
 # does, not `--include-ignored`. The tier 2 suite drives a real Docker Compose
 # stack (see docs/TESTING.md) — coverage over a suite this workflow cannot run
 # would just be a misleading percentage.
 #
-# The `main` leg chains off a green CI run rather than `push: branches: [main]`
-# directly: only a tree `cargo test` already passed on is worth a full
-# instrumented rebuild. See pages.yml's header for why a workflow_run trigger
-# is safe despite zizmor's default suspicion of it: no job on that leg checks
-# out the triggering run's ref.
-#
-# The pull_request leg runs PR code with a read-only token; the one job that
-# can write (the comment) checks nothing out and only reads that run's own
-# artifact. A fork PR's token cannot write to the PR at all, so forks skip
-# both jobs rather than measure a figure nobody would see.
+# It chains off a green CI run rather than `push: branches: [main]` directly:
+# only a tree `cargo test` already passed on is worth a full instrumented
+# rebuild. See pages.yml's header for why a workflow_run trigger is safe despite
+# zizmor's default suspicion of it: no job here checks out the triggering run's
+# ref.
 on:
   workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: [CI]
     types: [completed]
     branches: [main]
-  # drafts skip, same as ci.yml; docs-only changes can't move either figure
-  pull_request:
-    branches: [main] # PRs into dev run only CI and CodeQL
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore: ["**/*.md", "docs/**"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer push to a pull request replaces its in-flight measurement; main's
-# runs queue, since pages.yml deploys from each one.
+# Runs queue, since pages.yml deploys from each one.
 concurrency:
-  group: coverage-${{ github.event.pull_request.number || 'main' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: coverage-main
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -177,161 +163,3 @@ jobs:
       # previous badge until coverage is back above the floor.
       - name: Enforce the line-coverage floor
         run: scripts/check.sh coverage-floor
-
-  pr:
-    name: coverage (pull request)
-    if: >-
-      github.event_name == 'pull_request' &&
-      !github.event.pull_request.draft &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-26.04
-    timeout-minutes: 20
-    # Advisory: a figure on a PR is information, not a gate. The main leg's
-    # floor is what fails.
-    continue-on-error: true
-    permissions:
-      contents: read
-      # the cross-run read of main's latest coverage-badge artifact
-      actions: read
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install the stable toolchain (llvm-tools-preview)
-        uses: ./.github/actions/rust-toolchain
-        with:
-          components: llvm-tools-preview
-
-      # Reads the `coverage` job's cache from main; never writes one of its own.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: coverage
-          save-if: false
-
-      - uses: ./.github/actions/setup-tool
-        with:
-          tool: cargo-llvm-cov
-
-      - name: Run the hermetic suite under instrumentation
-        run: scripts/check.sh coverage-run
-
-      - id: floor
-        name: Check the line-coverage floor
-        continue-on-error: true
-        run: scripts/check.sh coverage-floor
-
-      # The `coverage` job's own run on `main`, never a pull_request run (the
-      # action's `event` filter), so a PR's figure is never its own baseline.
-      - uses: ./.github/actions/fetch-latest-artifact
-        with:
-          workflow: coverage.yml
-          artifact-name: coverage-badge
-          dest-subdir: main-coverage
-          event: workflow_run
-          found-message: comparing with main's coverage run
-          missing-message: no successful coverage run on main yet - the comment will show this PR's figure alone
-
-      - name: Write the comment
-        env:
-          FLOOR_OUTCOME: ${{ steps.floor.outcome }}
-        run: |
-          set -euo pipefail
-          summary="$(cargo llvm-cov report --summary-only)"
-          pr_pct="$(awk '/^TOTAL/ {print $10}' <<<"$summary")"
-          main_pct=""
-          f="$RUNNER_TEMP/main-coverage/coverage.json"
-          [ -f "$f" ] && main_pct="$(jq -r '.message // empty' "$f")"
-          if [ -n "$main_pct" ]; then
-            delta="$(awk -v a="${pr_pct%\%}" -v b="${main_pct%\%}" 'BEGIN { printf "%+.2f", a - b }')"
-          else
-            main_pct="unknown"
-            delta="n/a"
-          fi
-          floor="$(sed -n 's/^COVERAGE_FLOOR_LINES=\([0-9.]*\).*/\1/p' scripts/check.sh)"
-          if [ "$FLOOR_OUTCOME" = success ]; then met="met"; else met="**not met**"; fi
-          mkdir -p "$RUNNER_TEMP/coverage-comment"
-          {
-            echo "<!-- coverage-comment -->"
-            echo "### Line coverage (tier 1 suite)"
-            echo
-            echo "| | Lines |"
-            echo "| --- | --- |"
-            echo "| This PR | $pr_pct |"
-            echo "| \`main\` | $main_pct |"
-            echo "| Change | $delta |"
-            echo "| Floor | ${floor}% ($met) |"
-            echo
-            echo "<details><summary>Per-file summary</summary>"
-            echo
-            echo '```'
-            head -c 50000 <<<"$summary"
-            echo '```'
-            echo
-            echo "</details>"
-            echo
-            echo "Advisory: updated on every push to this PR; it never blocks a merge."
-          } >"$RUNNER_TEMP/coverage-comment/comment.md"
-          cat "$RUNNER_TEMP/coverage-comment/comment.md" >>"$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: coverage-comment
-          path: ${{ runner.temp }}/coverage-comment
-          retention-days: 1
-          if-no-files-found: error
-
-  # The only job with a write token, and it checks nothing out: it downloads
-  # the comment the `pr` job wrote in this same run and posts or edits it.
-  comment:
-    name: coverage (comment)
-    needs: pr
-    # Wherever `pr` ran (it has no `needs:`, so it is skipped only by its own
-    # `if:`). The event check is redundant with that but stays: it is what
-    # tells lint_workflows.sh (rule 4) this job never runs on workflow_run.
-    if: >-
-      !cancelled() &&
-      github.event_name == 'pull_request' &&
-      needs.pr.result != 'skipped'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    continue-on-error: true
-    permissions:
-      pull-requests: write
-    steps:
-      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
-        with:
-          egress-policy: audit
-
-      - id: download
-        continue-on-error: true
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: coverage-comment
-          path: ${{ runner.temp }}/coverage-comment
-
-      # One comment per PR, found by its marker and edited in place, so a
-      # busy PR does not collect one per push.
-      - name: Post or update the coverage comment
-        if: steps.download.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          body="$RUNNER_TEMP/coverage-comment/comment.md"
-          id="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- coverage-comment -->"))) | .id' |
-            head -1)"
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" >/dev/null
-            echo "updated comment $id"
-          else
-            gh api "repos/$REPO/issues/$PR/comments" -F body=@"$body" >/dev/null
-            echo "posted a new comment"
-          fi

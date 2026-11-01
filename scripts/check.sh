@@ -26,17 +26,16 @@
 #
 # Checks, by the ci.yml job that runs them (a job name here is a required
 # check name there; see ci.yml's header):
-#   rustfmt                                  fmt
-#   clippy + tests                           clippy, test, doc (rustdoc -D warnings)
+#   quick lint                               fmt, deny, shellcheck, compose (needs
+#                                            docker), terraform, zizmor, actionlint,
+#                                            workflows, links, typos, markdownlint,
+#                                            prettier, gitleaks
+#   clippy + tests                           clippy, test, doc (rustdoc -D warnings);
+#                                            on a pull request, coverage-run and
+#                                            doctest (in no group: test holds it)
+#                                            in place of test
 #   msrv                                     msrv (needs the rust-version toolchain)
-#   cargo-deny                               deny
-#   shell + compose                          shellcheck, compose (needs docker)
-#   terraform (fmt + validate)               terraform
-#   workflow lint (zizmor + actionlint)      zizmor, actionlint, workflows
-#   markdown links (lychee offline)          links
-#   docs (markdownlint + prettier + typos)   typos, markdownlint, prettier
-#   secrets (gitleaks)                       gitleaks
-#   advisory (semver)                        semver (in no group: advisory until a
+#   advisory (semver)                       semver (in no group: advisory until a
 #                                            crate is published)
 #   no workflow                              mutants (in no group: run by hand)
 #   scorecard.yml, after merge               osv (osv-scanner over every lockfile,
@@ -47,7 +46,7 @@
 #                                            render the same profile
 #
 # Not here, because they have no local equivalent: CI's dependency review (a
-# PR-diff API) and the advisory hadolint job.
+# PR-diff API) and quick lint's advisory hadolint step.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -150,6 +149,12 @@ check_doc() {
 # keeps it from running. Never add --include-ignored (see docs/TESTING.md).
 check_test() {
   cargo test --workspace --all-features --locked
+}
+
+# What coverage-run leaves out of check_test: cargo-llvm-cov instruments no
+# doctest without a nightly flag.
+check_doctest() {
+  cargo test --workspace --all-features --locked --doc
 }
 
 # _msrv - Cargo.toml's rust-version, the one place it is parsed: check_msrv
