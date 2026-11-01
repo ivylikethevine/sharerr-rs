@@ -29,7 +29,7 @@ x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
 
 services:
   radarr-a:
-    image: lscr.io/linuxserver/radarr:6.4.4@sha256:7dfd049e79c00b16fbc29c3f5d96a9e7b9e73a23930b4c5b3c4541d60b366814
+    image: lscr.io/linuxserver/radarr:6.4.4@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: sharerr-two-instance-radarr-a
     environment:
       PUID: *puid
@@ -44,7 +44,7 @@ services:
       - "127.0.0.1:58878:7878"
 
   radarr-b:
-    image: lscr.io/linuxserver/radarr:6.4.4@sha256:7dfd049e79c00b16fbc29c3f5d96a9e7b9e73a23930b4c5b3c4541d60b366814
+    image: lscr.io/linuxserver/radarr:6.4.4@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: sharerr-two-instance-radarr-b
     environment:
       PUID: *puid

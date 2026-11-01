@@ -1,0 +1,10 @@
+# Advisories against Cargo.lock accepted as not applicable, each with its
+# reason, for OpenSSF Scorecard's Vulnerabilities check and `scripts/check.sh
+# osv`. cargo-deny reads its own list, so an id here also belongs in deny.toml.
+# Only for an advisory with no patched release to move to; each entry expires,
+# so one that is never fixed comes back for review.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0374"
+ignoreUntil = 2027-01-31
+reason = "unmaintained parser behind askama's `config` feature; fix merged upstream, no release past 0.16.1 yet"

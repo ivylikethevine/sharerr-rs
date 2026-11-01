@@ -146,7 +146,10 @@ fn it_serves_and_mints_a_secret_on_first_run() {
     assert_eq!(std::fs::read(&secret_file).unwrap().len(), 32);
 
     let response = lighthouse.get("/lighthouse/v1/health");
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "the health route did not answer 200"
+    );
 }
 
 /// The decoy secret has to survive a restart, or every decoy reshuffles and a

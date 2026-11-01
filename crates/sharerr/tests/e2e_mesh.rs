@@ -95,6 +95,6 @@ async fn the_lighthouse_holds_a_real_record_for_node_a_at_its_rotated_endpoint()
             .iter()
             .any(|endpoint| endpoint.addr.ends_with(&format!(":{ROTATED_PORT}"))),
         "the lighthouse's record for A does not carry the rotated port {ROTATED_PORT} — \
-         A verified, but has not re-reported since the script moved it: {record:?}"
+         A verified, but has not re-reported since the script moved it"
     );
 }
