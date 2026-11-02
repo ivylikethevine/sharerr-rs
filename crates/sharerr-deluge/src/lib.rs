@@ -475,15 +475,22 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use std::sync::LazyLock;
     use wiremock::matchers::{body_partial_json, header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const PASSWORD: &str = "deluge-test-password";
     const COOKIE: &str = "_session_id=abc123";
+
+    /// Generated once per test binary: a literal reaching `SecretString` is a
+    /// `rust/hard-coded-cryptographic-value` finding.
+    fn password() -> &'static str {
+        static PASSWORD: LazyLock<String> = LazyLock::new(sharerr_testkit::secrets::fresh_password);
+        &PASSWORD
+    }
 
     fn client(server: &MockServer) -> DelugeClient {
         let base = sharerr_testkit::mock::base_url(server);
-        DelugeClient::new(&base, SecretString::from(PASSWORD)).unwrap()
+        DelugeClient::new(&base, SecretString::from(password())).unwrap()
     }
 
     fn ok(result: Value) -> ResponseTemplate {
@@ -545,7 +552,10 @@ mod tests {
         let client = client(&server);
         client.login().await.unwrap();
         assert_eq!(client.version().await.unwrap(), "2.1.1");
-        assert_eq!(calls(&server, "auth.login").await, vec![json!([PASSWORD])]);
+        assert_eq!(
+            calls(&server, "auth.login").await,
+            vec![json!([password()])]
+        );
     }
 
     /// `auth.login` says no with a 200 and `false`, not with a status code.
@@ -561,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
         let base = sharerr_testkit::net::closed_url();
-        let client = DelugeClient::new(&base, SecretString::from(PASSWORD)).unwrap();
+        let client = DelugeClient::new(&base, SecretString::from(password())).unwrap();
 
         let err = client.login().await.unwrap_err();
         assert!(err.is_unreachable(), "{err}");
@@ -1040,16 +1050,16 @@ mod tests {
     #[test]
     fn a_subpath_base_url_keeps_its_prefix() {
         let base = Url::parse("http://box.lan/deluge").unwrap();
-        let client = DelugeClient::new(&base, SecretString::from(PASSWORD)).unwrap();
+        let client = DelugeClient::new(&base, SecretString::from(password())).unwrap();
         assert_eq!(client.endpoint.as_str(), "http://box.lan/deluge/json");
     }
 
     #[test]
     fn debug_does_not_leak_the_password() {
         let base = Url::parse("http://box.lan").unwrap();
-        let client = DelugeClient::new(&base, SecretString::from(PASSWORD)).unwrap();
+        let client = DelugeClient::new(&base, SecretString::from(password())).unwrap();
         let rendered = format!("{client:?}");
-        assert!(!rendered.contains(PASSWORD), "{rendered}");
+        assert!(!rendered.contains(password()), "{rendered}");
         assert!(rendered.contains("redacted"), "{rendered}");
     }
 }

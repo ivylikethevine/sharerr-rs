@@ -104,8 +104,8 @@ renaming the function parameter alone would leave the
 
 ## Insecure cookie on the session cookie
 
-**The `rust/insecure-cookie` finding on `web/auth.rs`'s `session_cookie`**
-is dismissed as won't-fix (alert #69), not fixed. The query reports any
+**The `rust/insecure-cookie` finding on `web/auth.rs`'s `base_cookie`**
+is dismissed as won't-fix (alert #167), not fixed. The query reports any
 `Cookie` builder whose `Secure` attribute it cannot prove is `true`, and
 `session_cookie` sets it from `arrived_over_https(headers)` rather than a
 literal. That is the design, not an omission: sharerr is built for a
@@ -119,13 +119,15 @@ spoofer's own cookie.
 A code-shape workaround was not attempted: the query also reports a builder
 that never sets `Secure`, so branching into `.secure(true)` on one arm would
 leave the other arm to be flagged instead. The dismissal is bound to the flagged lines, so
-moving `session_cookie` or reshaping its builder chain resurfaces the finding
+moving `base_cookie` or reshaping its builder chain resurfaces the finding
 as new; point its dismissal back here.
 
-`web/two_factor.rs`'s `pending_cookie`, the five-minute cookie that carries
-a sign-in from `/login` to `/login/totp` once the password has passed, is the
-same finding (alert #162) dismissed for the same reason. It takes `secure`
-from the same `arrived_over_https(headers)` call as `session_cookie`, so
-everything above applies verbatim; a cookie scoped to `/login` that a browser
-discards on the plain-HTTP LAN would leave `/login/totp` with no pending
-sign-in to find, which presents as the password form coming straight back.
+`pending_cookie`, the five-minute cookie that carries a sign-in from `/login`
+to `/login/totp` once the password has passed, takes `secure` from the same
+`arrived_over_https(headers)` call, so everything above applies verbatim; a
+cookie scoped to `/login` that a browser discards on the plain-HTTP LAN would
+leave `/login/totp` with no pending sign-in to find, which presents as the
+password form coming straight back.
+
+Both cookies now share `base_cookie`, so one builder and one alert (#167,
+replacing #69 and #162) cover them.
