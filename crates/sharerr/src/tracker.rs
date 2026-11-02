@@ -194,6 +194,11 @@ pub struct ScrapeParams {
     info_hash: Option<String>,
 }
 
+/// What every tracker route documents about its one status code.
+const ALWAYS_200: &str = "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+     reports refusal as a bencoded `failure reason` key, not as an HTTP status, so a \
+     client that only checks the status code will read an error as a swarm.";
+
 /// `GET /announce`.
 #[utoipa::path(
     get,
@@ -201,11 +206,7 @@ pub struct ScrapeParams {
     tag = "tracker",
     operation_id = "announce",
     params(AnnounceParams),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn announce(
     State(state): State<Arc<ServeState>>,
@@ -228,11 +229,7 @@ pub async fn announce(
           revoked without disturbing anyone else's."),
         AnnounceParams,
     ),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn announce_with_token(
     State(state): State<Arc<ServeState>>,
@@ -329,11 +326,7 @@ async fn handle_announce(
     tag = "tracker",
     operation_id = "scrape",
     params(ScrapeParams),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn scrape(State(state): State<Arc<ServeState>>, RawQuery(query): RawQuery) -> Response {
     handle_scrape(&state, None, query).await
@@ -349,11 +342,7 @@ pub async fn scrape(State(state): State<Arc<ServeState>>, RawQuery(query): RawQu
         ("token" = String, Path, description = "As on `/announce/{token}`."),
         ScrapeParams,
     ),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn scrape_with_token(
     State(state): State<Arc<ServeState>>,
@@ -587,13 +576,12 @@ pub async fn torrent_file(
     Path(name): Path<String>,
     Query(query): Query<TorrentFileQuery>,
 ) -> Response {
-    let Some(hex_hash) = name.strip_suffix(".torrent") else {
-        return (StatusCode::NOT_FOUND, "not a torrent").into_response();
-    };
-
     // Parsed as a hash rather than used as a path component. `..` and `/` cannot
     // survive this, so the filename below is always exactly 40 hex characters.
-    let Some(info_hash) = announce::info_hash_from_hex(hex_hash) else {
+    let Some(info_hash) = name
+        .strip_suffix(".torrent")
+        .and_then(announce::info_hash_from_hex)
+    else {
         return (StatusCode::NOT_FOUND, "not a torrent").into_response();
     };
 
@@ -601,8 +589,8 @@ pub async fn torrent_file(
         return (StatusCode::NOT_FOUND, "not shared").into_response();
     }
 
-    let path =
-        sharerr_torrent::torrent_file_path(&state.torrent_dir().await, &hex::encode(info_hash));
+    let hex_hash = hex::encode(info_hash);
+    let path = sharerr_torrent::torrent_file_path(&state.torrent_dir().await, &hex_hash);
 
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -626,8 +614,8 @@ pub async fn torrent_file(
             (
                 header::CONTENT_DISPOSITION,
                 format!(
-                    "attachment; filename=\"{}.torrent\"",
-                    hex::encode(info_hash)
+                    "attachment; filename=\"{}\"",
+                    sharerr_torrent::torrent_file_name(&hex_hash)
                 ),
             ),
         ],
@@ -874,19 +862,7 @@ mod tests {
         F: FnOnce(Arc<crate::state::ServeState>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("SHARERR_MASTER_KEY", "tracker-tests-master-key");
-            let config = sharerr_core::Config {
-                data_dir: jail.directory().to_path_buf(),
-                ..Default::default()
-            };
-            let path = jail.directory().join("sharerr.toml");
-            let state = Arc::new(crate::state::ServeState::new(config, path, None));
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(body(state));
-            Ok(())
-        });
+        crate::state::fixtures::with_open_vault(sharerr_core::Config::default(), |_| {}, body);
     }
 
     async fn get(state: &Arc<crate::state::ServeState>, uri: &str) -> (StatusCode, String) {
@@ -948,41 +924,12 @@ mod tests {
     #[test]
     fn an_announce_for_a_shared_torrent_is_admitted_and_answered() {
         with_open_vault(|state| async move {
-            use sharerr_core::model::{
-                ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem,
-            };
+            use sharerr_core::model::MediaSource;
 
             let store = state.store().await.unwrap();
 
             let hash_hex = "00".repeat(20);
-            store
-                .upsert(&SharedItem {
-                    id: None,
-                    source: MediaSource::Sonarr,
-                    source_id: 1,
-                    file_id: 1,
-                    spec: MediaSpec::Episode {
-                        series_title: "Lanternwick Hollow".to_owned(),
-                        season: 1,
-                        episode: 1,
-                    },
-                    release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                    arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                    size: 1,
-                    ids: ExternalIds::default(),
-                    media: None,
-                    info_hash: None,
-                    announce_token_fp: None,
-                    created_by_sharerr: true,
-                    private: true,
-                    state: ShareState::Pending,
-                    last_error: None,
-                    created_at: None,
-                    achieved_ratio: None,
-                    ratio_limit_reported: None,
-                })
-                .await
-                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
             store
                 .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true, Some(true))
                 .await
@@ -1249,41 +1196,12 @@ mod tests {
     #[test]
     fn scrape_for_a_shared_torrent_reports_it() {
         with_open_vault(|state| async move {
-            use sharerr_core::model::{
-                ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem,
-            };
+            use sharerr_core::model::MediaSource;
 
             let store = state.store().await.unwrap();
 
             let hash_hex = "00".repeat(20);
-            store
-                .upsert(&SharedItem {
-                    id: None,
-                    source: MediaSource::Sonarr,
-                    source_id: 1,
-                    file_id: 1,
-                    spec: MediaSpec::Episode {
-                        series_title: "Lanternwick Hollow".to_owned(),
-                        season: 1,
-                        episode: 1,
-                    },
-                    release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                    arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                    size: 1,
-                    ids: ExternalIds::default(),
-                    media: None,
-                    info_hash: None,
-                    announce_token_fp: None,
-                    created_by_sharerr: true,
-                    private: true,
-                    state: ShareState::Pending,
-                    last_error: None,
-                    created_at: None,
-                    achieved_ratio: None,
-                    ratio_limit_reported: None,
-                })
-                .await
-                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
             store
                 .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true, Some(true))
                 .await
@@ -1303,7 +1221,7 @@ mod tests {
     /// per-peer token is supplied.
     #[tokio::test]
     async fn torrent_file_serves_the_cached_bytes_for_a_shared_torrent() {
-        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+        use sharerr_core::model::MediaSource;
 
         let (dir, state) = unconfigured();
         let store = state.store().await.unwrap();
@@ -1319,34 +1237,7 @@ mod tests {
         .await
         .unwrap();
 
-        store
-            .upsert(&SharedItem {
-                id: None,
-                source: MediaSource::Sonarr,
-                source_id: 1,
-                file_id: 1,
-                spec: MediaSpec::Episode {
-                    series_title: "Lanternwick Hollow".to_owned(),
-                    season: 1,
-                    episode: 1,
-                },
-                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                size: 1,
-                ids: ExternalIds::default(),
-                media: None,
-                info_hash: None,
-                announce_token_fp: None,
-                created_by_sharerr: true,
-                private: true,
-                state: ShareState::Pending,
-                last_error: None,
-                created_at: None,
-                achieved_ratio: None,
-                ratio_limit_reported: None,
-            })
-            .await
-            .unwrap();
+        store.upsert(&shared_item()).await.unwrap();
         store
             .set_seeding(
                 MediaSource::Sonarr,
@@ -1388,34 +1279,7 @@ mod tests {
 
     // ------------------------------------------------------ the long tail
 
-    fn shared_item() -> sharerr_core::model::SharedItem {
-        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
-        SharedItem {
-            id: None,
-            source: MediaSource::Sonarr,
-            source_id: 1,
-            file_id: 1,
-            spec: MediaSpec::Episode {
-                series_title: "Lanternwick Hollow".to_owned(),
-                season: 1,
-                episode: 1,
-            },
-            release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-            arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-            size: 1,
-            ids: ExternalIds::default(),
-            media: None,
-            info_hash: None,
-            announce_token_fp: None,
-            created_by_sharerr: true,
-            private: true,
-            state: ShareState::Pending,
-            last_error: None,
-            created_at: None,
-            achieved_ratio: None,
-            ratio_limit_reported: None,
-        }
-    }
+    use crate::test_support::shared_item;
 
     /// An announce carrying a friend's own key hash, through the real router:
     /// admitted, answered, and the address it came from recorded against that

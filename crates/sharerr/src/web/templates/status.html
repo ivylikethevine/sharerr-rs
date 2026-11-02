@@ -13,7 +13,7 @@
 
 {# Polled rather than reloaded: see `_stat_tiles.html`. The wrapper is the swap
    target, so the fragment it fetches is the same partial rendered on its own. #}
-<div id="stat-tiles" hx-get="/status/tiles" hx-trigger="every 30s" hx-swap="innerHTML">
+<div id="stat-tiles" hx-get="/status/tiles" hx-trigger="every 30s">
 {% include "_stat_tiles.html" %}
 </div>
 
@@ -55,11 +55,7 @@
 <ol class="panel checklist">
   {% for step in diag.setup %}
   <li>
-    {% if step.done %}
-    <span class="ok" aria-hidden="true">&#10003;</span><span class="visually-hidden">Done:</span>
-    {% else %}
-    <span class="hint" aria-hidden="true">&#9675;</span><span class="visually-hidden">To do:</span>
-    {% endif %}
+    {% call ui::step_mark(step.done) %}{% endcall %}
     {% if step.href.is_empty() %}{{ step.label }}{% else %}<a href="{{ step.href }}">{{ step.label }}</a>{% endif %}
     {% if !step.done %}<br><span class="hint">{{ step.hint }}</span>{% endif %}
   </li>
@@ -139,11 +135,7 @@
       <tr>
         <td class="nowrap"{% if !run.when_absolute.is_empty() %} title="{{ run.when_absolute }}"{% endif %}>{{ run.when }}</td>
         <td class="nowrap">
-          {% if run.took.is_empty() %}
-          <span class="hint">—</span>
-          {% else %}
-          {{ run.took }}
-          {% endif %}
+          {% call ui::or_dash(run.took) %}{% endcall %}
         </td>
         <td>
           {% if run.failed %}

@@ -37,11 +37,7 @@ fn fixture(name: &str, size: usize, seed: u64) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn tiered(urls: &[&str]) -> AnnounceSet {
-    let tiers: Vec<Url> = urls.iter().map(|u| Url::parse(u).unwrap()).collect();
-    AnnounceSet {
-        primary: tiers[0].clone(),
-        tiers,
-    }
+    AnnounceSet::from_tiers(urls.iter().map(|u| Url::parse(u).unwrap()).collect()).unwrap()
 }
 
 #[test]

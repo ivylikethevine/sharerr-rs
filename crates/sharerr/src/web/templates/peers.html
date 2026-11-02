@@ -16,9 +16,7 @@
   else.
 </p>
 
-{% if let Some(message) = error %}
-<p class="error" role="alert">{{ message }}</p>
-{% endif %}
+{% call ui::flash_error(error) %}{% endcall %}
 
 {% if let Some(done) = paired %}
 <div class="ok" role="status">
@@ -70,11 +68,10 @@
               aria-label="Copy the feed URL">copy</button>
       <span class="hint" data-copy-note></span>
     </dd>
-    {% if let Some(invite) = new.invite %}
     <dt>Invite</dt>
     <dd>
-      <code class="invite">{{ invite }}</code>
-      <button type="button" class="link micro" data-copy-text="{{ invite }}"
+      <code class="invite">{{ new.invite }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ new.invite }}"
               aria-label="Copy the invite">copy</button>
       <span class="hint" data-copy-note></span>
       <p class="hint">
@@ -84,7 +81,6 @@
         refused after seven days; a fresh one means deleting and re-adding them.
       </p>
     </dd>
-    {% endif %}
   </dl>
 </div>
 {% endif %}
@@ -278,11 +274,7 @@
       <ul class="checklist">
         {% for step in peer.setup %}
         <li>
-          {% if step.done %}
-          <span class="ok" aria-hidden="true">&#10003;</span><span class="visually-hidden">Done:</span>
-          {% else %}
-          <span class="hint" aria-hidden="true">&#9675;</span><span class="visually-hidden">To do:</span>
-          {% endif %}
+          {% call ui::step_mark(step.done) %}{% endcall %}
           {{ step.label }}
           {% if !step.done %}<br><span class="hint">{{ step.hint }}</span>{% endif %}
         </li>

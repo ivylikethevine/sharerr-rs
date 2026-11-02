@@ -13,28 +13,16 @@ use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
-use axum_extra::extract::cookie::{Cookie, SameSite};
-use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::endpoint::now_epoch;
 use sharerr_store::{Store, StoreError};
 
 use crate::web::WebState;
 use crate::web::auth::{
-    COOKIE_NAME, PENDING_COOKIE, arrived_over_https, current_user, internal, sign_in, too_busy,
+    COOKIE_NAME, PENDING_COOKIE, arrived_over_https, current_user, internal, password_ok,
+    pending_cookie, sign_in,
 };
 use crate::web::templates::{LoginPage, TotpLoginPage, TotpPage, render};
-
-/// The pending-sign-in cookie: scoped to `/login`, gone when the step is.
-fn pending_cookie(token: String, secure: bool) -> Cookie<'static> {
-    Cookie::build((PENDING_COOKIE, token))
-        .path("/login")
-        .http_only(true)
-        .same_site(SameSite::Strict)
-        .secure(secure)
-        .max_age(time::Duration::minutes(5))
-        .build()
-}
 
 /// The password was right and the account has a second factor: park the
 /// sign-in and ask for the code.
@@ -85,15 +73,13 @@ pub async fn login_submit(
     let Some((token, username)) = pending(&state, &jar).await else {
         return Redirect::to("/login").into_response();
     };
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
+    let secure = arrived_over_https(&headers);
 
     match check_code(&store, &username, &form.code).await {
         Ok(true) => {
             state.sessions.finish_second_factor(&token).await;
-            let jar = jar.remove(pending_cookie(String::new(), arrived_over_https(&headers)));
+            let jar = jar.remove(pending_cookie(String::new(), secure));
             sign_in(&state, jar, &headers, &username, "/").await
         }
         Ok(false) => {
@@ -108,7 +94,7 @@ pub async fn login_submit(
                 )
                     .into_response()
             } else {
-                let jar = jar.remove(pending_cookie(String::new(), arrived_over_https(&headers)));
+                let jar = jar.remove(pending_cookie(String::new(), secure));
                 (
                     StatusCode::UNAUTHORIZED,
                     jar,
@@ -150,10 +136,7 @@ pub async fn account_page(
     let Some(username) = current_user(&state, &jar).await else {
         return Redirect::to("/login").into_response();
     };
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     match store.totp_secret(&username).await {
         Ok(Some(_)) => render(&enabled_page(username, query.saved, None)),
         Ok(None) => match crate::totp::generate_secret() {
@@ -218,10 +201,7 @@ pub async fn enable(
     let Some(username) = current_user(&state, &jar).await else {
         return Redirect::to("/login").into_response();
     };
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let retry = |message: &str| {
         enrol_page(
             username.clone(),
@@ -233,7 +213,7 @@ pub async fn enable(
     if !crate::totp::is_valid_secret(&form.secret) {
         return Redirect::to("/settings/account/totp").into_response();
     }
-    match password_ok(&store, &username, &form.current_password).await {
+    match password_ok(&store, &username, form.current_password).await {
         Ok(true) => {}
         Ok(false) => return retry("That is not your current password."),
         Err(response) => return *response,
@@ -274,10 +254,7 @@ pub async fn disable(
     let Some(username) = current_user(&state, &jar).await else {
         return Redirect::to("/login").into_response();
     };
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let refuse = |message: &str| {
         render(&enabled_page(
             username.clone(),
@@ -285,7 +262,7 @@ pub async fn disable(
             Some(message.to_owned()),
         ))
     };
-    match password_ok(&store, &username, &form.current_password).await {
+    match password_ok(&store, &username, form.current_password).await {
         Ok(true) => {}
         Ok(false) => return refuse("That is not your current password."),
         Err(response) => return *response,
@@ -304,22 +281,14 @@ pub async fn disable(
     }
 }
 
-/// Boxed like `WebState::store_or_503`'s error, to keep the `Result` small.
-async fn password_ok(store: &Store, username: &str, password: &str) -> Result<bool, Box<Response>> {
-    let password = SecretString::from(password.to_owned());
-    match store.verify_password(username, &password).await {
-        Ok(verified) => Ok(verified),
-        Err(StoreError::TooBusy) => Err(Box::new(too_busy())),
-        Err(err) => Err(Box::new(internal(&format!("checking the password: {err}")))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::web::web_state;
+    use crate::web::{body_of, location, web_state};
+    use axum_extra::extract::cookie::Cookie;
+    use secrecy::SecretString;
     use sharerr_testkit::secrets::fresh_password;
 
     /// An account with two-step sign-in on, and its password and secret.
@@ -357,22 +326,6 @@ mod tests {
             CookieJar::new().add(Cookie::new(COOKIE_NAME, token.clone())),
             token,
         )
-    }
-
-    fn location(response: &Response) -> &str {
-        response
-            .headers()
-            .get(axum::http::header::LOCATION)
-            .unwrap()
-            .to_str()
-            .unwrap()
-    }
-
-    async fn body_of(response: Response) -> String {
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     fn code_form(code: String) -> Form<CodeForm> {

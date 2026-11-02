@@ -41,7 +41,7 @@ fn a_torrent_missing_from_the_client_is_reported_absent() {
     assert_eq!(check.absent.len(), 1);
     assert_eq!(check.absent[0].title, "Removed");
     assert!(check.idle.is_empty());
-    assert!(!check.healthy);
+    assert!(!check.healthy());
 }
 
 /// Held but paused is a different problem from not held at all, and has a
@@ -54,7 +54,7 @@ fn a_paused_torrent_is_idle_rather_than_absent() {
     assert!(check.absent.is_empty());
     assert_eq!(check.idle.len(), 1);
     assert_eq!(check.idle[0].title, "Paused");
-    assert!(!check.healthy);
+    assert!(!check.healthy());
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn everything_seeding_is_healthy() {
     );
 
     assert_eq!(check.confirmed, 2);
-    assert!(check.healthy);
+    assert!(check.healthy());
     assert!(check.error.is_none());
 }
 
@@ -80,7 +80,7 @@ fn hashes_compare_without_regard_to_case() {
     );
 
     assert_eq!(check.confirmed, 1);
-    assert!(check.healthy);
+    assert!(check.healthy());
 }
 
 /// A wiped client would otherwise render ten thousand rows and bury the
@@ -95,7 +95,7 @@ fn a_long_list_of_mismatches_is_capped_and_counted() {
 
     assert_eq!(check.absent.len(), MAX_MISMATCHES);
     assert_eq!(check.more_absent, 5);
-    assert!(!check.healthy);
+    assert!(!check.healthy());
 }
 
 /// A client that answered the version probe but not the listing is not the
@@ -105,7 +105,7 @@ fn a_long_list_of_mismatches_is_capped_and_counted() {
 fn a_failed_listing_is_not_healthy() {
     let check = client_check_failed("connection reset".to_owned());
 
-    assert!(!check.healthy);
+    assert!(!check.healthy());
     assert_eq!(check.error.as_deref(), Some("connection reset"));
     assert_eq!(check.expected, 0);
 }
@@ -126,9 +126,9 @@ fn unseen_friend(label: &str) -> FriendNode {
     FriendNode {
         label: label.to_owned(),
         accent: peer_color(0),
-        tracker: Channel::unseen(),
-        indexer: Channel::unseen(),
-        client: Channel::unseen(),
+        tracker: Channel(None),
+        indexer: Channel(None),
+        client: Channel(None),
     }
 }
 
@@ -212,13 +212,13 @@ fn a_friend_observed_on_only_one_channel_gets_one_edge() {
     let friends = vec![FriendNode {
         label: "Sam".to_owned(),
         accent: peer_color(0),
-        tracker: Channel::unseen(),
-        indexer: Channel {
-            addr: Some("203.0.113.5:1".to_owned()),
+        tracker: Channel(None),
+        indexer: Channel(Some(Seen {
+            addr: "203.0.113.5:1".to_owned(),
             style: EdgeStyle::Solid,
             edge_label: "direct now".to_owned(),
-        },
-        client: Channel::unseen(),
+        })),
+        client: Channel(None),
     }];
     let Layout { edges, .. } = layout(LayoutInput {
         sources: &[],
@@ -240,15 +240,17 @@ fn a_friend_observed_on_only_one_channel_gets_one_edge() {
 /// the common case rather than the exception.
 #[test]
 fn two_channels_learned_the_same_way_are_labelled_once() {
-    let same = || Channel {
-        addr: Some("203.0.113.5:1".to_owned()),
-        style: EdgeStyle::Dashed,
-        edge_label: "gossip 2h".to_owned(),
+    let same = || {
+        Channel(Some(Seen {
+            addr: "203.0.113.5:1".to_owned(),
+            style: EdgeStyle::Dashed,
+            edge_label: "gossip 2h".to_owned(),
+        }))
     };
     let friends = vec![FriendNode {
         label: "Sam".to_owned(),
         accent: peer_color(0),
-        tracker: Channel::unseen(),
+        tracker: Channel(None),
         indexer: same(),
         client: same(),
     }];
@@ -465,10 +467,8 @@ fn peer_color_cycles_past_the_palette() {
 #[test]
 fn friend_node_with_no_endpoints_reads_as_unseen_on_both_channels() {
     let node = friend_node("Sam", &[], peer_color(0));
-    assert!(node.indexer.addr.is_none());
-    assert!(node.client.addr.is_none());
-    assert_eq!(node.indexer.style, EdgeStyle::None);
-    assert_eq!(node.client.style, EdgeStyle::None);
+    assert!(node.indexer.0.is_none());
+    assert!(node.client.0.is_none());
 }
 
 #[test]
@@ -490,10 +490,10 @@ fn friend_node_keeps_indexer_and_client_channels_independent() {
 
     let node = friend_node("Sam", &endpoints, peer_color(0));
 
-    assert_eq!(node.indexer.addr.as_deref(), Some("203.0.113.5:1"));
-    assert_eq!(node.indexer.style, EdgeStyle::Dashed);
-    assert_eq!(node.client.addr.as_deref(), Some("203.0.113.9:2"));
-    assert_eq!(node.client.style, EdgeStyle::Solid);
+    assert_eq!(node.indexer.0.as_ref().unwrap().addr, "203.0.113.5:1");
+    assert_eq!(node.indexer.0.as_ref().unwrap().style, EdgeStyle::Dashed);
+    assert_eq!(node.client.0.as_ref().unwrap().addr, "203.0.113.9:2");
+    assert_eq!(node.client.0.as_ref().unwrap().style, EdgeStyle::Solid);
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn channel_edge_style_follows_observed_via() {
             via,
         }];
         assert_eq!(
-            channel(&endpoints, EndpointKind::Api).style,
+            channel(&endpoints, EndpointKind::Api).0.unwrap().style,
             style,
             "{via:?}"
         );
@@ -949,7 +949,7 @@ fn client_node_reports_no_credential_then_failed_once_one_is_stored() {
                 .unwrap();
 
             // qBittorrent's `login()` is a no-op (API-key auth needs no
-            // handshake — see `QbitClient::login`), so an unreachable
+            // handshake), so an unreachable
             // qBittorrent surfaces once `version()` itself fails, which
             // `check_qbit` reports as `Failed` rather than `Unreachable`
             // or `AuthRejected` — those two arms are only reachable
@@ -1043,9 +1043,7 @@ async fn client_node_reports_every_failure_outcome_with_its_reason() {
     assert_eq!(status, NodeStatus::Error);
     assert!(headline(&lines).contains(&"Misconfigured"), "{lines:?}");
 
-    let port = sharerr_testkit::net::closed_port();
-    let closed =
-        transmission_config(&url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap());
+    let closed = transmission_config(&sharerr_testkit::net::closed_url());
     let (_, lines, status, _) = client_node(&closed, &state, &any_secret, &[]).await;
     assert_eq!(status, NodeStatus::Error);
     assert!(headline(&lines).contains(&"Unreachable"), "{lines:?}");
@@ -1069,31 +1067,10 @@ async fn client_node_reports_every_failure_outcome_with_its_reason() {
 }
 
 fn seeding_item(hash: &str) -> sharerr_core::SharedItem {
-    use sharerr_core::{MediaSpec, ShareState, SharedItem};
-    SharedItem {
-        id: None,
-        source: MediaSource::Sonarr,
-        source_id: 1,
-        file_id: 1,
-        spec: MediaSpec::Episode {
-            series_title: "Lanternwick Hollow".to_owned(),
-            season: 1,
-            episode: 1,
-        },
-        release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-        arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-        size: 1,
-        ids: Default::default(),
-        media: None,
+    sharerr_core::SharedItem {
         info_hash: Some(hash.to_owned()),
-        announce_token_fp: None,
-        created_by_sharerr: true,
-        private: true,
-        state: ShareState::Seeding,
-        last_error: None,
-        created_at: None,
-        achieved_ratio: None,
-        ratio_limit_reported: None,
+        state: sharerr_core::ShareState::Seeding,
+        ..crate::test_support::shared_item()
     }
 }
 
@@ -1165,7 +1142,7 @@ async fn client_node_reconciles_a_reachable_client_against_the_store() {
         "{lines:?}"
     );
     let check = check.expect("a reachable client is reconciled");
-    assert!(check.healthy);
+    assert!(check.healthy());
 
     // The same client with nothing loaded: reachable, but not seeding what
     // the store says it should be.
@@ -1185,7 +1162,7 @@ async fn client_node_reconciles_a_reachable_client_against_the_store() {
             .any(|l| l.tag == "seeding" && l.text == "0 of 1"),
         "{lines:?}"
     );
-    assert!(!check.expect("reconciled").healthy);
+    assert!(!check.expect("reconciled").healthy());
 
     // Signed in, but the listing itself failed: the node says so rather
     // than reporting zero of everything.

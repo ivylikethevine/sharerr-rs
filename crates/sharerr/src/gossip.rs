@@ -129,33 +129,25 @@ pub(crate) async fn self_record(state: &ServeState) -> Option<EndpointRecord> {
     };
 
     let now = now_epoch();
+    let endpoint = |kind: EndpointKind, base: &url::Url| RecordEndpoint {
+        kind: kind.as_str().to_owned(),
+        addr: sharerr_core::endpoint::base_string(base),
+        observed_at: now,
+    };
     let mut endpoints = Vec::new();
     if let Some(base) = state.endpoint().current() {
-        let addr = sharerr_core::endpoint::base_string(&base);
         // Tracker and Api share one listener today, so they always carry the
         // same address; recorded separately so a friend who only understands
         // one of the two kinds still gets it.
-        endpoints.push(RecordEndpoint {
-            kind: EndpointKind::Tracker.as_str().to_owned(),
-            addr: addr.clone(),
-            observed_at: now,
-        });
-        endpoints.push(RecordEndpoint {
-            kind: EndpointKind::Api.as_str().to_owned(),
-            addr,
-            observed_at: now,
-        });
+        endpoints.push(endpoint(EndpointKind::Tracker, &base));
+        endpoints.push(endpoint(EndpointKind::Api, &base));
     }
     // Unlike Tracker/Api, Client is genuinely independent. Present only once
     // `[gluetun_client]` (or some other future source) has actually observed
     // the torrent client's own address; absent is honest where nothing knows
     // it, rather than repeating the tracker's address as a guess.
     if let Some(base) = state.client_endpoint().current() {
-        endpoints.push(RecordEndpoint {
-            kind: EndpointKind::Client.as_str().to_owned(),
-            addr: sharerr_core::endpoint::base_string(&base),
-            observed_at: now,
-        });
+        endpoints.push(endpoint(EndpointKind::Client, &base));
     }
 
     match identity.sign_record(endpoints, now) {
@@ -212,6 +204,25 @@ pub async fn ingest(
         .filter_map(|p| p.pubkey.as_deref().map(|pubkey| (pubkey, p)))
         .collect();
 
+    // One read for every stored `signed_at`, kept current as records are accepted so
+    // a duplicate subject later in the batch still reads as stale. Only the timestamp
+    // is read out: the endpoints and the signature would be deserialised and dropped.
+    #[derive(Deserialize)]
+    struct SignedAt {
+        signed_at: i64,
+    }
+    let peer_ids: Vec<i64> = peers.iter().map(|p| p.id).collect();
+    let mut stored_signed_at: std::collections::HashMap<i64, i64> = store
+        .peer_gossip_records(&peer_ids)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, raw)| {
+            let stored = serde_json::from_str::<SignedAt>(&raw).ok()?;
+            Some((id, stored.signed_at))
+        })
+        .collect();
+
     for record in records.into_iter().take(MAX_RECORDS) {
         if let Err(reason) = verify(&record) {
             tracing::debug!(reason, "rejected a gossip record");
@@ -265,21 +276,11 @@ pub async fn ingest(
             }
         };
 
-        // Freshness: never let an older record rewind a newer one. Only the
-        // timestamp is read out of the stored record — the endpoints and the
-        // signature would be deserialised and dropped.
-        #[derive(Deserialize)]
-        struct SignedAt {
-            signed_at: i64,
-        }
-        let stored_signed_at = store
-            .peer_gossip_record(subject_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|raw| serde_json::from_str::<SignedAt>(&raw).ok())
-            .map(|stored| stored.signed_at);
-        if stored_signed_at.is_some_and(|stored| stored >= record.signed_at) {
+        // Freshness: never let an older record rewind a newer one.
+        if stored_signed_at
+            .get(&subject_id)
+            .is_some_and(|&stored| stored >= record.signed_at)
+        {
             summary.stale += 1;
             continue;
         }
@@ -295,6 +296,8 @@ pub async fn ingest(
             Ok(raw) => {
                 if let Err(err) = store.set_peer_gossip_record(subject_id, &raw).await {
                     tracing::warn!(error = %err, "could not store a gossip record");
+                } else {
+                    stored_signed_at.insert(subject_id, record.signed_at);
                 }
             }
             Err(err) => tracing::warn!(error = %err, "could not serialise a gossip record"),
@@ -391,13 +394,12 @@ pub async fn pull(
         .filter(|p| !p.is_empty())
         .collect();
     if !wanted.is_empty()
-        && let Ok(peers) = store.list_peers().await
+        && let Ok(peers) = store.active_peers().await
     {
         // The intersection rule: only relay records for peers the caller
         // proved they already know by naming the pubkey.
         let matched_ids: Vec<i64> = peers
             .iter()
-            .filter(|p| !p.is_revoked())
             .filter_map(|peer| {
                 let pubkey = peer.pubkey.as_deref()?;
                 wanted.contains(pubkey).then_some(peer.id)
@@ -435,7 +437,7 @@ pub async fn pull(
           share with are counted `unknown` and dropped by design, not rejected — a \
           friend relaying their whole view is normal.", body = IngestSummary),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
         (status = 503, description = "The database is not open yet.", body = String),
     ),
 )]
@@ -491,11 +493,10 @@ async fn run_exchange(state: &Arc<ServeState>, http: &reqwest::Client) -> Result
     let store = state.store().await?;
     let peers = store.list_peers().await.map_err(|e| e.to_string())?;
 
-    let outbound: Vec<_> = peers
+    let any_outbound = peers
         .iter()
-        .filter(|p| !p.is_revoked() && p.gossip_url.is_some())
-        .collect();
-    if outbound.is_empty() {
+        .any(|p| !p.is_revoked() && p.gossip_url.is_some());
+    if !any_outbound {
         return Ok(());
     }
 
@@ -516,18 +517,14 @@ async fn run_exchange(state: &Arc<ServeState>, http: &reqwest::Client) -> Result
     // behind a dead tunnel delayed every friend after them — with five friends
     // and two unreachable, a single pass burned 30s of wall time doing nothing.
     let (store, own, known) = (&store, own.as_ref(), &known);
-    let exchanges = outbound.into_iter().filter_map(|peer| {
+    let exchanges = peers.iter().filter(|p| !p.is_revoked()).filter_map(|peer| {
+        let url = peer.gossip_url.as_deref()?;
         let Ok(Some(key)) = vault.get(&secret_keys::peer_gossip_key(peer.id)) else {
             tracing::debug!(peer = %peer.label, "no outbound key stored — skipping gossip");
             return None;
         };
 
         Some(async move {
-            // `filter` above; this cannot fire but the type does not know.
-            let Some(url) = peer.gossip_url.as_deref() else {
-                return;
-            };
-
             if let Err(reason) =
                 exchange_with(http, store, peer.id, url, key.expose_secret(), own, known).await
             {
@@ -1313,8 +1310,9 @@ mod tests {
     async fn ingest_counts_a_record_whose_writes_fail_after_the_identity_was_bound() {
         let (store, ids) = store_with(&["Sam"]).await;
         let sam = identity(1);
-        // `list_peers` and `bind_peer_pubkey` answer; everything after fails.
-        store.fail_after(2).await.unwrap();
+        // `list_peers`, `peer_gossip_records` and `bind_peer_pubkey` answer;
+        // everything after fails.
+        store.fail_after(3).await.unwrap();
 
         let summary = ingest(&store, ids[0], vec![record_for(&sam, "http://a:1", 1000)]).await;
 

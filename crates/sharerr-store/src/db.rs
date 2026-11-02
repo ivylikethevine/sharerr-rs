@@ -16,15 +16,29 @@ use sharerr_core::model::{ExternalIds, MediaMeta, MediaSource, MediaSpec, ShareS
 
 /// A bound, not-yet-executed SQLite query — what [`Store::update_item`]
 /// takes, spelled out once rather than at every call site.
-type SqliteQuery<'q> = sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
+pub(crate) type SqliteQuery<'q> =
+    sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>;
+
+/// A single-row `UPDATE shared_items`: `$set` plus the tail [`Store::update_item`]
+/// binds.
+macro_rules! item_update {
+    ($set:literal) => {
+        sqlx::query(concat!(
+            "UPDATE shared_items SET ",
+            $set,
+            ", updated_at = ? WHERE source = ? AND file_id = ?"
+        ))
+    };
+}
 
 pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
-/// Serialises [`Store::from_options`] within this process.
+/// Serialises [`Store::open`] within this process.
 ///
-/// `ServeState::store()` and `Syncer::build` each open their own pool
-/// against the same file independently, so on a fresh start (or an upgrade
-/// with a pending migration) they can race each other in two ways: the very
+/// `ServeState::store()`'s check-then-open and `doctor`'s database check, which
+/// `/api/v1/doctor` reaches in-process, can each open a pool against the same
+/// file, so on a fresh start (or an upgrade with a pending migration) they can
+/// race each other in two ways: the very
 /// first connection's WAL/pragma setup against a brand new file can itself
 /// return `SQLITE_BUSY` immediately rather than waiting out `busy_timeout`,
 /// and sqlx-sqlite's own migration `lock`/`unlock` are no-ops over
@@ -85,7 +99,19 @@ pub enum StoreError {
     },
 }
 
-type Result<T> = std::result::Result<T, StoreError>;
+impl StoreError {
+    /// An `INSERT` failure, naming `name` when the UNIQUE constraint refused it.
+    pub(crate) fn from_insert(err: sqlx::Error, name: &str) -> Self {
+        match &err {
+            sqlx::Error::Database(db) if db.is_unique_violation() => Self::UserExists {
+                username: name.to_owned(),
+            },
+            _ => Self::Sql(err),
+        }
+    }
+}
+
+pub(crate) type Result<T> = std::result::Result<T, StoreError>;
 
 #[derive(Debug, Clone)]
 /// sharerr's SQLite database: what is shared, and every reconciliation run.
@@ -94,7 +120,7 @@ type Result<T> = std::result::Result<T, StoreError>;
 pub struct Store {
     pool: SqlitePool,
     /// How much history each self-growing table keeps — see [`crate::retention`].
-    pub(crate) retention: std::sync::Arc<crate::retention::RetentionCell>,
+    pub(crate) retention: crate::retention::RetentionCell,
     #[cfg(feature = "fault-injection")]
     pub(crate) fault: std::sync::Arc<crate::fault::Fault>,
 }
@@ -118,6 +144,12 @@ impl Store {
             .foreign_keys(true)
             .busy_timeout(std::time::Duration::from_secs(10));
 
+        // Held across both connecting and migrating: on a brand new file the
+        // very first connection's WAL/pragma setup can itself race a second
+        // pool doing the same (`SQLITE_BUSY`, immediate rather than retried:
+        // `busy_timeout` does not cover it), before either reaches
+        // `MIGRATOR.run`. See `MIGRATE_LOCK`.
+        let _guard = MIGRATE_LOCK.lock().await;
         Self::from_options(opts, 5).await
     }
 
@@ -132,12 +164,6 @@ impl Store {
     }
 
     async fn from_options(opts: SqliteConnectOptions, max_connections: u32) -> Result<Self> {
-        // Held across both connecting and migrating: on a brand new file the
-        // very first connection's WAL/pragma setup can itself race a second
-        // pool doing the same (`SQLITE_BUSY`, immediate rather than retried —
-        // `busy_timeout` does not cover it), before either reaches
-        // `MIGRATOR.run`. See `MIGRATE_LOCK`.
-        let _guard = MIGRATE_LOCK.lock().await;
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             // Recycling a connection is ordinarily harmless, but for `:memory:` the
@@ -150,7 +176,7 @@ impl Store {
         MIGRATOR.run(&pool).await?;
         Ok(Self {
             pool,
-            retention: crate::retention::RetentionCell::new(crate::Retention::default()),
+            retention: Default::default(),
             #[cfg(feature = "fault-injection")]
             fault: std::sync::Arc::new(crate::fault::Fault::new()),
         })
@@ -181,18 +207,10 @@ impl Store {
     /// of decoding every row's JSON columns just to tally which state each
     /// is in.
     pub async fn counts_by_state(&self) -> Result<Vec<(ShareState, i64)>> {
-        let rows = sqlx::query("SELECT state, COUNT(*) AS count FROM shared_items GROUP BY state")
-            .fetch_all(self.pool())
-            .await?;
-        let raw = rows
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get::<String, _>("state")?,
-                    row.try_get::<i64, _>("count")?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let raw: Vec<(String, i64)> =
+            sqlx::query_as("SELECT state, COUNT(*) FROM shared_items GROUP BY state")
+                .fetch_all(self.pool())
+                .await?;
         Ok(ShareState::ALL
             .iter()
             .map(|&state| {
@@ -347,7 +365,7 @@ impl Store {
         .bind(&spec_json)
         .bind(&item.release_title)
         .bind(item.arr_path.to_string_lossy().as_ref())
-        .bind(i64::try_from(item.size).unwrap_or(i64::MAX))
+        .bind(sharerr_core::saturating_i64(item.size))
         .bind(&ids_json)
         .bind(item.info_hash.as_deref())
         .bind(item.announce_token_fp.as_deref())
@@ -365,19 +383,27 @@ impl Store {
         Ok(row.try_get::<i64, _>("id")?)
     }
 
-    /// Bind the standard trailing three — `updated_at`, `source`, `file_id`
-    /// — and execute. The tail every single-row updater in this file
-    /// shares: [`Self::set_state`], [`Self::set_seeding`],
-    /// [`Self::confirm_seeding`], [`Self::set_ratio`],
-    /// [`Self::reset_for_rebuild`] each built this identically by hand, so changing
-    /// the natural key or its `WHERE` clause was six edits instead of one.
-    ///
-    /// `query` is the caller's own `UPDATE shared_items SET ...` text, SET
-    /// clause values already bound, ending in exactly `, updated_at = ?
-    /// WHERE source = ? AND file_id = ?` for this to bind correctly.
-    async fn update_item<'q>(
+    /// Execute `query`, reporting whether it changed any row.
+    pub(crate) async fn changed(&self, query: SqliteQuery<'_>) -> Result<bool> {
+        Ok(query.execute(self.pool()).await?.rows_affected() > 0)
+    }
+
+    /// Execute an [`item_update!`] query, binding its trailing `updated_at`,
+    /// `source` and `file_id`.
+    async fn update_item(
         &self,
-        query: SqliteQuery<'q>,
+        query: SqliteQuery<'_>,
+        source: MediaSource,
+        file_id: i64,
+    ) -> Result<()> {
+        self.update_item_counted(query, source, file_id).await?;
+        Ok(())
+    }
+
+    /// [`Self::update_item`], returning how many rows changed.
+    async fn update_item_counted(
+        &self,
+        query: SqliteQuery<'_>,
         source: MediaSource,
         file_id: i64,
     ) -> Result<u64> {
@@ -399,17 +425,13 @@ impl Store {
         last_error: Option<&str>,
     ) -> Result<()> {
         self.update_item(
-            sqlx::query(
-                "UPDATE shared_items SET state = ?, last_error = ?, updated_at = ? \
-                 WHERE source = ? AND file_id = ?",
-            )
-            .bind(state.as_str())
-            .bind(last_error),
+            item_update!("state = ?, last_error = ?")
+                .bind(state.as_str())
+                .bind(last_error),
             source,
             file_id,
         )
         .await
-        .map(|_| ())
     }
 
     /// Mark an item seeding under `info_hash`, in one write.
@@ -445,11 +467,10 @@ impl Store {
         private: Option<bool>,
     ) -> Result<()> {
         self.update_item(
-            sqlx::query(
-                "UPDATE shared_items SET info_hash = ?, announce_token_fp = ?, \
+            item_update!(
+                "info_hash = ?, announce_token_fp = ?, \
                  created_by_sharerr = ?, private = COALESCE(?, private), state = ?, \
-                 last_error = NULL, updated_at = ? \
-                 WHERE source = ? AND file_id = ?",
+                 last_error = NULL"
             )
             .bind(info_hash)
             .bind(announce_token_fp)
@@ -460,7 +481,6 @@ impl Store {
             file_id,
         )
         .await
-        .map(|_| ())
     }
 
     /// [`Self::set_ratio`], plus recording which token an already-seeding
@@ -485,9 +505,9 @@ impl Store {
         ratio_limit: Option<f64>,
     ) -> Result<()> {
         self.update_item(
-            sqlx::query(
-                "UPDATE shared_items SET announce_token_fp = ?, achieved_ratio = ?, \
-                 ratio_limit_reported = ?, updated_at = ? WHERE source = ? AND file_id = ?",
+            item_update!(
+                "announce_token_fp = ?, achieved_ratio = ?, \
+                 ratio_limit_reported = ?"
             )
             .bind(announce_token_fp)
             .bind(ratio)
@@ -496,7 +516,6 @@ impl Store {
             file_id,
         )
         .await
-        .map(|_| ())
     }
 
     /// Record what the torrent client itself reports for an already-seeding
@@ -514,17 +533,13 @@ impl Store {
         ratio_limit: Option<f64>,
     ) -> Result<()> {
         self.update_item(
-            sqlx::query(
-                "UPDATE shared_items SET achieved_ratio = ?, ratio_limit_reported = ?, \
-                 updated_at = ? WHERE source = ? AND file_id = ?",
-            )
-            .bind(ratio)
-            .bind(ratio_limit),
+            item_update!("achieved_ratio = ?, ratio_limit_reported = ?")
+                .bind(ratio)
+                .bind(ratio_limit),
             source,
             file_id,
         )
         .await
-        .map(|_| ())
     }
 
     /// Record the file's identity on disk for the torrent sharerr just built
@@ -537,17 +552,13 @@ impl Store {
         stamp: Option<FileStamp>,
     ) -> Result<()> {
         self.update_item(
-            sqlx::query(
-                "UPDATE shared_items SET file_inode = ?, file_mtime_ns = ?, updated_at = ? \
-                 WHERE source = ? AND file_id = ?",
-            )
-            .bind(stamp.and_then(|s| s.inode).map(inode_to_sql))
-            .bind(stamp.map(|s| s.mtime_ns)),
+            item_update!("file_inode = ?, file_mtime_ns = ?")
+                .bind(stamp.and_then(|s| s.inode).map(inode_to_sql))
+                .bind(stamp.map(|s| s.mtime_ns)),
             source,
             file_id,
         )
         .await
-        .map(|_| ())
     }
 
     /// Every recorded [`FileStamp`], keyed like [`SharedItem::key`], for one
@@ -580,11 +591,10 @@ impl Store {
         file_id: i64,
         until: Option<i64>,
     ) -> Result<bool> {
-        let query = sqlx::query(
-            "UPDATE shared_items SET share_until = ?, updated_at = ? \
-             WHERE source = ? AND file_id = ?",
-        );
-        let affected = self.update_item(query.bind(until), source, file_id).await?;
+        let query = item_update!("share_until = ?");
+        let affected = self
+            .update_item_counted(query.bind(until), source, file_id)
+            .await?;
         Ok(affected > 0)
     }
 
@@ -603,6 +613,18 @@ impl Store {
         Ok(ends)
     }
 
+    /// One item's share-until date, if it has one.
+    pub async fn share_end(&self, source: MediaSource, file_id: i64) -> Result<Option<i64>> {
+        let until: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT share_until FROM shared_items WHERE source = ?1 AND file_id = ?2",
+        )
+        .bind(source.as_str())
+        .bind(file_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(until.flatten())
+    }
+
     /// Give an item an info hash with no other change, for a test setting up a row.
     /// Production records one through [`Self::set_seeding`].
     #[cfg(any(test, feature = "fault-injection"))]
@@ -613,13 +635,11 @@ impl Store {
         info_hash: &str,
     ) -> Result<()> {
         self.update_item(
-            sqlx::query("UPDATE shared_items SET info_hash = ?, updated_at = ? WHERE source = ? AND file_id = ?")
-                .bind(info_hash),
+            item_update!("info_hash = ?").bind(info_hash),
             source,
             file_id,
         )
         .await
-        .map(|_| ())
     }
 
     /// Clear an item's torrent identity back to "never shared", so a fresh
@@ -631,17 +651,15 @@ impl Store {
     /// `Syncer::prepare_rebuild`), since this call only touches the row.
     pub async fn reset_for_rebuild(&self, source: MediaSource, file_id: i64) -> Result<()> {
         self.update_item(
-            sqlx::query(
-                "UPDATE shared_items SET info_hash = NULL, announce_token_fp = NULL, \
-                 created_by_sharerr = 0, private = 1, state = ?, last_error = NULL, \
-                 updated_at = ? WHERE source = ? AND file_id = ?",
+            item_update!(
+                "info_hash = NULL, announce_token_fp = NULL, \
+                 created_by_sharerr = 0, private = 1, state = ?, last_error = NULL"
             )
             .bind(ShareState::Pending.as_str()),
             source,
             file_id,
         )
         .await
-        .map(|_| ())
     }
 }
 
@@ -701,6 +719,11 @@ pub struct SeedingSummary {
     pub size: i64,
 }
 
+/// `n` comma-separated `?` placeholders for an `IN (...)`.
+pub(crate) fn placeholders(n: usize) -> String {
+    vec!["?"; n].join(", ")
+}
+
 /// The `WHERE` fragment selecting the seeding rows a [`crate::PeerScope`] may
 /// see, and the binder that fills its placeholders in the same order.
 ///
@@ -723,7 +746,7 @@ struct ScopeFilter {
 /// hot path: without the cache, every Prowlarr RSS poll from every friend
 /// rebuilds the same handful of SQL fragments and bind lists from scratch.
 fn scope_filter(scope: crate::PeerScope) -> &'static ScopeFilter {
-    static FILTERS: LazyLock<[ScopeFilter; 5]> =
+    static FILTERS: LazyLock<[ScopeFilter; crate::PeerScope::ALL.len()]> =
         LazyLock::new(|| std::array::from_fn(|i| ScopeFilter::new(crate::PeerScope::ALL[i])));
 
     // `ALL` is exhaustive over every `PeerScope` variant by construction
@@ -751,13 +774,13 @@ impl ScopeFilter {
             .filter(|source| scope.allows(*source))
             .map(MediaSource::as_str)
             .collect();
-        let placeholders = vec!["?"; allowed.len()].join(", ");
+        let allowed_slots = placeholders(allowed.len());
 
         // Items from the kind-scoped directory source carry no single app
         // identity, so a narrow scope admits them by the declared kind in
         // their spec instead — see `PeerScope::directory_kind`. Under `All`
         // the source list already includes it and this clause is absent.
-        let kind_placeholders = vec!["?"; MediaSource::KIND_SCOPED.len()].join(", ");
+        let kind_placeholders = placeholders(MediaSource::KIND_SCOPED.len());
         let directory_kind = scope.directory_kind();
         let kind_arm = match directory_kind {
             Some(_) => format!(
@@ -766,7 +789,7 @@ impl ScopeFilter {
             None => String::new(),
         };
         let clause = format!(
-            "state = ? AND info_hash IS NOT NULL AND (source IN ({placeholders}){kind_arm})"
+            "state = ? AND info_hash IS NOT NULL AND (source IN ({allowed_slots}){kind_arm})"
         );
 
         let mut binds = vec![ShareState::Seeding.as_str()];
@@ -1029,6 +1052,57 @@ mod tests {
         let sources: std::collections::HashSet<MediaSource> =
             stored.iter().map(|item| item.source).collect();
         assert_eq!(sources.len(), MediaSource::ALL.len());
+    }
+
+    /// `PeerScope::admits` restates `ScopeFilter`'s SQL over an in-memory item,
+    /// and access control rests on the two agreeing.
+    #[tokio::test]
+    async fn the_rust_and_sql_forms_of_a_scope_agree() {
+        let store = Store::open_in_memory().await.unwrap();
+
+        let mut file_id = 0;
+        for source in MediaSource::ALL.iter().copied() {
+            for spec in [episode(0).spec, movie(0).spec] {
+                file_id += 1;
+                let item = SharedItem {
+                    source,
+                    spec,
+                    ..episode(file_id)
+                };
+                store.upsert(&item).await.unwrap();
+                store
+                    .set_seeding(
+                        source,
+                        file_id,
+                        &format!("{file_id:040x}"),
+                        None,
+                        true,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let all = store.seeding_items(crate::PeerScope::All).await.unwrap();
+        assert_eq!(all.len(), MediaSource::ALL.len() * 2);
+        for &scope in crate::PeerScope::ALL {
+            let mut in_sql: Vec<_> = store
+                .seeding_items(scope)
+                .await
+                .unwrap()
+                .iter()
+                .map(SharedItem::key)
+                .collect();
+            let mut in_rust: Vec<_> = all
+                .iter()
+                .filter(|item| scope.admits(item))
+                .map(SharedItem::key)
+                .collect();
+            in_sql.sort_by_key(|(_, file_id)| *file_id);
+            in_rust.sort_by_key(|(_, file_id)| *file_id);
+            assert_eq!(in_sql, in_rust, "{scope:?}");
+        }
     }
 
     fn movie(file_id: i64) -> SharedItem {
@@ -1326,6 +1400,14 @@ mod tests {
         assert_eq!(
             store.share_ends().await.unwrap()[&(MediaSource::Sonarr, 1001)],
             1_800_000_000
+        );
+        assert_eq!(
+            store.share_end(MediaSource::Sonarr, 1001).await.unwrap(),
+            Some(1_800_000_000)
+        );
+        assert_eq!(
+            store.share_end(MediaSource::Sonarr, 9999).await.unwrap(),
+            None
         );
         assert!(
             store
@@ -1795,6 +1877,11 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            store.audience(MediaSource::Sonarr, 4).await.unwrap(),
+            Some(vec!["sam".to_owned()])
+        );
+        assert_eq!(store.audience(MediaSource::Sonarr, 1).await.unwrap(), None);
 
         let ids_for = async |limits: PeerLimits| {
             let mut ids: Vec<i64> = store

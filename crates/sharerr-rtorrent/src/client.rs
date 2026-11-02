@@ -1,8 +1,8 @@
 //! [`RtorrentClient`]: construction, and the raw XML-RPC call machinery
 //! everything in [`crate::adapter`] is built on.
 
-use secrecy::{ExposeSecret, SecretString};
-use sharerr_client::{ClientError, Result, http_client};
+use secrecy::SecretString;
+use sharerr_client::{ClientError, Result, RpcConnection};
 use url::Url;
 
 use crate::KIND;
@@ -12,24 +12,13 @@ use crate::xmlrpc::{
 
 /// An rTorrent XML-RPC client.
 pub struct RtorrentClient {
-    http: reqwest::Client,
-    endpoint: Url,
-    username: String,
-    password: SecretString,
+    connection: RpcConnection,
 }
 
 impl std::fmt::Debug for RtorrentClient {
     /// Hand-written so the password cannot reach a log through a derived `Debug`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        sharerr_client::debug_redacted(
-            f,
-            "RtorrentClient",
-            &[
-                ("endpoint", &self.endpoint.as_str() as &dyn std::fmt::Debug),
-                ("username", &self.username as &dyn std::fmt::Debug),
-            ],
-            &["password"],
-        )
+        self.connection.debug_as(f, "RtorrentClient")
     }
 }
 
@@ -38,12 +27,8 @@ impl RtorrentClient {
     /// module docs for why this is the full RPC URL, not a base to append a
     /// path to.
     pub fn new(endpoint: &Url, username: &str, password: SecretString) -> Result<Self> {
-        let http = http_client()?;
         Ok(Self {
-            http,
-            endpoint: endpoint.clone(),
-            username: username.to_owned(),
-            password,
+            connection: RpcConnection::new(KIND, endpoint.clone(), username, password)?,
         })
     }
 
@@ -51,15 +36,12 @@ impl RtorrentClient {
     /// (a method name for [`Self::call`], or `"system.multicall"` for
     /// [`Self::call_batch`]).
     async fn send(&self, body: String, label: &str) -> Result<XmlValue> {
-        let response = self
-            .http
-            .post(self.endpoint.clone())
-            .basic_auth(&self.username, Some(self.password.expose_secret()))
+        let request = self
+            .connection
+            .post()
             .header("Content-Type", "text/xml")
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
+            .body(body);
+        let response = self.connection.send(request).await?;
 
         sharerr_client::check_status(KIND, response.status(), label)?;
 
@@ -79,18 +61,23 @@ impl RtorrentClient {
         self.send(request_xml(method, params), method).await
     }
 
-    /// Issue several distinct method calls as one `system.multicall` request
-    /// — one HTTP round trip, executed by rTorrent in the given order — and
-    /// return one decoded value per call, in that same order.
+    /// Issue `method` once per entry of `params` as one `system.multicall` request:
+    /// one HTTP round trip, executed by rTorrent in the given order.
     ///
     /// Unlike [`Self::call`], a per-call failure inside the batch does not
     /// come back as this module's own `<fault>` (that only covers a fault in
     /// `system.multicall` itself, e.g. an unknown method); it is a struct in
     /// the results array, one per failed entry, which is why this reads
     /// [`fault_message`] rather than relying on [`parse_response`] alone.
-    pub(crate) async fn call_batch(&self, calls: &[(&str, &[Param<'_>])]) -> Result<Vec<XmlValue>> {
+    pub(crate) async fn call_batch<const N: usize>(
+        &self,
+        method: &str,
+        params: &[[Param<'_>; N]],
+    ) -> Result<()> {
+        let calls: Vec<(&str, &[Param<'_>])> =
+            params.iter().map(|p| (method, p.as_slice())).collect();
         let value = self
-            .send(multicall_request_xml(calls), "system.multicall")
+            .send(multicall_request_xml(&calls), "system.multicall")
             .await?;
 
         let XmlValue::Array(rows) = value else {
@@ -111,23 +98,27 @@ impl RtorrentClient {
             });
         }
 
-        rows.into_iter()
-            .zip(calls)
-            .map(|(row, (method, _))| match row {
+        for row in rows {
+            match row {
                 // The multicall extension wraps each successful return value
                 // in a one-element array.
-                XmlValue::Array(mut values) if values.len() == 1 => Ok(values.remove(0)),
-                fault @ XmlValue::Struct(_) => Err(ClientError::Api {
-                    kind: KIND,
-                    detail: format!("{method}: {}", fault_message(&fault)),
-                }),
-                other => Err(malformed_shape(
-                    "system.multicall",
-                    "a one-element array or a fault struct",
-                    &other,
-                )),
-            })
-            .collect()
+                XmlValue::Array(values) if values.len() == 1 => {}
+                fault @ XmlValue::Struct(_) => {
+                    return Err(ClientError::Api {
+                        kind: KIND,
+                        detail: format!("{method}: {}", fault_message(&fault)),
+                    });
+                }
+                other => {
+                    return Err(malformed_shape(
+                        "system.multicall",
+                        "a one-element array or a fault struct",
+                        &other,
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::call`], expecting the reply to be a plain string.

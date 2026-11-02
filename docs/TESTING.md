@@ -84,8 +84,8 @@ brings up `docker/compose.test.yml` (or the `--vpn`, `--transmission`,
 `--rtorrent`, `--deluge` sibling, or with `--sonarr-v5` the same stack on Sonarr v5),
 seeds Sonarr, Radarr, Lidarr and Readarr (Bookshelf) with tagged synthetic
 content via `sharerr-testkit`'s `seed-arr` binary, runs the suite behind the
-`e2e` feature and `#[ignore]` (`cargo test -p sharerr --features e2e --
---ignored --test-threads=1`), and tears the stack down on exit whether the
+`e2e` feature and `#[ignore]` (`cargo test -p sharerr --features e2e --test e2e
+-- --ignored --test-threads=1`), and tears the stack down on exit whether the
 run passed or not. Every step is idempotent, so re-running after a failure is
 safe.
 

@@ -30,7 +30,7 @@ pub const ARR_BOOK_PREFIX: &str = "/books";
 
 /// The tagged series, as the *arr apps record it.
 ///
-/// Constants rather than literals inside [`Library::series_json`] because the
+/// Constants rather than literals inside [`series_json`] because the
 /// compose stack seeds these same values into Sonarr's own database, and the two
 /// descriptions of one series drifting apart is exactly the failure this module
 /// exists to prevent.
@@ -155,14 +155,13 @@ pub fn tv_files(root: &Path) -> Vec<MediaFile> {
         .into_iter()
         .map(|(file_id, tail, scene_name)| {
             let suffix = format!("{SERIES_FOLDER}/{tail}");
-            MediaFile {
-                file_id,
-                source_id: SERIES_ID,
-                arr_path: format!("{ARR_TV_PREFIX}/{suffix}"),
-                disk_path: root.join("tv").join(&suffix),
-                size: FILE_SIZE as u64,
-                scene_name: scene_name.map(str::to_owned),
-            }
+            media_file(
+                root.join("tv"),
+                ARR_TV_PREFIX,
+                &suffix,
+                (file_id, SERIES_ID),
+                scene_name,
+            )
         })
         .collect()
 }
@@ -170,14 +169,13 @@ pub fn tv_files(root: &Path) -> Vec<MediaFile> {
 /// The movie fixtures as records, without touching the disk. See [`tv_files`].
 pub fn movie_files(root: &Path) -> Vec<MediaFile> {
     let suffix = format!("{MOVIE_FOLDER}/gilded.ferry.2019.mkv");
-    vec![MediaFile {
-        file_id: 900,
-        source_id: MOVIE_ID,
-        arr_path: format!("{ARR_MOVIE_PREFIX}/{suffix}"),
-        disk_path: root.join("movies").join(&suffix),
-        size: FILE_SIZE as u64,
-        scene_name: Some("The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP".to_owned()),
-    }]
+    vec![media_file(
+        root.join("movies"),
+        ARR_MOVIE_PREFIX,
+        &suffix,
+        (900, MOVIE_ID),
+        Some("The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP"),
+    )]
 }
 
 /// The music fixtures as records, without touching the disk. See [`tv_files`].
@@ -199,14 +197,13 @@ pub fn music_files(root: &Path) -> Vec<MediaFile> {
         .into_iter()
         .map(|(file_id, tail, scene_name)| {
             let suffix = format!("{ARTIST_FOLDER}/{ALBUM_TITLE}/{tail}");
-            MediaFile {
-                file_id,
-                source_id: ARTIST_ID,
-                arr_path: format!("{ARR_MUSIC_PREFIX}/{suffix}"),
-                disk_path: root.join("music").join(&suffix),
-                size: FILE_SIZE as u64,
-                scene_name: scene_name.map(str::to_owned),
-            }
+            media_file(
+                root.join("music"),
+                ARR_MUSIC_PREFIX,
+                &suffix,
+                (file_id, ARTIST_ID),
+                scene_name,
+            )
         })
         .collect()
 }
@@ -214,14 +211,32 @@ pub fn music_files(root: &Path) -> Vec<MediaFile> {
 /// The book fixture as a record, without touching the disk. See [`tv_files`].
 pub fn book_files(root: &Path) -> Vec<MediaFile> {
     let suffix = format!("{AUTHOR_FOLDER}/{BOOK_TITLE}/brass.orchard.almanac.epub");
-    vec![MediaFile {
-        file_id: 701,
-        source_id: AUTHOR_ID,
-        arr_path: format!("{ARR_BOOK_PREFIX}/{suffix}"),
-        disk_path: root.join("books").join(&suffix),
+    vec![media_file(
+        root.join("books"),
+        ARR_BOOK_PREFIX,
+        &suffix,
+        (701, AUTHOR_ID),
+        None,
+    )]
+}
+
+/// One fixture file: `suffix` under `disk_root` on disk, under `arr_prefix` as
+/// the *arr app sees it. `ids` is `(file_id, source_id)`.
+fn media_file(
+    disk_root: PathBuf,
+    arr_prefix: &str,
+    suffix: &str,
+    (file_id, source_id): (i64, i64),
+    scene_name: Option<&str>,
+) -> MediaFile {
+    MediaFile {
+        file_id,
+        source_id,
+        arr_path: format!("{arr_prefix}/{suffix}"),
+        disk_path: disk_root.join(suffix),
         size: FILE_SIZE as u64,
-        scene_name: None,
-    }]
+        scene_name: scene_name.map(str::to_owned),
+    }
 }
 
 /// Write `files` to disk and wrap them as a [`Library`] rooted at `root`.
@@ -275,28 +290,44 @@ pub fn system_status_json(app: &str) -> Value {
     json!({ "appName": app, "version": "4.0.15.2941", "instanceName": app })
 }
 
-impl Library {
-    /// `GET /api/v3/series`: the tagged series plus an untagged decoy.
-    pub fn series_json(&self) -> Value {
-        json!([
-            {
-                "id": SERIES_ID,
-                "title": SERIES_TITLE,
-                "tvdbId": SERIES_TVDB_ID,
-                "tvMazeId": SERIES_TVMAZE_ID,
-                "imdbId": SERIES_IMDB_ID,
-                "tags": [TAG_ID],
-            },
-            {
-                // Untagged: discovery must never return this.
-                "id": 12,
-                "title": "Copper Vale Station",
-                "tvdbId": 112_233,
-                "tags": [1],
-            },
-        ])
-    }
+/// `GET /api/v3/series`: the tagged series plus an untagged decoy.
+pub fn series_json() -> Value {
+    json!([
+        {
+            "id": SERIES_ID,
+            "title": SERIES_TITLE,
+            "tvdbId": SERIES_TVDB_ID,
+            "tvMazeId": SERIES_TVMAZE_ID,
+            "imdbId": SERIES_IMDB_ID,
+            "tags": [TAG_ID],
+        },
+        {
+            // Untagged: discovery must never return this.
+            "id": 12,
+            "title": "Copper Vale Station",
+            "tvdbId": 112_233,
+            "tags": [1],
+        },
+    ])
+}
 
+/// `GET /api/v3/episode`: every fixture episode and the file it points at.
+pub fn episode_json() -> Value {
+    Value::Array(
+        EPISODES
+            .iter()
+            .map(|&(season, episode, file_id)| {
+                json!({
+                    "seasonNumber": season,
+                    "episodeNumber": episode,
+                    "episodeFileId": file_id,
+                })
+            })
+            .collect(),
+    )
+}
+
+impl Library {
     pub fn episodefile_json(&self) -> Value {
         Value::Array(
             self.files
@@ -316,51 +347,12 @@ impl Library {
         )
     }
 
-    pub fn episode_json(&self) -> Value {
-        Value::Array(
-            EPISODES
-                .iter()
-                .map(|&(season, episode, file_id)| {
-                    json!({
-                        "seasonNumber": season,
-                        "episodeNumber": episode,
-                        "episodeFileId": file_id,
-                    })
-                })
-                .collect(),
-        )
-    }
-
     /// Look a fixture up by its *arr file id.
     pub fn file(&self, file_id: i64) -> &MediaFile {
         self.files
             .iter()
             .find(|f| f.file_id == file_id)
             .unwrap_or_else(|| panic!("no fixture with file_id {file_id}"))
-    }
-
-    pub fn movie_json(&self) -> Value {
-        let file = &self.files[0];
-        json!([
-            {
-                "id": MOVIE_ID,
-                "title": MOVIE_TITLE,
-                "year": MOVIE_YEAR,
-                "tmdbId": MOVIE_TMDB_ID,
-                "imdbId": MOVIE_IMDB_ID,
-                "tags": [TAG_ID],
-                "hasFile": true,
-                "movieFile": {
-                    "id": file.file_id,
-                    "path": file.arr_path,
-                    "size": file.size,
-                    "sceneName": file.scene_name,
-                },
-            },
-            { "id": 32, "title": "Paper Lantern Sky", "year": 2021, "tags": [1], "hasFile": false },
-            // Tagged, but nothing downloaded yet.
-            { "id": 33, "title": "Harrowmere", "year": 2024, "tags": [TAG_ID], "hasFile": false },
-        ])
     }
 }
 
@@ -429,7 +421,6 @@ mod tests {
 
         assert_eq!(library.files.len(), 1);
         assert!(library.files[0].disk_path.exists());
-        assert_eq!(library.movie_json().as_array().unwrap().len(), 3);
     }
 
     #[test]

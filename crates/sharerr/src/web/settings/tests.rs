@@ -1823,27 +1823,19 @@ where
     F: FnOnce(WebState, std::path::PathBuf) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    figment::Jail::expect_with(|jail| {
-        jail.set_env("SHARERR_MASTER_KEY", "settings-tests-master-key");
-        let config = sharerr_core::Config {
-            data_dir: jail.directory().to_path_buf(),
-            ..Default::default()
-        };
-        let path = jail.directory().join("sharerr.toml");
-        // A save reloads the config from this file, and a reload that
-        // forgot `data_dir` would move the vault path out from under the
-        // very secret the save just wrote.
-        std::fs::write(
-            &path,
-            format!("data_dir = {:?}\n", jail.directory().display().to_string()),
-        )
-        .unwrap();
-        let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path.clone(), None));
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(body(web_state(serve), path));
-        Ok(())
-    });
+    crate::state::fixtures::with_open_vault(
+        sharerr_core::Config::default(),
+        |_| {},
+        |serve| {
+            let path = serve.config_path().to_path_buf();
+            // A save reloads the config from this file, and a reload that
+            // forgot `data_dir` would move the vault path out from under the
+            // very secret the save just wrote.
+            let data_dir = path.parent().unwrap().display().to_string();
+            std::fs::write(&path, format!("data_dir = {data_dir:?}\n")).unwrap();
+            body(web_state(serve), path)
+        },
+    );
 }
 
 async fn stored(state: &WebState, key: &str) -> Option<String> {
@@ -1964,7 +1956,7 @@ fn save_metrics_writes_the_flag_and_stores_then_clears_the_token() {
     with_open_vault(|state, config_path| async move {
         let response = save_metrics(
             State(state.clone()),
-            Form(MetricsForm {
+            Form(TokenToggleForm {
                 enabled: Some("on".to_owned()),
                 token: "scrape-me".to_owned(),
                 clear_token: None,
@@ -1982,7 +1974,7 @@ fn save_metrics_writes_the_flag_and_stores_then_clears_the_token() {
 
         let response = save_metrics(
             State(state.clone()),
-            Form(MetricsForm {
+            Form(TokenToggleForm {
                 enabled: None,
                 token: String::new(),
                 clear_token: Some("on".to_owned()),
@@ -1999,7 +1991,7 @@ fn save_api_writes_its_own_flag_and_token_and_leaves_metrics_alone() {
     with_open_vault(|state, config_path| async move {
         let response = save_api(
             State(state.clone()),
-            Form(ApiForm {
+            Form(TokenToggleForm {
                 enabled: Some("on".to_owned()),
                 token: "manage-me".to_owned(),
                 clear_token: None,
@@ -2018,7 +2010,7 @@ fn save_api_writes_its_own_flag_and_token_and_leaves_metrics_alone() {
 
         let response = save_api(
             State(state.clone()),
-            Form(ApiForm {
+            Form(TokenToggleForm {
                 enabled: None,
                 token: String::new(),
                 clear_token: Some("on".to_owned()),

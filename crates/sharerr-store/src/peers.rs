@@ -17,9 +17,7 @@ use sharerr_core::endpoint::now_epoch;
 use sharerr_core::{MediaSource, SharedItem};
 use sqlx::{AssertSqlSafe, Row};
 
-use crate::db::{SeedingSummary, Store, StoreError};
-
-type Result<T> = std::result::Result<T, StoreError>;
+use crate::db::{Result, SeedingSummary, Store, StoreError};
 
 /// What a friend is allowed to see.
 ///
@@ -110,6 +108,16 @@ impl PeerScope {
             Self::Music => Some("track"),
             Self::Books => Some("book"),
         }
+    }
+
+    /// Whether this scope would show `item` in the Torznab feed: the rule
+    /// `Store::seeding_items` applies in SQL, over an in-memory item.
+    pub fn admits(self, item: &SharedItem) -> bool {
+        if self.allows(item.source) {
+            return true;
+        }
+        MediaSource::KIND_SCOPED.contains(&item.source)
+            && self.directory_kind() == Some(item.spec.kind_tag())
     }
 
     /// How to describe it to the operator.
@@ -254,12 +262,9 @@ fn validate_label(label: &str) -> Result<String> {
     )
 }
 
-/// Every column `row_to_peer` decodes, in one place.
-///
-/// One list instead of separate spellings across two `SELECT`s and a
-/// `RETURNING`: adding a column here is one edit, and a missed one is a compile
-/// error rather than a runtime `try_get` failure. `db.rs` solves the same
-/// problem for `shared_items` with `SELECT_COLUMNS`.
+/// How long a sighting stays fresh before [`Store::touch_peer`] writes again.
+const TOUCH_WINDOW_SECS: i64 = 300;
+
 /// What [`Store::touch_peer`] did with a sighting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Touch {
@@ -279,6 +284,12 @@ impl Touch {
     }
 }
 
+/// Every column `row_to_peer` decodes, in one place.
+///
+/// One list instead of separate spellings across two `SELECT`s and a
+/// `RETURNING`: adding a column here is one edit, and a missed one is a compile
+/// error rather than a runtime `try_get` failure. `db.rs` solves the same
+/// problem for `shared_items` with `SELECT_COLUMNS`.
 const PEER_COLUMNS: &str = "id, label, created_at, last_seen_at, revoked_at, scope, pubkey, \
      gossip_url, key_hash, downloaded, uploaded, max_size_bytes, max_height";
 
@@ -329,14 +340,21 @@ impl Store {
         .bind(scope.as_str())
         .fetch_one(self.pool())
         .await
-        .map_err(|err| match &err {
-            sqlx::Error::Database(db) if db.is_unique_violation() => StoreError::UserExists {
-                username: label.clone(),
-            },
-            _ => StoreError::Sql(err),
-        })?;
+        .map_err(|err| StoreError::from_insert(err, &label))?;
 
         row_to_peer(&row)
+    }
+
+    /// Every peer not revoked, newest first: the friends who count.
+    pub async fn active_peers(&self) -> Result<Vec<Peer>> {
+        let rows = sqlx::query(AssertSqlSafe(format!(
+            "SELECT {PEER_COLUMNS} FROM peers WHERE revoked_at IS NULL \
+             ORDER BY created_at DESC, id DESC"
+        )))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.iter().map(row_to_peer).collect()
     }
 
     /// Every peer, newest first, revoked ones included.
@@ -412,33 +430,29 @@ impl Store {
             .fetch_optional(self.pool())
             .await?
             .flatten();
-        if seen.is_some_and(|seen| seen >= now - 300) {
+        if seen.is_some_and(|seen| seen >= now - TOUCH_WINDOW_SECS) {
             return Ok(Touch::Throttled);
         }
-        let first = sqlx::query(
-            "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL",
-        )
-        .bind(now)
-        .bind(id)
-        .execute(self.pool())
-        .await?
-        .rows_affected();
-        if first > 0 {
-            return Ok(Touch::First);
-        }
-        let affected = sqlx::query(
-            "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at < ?1 - 300",
-        )
-        .bind(now)
-        .bind(id)
-        .execute(self.pool())
-        .await?
-        .rows_affected();
-        Ok(if affected > 0 {
-            Touch::Refreshed
+        let (sql, touched) = if seen.is_none() {
+            (
+                "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL",
+                Touch::First,
+            )
         } else {
-            Touch::Throttled
-        })
+            (
+                "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at < ?3",
+                Touch::Refreshed,
+            )
+        };
+        let changed = self
+            .changed(
+                sqlx::query(sql)
+                    .bind(now)
+                    .bind(id)
+                    .bind(now - TOUCH_WINDOW_SECS),
+            )
+            .await?;
+        Ok(if changed { touched } else { Touch::Throttled })
     }
 
     /// One peer by id, revoked or not — the operator's view, not the
@@ -460,14 +474,12 @@ impl Store {
     /// Idempotent: revoking an already-revoked peer returns `false` rather than
     /// moving the timestamp, so the record of *when* access was cut stays true.
     pub async fn revoke_peer(&self, id: i64) -> Result<bool> {
-        let affected =
+        self.changed(
             sqlx::query("UPDATE peers SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL")
                 .bind(now_epoch())
-                .bind(id)
-                .execute(self.pool())
-                .await?
-                .rows_affected();
-        Ok(affected > 0)
+                .bind(id),
+        )
+        .await
     }
 
     /// Change what a friend is allowed to see. Returns whether anything changed.
@@ -477,15 +489,13 @@ impl Store {
         max_size_bytes: Option<i64>,
         max_height: Option<i64>,
     ) -> Result<bool> {
-        let affected =
+        self.changed(
             sqlx::query("UPDATE peers SET max_size_bytes = ?1, max_height = ?2 WHERE id = ?3")
                 .bind(max_size_bytes)
                 .bind(max_height)
-                .bind(id)
-                .execute(self.pool())
-                .await?
-                .rows_affected();
-        Ok(affected > 0)
+                .bind(id),
+        )
+        .await
     }
 
     /// Which friends every item that is for particular friends is for.
@@ -507,6 +517,18 @@ impl Store {
                 .push(row.try_get("friend")?);
         }
         Ok(audiences)
+    }
+
+    /// Which friends one item is for, or `None` when it is not for particular friends.
+    pub async fn audience(&self, source: MediaSource, file_id: i64) -> Result<Option<Vec<String>>> {
+        let friends: Vec<String> = sqlx::query_scalar(
+            "SELECT friend FROM item_audience WHERE source = ?1 AND file_id = ?2",
+        )
+        .bind(source.as_str())
+        .bind(file_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok((!friends.is_empty()).then_some(friends))
     }
 
     /// Replace which friends `source`'s items are for with what its discovery just
@@ -575,26 +597,21 @@ impl Store {
     /// are read once rather than once per friend.
     pub async fn seeding_summaries(&self, peers: &[Peer]) -> Result<Vec<SeedingSummary>> {
         let audiences = self.audiences().await?;
-        let mut by_scope: HashMap<&str, Vec<SharedItem>> = HashMap::new();
-        for peer in peers {
-            if !by_scope.contains_key(peer.scope.as_str()) {
-                let items = self.seeding_items(peer.scope).await?;
-                by_scope.insert(peer.scope.as_str(), items);
-            }
-        }
+        let items = self.seeding_items(PeerScope::All).await?;
         Ok(peers
             .iter()
             .map(|peer| {
                 let limits = peer.limits();
                 let mut summary = SeedingSummary::default();
-                let admitted = by_scope[peer.scope.as_str()].iter().filter(|item| {
-                    limits.admits(item, audiences.get(&item.key()).map(Vec::as_slice))
+                let admitted = items.iter().filter(|item| {
+                    peer.scope.admits(item)
+                        && limits.admits(item, audiences.get(&item.key()).map(Vec::as_slice))
                 });
                 for item in admitted {
                     summary.count += 1;
                     summary.size = summary
                         .size
-                        .saturating_add(i64::try_from(item.size).unwrap_or(i64::MAX));
+                        .saturating_add(sharerr_core::saturating_i64(item.size));
                 }
                 summary
             })
@@ -602,23 +619,18 @@ impl Store {
     }
 
     pub async fn set_peer_scope(&self, id: i64, scope: PeerScope) -> Result<bool> {
-        let affected = sqlx::query("UPDATE peers SET scope = ?1 WHERE id = ?2")
-            .bind(scope.as_str())
-            .bind(id)
-            .execute(self.pool())
-            .await?
-            .rows_affected();
-        Ok(affected > 0)
+        self.changed(
+            sqlx::query("UPDATE peers SET scope = ?1 WHERE id = ?2")
+                .bind(scope.as_str())
+                .bind(id),
+        )
+        .await
     }
 
     /// Remove a peer entirely, freeing its label for reuse.
     pub async fn delete_peer(&self, id: i64) -> Result<bool> {
-        let affected = sqlx::query("DELETE FROM peers WHERE id = ?1")
-            .bind(id)
-            .execute(self.pool())
-            .await?
-            .rows_affected();
-        Ok(affected > 0)
+        self.changed(sqlx::query("DELETE FROM peers WHERE id = ?1").bind(id))
+            .await
     }
 }
 
@@ -636,8 +648,6 @@ mod tests {
             .expect("in-memory store opens")
     }
 
-    /// `directory_kind` hands raw strings to `json_extract(spec_json, '$.kind')`,
-    /// so each must be a tag `MediaSpec` actually serializes. A rename in
     /// What an *arr tag can carry: the same rules the apps apply when saving one.
     #[test]
     fn a_friends_tag_name_folds_their_label_to_what_a_tag_can_carry() {
@@ -669,6 +679,8 @@ mod tests {
         assert_eq!(listed[0].limits().max_height, Some(1080));
     }
 
+    /// `directory_kind` hands raw strings to `json_extract(spec_json, '$.kind')`,
+    /// so each must be a tag `MediaSpec` actually serializes. A rename in
     /// `sharerr-core` fails here instead of silently emptying a scoped peer's feed.
     #[test]
     fn every_scope_names_a_real_media_kind() {

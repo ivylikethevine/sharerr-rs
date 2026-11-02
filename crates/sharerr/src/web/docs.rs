@@ -14,71 +14,62 @@
 //! rather than typing a URL, so the settings page and the status page can never
 //! disagree about where the tracker documentation is.
 
-/// The repository itself — the footer's "Source" link and the base every
-/// internal link below is built from.
+/// The repository itself — the footer's "Source" link.
 pub const REPO: &str = "https://github.com/ivylikethevine/sharerr-rs";
 
 // ---- This project's own documentation ---------------------------------
 
 pub const README: &str = "https://github.com/ivylikethevine/sharerr-rs#readme";
-pub const CONFIGURATION: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md";
-pub const CONFIG_LAYERING: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#how-configuration-is-layered";
-pub const CONFIG_TOP_LEVEL: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#top-level-settings";
-pub const CONFIG_ARR: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#arr-apps";
-pub const CONFIG_LIBRARY: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#library--plain-directories";
-pub const CONFIG_TORRENT_CLIENT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#torrent-client";
-pub const CONFIG_QBITTORRENT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#qbittorrent";
-pub const CONFIG_TRANSMISSION: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#transmission";
-pub const CONFIG_RTORRENT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#rtorrent";
-pub const CONFIG_DELUGE: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#deluge";
-pub const CONFIG_SEEDING: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#seeding";
-pub const CONFIG_FEED: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#feed";
-pub const CONFIG_TRACKER: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#tracker";
-pub const CONFIG_PATH_MAP: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#path_map";
-pub const CONFIG_LIGHTHOUSE: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#lighthouse";
-pub const CONFIG_GLUETUN: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#gluetun-and-gluetun_client";
-pub const CONFIG_SYNC: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#sync";
-pub const CONFIG_CHECKS: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#checks";
-pub const CONFIG_NOTIFICATIONS: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#notifications";
-pub const CONFIG_METRICS: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#metrics";
-pub const CONFIG_API: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#api";
-pub const CONFIG_VAULT: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#vault-secrets";
-pub const CONFIG_ENV: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#environment-variable-overrides";
 
-pub const SUPPORTED: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#supported-services";
-pub const SUPPORTED_SOURCES: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#library-sources-where-tagged-content-comes-from";
-pub const SUPPORTED_CLIENTS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds";
-pub const SUPPORTED_INDEXERS: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#indexers-what-consumes-the-feed";
-pub const UNSUPPORTED: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#not-supported";
+/// One constant per link, and the list the test below walks, paired with each
+/// constant's name so a failure says which one to fix. The URLs stay whole
+/// literals so the link checker's sweep of this file can read them.
+macro_rules! internal_docs {
+    ($($name:ident = $url:literal;)*) => {
+        $(pub const $name: &str = $url;)*
 
-pub const API: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/API.md";
-pub const SECURITY: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md";
-pub const SECURITY_SCOPE: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-is-in-scope";
-pub const ROADMAP: &str = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md";
-pub const LIGHTHOUSE: &str =
-    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/LIGHTHOUSE.md";
+        #[cfg(test)]
+        const INTERNAL_LINKS: &[(&str, &str)] = &[$((stringify!($name), $name)),*];
+    };
+}
+
+internal_docs! {
+    CONFIGURATION = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md";
+    CONFIG_LAYERING = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#how-configuration-is-layered";
+    CONFIG_TOP_LEVEL = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#top-level-settings";
+    CONFIG_ARR = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#arr-apps";
+    CONFIG_LIBRARY = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#library--plain-directories";
+    CONFIG_TORRENT_CLIENT = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#torrent-client";
+    CONFIG_QBITTORRENT = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#qbittorrent";
+    CONFIG_TRANSMISSION = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#transmission";
+    CONFIG_RTORRENT = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#rtorrent";
+    CONFIG_DELUGE = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#deluge";
+    CONFIG_SEEDING = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#seeding";
+    CONFIG_FEED = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#feed";
+    CONFIG_TRACKER = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#tracker";
+    CONFIG_PATH_MAP = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#path_map";
+    CONFIG_LIGHTHOUSE = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#lighthouse";
+    CONFIG_GLUETUN = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#gluetun-and-gluetun_client";
+    CONFIG_SYNC = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#sync";
+    CONFIG_CHECKS = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#checks";
+    CONFIG_NOTIFICATIONS = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#notifications";
+    CONFIG_METRICS = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#metrics";
+    CONFIG_API = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#api";
+    CONFIG_VAULT = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#vault-secrets";
+    CONFIG_ENV = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#environment-variable-overrides";
+
+    SUPPORTED = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#supported-services";
+    SUPPORTED_SOURCES = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#library-sources-where-tagged-content-comes-from";
+    SUPPORTED_CLIENTS = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds";
+    SUPPORTED_INDEXERS = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#indexers-what-consumes-the-feed";
+    UNSUPPORTED = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/COMPATIBILITY.md#not-supported";
+
+    API = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/API.md";
+    SECURITY = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md";
+    SECURITY_SCOPE = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SECURITY.md#what-is-in-scope";
+    ROADMAP = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/ROADMAP.md";
+    LIGHTHOUSE = "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/LIGHTHOUSE.md";
+}
 
 // ---- Upstream documentation for the services sharerr talks to ---------
 //
@@ -167,50 +158,10 @@ mod tests {
             .collect()
     }
 
-    /// Every internal link, paired with the constant's name so a failure says
-    /// which one to fix rather than only printing a URL.
-    fn internal_links() -> Vec<(&'static str, &'static str)> {
-        vec![
-            ("CONFIGURATION", super::CONFIGURATION),
-            ("CONFIG_LAYERING", super::CONFIG_LAYERING),
-            ("CONFIG_TOP_LEVEL", super::CONFIG_TOP_LEVEL),
-            ("CONFIG_ARR", super::CONFIG_ARR),
-            ("CONFIG_LIBRARY", super::CONFIG_LIBRARY),
-            ("CONFIG_TORRENT_CLIENT", super::CONFIG_TORRENT_CLIENT),
-            ("CONFIG_QBITTORRENT", super::CONFIG_QBITTORRENT),
-            ("CONFIG_TRANSMISSION", super::CONFIG_TRANSMISSION),
-            ("CONFIG_RTORRENT", super::CONFIG_RTORRENT),
-            ("CONFIG_DELUGE", super::CONFIG_DELUGE),
-            ("CONFIG_SEEDING", super::CONFIG_SEEDING),
-            ("CONFIG_FEED", super::CONFIG_FEED),
-            ("CONFIG_TRACKER", super::CONFIG_TRACKER),
-            ("CONFIG_PATH_MAP", super::CONFIG_PATH_MAP),
-            ("CONFIG_LIGHTHOUSE", super::CONFIG_LIGHTHOUSE),
-            ("CONFIG_GLUETUN", super::CONFIG_GLUETUN),
-            ("CONFIG_SYNC", super::CONFIG_SYNC),
-            ("CONFIG_CHECKS", super::CONFIG_CHECKS),
-            ("CONFIG_NOTIFICATIONS", super::CONFIG_NOTIFICATIONS),
-            ("CONFIG_METRICS", super::CONFIG_METRICS),
-            ("CONFIG_API", super::CONFIG_API),
-            ("CONFIG_VAULT", super::CONFIG_VAULT),
-            ("CONFIG_ENV", super::CONFIG_ENV),
-            ("SUPPORTED", super::SUPPORTED),
-            ("SUPPORTED_SOURCES", super::SUPPORTED_SOURCES),
-            ("SUPPORTED_CLIENTS", super::SUPPORTED_CLIENTS),
-            ("SUPPORTED_INDEXERS", super::SUPPORTED_INDEXERS),
-            ("UNSUPPORTED", super::UNSUPPORTED),
-            ("API", super::API),
-            ("SECURITY", super::SECURITY),
-            ("SECURITY_SCOPE", super::SECURITY_SCOPE),
-            ("ROADMAP", super::ROADMAP),
-            ("LIGHTHOUSE", super::LIGHTHOUSE),
-        ]
-    }
-
     #[test]
     fn every_internal_link_resolves_to_a_real_file_and_heading() {
         let root = repo_root();
-        for (name, url) in internal_links() {
+        for (name, url) in super::INTERNAL_LINKS {
             let tail = url
                 .strip_prefix(INTERNAL_PREFIX)
                 .unwrap_or_else(|| panic!("{name} is not a repo-relative link: {url}"));

@@ -43,7 +43,6 @@ use std::time::Duration;
 use secrecy::ExposeSecret;
 use sharerr_core::config::{NotificationTrigger, NotifyKind, secret_keys};
 use sharerr_core::endpoint::now_epoch;
-use tokio::sync::RwLock;
 
 use crate::state::ServeState;
 
@@ -58,23 +57,13 @@ const QUIET_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 /// Not persisted. A restart before the peer reappears costs one duplicate
 /// notification for what is, at most, a weekly event — cheaper than a migration
 /// for state that is naturally reconstructed the next time the peer is seen.
-#[derive(Debug, Default)]
-pub struct QuietNotified {
-    inner: RwLock<HashMap<i64, i64>>,
-}
+type QuietNotified = HashMap<i64, i64>;
 
-impl QuietNotified {
-    /// Whether `peer_id` being stale as of `last_seen_at` is new information —
-    /// `false` if this exact staleness was already reported. Recording happens
-    /// here too, so a caller cannot check and forget to mark in one step.
-    async fn should_notify(&self, peer_id: i64, last_seen_at: i64) -> bool {
-        let mut map = self.inner.write().await;
-        if map.get(&peer_id) == Some(&last_seen_at) {
-            return false;
-        }
-        map.insert(peer_id, last_seen_at);
-        true
-    }
+/// Whether `peer_id` being stale as of `last_seen_at` is new information: `false`
+/// if this exact staleness was already reported. Recording happens here too, so a
+/// caller cannot check and forget to mark in one step.
+fn should_notify(notified: &mut QuietNotified, peer_id: i64, last_seen_at: i64) -> bool {
+    notified.insert(peer_id, last_seen_at) != Some(last_seen_at)
 }
 
 /// Where notifications go, and in what shape — resolved once.
@@ -112,18 +101,45 @@ fn http_client() -> Option<&'static reqwest::Client> {
         .as_ref()
 }
 
+/// Why a URL stored in the vault could not be used.
+enum StoredUrlError {
+    Vault(String),
+    Unreadable(String),
+    Absent,
+    Invalid,
+}
+
+/// The URL stored under `key`.
+async fn stored_url(state: &ServeState, key: &str) -> Result<url::Url, StoredUrlError> {
+    let vault = state.open_vault().await.map_err(StoredUrlError::Vault)?;
+    let configured = vault
+        .get(key)
+        .map_err(|err| StoredUrlError::Unreadable(err.to_string()))?
+        .ok_or(StoredUrlError::Absent)?;
+    url::Url::parse(configured.expose_secret()).map_err(|_| StoredUrlError::Invalid)
+}
+
+/// [`stored_url`] for a background sender: nothing to send to is the ordinary
+/// state for most instances, so only a URL that will not parse is worth a warning.
+async fn background_url(state: &ServeState, key: &str, setting: &str) -> Option<url::Url> {
+    match stored_url(state, key).await {
+        Ok(url) => Some(url),
+        Err(StoredUrlError::Invalid) => {
+            tracing::warn!("{setting} is not a valid URL — check Settings");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
 /// The configured webhook, or `None` when there is none to send through.
 async fn webhook(state: &ServeState) -> Option<Webhook> {
-    let vault = state.open_vault().await.ok()?;
-    let Ok(Some(configured)) = vault.get(secret_keys::NOTIFICATIONS_WEBHOOK_URL) else {
-        // Not configured — the ordinary state for most instances, so this is
-        // silent rather than a warning on every sync.
-        return None;
-    };
-    let Ok(url) = url::Url::parse(configured.expose_secret()) else {
-        tracing::warn!("notifications.webhook_url is not a valid URL — check Settings");
-        return None;
-    };
+    let url = background_url(
+        state,
+        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+        "notifications.webhook_url",
+    )
+    .await?;
 
     Some(Webhook {
         url,
@@ -151,16 +167,16 @@ pub async fn send(state: &ServeState, trigger: NotificationTrigger, message: &st
 /// operator asked) and reports every failure in words instead of logging it,
 /// since for once there is someone to tell.
 pub async fn send_test(state: &ServeState) -> Result<String, String> {
-    let vault = state
-        .open_vault()
+    let url = stored_url(state, secret_keys::NOTIFICATIONS_WEBHOOK_URL)
         .await
-        .map_err(|err| format!("The vault could not be opened: {err}"))?;
-    let configured = vault
-        .get(secret_keys::NOTIFICATIONS_WEBHOOK_URL)
-        .map_err(|err| format!("The stored webhook URL could not be read: {err}"))?
-        .ok_or_else(|| "No webhook URL is stored. Save one first.".to_owned())?;
-    let url = url::Url::parse(configured.expose_secret())
-        .map_err(|_| "The stored webhook URL is not a valid URL.".to_owned())?;
+        .map_err(|err| match err {
+            StoredUrlError::Vault(err) => format!("The vault could not be opened: {err}"),
+            StoredUrlError::Unreadable(err) => {
+                format!("The stored webhook URL could not be read: {err}")
+            }
+            StoredUrlError::Absent => "No webhook URL is stored. Save one first.".to_owned(),
+            StoredUrlError::Invalid => "The stored webhook URL is not a valid URL.".to_owned(),
+        })?;
     let client = http_client()
         .cloned()
         .ok_or_else(|| "The notification HTTP client could not be built.".to_owned())?;
@@ -443,7 +459,7 @@ pub async fn heartbeat_loop(state: Arc<ServeState>) {
         {
             push_heartbeat(&client, &url).await;
         }
-        tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
+        tokio::time::sleep(Duration::from_secs(secs)).await;
     }
 }
 
@@ -457,14 +473,12 @@ async fn is_ready(state: &ServeState) -> bool {
 /// The stored push URL and the shared client, or `None` when there is
 /// nothing to push to (the ordinary state — most instances have no monitor).
 async fn heartbeat_target(state: &ServeState) -> Option<(url::Url, reqwest::Client)> {
-    let vault = state.open_vault().await.ok()?;
-    let Ok(Some(configured)) = vault.get(secret_keys::NOTIFICATIONS_HEARTBEAT_URL) else {
-        return None;
-    };
-    let Ok(url) = url::Url::parse(configured.expose_secret()) else {
-        tracing::warn!("notifications.heartbeat_url is not a valid URL — check Settings");
-        return None;
-    };
+    let url = background_url(
+        state,
+        secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
+        "notifications.heartbeat_url",
+    )
+    .await?;
     Some((url, http_client()?.clone()))
 }
 
@@ -490,15 +504,19 @@ async fn push_heartbeat(client: &reqwest::Client, url: &url::Url) {
 
 /// Watch every friend for having gone quiet, on a timer. Never returns.
 pub async fn quiet_peers_loop(state: Arc<ServeState>) {
+    let mut notified = QuietNotified::new();
     loop {
-        if let Err(reason) = check_quiet_peers(&state).await {
+        if let Err(reason) = check_quiet_peers(&state, &mut notified).await {
             tracing::debug!(reason, "peer-quiet check skipped");
         }
         tokio::time::sleep(QUIET_CHECK_INTERVAL).await;
     }
 }
 
-async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
+async fn check_quiet_peers(
+    state: &Arc<ServeState>,
+    notified: &mut QuietNotified,
+) -> Result<(), String> {
     let threshold = state.with_config(|c| c.notifications.peer_quiet_secs).await;
     if threshold == 0 || !trigger_enabled(state, NotificationTrigger::PeerQuiet).await {
         return Ok(());
@@ -513,11 +531,11 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
     };
 
     let store = state.store().await?;
-    let peers = store.list_peers().await.map_err(|err| err.to_string())?;
+    let peers = store.active_peers().await.map_err(|err| err.to_string())?;
     let now = now_epoch();
-    let threshold = i64::try_from(threshold).unwrap_or(i64::MAX);
+    let threshold = sharerr_core::saturating_i64(threshold);
 
-    for peer in peers.iter().filter(|p| !p.is_revoked()) {
+    for peer in &peers {
         // A peer never seen at all has not "gone" quiet — it was never
         // otherwise, and there is nothing to compare a silence against.
         let Some(last_seen) = peer.last_seen_at else {
@@ -526,11 +544,7 @@ async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
         if now - last_seen < threshold {
             continue;
         }
-        if !state
-            .quiet_notified()
-            .should_notify(peer.id, last_seen)
-            .await
-        {
+        if !should_notify(notified, peer.id, last_seen) {
             continue;
         }
 
@@ -557,10 +571,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_same_staleness_is_reported_once() {
-        let notified = QuietNotified::default();
+        let mut notified = QuietNotified::new();
 
-        assert!(notified.should_notify(1, 1_000).await);
-        assert!(!notified.should_notify(1, 1_000).await, "must not repeat");
+        assert!(should_notify(&mut notified, 1, 1_000));
+        assert!(!should_notify(&mut notified, 1, 1_000), "must not repeat");
     }
 
     /// A peer who was seen again and then went quiet a second time is worth a
@@ -568,18 +582,18 @@ mod tests {
     /// bare "already notified" flag.
     #[tokio::test]
     async fn a_later_staleness_notifies_again() {
-        let notified = QuietNotified::default();
+        let mut notified = QuietNotified::new();
 
-        assert!(notified.should_notify(1, 1_000).await);
-        assert!(notified.should_notify(1, 2_000).await);
+        assert!(should_notify(&mut notified, 1, 1_000));
+        assert!(should_notify(&mut notified, 1, 2_000));
     }
 
     #[tokio::test]
     async fn different_peers_are_independent() {
-        let notified = QuietNotified::default();
+        let mut notified = QuietNotified::new();
 
-        assert!(notified.should_notify(1, 1_000).await);
-        assert!(notified.should_notify(2, 1_000).await);
+        assert!(should_notify(&mut notified, 1, 1_000));
+        assert!(should_notify(&mut notified, 2, 1_000));
     }
 
     // ------------------------------------------------------------ Webhook
@@ -593,7 +607,7 @@ mod tests {
 
     fn webhook_to(server: &wiremock::MockServer, kind: NotifyKind) -> Webhook {
         Webhook {
-            url: url::Url::parse(&server.uri()).unwrap(),
+            url: sharerr_testkit::mock::base_url(server),
             kind,
             client: reqwest::Client::new(),
         }
@@ -820,9 +834,8 @@ mod tests {
 
     #[tokio::test]
     async fn posting_to_nothing_listening_does_not_panic() {
-        let port = sharerr_testkit::net::closed_port();
         let webhook = Webhook {
-            url: url::Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+            url: sharerr_testkit::net::closed_url(),
             kind: NotifyKind::Generic,
             client: reqwest::Client::new(),
         };
@@ -1159,10 +1172,11 @@ mod tests {
                 store.touch_peer(peer.id).await.unwrap();
                 tokio::time::sleep(Duration::from_millis(1500)).await;
 
-                check_quiet_peers(&state).await.unwrap();
+                let mut notified = QuietNotified::new();
+                check_quiet_peers(&state, &mut notified).await.unwrap();
                 // A second pass finds the same staleness and must not notify
                 // again — the mock's `expect(1)` above enforces this.
-                check_quiet_peers(&state).await.unwrap();
+                check_quiet_peers(&state, &mut notified).await.unwrap();
             });
             Ok(())
         });
@@ -1197,7 +1211,10 @@ mod tests {
 
         // `0` turns the check off entirely — see `NotificationsConfig::peer_quiet_secs`.
         // No database exists at this data_dir; a store touch here would fail.
-        assert_eq!(check_quiet_peers(&state).await, Ok(()));
+        assert_eq!(
+            check_quiet_peers(&state, &mut QuietNotified::new()).await,
+            Ok(())
+        );
     }
 
     // ------------------------------------------------------- first contact
@@ -1421,7 +1438,10 @@ mod tests {
 
         // No master key, so `webhook()` finds nothing to send through and this
         // returns before ever touching the (nonexistent) database either.
-        assert_eq!(check_quiet_peers(&state).await, Ok(()));
+        assert_eq!(
+            check_quiet_peers(&state, &mut QuietNotified::new()).await,
+            Ok(())
+        );
     }
 
     /// A peer the store can no longer describe is still announced, under

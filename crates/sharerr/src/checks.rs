@@ -36,7 +36,7 @@ use sharerr_rtorrent::RtorrentClient;
 use sharerr_transmission::TransmissionClient;
 use url::Url;
 
-pub use sharerr_client::error_chain as chain;
+use sharerr_client::error_chain;
 
 /// What a Sonarr or Radarr instance turned out to be.
 ///
@@ -109,7 +109,7 @@ pub async fn check_arr(
 
     let client = match ArrClient::new(kind, url, api_key) {
         Ok(client) => client,
-        Err(err) => return ArrOutcome::BadUrl(chain(&err)),
+        Err(err) => return ArrOutcome::BadUrl(error_chain(&err)),
     };
 
     // Reachability and authentication first: every later check would report the
@@ -117,8 +117,8 @@ pub async fn check_arr(
     let status = match client.system_status().await {
         Ok(status) => status,
         Err(err) if err.is_auth_failure() => return ArrOutcome::AuthRejected,
-        Err(err) if err.is_unreachable() => return ArrOutcome::Unreachable(chain(&err)),
-        Err(err) => return ArrOutcome::Failed(chain(&err)),
+        Err(err) if err.is_unreachable() => return ArrOutcome::Unreachable(error_chain(&err)),
+        Err(err) => return ArrOutcome::Failed(error_chain(&err)),
     };
 
     let version = status.version;
@@ -141,7 +141,7 @@ pub async fn check_arr(
             app_name,
             items,
         },
-        Err(err) => ArrOutcome::Failed(chain(&err)),
+        Err(err) => ArrOutcome::Failed(error_chain(&err)),
     }
 }
 
@@ -236,7 +236,7 @@ pub fn check_paths_of<'a>(
                     report.sample = Some(paths);
                 }
             }
-            Err(err) => report.invalid.push(chain(&err)),
+            Err(err) => report.invalid.push(error_chain(&err)),
         }
     }
 
@@ -395,21 +395,30 @@ pub async fn check_reachable(base: Option<&Url>) -> ReachOutcome {
     let Some(base) = base else {
         return ReachOutcome::NotConfigured;
     };
-    let Some(host) = base.host_str() else {
-        return ReachOutcome::Unusable(format!("{base} has no host"));
+    let target = match dial_target(base) {
+        Ok(target) => target,
+        Err(reason) => return ReachOutcome::Unusable(reason),
     };
-    let Some(port) = base.port_or_known_default() else {
-        return ReachOutcome::Unusable(format!("{base} has no port"));
-    };
-    // An IPv6 literal arrives bracketed from the URL and unbracketed from the
-    // resolver, so the brackets come off before either is dialled.
-    let target = format!("{}:{port}", host.trim_matches(['[', ']']));
 
     match tokio::time::timeout(REACH_TIMEOUT, tokio::net::TcpStream::connect(&target)).await {
         Ok(Ok(_)) => ReachOutcome::Reachable,
         Ok(Err(err)) => ReachOutcome::Refused(err.to_string()),
         Err(_) => ReachOutcome::TimedOut,
     }
+}
+
+/// The `host:port` a connection to `base` dials.
+///
+/// An IPv6 literal arrives bracketed from the URL and unbracketed from the resolver,
+/// so the brackets come off before either is dialled.
+pub fn dial_target(base: &Url) -> Result<String, String> {
+    let host = base
+        .host_str()
+        .ok_or_else(|| format!("{base} has no host"))?;
+    let port = base
+        .port_or_known_default()
+        .ok_or_else(|| format!("{base} has no port"))?;
+    Ok(format!("{}:{port}", host.trim_matches(['[', ']'])))
 }
 
 /// What a `[[library]]` directory turned out to be.
@@ -529,11 +538,11 @@ pub fn build_torrent_client(
             );
         }
         (TorrentBackend::Qbittorrent, TorrentCredential::ApiKey(key)) => {
-            Arc::new(QbitClient::with_api_key(url, key).map_err(|e| chain(&e))?)
+            Arc::new(QbitClient::with_api_key(url, key).map_err(|e| error_chain(&e))?)
         }
         (TorrentBackend::Transmission, TorrentCredential::Password(password)) => {
             let username = username.unwrap_or_default();
-            Arc::new(TransmissionClient::new(url, username, password).map_err(|e| chain(&e))?)
+            Arc::new(TransmissionClient::new(url, username, password).map_err(|e| error_chain(&e))?)
         }
         // Reported rather than silently ignored: an operator who stored a key for
         // Transmission believes it is in use, and falling back to the password
@@ -547,7 +556,7 @@ pub fn build_torrent_client(
         }
         (TorrentBackend::Rtorrent, TorrentCredential::Password(password)) => {
             let username = username.unwrap_or_default();
-            Arc::new(RtorrentClient::new(url, username, password).map_err(|e| chain(&e))?)
+            Arc::new(RtorrentClient::new(url, username, password).map_err(|e| error_chain(&e))?)
         }
         // Same reasoning as Transmission above: rTorrent's XML-RPC has no key
         // auth of its own, only the username/password sent as Basic Auth.
@@ -559,7 +568,7 @@ pub fn build_torrent_client(
             );
         }
         (TorrentBackend::Deluge, TorrentCredential::Password(password)) => {
-            Arc::new(DelugeClient::new(url, password).map_err(|e| chain(&e))?)
+            Arc::new(DelugeClient::new(url, password).map_err(|e| error_chain(&e))?)
         }
         (TorrentBackend::Deluge, TorrentCredential::ApiKey(_)) => {
             return Err(
@@ -660,9 +669,9 @@ pub async fn check_qbit(
         return if err.is_auth_failure() {
             QbitOutcome::AuthRejected
         } else if err.is_unreachable() {
-            QbitOutcome::Unreachable(chain(&err))
+            QbitOutcome::Unreachable(error_chain(&err))
         } else {
-            QbitOutcome::Failed(chain(&err))
+            QbitOutcome::Failed(error_chain(&err))
         };
     }
 
@@ -672,7 +681,7 @@ pub async fn check_qbit(
             kind: client.kind(),
             client,
         },
-        Err(err) => QbitOutcome::Failed(chain(&err)),
+        Err(err) => QbitOutcome::Failed(error_chain(&err)),
     }
 }
 
@@ -706,7 +715,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const API_KEY: &str = "0123456789abcdef0123456789abcdef";
+    const API_KEY: &str = sharerr_testkit::mock::ARR_API_KEY;
 
     /// Shaped to `check_arr`'s `api_key` parameter, which is itself a
     /// `Result` because resolving a secret from the vault can fail. Unwrapping
@@ -728,7 +737,7 @@ mod tests {
     }
 
     fn base(server: &MockServer) -> Url {
-        Url::parse(&server.uri()).unwrap()
+        sharerr_testkit::mock::base_url(server)
     }
 
     /// The distinction this module was created to preserve: a tag that does not
@@ -794,8 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        let port = sharerr_testkit::net::closed_port();
-        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let url = sharerr_testkit::net::closed_url();
 
         let outcome = check_arr(MediaSource::Sonarr, Some(&url), key(), "sharerr").await;
 
@@ -1176,7 +1184,7 @@ mod tests {
             TorrentBackend::Qbittorrent,
             &url,
             None,
-            TorrentCredential::ApiKey(SecretString::from("qbt_jCGn3V76XutJwQpsXgIm6A9NLB86")),
+            TorrentCredential::ApiKey(SecretString::from(sharerr_testkit::mock::QBIT_API_KEY)),
         )
         .unwrap();
         assert_eq!(client.kind(), ClientKind::QBittorrent);
@@ -1228,7 +1236,7 @@ mod tests {
             .await;
 
         let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
-            "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
+            sharerr_testkit::mock::QBIT_API_KEY,
         ))));
         let outcome = check_qbit(
             TorrentBackend::Qbittorrent,
@@ -1280,7 +1288,7 @@ mod tests {
             .await;
 
         let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
-            "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
+            sharerr_testkit::mock::QBIT_API_KEY,
         ))));
         let outcome = check_qbit(
             TorrentBackend::Qbittorrent,
@@ -1297,11 +1305,10 @@ mod tests {
     /// `check_qbit_reports_a_rejected_key_as_a_generic_failure_not_auth_rejected`.
     #[tokio::test]
     async fn check_qbit_reports_an_unreachable_client_as_a_generic_failure_not_unreachable() {
-        let port = sharerr_testkit::net::closed_port();
-        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let url = sharerr_testkit::net::closed_url();
 
         let credential = Ok(Some(TorrentCredential::ApiKey(SecretString::from(
-            "qbt_jCGn3V76XutJwQpsXgIm6A9NLB86",
+            sharerr_testkit::mock::QBIT_API_KEY,
         ))));
         let outcome = check_qbit(TorrentBackend::Qbittorrent, &url, None, credential).await;
 

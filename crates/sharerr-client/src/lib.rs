@@ -26,6 +26,7 @@ use std::fmt::Debug;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use secrecy::{ExposeSecret, SecretString};
 use std::time::Duration;
 use url::Url;
 
@@ -105,6 +106,91 @@ pub fn malformed(kind: ClientKind, what: &str, err: impl std::fmt::Display) -> C
     ClientError::Malformed {
         kind,
         detail: format!("reading the {what} response: {err}"),
+    }
+}
+
+/// Decode one JSON RPC result, naming the call on failure.
+///
+/// Typed on purpose: a renamed field must be an error, not an empty value that
+/// makes reconciliation re-add every torrent.
+pub fn decode_json<T: serde::de::DeserializeOwned>(
+    kind: ClientKind,
+    call: &str,
+    value: serde_json::Value,
+) -> Result<T> {
+    serde_json::from_value(value).map_err(|err| malformed(kind, call, err))
+}
+
+/// A client's single label as a tag list: empty when it has none.
+pub fn single_tag(label: String) -> Vec<String> {
+    if label.is_empty() {
+        Vec::new()
+    } else {
+        vec![label]
+    }
+}
+
+/// An RPC endpoint behind HTTP Basic Auth, as Transmission and rTorrent speak.
+pub struct RpcConnection {
+    kind: ClientKind,
+    http: reqwest::Client,
+    endpoint: Url,
+    username: String,
+    password: SecretString,
+}
+
+impl Debug for RpcConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.debug_as(f, "RpcConnection")
+    }
+}
+
+impl RpcConnection {
+    pub fn new(
+        kind: ClientKind,
+        endpoint: Url,
+        username: &str,
+        password: SecretString,
+    ) -> Result<Self> {
+        Ok(Self {
+            kind,
+            http: http_client()?,
+            endpoint,
+            username: username.to_owned(),
+            password,
+        })
+    }
+
+    pub fn endpoint(&self) -> &Url {
+        &self.endpoint
+    }
+
+    /// An authenticated POST to the endpoint, ready for its body.
+    pub fn post(&self) -> reqwest::RequestBuilder {
+        self.http
+            .post(self.endpoint.clone())
+            .basic_auth(&self.username, Some(self.password.expose_secret()))
+    }
+
+    /// Send `request`, naming the endpoint on a transport failure.
+    pub async fn send(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        request
+            .send()
+            .await
+            .map_err(|e| unreachable(self.kind, self.endpoint.as_str(), &e))
+    }
+
+    /// Render the owning client's `Debug` under `name`, with the password redacted.
+    pub fn debug_as(&self, f: &mut std::fmt::Formatter<'_>, name: &str) -> std::fmt::Result {
+        debug_redacted(
+            f,
+            name,
+            &[
+                ("endpoint", &self.endpoint.as_str() as &dyn Debug),
+                ("username", &self.username as &dyn Debug),
+            ],
+            &["password"],
+        )
     }
 }
 

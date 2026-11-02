@@ -438,6 +438,12 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The advertised endpoint this config resolves to, via the one resolver the
+    /// tracker itself uses.
+    pub fn advertised_base(&self) -> Result<Option<Url>, crate::endpoint::EndpointError> {
+        crate::endpoint::advertised_base(&self.tracker, self.server.bind.port())
+    }
+
     /// Where the SQLite database lives, derived from `data_dir`.
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("sharerr.db")
@@ -451,6 +457,11 @@ impl Config {
     /// Directory for the .torrent files handed to qBittorrent.
     pub fn torrent_dir(&self) -> PathBuf {
         self.data_dir.join("torrents")
+    }
+
+    /// Seconds between periodic syncs, or `None` while periodic sync is off.
+    pub fn sync_every(&self) -> Option<u64> {
+        self.sync.enabled.then_some(self.sync.interval_secs)
     }
 
     /// Take the pending `[[peers]]` bootstrap block, leaving `Config::peers`
@@ -632,6 +643,14 @@ pub struct TorrentClientConfig<'a> {
     pub skip_checking: bool,
 }
 
+impl TorrentClientConfig<'_> {
+    /// The vault key to name when the credential is absent: the password when the
+    /// backend has that concept, since qBittorrent authenticates by API key alone.
+    pub fn credential_name(&self) -> Option<&'static str> {
+        self.fallback_credential.or(self.primary_credential)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 /// Where the HTTP server listens. One port carries the web UI, the tracker, and
@@ -778,13 +797,17 @@ pub struct QbitConfig {
     pub skip_checking: bool,
 }
 
-impl Default for QbitConfig {
-    // The URL is a compile-time literal; parsing it cannot fail at runtime and
-    // `Url` has no const constructor to express that in the type system.
+/// A compile-time literal URL: parsing cannot fail at runtime, and `Url` has no
+/// const constructor to express that in the type system.
+fn literal_url(url: &'static str) -> Url {
     #[allow(clippy::expect_used)]
+    Url::parse(url).expect("valid literal url")
+}
+
+impl Default for QbitConfig {
     fn default() -> Self {
         Self {
-            url: Url::parse("http://localhost:8080").expect("valid literal url"),
+            url: literal_url("http://localhost:8080"),
             category: "sharerr".to_owned(),
             tag: "sharerr".to_owned(),
             skip_checking: true,
@@ -852,10 +875,9 @@ pub struct TransmissionConfig {
 impl Default for TransmissionConfig {
     // A compile-time literal; parsing cannot fail at runtime and `Url` has no const
     // constructor to say so in the type system.
-    #[allow(clippy::expect_used)]
     fn default() -> Self {
         Self {
-            url: Url::parse("http://localhost:9091").expect("valid literal url"),
+            url: literal_url("http://localhost:9091"),
             login: "transmission".to_owned(),
             label: "sharerr".to_owned(),
         }
@@ -887,10 +909,9 @@ pub struct RtorrentConfig {
 impl Default for RtorrentConfig {
     // A compile-time literal; parsing cannot fail at runtime and `Url` has no const
     // constructor to say so in the type system.
-    #[allow(clippy::expect_used)]
     fn default() -> Self {
         Self {
-            url: Url::parse("http://localhost/RPC2").expect("valid literal url"),
+            url: literal_url("http://localhost/RPC2"),
             login: "rtorrent".to_owned(),
             label: "sharerr".to_owned(),
         }
@@ -912,10 +933,9 @@ pub struct DelugeConfig {
 impl Default for DelugeConfig {
     // A compile-time literal; parsing cannot fail at runtime and `Url` has no const
     // constructor to say so in the type system.
-    #[allow(clippy::expect_used)]
     fn default() -> Self {
         Self {
-            url: Url::parse("http://localhost:8112").expect("valid literal url"),
+            url: literal_url("http://localhost:8112"),
             label: "sharerr".to_owned(),
         }
     }
@@ -976,18 +996,6 @@ crate::str_enum!(LighthouseMount {
     Tracker => "tracker",
 });
 
-/// Running the lighthouse rendezvous service (`sharerr_lighthouse` in the
-/// workspace) as extra routes on one of sharerr's own listeners, instead of
-/// its own separate image and port.
-///
-/// The design brief in `docs/LIGHTHOUSE.md` wants the lighthouse to be a
-/// deliberately separate deployment — no shared process, no shared port — so
-/// that it can be self-hosted by anyone on neutral ground away from any
-/// particular library. This is the exception to that: a single operator
-/// running the lighthouse for their own circle of friends, who would rather
-/// not run a second container for it. Off by default; enabling it changes
-/// nothing about the standalone binary, which keeps working the same way for
-/// anyone who wants the separation.
 /// A seed-ratio/bandwidth goal applied once, at the moment sharerr hands a
 /// torrent to the client — never enforced by sharerr itself afterward. Both
 /// fields are backend-agnostic: qBittorrent and Transmission each honour
@@ -1218,6 +1226,18 @@ impl Default for RetentionConfig {
     }
 }
 
+/// Running the lighthouse rendezvous service (`sharerr_lighthouse` in the
+/// workspace) as extra routes on one of sharerr's own listeners, instead of
+/// its own separate image and port.
+///
+/// The design brief in `docs/LIGHTHOUSE.md` wants the lighthouse to be a
+/// deliberately separate deployment — no shared process, no shared port — so
+/// that it can be self-hosted by anyone on neutral ground away from any
+/// particular library. This is the exception to that: a single operator
+/// running the lighthouse for their own circle of friends, who would rather
+/// not run a second container for it. Off by default; enabling it changes
+/// nothing about the standalone binary, which keeps working the same way for
+/// anyone who wants the separation.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LighthouseConfig {

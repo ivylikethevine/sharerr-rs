@@ -124,6 +124,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # of an accented character (`é` -> `e` + combining accent) before the ASCII
 # filter runs, so e.g. `Amélie` transliterates to `Amelie` instead of `Am.lie`.
 unicode-normalization = "0.1.25"
+percent-encoding = "2.3.2"
 url = "2.5.8"
 # The OpenAPI spec is generated from the handlers themselves rather than
 # hand-written, so a route cannot be documented into existence or quietly

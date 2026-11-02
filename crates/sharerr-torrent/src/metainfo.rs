@@ -123,6 +123,19 @@ impl Torrent {
         self.info_field("name").and_then(Value::as_str)
     }
 
+    /// [`Self::length`] as the size a caller compares against the file on disk.
+    ///
+    /// A missing or negative value is not producible by anything sharerr writes;
+    /// `0` just means a corrupt or hand-edited torrent reads as size zero, which
+    /// never matches a real file and so still triggers the rebuild its caller
+    /// falls back to on a mismatch.
+    #[must_use]
+    pub fn content_length(&self) -> u64 {
+        self.length()
+            .and_then(|length| u64::try_from(length).ok())
+            .unwrap_or(0)
+    }
+
     /// Total content length. For a single-file torrent this is `length`; for
     /// a multi-file one, the sum of each file's `length`.
     #[must_use]

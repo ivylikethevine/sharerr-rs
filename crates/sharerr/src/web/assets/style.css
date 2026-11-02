@@ -40,7 +40,6 @@
   --topo-peer-5: #3d92c9;
   --topo-peer-6: #9c5fc0;
   --shadow-sm: 0 1px 2px rgba(20, 21, 26, 0.04);
-  --shadow-md: 0 4px 14px rgba(20, 21, 26, 0.06);
   --radius: 10px;
   --radius-sm: 7px;
   --ease: 150ms cubic-bezier(0.2, 0, 0, 1);
@@ -133,7 +132,6 @@
     --topo-peer-5: #74bfe8;
     --topo-peer-6: #c98fe0;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
-    --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
   }
 }
 
@@ -172,7 +170,6 @@
   --topo-peer-5: #74bfe8;
   --topo-peer-6: #c98fe0;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
-  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.3);
 }
 :root[data-theme="light"] { color-scheme: light; }
 
@@ -295,17 +292,18 @@ main > * { grid-column: content; }
   flex-wrap: wrap;
 }
 
-.bar nav a {
+.bar nav :is(a, button) {
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--radius-sm);
   color: var(--muted);
   text-decoration: none;
   font-weight: 550;
   font-size: var(--text-md);
-  transition: background var(--ease), color var(--ease);
 }
 
-.bar nav a:hover { color: var(--ink); background: var(--accent-wash); }
+.bar nav a { transition: background var(--ease), color var(--ease); }
+
+.bar nav :is(a, button):hover { color: var(--ink); background: var(--accent-wash); }
 
 /* `--accent-hover`, not `--accent`: this is the one place accent-coloured text
    sits on an accent-tinted pill, and in dark mode that pairing composited to
@@ -399,8 +397,9 @@ details.fold[open] > summary::before { transform: rotate(90deg); }
 details.fold > summary:hover { color: var(--accent); }
 
 .lede { color: var(--muted); font-size: var(--text-lg); max-width: 42rem; }
-.hint { color: var(--muted); }
-.hint { font-size: var(--text-sm); }
+/* 14px muted text inherits the body's 1.55 and reads loose at that size —
+   hints are the app's explanatory voice and there are a lot of them. */
+.hint { color: var(--muted); font-size: var(--text-sm); line-height: 1.5; }
 /* A paragraph of hint text on a wide screen otherwise runs the full panel —
    150+ characters a line at 1440px, which is past what reads comfortably.
    Paragraphs only: a `label.hint` holds a checkbox row, a `span.hint` a cell. */
@@ -668,9 +667,6 @@ p.error,div.error { background: var(--error-bg); border-color: color-mix(in srgb
   margin-left: var(--sp-2);
   vertical-align: middle;
 }
-.field-status--set   { background: var(--ok-bg);    color: var(--ok-ink); }
-.field-status--unset { background: transparent; color: var(--muted); border: 1px solid var(--line-strong); }
-.field-status--warn  { background: var(--warn-bg);  color: var(--warn-ink); }
 .field-status--stale { background: var(--error-bg); color: var(--error-ink); }
 
 /* The topology diagram. A node's box color is its health — the same
@@ -747,7 +743,7 @@ svg text { font-family: inherit; }
   overflow: hidden;
   background: var(--panel-2);
 }
-.composition-seg { stroke: none; }
+.composition-seg { stroke: none; fill: var(--seg); }
 
 /* The key beside a legend row, so the table is readable without cross-checking
    against the bar by position. */
@@ -758,29 +754,18 @@ svg text { font-family: inherit; }
   margin-right: var(--sp-2);
   border-radius: 2px;
   vertical-align: baseline;
+  background: var(--seg);
 }
 
-.composition-seg--1 { fill: var(--topo-arr); }
-.composition-seg--2 { fill: var(--topo-peer-1); }
-.composition-seg--3 { fill: var(--topo-library); }
-.composition-seg--4 { fill: var(--topo-peer-2); }
-.composition-seg--5 { fill: var(--topo-client); }
-.composition-seg--6 { fill: var(--topo-peer-3); }
-.composition-seg--7 { fill: var(--topo-peer-5); }
-.composition-seg--8 { fill: var(--topo-peer-4); }
-.composition-seg--9 { fill: var(--topo-peer-6); }
-
-/* `fill` paints the SVG rect, `background` the HTML key — one class has to do
-   both, since the two sit side by side and must never disagree about a colour. */
-.composition-key.composition-seg--1 { background: var(--topo-arr); }
-.composition-key.composition-seg--2 { background: var(--topo-peer-1); }
-.composition-key.composition-seg--3 { background: var(--topo-library); }
-.composition-key.composition-seg--4 { background: var(--topo-peer-2); }
-.composition-key.composition-seg--5 { background: var(--topo-client); }
-.composition-key.composition-seg--6 { background: var(--topo-peer-3); }
-.composition-key.composition-seg--7 { background: var(--topo-peer-5); }
-.composition-key.composition-seg--8 { background: var(--topo-peer-4); }
-.composition-key.composition-seg--9 { background: var(--topo-peer-6); }
+.composition-seg--1 { --seg: var(--topo-arr); }
+.composition-seg--2 { --seg: var(--topo-peer-1); }
+.composition-seg--3 { --seg: var(--topo-library); }
+.composition-seg--4 { --seg: var(--topo-peer-2); }
+.composition-seg--5 { --seg: var(--topo-client); }
+.composition-seg--6 { --seg: var(--topo-peer-3); }
+.composition-seg--7 { --seg: var(--topo-peer-5); }
+.composition-seg--8 { --seg: var(--topo-peer-4); }
+.composition-seg--9 { --seg: var(--topo-peer-6); }
 
 .composition-legend {
   width: auto;
@@ -1217,9 +1202,9 @@ h2:has(> .section-chip), h3:has(> .section-chip) {
   border-radius: 999px;
   white-space: nowrap;
 }
-.section-chip--set   { background: var(--ok-bg);   color: var(--ok-ink); }
-.section-chip--unset { background: transparent;    color: var(--muted); border: 1px solid var(--line-strong); }
-.section-chip--warn  { background: var(--warn-bg); color: var(--warn-ink); }
+.field-status--set,   .section-chip--set   { background: var(--ok-bg);   color: var(--ok-ink); }
+.field-status--unset, .section-chip--unset { background: transparent;    color: var(--muted); border: 1px solid var(--line-strong); }
+.field-status--warn,  .section-chip--warn  { background: var(--warn-bg); color: var(--warn-ink); }
 
 /* A pill strip introduces what follows it, so it wants more air below than the
    flow default — expressed on the *next* block, so only one side of the gap
@@ -1312,32 +1297,25 @@ td.actions > * + * { margin-left: var(--sp-3); }
 .paths li { font-size: var(--text-sm); margin: var(--sp-1) 0; }
 .paths code { word-break: break-all; }
 
-@media (max-width: 32rem) {
-  main { padding: var(--sp-6) var(--sp-4) 4rem; }
-  /* Keeps the strip's edge-to-edge background in step with main's narrower
-     padding, or it overhangs the page by the difference. */
-  .quicknav--sticky { margin-inline: calc(-1 * var(--sp-4)); padding-inline: var(--sp-4); }
-  .bar { padding: var(--sp-3) var(--sp-4); }
-  h1 { font-size: var(--text-xl); }
-}
-
 /* ---- Nav icons, banner glyphs, footer ---------------------------------
    Inline 16×16 stroke glyphs beside each nav link, drawn in the link's own
    colour so they follow hover and aria-current for free. The banners get a
    glyph from CSS alone — a check, a bang, a cross — via a mask filled with
    currentColor, so no template has to carry markup for it and both themes
    inherit the banner's ink. */
-.bar nav a svg {
-  width: 1rem;
-  height: 1rem;
-  vertical-align: -0.15em;
-  margin-right: 0.35rem;
+.bar nav :is(a, button) svg, .doclink svg, .sec-icon, .empty svg, .stat dt svg {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+.bar nav :is(a, button) svg {
+  width: 1rem;
+  height: 1rem;
+  margin-right: 0.35rem;
+}
+.bar nav a svg { vertical-align: -0.15em; }
 
 /* A `div` banner opens with a `<p>` (a heading line, then prose), so the glyph
    goes on that first paragraph — on the div itself it sat alone on a line
@@ -1372,15 +1350,16 @@ body:has(main > form.card) .foot { max-width: var(--measure); }
 
 .foot {
   max-width: var(--wide);
-  margin: 0 auto;
-  padding: 0 var(--sp-5) var(--sp-8);
+  margin: var(--sp-8) auto 0;
+  padding: var(--sp-4) var(--sp-5) var(--sp-8);
   color: var(--faint);
   font-size: var(--text-xs);
-  text-align: right;
-}
-
-@media (max-width: 32rem) {
-  .bar nav a svg { display: none; }
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--line);
 }
 
 /* ---- Documentation links ---------------------------------------------
@@ -1429,11 +1408,6 @@ body:has(main > form.card) .foot { max-width: var(--measure); }
   width: 0.95em;
   height: 0.95em;
   flex: none;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 .doclink::after {
   content: "";
@@ -1496,11 +1470,6 @@ p .doclink::after, li .doclink::after, dd .doclink::after, .hint .doclink::after
   vertical-align: -0.15em;
   margin-right: 0.45em;
   color: var(--faint);
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 /* `h2:has(> .section-chip)` makes the heading a flex row, where the glyph is a
    flex item and its `margin-right` would double up with the row's gap. */
@@ -1520,10 +1489,6 @@ table, .stat dd, .facts dd, .filter-count { font-variant-numeric: tabular-nums; 
    a table's own escape hatch is `.table-scroll`, and letting a cell break
    mid-string instead lets the auto layout shrink that column to nothing. */
 .facts dd code { overflow-wrap: anywhere; }
-
-/* 14px muted text inherits the body's 1.55 and reads loose at that size —
-   hints are the app's explanatory voice and there are a lot of them. */
-.hint { line-height: 1.5; }
 
 /* Body prose gets the same measure cap `p.hint` already had. A settings panel
    is 46rem of column and an unconstrained paragraph runs the whole of it. */
@@ -1549,11 +1514,7 @@ main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
   width: 1.75rem;
   height: 1.75rem;
   color: var(--faint);
-  fill: none;
-  stroke: currentColor;
   stroke-width: 1.25;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 .empty p { margin: 0; max-width: 44ch; font-size: var(--text-sm); }
 .empty strong { color: var(--ink); font-size: var(--text-base); font-weight: 650; }
@@ -1563,17 +1524,6 @@ main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
    page, which makes it the right place for the links an operator wants when
    they are stuck — and the version still has to be there, because it is the
    first thing a bug report needs. */
-.foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2) var(--sp-4);
-  text-align: left;
-  border-top: 1px solid var(--line);
-  padding-top: var(--sp-4);
-  margin-top: var(--sp-8);
-}
 .foot nav {
   display: flex;
   flex-wrap: wrap;
@@ -1588,6 +1538,13 @@ main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
 .foot .foot-version { color: var(--faint); }
 
 @media (max-width: 32rem) {
+  main { padding: var(--sp-6) var(--sp-4) 4rem; }
+  /* Keeps the strip's edge-to-edge background in step with main's narrower
+     padding, or it overhangs the page by the difference. */
+  .quicknav--sticky { margin-inline: calc(-1 * var(--sp-4)); padding-inline: var(--sp-4); }
+  .bar { padding: var(--sp-3) var(--sp-4); }
+  h1 { font-size: var(--text-xl); }
+  .bar nav :is(a, button) svg { display: none; }
   .foot { justify-content: flex-start; }
 }
 
@@ -1599,29 +1556,8 @@ main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
   display: inline-flex;
   align-items: center;
   margin: 0;
-  padding: var(--sp-2) var(--sp-3);
   border: none;
-  border-radius: var(--radius-sm);
   background: none;
-  color: var(--muted);
-  font-weight: 550;
-  font-size: var(--text-md);
-  text-decoration: none;
-}
-.bar nav button:hover { color: var(--ink); background: var(--accent-wash); }
-.bar nav button svg {
-  width: 1rem;
-  height: 1rem;
-  margin-right: 0.35rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-@media (max-width: 32rem) {
-  .bar nav button svg { display: none; }
 }
 
 /* The column a row is identified by. Without a floor the auto layout hands it
@@ -1643,11 +1579,6 @@ td.peer-name .error { display: block; }
   vertical-align: -0.12em;
   margin-right: 0.4em;
   color: var(--faint);
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.5;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 /* The theme toggle cycles system → light → dark (assets/theme.js); one glyph

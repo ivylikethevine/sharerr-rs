@@ -14,8 +14,8 @@
 //! don't-confirm-existence posture: a bare port scan cannot tell "off" from
 //! "wrong token" from "this is not sharerr".
 //!
-//! No per-item labels, ever — see [`items_by_state`]. A large library would
-//! otherwise turn this endpoint into a metric-per-file cardinality liability.
+//! No per-item labels, ever. A large library would otherwise turn this endpoint
+//! into a metric-per-file cardinality liability.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -46,8 +46,7 @@ pub(crate) fn routes() -> OpenApiRouter<Arc<ServeState>> {
 /// `crate::web::glance`.
 #[derive(Debug, Clone)]
 pub(crate) struct MetricsSnapshot {
-    /// Every lifecycle state, always present even at zero — see
-    /// [`items_by_state`].
+    /// Every lifecycle state, always present even at zero — see [`Self::zeroed`].
     items_by_state: Vec<(ShareState, i64)>,
     pub(crate) seeding_count: i64,
     pub(crate) seeding_bytes: i64,
@@ -65,17 +64,26 @@ pub(crate) struct MetricsSnapshot {
     pub(crate) system: Option<SystemSnapshot>,
 }
 
-/// Every [`ShareState`] paired with its count, in declaration order — a store
-/// error or an empty library both read as all-zero rather than an absent
-/// series, so a dashboard need not special-case "no data yet".
-fn items_by_state(items: &[sharerr_core::SharedItem]) -> Vec<(ShareState, i64)> {
-    ShareState::ALL
-        .iter()
-        .map(|&state| {
-            let count = items.iter().filter(|item| item.state == state).count() as i64;
-            (state, count)
-        })
-        .collect()
+impl MetricsSnapshot {
+    /// Every figure at zero, every [`ShareState`] still present: a store error or
+    /// an empty library reads as all-zero rather than an absent series, so a
+    /// dashboard need not special-case "no data yet".
+    fn zeroed() -> Self {
+        Self {
+            items_by_state: ShareState::ALL.iter().map(|&state| (state, 0)).collect(),
+            seeding_count: 0,
+            seeding_bytes: 0,
+            last_run: None,
+            swarm: sharerr_torrent::announce::SwarmStats::default(),
+            transfer: sharerr_store::TransferTotals::default(),
+            peers_total: 0,
+            peers_recent: 0,
+            gluetun_tracker: GluetunSnapshot::default(),
+            gluetun_client: GluetunSnapshot::default(),
+            lighthouse: LighthouseSnapshot::default(),
+            system: None,
+        }
+    }
 }
 
 /// Gather everything both endpoints render from. Never fails outright: a
@@ -83,56 +91,8 @@ fn items_by_state(items: &[sharerr_core::SharedItem]) -> Vec<(ShareState, i64)> 
 /// the endpoint down, the same tolerance `crate::web::glance` gives a
 /// briefly-unavailable database.
 pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
-    let (items_by_state_vec, seeding, last_run, peers_total, peers_recent, transfer) =
-        match state.store().await {
-            Ok(store) => {
-                let (counts, seeding_summary, runs, peers, transfer) = tokio::join!(
-                    store.counts_by_state(),
-                    store.seeding_summary(sharerr_store::PeerScope::All),
-                    store.recent_runs(1),
-                    store.list_peers(),
-                    store.transfer_totals(),
-                );
-                let last_run = runs
-                    .unwrap_or_default()
-                    .into_iter()
-                    .next()
-                    .filter(|run| run.finished_at.is_some());
-                let peers = peers.unwrap_or_default();
-                let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
-                let now = sharerr_core::endpoint::now_epoch();
-                let recent = active
-                    .iter()
-                    .filter(|p| p.last_seen_at.is_some_and(|at| now - at < 3600))
-                    .count();
-                (
-                    counts.unwrap_or_else(|_| items_by_state(&[])),
-                    seeding_summary.unwrap_or_default(),
-                    last_run,
-                    active.len(),
-                    recent,
-                    transfer.unwrap_or_default(),
-                )
-            }
-            Err(_) => (
-                items_by_state(&[]),
-                sharerr_store::SeedingSummary::default(),
-                None,
-                0,
-                0,
-                sharerr_store::TransferTotals::default(),
-            ),
-        };
-
-    MetricsSnapshot {
-        items_by_state: items_by_state_vec,
-        seeding_count: seeding.count,
-        seeding_bytes: seeding.size,
-        last_run,
+    let mut snapshot = MetricsSnapshot {
         swarm: state.swarms().stats().await,
-        transfer,
-        peers_total,
-        peers_recent,
         gluetun_tracker: state
             .gluetun_status(GluetunTarget::Tracker)
             .snapshot()
@@ -140,7 +100,39 @@ pub(crate) async fn gather(state: &ServeState) -> MetricsSnapshot {
         gluetun_client: state.gluetun_status(GluetunTarget::Client).snapshot().await,
         lighthouse: state.lighthouse_status().snapshot().await,
         system: state.system_status().snapshot().await,
+        ..MetricsSnapshot::zeroed()
+    };
+
+    if let Ok(store) = state.store().await {
+        let (counts, seeding, runs, peers, transfer) = tokio::join!(
+            store.counts_by_state(),
+            store.seeding_summary(sharerr_store::PeerScope::All),
+            store.recent_runs(1),
+            store.active_peers(),
+            store.transfer_totals(),
+        );
+        if let Ok(counts) = counts {
+            snapshot.items_by_state = counts;
+        }
+        let seeding = seeding.unwrap_or_default();
+        snapshot.seeding_count = seeding.count;
+        snapshot.seeding_bytes = seeding.size;
+        snapshot.last_run = runs
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .filter(|run| run.finished_at.is_some());
+        let peers = peers.unwrap_or_default();
+        let now = sharerr_core::endpoint::now_epoch();
+        snapshot.peers_total = peers.len();
+        snapshot.peers_recent = peers
+            .iter()
+            .filter(|p| p.last_seen_at.is_some_and(|at| now - at < 3600))
+            .count();
+        snapshot.transfer = transfer.unwrap_or_default();
     }
+
+    snapshot
 }
 
 /// One OpenMetrics gauge line, with zero or more `label="value"` pairs.
@@ -163,30 +155,39 @@ fn sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: impl std
     let _ = writeln!(out, " {value}");
 }
 
+/// The samples of one metric family, so each is written under the family's name.
+struct Samples<'a> {
+    out: &'a mut String,
+    name: &'a str,
+}
+
+impl Samples<'_> {
+    fn add(&mut self, labels: &[(&str, &str)], value: impl std::fmt::Display) {
+        sample(self.out, self.name, labels, value);
+    }
+}
+
 /// One metric family: `# HELP`, `# TYPE`, then its samples — Prometheus's own
 /// exposition order, which OpenMetrics does not mandate but every real
 /// scraper expects.
-fn family(out: &mut String, name: &str, help: &str, samples: impl FnOnce(&mut String)) {
-    typed_family(out, name, "gauge", help, samples);
+fn family(out: &mut String, name: &str, help: &str, samples: impl FnOnce(&mut Samples<'_>)) {
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} gauge");
+    samples(&mut Samples { out, name });
+}
+
+/// A family holding one unlabelled sample.
+fn gauge(out: &mut String, name: &str, help: &str, value: impl std::fmt::Display) {
+    family(out, name, help, |samples| samples.add(&[], value));
 }
 
 /// A monotonically increasing family. OpenMetrics wants a counter's samples
-/// suffixed `_total` with the family named without it, which the one
-/// caller spells out.
-fn counter(out: &mut String, name: &str, help: &str, samples: impl FnOnce(&mut String)) {
-    typed_family(out, name, "counter", help, samples);
-}
-
-fn typed_family(
-    out: &mut String,
-    name: &str,
-    kind: &str,
-    help: &str,
-    samples: impl FnOnce(&mut String),
-) {
+/// suffixed `_total` with the family named without it.
+fn counter(out: &mut String, name: &str, help: &str, samples: impl FnOnce(&mut Samples<'_>)) {
     let _ = writeln!(out, "# HELP {name} {help}");
-    let _ = writeln!(out, "# TYPE {name} {kind}");
-    samples(out);
+    let _ = writeln!(out, "# TYPE {name} counter");
+    let total = format!("{name}_total");
+    samples(&mut Samples { out, name: &total });
 }
 
 /// Render `snapshot` as OpenMetrics text. Hand-rendered rather than pulling
@@ -199,94 +200,75 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
         &mut out,
         "sharerr_items",
         "Items by lifecycle state.",
-        |out| {
+        |samples| {
             for (state, count) in &snapshot.items_by_state {
-                sample(out, "sharerr_items", &[("state", state.as_str())], count);
+                samples.add(&[("state", state.as_str())], count);
             }
         },
     );
 
-    family(
+    gauge(
         &mut out,
         "sharerr_seeding_bytes",
         "Total size on disk of items currently seeding.",
-        |out| sample(out, "sharerr_seeding_bytes", &[], snapshot.seeding_bytes),
+        snapshot.seeding_bytes,
     );
 
-    if let Some(run) = &snapshot.last_run {
-        family(
+    if let Some(run) = &snapshot.last_run
+        && let Some(finished_at) = run.finished_at
+    {
+        gauge(
             &mut out,
             "sharerr_sync_last_run_timestamp_seconds",
             "When the last finished sync pass completed.",
-            |out| {
-                if let Some(finished_at) = run.finished_at {
-                    sample(
-                        out,
-                        "sharerr_sync_last_run_timestamp_seconds",
-                        &[],
-                        finished_at,
-                    );
-                }
-            },
+            finished_at,
         );
-        if let Some(finished_at) = run.finished_at {
-            family(
-                &mut out,
-                "sharerr_sync_last_run_duration_seconds",
-                "How long the last finished sync pass took.",
-                |out| {
-                    sample(
-                        out,
-                        "sharerr_sync_last_run_duration_seconds",
-                        &[],
-                        (finished_at - run.started_at).max(0),
-                    );
-                },
-            );
-        }
-        family(
+        gauge(
+            &mut out,
+            "sharerr_sync_last_run_duration_seconds",
+            "How long the last finished sync pass took.",
+            (finished_at - run.started_at).max(0),
+        );
+        gauge(
             &mut out,
             "sharerr_sync_last_run_ok",
             "1 if the last finished sync pass succeeded outright, 0 if it errored.",
-            |out| {
-                let ok = i32::from(run.summary.error.is_none());
-                sample(out, "sharerr_sync_last_run_ok", &[], ok);
-            },
+            i32::from(run.summary.error.is_none()),
         );
         family(
             &mut out,
             "sharerr_sync_last_run",
             "What the last finished sync pass did, by result.",
-            |out| {
+            |samples| {
                 for (result, value) in [
                     ("discovered", run.summary.discovered),
                     ("added", run.summary.added),
                     ("unshared", run.summary.unshared),
                     ("failed", run.summary.failed),
                 ] {
-                    sample(out, "sharerr_sync_last_run", &[("result", result)], value);
+                    samples.add(&[("result", result)], value);
                 }
             },
         );
     }
 
-    family(
+    gauge(
         &mut out,
         "sharerr_swarm_torrents",
         "Distinct torrents with at least one live peer right now.",
-        |out| sample(out, "sharerr_swarm_torrents", &[], snapshot.swarm.swarms),
+        snapshot.swarm.swarms,
     );
-    family(
+    gauge(
         &mut out,
         "sharerr_swarm_peers",
         "Live peers across every swarm right now, seeders included.",
-        |out| sample(out, "sharerr_swarm_peers", &[], snapshot.swarm.peers),
+        snapshot.swarm.peers,
     );
-    family(
+    gauge(
         &mut out,
         "sharerr_swarm_seeders",
         "The subset of sharerr_swarm_peers with the whole thing.",
-        |out| sample(out, "sharerr_swarm_seeders", &[], snapshot.swarm.seeders),
+        snapshot.swarm.seeders,
     );
 
     counter(
@@ -294,18 +276,9 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
         "sharerr_transfer_bytes",
         "All-time bytes the tracker's announces report moved, by direction as the \
          announcing client saw it: downloaded is what left this instance.",
-        |out| {
-            for (direction, value) in [
-                ("downloaded", snapshot.transfer.downloaded),
-                ("uploaded", snapshot.transfer.uploaded),
-            ] {
-                sample(
-                    out,
-                    "sharerr_transfer_bytes_total",
-                    &[("direction", direction)],
-                    value,
-                );
-            }
+        |samples| {
+            samples.add(&[("direction", "downloaded")], snapshot.transfer.downloaded);
+            samples.add(&[("direction", "uploaded")], snapshot.transfer.uploaded);
         },
     );
 
@@ -313,19 +286,9 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
         &mut out,
         "sharerr_peers",
         "Friends by activity, bounded by the friends list.",
-        |out| {
-            sample(
-                out,
-                "sharerr_peers",
-                &[("state", "total")],
-                snapshot.peers_total,
-            );
-            sample(
-                out,
-                "sharerr_peers",
-                &[("state", "recent")],
-                snapshot.peers_recent,
-            );
+        |samples| {
+            samples.add(&[("state", "total")], snapshot.peers_total);
+            samples.add(&[("state", "recent")], snapshot.peers_recent);
         },
     );
 
@@ -342,15 +305,10 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
             "sharerr_gluetun_last_success_timestamp_seconds",
             "When each gluetun poller last successfully resolved an endpoint. \
              Absent for a target that has never succeeded.",
-            |out| {
+            |samples| {
                 for (target, status) in gluetun_targets {
                     if let Some(at) = status.last_success_at {
-                        sample(
-                            out,
-                            "sharerr_gluetun_last_success_timestamp_seconds",
-                            &[("target", target)],
-                            at,
-                        );
+                        samples.add(&[("target", target)], at);
                     }
                 }
             },
@@ -358,18 +316,11 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
     }
 
     if let Some(last_pass_at) = snapshot.lighthouse.last_pass_at {
-        family(
+        gauge(
             &mut out,
             "sharerr_lighthouse_last_pass_timestamp_seconds",
             "When the lighthouse report-and-lookup pass last ran to completion.",
-            |out| {
-                sample(
-                    out,
-                    "sharerr_lighthouse_last_pass_timestamp_seconds",
-                    &[],
-                    last_pass_at,
-                );
-            },
+            last_pass_at,
         );
     }
     // One label per *configured* lighthouse — bounded the same way peer
@@ -381,15 +332,10 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
             "sharerr_lighthouse_last_success_timestamp_seconds",
             "When each configured lighthouse last accepted a report. Absent \
              for one that has never succeeded.",
-            |out| {
-                for report in &snapshot.lighthouse.lighthouses {
+            |samples| {
+                for (url, report) in &snapshot.lighthouse.lighthouses {
                     if let Some(at) = report.last_success_at {
-                        sample(
-                            out,
-                            "sharerr_lighthouse_last_success_timestamp_seconds",
-                            &[("lighthouse", &report.url)],
-                            at,
-                        );
+                        samples.add(&[("lighthouse", url)], at);
                     }
                 }
             },
@@ -397,45 +343,30 @@ pub(crate) fn render(snapshot: &MetricsSnapshot) -> String {
     }
 
     if let Some(system) = &snapshot.system {
-        family(
+        gauge(
             &mut out,
             "sharerr_system_cpu_percent",
             "CPU utilization across every core, as last sampled.",
-            |out| sample(out, "sharerr_system_cpu_percent", &[], system.cpu_percent),
+            system.cpu_percent,
         );
         family(
             &mut out,
             "sharerr_system_memory_bytes",
             "Memory in use versus total, as last sampled.",
-            |out| {
-                sample(
-                    out,
-                    "sharerr_system_memory_bytes",
-                    &[("kind", "used")],
-                    system.memory_used,
-                );
-                sample(
-                    out,
-                    "sharerr_system_memory_bytes",
-                    &[("kind", "total")],
-                    system.memory_total,
-                );
+            |samples| {
+                samples.add(&[("kind", "used")], system.memory_used);
+                samples.add(&[("kind", "total")], system.memory_total);
             },
         );
-        if let (Some(used), Some(total)) = (system.disk_used, system.disk_total) {
+        if let Some((used, total)) = system.disk {
             family(
                 &mut out,
                 "sharerr_system_disk_bytes",
                 "Disk usage of the filesystem holding the data directory, as \
                  last sampled.",
-                |out| {
-                    sample(out, "sharerr_system_disk_bytes", &[("kind", "used")], used);
-                    sample(
-                        out,
-                        "sharerr_system_disk_bytes",
-                        &[("kind", "total")],
-                        total,
-                    );
+                |samples| {
+                    samples.add(&[("kind", "used")], used);
+                    samples.add(&[("kind", "total")], total);
                 },
             );
         }
@@ -618,20 +549,7 @@ mod tests {
     use super::*;
 
     fn empty_snapshot() -> MetricsSnapshot {
-        MetricsSnapshot {
-            items_by_state: items_by_state(&[]),
-            seeding_count: 0,
-            seeding_bytes: 0,
-            last_run: None,
-            swarm: sharerr_torrent::announce::SwarmStats::default(),
-            transfer: sharerr_store::TransferTotals::default(),
-            peers_total: 0,
-            peers_recent: 0,
-            gluetun_tracker: GluetunSnapshot::default(),
-            gluetun_client: GluetunSnapshot::default(),
-            lighthouse: LighthouseSnapshot::default(),
-            system: None,
-        }
+        MetricsSnapshot::zeroed()
     }
 
     #[test]
@@ -781,18 +699,23 @@ mod tests {
     fn lighthouse_pass_and_per_lighthouse_success_render_only_what_happened() {
         let mut snapshot = empty_snapshot();
         snapshot.lighthouse.last_pass_at = Some(1_700_000_100);
-        snapshot.lighthouse.lighthouses = vec![
-            crate::lighthouse_client::LighthouseReport {
-                url: "https://beacon.example/".to_owned(),
-                last_success_at: Some(1_700_000_050),
-                last_error: None,
-            },
-            crate::lighthouse_client::LighthouseReport {
-                url: "https://never.example/".to_owned(),
-                last_success_at: None,
-                last_error: Some("403".to_owned()),
-            },
-        ];
+        snapshot.lighthouse.lighthouses = [
+            (
+                "https://beacon.example/".to_owned(),
+                crate::lighthouse_client::LighthouseReport {
+                    last_success_at: Some(1_700_000_050),
+                    last_error: None,
+                },
+            ),
+            (
+                "https://never.example/".to_owned(),
+                crate::lighthouse_client::LighthouseReport {
+                    last_success_at: None,
+                    last_error: Some("403".to_owned()),
+                },
+            ),
+        ]
+        .into();
         let text = render(&snapshot);
         assert!(
             text.contains("sharerr_lighthouse_last_pass_timestamp_seconds 1700000100"),
@@ -817,8 +740,7 @@ mod tests {
             cpu_percent: 12.5,
             memory_used: 1_024,
             memory_total: 4_096,
-            disk_used: Some(10),
-            disk_total: Some(100),
+            disk: Some((10, 100)),
         });
         let text = render(&snapshot);
         assert!(text.contains("sharerr_system_cpu_percent 12.5"), "{text}");
@@ -845,8 +767,7 @@ mod tests {
             cpu_percent: 0.0,
             memory_used: 0,
             memory_total: 0,
-            disk_used: None,
-            disk_total: None,
+            disk: None,
         });
         let text = render(&snapshot);
         assert!(text.contains("sharerr_system_cpu_percent"), "{text}");
@@ -857,12 +778,10 @@ mod tests {
 
     use crate::state::fixtures::{store_unopenable, unconfigured};
     use secrecy::SecretString;
-    use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
+    use sharerr_core::model::{MediaSource, MediaSpec, SharedItem};
 
     fn seeding_item(file_id: i64, size: u64) -> SharedItem {
         SharedItem {
-            id: None,
-            source: MediaSource::Sonarr,
             source_id: file_id,
             file_id,
             spec: MediaSpec::Episode {
@@ -873,17 +792,7 @@ mod tests {
             release_title: format!("Lanternwick.Hollow.S01E0{file_id}.WEB-DL.x264-SHARERR"),
             arr_path: std::path::PathBuf::from(format!("/tv/s01e0{file_id}.mkv")),
             size,
-            ids: ExternalIds::default(),
-            media: None,
-            info_hash: None,
-            announce_token_fp: None,
-            created_by_sharerr: true,
-            private: true,
-            state: ShareState::Pending,
-            last_error: None,
-            created_at: None,
-            achieved_ratio: None,
-            ratio_limit_reported: None,
+            ..crate::test_support::shared_item()
         }
     }
 
@@ -1058,19 +967,11 @@ mod tests {
         F: FnOnce(Arc<ServeState>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("SHARERR_MASTER_KEY", "metrics-tests-master-key");
-            let config = metrics_enabled(jail.directory());
-            let path = jail.directory().join("sharerr.toml");
-            let state = Arc::new(ServeState::new(config, path, None));
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
-                let mut vault = state.open_vault().await.unwrap();
-                store(&mut vault);
-                drop(vault);
-                body(state).await;
-            });
-            Ok(())
-        });
+        crate::state::fixtures::with_open_vault(
+            metrics_enabled(std::path::Path::new("")),
+            store,
+            body,
+        );
     }
 
     #[tokio::test]

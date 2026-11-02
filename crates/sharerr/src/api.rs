@@ -61,8 +61,16 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for ApiAuth {
 }
 
 /// The 503 every handler answers with when the database will not open.
-fn unavailable(reason: &str) -> Response {
-    (StatusCode::SERVICE_UNAVAILABLE, reason.to_owned()).into_response()
+struct Unavailable(String);
+
+impl IntoResponse for Unavailable {
+    fn into_response(self) -> Response {
+        (StatusCode::SERVICE_UNAVAILABLE, self.0).into_response()
+    }
+}
+
+fn unavailable(reason: &str) -> Unavailable {
+    Unavailable(reason.to_owned())
 }
 
 /// One shared or once-shared file.
@@ -105,38 +113,38 @@ pub(crate) struct ApiItem {
     ),
     security(("apiToken" = [])),
 )]
-async fn items(State(state): State<Arc<ServeState>>, _auth: ApiAuth) -> Response {
-    let store = match state.store().await {
-        Ok(store) => store,
-        Err(reason) => return unavailable(&reason),
-    };
-    let ends = match store.share_ends().await {
-        Ok(ends) => ends,
-        Err(err) => return unavailable(&format!("reading share-until dates: {err}")),
-    };
-    match store.all_items().await {
-        Ok(items) => axum::Json(
-            items
-                .into_iter()
-                .map(|item| ApiItem {
-                    share_until: ends.get(&item.key()).copied(),
-                    source: item.source.as_str().to_owned(),
-                    file_id: item.file_id,
-                    kind: item.spec.kind_tag().to_owned(),
-                    title: item.spec.title().to_owned(),
-                    release_title: item.release_title,
-                    state: item.state.as_str().to_owned(),
-                    last_error: item.last_error,
-                    size: item.size,
-                    info_hash: item.info_hash,
-                    created_by_sharerr: item.created_by_sharerr,
-                    created_at: item.created_at,
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Err(err) => unavailable(&format!("reading items: {err}")),
-    }
+async fn items(
+    State(state): State<Arc<ServeState>>,
+    _auth: ApiAuth,
+) -> Result<axum::Json<Vec<ApiItem>>, Unavailable> {
+    let store = state.store().await.map_err(|reason| unavailable(&reason))?;
+    let ends = store
+        .share_ends()
+        .await
+        .map_err(|err| unavailable(&format!("reading share-until dates: {err}")))?;
+    let items = store
+        .all_items()
+        .await
+        .map_err(|err| unavailable(&format!("reading items: {err}")))?;
+    Ok(axum::Json(
+        items
+            .into_iter()
+            .map(|item| ApiItem {
+                share_until: ends.get(&item.key()).copied(),
+                source: item.source.as_str().to_owned(),
+                file_id: item.file_id,
+                kind: item.spec.kind_tag().to_owned(),
+                title: item.spec.title().to_owned(),
+                release_title: item.release_title,
+                state: item.state.as_str().to_owned(),
+                last_error: item.last_error,
+                size: item.size,
+                info_hash: item.info_hash,
+                created_by_sharerr: item.created_by_sharerr,
+                created_at: item.created_at,
+            })
+            .collect(),
+    ))
 }
 
 /// One friend.
@@ -169,30 +177,30 @@ pub(crate) struct ApiFriend {
     ),
     security(("apiToken" = [])),
 )]
-async fn friends(State(state): State<Arc<ServeState>>, _auth: ApiAuth) -> Response {
-    let store = match state.store().await {
-        Ok(store) => store,
-        Err(reason) => return unavailable(&reason),
-    };
-    match store.list_peers().await {
-        Ok(peers) => axum::Json(
-            peers
-                .into_iter()
-                .map(|peer| ApiFriend {
-                    id: peer.id,
-                    label: peer.label,
-                    scope: peer.scope.as_str().to_owned(),
-                    created_at: peer.created_at,
-                    last_seen_at: peer.last_seen_at,
-                    revoked_at: peer.revoked_at,
-                    downloaded: peer.downloaded,
-                    uploaded: peer.uploaded,
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_response(),
-        Err(err) => unavailable(&format!("reading friends: {err}")),
-    }
+async fn friends(
+    State(state): State<Arc<ServeState>>,
+    _auth: ApiAuth,
+) -> Result<axum::Json<Vec<ApiFriend>>, Unavailable> {
+    let store = state.store().await.map_err(|reason| unavailable(&reason))?;
+    let peers = store
+        .list_peers()
+        .await
+        .map_err(|err| unavailable(&format!("reading friends: {err}")))?;
+    Ok(axum::Json(
+        peers
+            .into_iter()
+            .map(|peer| ApiFriend {
+                id: peer.id,
+                label: peer.label,
+                scope: peer.scope.as_str().to_owned(),
+                created_at: peer.created_at,
+                last_seen_at: peer.last_seen_at,
+                revoked_at: peer.revoked_at,
+                downloaded: peer.downloaded,
+                uploaded: peer.uploaded,
+            })
+            .collect(),
+    ))
 }
 
 /// One sync pass.
@@ -234,17 +242,17 @@ pub(crate) struct ApiSync {
     ),
     security(("apiToken" = [])),
 )]
-async fn sync(State(state): State<Arc<ServeState>>, _auth: ApiAuth) -> Response {
-    let config = state.config().await.sync;
-    let store = match state.store().await {
-        Ok(store) => store,
-        Err(reason) => return unavailable(&reason),
-    };
-    let runs = match store.recent_runs(RECENT_RUNS).await {
-        Ok(runs) => runs,
-        Err(err) => return unavailable(&format!("reading sync runs: {err}")),
-    };
-    axum::Json(ApiSync {
+async fn sync(
+    State(state): State<Arc<ServeState>>,
+    _auth: ApiAuth,
+) -> Result<axum::Json<ApiSync>, Unavailable> {
+    let config = state.with_config(|c| c.sync.clone()).await;
+    let store = state.store().await.map_err(|reason| unavailable(&reason))?;
+    let runs = store
+        .recent_runs(RECENT_RUNS)
+        .await
+        .map_err(|err| unavailable(&format!("reading sync runs: {err}")))?;
+    Ok(axum::Json(ApiSync {
         enabled: config.enabled,
         interval_secs: config.effective_interval_secs(),
         blocked: state.blocked_reason().await,
@@ -260,8 +268,7 @@ async fn sync(State(state): State<Arc<ServeState>>, _auth: ApiAuth) -> Response 
                 error: run.summary.error,
             })
             .collect(),
-    })
-    .into_response()
+    }))
 }
 
 /// `GET /api/v1/doctor` — `sharerr doctor --json`, run now.
@@ -343,24 +350,12 @@ mod tests {
         F: FnOnce(Arc<ServeState>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("SHARERR_MASTER_KEY", "api-tests-master-key");
-            let config = sharerr_core::Config {
-                data_dir: jail.directory().to_path_buf(),
-                api: sharerr_core::config::ApiConfig { enabled: true },
-                metrics: sharerr_core::config::MetricsConfig { enabled: true },
-                ..Default::default()
-            };
-            let path = jail.directory().join("sharerr.toml");
-            let state = Arc::new(ServeState::new(config, path, None));
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
-                let mut vault = state.open_vault().await.unwrap();
-                seed(&mut vault);
-                drop(vault);
-                body(state).await;
-            });
-            Ok(())
-        });
+        let config = sharerr_core::Config {
+            api: sharerr_core::config::ApiConfig { enabled: true },
+            metrics: sharerr_core::config::MetricsConfig { enabled: true },
+            ..Default::default()
+        };
+        crate::state::fixtures::with_open_vault(config, seed, body);
     }
 
     fn put(vault: &mut sharerr_store::Vault, key: &str, value: &str) {

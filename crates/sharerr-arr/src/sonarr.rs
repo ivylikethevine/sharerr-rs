@@ -34,11 +34,10 @@ async fn fetch_series(client: &ArrClient, series: &Series) -> Result<SeriesPaylo
     // Independent lookups, so they run concurrently — per tagged series this
     // halves the round trips paid in sequence.
     let by_series = [("seriesId", series.id)];
-    let (files, episodes) = tokio::try_join!(
+    tokio::try_join!(
         client.get::<Vec<EpisodeFile>, _>("episodefile", &by_series),
         client.get::<Vec<Episode>, _>("episode", &by_series),
-    )?;
-    Ok((files, episodes))
+    )
 }
 
 pub(crate) async fn discover(

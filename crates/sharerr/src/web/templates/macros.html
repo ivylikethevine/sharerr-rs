@@ -39,3 +39,173 @@
 {%- else %}<span class="field-status field-status--unset">not set</span>
 {%- endif %}
 {%- endmacro %}
+
+{#- A vault secret's input: write-only, and blank leaves it alone. -#}
+{%- macro secret_field(master_key_present, id, label, name, is_set, clear_name, clear_label) %}
+  <label for="{{ id }}">{{ label }} {% call field_status(is_set) %}{% endcall %}</label>
+  <input id="{{ id }}" name="{{ name }}" type="password" autocomplete="off"
+         placeholder="{% call stored(is_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if is_set %}
+  <label class="hint"><input type="checkbox" name="{{ clear_name }}" value="1"> {{ clear_label }}</label>
+  {% endif %}
+{%- endmacro %}
+
+{#- A config path's text input. `key` comes second so the lock-key test can find it. -#}
+{%- macro text_field(locks, key, id, name, label, value, placeholder, inputmode, required) %}
+  <label for="{{ id }}">{{ label }}</label>
+  <input id="{{ id }}" name="{{ name }}" value="{{ value }}"
+         {%- if required %} required{% endif %}
+         {%- if !inputmode.is_empty() %} inputmode="{{ inputmode }}"{% endif %}
+         {%- if !placeholder.is_empty() %} placeholder="{{ placeholder }}"{% endif %}
+         {% call lock_attr(locks, key) %}{% endcall %}>
+  {% call locked(locks, key) %}{% endcall %}
+{%- endmacro %}
+
+{#- The button that asks one service whether it answers, and where the answer lands. -#}
+{%- macro test_button(service, label) %}
+  <button type="button" class="secondary" hx-post="/settings/test/{{ service }}" hx-target="#test-{{ service }}">{{ label }}</button>
+  <span id="test-{{ service }}"></span>
+{%- endmacro %}
+
+{#- A config path's checkbox. -#}
+{%- macro check_field(locks, key, name, checked, label) %}
+  <label class="hint">
+    <input type="checkbox" name="{{ name }}" value="1" {% if checked %}checked{% endif %}
+           {% call lock_attr(locks, key) %}{% endcall %}>
+    {{ label }}
+  </label>
+  {% call locked(locks, key) %}{% endcall %}
+{%- endmacro %}
+
+{%- macro flash_error(message) %}
+{%- if let Some(message) = message %}<p class="error" role="alert">{{ message }}</p>{% endif %}
+{%- endmacro %}
+
+{#- A checklist step's mark, spoken as well as drawn. -#}
+{%- macro step_mark(done) %}
+{%- if done %}<span class="ok" aria-hidden="true">&#10003;</span><span class="visually-hidden">Done:</span>
+{%- else %}<span class="hint" aria-hidden="true">&#9675;</span><span class="visually-hidden">To do:</span>{% endif %}
+{%- endmacro %}
+
+{#- A value, or a dash where there is none. -#}
+{%- macro or_dash(value) %}{% if value.is_empty() %}<span class="hint">—</span>{% else %}{{ value }}{% endif %}{% endmacro %}
+
+{#- An item's announce token: its fingerprint, or the status alone before it has one. -#}
+{%- macro token_badge(fp, status) %}
+{%- if let Some(fp) = fp %}<span class="field-status {{ status.css_class() }}" title="{{ status.label() }}"><code>{{ fp }}</code></span>
+{%- else %}<span class="field-status {{ status.css_class() }}">{{ status.label() }}</span>{% endif %}
+{%- endmacro %}
+
+{#- One filter on the items page: `id` is also the query parameter. -#}
+{%- macro filter_select(id, label, options, current) %}
+  <div class="field">
+    <label for="{{ id }}">{{ label }}</label>
+    <select id="{{ id }}" name="{{ id }}">
+      <option value=""{% if current.is_empty() %} selected{% endif %}>Any</option>
+      {% for option in options %}
+      <option value="{{ option.value }}"{% if current == option.value %} selected{% endif %}>{{ option.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+{%- endmacro %}
+
+{#- Torrents the client and the store disagree about, and how many were left out. -#}
+{%- macro mismatch_table(rows, more) %}
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Torrent</th><th title="The torrent's identity, and the join key for finding it in the client's own UI">Info hash</th></tr></thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td>{{ row.title }}</td>
+        <td class="nowrap">
+          <code class="truncate" title="{{ row.hash }}">{{ row.hash }}</code>
+          <button type="button" class="link micro" data-copy-text="{{ row.hash }}"
+                  aria-label="Copy the info hash for {{ row.title }}">copy</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if more > 0 %}
+  <p class="hint">… and {{ more }} more.</p>
+  {% endif %}
+{%- endmacro %}
+
+{#- The forms the settings page and the wizard share. `next` is the query string
+    that sends a save back to the wizard, empty on the settings page. -#}
+{% macro arr_form(locks, master_key_present, arr, next) %}
+<form method="post" action="/settings/arr/{{ arr.source }}{{ next }}" class="panel">
+  {% call text_field(locks, arr.url_path, "{}_url"|format(arr.source), "url", "URL", arr.url, arr.placeholder, "", false) %}{% endcall %}
+  <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
+
+  {% call secret_field(master_key_present, "{}_key"|format(arr.source), "API key", "api_key", arr.key_set, "clear_api_key", "Remove the stored key") %}{% endcall %}
+
+  <button type="submit">Save</button>
+  {% call test_button(arr.source, "Test connection") %}{% endcall %}
+</form>
+{% endmacro %}
+
+{#- `full` adds the explanations the settings page has room for. -#}
+{% macro qbit_form(locks, master_key_present, url, api_key_set, category, tag, skip_checking, next, full) %}
+<form method="post" action="/settings/qbittorrent{{ next }}" class="panel">
+  {% call text_field(locks, "qbittorrent.url", "qbit_url", "url", "URL", url, "", "", true) %}{% endcall %}
+
+  {% call secret_field(master_key_present, "qbit_api_key", "API key", "api_key", api_key_set, "clear_api_key", "Remove the stored API key") %}{% endcall %}
+  <p class="hint">
+    Generate one under Options &rarr; Web UI &rarr; API key (qBittorrent 5.2 or
+    newer).{% if full %} This is the only credential sharerr uses to sign in — it does not
+    expire the way a session does, and rotating the key in qBittorrent
+    invalidates the old one immediately.{% endif %}
+  </p>
+
+  {% call text_field(locks, "qbittorrent.category", "qbit_category", "category", "Category for sharerr's torrents", category, "", "", false) %}{% endcall %}
+
+  {% call text_field(locks, "qbittorrent.tag", "qbit_tag", "tag", "Tag for sharerr's torrents", tag, "", "", false) %}{% endcall %}
+
+  {% call check_field(locks, "qbittorrent.skip_checking", "skip_checking", skip_checking, "Skip the hash check when adding a torrent") %}{% endcall %}
+  <p class="hint">
+    {% if full %}On by default — faster on a large library. Turn it off while you're still
+    confirming your path mappings{% else %}On by default. Turn it off while you're still confirming your path mappings
+    on the next step{% endif %}: with it on, a wrong mapping seeds mismatched
+    data instead of qBittorrent catching it.
+  </p>
+
+  <button type="submit">Save</button>
+  {% call test_button("qbittorrent", "Test connection") %}{% endcall %}
+</form>
+{% endmacro %}
+
+{% macro path_map_form(path_map, next, intro) %}
+<form method="post" action="/settings/paths{{ next }}" class="panel">
+  <p class="hint">{{ intro }}</p>
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>As Sonarr/Radarr report it</th><th>As sharerr sees it</th><th>As qBittorrent sees it</th></tr>
+    </thead>
+    <tbody>
+      {% for row in path_map %}
+      <tr>
+        <td>
+          <input name="arr" value="{{ row.arr }}" placeholder="/tv"
+                 aria-label="Path mapping {{ loop.index }}, as Sonarr and Radarr report it">
+        </td>
+        <td>
+          <input name="sharerr" value="{{ row.sharerr }}" placeholder="/media/tv"
+                 aria-label="Path mapping {{ loop.index }}, as sharerr sees it">
+        </td>
+        <td>
+          <input name="qbit" value="{{ row.qbit }}" placeholder="same as sharerr"
+                 aria-label="Path mapping {{ loop.index }}, as the torrent client sees it">
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <button type="submit">Save</button>
+</form>
+{% endmacro %}

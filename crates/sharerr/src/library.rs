@@ -362,7 +362,7 @@ fn spec_for(root: &Path, path: &Path, kind: LibraryKind) -> Option<MediaSpec> {
         }
         LibraryKind::Book => Some(MediaSpec::Book {
             author: dir_name(root, path, 1).unwrap_or_else(|| "Unknown Author".to_owned()),
-            title: humanize(&stem),
+            title: sharerr_torrent::humanize(&stem),
         }),
     }
 }
@@ -384,19 +384,7 @@ fn dir_name(root: &Path, path: &Path, levels: usize) -> Option<String> {
 /// `01 - Something.flac` -> `1`; a stem with no leading digits has no track.
 fn leading_number(stem: &str) -> Option<u32> {
     let digits: String = stem.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return None;
-    }
     digits.parse().ok()
-}
-
-/// Dots and underscores back to spaces — the inverse of scene-style naming,
-/// for stems that are about to become display titles.
-///
-/// `sharerr_torrent::humanize` rather than a second copy of the same
-/// substitution: that crate already owns "what a release name looks like".
-fn humanize(stem: &str) -> String {
-    sharerr_torrent::humanize(stem)
 }
 
 /// Tokens that mark where a filename stops being a title and starts being
@@ -416,7 +404,7 @@ const RELEASE_TOKENS: &[&str] = &[
 /// The humanized stem, cut at the first release-cruft token — for movie names
 /// with no year, where the whole stem would otherwise become the title.
 fn display_title(stem: &str) -> String {
-    let normalised = humanize(stem);
+    let normalised = sharerr_torrent::humanize(stem);
     let is_cruft = |word: &str| {
         let lowered = word.to_ascii_lowercase();
         let head = lowered.split('-').next().unwrap_or(&lowered);

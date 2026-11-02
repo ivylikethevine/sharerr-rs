@@ -1,47 +1,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::*;
+use crate::test_support::{peer, shared_item};
 use sharerr_core::MediaSpec;
+use sharerr_store::PeerScope;
 
 fn item(source: MediaSource, spec: MediaSpec, state: ShareState) -> SharedItem {
     SharedItem {
-        id: None,
         source,
-        source_id: 1,
-        file_id: 1,
         spec,
         release_title: "Some.Release.Title".to_owned(),
         arr_path: "/x".into(),
         size: 1_610_612_736, // 1.5 GiB
-        ids: sharerr_core::ExternalIds::default(),
-        media: None,
-        info_hash: None,
-        announce_token_fp: None,
-        created_by_sharerr: true,
-        private: true,
         state,
-        last_error: None,
-        created_at: None,
-        achieved_ratio: None,
-        ratio_limit_reported: None,
-    }
-}
-
-fn peer(label: &str, scope: PeerScope) -> Peer {
-    Peer {
-        id: 1,
-        label: label.to_owned(),
-        created_at: 0,
-        last_seen_at: None,
-        revoked_at: None,
-        scope,
-        pubkey: None,
-        gossip_url: None,
-        key_hash: "hash".to_owned(),
-        downloaded: 0,
-        uploaded: 0,
-        max_size_bytes: None,
-        max_height: None,
+        ..shared_item()
     }
 }
 
@@ -62,10 +34,7 @@ fn only_seeding_items_show_anyone_as_able_to_see_them() {
         },
         ShareState::Pending,
     );
-    assert_eq!(
-        visible_to(&it, &[peer("Sam", PeerScope::All)], &Default::default()),
-        ""
-    );
+    assert_eq!(visible_to(&it, &[peer("Sam", PeerScope::All)], None), "");
 }
 
 #[test]
@@ -78,8 +47,8 @@ fn a_narrow_scope_admits_a_directory_item_by_declared_kind() {
         },
         ShareState::Seeding,
     );
-    assert!(scope_admits(PeerScope::Movies, &it));
-    assert!(!scope_admits(PeerScope::Tv, &it));
+    assert!(PeerScope::Movies.admits(&it));
+    assert!(!PeerScope::Tv.admits(&it));
 }
 
 #[test]
@@ -93,22 +62,22 @@ fn a_narrow_scope_excludes_a_source_it_does_not_cover() {
         ShareState::Seeding,
     );
     assert_eq!(
-        visible_to(&it, &[peer("Sam", PeerScope::Tv)], &Default::default()),
+        visible_to(&it, &[peer("Sam", PeerScope::Tv)], None),
         "no friend's scope covers it"
     );
     assert_eq!(
-        visible_to(&it, &[peer("Sam", PeerScope::Movies)], &Default::default()),
+        visible_to(&it, &[peer("Sam", PeerScope::Movies)], None),
         "Sam"
     );
 
     // Who it answers for has to match the feed: an item for one friend names them
     // alone, however wide anyone else's scope is.
-    let audiences = sharerr_store::Audiences::from([(it.key(), vec!["alex".to_owned()])]);
+    let audience = ["alex".to_owned()];
     assert_eq!(
         visible_to(
             &it,
             &[peer("Sam", PeerScope::All), peer("Alex", PeerScope::All)],
-            &audiences
+            Some(&audience)
         ),
         "Alex"
     );
@@ -117,11 +86,7 @@ fn a_narrow_scope_excludes_a_source_it_does_not_cover() {
         ..peer("Sam", PeerScope::All)
     };
     assert_eq!(
-        visible_to(
-            &SharedItem { size: 1, ..it },
-            &[capped],
-            &Default::default()
-        ),
+        visible_to(&SharedItem { size: 1, ..it }, &[capped], None),
         "no friend's scope covers it"
     );
 }
@@ -354,7 +319,7 @@ fn a_row_names_the_arr_identifiers_in_the_source_hint() {
         TokenFps::default(),
         None,
     );
-    assert_eq!(row.source_hint, "Sonarr series 42, file 1337");
+    assert_eq!(row.facts.source_hint, "Sonarr series 42, file 1337");
     assert_eq!(row.info_hash_short, None);
 }
 
@@ -368,7 +333,7 @@ fn only_pending_and_unshared_get_a_hint() {
 
 // -------------------------------------------------------------- page()
 
-use super::super::{location, web_state};
+use super::super::{body_of, location, web_state};
 
 fn named(source: MediaSource, title: &str, file_id: i64) -> SharedItem {
     let spec = MediaSpec::Movie {
@@ -379,13 +344,6 @@ fn named(source: MediaSource, title: &str, file_id: i64) -> SharedItem {
         file_id,
         ..item(source, spec, ShareState::Seeding)
     }
-}
-
-async fn body_of(response: Response) -> String {
-    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .unwrap();
-    String::from_utf8(bytes.to_vec()).unwrap()
 }
 
 /// The search box above the table matches on `release_title`, so a row that
@@ -414,14 +372,14 @@ fn a_row_carries_the_release_title_and_the_arr_path() {
         None,
     );
 
-    assert_eq!(row.release_title, "Harborlight.2019.2160p-SYNTH");
+    assert_eq!(row.facts.release_title, "Harborlight.2019.2160p-SYNTH");
     assert_eq!(
         row.arr_path,
         "/data/movies/Harborlight (2019)/Harborlight.mkv"
     );
     // The two are deliberately different strings — conflating them stalls
     // seeding at 0%, which is why both are worth showing side by side.
-    assert_ne!(row.title, row.release_title);
+    assert_ne!(row.facts.title, row.facts.release_title);
 }
 
 /// Withdrawing an item sharerr did not create leaves the torrent alone, so
@@ -443,6 +401,7 @@ fn a_row_says_whether_sharerr_created_the_torrent() {
             TokenFps::default(),
             None
         )
+        .facts
         .created_by_sharerr
     );
 
@@ -460,6 +419,7 @@ fn a_row_says_whether_sharerr_created_the_torrent() {
             TokenFps::default(),
             None
         )
+        .facts
         .created_by_sharerr
     );
 }
@@ -1155,10 +1115,9 @@ async fn bulk_with_nothing_selected_returns_to_the_same_view_with_an_error() {
 
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = location(&response);
-    assert!(
-        location.starts_with("/items?q=lantern+wick&source=&state=pending"),
-        "{location}"
-    );
+    assert!(location.starts_with("/items?"), "{location}");
+    assert!(location.contains("&state=pending&"), "{location}");
+    assert!(location.contains("&q=lantern+wick&"), "{location}");
     assert!(location.contains("&error=Nothing"), "{location}");
 }
 
@@ -1315,8 +1274,8 @@ fn scope_admits_never_reads_a_declared_kind_for_an_arr_source() {
         },
         ShareState::Seeding,
     );
-    assert!(!scope_admits(PeerScope::Tv, &it));
-    assert!(scope_admits(PeerScope::Movies, &it));
+    assert!(!PeerScope::Tv.admits(&it));
+    assert!(PeerScope::Movies.admits(&it));
 }
 
 #[tokio::test]

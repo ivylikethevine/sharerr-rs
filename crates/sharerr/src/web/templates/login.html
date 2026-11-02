@@ -1,12 +1,11 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Sign in to sharerr{% endblock %}
 
 {% block content %}
 <h1>Sign in</h1>
 
-{% if let Some(message) = error %}
-<p class="error" role="alert">{{ message }}</p>
-{% endif %}
+{% call ui::flash_error(error) %}{% endcall %}
 
 <form method="post" action="/login" class="card">
   <label for="username">Username</label>

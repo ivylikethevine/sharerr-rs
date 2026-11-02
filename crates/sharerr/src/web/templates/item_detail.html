@@ -1,10 +1,10 @@
 {% extends "layout.html" %}
 {% import "macros.html" as ui %}
-{% block title %}{{ title }} — sharerr{% endblock %}
+{% block title %}{{ facts.title }} — sharerr{% endblock %}
 
 {% block content %}
 <p><a href="/items">&larr; All items</a></p>
-<h1>{{ title }} <span class="hint">({{ kind }})</span></h1>
+<h1>{{ facts.title }} <span class="hint">({{ facts.kind }})</span></h1>
 
 {% if let Some(message) = message %}
 {% if message_failed %}
@@ -21,7 +21,7 @@
      trap. There was previously no view anywhere that showed both. #}
   <dl class="facts">
     <dt>Release title <span class="hint" title="What the feed advertises">(the feed)</span></dt>
-    <dd><code>{{ release_title }}</code></dd>
+    <dd><code>{{ facts.release_title }}</code></dd>
     <dt>Read as <span class="hint" title="SxxEyy, the year and the quality tokens: the parts every *arr parser agrees on, not Sonarr's or Radarr's whole parser">(a friend's *arr)</span></dt>
     <dd>
       {% if let Some(reads_as) = title_reads_as %}
@@ -41,29 +41,29 @@
 <div class="panel">
   <dl class="facts">
     <dt>Source</dt>
-    <dd title="{{ source_hint }}">{{ source_label }}</dd>
+    <dd title="{{ facts.source_hint }}">{{ facts.source_label }}</dd>
     <dt>Size</dt>
-    <dd>{{ size }}</dd>
+    <dd>{{ facts.size }}</dd>
     <dt>State</dt>
     <dd class="state">
-      {{ state_label }}
-      {% if let Some(hint) = state_hint %}<br><span class="hint">{{ hint }}</span>{% endif %}
-      {% if info_hash.is_some() %}
-      <br><span class="hint">{% if created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}</span>
+      {{ facts.state_label }}
+      {% if let Some(hint) = facts.state_hint %}<br><span class="hint">{{ hint }}</span>{% endif %}
+      {% if facts.info_hash.is_some() %}
+      <br><span class="hint">{% if facts.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}</span>
       {% endif %}
     </dd>
-    {% if let Some(reason) = last_error %}
+    {% if let Some(reason) = facts.last_error %}
     <dt>Last error</dt>
     <dd><pre class="wrap error">{{ reason }}</pre></dd>
     {% endif %}
     <dt>Discovered</dt>
-    <dd{% if !since_absolute.is_empty() %} title="{{ since_absolute }}"{% endif %}>{{ since }}</dd>
-    {% if !ids.is_empty() %}
+    <dd{% if !facts.since_absolute.is_empty() %} title="{{ facts.since_absolute }}"{% endif %}>{{ facts.since }}</dd>
+    {% if !facts.ids.is_empty() %}
     <dt>Metadata IDs <span class="hint" title="What a friend's *arr matches the release on">(the feed)</span></dt>
-    <dd class="ids">{{ ids }}</dd>
+    <dd class="ids">{{ facts.ids }}</dd>
     {% endif %}
     <dt>Visible to</dt>
-    <dd>{% if visible_to.is_empty() %}<span class="hint">—</span>{% else %}{{ visible_to }}{% endif %}</dd>
+    <dd>{% call ui::or_dash(facts.visible_to) %}{% endcall %}</dd>
   </dl>
 </div>
 </section>
@@ -94,33 +94,29 @@
   <dl class="facts">
     <dt>Info hash</dt>
     <dd>
-      {% if let Some(hash) = info_hash %}
+      {% if let Some(hash) = facts.info_hash %}
       <code title="{{ hash }}">{{ hash }}</code>
-      <button type="button" class="link micro" data-copy-text="{{ hash }}" aria-label="Copy the full info hash for {{ title }}">copy</button>
+      <button type="button" class="link micro" data-copy-text="{{ hash }}" aria-label="Copy the full info hash for {{ facts.title }}">copy</button>
       {% else %}
       <span class="hint">none yet</span>
       {% endif %}
     </dd>
     <dt>Announce URL</dt>
     <dd>
-      {% if let Some(url) = announce_url %}
+      {% if let Some(url) = facts.announce_url %}
       <code class="truncate" title="{{ url }}">{{ url }}</code>
-      <button type="button" class="link micro" data-copy-text="{{ url }}" aria-label="Copy the full announce URL for {{ title }}">copy</button>
+      <button type="button" class="link micro" data-copy-text="{{ url }}" aria-label="Copy the full announce URL for {{ facts.title }}">copy</button>
       {% else %}
       <span class="hint">none yet</span>
       {% endif %}
     </dd>
     <dt>Announce token</dt>
     <dd>
-      {% if let Some(fp) = token_fp %}
-      <span class="field-status {{ token_status.css_class() }}" title="{{ token_status.label() }}"><code>{{ fp }}</code></span>
-      {% else %}
-      <span class="field-status {{ token_status.css_class() }}">{{ token_status.label() }}</span>
-      {% endif %}
+      {% call ui::token_badge(facts.token_fp, facts.token_status) %}{% endcall %}
     </dd>
     <dt>Ratio</dt>
-    <dd{% if !ratio_hint.is_empty() %} title="{{ ratio_hint }}"{% endif %}>
-      {% if ratio.is_empty() %}<span class="hint">—</span>{% else %}{{ ratio }}{% endif %}
+    <dd{% if !facts.ratio_hint.is_empty() %} title="{{ facts.ratio_hint }}"{% endif %}>
+      {% call ui::or_dash(facts.ratio) %}{% endcall %}
     </dd>
   </dl>
 
@@ -181,7 +177,7 @@
 </p>
 <div class="panel">
   {% if can_retry %}
-  <form method="post" action="/items/{{ source }}/{{ file_id }}/retry" class="inline">
+  <form method="post" action="/items/{{ facts.source }}/{{ facts.file_id }}/retry" class="inline">
     <button type="submit">Retry now</button>
   </form>
   <p class="hint">
@@ -191,7 +187,7 @@
   {% endif %}
 
   {% if can_rebuild %}
-  <form method="post" action="/items/{{ source }}/{{ file_id }}/rebuild" class="inline">
+  <form method="post" action="/items/{{ facts.source }}/{{ facts.file_id }}/rebuild" class="inline">
     <button type="submit" class="secondary">Force rebuild</button>
   </form>
   <p class="hint">
@@ -203,7 +199,7 @@
   {% endif %}
 
   {% if can_unshare %}
-  <form method="post" action="/items/{{ source }}/{{ file_id }}/unshare" class="inline">
+  <form method="post" action="/items/{{ facts.source }}/{{ facts.file_id }}/unshare" class="inline">
     <button type="submit" class="link">Unshare</button>
   </form>
   <p class="hint">
@@ -218,7 +214,7 @@
 </div>
 
 <div class="panel">
-  <form method="post" action="/items/{{ source }}/{{ file_id }}/until">
+  <form method="post" action="/items/{{ facts.source }}/{{ facts.file_id }}/until">
     <label for="share_until">Share until</label>
     <input id="share_until" name="date" type="date" value="{{ share_until }}">
     <button type="submit" class="secondary">Set end date</button>

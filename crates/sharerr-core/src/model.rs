@@ -216,33 +216,7 @@ impl MediaMeta {
     /// unknown string dropped into a release title is worse than no token, since
     /// the far end parses it as part of the name.
     pub fn scene_video_codec(&self) -> Option<&'static str> {
-        // Separators are stripped, not just case: `H.264`, `H-264` and `h264`
-        // are one codec written three ways, and matching on the raw string would
-        // recognise only the third.
-        let raw: String = self
-            .video_codec
-            .as_deref()?
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        for (needle, token) in [
-            ("av1", "AV1"),
-            ("hevc", "x265"),
-            ("h265", "x265"),
-            ("x265", "x265"),
-            ("avc", "x264"),
-            ("h264", "x264"),
-            ("x264", "x264"),
-            ("vp9", "VP9"),
-            ("mpeg2", "MPEG2"),
-            ("xvid", "XviD"),
-        ] {
-            if raw.contains(needle) {
-                return Some(token);
-            }
-        }
-        None
+        scene_token(self.video_codec.as_deref()?, VIDEO_TOKENS)
     }
 
     /// The audio codec as a release title spells it.
@@ -252,50 +226,7 @@ impl MediaMeta {
     /// token far more strictly than a video one is: a Lidarr quality profile
     /// distinguishes FLAC from MP3 and nothing else in the name substitutes.
     pub fn scene_audio_format(&self) -> Option<&'static str> {
-        Self::audio_format(self.audio_codec.as_deref()?)
-    }
-
-    /// The lookup behind [`Self::scene_audio_format`].
-    ///
-    /// Matching is `contains` over the codec with separators stripped, because the
-    /// same codec arrives spelled several ways: `A_AC3` from a Matroska header,
-    /// `EAC3` from Sonarr, `DTS-HD MA` from a remux. Order is therefore load
-    /// bearing — a needle that is a substring of another codec's name must be
-    /// tried after it, which is why `eac3` precedes `ac3` and `wavpack` precedes
-    /// `wav`.
-    fn audio_format(codec: &str) -> Option<&'static str> {
-        let raw: String = codec
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
-        for (needle, token) in [
-            ("wavpack", "WV"),
-            ("truehd", "TrueHD"),
-            ("dtshd", "DTS-HD"),
-            ("flac", "FLAC"),
-            ("alac", "ALAC"),
-            ("eac3", "EAC3"),
-            ("ac3", "AC3"),
-            ("dts", "DTS"),
-            ("mp3", "MP3"),
-            // `A_MPEG/L3` from a Matroska header, `MPEG Audio (Layer 3)` from
-            // MediaInfo — the same codec, and neither spelling contains `mp3`.
-            ("mpegl3", "MP3"),
-            ("layer3", "MP3"),
-            ("aac", "AAC"),
-            ("opus", "OPUS"),
-            ("vorbis", "VORBIS"),
-            ("wma", "WMA"),
-            ("ape", "APE"),
-            ("pcm", "PCM"),
-            ("wav", "WAV"),
-        ] {
-            if raw.contains(needle) {
-                return Some(token);
-            }
-        }
-        None
+        scene_token(self.audio_codec.as_deref()?, AUDIO_TOKENS)
     }
 
     /// [`Self::audio_sample_rate`] as a release and a reader both write it —
@@ -313,6 +244,65 @@ impl MediaMeta {
             Some(format!("{khz:.1} kHz"))
         }
     }
+}
+
+/// `(needle, token)` for [`MediaMeta::scene_video_codec`].
+const VIDEO_TOKENS: &[(&str, &str)] = &[
+    ("av1", "AV1"),
+    ("hevc", "x265"),
+    ("h265", "x265"),
+    ("x265", "x265"),
+    ("avc", "x264"),
+    ("h264", "x264"),
+    ("x264", "x264"),
+    ("vp9", "VP9"),
+    ("mpeg2", "MPEG2"),
+    ("xvid", "XviD"),
+];
+
+/// `(needle, token)` for [`MediaMeta::scene_audio_format`].
+///
+/// Order is load bearing: a needle that is a substring of another codec's name
+/// must be tried after it, which is why `eac3` precedes `ac3` and `wavpack`
+/// precedes `wav`.
+const AUDIO_TOKENS: &[(&str, &str)] = &[
+    ("wavpack", "WV"),
+    ("truehd", "TrueHD"),
+    ("dtshd", "DTS-HD"),
+    ("flac", "FLAC"),
+    ("alac", "ALAC"),
+    ("eac3", "EAC3"),
+    ("ac3", "AC3"),
+    ("dts", "DTS"),
+    ("mp3", "MP3"),
+    // `A_MPEG/L3` from a Matroska header, `MPEG Audio (Layer 3)` from
+    // MediaInfo: the same codec, and neither spelling contains `mp3`.
+    ("mpegl3", "MP3"),
+    ("layer3", "MP3"),
+    ("aac", "AAC"),
+    ("opus", "OPUS"),
+    ("vorbis", "VORBIS"),
+    ("wma", "WMA"),
+    ("ape", "APE"),
+    ("pcm", "PCM"),
+    ("wav", "WAV"),
+];
+
+/// The first token whose needle `raw` contains.
+///
+/// Separators are stripped, not just case: the same codec arrives as `H.264`,
+/// `H-264` and `h264`, or `A_AC3`, `EAC3` and `DTS-HD MA`, and matching on the
+/// raw string would recognise only some of them.
+fn scene_token(raw: &str, table: &[(&str, &'static str)]) -> Option<&'static str> {
+    let raw: String = raw
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    table
+        .iter()
+        .find(|(needle, _)| raw.contains(needle))
+        .map(|&(_, token)| token)
 }
 
 impl ExternalIds {

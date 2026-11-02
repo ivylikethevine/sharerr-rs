@@ -10,16 +10,9 @@
 use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
 use sqlx::{AssertSqlSafe, Row};
 
-use crate::db::{Store, StoreError};
+use std::collections::HashMap;
 
-type Result<T> = std::result::Result<T, StoreError>;
-
-/// How many addresses are kept per `(peer, kind)`.
-///
-/// Enough to span a few of the friend's reconnects; more would be a location
-/// log, which is precisely what this table must not become.
-#[cfg(test)]
-pub(crate) const MAX_HISTORY: usize = sharerr_core::config::DEFAULT_ENDPOINT_HISTORY as usize;
+use crate::db::{Result, Store, StoreError};
 
 /// Which of a friend's addresses an observation describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,9 +80,20 @@ pub struct PeerEndpoint {
     pub via: ObservedVia,
 }
 
-/// Decode one `peer_endpoints` row into a [`PeerEndpoint`] — shared by
-/// [`Store::peer_endpoints`] and [`Store::peer_endpoints_for`], which read
-/// the same four columns and skip a row the same way on a decode failure.
+/// A sighting with a real timestamp, which replaces an older one of the address.
+const UPSERT_NEWER: &str = "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
+     VALUES (?1, ?2, ?3, ?4, ?5) \
+     ON CONFLICT (peer_id, kind, addr) DO UPDATE \
+     SET observed_at = excluded.observed_at, via = excluded.via \
+     WHERE excluded.observed_at > peer_endpoints.observed_at";
+
+/// A sighting with no timestamp of its own, which only fills a gap.
+const INSERT_ONLY: &str = "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
+     VALUES (?1, ?2, ?3, ?4, ?5) \
+     ON CONFLICT (peer_id, kind, addr) DO NOTHING";
+
+/// Decode one `peer_endpoints` row into a [`PeerEndpoint`], skipping a row that
+/// fails to decode.
 fn row_to_endpoint(row: &sqlx::sqlite::SqliteRow) -> Option<PeerEndpoint> {
     Some(PeerEndpoint {
         // A kind written by a newer version is skipped, not an error.
@@ -101,6 +105,21 @@ fn row_to_endpoint(row: &sqlx::sqlite::SqliteRow) -> Option<PeerEndpoint> {
 }
 
 impl Store {
+    /// Run `sql`, whose generated `IN (...)` list holds one placeholder per id,
+    /// with `ids` bound. Nothing is read for an empty list.
+    async fn fetch_by_ids(&self, sql: String, ids: &[i64]) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `AssertSqlSafe`: `sql` interpolates only generated `?` placeholders; the
+        // ids themselves travel through `.bind()`.
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for id in ids {
+            query = query.bind(id);
+        }
+        Ok(query.fetch_all(self.pool()).await?)
+    }
+
     /// Record a sighting, refreshing the timestamp if the address is already
     /// known and pruning the `(peer, kind)` history to the newest few.
     ///
@@ -128,47 +147,30 @@ impl Store {
         via: ObservedVia,
     ) -> Result<()> {
         let mut tx = self.pool().begin().await?;
-        let written = match observed_at {
-            Some(observed_at) => {
+        let (sql, at) = match observed_at {
+            Some(observed_at) => (
                 // Clamped, not rejected: an observation is still worth keeping
                 // even from a peer whose clock runs fast, but an unclamped
                 // future timestamp would win every `excluded.observed_at > …`
                 // comparison below forever, past the point the sender's clock
                 // is fixed — see `MAX_FUTURE_SKEW_SECS`.
-                let observed_at = observed_at.min(now_epoch().saturating_add(MAX_FUTURE_SKEW_SECS));
-                sqlx::query(
-                    "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
-                     VALUES (?1, ?2, ?3, ?4, ?5) \
-                     ON CONFLICT (peer_id, kind, addr) DO UPDATE \
-                     SET observed_at = excluded.observed_at, via = excluded.via \
-                     WHERE excluded.observed_at > peer_endpoints.observed_at",
-                )
-                .bind(peer_id)
-                .bind(kind.as_str())
-                .bind(addr)
-                .bind(observed_at)
-                .bind(via.as_str())
-                .execute(&mut *tx)
-                .await?
-                .rows_affected()
-            }
-            None => sqlx::query(
-                "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) \
-                     VALUES (?1, ?2, ?3, ?4, ?5) \
-                     ON CONFLICT (peer_id, kind, addr) DO NOTHING",
-            )
+                UPSERT_NEWER,
+                observed_at.min(now_epoch().saturating_add(MAX_FUTURE_SKEW_SECS)),
+            ),
+            None => (INSERT_ONLY, now_epoch()),
+        };
+        let written = sqlx::query(sql)
             .bind(peer_id)
             .bind(kind.as_str())
             .bind(addr)
-            .bind(now_epoch())
+            .bind(at)
             .bind(via.as_str())
             .execute(&mut *tx)
             .await?
-            .rows_affected(),
-        };
+            .rows_affected();
 
-        // Prune beyond the newest `retention.endpoint_history` (MAX_HISTORY
-        // unless `[retention]` says otherwise). Done here rather than on a timer:
+        // Prune beyond the newest `retention.endpoint_history` (a few reconnects;
+        // more would be a location log). Done here rather than on a timer:
         // inserts are the only thing that grows the table — so an upsert that
         // changed nothing (an older sighting of a known address) has nothing
         // to prune either.
@@ -202,25 +204,15 @@ impl Store {
     pub async fn peer_endpoints_for(
         &self,
         peer_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, Vec<PeerEndpoint>>> {
-        if peer_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let placeholders = vec!["?"; peer_ids.len()].join(", ");
+    ) -> Result<HashMap<i64, Vec<PeerEndpoint>>> {
+        let slots = crate::db::placeholders(peer_ids.len());
         let sql = format!(
             "SELECT peer_id, kind, addr, observed_at, via FROM peer_endpoints \
-             WHERE peer_id IN ({placeholders}) ORDER BY peer_id, kind, observed_at DESC, id DESC"
+             WHERE peer_id IN ({slots}) ORDER BY peer_id, kind, observed_at DESC, id DESC"
         );
-        // `AssertSqlSafe`: `placeholders` is a generated `?N` list; the ids
-        // themselves travel through `.bind()`.
-        let mut query = sqlx::query(AssertSqlSafe(sql));
-        for id in peer_ids {
-            query = query.bind(id);
-        }
-        let rows = query.fetch_all(self.pool()).await?;
+        let rows = self.fetch_by_ids(sql, peer_ids).await?;
 
-        let mut by_peer: std::collections::HashMap<i64, Vec<PeerEndpoint>> =
-            std::collections::HashMap::new();
+        let mut by_peer: HashMap<i64, Vec<PeerEndpoint>> = HashMap::new();
         for row in &rows {
             let Ok(peer_id) = row.try_get::<i64, _>("peer_id") else {
                 continue;
@@ -239,15 +231,14 @@ impl Store {
     /// not change, and a second key presented over the same API key is either a
     /// reinstall (the operator re-pairs by clearing it) or an impersonation.
     pub async fn bind_peer_pubkey(&self, peer_id: i64, pubkey: &str) -> Result<bool> {
-        let affected = sqlx::query(
-            "UPDATE peers SET pubkey = ?2 WHERE id = ?1 AND (pubkey IS NULL OR pubkey = ?2)",
+        self.changed(
+            sqlx::query(
+                "UPDATE peers SET pubkey = ?2 WHERE id = ?1 AND (pubkey IS NULL OR pubkey = ?2)",
+            )
+            .bind(peer_id)
+            .bind(pubkey),
         )
-        .bind(peer_id)
-        .bind(pubkey)
-        .execute(self.pool())
-        .await?
-        .rows_affected();
-        Ok(affected > 0)
+        .await
     }
 
     /// Set or clear where this friend's own sharerr can be pulled from. Blank
@@ -269,13 +260,12 @@ impl Store {
                     .to_string(),
             ),
         };
-        let affected = sqlx::query("UPDATE peers SET gossip_url = ?2 WHERE id = ?1")
-            .bind(peer_id)
-            .bind(url)
-            .execute(self.pool())
-            .await?
-            .rows_affected();
-        Ok(affected > 0)
+        self.changed(
+            sqlx::query("UPDATE peers SET gossip_url = ?2 WHERE id = ?1")
+                .bind(peer_id)
+                .bind(url),
+        )
+        .await
     }
 
     /// Keep the peer's latest verified self-record, exactly as signed, so it can
@@ -305,23 +295,13 @@ impl Store {
     /// `join_all`, since it paid each round trip one after another.
     /// A peer with no stored record (or an id absent from `peer_ids`) is
     /// simply absent from the returned map.
-    pub async fn peer_gossip_records(
-        &self,
-        peer_ids: &[i64],
-    ) -> Result<std::collections::HashMap<i64, String>> {
-        if peer_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let placeholders = vec!["?"; peer_ids.len()].join(", ");
+    pub async fn peer_gossip_records(&self, peer_ids: &[i64]) -> Result<HashMap<i64, String>> {
+        let slots = crate::db::placeholders(peer_ids.len());
         let sql = format!(
             "SELECT id, gossip_record FROM peers \
-             WHERE id IN ({placeholders}) AND gossip_record IS NOT NULL"
+             WHERE id IN ({slots}) AND gossip_record IS NOT NULL"
         );
-        let mut query = sqlx::query(AssertSqlSafe(sql));
-        for id in peer_ids {
-            query = query.bind(id);
-        }
-        let rows = query.fetch_all(self.pool()).await?;
+        let rows = self.fetch_by_ids(sql, peer_ids).await?;
 
         Ok(rows
             .iter()
@@ -605,7 +585,10 @@ mod tests {
             .unwrap()
             .remove(&peer)
             .unwrap_or_default();
-        assert_eq!(endpoints.len(), MAX_HISTORY);
+        assert_eq!(
+            endpoints.len(),
+            sharerr_core::config::DEFAULT_ENDPOINT_HISTORY as usize
+        );
         assert_eq!(endpoints[0].observed_at, 19, "the newest must survive");
     }
 

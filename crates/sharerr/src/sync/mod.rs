@@ -46,7 +46,7 @@ pub(crate) fn fingerprint(token: &str) -> String {
 /// when the tracker carries no token at all. See [`Syncer::share`], which
 /// records this per item as its torrent is built or confirmed.
 pub(crate) fn token_fingerprint(announce: &AnnounceSet) -> Option<String> {
-    let token = sharerr_torrent::token_from_announce_url(&announce.primary)?;
+    let token = sharerr_torrent::token_from_announce_url(announce.primary())?;
     Some(fingerprint(&token))
 }
 
@@ -175,18 +175,33 @@ pub struct Syncer {
     /// [`Seeder::qbit`], so there is exactly one handle to keep consistent.
     seeder: Seeder,
     resolver: PathResolver,
-    /// Torrents whose seeding limits this syncer has already brought into
-    /// line with `[seeding]` — see [`Self::reconcile_limits`]. Per syncer
-    /// lifetime on purpose: a settings save rebuilds the syncer, which is
-    /// exactly when the configured goal can have changed.
-    limits_applied: std::sync::Mutex<HashSet<String>>,
-    /// The upload cap the last pass applied: the normal one, or the quiet
-    /// one inside `[seeding] quiet_hours`. A pass that lands on the other
-    /// side of a window edge clears `limits_applied`, so every torrent takes
-    /// the new cap once.
-    cap_in_force: std::sync::Mutex<Option<Option<u64>>>,
+    limits: std::sync::Mutex<LimitsMemo>,
     /// Minutes past local midnight; the system clock, or a fixed one in tests.
     clock: fn() -> u16,
+}
+
+/// What this syncer has already done about seeding limits.
+#[derive(Debug, Default)]
+struct LimitsMemo {
+    /// Torrents whose limits this syncer has already brought into line with
+    /// `[seeding]`; see [`Syncer::reconcile_limits`]. Per syncer lifetime on purpose:
+    /// a settings save rebuilds the syncer, which is exactly when the configured
+    /// goal can have changed.
+    applied: HashSet<String>,
+    /// The upload cap the last pass applied: the normal one, or the quiet one
+    /// inside `[seeding] quiet_hours`. A pass that lands on the other side of a
+    /// window edge clears `applied`, so every torrent takes the new cap once.
+    cap: Option<Option<u64>>,
+}
+
+/// What every item in one reconciliation pass shares.
+struct PassContext<'a> {
+    announce: &'a AnnounceSet,
+    /// [`token_fingerprint`] of `announce`, computed once for the pass.
+    token_fp: Option<String>,
+    live: &'a HashMap<String, &'a sharerr_client::TorrentSummary>,
+    torrents: &'a [sharerr_client::TorrentSummary],
+    dry_run: bool,
 }
 
 impl std::fmt::Debug for Syncer {
@@ -375,9 +390,7 @@ impl Syncer {
             category: client_config.category.to_owned(),
             tag: client_config.tag.to_owned(),
             skip_checking: client_config.skip_checking,
-            upload_limit_kib: config.seeding.upload_limit_kib,
-            ratio_limit: config.seeding.ratio_limit,
-            private: config.seeding.private,
+            seeding: config.seeding,
             sidecar_roots: sidecar_roots(config),
             torrent_dir: config.torrent_dir(),
         };
@@ -406,8 +419,7 @@ impl Syncer {
             sources,
             tracker,
             seeder,
-            limits_applied: std::sync::Mutex::new(HashSet::new()),
-            cap_in_force: std::sync::Mutex::new(None),
+            limits: std::sync::Mutex::default(),
             clock: crate::localtime::minute_of_day,
         }
     }
@@ -422,28 +434,24 @@ impl Syncer {
     /// The upload cap for now: `[seeding] quiet_hours`' one inside the
     /// window, the seeder's normal one outside it.
     fn upload_cap_now(&self) -> Option<u64> {
-        sharerr_core::config::SeedingConfig {
-            upload_limit_kib: self.seeder.upload_limit_kib,
-            ..self.config.seeding
-        }
-        .upload_limit_at((self.clock)())
+        self.seeder.seeding.upload_limit_at((self.clock)())
+    }
+
+    fn limits_memo(&self) -> Result<std::sync::MutexGuard<'_, LimitsMemo>> {
+        self.limits
+            .lock()
+            .map_err(|_| anyhow::anyhow!("limits memo lock poisoned"))
     }
 
     /// Note which cap this pass applies, and forget which torrents already
     /// have one if it changed since the last pass.
     fn track_cap_in_force(&self) -> Result<()> {
         let cap = self.upload_cap_now();
-        let mut in_force = self
-            .cap_in_force
-            .lock()
-            .map_err(|_| anyhow::anyhow!("cap_in_force lock poisoned"))?;
-        if in_force.is_some_and(|previous| previous != cap) {
-            self.limits_applied
-                .lock()
-                .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
-                .clear();
+        let mut memo = self.limits_memo()?;
+        if memo.cap.is_some_and(|previous| previous != cap) {
+            memo.applied.clear();
         }
-        *in_force = Some(cap);
+        memo.cap = Some(cap);
         Ok(())
     }
 
@@ -475,17 +483,12 @@ impl Syncer {
         hash: &str,
         reported: &sharerr_client::TorrentSummary,
     ) -> Result<bool> {
-        if self
-            .limits_applied
-            .lock()
-            .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
-            .contains(hash)
-        {
+        if self.limits_memo()?.applied.contains(hash) {
             return Ok(false);
         }
         let goal = sharerr_client::SeedingLimits {
             upload_limit_kib: self.upload_cap_now(),
-            ratio_limit: self.seeder.ratio_limit,
+            ratio_limit: self.seeder.seeding.ratio_limit,
         };
         let applied = if goal.matches(reported) {
             false
@@ -502,10 +505,7 @@ impl Syncer {
                 })?;
             true
         };
-        self.limits_applied
-            .lock()
-            .map_err(|_| anyhow::anyhow!("limits_applied lock poisoned"))?
-            .insert(hash.to_owned());
+        self.limits_memo()?.applied.insert(hash.to_owned());
         Ok(applied)
     }
 
@@ -629,9 +629,13 @@ impl Syncer {
             })
             .collect();
 
-        // Indexed once per pass — see `seed::KnownTorrents`.
-        let torrents = seed::KnownTorrents::index(&torrents);
-
+        let pass = PassContext {
+            announce: &announce,
+            token_fp: token_fingerprint(&announce),
+            live: &live,
+            torrents: &torrents,
+            dry_run,
+        };
         for item in discovered {
             if ends.get(&item.key()).is_some_and(|&until| until <= now) {
                 if let Some(known) = known.get(&item.key())
@@ -643,26 +647,9 @@ impl Syncer {
                 }
                 continue;
             }
-            self.watch(
-                item,
-                known.get(&item.key()),
-                &live,
-                &stamps,
-                &mut report,
-                dry_run,
-            )
-            .await;
-            match self
-                .share(
-                    item,
-                    &announce,
-                    &live,
-                    &torrents,
-                    known.get(&item.key()),
-                    dry_run,
-                )
-                .await
-            {
+            self.watch(item, known.get(&item.key()), &pass, &stamps, &mut report)
+                .await;
+            match self.share(item, &pass, known.get(&item.key())).await {
                 Ok(Step::Added) => report.added += 1,
                 Ok(Step::Reused) => report.reused += 1,
                 Ok(Step::Unchanged) => report.unchanged += 1,
@@ -772,10 +759,9 @@ impl Syncer {
         &self,
         item: &Discovered,
         known: Option<&SharedItem>,
-        live: &HashMap<String, &sharerr_client::TorrentSummary>,
+        pass: &PassContext<'_>,
         stamps: &HashMap<(MediaSource, i64), FileStamp>,
         report: &mut SyncReport,
-        dry_run: bool,
     ) {
         let Some(known) = known else { return };
         let Some(hash) = &known.info_hash else { return };
@@ -786,7 +772,7 @@ impl Syncer {
             hash: hash.clone(),
             title: known.release_title.clone(),
         };
-        match live.get(hash) {
+        match pass.live.get(hash) {
             None => {
                 report.removed.push(flagged());
                 return;
@@ -812,7 +798,7 @@ impl Syncer {
             Some(_) => {}
             // A row from before stamps were recorded: what is there now is
             // the best baseline there is.
-            None if !dry_run => {
+            None if !pass.dry_run => {
                 if let Err(err) = self
                     .store
                     .set_file_stamp(item.source, item.file_id, Some(now))
@@ -828,12 +814,17 @@ impl Syncer {
     async fn share(
         &self,
         item: &Discovered,
-        announce: &AnnounceSet,
-        live: &HashMap<String, &sharerr_client::TorrentSummary>,
-        torrents: &seed::KnownTorrents,
+        pass: &PassContext<'_>,
         known: Option<&SharedItem>,
-        dry_run: bool,
     ) -> Result<Step> {
+        let PassContext {
+            announce,
+            token_fp,
+            live,
+            torrents,
+            dry_run,
+        } = pass;
+        let dry_run = *dry_run;
         // Already seeding, and qBittorrent agrees. This is the branch that makes a
         // repeat run a no-op — except when the advertised endpoint has moved
         // since the torrent was built, in which case its announce URLs are
@@ -845,77 +836,9 @@ impl Syncer {
             && let Some(hash) = &known.info_hash
             && let Some(&reported) = live.get(hash)
         {
-            let ratio = reported.ratio;
-            let mut ratio_limit = reported.ratio_limit;
             if !dry_run {
-                // Retroactive seeding limits, for sharerr's own torrents only
-                // — an adopted one carries the operator's limits, which are
-                // theirs the same way its trackers are. A failure here is a
-                // warning, like the announce refresh below: the torrent is
-                // still seeding, and the next pass retries.
-                if known.created_by_sharerr {
-                    match self.reconcile_limits(hash, reported).await {
-                        // What the store records as the limit should be the
-                        // one now in force, not the pre-apply reading.
-                        Ok(true) => ratio_limit = self.seeder.ratio_limit.or(ratio_limit),
-                        Ok(false) => {}
-                        Err(err) => tracing::warn!(
-                            item = %item.spec,
-                            error = format!("{err:#}"),
-                            "could not apply the configured seeding limits"
-                        ),
-                    }
-                }
-                match self.seeder.refresh_announce(hash, announce).await {
-                    // Either branch means the live torrent now genuinely
-                    // matches `announce.primary` — a no-op refresh is still a
-                    // confirmation, not merely "nothing to do". Confirmed
-                    // fingerprint and reported ratio land in the one write
-                    // `confirm_seeding` makes for them — this is the pass's
-                    // common case, so folding the two together here is what
-                    // actually saves the second UPDATE most passes would
-                    // otherwise pay.
-                    Ok(AnnounceRefresh::Current | AnnounceRefresh::Updated) => {
-                        let fp = token_fingerprint(announce);
-                        if let Err(err) = self
-                            .store
-                            .confirm_seeding(
-                                item.source,
-                                item.file_id,
-                                fp.as_deref(),
-                                ratio,
-                                ratio_limit,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                item = %item.spec,
-                                error = %err,
-                                "could not record the confirmed announce token and ratio"
-                            );
-                        }
-                    }
-                    // Nothing was compared, so nothing is confirmed: leave
-                    // the stored fingerprint alone and the items page keeps
-                    // showing this one as not-yet-current rather than Valid.
-                    // The ratio is still worth recording on its own.
-                    Ok(AnnounceRefresh::NoCachedTorrent) => {
-                        tracing::debug!(
-                            item = %item.spec,
-                            info_hash = %hash,
-                            "no cached .torrent to confirm the announce URL against"
-                        );
-                        self.record_ratio(item, ratio, ratio_limit).await;
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            item = %item.spec,
-                            error = format!("{err:#}"),
-                            "could not refresh announce URLs"
-                        );
-                        self.record_ratio(item, ratio, ratio_limit).await;
-                    }
-                }
+                self.confirm_live(item, known, hash, reported, announce, token_fp.as_deref())
+                    .await;
             }
             return Ok(Step::Unchanged);
         }
@@ -985,11 +908,13 @@ impl Syncer {
             .with_context(|| format!("resolving {}", item.arr_path.display()))?;
 
         // Checked before hashing: discovering a missing file only after SHA-1ing
-        // gigabytes would be a needlessly expensive way to find out.
-        let missing = || {
-            if item.source == MediaSource::Directory {
-                // No mapping was involved, so pointing at [[path_map]] would
-                // send the operator to the wrong setting.
+        // gigabytes would be a needlessly expensive way to find out. `try_exists`
+        // rather than a blocking `exists()`: this runs per item on the async loop,
+        // against a mount that may be remote.
+        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
+            // No mapping was involved for a directory, so pointing at [[path_map]]
+            // would send the operator to the wrong setting.
+            return Err(if item.source == MediaSource::Directory {
                 anyhow::anyhow!(
                     "{} does not exist as sharerr sees it — check the [[library]] mount",
                     paths.sharerr.display()
@@ -1001,13 +926,7 @@ impl Syncer {
                     item.source,
                     paths.arr.display()
                 )
-            }
-        };
-
-        // `try_exists` rather than a blocking `exists()`: this runs per item on
-        // the async loop, against a mount that may be remote.
-        if !tokio::fs::try_exists(&paths.sharerr).await.unwrap_or(false) {
-            return Err(missing());
+            });
         }
 
         if dry_run {
@@ -1037,25 +956,24 @@ impl Syncer {
                 item.media.as_ref(),
             )
             .await?;
+        let info_hash = outcome.info_hash().to_owned();
         // `None` for `Reused`: an operator's own torrent or a cross-seed is not
         // sharerr's to characterise, so `set_seeding` leaves the stored
         // `private` value exactly as it was rather than guessing. The same
         // goes for the file stamp, which only a torrent sharerr built has.
-        let stamp = match outcome {
-            SeedOutcome::Added { .. } => stamp_before_seed,
-            SeedOutcome::Reused { .. } => None,
-        };
-        let private = match outcome {
-            SeedOutcome::Added { private, .. } => Some(private),
-            SeedOutcome::Reused { .. } => None,
+        let (step, private, stamp, created) = match outcome {
+            SeedOutcome::Added { private, .. } => {
+                (Step::Added, Some(private), stamp_before_seed, true)
+            }
+            SeedOutcome::Reused { .. } => (Step::Reused, None, None, false),
         };
         self.store
             .set_seeding(
                 item.source,
                 item.file_id,
-                outcome.info_hash(),
-                token_fingerprint(announce).as_deref(),
-                matches!(outcome, SeedOutcome::Added { .. }),
+                &info_hash,
+                token_fp.as_deref(),
+                created,
                 private,
             )
             .await?;
@@ -1067,10 +985,79 @@ impl Syncer {
             tracing::warn!(item = %item.spec, %err, "could not record the file stamp");
         }
 
-        Ok(match outcome {
-            SeedOutcome::Added { .. } => Step::Added,
-            SeedOutcome::Reused { .. } => Step::Reused,
-        })
+        Ok(step)
+    }
+
+    /// The fast path for an item already seeding that the client agrees about:
+    /// bring its limits and announce URLs up to date and record what the client
+    /// reports. Every failure here is a warning, not a failed item: the torrent is
+    /// still seeding, and the next pass retries.
+    async fn confirm_live(
+        &self,
+        item: &Discovered,
+        known: &SharedItem,
+        hash: &str,
+        reported: &sharerr_client::TorrentSummary,
+        announce: &AnnounceSet,
+        token_fp: Option<&str>,
+    ) {
+        let ratio = reported.ratio;
+        let mut ratio_limit = reported.ratio_limit;
+        // Retroactive seeding limits, for sharerr's own torrents only: an adopted
+        // one carries the operator's limits, which are theirs the same way its
+        // trackers are.
+        if known.created_by_sharerr {
+            match self.reconcile_limits(hash, reported).await {
+                // What the store records as the limit should be the one now in
+                // force, not the pre-apply reading.
+                Ok(true) => ratio_limit = self.seeder.seeding.ratio_limit.or(ratio_limit),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    item = %item.spec,
+                    error = format!("{err:#}"),
+                    "could not apply the configured seeding limits"
+                ),
+            }
+        }
+        match self.seeder.refresh_announce(hash, announce).await {
+            // Either branch means the live torrent now genuinely matches
+            // `announce.primary()`: a no-op refresh is still a confirmation. Confirmed
+            // fingerprint and reported ratio land in the one write `confirm_seeding`
+            // makes for them, which is what saves the second UPDATE most passes
+            // would otherwise pay.
+            Ok(AnnounceRefresh::Current | AnnounceRefresh::Updated) => {
+                if let Err(err) = self
+                    .store
+                    .confirm_seeding(item.source, item.file_id, token_fp, ratio, ratio_limit)
+                    .await
+                {
+                    tracing::warn!(
+                        item = %item.spec,
+                        error = %err,
+                        "could not record the confirmed announce token and ratio"
+                    );
+                }
+            }
+            // Nothing was compared, so nothing is confirmed: leave the stored
+            // fingerprint alone and the items page keeps showing this one as
+            // not-yet-current rather than Valid. The ratio is still worth recording.
+            Ok(AnnounceRefresh::NoCachedTorrent) => {
+                tracing::debug!(
+                    item = %item.spec,
+                    info_hash = %hash,
+                    "no cached .torrent to confirm the announce URL against"
+                );
+                self.record_ratio(item, ratio, ratio_limit).await;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    item = %item.spec,
+                    error = format!("{err:#}"),
+                    "could not refresh announce URLs"
+                );
+                self.record_ratio(item, ratio, ratio_limit).await;
+            }
+        }
     }
 
     /// Record the client-reported ratio alone, for a fast-path pass whose

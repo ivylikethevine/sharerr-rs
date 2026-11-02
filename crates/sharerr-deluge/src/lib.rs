@@ -196,6 +196,12 @@ impl DelugeClient {
 
     /// Apply a torrent's label, creating it first if this is its first use. Never
     /// fails the add: see the module docs.
+    async fn write_trackers(&self, hash: &str, trackers: Vec<Value>) -> Result<()> {
+        self.rpc("core.set_torrent_trackers", json!([hash, trackers]))
+            .await
+            .map(|_| ())
+    }
+
     async fn apply_label(&self, hash: &str, label: &str) {
         // Deluge folds labels to lowercase on both calls; doing it here keeps
         // what gets logged the same as what it stored.
@@ -227,11 +233,9 @@ fn into_result(method: &str, reply: Reply) -> Result<Value> {
     }
 }
 
-/// Decode a result, naming the call on failure. Typed for the reason
-/// `sharerr-transmission` gives: a renamed field must be an error, not an empty
-/// value that makes reconciliation re-add every torrent.
+/// Decode a result, naming the call on failure.
 fn decode<T: serde::de::DeserializeOwned>(call: &str, result: Value) -> Result<T> {
-    serde_json::from_value(result).map_err(|err| sharerr_client::malformed(KIND, call, err))
+    sharerr_client::decode_json(KIND, call, result)
 }
 
 /// `core.set_torrent_options`' and `core.add_torrent_file`'s shared names for a
@@ -298,11 +302,7 @@ impl ListedTorrent {
             save_path: self.save_path,
             content_path,
             category: self.label.clone(),
-            tags: if self.label.is_empty() {
-                Vec::new()
-            } else {
-                vec![self.label]
-            },
+            tags: sharerr_client::single_tag(self.label),
             is_seeding: self.state == "Seeding",
             is_stopped: self.state == "Paused",
             ratio: (self.ratio >= 0.0).then_some(self.ratio),
@@ -431,10 +431,8 @@ impl TorrentClient for DelugeClient {
     }
 
     async fn set_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
-        let trackers = tiered(urls.iter().map(Url::as_str));
-        self.rpc("core.set_torrent_trackers", json!([hash, trackers]))
+        self.write_trackers(hash, tiered(urls.iter().map(Url::as_str)))
             .await
-            .map(|_| ())
     }
 
     async fn add_trackers(&self, hash: &str, urls: &[Url]) -> Result<()> {
@@ -460,9 +458,7 @@ impl TorrentClient for DelugeClient {
                 .iter()
                 .map(|t| json!({ "url": t.url, "tier": t.tier + shift })),
         );
-        self.rpc("core.set_torrent_trackers", json!([hash, trackers]))
-            .await
-            .map(|_| ())
+        self.write_trackers(hash, trackers).await
     }
 
     async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
@@ -564,8 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        let port = sharerr_testkit::net::closed_port();
-        let base = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let base = sharerr_testkit::net::closed_url();
         let client = DelugeClient::new(&base, SecretString::from(PASSWORD)).unwrap();
 
         let err = client.login().await.unwrap_err();

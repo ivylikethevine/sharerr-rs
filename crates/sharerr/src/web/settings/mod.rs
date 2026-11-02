@@ -23,6 +23,7 @@
 
 use std::collections::BTreeSet;
 
+use anyhow::Context as _;
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
@@ -249,18 +250,10 @@ pub struct NotificationsForm {
     triggers: Vec<String>,
 }
 
+/// A switch and a bearer token: `/metrics` and the management API.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct MetricsForm {
-    enabled: Option<String>,
-    token: String,
-    clear_token: Option<String>,
-}
-
-/// The management API's switch and token, the same shape as [`MetricsForm`].
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct ApiForm {
+pub struct TokenToggleForm {
     enabled: Option<String>,
     token: String,
     clear_token: Option<String>,
@@ -544,18 +537,13 @@ pub async fn save_tracker(
             edits.push(Edit::int(config_paths::TRACKER_PORT, i64::from(parsed)));
         }
 
-        let advertised_url = form.advertised_url.trim();
-        if advertised_url.is_empty() {
-            edits.push(Edit::unset(config_paths::TRACKER_ADVERTISED_URL));
-        } else {
-            // Validated here rather than at the next sync: a URL that does not
-            // parse would otherwise store fine and surface later as torrents
-            // nobody can announce to.
-            edits.push(Edit::str(
-                config_paths::TRACKER_ADVERTISED_URL,
-                normalise_url(advertised_url)?,
-            ));
-        }
+        // Validated here rather than at the next sync: a URL that does not
+        // parse would otherwise store fine and surface later as torrents
+        // nobody can announce to.
+        edits.push(url_or_unset(
+            config_paths::TRACKER_ADVERTISED_URL,
+            &form.advertised_url,
+        )?);
 
         file.apply(edits);
         Ok(())
@@ -640,33 +628,60 @@ pub struct SeedingForm {
     quiet_upload_limit_kib: String,
 }
 
+/// `None` for a blank field; anything else goes through `parse`.
+fn parse_optional<T>(
+    raw: &str,
+    parse: impl FnOnce(&str) -> anyhow::Result<T>,
+) -> anyhow::Result<Option<T>> {
+    match raw.trim() {
+        "" => Ok(None),
+        text => parse(text).map(Some),
+    }
+}
+
 /// A blank field means no goal; anything else must be a whole number of
 /// KiB/s. Named in the error the same way [`parse_lighthouse_urls`] names a
 /// bad line, rather than silently discarding an unparseable value.
 fn parse_upload_limit_kib(raw: &str) -> anyhow::Result<Option<u64>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|_| anyhow::anyhow!("the upload limit must be a whole number of KiB/s"))
+    parse_optional(raw, |text| {
+        text.parse()
+            .map_err(|_| anyhow::anyhow!("the upload limit must be a whole number of KiB/s"))
+    })
 }
 
 /// A blank field means no goal; anything else must be a positive ratio.
 fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let ratio: f64 = trimmed
-        .parse()
-        .map_err(|_| anyhow::anyhow!("the ratio limit must be a number, e.g. 2.0"))?;
-    if !ratio.is_finite() || ratio <= 0.0 {
-        anyhow::bail!("the ratio limit must be a positive number");
-    }
-    Ok(Some(ratio))
+    parse_optional(raw, |text| {
+        let ratio: f64 = text
+            .parse()
+            .map_err(|_| anyhow::anyhow!("the ratio limit must be a number, e.g. 2.0"))?;
+        if !ratio.is_finite() || ratio <= 0.0 {
+            anyhow::bail!("the ratio limit must be a positive number");
+        }
+        Ok(ratio)
+    })
+}
+
+/// The form's fields that can be refused, parsed.
+struct SeedingLimits {
+    upload_limit_kib: Option<u64>,
+    ratio_limit: Option<f64>,
+    quiet_upload_limit_kib: Option<u64>,
+    quiet_hours: Option<sharerr_core::config::QuietHours>,
+}
+
+fn parse_seeding(form: &SeedingForm) -> anyhow::Result<SeedingLimits> {
+    Ok(SeedingLimits {
+        upload_limit_kib: parse_upload_limit_kib(&form.upload_limit_kib)?,
+        ratio_limit: parse_ratio_limit(&form.ratio_limit)?,
+        quiet_upload_limit_kib: parse_upload_limit_kib(&form.quiet_upload_limit_kib)
+            .context("quiet hours")?,
+        quiet_hours: parse_optional(&form.quiet_hours, |text| {
+            text.parse::<sharerr_core::config::QuietHours>()
+                .map_err(|err| anyhow::anyhow!("{err}"))
+        })
+        .context("quiet hours")?,
+    })
 }
 
 /// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
@@ -683,58 +698,38 @@ pub async fn save_seeding(
     State(state): State<WebState>,
     Form(form): Form<SeedingForm>,
 ) -> Response {
-    let upload_limit_kib = match parse_upload_limit_kib(&form.upload_limit_kib) {
-        Ok(v) => v,
+    let limits = match parse_seeding(&form) {
+        Ok(limits) => limits,
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
-    let ratio_limit = match parse_ratio_limit(&form.ratio_limit) {
-        Ok(v) => v,
-        Err(err) => return reject(&state, &format!("{err:#}")).await,
-    };
-    let quiet_upload_limit_kib = match parse_upload_limit_kib(&form.quiet_upload_limit_kib) {
-        Ok(v) => v,
-        Err(err) => return reject(&state, &format!("quiet hours: {err:#}")).await,
-    };
-    let quiet_hours = match form.quiet_hours.trim() {
-        "" => None,
-        text => match text.parse::<sharerr_core::config::QuietHours>() {
-            Ok(window) => Some(window),
-            Err(err) => return reject(&state, &format!("quiet hours: {err}")).await,
-        },
-    };
-    let private = form.private.is_some();
-    let sidecars = form.sidecars.is_some();
-    let magnet_links = form.magnet_links.is_some();
+    let kib_edit =
+        |path: &'static str, kib: u64| Edit::int(path, sharerr_core::saturating_i64(kib));
 
     write_config(&state, "seeding", None, move |file| {
         file.apply([
-            match quiet_hours {
-                Some(window) => Edit::str(config_paths::SEEDING_QUIET_HOURS, window.to_string()),
-                None => Edit::unset(config_paths::SEEDING_QUIET_HOURS),
-            },
-            match quiet_upload_limit_kib {
-                Some(kib) => Edit::int(
-                    config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB,
-                    i64::try_from(kib).unwrap_or(i64::MAX),
-                ),
-                None => Edit::unset(config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB),
-            },
-        ]);
-        file.apply([
-            match upload_limit_kib {
-                Some(kib) => Edit::int(
-                    config_paths::SEEDING_UPLOAD_LIMIT_KIB,
-                    i64::try_from(kib).unwrap_or(i64::MAX),
-                ),
-                None => Edit::unset(config_paths::SEEDING_UPLOAD_LIMIT_KIB),
-            },
-            match ratio_limit {
-                Some(ratio) => Edit::float(config_paths::SEEDING_RATIO_LIMIT, ratio),
-                None => Edit::unset(config_paths::SEEDING_RATIO_LIMIT),
-            },
-            Edit::bool(config_paths::SEEDING_PRIVATE, private),
-            Edit::bool(config_paths::SEEDING_SIDECARS, sidecars),
-            Edit::bool(config_paths::FEED_MAGNET_LINKS, magnet_links),
+            Edit::or_unset(
+                config_paths::SEEDING_QUIET_HOURS,
+                limits.quiet_hours,
+                |path, window| Edit::str(path, window.to_string()),
+            ),
+            Edit::or_unset(
+                config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB,
+                limits.quiet_upload_limit_kib,
+                kib_edit,
+            ),
+            Edit::or_unset(
+                config_paths::SEEDING_UPLOAD_LIMIT_KIB,
+                limits.upload_limit_kib,
+                kib_edit,
+            ),
+            Edit::or_unset(
+                config_paths::SEEDING_RATIO_LIMIT,
+                limits.ratio_limit,
+                Edit::float,
+            ),
+            Edit::bool(config_paths::SEEDING_PRIVATE, form.private.is_some()),
+            Edit::bool(config_paths::SEEDING_SIDECARS, form.sidecars.is_some()),
+            Edit::bool(config_paths::FEED_MAGNET_LINKS, form.magnet_links.is_some()),
         ]);
         Ok(())
     })
@@ -773,14 +768,10 @@ async fn save_gluetun_section(
         section,
         None,
         |file| {
-            file.apply([Edit::bool(enabled_path, form.enabled.is_some())]);
-
-            let url = form.control_url.trim();
-            if url.is_empty() {
-                file.apply([Edit::unset(control_url_path)]);
-            } else {
-                file.apply([Edit::str(control_url_path, normalise_url(url)?)]);
-            }
+            file.apply([
+                Edit::bool(enabled_path, form.enabled.is_some()),
+                url_or_unset(control_url_path, &form.control_url)?,
+            ]);
 
             let poll = form.poll_secs.trim();
             if !poll.is_empty() {
@@ -953,39 +944,48 @@ pub async fn save_notifications(
 /// silent one, matching how `[gluetun]` can be enabled with no API key yet.
 pub async fn save_metrics(
     State(state): State<WebState>,
-    Form(form): Form<MetricsForm>,
+    Form(form): Form<TokenToggleForm>,
 ) -> Response {
-    write_config_and_secret(
+    save_token_toggle(
         &state,
         "metrics",
-        None,
-        |file| {
-            file.apply([Edit::bool(
-                config_paths::METRICS_ENABLED,
-                form.enabled.is_some(),
-            )]);
-            Ok(())
-        },
+        config_paths::METRICS_ENABLED,
         secret_keys::METRICS_TOKEN,
-        form.token.trim(),
-        form.clear_token.is_some(),
+        form,
     )
     .await
 }
 
-pub async fn save_api(State(state): State<WebState>, Form(form): Form<ApiForm>) -> Response {
-    write_config_and_secret(
+pub async fn save_api(
+    State(state): State<WebState>,
+    Form(form): Form<TokenToggleForm>,
+) -> Response {
+    save_token_toggle(
         &state,
         "api",
+        config_paths::API_ENABLED,
+        secret_keys::API_TOKEN,
+        form,
+    )
+    .await
+}
+
+async fn save_token_toggle(
+    state: &WebState,
+    section: &str,
+    enabled_path: &'static str,
+    key: &'static str,
+    form: TokenToggleForm,
+) -> Response {
+    write_config_and_secret(
+        state,
+        section,
         None,
         |file| {
-            file.apply([Edit::bool(
-                config_paths::API_ENABLED,
-                form.enabled.is_some(),
-            )]);
+            file.apply([Edit::bool(enabled_path, form.enabled.is_some())]);
             Ok(())
         },
-        secret_keys::API_TOKEN,
+        key,
         form.token.trim(),
         form.clear_token.is_some(),
     )
@@ -1049,31 +1049,23 @@ pub async fn import_config(
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
 
-    let guard = state.serve.lock_config_write().await;
     let path = state.serve.config_path().to_path_buf();
-    let file = ConfigFile::replacing(&path);
-
-    let write_path = path.clone();
-    let written = {
-        let text = text.clone();
-        tokio::task::spawn_blocking(move || file.write_validated(&text))
-            .await
-            .map_err(|err| format!("writing the config file: {err}"))
-            .and_then(|result| result.map_err(|err| format!("{err:#}")))
+    let pending = PendingConfig {
+        _guard: state.serve.lock_config_write().await,
+        file: ConfigFile::replacing(&path),
+        text,
+        config,
+        path: path.clone(),
     };
-    drop(guard);
+    let response = commit_config(&state, "config", None, pending).await;
 
-    match written {
-        Ok(()) => {
-            state.serve.replace_config(config).await;
-            // A no-op unless the pasted document itself carried a pending
-            // `[[peers]]` block — see this function's own doc comment.
-            crate::commands::serve::import_peers(&state.serve).await;
-            tracing::info!(path = %write_path.display(), "config imported through the web ui");
-            Redirect::to("/settings?saved=config").into_response()
-        }
-        Err(message) => reject(&state, &message).await,
+    if response.status().is_redirection() {
+        // A no-op unless the pasted document itself carried a pending
+        // `[[peers]]` block — see this function's own doc comment.
+        crate::commands::serve::import_peers(&state.serve).await;
+        tracing::info!(path = %path.display(), "config imported through the web ui");
     }
+    response
 }
 
 pub async fn save_libraries(
@@ -1568,6 +1560,24 @@ pub(super) async fn gluetun_last_error(
     state.gluetun_status(target).snapshot().await.last_error
 }
 
+async fn gluetun_section(
+    state: &WebState,
+    config: &Config,
+    target: GluetunTarget,
+    is_set: &impl Fn(&str) -> bool,
+) -> GluetunSection {
+    let gluetun = target.config(config);
+    GluetunSection::new(
+        target,
+        url_or_empty(gluetun.control_url.as_ref()),
+        gluetun.enabled,
+        is_set(target.credential_key()),
+        gluetun.poll_secs,
+        gluetun_last_observed(&state.serve.endpoint_for(target)),
+        gluetun_last_error(&state.serve, target).await,
+    )
+}
+
 /// Reject a `tracker.advertised_host` that could never work for anyone outside
 /// this machine or network.
 ///
@@ -1629,9 +1639,19 @@ fn normalise_url(raw: &str) -> anyhow::Result<String> {
         .map_err(|err| anyhow::anyhow!("{raw:?} is not a valid URL: {err}"))
 }
 
+/// A URL field: normalised, or the key removed when the input is blank.
+fn url_or_unset(path: &'static str, raw: &str) -> anyhow::Result<Edit> {
+    let url = raw.trim();
+    if url.is_empty() {
+        Ok(Edit::unset(path))
+    } else {
+        Ok(Edit::str(path, normalise_url(url)?))
+    }
+}
+
 /// How the app's name is written, for headings — `as_str` is the lowercase
 /// wire/storage form.
-pub(super) fn title_case(name: &str) -> String {
+pub(crate) fn title_case(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -1824,24 +1844,8 @@ async fn build_page(
             .collect::<Vec<_>>()
             .join("\n"),
         lighthouse_url_count: config.lighthouse.urls.len(),
-        gluetun: GluetunSection::new(
-            GluetunTarget::Tracker,
-            url_or_empty(config.gluetun.control_url.as_ref()),
-            config.gluetun.enabled,
-            is_set(secret_keys::GLUETUN_API_KEY),
-            config.gluetun.poll_secs,
-            gluetun_last_observed(&state.serve.endpoint()),
-            gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
-        ),
-        gluetun_client: GluetunSection::new(
-            GluetunTarget::Client,
-            url_or_empty(config.gluetun_client.control_url.as_ref()),
-            config.gluetun_client.enabled,
-            is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
-            config.gluetun_client.poll_secs,
-            gluetun_last_observed(&state.serve.client_endpoint()),
-            gluetun_last_error(&state.serve, GluetunTarget::Client).await,
-        ),
+        gluetun: gluetun_section(state, &config, GluetunTarget::Tracker, &is_set).await,
+        gluetun_client: gluetun_section(state, &config, GluetunTarget::Client, &is_set).await,
         gluetun_client_configured: config.gluetun_client.control_url.is_some(),
 
         revealed: None,

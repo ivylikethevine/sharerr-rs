@@ -224,7 +224,7 @@ fn finish(
     }
 
     let torrent = Torrent {
-        announce: Some(announce.primary.to_string()),
+        announce: Some(announce.primary().to_string()),
         // An announce *list* only when there is genuinely more than one
         // endpoint: BEP 12 clients ignore `announce` the moment the list
         // exists, so a one-entry list would only add bytes and change
@@ -272,7 +272,6 @@ fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec
         })?;
         stream = Box::new(stream.chain(file));
     }
-    let mut reader = std::io::BufReader::new(stream);
     let chunk = usize::try_from(piece_length).unwrap_or(usize::MAX);
     let mut buf = vec![0u8; chunk];
     let mut pieces = Vec::new();
@@ -281,7 +280,7 @@ fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec
         // until the buffer is full or the file ends.
         let mut filled = 0;
         while filled < chunk {
-            let n = reader.read(&mut buf[filled..]).map_err(io)?;
+            let n = stream.read(&mut buf[filled..]).map_err(io)?;
             if n == 0 {
                 break;
             }
@@ -329,9 +328,14 @@ pub fn piece_length_for(size: u64) -> u64 {
     }
 }
 
+/// The name a torrent's `.torrent` file goes by.
+pub fn torrent_file_name(info_hash: &str) -> String {
+    format!("{info_hash}.torrent")
+}
+
 /// Where sharerr keeps a copy of each `.torrent` it has produced.
 pub fn torrent_file_path(dir: &Path, info_hash: &str) -> PathBuf {
-    dir.join(format!("{info_hash}.torrent"))
+    dir.join(torrent_file_name(info_hash))
 }
 
 /// Rewrite a stored `.torrent`'s announce URL and tiers, leaving everything else
@@ -345,7 +349,7 @@ pub fn torrent_file_path(dir: &Path, info_hash: &str) -> PathBuf {
 pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Vec<u8>> {
     let mut torrent = Torrent::read_from_bytes(data)?;
 
-    torrent.announce = Some(announce.primary.to_string());
+    torrent.announce = Some(announce.primary().to_string());
     torrent.announce_list = announce.tier_list();
 
     Ok(torrent.encode())
@@ -364,12 +368,6 @@ pub enum Retargeted {
         /// The parse, for a caller that wants its info hash: computing one means
         /// hashing the piece list, and the common caller only compares the URL.
         torrent: Torrent,
-        /// The torrent's recorded content length — the file's size at the
-        /// moment this torrent was built. A caller can compare it against
-        /// `fs::metadata` on the file as it stands now to detect an
-        /// in-place upgrade under the same path, with no second parse and
-        /// no re-hash.
-        length: u64,
     },
     /// The announce did not match; here is the rewritten, re-encoded
     /// `.torrent` and the announce it carried before.
@@ -377,10 +375,16 @@ pub enum Retargeted {
         previous: Option<String>,
         torrent: Torrent,
         data: Vec<u8>,
-        /// The torrent's recorded content length — see the `Current`
-        /// variant's `length` field.
-        length: u64,
     },
+}
+
+impl Retargeted {
+    /// The parsed torrent, whichever way it came out.
+    pub fn torrent(&self) -> &Torrent {
+        match self {
+            Self::Current { torrent } | Self::Updated { torrent, .. } => torrent,
+        }
+    }
 }
 
 /// Whether a stored `.torrent` already announces to `announce.primary`, and
@@ -398,21 +402,11 @@ pub enum Retargeted {
 pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Retargeted> {
     let mut torrent = Torrent::read_from_bytes(data)?;
     let previous = torrent.announce.clone();
-    // The content's total size when the torrent was built: the file's, or the
-    // sum of a multi-file torrent's. A missing or negative value is not producible by anything sharerr
-    // writes; `0` just means a corrupt/hand-edited torrent reads as size zero,
-    // which never matches a real file and so still triggers the rebuild its
-    // caller falls back to on a mismatch.
-    let length = torrent
-        .length()
-        .and_then(|length| u64::try_from(length).ok())
-        .unwrap_or(0);
-
-    if previous.as_deref() == Some(announce.primary.as_str()) {
-        return Ok(Retargeted::Current { torrent, length });
+    if previous.as_deref() == Some(announce.primary().as_str()) {
+        return Ok(Retargeted::Current { torrent });
     }
 
-    torrent.announce = Some(announce.primary.to_string());
+    torrent.announce = Some(announce.primary().to_string());
     torrent.announce_list = announce.tier_list();
     let data = torrent.encode();
 
@@ -420,7 +414,6 @@ pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<R
         previous,
         torrent,
         data,
-        length,
     })
 }
 
@@ -551,11 +544,8 @@ mod tests {
             .unwrap()
     }
 
-    fn announce_set(primary: &str, tiers: &[&str]) -> crate::AnnounceSet {
-        crate::AnnounceSet {
-            primary: primary.parse().unwrap(),
-            tiers: tiers.iter().map(|t| t.parse().unwrap()).collect(),
-        }
+    fn announce_set(primary: &str) -> crate::AnnounceSet {
+        crate::AnnounceSet::single(primary.parse().unwrap())
     }
 
     /// The info hash is a torrent's identity in every client already seeding
@@ -569,7 +559,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let built = built(
             &dir,
-            &announce_set("http://seed.example:51413/announce/tok", &[]),
+            &announce_set("http://seed.example:51413/announce/tok"),
         );
         assert_eq!(built.info_hash, "5eeab2c54e0d08a30dfc821c34d0d7f38ba14629");
         assert_eq!(built.data.len(), 201);
@@ -592,7 +582,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Lanternwick Hollow S01E01.mkv");
         std::fs::write(&path, vec![7u8; 512 * 1024]).unwrap();
-        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let set = announce_set("http://seed.example:51413/announce/tok");
 
         let bare = TorrentFactory
             .create(&TorrentRequest {
@@ -635,7 +625,7 @@ mod tests {
     #[test]
     fn nothing_known_writes_no_comment_at_all() {
         let dir = tempfile::tempdir().unwrap();
-        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let set = announce_set("http://seed.example:51413/announce/tok");
         let torrent = built(&dir, &set);
 
         assert!(!String::from_utf8_lossy(&torrent.data).contains("comment"));
@@ -672,7 +662,7 @@ mod tests {
     #[test]
     fn a_built_torrent_reports_the_announce_url_it_was_given() {
         let dir = tempfile::tempdir().unwrap();
-        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let set = announce_set("http://seed.example:51413/announce/tok");
         let torrent = built(&dir, &set);
 
         assert_eq!(
@@ -690,7 +680,7 @@ mod tests {
     #[test]
     fn the_info_hash_read_back_matches_the_one_the_builder_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let set = announce_set("http://seed.example:51413/announce/tok");
         let torrent = built(&dir, &set);
 
         assert_eq!(
@@ -706,12 +696,9 @@ mod tests {
     #[test]
     fn rewriting_the_announce_url_leaves_the_info_hash_untouched() {
         let dir = tempfile::tempdir().unwrap();
-        let before = built(
-            &dir,
-            &announce_set("http://old.example:51413/announce/a", &[]),
-        );
+        let before = built(&dir, &announce_set("http://old.example:51413/announce/a"));
 
-        let moved = announce_set("http://new.example:6881/announce/b", &[]);
+        let moved = announce_set("http://new.example:6881/announce/b");
         let after = rewrite_announce(&before.data, &moved).unwrap();
 
         assert_eq!(
@@ -734,17 +721,14 @@ mod tests {
     #[test]
     fn retargeting_an_already_current_announce_reports_current() {
         let dir = tempfile::tempdir().unwrap();
-        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let set = announce_set("http://seed.example:51413/announce/tok");
         let torrent = built(&dir, &set);
 
         let outcome = retarget_announce(&torrent.data, &set).unwrap();
         match outcome {
-            Retargeted::Current {
-                torrent: parsed,
-                length,
-            } => {
+            Retargeted::Current { torrent: parsed } => {
                 assert_eq!(parsed.info_hash(), torrent.info_hash);
-                assert_eq!(length, torrent.size);
+                assert_eq!(parsed.content_length(), torrent.size);
             }
             Retargeted::Updated { .. } => panic!("an unchanged announce must report Current"),
         }
@@ -757,23 +741,19 @@ mod tests {
     #[test]
     fn retargeting_a_stale_announce_reports_updated_and_matches_the_two_call_version() {
         let dir = tempfile::tempdir().unwrap();
-        let before = built(
-            &dir,
-            &announce_set("http://old.example:51413/announce/a", &[]),
-        );
-        let moved = announce_set("http://new.example:6881/announce/b", &[]);
+        let before = built(&dir, &announce_set("http://old.example:51413/announce/a"));
+        let moved = announce_set("http://new.example:6881/announce/b");
 
         let outcome = retarget_announce(&before.data, &moved).unwrap();
         let Retargeted::Updated {
             previous,
             torrent,
             data,
-            length,
         } = outcome
         else {
             panic!("a changed announce must report Updated");
         };
-        assert_eq!(length, before.size);
+        assert_eq!(torrent.content_length(), before.size);
 
         assert_eq!(
             previous.as_deref(),
@@ -796,15 +776,9 @@ mod tests {
     #[test]
     fn a_rewrite_with_fallback_tiers_emits_a_tier_list_and_one_without_does_not() {
         let dir = tempfile::tempdir().unwrap();
-        let before = built(
-            &dir,
-            &announce_set("http://old.example:51413/announce/a", &[]),
-        );
+        let before = built(&dir, &announce_set("http://old.example:51413/announce/a"));
 
-        let single = announce_set(
-            "http://new.example:6881/announce/b",
-            &["http://new.example:6881/announce/b"],
-        );
+        let single = announce_set("http://new.example:6881/announce/b");
         let rewritten = rewrite_announce(&before.data, &single).unwrap();
         let parsed = Torrent::read_from_bytes(&rewritten).unwrap();
         assert!(
@@ -812,13 +786,11 @@ mod tests {
             "one tier should emit no list"
         );
 
-        let two = announce_set(
-            "http://new.example:6881/announce/b",
-            &[
-                "http://new.example:6881/announce/b",
-                "http://old.example:51413/announce/a",
-            ],
-        );
+        let two = crate::AnnounceSet::from_tiers(vec![
+            "http://new.example:6881/announce/b".parse().unwrap(),
+            "http://old.example:51413/announce/a".parse().unwrap(),
+        ])
+        .unwrap();
         let rewritten = rewrite_announce(&before.data, &two).unwrap();
         let parsed = Torrent::read_from_bytes(&rewritten).unwrap();
         assert_eq!(parsed.announce_list.unwrap().len(), 2);
@@ -833,7 +805,7 @@ mod tests {
         assert!(
             rewrite_announce(
                 b"not a torrent at all",
-                &announce_set("http://x.example/announce", &[])
+                &announce_set("http://x.example/announce")
             )
             .is_err()
         );
@@ -856,7 +828,7 @@ mod tests {
         let media = dir.path().join("Show.S01E01.mkv");
         std::fs::write(&media, &media_bytes).unwrap();
         std::fs::write(dir.path().join("Show.S01E01.en.srt"), &sub_bytes).unwrap();
-        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+        let set = announce_set("http://seed.example:51413/announce/tok");
 
         let built = TorrentFactory
             .create_with_sidecars(&SidecarRequest {
@@ -908,7 +880,7 @@ mod tests {
                     path: &media,
                     sidecars: &sidecars,
                     root_name: "d",
-                    announce: &announce_set(announce, &[]),
+                    announce: &announce_set(announce),
                     media: comment,
                     private: true,
                 })
@@ -930,7 +902,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("a.mkv");
         std::fs::write(&media, b"bytes").unwrap();
-        let set = announce_set("http://seed.example/announce", &[]);
+        let set = announce_set("http://seed.example/announce");
 
         let err = TorrentFactory
             .create_with_sidecars(&SidecarRequest {
@@ -951,7 +923,7 @@ mod tests {
     #[test]
     fn a_sidecar_torrent_over_a_directory_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let set = announce_set("http://seed.example/announce", &[]);
+        let set = announce_set("http://seed.example/announce");
         let err = TorrentFactory
             .create_with_sidecars(&SidecarRequest {
                 path: dir.path(),

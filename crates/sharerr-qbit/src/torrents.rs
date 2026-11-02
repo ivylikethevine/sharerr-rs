@@ -23,20 +23,13 @@ fn missing_from<'a>(existing: &[TrackerEntry], wanted: &'a [Url]) -> Vec<&'a str
 impl QbitClient {
     /// `GET /api/v2/torrents/info`.
     ///
-    /// `category` and `tag` narrow the result server-side; passing `None` for both
-    /// lists everything, which is what existing-torrent detection needs.
-    pub async fn torrents_info(
-        &self,
-        category: Option<&str>,
-        tag: Option<&str>,
-    ) -> Result<Vec<TorrentInfo>> {
+    /// `category` narrows the result server-side; `None` lists everything, which
+    /// is what existing-torrent detection needs.
+    pub async fn torrents_info(&self, category: Option<&str>) -> Result<Vec<TorrentInfo>> {
         self.send_json(Method::GET, "torrents/info", |rb| {
             let mut query: Vec<(&str, &str)> = Vec::new();
             if let Some(category) = category {
                 query.push(("category", category));
-            }
-            if let Some(tag) = tag {
-                query.push(("tag", tag));
             }
             rb.query(&query)
         })
@@ -252,9 +245,7 @@ impl QbitClient {
             })
             .await?;
         }
-        if !limits.is_empty() {
-            tracing::info!(hash, ?limits, "applied the configured seeding limits");
-        }
+        tracing::info!(hash, ?limits, "applied the configured seeding limits");
         Ok(())
     }
 

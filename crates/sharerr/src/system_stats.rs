@@ -26,7 +26,7 @@ pub struct SystemStatus {
     inner: tokio::sync::RwLock<Option<SystemSnapshot>>,
 }
 
-/// One sample. `disk_used`/`disk_total` are `None` when no mounted
+/// One sample. `disk` is `(used, total)`, or `None` when no mounted
 /// filesystem was found covering the data directory — not expected in the
 /// documented Docker deployment, but rendered as an honest blank rather than
 /// a wrong number if it happens.
@@ -35,8 +35,7 @@ pub struct SystemSnapshot {
     pub cpu_percent: f32,
     pub memory_used: u64,
     pub memory_total: u64,
-    pub disk_used: Option<u64>,
-    pub disk_total: Option<u64>,
+    pub disk: Option<(u64, u64)>,
 }
 
 impl SystemStatus {
@@ -88,18 +87,16 @@ async fn sample(sys: &mut System, disk: Option<&Disk>) -> SystemSnapshot {
     let memory_used = sys.used_memory();
     let memory_total = sys.total_memory();
 
-    let (disk_used, disk_total) = disk.map_or((None, None), |disk| {
+    let disk = disk.map(|disk| {
         let total = disk.total_space();
-        let used = total.saturating_sub(disk.available_space());
-        (Some(used), Some(total))
+        (total.saturating_sub(disk.available_space()), total)
     });
 
     SystemSnapshot {
         cpu_percent,
         memory_used,
         memory_total,
-        disk_used,
-        disk_total,
+        disk,
     }
 }
 
@@ -113,14 +110,13 @@ pub fn format(snapshot: SystemSnapshot) -> (String, String, Option<String>) {
         crate::web::items::human_size(snapshot.memory_used),
         crate::web::items::human_size(snapshot.memory_total)
     );
-    let disk_usage = match (snapshot.disk_used, snapshot.disk_total) {
-        (Some(used), Some(total)) => Some(format!(
+    let disk_usage = snapshot.disk.map(|(used, total)| {
+        format!(
             "{} of {}",
             crate::web::items::human_size(used),
             crate::web::items::human_size(total)
-        )),
-        _ => None,
-    };
+        )
+    });
     (cpu_percent, memory_usage, disk_usage)
 }
 
@@ -148,34 +144,33 @@ fn disk_covering(disks: Vec<Disk>, path: &Path) -> Option<Disk> {
 mod tests {
     use super::*;
 
-    fn snapshot(disk_used: Option<u64>, disk_total: Option<u64>) -> SystemSnapshot {
+    fn snapshot(disk: Option<(u64, u64)>) -> SystemSnapshot {
         SystemSnapshot {
             cpu_percent: 12.34,
             memory_used: 4 * 1024 * 1024 * 1024,
             memory_total: 16 * 1024 * 1024 * 1024,
-            disk_used,
-            disk_total,
+            disk,
         }
     }
 
     #[test]
     fn format_renders_cpu_to_one_decimal() {
-        let (cpu, _, _) = format(snapshot(None, None));
+        let (cpu, _, _) = format(snapshot(None));
         assert_eq!(cpu, "12.3%");
     }
 
     #[test]
     fn format_renders_memory_as_used_of_total() {
-        let (_, memory, _) = format(snapshot(None, None));
+        let (_, memory, _) = format(snapshot(None));
         assert_eq!(memory, "4.0 GiB of 16.0 GiB");
     }
 
     #[test]
     fn format_renders_disk_when_a_mount_was_found() {
-        let (_, _, disk) = format(snapshot(
-            Some(120 * 1024 * 1024 * 1024),
-            Some(500 * 1024 * 1024 * 1024),
-        ));
+        let (_, _, disk) = format(snapshot(Some((
+            120 * 1024 * 1024 * 1024,
+            500 * 1024 * 1024 * 1024,
+        ))));
         assert_eq!(disk.as_deref(), Some("120.0 GiB of 500.0 GiB"));
     }
 
@@ -183,7 +178,7 @@ mod tests {
     /// tile must not fabricate a "0 B of 0 B" that reads as a real answer.
     #[test]
     fn format_leaves_disk_blank_when_nothing_matched() {
-        let (_, _, disk) = format(snapshot(None, None));
+        let (_, _, disk) = format(snapshot(None));
         assert_eq!(disk, None);
     }
 
@@ -204,7 +199,7 @@ mod tests {
             "used must not exceed total"
         );
         assert!(
-            snapshot.disk_total.is_some(),
+            snapshot.disk.is_some(),
             "/tmp must resolve to a mounted filesystem"
         );
     }

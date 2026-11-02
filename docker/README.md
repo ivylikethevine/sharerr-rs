@@ -88,7 +88,7 @@ Then add a _Generic Torznab_ indexer pointing at `http://sharerr:8477/api`.
 ## The opt-in test suite
 
 ```bash
-cargo test -p sharerr --features e2e -- --ignored --test-threads=1
+cargo test -p sharerr --features e2e --test e2e -- --ignored --test-threads=1
 ```
 
 The assertion that justifies the whole tier is in

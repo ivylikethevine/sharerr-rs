@@ -119,7 +119,7 @@ pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
         (status = 400, content_type = "application/xml",
          description = "No such Torznab function.", body = String),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
     ),
 )]
 async fn torznab_search(
@@ -189,7 +189,7 @@ pub(crate) struct Capability {
         (status = 200, description = "A one-element list: sharerr itself.",
          body = Vec<IndexerEntry>),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
     ),
 )]
 async fn indexers(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
@@ -258,7 +258,7 @@ pub(crate) struct ServerConfigDto {
           echoing a key back would turn one friend's credential into every \
           friend's.", body = ServerConfigDto),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
     ),
 )]
 async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) -> Response {
@@ -282,42 +282,27 @@ async fn server_config(State(state): State<Arc<ServeState>>, _caller: Caller) ->
 /// Capitalised field names, unlike the indexer DTO above — that inconsistency is
 /// Jackett's, and clients depend on it.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "PascalCase")]
 #[schema(as = JackettResult)]
 pub(crate) struct JsonResult {
-    #[serde(rename = "Tracker")]
     tracker: &'static str,
-    #[serde(rename = "TrackerId")]
     tracker_id: &'static str,
-    #[serde(rename = "TrackerType")]
     tracker_type: &'static str,
-    #[serde(rename = "Title")]
     title: String,
-    #[serde(rename = "Guid")]
     guid: String,
-    #[serde(rename = "Link")]
     link: String,
-    #[serde(rename = "Details")]
     details: String,
-    #[serde(rename = "Category")]
     category: Vec<u32>,
-    #[serde(rename = "CategoryDesc")]
     category_desc: &'static str,
-    #[serde(rename = "Size")]
     size: u64,
-    #[serde(rename = "Seeders")]
     seeders: u32,
-    #[serde(rename = "Peers")]
     peers: u32,
-    #[serde(rename = "InfoHash")]
     info_hash: String,
     /// Jackett serialises the key even when null, and clients read it that way.
-    #[serde(rename = "MagnetUri")]
     magnet_uri: Option<String>,
-    #[serde(rename = "DownloadVolumeFactor")]
     download_volume_factor: f32,
-    #[serde(rename = "UploadVolumeFactor")]
     upload_volume_factor: f32,
-    #[serde(rename = "Imdb", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     imdb: Option<i64>,
     #[serde(rename = "TVDBId", skip_serializing_if = "Option::is_none")]
     tvdb: Option<i64>,
@@ -329,53 +314,62 @@ pub(crate) struct JsonResult {
     // attributes. The XML renderer emits the same set from the same
     // `item.media` — the two disagreeing about one release is the failure mode
     // this whole module is kept in step to avoid.
-    #[serde(rename = "Resolution", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     resolution: Option<String>,
-    #[serde(rename = "VideoCodec", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     video_codec: Option<String>,
-    #[serde(rename = "AudioCodec", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     audio_codec: Option<String>,
-    #[serde(rename = "AudioChannels", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     audio_channels: Option<String>,
-    #[serde(rename = "Languages", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     languages: Option<String>,
-    #[serde(rename = "Subs", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     subs: Option<String>,
-    #[serde(rename = "Runtime", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     runtime: Option<String>,
-    #[serde(rename = "Hdr", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     hdr: Option<String>,
     // Jackett has no established name for either, having never indexed a source
     // that reports them. These follow its `PascalCase` convention so a consumer
     // reading the rest of this object needs no second rule for them.
-    #[serde(rename = "AudioSampleRate", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     audio_sample_rate: Option<String>,
-    #[serde(rename = "AudioBitDepth", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     audio_bit_depth: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "PascalCase")]
 #[schema(as = JackettResults)]
 pub(crate) struct JsonResults {
-    #[serde(rename = "Results")]
     results: Vec<JsonResult>,
-    #[serde(rename = "Indexers")]
     indexers: Vec<QueriedIndexer>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "PascalCase")]
 #[schema(as = JackettQueriedIndexer)]
 pub(crate) struct QueriedIndexer {
     #[serde(rename = "ID")]
     id: &'static str,
-    #[serde(rename = "Name")]
     name: &'static str,
-    #[serde(rename = "Status")]
     status: u32,
-    #[serde(rename = "Results")]
     results: usize,
-    #[serde(rename = "Error", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+impl QueriedIndexer {
+    fn sharerr(status: u32, results: usize, error: Option<String>) -> Self {
+        Self {
+            id: INDEXER_ID,
+            name: "sharerr",
+            status,
+            results,
+            error,
+        }
+    }
 }
 
 /// `GET /api/v2.0/indexers/{id}/results` — the same search, rendered as JSON.
@@ -403,7 +397,7 @@ pub(crate) struct QueriedIndexer {
           runs through the same code path, so the two surfaces cannot report \
           different libraries.", body = JsonResults),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
     ),
 )]
 async fn json_results(
@@ -417,7 +411,7 @@ async fn json_results(
     // Scoped to the friend who asked, exactly as the XML feed is. A second surface
     // that forgot to scope would be a way around the setting rather than a
     // rendering of it.
-    let matched = match collect(
+    let mut matched = match collect(
         &state,
         &query,
         caller.scope(),
@@ -434,35 +428,28 @@ async fn json_results(
                 status,
                 json(JsonResults {
                     results: Vec::new(),
-                    indexers: vec![QueriedIndexer {
-                        id: INDEXER_ID,
-                        name: "sharerr",
-                        // Jackett uses a non-zero status to mean "this indexer
-                        // errored", which is exactly what happened.
-                        status: 1,
-                        results: 0,
-                        error: Some(reason),
-                    }],
+                    // Jackett uses a non-zero status to mean "this indexer errored",
+                    // which is exactly what happened.
+                    indexers: vec![QueriedIndexer::sharerr(1, 0, Some(reason))],
                 }),
             )
                 .into_response();
         }
     };
 
-    let results: Vec<JsonResult> = matched
-        .items
-        .iter()
+    let results: Vec<JsonResult> = std::mem::take(&mut matched.items)
+        .into_iter()
         .map(|item| {
-            let category = crate::torznab::category_for(item);
-            let link = matched.download_url(item);
-            let info_hash = item.info_hash.clone().unwrap_or_default();
-            let magnet = matched.magnet_url(item);
+            let category = crate::torznab::category_for(&item);
+            let link = matched.download_url(&item);
+            let magnet = matched.magnet_url(&item);
+            let media = item.media.unwrap_or_default();
 
             JsonResult {
                 tracker: "sharerr",
                 tracker_id: INDEXER_ID,
                 tracker_type: "private",
-                title: item.release_title.clone(),
+                title: item.release_title,
                 guid: link.clone(),
                 details: link.clone(),
                 link,
@@ -472,7 +459,7 @@ async fn json_results(
                 // Shared with the XML feed — see the constants' docs.
                 seeders: crate::torznab::ADVERTISED_SEEDERS,
                 peers: crate::torznab::ADVERTISED_PEERS,
-                info_hash,
+                info_hash: item.info_hash.unwrap_or_default(),
                 magnet_uri: (!magnet.is_empty()).then_some(magnet),
                 download_volume_factor: crate::torznab::DOWNLOAD_VOLUME_FACTOR,
                 upload_volume_factor: crate::torznab::UPLOAD_VOLUME_FACTOR,
@@ -481,19 +468,16 @@ async fn json_results(
                 imdb: item.ids.imdb_numeric().and_then(|id| id.parse().ok()),
                 tvdb: item.ids.tvdb,
                 tmdb: item.ids.tmdb,
-                resolution: item.media.as_ref().and_then(|m| m.resolution.clone()),
-                video_codec: item.media.as_ref().and_then(|m| m.video_codec.clone()),
-                audio_codec: item.media.as_ref().and_then(|m| m.audio_codec.clone()),
-                audio_channels: item.media.as_ref().and_then(|m| m.audio_channels.clone()),
-                languages: item.media.as_ref().and_then(|m| m.audio_languages.clone()),
-                subs: item.media.as_ref().and_then(|m| m.subtitles.clone()),
-                runtime: item.media.as_ref().and_then(|m| m.runtime.clone()),
-                hdr: item.media.as_ref().and_then(|m| m.dynamic_range.clone()),
-                audio_sample_rate: item
-                    .media
-                    .as_ref()
-                    .and_then(|m| m.audio_sample_rate.clone()),
-                audio_bit_depth: item.media.as_ref().and_then(|m| m.audio_bit_depth.clone()),
+                resolution: media.resolution,
+                video_codec: media.video_codec,
+                audio_codec: media.audio_codec,
+                audio_channels: media.audio_channels,
+                languages: media.audio_languages,
+                subs: media.subtitles,
+                runtime: media.runtime,
+                hdr: media.dynamic_range,
+                audio_sample_rate: media.audio_sample_rate,
+                audio_bit_depth: media.audio_bit_depth,
             }
         })
         .collect();
@@ -503,13 +487,7 @@ async fn json_results(
 
     json(JsonResults {
         results,
-        indexers: vec![QueriedIndexer {
-            id: INDEXER_ID,
-            name: "sharerr",
-            status: 0,
-            results: count,
-            error: None,
-        }],
+        indexers: vec![QueriedIndexer::sharerr(0, count, None)],
     })
 }
 

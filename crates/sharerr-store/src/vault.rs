@@ -208,20 +208,16 @@ impl Vault {
     pub fn open(path: impl Into<PathBuf>, master: &SecretString) -> Result<Self> {
         let path = path.into();
 
-        let raw = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let salt = crate::random_array::<SALT_LEN>()
-                    .map_err(|e| VaultError::Kdf(format!("salt generation failed: {e}")))?;
-                let cipher = derive_cipher(master, &salt)?;
-                return Ok(Self {
-                    path,
-                    salt,
-                    cipher,
-                    records: BTreeMap::new(),
-                });
-            }
-            Err(source) => return Err(VaultError::Io { path, source }),
+        let Some(raw) = read_if_present(&path)? else {
+            let salt = crate::random_array::<SALT_LEN>()
+                .map_err(|e| VaultError::Kdf(format!("salt generation failed: {e}")))?;
+            let cipher = derive_cipher(master, &salt)?;
+            return Ok(Self {
+                path,
+                salt,
+                cipher,
+                records: BTreeMap::new(),
+            });
         };
 
         let (salt, records) = parse(&raw)?;
@@ -284,25 +280,31 @@ impl Vault {
             },
         )?;
         let record = self.seal(key, value.expose_secret().as_bytes())?;
-        let _guard = write_lock();
-        let mut file_lock = cross_process_lock(&self.path)?;
-        let _file_guard = lock_write(&mut file_lock, &self.path)?;
-        self.reload()?;
-        self.records.insert(key.to_owned(), record);
-        self.persist()
+        self.locked(|vault| {
+            vault.records.insert(key.to_owned(), record);
+            vault.persist()
+        })
     }
 
     /// Remove a value. Returns whether it was present.
     pub fn remove(&mut self, key: &str) -> Result<bool> {
+        self.locked(|vault| {
+            let existed = vault.records.remove(key).is_some();
+            if existed {
+                vault.persist()?;
+            }
+            Ok(existed)
+        })
+    }
+
+    /// Run one mutation under both write locks, over the records as they are on
+    /// disk now.
+    fn locked<T>(&mut self, mutate: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let _guard = write_lock();
         let mut file_lock = cross_process_lock(&self.path)?;
         let _file_guard = lock_write(&mut file_lock, &self.path)?;
         self.reload()?;
-        let existed = self.records.remove(key).is_some();
-        if existed {
-            self.persist()?;
-        }
-        Ok(existed)
+        mutate(self)
     }
 
     /// Re-read the records from disk before a mutation.
@@ -315,17 +317,10 @@ impl Vault {
     /// snapshot. Only the ciphertext is reloaded — no key derivation — so it
     /// costs one file read.
     fn reload(&mut self) -> Result<()> {
-        let raw = match std::fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            // Never written, or deleted out from under us: what this handle
-            // holds is the whole truth.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(VaultError::Io {
-                    path: self.path.clone(),
-                    source,
-                });
-            }
+        // Never written, or deleted out from under us: what this handle holds is
+        // the whole truth.
+        let Some(raw) = read_if_present(&self.path)? else {
+            return Ok(());
         };
         let (salt, records) = parse(&raw)?;
         if salt != self.salt {
@@ -358,15 +353,8 @@ impl Vault {
     /// secret that cannot currently be decrypted is still *stored*, and telling
     /// the operator otherwise would invite them to overwrite it.
     pub fn key_names(path: &Path) -> Result<Vec<String>> {
-        let raw = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => {
-                return Err(VaultError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
+        let Some(raw) = read_if_present(path)? else {
+            return Ok(Vec::new());
         };
 
         Ok(parse(&raw)?.1.into_keys().collect())
@@ -416,25 +404,31 @@ impl Vault {
         }
 
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| VaultError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+            std::fs::create_dir_all(parent).map_err(io_err(parent))?;
         }
 
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, &out).map_err(|source| VaultError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
+        std::fs::write(&tmp, &out).map_err(io_err(&tmp))?;
         restrict_permissions(&tmp)?;
-        std::fs::rename(&tmp, &self.path).map_err(|source| VaultError::Io {
-            path: self.path.clone(),
-            source,
-        })?;
+        std::fs::rename(&tmp, &self.path).map_err(io_err(&self.path))?;
 
         out.zeroize();
         Ok(())
+    }
+}
+
+/// The [`VaultError::Io`] for a failure on `path`.
+fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> VaultError {
+    let path = path.to_path_buf();
+    move |source| VaultError::Io { path, source }
+}
+
+/// The file at `path`, or `None` when there is none.
+fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_err(path)(source)),
     }
 }
 
@@ -463,20 +457,14 @@ fn write_lock() -> std::sync::MutexGuard<'static, ()> {
 fn cross_process_lock(vault_path: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
     let lock_path = vault_path.with_extension("lock");
     if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| VaultError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&lock_path)
-        .map_err(|source| VaultError::Io {
-            path: lock_path,
-            source,
-        })?;
+        .map_err(io_err(&lock_path))?;
     Ok(fd_lock::RwLock::new(file))
 }
 
@@ -486,21 +474,14 @@ fn lock_write<'a>(
     lock: &'a mut fd_lock::RwLock<std::fs::File>,
     vault_path: &Path,
 ) -> Result<fd_lock::RwLockWriteGuard<'a, std::fs::File>> {
-    lock.write().map_err(|source| VaultError::Io {
-        path: vault_path.with_extension("lock"),
-        source,
-    })
+    lock.write()
+        .map_err(io_err(&vault_path.with_extension("lock")))
 }
 
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|source| {
-        VaultError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
-    })
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(io_err(path))
 }
 
 #[cfg(not(unix))]

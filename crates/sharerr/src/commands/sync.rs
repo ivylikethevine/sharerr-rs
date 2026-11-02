@@ -9,9 +9,7 @@ use sharerr_core::endpoint::AdvertisedEndpoint;
 use crate::sync::Syncer;
 
 pub async fn run(config: &Config, dry_run: bool) -> Result<()> {
-    let endpoint = Arc::new(AdvertisedEndpoint::new(
-        sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port())?,
-    ));
+    let endpoint = Arc::new(AdvertisedEndpoint::new(config.advertised_base()?));
 
     // One-shot resolve from the same source of truth `serve`'s poller uses, so a
     // manual sync inside a gluetun namespace builds torrents that announce to

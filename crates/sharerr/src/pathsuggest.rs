@@ -117,14 +117,13 @@ fn common_suffix_prefixes(arr_path: &Path, sharerr_path: &Path) -> Option<(PathB
     // one real directory name) — see the doc comment above.
     let max_matched = arr_components.len().saturating_sub(2);
 
-    let mut matched = 0;
-    while matched < max_matched
-        && matched < sharerr_components.len()
-        && arr_components[arr_components.len() - 1 - matched]
-            == sharerr_components[sharerr_components.len() - 1 - matched]
-    {
-        matched += 1;
-    }
+    let matched = arr_components
+        .iter()
+        .rev()
+        .zip(sharerr_components.iter().rev())
+        .take(max_matched)
+        .take_while(|(arr, sharerr)| arr == sharerr)
+        .count();
 
     if matched == 0 || matched == sharerr_components.len() {
         return None;

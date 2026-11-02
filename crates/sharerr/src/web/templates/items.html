@@ -16,9 +16,7 @@
   is currently seeding.
 </p>
 
-{% if let Some(message) = error %}
-<p class="error" role="alert">{{ message }}</p>
-{% endif %}
+{% call ui::flash_error(error) %}{% endcall %}
 {% if let Some(message) = ok %}
 <p class="ok" role="status">{{ message }}</p>
 {% endif %}
@@ -80,38 +78,14 @@
 <form method="get" action="/items" class="panel filter-bar">
   <div class="field">
     <label for="q">Search</label>
-    <input id="q" name="q" value="{{ q }}" placeholder="title or release name" autocomplete="off">
+    <input id="q" name="q" value="{{ filters.q }}" placeholder="title or release name" autocomplete="off">
   </div>
 
-  <div class="field">
-    <label for="source">Source</label>
-    <select id="source" name="source">
-      <option value=""{% if source_filter.is_empty() %} selected{% endif %}>Any</option>
-      {% for option in source_options %}
-      <option value="{{ option.value }}"{% if source_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
-      {% endfor %}
-    </select>
-  </div>
+  {% call ui::filter_select("source", "Source", source_options, filters.source) %}{% endcall %}
 
-  <div class="field">
-    <label for="state">State</label>
-    <select id="state" name="state">
-      <option value=""{% if state_filter.is_empty() %} selected{% endif %}>Any</option>
-      {% for option in state_options %}
-      <option value="{{ option.value }}"{% if state_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
-      {% endfor %}
-    </select>
-  </div>
+  {% call ui::filter_select("state", "State", state_options, filters.state) %}{% endcall %}
 
-  <div class="field">
-    <label for="kind">Kind</label>
-    <select id="kind" name="kind">
-      <option value=""{% if kind_filter.is_empty() %} selected{% endif %}>Any</option>
-      {% for option in kind_options %}
-      <option value="{{ option.value }}"{% if kind_filter == option.value %} selected{% endif %}>{{ option.label }}</option>
-      {% endfor %}
-    </select>
-  </div>
+  {% call ui::filter_select("kind", "Kind", kind_options, filters.kind) %}{% endcall %}
 
   <button type="submit">Filter</button>
   <span class="filter-count">
@@ -171,63 +145,51 @@
     <tbody>
       {% for item in items %}
       <tr>
-        <td class="select"><input type="checkbox" name="item" value="{{ item.source }}:{{ item.file_id }}"
-              form="bulk" aria-label="Select {{ item.title }}"></td>
-        <td class="nowrap"{% if !item.since_absolute.is_empty() %} title="{{ item.since_absolute }}"{% endif %}>{{ item.since }}</td>
+        <td class="select"><input type="checkbox" name="item" value="{{ item.facts.source }}:{{ item.facts.file_id }}"
+              form="bulk" aria-label="Select {{ item.facts.title }}"></td>
+        <td class="nowrap"{% if !item.facts.since_absolute.is_empty() %} title="{{ item.facts.since_absolute }}"{% endif %}>{{ item.facts.since }}</td>
         <td class="title">
-          <a href="/items/{{ item.source }}/{{ item.file_id }}">{{ item.title }}</a>
-          <span class="hint">({{ item.kind }})</span>
+          <a href="/items/{{ item.facts.source }}/{{ item.facts.file_id }}">{{ item.facts.title }}</a>
+          <span class="hint">({{ item.facts.kind }})</span>
           {# Two different strings by design — conflating them stalls seeding at
              0%, see `sharerr-torrent`. The release title is also what the
              search box above matches on, so hiding it meant filtering against
              something the operator could not read. #}
-          <br><span class="hint"><code>{{ item.release_title }}</code></span>
+          <br><span class="hint"><code>{{ item.facts.release_title }}</code></span>
           <br><span class="hint">{{ item.arr_path }}</span>
-          {% if !item.ids.is_empty() %}
-          <br><span class="hint ids" title="Metadata IDs carried in the feed — what a friend's *arr matches the release on">{{ item.ids }}</span>
+          {% if !item.facts.ids.is_empty() %}
+          <br><span class="hint ids" title="Metadata IDs carried in the feed — what a friend's *arr matches the release on">{{ item.facts.ids }}</span>
           {% endif %}
-          {% if let Some(reason) = item.last_error %}
+          {% if let Some(reason) = item.facts.last_error %}
           <br><span class="error">{{ reason }}</span>
           {% endif %}
         </td>
-        <td title="{{ item.source_hint }}">{{ item.source_label }}</td>
-        <td class="nowrap">{{ item.size }}</td>
+        <td title="{{ item.facts.source_hint }}">{{ item.facts.source_label }}</td>
+        <td class="nowrap">{{ item.facts.size }}</td>
         <td class="state">
-          {{ item.state_label }}
-          {% if let Some(hint) = item.state_hint %}
+          {{ item.facts.state_label }}
+          {% if let Some(hint) = item.facts.state_hint %}
           <br><span class="hint">{{ hint }}</span>
           {% endif %}
           {# Only meaningful once a torrent exists. Withdrawing an item sharerr
              did not create leaves the torrent alone, so this changes what the
              operator should expect — see `SharedItem::created_by_sharerr`. #}
-          {% if item.info_hash.is_some() %}
+          {% if item.facts.info_hash.is_some() %}
           <br><span class="hint">
-            {% if item.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}
+            {% if item.facts.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}
           </span>
           {% endif %}
         </td>
-        <td class="nowrap"{% if !item.ratio_hint.is_empty() %} title="{{ item.ratio_hint }}"{% endif %}>
-          {% if item.ratio.is_empty() %}
-          <span class="hint">—</span>
-          {% else %}
-          {{ item.ratio }}
-          {% endif %}
+        <td class="nowrap"{% if !item.facts.ratio_hint.is_empty() %} title="{{ item.facts.ratio_hint }}"{% endif %}>
+          {% call ui::or_dash(item.facts.ratio) %}{% endcall %}
         </td>
         {# The tracker's own live count — first-hand, unlike anything the
            client reports. Empty means nobody is announcing right now. #}
         <td class="nowrap"{% if !item.peers_hint.is_empty() %} title="{{ item.peers_hint }}"{% endif %}>
-          {% if item.peers.is_empty() %}
-          <span class="hint">—</span>
-          {% else %}
-          {{ item.peers }}
-          {% endif %}
+          {% call ui::or_dash(item.peers) %}{% endcall %}
         </td>
         <td class="visible">
-          {% if item.visible_to.is_empty() %}
-          <span class="hint">—</span>
-          {% else %}
-          {{ item.visible_to }}
-          {% endif %}
+          {% call ui::or_dash(item.facts.visible_to) %}{% endcall %}
         </td>
         {# A 40-character hash and a full announce URL are both far wider than
            anything else in the row, and left at full width they squeezed the
@@ -237,29 +199,25 @@
            it: every row is already three lines tall, and side by side the two
            cells together pushed the table past the panel's edge. #}
         <td class="nowrap">
-          {% if let Some(hash) = item.info_hash %}
+          {% if let Some(hash) = item.facts.info_hash %}
           <code title="{{ hash }}">{% if let Some(short) = item.info_hash_short %}{{ short }}{% endif %}</code>
           <br><button type="button" class="link micro" data-copy-text="{{ hash }}"
-                  aria-label="Copy the full info hash for {{ item.title }}">copy</button>
+                  aria-label="Copy the full info hash for {{ item.facts.title }}">copy</button>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
         </td>
         <td class="nowrap">
-          {% if let Some(url) = item.announce_url %}
+          {% if let Some(url) = item.facts.announce_url %}
           <code class="truncate" title="{{ url }}">{{ url }}</code>
           <br><button type="button" class="link micro" data-copy-text="{{ url }}"
-                  aria-label="Copy the full announce URL for {{ item.title }}">copy</button>
+                  aria-label="Copy the full announce URL for {{ item.facts.title }}">copy</button>
           {% else %}
           <span class="hint">none yet</span>
           {% endif %}
         </td>
         <td>
-          {% if let Some(fp) = item.token_fp %}
-          <span class="field-status {{ item.token_status.css_class() }}" title="{{ item.token_status.label() }}"><code>{{ fp }}</code></span>
-          {% else %}
-          <span class="field-status {{ item.token_status.css_class() }}">{{ item.token_status.label() }}</span>
-          {% endif %}
+          {% call ui::token_badge(item.facts.token_fp, item.facts.token_status) %}{% endcall %}
         </td>
       </tr>
       {% endfor %}

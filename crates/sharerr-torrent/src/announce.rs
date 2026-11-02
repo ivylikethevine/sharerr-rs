@@ -412,6 +412,35 @@ impl Swarms {
         result
     }
 
+    /// One swarm's [`SwarmView`], if it has a live peer right now.
+    pub async fn snapshot(&self, info_hash: &InfoHash) -> Option<SwarmView> {
+        let swarms = self.inner.read().await;
+        let swarm = swarms.get(info_hash)?;
+        let now = Instant::now();
+        let peers: Vec<SocketAddr> = live(swarm, now).map(|(_, peer)| peer.addr).collect();
+        if peers.is_empty() {
+            return None;
+        }
+        let (complete, incomplete) = tally(swarm, now);
+        Some(SwarmView {
+            info_hash: *info_hash,
+            peers,
+            complete,
+            incomplete,
+        })
+    }
+
+    /// Seeder and leecher counts of every swarm with a live peer right now.
+    pub async fn counts(&self) -> HashMap<InfoHash, (usize, usize)> {
+        let swarms = self.inner.read().await;
+        let now = Instant::now();
+        swarms
+            .iter()
+            .map(|(info_hash, swarm)| (*info_hash, tally(swarm, now)))
+            .filter(|(_, counts)| *counts != (0, 0))
+            .collect()
+    }
+
     /// Seeder and leecher counts for one hash, for `/scrape`.
     pub async fn scrape(&self, info_hash: &InfoHash) -> (usize, usize) {
         let swarms = self.inner.read().await;
@@ -563,41 +592,17 @@ pub fn parse_query(query: &[u8]) -> HashMap<&str, Cow<'_, [u8]>> {
 /// `%` or `+` in it, so `port`, `left`, `event`, `compact` and `numwant` cost
 /// no allocation on the hot path every announce takes.
 fn percent_decode(raw: &[u8]) -> Cow<'_, [u8]> {
-    if !raw.contains(&b'%') && !raw.contains(&b'+') {
-        return Cow::Borrowed(raw);
+    // Replaced first, so a `%2B` still decodes to a literal `+`.
+    if raw.contains(&b'+') {
+        let spaced: Vec<u8> = raw
+            .iter()
+            .map(|&byte| if byte == b'+' { b' ' } else { byte })
+            .collect();
+        return Cow::Owned(percent_encoding::percent_decode(&spaced).collect());
     }
-
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-
-    while i < raw.len() {
-        match raw[i] {
-            b'%' if i + 2 < raw.len() => {
-                match (hex_nibble(raw[i + 1]), hex_nibble(raw[i + 2])) {
-                    (Some(hi), Some(lo)) => {
-                        out.push((hi << 4) | lo);
-                        i += 3;
-                    }
-                    // A stray `%` is kept verbatim rather than dropped; dropping it
-                    // would shorten a hash and produce a confusing length error.
-                    _ => {
-                        out.push(raw[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-
-    Cow::Owned(out)
+    // A stray `%` is kept verbatim rather than dropped; dropping it would shorten
+    // a hash and produce a confusing length error.
+    percent_encoding::percent_decode(raw).into()
 }
 
 /// Append one peer in BEP 23/7 compact form: address octets then a big-endian
@@ -609,15 +614,6 @@ fn pack_compact(out: &mut Vec<u8>, addr: &SocketAddr) {
         IpAddr::V6(ip) => out.extend_from_slice(&ip.octets()),
     }
     out.extend_from_slice(&addr.port().to_be_bytes());
-}
-
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Parse a hex info hash — the form sharerr stores and the Torznab feed publishes.
@@ -1094,5 +1090,15 @@ mod tests {
             }
         );
         assert_eq!(swarms.snapshots().await.len(), 2);
+
+        let view = swarms.snapshot(&seeder.info_hash).await.unwrap();
+        assert_eq!(
+            (view.complete, view.incomplete, view.peers.len()),
+            (1, 1, 2)
+        );
+        assert!(swarms.snapshot(&[0; 20]).await.is_none());
+        let counts = swarms.counts().await;
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts.get(&seeder.info_hash), Some(&(1, 1)));
     }
 }

@@ -13,6 +13,19 @@
 //! shipping files alongside the binary that the Dockerfile deliberately does not
 //! copy.
 
+/// The value of a `Result` whose `Err` is a boxed response, or that response
+/// returned from the handler. A macro because `Box<Response>` is not `IntoResponse`,
+/// so `?` cannot carry it, and an extractor would run ahead of `Form` and the checks
+/// done before the store, changing which response wins.
+macro_rules! ok_or_return {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(response) => return *response,
+        }
+    };
+}
+
 pub mod auth;
 pub mod composition;
 pub mod config_io;
@@ -88,8 +101,13 @@ impl WebState {
         self.serve
             .store()
             .await
-            .map_err(|reason| Box::new((StatusCode::SERVICE_UNAVAILABLE, reason).into_response()))
+            .map_err(|reason| Box::new(unavailable(reason)))
     }
+}
+
+/// The 503 a handler answers with when something it needs is unavailable.
+pub(crate) fn unavailable(reason: String) -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
 }
 
 /// Every route the browser talks to, ready to merge into the server's router.
@@ -276,10 +294,12 @@ async fn status_page(State(state): State<WebState>, Query(query): Query<StatusQu
     let config = state.serve.config().await;
     // Concurrently, because they share no data and `gather` is the expensive
     // half — it probes every *arr over HTTP and stats every discovered file,
-    // while `glance` is two store queries. Run in series the cheap one sat
+    // while `glance` only reads local state. Run in series the cheap one sat
     // behind the slow one on the page an operator lands on.
-    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
-    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state, sync_every));
+    let (diag, glance) = tokio::join!(
+        diagnostics::gather(&state),
+        glance(&state, config.sync_every())
+    );
 
     render(&StatusPage {
         signed_in: true,
@@ -328,8 +348,10 @@ async fn sync_now(State(state): State<WebState>) -> Redirect {
 /// on screen looking current. The `None` branch of the partial says "unavailable"
 /// instead, which is the truth.
 async fn stat_tiles(State(state): State<WebState>) -> Response {
-    let config = state.serve.config().await;
-    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
+    let sync_every = state
+        .serve
+        .with_config(sharerr_core::Config::sync_every)
+        .await;
 
     render(&crate::web::templates::StatTiles {
         glance: glance(&state, sync_every).await,
@@ -406,11 +428,7 @@ async fn glance(
     let snapshot = crate::metrics::gather(&state.serve).await;
 
     let items_shared = snapshot.seeding_count;
-    let shared_size = if snapshot.seeding_bytes > 0 {
-        items::human_size(snapshot.seeding_bytes.unsigned_abs())
-    } else {
-        String::new()
-    };
+    let shared_size = peers::bytes_or_empty(snapshot.seeding_bytes);
 
     let last_run = &snapshot.last_run;
     let (last_sync, last_sync_note, last_sync_failed) = match last_run {
@@ -438,7 +456,6 @@ async fn glance(
             let every = state
                 .serve
                 .sync_retry_delay(Duration::from_secs(every))
-                .await
                 .as_secs() as i64;
             let due_in = finished + every - now;
             if due_in <= 0 {
@@ -472,11 +489,7 @@ async fn glance(
 
     // All-time, from the announces themselves. Zero reads as "nothing to
     // say yet" rather than "0 B": a figure only appears once it is one.
-    let bytes_served = if snapshot.transfer.downloaded > 0 {
-        items::human_size(snapshot.transfer.downloaded.unsigned_abs())
-    } else {
-        String::new()
-    };
+    let bytes_served = peers::bytes_or_empty(snapshot.transfer.downloaded);
 
     let (cpu_percent, memory_usage, disk_usage) = match snapshot.system {
         Some(sample) => {
@@ -754,7 +767,7 @@ mod tests {
             )
             .await
             .unwrap();
-        serve.note_sync_failure().await;
+        serve.note_sync_failure();
 
         let state = web_state(serve);
         // A 15-minute interval: if this ignored the backoff it would say

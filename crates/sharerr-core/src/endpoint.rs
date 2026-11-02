@@ -78,11 +78,7 @@ pub fn advertised_base(
 /// composes correctly. `Url` prints a bare origin as `http://host:8477/`, and
 /// that slash would otherwise double up against every path constant.
 pub fn base_string(base: &Url) -> String {
-    let mut rendered = base.to_string();
-    while rendered.ends_with('/') {
-        rendered.pop();
-    }
-    rendered
+    base.as_str().trim_end_matches('/').to_owned()
 }
 
 /// `base` with `path` appended, keeping any path prefix the base carries.

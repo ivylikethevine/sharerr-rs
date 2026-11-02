@@ -324,23 +324,26 @@ check_coverage-run() {
 }
 
 # The three readers of the profile coverage-run left behind; none reruns
-# the suite. Every `cargo llvm-cov report` lives here so the ignore regex
-# cannot differ between the floor, the HTML and the badge figure.
+# the suite. One `cargo llvm-cov report`, so the ignore regex cannot
+# differ between the floor, the HTML and the badge figure.
+_cov_report() {
+  cargo llvm-cov report --ignore-filename-regex "$COVERAGE_IGNORE" "$@"
+}
+
 check_coverage-floor() {
   _need cargo-llvm-cov || return
-  cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE" \
-    --fail-under-lines "$COVERAGE_FLOOR_LINES"
+  _cov_report --summary-only --fail-under-lines "$COVERAGE_FLOOR_LINES"
 }
 
 check_coverage-html() {
   _need cargo-llvm-cov || return
-  cargo llvm-cov report --html --output-dir coverage-html --ignore-filename-regex "$COVERAGE_IGNORE"
+  _cov_report --html --output-dir coverage-html
 }
 
 # Stdout is the summary table alone, for a caller that keeps it in a file.
 check_coverage-summary() {
   _need cargo-llvm-cov || return
-  cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE"
+  _cov_report --summary-only
 }
 
 check_coverage() {

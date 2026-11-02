@@ -25,12 +25,12 @@
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
-    AddRequest, ClientError, ClientKind, Result, SeedingLimits, SessionSlot, TorrentClient,
-    TorrentFileEntry, TorrentSummary, http_client, rpc_endpoint,
+    AddRequest, ClientError, ClientKind, Result, RpcConnection, SeedingLimits, SessionSlot,
+    TorrentClient, TorrentFileEntry, TorrentSummary, rpc_endpoint,
 };
 use url::Url;
 
@@ -47,10 +47,7 @@ const SESSION_HEADER: &str = "X-Transmission-Session-Id";
 /// Holds the session id, so the 409 handshake is paid once rather than on every
 /// call.
 pub struct TransmissionClient {
-    http: reqwest::Client,
-    endpoint: Url,
-    username: String,
-    password: SecretString,
+    connection: RpcConnection,
     /// Learned from a 409 and replayed on every later request.
     session: SessionSlot,
 }
@@ -58,15 +55,7 @@ pub struct TransmissionClient {
 impl std::fmt::Debug for TransmissionClient {
     /// Hand-written so the password cannot reach a log through a derived `Debug`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        sharerr_client::debug_redacted(
-            f,
-            "TransmissionClient",
-            &[
-                ("endpoint", &self.endpoint.as_str() as &dyn std::fmt::Debug),
-                ("username", &self.username as &dyn std::fmt::Debug),
-            ],
-            &["password"],
-        )
+        self.connection.debug_as(f, "TransmissionClient")
     }
 }
 
@@ -78,10 +67,12 @@ impl TransmissionClient {
     /// with a path (a reverse-proxy subpath) is preserved.
     pub fn new(base: &Url, username: &str, password: SecretString) -> Result<Self> {
         Ok(Self {
-            http: http_client()?,
-            endpoint: rpc_endpoint(base, RPC_PATH)?,
-            username: username.to_owned(),
-            password,
+            connection: RpcConnection::new(
+                KIND,
+                rpc_endpoint(base, RPC_PATH)?,
+                username,
+                password,
+            )?,
             session: SessionSlot::default(),
         })
     }
@@ -95,19 +86,12 @@ impl TransmissionClient {
         let body = json!({ "method": method, "arguments": arguments });
 
         for attempt in 0..2 {
-            let mut request = self
-                .http
-                .post(self.endpoint.clone())
-                .basic_auth(&self.username, Some(self.password.expose_secret()))
-                .json(&body);
+            let mut request = self.connection.post().json(&body);
             if let Some(session) = self.session.get() {
                 request = request.header(SESSION_HEADER, session);
             }
 
-            let response = request
-                .send()
-                .await
-                .map_err(|e| sharerr_client::unreachable(KIND, self.endpoint.as_str(), &e))?;
+            let response = self.connection.send(request).await?;
             let status = response.status();
 
             if status == reqwest::StatusCode::CONFLICT && attempt == 0 {
@@ -223,7 +207,7 @@ struct ListedTorrent {
     seed_ratio_limit: f64,
     /// `0` = use Transmission's global default, `1` = `seed_ratio_limit` applies
     /// to this torrent, `2` = unlimited. Only `1` is a fixed number this specific
-    /// torrent is held to — see [`ratio_limit_reported`].
+    /// torrent is held to.
     #[serde(default)]
     seed_ratio_mode: i64,
     /// Whether `upload_limit` is in force for this torrent at all.
@@ -236,16 +220,27 @@ struct ListedTorrent {
     upload_limit: u64,
 }
 
-/// The per-torrent upload cap Transmission is enforcing, or `None` when the
-/// torrent is not individually limited.
-fn upload_limit_reported(torrent: &ListedTorrent) -> Option<u64> {
-    torrent.upload_limited.then_some(torrent.upload_limit)
-}
-
-/// The actual per-torrent limit Transmission is enforcing, or `None` when this
-/// torrent instead follows the global default or has no limit at all.
-fn ratio_limit_reported(torrent: &ListedTorrent) -> Option<f64> {
-    (torrent.seed_ratio_mode == 1).then_some(torrent.seed_ratio_limit)
+impl ListedTorrent {
+    fn into_summary(self, category: Option<&str>) -> TorrentSummary {
+        TorrentSummary {
+            content_path: sharerr_client::content_path(&self.download_dir, &self.name),
+            // Lowercased because sharerr joins on this against its own store,
+            // which holds lowercase hex.
+            hash: self.hash_string.to_ascii_lowercase(),
+            name: self.name,
+            save_path: self.download_dir,
+            category: category.unwrap_or_default().to_owned(),
+            is_seeding: is_seeding_status(self.status),
+            // 0 is `TR_STATUS_STOPPED`.
+            is_stopped: self.status == 0,
+            ratio: ratio_reported(self.upload_ratio),
+            // Only mode `1` is a limit this torrent itself is held to; the others
+            // follow the global default or have none.
+            ratio_limit: (self.seed_ratio_mode == 1).then_some(self.seed_ratio_limit),
+            upload_limit_kib: self.upload_limited.then_some(self.upload_limit),
+            tags: self.labels,
+        }
+    }
 }
 
 /// Transmission uses two negative sentinels for `uploadRatio`: `TR_RATIO_NA`
@@ -285,7 +280,7 @@ struct TrackerListTorrent {
 
 /// Decode one RPC response body, naming the call on failure.
 fn decode<T: serde::de::DeserializeOwned>(call: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).map_err(|err| sharerr_client::malformed(KIND, call, err))
+    sharerr_client::decode_json(KIND, call, arguments)
 }
 
 /// Transmission's numeric status values that mean "complete and uploading".
@@ -327,39 +322,17 @@ impl TorrentClient for TransmissionClient {
             .await?;
         let listed: Torrents<ListedTorrent> = decode("torrent-get", arguments)?;
 
-        let mut out = Vec::with_capacity(listed.torrents.len());
-        for torrent in listed.torrents {
-            // Transmission has no categories, so sharerr's category is simply one
-            // of the labels. Filtering here rather than server-side is why the
-            // trait warns callers not to assume the filter was applied remotely.
-            if let Some(wanted) = category
-                && !torrent.labels.iter().any(|l| l == wanted)
-            {
-                continue;
-            }
-
-            let content_path = sharerr_client::content_path(&torrent.download_dir, &torrent.name);
-            let ratio_limit = ratio_limit_reported(&torrent);
-            let upload_limit_kib = upload_limit_reported(&torrent);
-            out.push(TorrentSummary {
-                // Lowercased because sharerr joins on this against its own store,
-                // which holds lowercase hex.
-                hash: torrent.hash_string.to_ascii_lowercase(),
-                name: torrent.name,
-                save_path: torrent.download_dir,
-                content_path,
-                category: category.unwrap_or_default().to_owned(),
-                is_seeding: is_seeding_status(torrent.status),
-                // 0 is `TR_STATUS_STOPPED`.
-                is_stopped: torrent.status == 0,
-                ratio: ratio_reported(torrent.upload_ratio),
-                ratio_limit,
-                upload_limit_kib,
-                tags: torrent.labels,
-            });
-        }
-
-        Ok(out)
+        // Transmission has no categories, so sharerr's category is simply one
+        // of the labels. Filtering here rather than server-side is why the
+        // trait warns callers not to assume the filter was applied remotely.
+        Ok(listed
+            .torrents
+            .into_iter()
+            .filter(|torrent| {
+                category.is_none_or(|wanted| torrent.labels.iter().any(|l| l == wanted))
+            })
+            .map(|torrent| torrent.into_summary(category))
+            .collect())
     }
 
     async fn files(&self, hash: &str) -> Result<Vec<TorrentFileEntry>> {
@@ -579,8 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        let port = sharerr_testkit::net::closed_port();
-        let base = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let base = sharerr_testkit::net::closed_url();
         // The socket is a closed port, so no request is ever built from these.
         let (user, pw) = sharerr_testkit::mock::rpc_credentials();
         let client = TransmissionClient::new(&base, &user, SecretString::from(pw)).unwrap();
@@ -1002,7 +974,7 @@ mod tests {
         let (user, pw) = sharerr_testkit::mock::rpc_credentials();
         let client = TransmissionClient::new(&base, &user, SecretString::from(pw)).unwrap();
         assert_eq!(
-            client.endpoint.as_str(),
+            client.connection.endpoint().as_str(),
             "http://box.lan/transmission-proxy/transmission/rpc"
         );
     }

@@ -71,12 +71,6 @@ const QUALITY: &str = r#"{"quality":0,"revision":{"version":1,"real":0,"isRepack
 /// Language id 1 is English. Ids, not objects, for the same reason as `QUALITY`.
 const LANGUAGES: &str = "[1]";
 
-/// Never a root folder the *arr app itself owns — these are the read-only mounts.
-const TV_ROOT: &str = ARR_TV_PREFIX;
-const MOVIE_ROOT: &str = ARR_MOVIE_PREFIX;
-const MUSIC_ROOT: &str = ARR_MUSIC_PREFIX;
-const BOOK_ROOT: &str = ARR_BOOK_PREFIX;
-
 #[tokio::main]
 async fn main() -> ExitCode {
     let args = match parse_args() {
@@ -162,48 +156,36 @@ async fn run(args: &Args) -> anyhow::Result<()> {
     // Every flag is independent — the single-instance stack always passes
     // `--sonarr`/`--radarr`/`--lidarr` together, but the two-instance stack's
     // instance A has no Sonarr at all, so `--radarr` has to work alone.
-    if let Some(sonarr_db) = &args.sonarr {
+    if let Some(db) = &args.sonarr {
         let tv = tv_files(unused_root);
-        let sonarr = open(sonarr_db).await?;
-        let tag_id = ensure_tag(&sonarr).await?;
-        seed_sonarr(&sonarr, tag_id, &tv).await?;
-        sonarr.close().await;
+        seed_one(db, &tv, seed_sonarr).await?;
         println!(
             "tagged {TAG_LABEL:?}: {} episode file(s) on {SERIES_TITLE:?}",
             tv.len()
         );
     }
 
-    if let Some(radarr_db) = &args.radarr {
+    if let Some(db) = &args.radarr {
         let movies = movie_files(unused_root);
-        let radarr = open(radarr_db).await?;
-        let tag_id = ensure_tag(&radarr).await?;
-        seed_radarr(&radarr, tag_id, &movies).await?;
-        radarr.close().await;
+        seed_one(db, &movies, seed_radarr).await?;
         println!(
             "tagged {TAG_LABEL:?}: {} movie file(s) on {MOVIE_TITLE:?}",
             movies.len()
         );
     }
 
-    if let Some(lidarr_db) = &args.lidarr {
+    if let Some(db) = &args.lidarr {
         let music = music_files(unused_root);
-        let lidarr = open(lidarr_db).await?;
-        let tag_id = ensure_tag(&lidarr).await?;
-        seed_lidarr(&lidarr, tag_id, &music).await?;
-        lidarr.close().await;
+        seed_one(db, &music, seed_lidarr).await?;
         println!(
             "tagged {TAG_LABEL:?}: {} track file(s) on {ARTIST_NAME:?}",
             music.len()
         );
     }
 
-    if let Some(readarr_db) = &args.readarr {
+    if let Some(db) = &args.readarr {
         let books = book_files(unused_root);
-        let readarr = open(readarr_db).await?;
-        let tag_id = ensure_tag(&readarr).await?;
-        seed_readarr(&readarr, tag_id, &books).await?;
-        readarr.close().await;
+        seed_one(db, &books, seed_readarr).await?;
         println!(
             "tagged {TAG_LABEL:?}: {} book file(s) by {AUTHOR_NAME:?}",
             books.len()
@@ -220,6 +202,26 @@ async fn run(args: &Args) -> anyhow::Result<()> {
     }
 
     println!("start the apps just stopped again to pick this up");
+    Ok(())
+}
+
+/// Open one app's database, make sure the tag exists, seed `files`, and close.
+async fn seed_one(
+    path: &std::path::Path,
+    files: &[MediaFile],
+    seed: impl AsyncFn(&SqlitePool, i64, &[MediaFile]) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let db = open(path).await?;
+    let tag_id = ensure_tag(&db).await?;
+    seed(&db, tag_id, files).await?;
+    db.close().await;
+    Ok(())
+}
+
+/// Register a read-only mount as a root folder; never one the app itself owns.
+async fn ensure_root(db: &SqlitePool, path: &str) -> anyhow::Result<()> {
+    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(path))
+        .await?;
     Ok(())
 }
 
@@ -264,12 +266,11 @@ fn relative_path(arr_path: &str, folder_prefix: &str) -> String {
 }
 
 async fn seed_sonarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyhow::Result<()> {
-    let series_path = format!("{TV_ROOT}/{SERIES_FOLDER}");
+    let series_path = format!("{ARR_TV_PREFIX}/{SERIES_FOLDER}");
     let tags = format!("[{tag_id}]");
     let seasons = r#"[{"seasonNumber":2,"monitored":true}]"#;
 
-    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(TV_ROOT))
-        .await?;
+    ensure_root(db, ARR_TV_PREFIX).await?;
 
     // `INSERT OR REPLACE` on a fixed id so re-running the script is a no-op rather
     // than a duplicate-key failure or a second copy of the series.
@@ -344,14 +345,13 @@ async fn seed_sonarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
 }
 
 async fn seed_radarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyhow::Result<()> {
-    let movie_path = format!("{MOVIE_ROOT}/{MOVIE_FOLDER}");
+    let movie_path = format!("{ARR_MOVIE_PREFIX}/{MOVIE_FOLDER}");
     let tags = format!("[{tag_id}]");
     let file = files
         .first()
         .ok_or_else(|| anyhow::anyhow!("no movie fixtures to seed"))?;
 
-    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(MOVIE_ROOT))
-        .await?;
+    ensure_root(db, ARR_MOVIE_PREFIX).await?;
     insert_movie_metadata(db).await?;
 
     sqlx::query(
@@ -426,10 +426,9 @@ async fn insert_movie_metadata(db: &SqlitePool) -> anyhow::Result<()> {
 /// `TmdbId` to search for, without B's own sharerr ever discovering or
 /// tagging the row itself.
 async fn seed_radarr_wanted(db: &SqlitePool) -> anyhow::Result<()> {
-    let movie_path = format!("{MOVIE_ROOT}/{MOVIE_FOLDER}");
+    let movie_path = format!("{ARR_MOVIE_PREFIX}/{MOVIE_FOLDER}");
 
-    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(MOVIE_ROOT))
-        .await?;
+    ensure_root(db, ARR_MOVIE_PREFIX).await?;
     insert_movie_metadata(db).await?;
 
     sqlx::query(
@@ -466,11 +465,10 @@ async fn seed_radarr_wanted(db: &SqlitePool) -> anyhow::Result<()> {
 /// Unlike `EpisodeFiles`/`MovieFiles`, `TrackFiles.Path` holds the *full* path —
 /// there is no `RelativePath` column to join against the artist's own `Path`.
 async fn seed_lidarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyhow::Result<()> {
-    let artist_path = format!("{MUSIC_ROOT}/{ARTIST_FOLDER}");
+    let artist_path = format!("{ARR_MUSIC_PREFIX}/{ARTIST_FOLDER}");
     let tags = format!("[{tag_id}]");
 
-    db.execute(sqlx::query("INSERT OR IGNORE INTO RootFolders (Path) VALUES (?)").bind(MUSIC_ROOT))
-        .await?;
+    ensure_root(db, ARR_MUSIC_PREFIX).await?;
 
     sqlx::query(
         "INSERT OR REPLACE INTO ArtistMetadata (
@@ -577,14 +575,14 @@ async fn seed_lidarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyho
 /// profile id 1 is the "eBook" quality and "Standard" metadata profile a
 /// fresh database creates.
 async fn seed_readarr(db: &SqlitePool, tag_id: i64, files: &[MediaFile]) -> anyhow::Result<()> {
-    let author_path = format!("{BOOK_ROOT}/{AUTHOR_FOLDER}");
+    let author_path = format!("{ARR_BOOK_PREFIX}/{AUTHOR_FOLDER}");
     let tags = format!("[{tag_id}]");
 
     db.execute(
         sqlx::query(
             "INSERT OR IGNORE INTO RootFolders (Path, Name, IsCalibreLibrary) VALUES (?, ?, 0)",
         )
-        .bind(BOOK_ROOT)
+        .bind(ARR_BOOK_PREFIX)
         .bind("Books"),
     )
     .await?;
@@ -725,7 +723,7 @@ mod tests {
     /// path-mapping bug rather than a seeding one.
     #[test]
     fn rejoining_the_folder_reproduces_the_path_the_api_reports() {
-        let folder = format!("{TV_ROOT}/{SERIES_FOLDER}");
+        let folder = format!("{ARR_TV_PREFIX}/{SERIES_FOLDER}");
         for file in tv_files(std::path::Path::new("/")) {
             let relative = relative_path(&file.arr_path, &folder);
             assert_eq!(format!("{folder}/{relative}"), file.arr_path);

@@ -110,7 +110,7 @@ pub struct PreviewArgs {
     pub bind: std::net::SocketAddr,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct DoctorArgs {
     /// Attempt to fix the mechanical problems this command can already name
     /// precisely: create a missing *arr tag, or a qBittorrent category that

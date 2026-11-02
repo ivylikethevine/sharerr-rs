@@ -74,11 +74,6 @@ impl RtorrentClient {
     }
 }
 
-/// No native per-torrent ratio limit — see the module docs.
-fn warn_no_ratio_limit() {
-    tracing::warn!("rTorrent has no per-torrent seed-ratio limit; ratio_limit was not applied");
-}
-
 #[async_trait]
 impl TorrentClient for RtorrentClient {
     fn kind(&self) -> ClientKind {
@@ -146,11 +141,7 @@ impl TorrentClient for RtorrentClient {
                 is_seeding: as_bool(&complete) && as_bool(&active),
                 // Stopped and paused downloads are both inactive.
                 is_stopped: !as_bool(&active),
-                tags: if tag.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![tag]
-                },
+                tags: sharerr_client::single_tag(tag),
                 // `d.ratio=` reports the up/down ratio scaled by 1000 (rTorrent's
                 // XML-RPC has no float type), e.g. `1850` means a ratio of 1.85.
                 ratio: Some(as_u64(&ratio) as f64 / 1000.0),
@@ -226,21 +217,12 @@ impl TorrentClient for RtorrentClient {
         params.extend(commands.iter().map(|c| Param::Str(c.as_str())));
         self.call(method, &params).await?;
 
-        if let Some(kib) = request.limits.upload_limit_kib {
-            // Using `request.info_hash` rather than asking rTorrent which
-            // torrent it loaded last avoids a race: `load.raw_start` loads
-            // asynchronously, so immediately afterward "last loaded" is not
-            // reliably "the one just added", especially with a
-            // `view.sort_current` configured in `.rtorrent.rc`.
-            self.throttle(&request.info_hash.to_ascii_lowercase(), kib)
-                .await?;
-        }
-
-        if request.limits.ratio_limit.is_some() {
-            warn_no_ratio_limit();
-        }
-
-        Ok(())
+        // Using `request.info_hash` rather than asking rTorrent which
+        // torrent it loaded last avoids a race: `load.raw_start` loads
+        // asynchronously, so immediately afterward "last loaded" is not
+        // reliably "the one just added", especially with a
+        // `view.sort_current` configured in `.rtorrent.rc`.
+        self.set_limits(request.info_hash, &request.limits).await
     }
 
     async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
@@ -252,7 +234,10 @@ impl TorrentClient for RtorrentClient {
             tracing::info!(hash, kib, "applied the configured upload cap");
         }
         if limits.ratio_limit.is_some() {
-            warn_no_ratio_limit();
+            // No native per-torrent ratio limit: see the module docs.
+            tracing::warn!(
+                "rTorrent has no per-torrent seed-ratio limit; ratio_limit was not applied"
+            );
         }
         Ok(())
     }
@@ -288,11 +273,7 @@ impl TorrentClient for RtorrentClient {
             .iter()
             .map(|url| [Param::Str(hash), Param::Int(0), Param::Str(url.as_str())])
             .collect();
-        let calls: Vec<(&str, &[Param<'_>])> = params
-            .iter()
-            .map(|p| ("d.tracker.insert", p.as_slice()))
-            .collect();
-        self.call_batch(&calls).await?;
+        self.call_batch("d.tracker.insert", &params).await?;
 
         tracing::debug!(
             hash,
@@ -414,8 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_reported_as_unreachable() {
-        let port = sharerr_testkit::net::closed_port();
-        let endpoint = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let endpoint = sharerr_testkit::net::closed_url();
         // The socket is a closed port, so no request is ever built from these.
         let (user, pw) = sharerr_testkit::mock::rpc_credentials();
         let client = RtorrentClient::new(&endpoint, &user, SecretString::from(pw)).unwrap();
@@ -1004,9 +984,8 @@ mod tests {
         let server = MockServer::start().await;
         mount_scalar(&server).await;
 
-        let no_params: &[Param<'_>] = &[];
         let err = client(&server)
-            .call_batch(&[("d.name", no_params)])
+            .call_batch("d.name", &[[] as [Param<'_>; 0]])
             .await
             .unwrap_err();
         assert!(
@@ -1023,9 +1002,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let no_params: &[Param<'_>] = &[];
         let err = client(&server)
-            .call_batch(&[("d.name", no_params)])
+            .call_batch("d.name", &[[] as [Param<'_>; 0]])
             .await
             .unwrap_err();
         assert!(
@@ -1046,9 +1024,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let no_params: &[Param<'_>] = &[];
         let err = client(&server)
-            .call_batch(&[("d.name", no_params)])
+            .call_batch("d.name", &[[] as [Param<'_>; 0]])
             .await
             .unwrap_err();
         assert!(

@@ -91,6 +91,18 @@ impl Edit {
         }
     }
 
+    /// Write `value` through `set`, or remove the key when there is none.
+    pub fn or_unset<T>(
+        path: &'static str,
+        value: Option<T>,
+        set: impl FnOnce(&'static str, T) -> Self,
+    ) -> Self {
+        match value {
+            Some(value) => set(path, value),
+            None => Self::unset(path),
+        }
+    }
+
     /// Write the value, or remove the key when the trimmed input is blank.
     ///
     /// This is what nearly every optional text input in the UI wants: a user who

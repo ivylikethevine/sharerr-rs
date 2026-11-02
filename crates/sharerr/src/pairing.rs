@@ -133,12 +133,12 @@ impl Invite {
         validate_url(&invite.url)?;
         validate_key(&invite.key)?;
         if let Some(pubkey) = &invite.pubkey
-            && !is_hex_pubkey(pubkey)
+            && !sharerr_lighthouse::is_hex_32_bytes(pubkey)
         {
             return Err("that invite carries an identity key of the wrong shape".to_owned());
         }
         if let Some(hash) = &invite.in_reply_to
-            && (hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            && !sharerr_lighthouse::is_hex_32_bytes(hash)
         {
             return Err("that reply names a key hash of the wrong shape".to_owned());
         }
@@ -163,10 +163,6 @@ fn validate_key(key: &str) -> Result<(), String> {
         return Err("the key is longer than any sharerr issues".to_owned());
     }
     Ok(())
-}
-
-fn is_hex_pubkey(pubkey: &str) -> bool {
-    pubkey.len() == 64 && pubkey.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +243,7 @@ pub struct PairRequest {
          "The address does not parse, the key is empty or oversized, or the \
           record's signature does not verify.", body = String),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
         (status = 409, description =
          "This peer's outbound half is already set, or the record names a \
           different identity from the one pinned. Pairing fills an empty row \

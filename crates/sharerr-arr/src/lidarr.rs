@@ -85,12 +85,11 @@ async fn fetch_artist(client: &ArrClient, artist: &Artist) -> Result<ArtistPaylo
     // numbers so a single-track file can be named precisely; a file no track
     // points at is still shareable — it is simply the whole album.
     let by_artist = [("artistId", artist.id)];
-    let (albums, files, tracks) = tokio::try_join!(
+    tokio::try_join!(
         client.get::<Vec<Album>, _>("album", &by_artist),
         client.get::<Vec<TrackFile>, _>("trackfile", &by_artist),
         client.get::<Vec<Track>, _>("track", &by_artist),
-    )?;
-    Ok((albums, files, tracks))
+    )
 }
 
 pub(crate) async fn discover(

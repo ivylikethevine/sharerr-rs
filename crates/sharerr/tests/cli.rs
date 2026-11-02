@@ -12,6 +12,25 @@
 
 use std::process::Command;
 
+/// Only ever opens vaults these tests create and throw away.
+const MASTER_KEY: &str = "a-throwaway-key-for-a-throwaway-vault";
+
+/// A `sharerr.toml` under `dir` that names its data directory, then `rest`.
+fn write_config(dir: &tempfile::TempDir, rest: &str) {
+    std::fs::write(
+        dir.path().join("sharerr.toml"),
+        format!("data_dir = {:?}\n\n{rest}", dir.path().join("data")),
+    )
+    .unwrap();
+}
+
+/// A `sharerr.toml` under `dir` that does not parse.
+fn malformed_config(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let config = dir.path().join("sharerr.toml");
+    std::fs::write(&config, "this is not = valid = toml [[[").unwrap();
+    config
+}
+
 fn bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_sharerr"));
     // Otherwise the binary reads the developer's own config, or /config in a
@@ -96,10 +115,7 @@ fn vault_list_with_a_master_key_opens_an_empty_vault() {
     std::fs::write(&config, format!("data_dir = {:?}\n", dir.path())).unwrap();
 
     let out = bin()
-        .env(
-            "SHARERR_MASTER_KEY",
-            "a-throwaway-key-for-a-throwaway-vault",
-        )
+        .env("SHARERR_MASTER_KEY", MASTER_KEY)
         .arg("--config")
         .arg(&config)
         .arg("vault")
@@ -126,8 +142,7 @@ fn vault_list_with_a_master_key_opens_an_empty_vault() {
 #[test]
 fn a_malformed_config_is_reported_but_does_not_abort_the_command() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("sharerr.toml");
-    std::fs::write(&config, "this is not = valid = toml [[[").unwrap();
+    let config = malformed_config(&dir);
 
     // `--output` so the document does not land in the stream the log shares.
     let out = bin()
@@ -157,8 +172,7 @@ fn a_malformed_config_is_reported_but_does_not_abort_the_command() {
 #[test]
 fn verbosity_flags_raise_the_log_level() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("sharerr.toml");
-    std::fs::write(&config, "this is not = valid = toml [[[").unwrap();
+    let config = malformed_config(&dir);
 
     let run = |extra: &[&str]| {
         let mut cmd = bin();
@@ -185,8 +199,7 @@ fn verbosity_flags_raise_the_log_level() {
 #[test]
 fn rust_log_overrides_the_verbosity_flags() {
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("sharerr.toml");
-    std::fs::write(&config, "this is not = valid = toml [[[").unwrap();
+    let config = malformed_config(&dir);
 
     let out = bin()
         .env("RUST_LOG", "error")
@@ -240,17 +253,9 @@ fn help_lists_every_subcommand() {
 // ------------------------------------------------------------------- serve
 
 /// Serialises port allocation and spawning — see the identical note in
-/// `sharerr-lighthouse`'s binary test. `free_port` releases the port before the
+/// `sharerr-lighthouse`'s binary test. `closed_port` releases the port before the
 /// child binds it, so two tests racing there can be handed the same number.
 static STARTUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 /// A running `sharerr serve`, torn down however the test exits.
 struct Serving {
@@ -284,15 +289,8 @@ impl Serving {
         let guard = STARTUP
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let port = free_port();
-        std::fs::write(
-            dir.path().join("sharerr.toml"),
-            format!(
-                "data_dir = {:?}\n\n[server]\nbind = \"127.0.0.1:{port}\"\n",
-                dir.path().join("data")
-            ),
-        )
-        .unwrap();
+        let port = sharerr_testkit::net::closed_port();
+        write_config(&dir, &format!("[server]\nbind = \"127.0.0.1:{port}\"\n"));
 
         let child = bin()
             .arg("--config")
@@ -353,19 +351,15 @@ impl Serving {
         let _ = stream.read_to_end(&mut raw);
         String::from_utf8_lossy(&raw).into_owned()
     }
-}
 
-impl Serving {
     /// Fetch a path, waiting for the server to come up first. Used by the
     /// preview test, which has no `/health` to poll.
     fn get_when_ready(&self, path: &str) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
-            if std::net::TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                let response = self.get(path);
-                if !response.is_empty() {
-                    return response;
-                }
+            let response = self.get(path);
+            if !response.is_empty() {
+                return response;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -438,27 +432,8 @@ fn serve_mounts_the_tracker_and_indexer_routes() {
 #[cfg(unix)]
 #[test]
 fn serve_shuts_down_on_sigterm() {
-    let (_dir, mut serving) = Serving::unconfigured();
-
-    let killed = Command::new("kill")
-        .arg("-TERM")
-        .arg(serving.child.id().to_string())
-        .status()
-        .unwrap();
-    assert!(killed.success());
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while std::time::Instant::now() < deadline {
-        if let Some(status) = serving.child.try_wait().unwrap() {
-            assert!(
-                status.success(),
-                "a graceful shutdown is a clean exit: {status:?}"
-            );
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    panic!("SIGTERM was ignored — docker stop would have to SIGKILL this");
+    let (_dir, serving) = Serving::unconfigured();
+    stop_gracefully(serving);
 }
 
 // -------------------------------------------------------------------- sync
@@ -478,23 +453,18 @@ fn sync_fixture() -> tempfile::TempDir {
     let media = dir.path().join("media");
     sharerr_testkit::tv_library(&media).unwrap();
 
-    std::fs::write(
-        dir.path().join("sharerr.toml"),
-        format!(
-            "data_dir = {:?}\n\n[tracker]\nadvertised_host = \"seed.example\"\n\n\
+    write_config(
+        &dir,
+        &format!(
+            "[tracker]\nadvertised_host = \"seed.example\"\n\n\
              [[library]]\npath = {:?}\nkind = \"tv\"\n",
-            dir.path().join("data"),
-            media.join("tv"),
+            media.join("tv")
         ),
-    )
-    .unwrap();
+    );
 
     // The vault refuses to open without this, so `sync` would stop there.
     let mut child = bin()
-        .env(
-            "SHARERR_MASTER_KEY",
-            "a-throwaway-key-for-a-throwaway-vault",
-        )
+        .env("SHARERR_MASTER_KEY", MASTER_KEY)
         .arg("--config")
         .arg(dir.path().join("sharerr.toml"))
         .arg("vault")
@@ -518,13 +488,10 @@ fn sync_fixture() -> tempfile::TempDir {
 
 fn sync(dir: &tempfile::TempDir, extra: &[&str]) -> std::process::Output {
     let mut cmd = bin();
-    cmd.env(
-        "SHARERR_MASTER_KEY",
-        "a-throwaway-key-for-a-throwaway-vault",
-    )
-    .arg("--config")
-    .arg(dir.path().join("sharerr.toml"))
-    .arg("sync");
+    cmd.env("SHARERR_MASTER_KEY", MASTER_KEY)
+        .arg("--config")
+        .arg(dir.path().join("sharerr.toml"))
+        .arg("sync");
     for arg in extra {
         cmd.arg(arg);
     }
@@ -595,14 +562,7 @@ fn sync_without_a_master_key_refuses_and_says_why() {
 fn sync_with_no_library_source_lists_what_to_configure() {
     let dir = sync_fixture();
     // Same fixture, minus the `[[library]]` section.
-    std::fs::write(
-        dir.path().join("sharerr.toml"),
-        format!(
-            "data_dir = {:?}\n\n[tracker]\nadvertised_host = \"seed.example\"\n",
-            dir.path().join("data")
-        ),
-    )
-    .unwrap();
+    write_config(&dir, "[tracker]\nadvertised_host = \"seed.example\"\n");
 
     let out = sync(&dir, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -624,15 +584,13 @@ fn sync_with_no_library_source_lists_what_to_configure() {
 fn sync_without_an_advertised_address_refuses_rather_than_guessing() {
     let dir = sync_fixture();
     let media = dir.path().join("media");
-    std::fs::write(
-        dir.path().join("sharerr.toml"),
-        format!(
-            "data_dir = {:?}\n\n[[library]]\npath = {:?}\nkind = \"tv\"\n",
-            dir.path().join("data"),
-            media.join("tv"),
+    write_config(
+        &dir,
+        &format!(
+            "[[library]]\npath = {:?}\nkind = \"tv\"\n",
+            media.join("tv")
         ),
-    )
-    .unwrap();
+    );
 
     let out = sync(&dir, &["--dry-run"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -651,18 +609,16 @@ fn sync_continues_when_the_gluetun_lookup_fails() {
     let dir = sync_fixture();
     let media = dir.path().join("media");
     // A control URL nothing answers on.
-    let dead_port = free_port();
-    std::fs::write(
-        dir.path().join("sharerr.toml"),
-        format!(
-            "data_dir = {:?}\n\n[tracker]\nadvertised_host = \"seed.example\"\n\n\
+    let dead_port = sharerr_testkit::net::closed_port();
+    write_config(
+        &dir,
+        &format!(
+            "[tracker]\nadvertised_host = \"seed.example\"\n\n\
              [gluetun]\ncontrol_url = \"http://127.0.0.1:{dead_port}\"\n\n\
              [[library]]\npath = {:?}\nkind = \"tv\"\n",
-            dir.path().join("data"),
-            media.join("tv"),
+            media.join("tv")
         ),
-    )
-    .unwrap();
+    );
 
     let out = sync(&dir, &["--dry-run"]);
     let logged = String::from_utf8_lossy(&out.stdout);
@@ -715,18 +671,16 @@ fn sync_adopts_a_freshly_resolved_gluetun_endpoint() {
         server
     });
 
-    std::fs::write(
-        dir.path().join("sharerr.toml"),
-        format!(
-            "data_dir = {:?}\n\n[tracker]\nadvertised_host = \"seed.example\"\n\n\
+    write_config(
+        &dir,
+        &format!(
+            "[tracker]\nadvertised_host = \"seed.example\"\n\n\
              [gluetun]\ncontrol_url = {:?}\n\n\
              [[library]]\npath = {:?}\nkind = \"tv\"\n",
-            dir.path().join("data"),
             gluetun.uri(),
-            media.join("tv"),
+            media.join("tv")
         ),
-    )
-    .unwrap();
+    );
 
     let out = sync(&dir, &["--dry-run"]);
     let logged = String::from_utf8_lossy(&out.stdout);
@@ -762,7 +716,7 @@ fn preview_renders_every_page_without_any_configuration() {
     let guard = STARTUP
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let port = free_port();
+    let port = sharerr_testkit::net::closed_port();
     let child = bin()
         .arg("preview")
         .arg("--bind")
@@ -815,7 +769,7 @@ fn stop_gracefully(mut serving: Serving) {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    panic!("preview ignored SIGTERM — its own message promises Ctrl+C works");
+    panic!("SIGTERM was ignored — docker stop would have to SIGKILL this");
 }
 
 #[cfg(not(unix))]

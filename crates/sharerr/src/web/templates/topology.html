@@ -33,19 +33,15 @@
     <svg id="topo-diagram" viewBox="0 0 {{ width }} {{ height }}" width="{{ width }}" height="{{ height }}"
          role="img" aria-label="Topology diagram">
       {% for edge in edges %}
-      {% if let Some(dash) = edge.style.dasharray() %}
       <g class="topo-edge-group" data-kind="{{ edge.kind.as_str() }}">
-        {% if !edge.label.is_empty() || !edge.style.describe().is_empty() %}
-        <title>{% if !edge.label.is_empty() %}{{ edge.label }}{% if !edge.style.describe().is_empty() %} — {% endif %}{% endif %}{{ edge.style.describe() }}</title>
-        {% endif %}
+        <title>{% if !edge.label.is_empty() %}{{ edge.label }} — {% endif %}{{ edge.style.describe() }}</title>
         <line class="topo-edge" x1="{{ edge.x1 }}" y1="{{ edge.y1 }}" x2="{{ edge.x2 }}" y2="{{ edge.y2 }}"
-              stroke="{{ edge.accent }}" stroke-dasharray="{{ dash }}"></line>
+              stroke="{{ edge.accent }}" stroke-dasharray="{{ edge.style.dasharray() }}"></line>
         {% if !edge.label.is_empty() %}
         <text class="topo-edge-label" text-anchor="middle"
               x="{{ (edge.x1 + edge.x2) / 2 }}" y="{{ (edge.y1 + edge.y2) / 2 - 4 }}">{{ edge.label }}</text>
         {% endif %}
       </g>
-      {% endif %}
       {% endfor %}
 
       {% for node in nodes %}
@@ -118,7 +114,7 @@
   <p class="error">
     The client answered, but its torrent list could not be read: {{ reason }}
   </p>
-  {% else if check.healthy %}
+  {% else if check.healthy() %}
   <p class="ok">
     All {{ check.expected }} torrent(s) sharerr is sharing are present in the
     client and seeding.
@@ -135,26 +131,7 @@
     sharerr believes these are shared, but the client does not have them —
     removed there without sharerr being told. Nothing is serving these files.
   </p>
-  <div class="table-scroll">
-  <table>
-    <thead><tr><th>Torrent</th><th title="The torrent's identity, and the join key for finding it in the client's own UI">Info hash</th></tr></thead>
-    <tbody>
-      {% for row in check.absent %}
-      <tr>
-        <td>{{ row.title }}</td>
-        <td class="nowrap">
-          <code class="truncate" title="{{ row.hash }}">{{ row.hash }}</code>
-          <button type="button" class="link micro" data-copy-text="{{ row.hash }}"
-                  aria-label="Copy the info hash for {{ row.title }}">copy</button>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  {% if check.more_absent > 0 %}
-  <p class="hint">… and {{ check.more_absent }} more.</p>
-  {% endif %}
+  {% call ui::mismatch_table(&check.absent, check.more_absent) %}{% endcall %}
   {% endif %}
 
   {% if !check.idle.is_empty() %}
@@ -163,26 +140,7 @@
     The client has these but is not uploading them — paused, errored, or still
     checking. Fixable in the client itself; sharerr will not restart them.
   </p>
-  <div class="table-scroll">
-  <table>
-    <thead><tr><th>Torrent</th><th title="The torrent's identity, and the join key for finding it in the client's own UI">Info hash</th></tr></thead>
-    <tbody>
-      {% for row in check.idle %}
-      <tr>
-        <td>{{ row.title }}</td>
-        <td class="nowrap">
-          <code class="truncate" title="{{ row.hash }}">{{ row.hash }}</code>
-          <button type="button" class="link micro" data-copy-text="{{ row.hash }}"
-                  aria-label="Copy the info hash for {{ row.title }}">copy</button>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  {% if check.more_idle > 0 %}
-  <p class="hint">… and {{ check.more_idle }} more.</p>
-  {% endif %}
+  {% call ui::mismatch_table(&check.idle, check.more_idle) %}{% endcall %}
   {% endif %}
   {% endif %}
 </div>

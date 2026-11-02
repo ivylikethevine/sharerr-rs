@@ -83,11 +83,10 @@ async fn fetch_author(client: &ArrClient, author: &Author) -> Result<AuthorPaylo
     // Independent lookups, so they run concurrently — per tagged author this
     // halves the round trips paid in sequence.
     let by_author = [("authorId", author.id)];
-    let (books, files) = tokio::try_join!(
+    tokio::try_join!(
         client.get::<Vec<Book>, _>("book", &by_author),
         client.get::<Vec<BookFile>, _>("bookfile", &by_author),
-    )?;
-    Ok((books, files))
+    )
 }
 
 /// Readarr's development settings; only the metadata server is read.

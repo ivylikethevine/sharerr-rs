@@ -22,13 +22,17 @@ use axum::routing::get;
 
 use crate::gluetun::GluetunTarget;
 use crate::web::templates::{
-    ArrSection, ClientCheck, ClientMismatch, DiagnosticsData, EdgeStyle, EndpointStatus,
-    FilterOption, Glance, GluetunSection, ItemRow, ItemsPage, LibraryRow, LighthouseRow,
-    LighthouseView, NodeStatus, PairedPeer, PathRow, PeerEndpointView, PeerGuidePage, PeerRow,
-    PeersPage, RevealedPeer, RunRow, SampleRow, ScopeOption, SettingsPage, SetupStep, SortLink,
-    StateCount, StatusPage, TokenStatus, TopologyPage,
+    ArrSection, ClientCheck, ClientMismatch, DiagnosticsData, EdgeStyle, EndpointStatus, Glance,
+    GluetunSection, ItemFacts, ItemRow, ItemsPage, LibraryRow, LighthouseRow, LighthouseView,
+    NodeStatus, PairedPeer, PathRow, PeerEndpointView, PeerGuidePage, PeerRow, PeersPage,
+    RevealedPeer, RunRow, SampleRow, SelectOption, SettingsPage, SetupStep, SortLink, StateCount,
+    StatusPage, TokenStatus, TopologyPage,
 };
-use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, SourceNode, layout};
+use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, Seen, SourceNode, layout};
+
+fn mock<T: Template + 'static>(build: fn() -> T) -> axum::routing::MethodRouter {
+    get(move || async move { Html(page(build())) })
+}
 
 /// Serve the mock pages on `bind` until the process is killed.
 ///
@@ -41,20 +45,14 @@ use crate::web::topology::{Channel, FriendNode, Layout, LayoutInput, SourceNode,
 /// drift.
 pub async fn run(bind: SocketAddr) -> Result<()> {
     let router = Router::new()
-        .route("/", get(|| async { Html(page(status_page())) }))
-        .route("/settings", get(|| async { Html(page(settings_page())) }))
-        .route("/peers", get(|| async { Html(page(peers_page())) }))
-        .route(
-            "/peers/1/guide",
-            get(|| async { Html(page(peer_guide_page())) }),
-        )
-        .route("/items", get(|| async { Html(page(items_page())) }))
-        .route("/topology", get(|| async { Html(page(topology_page())) }))
-        .route("/debug", get(|| async { Html(page(debug_page())) }))
-        .route(
-            "/settings/account/totp",
-            get(|| async { Html(page(totp_page())) }),
-        )
+        .route("/", mock(status_page))
+        .route("/settings", mock(settings_page))
+        .route("/peers", mock(peers_page))
+        .route("/peers/1/guide", mock(peer_guide_page))
+        .route("/items", mock(items_page))
+        .route("/topology", mock(topology_page))
+        .route("/debug", mock(debug_page))
+        .route("/settings/account/totp", mock(totp_page))
         // The status page polls this every thirty seconds. Without it here the
         // preview's own status page would 404 on a timer, which contradicts what
         // this command promises: that everything renders as it would live.
@@ -471,16 +469,14 @@ fn topology_page() -> TopologyPage {
         },
     ];
 
-    let seen = |addr: &str, style: EdgeStyle, edge_label: &str| Channel {
-        addr: Some(addr.to_owned()),
-        style,
-        edge_label: edge_label.to_owned(),
+    let seen = |addr: &str, style: EdgeStyle, edge_label: &str| {
+        Channel(Some(Seen {
+            addr: addr.to_owned(),
+            style,
+            edge_label: edge_label.to_owned(),
+        }))
     };
-    let unseen = || Channel {
-        addr: None,
-        style: EdgeStyle::None,
-        edge_label: String::new(),
-    };
+    let unseen = || Channel(None);
 
     let friends = vec![
         FriendNode {
@@ -578,7 +574,6 @@ fn topology_page() -> TopologyPage {
             }],
             more_idle: 0,
             error: None,
-            healthy: false,
         }),
         width,
         height,
@@ -811,15 +806,15 @@ fn settings_page() -> SettingsPage {
 fn peers_page() -> PeersPage {
     PeersPage {
         scope_options: vec![
-            ScopeOption {
+            SelectOption {
                 value: "all",
                 label: "Everything".to_owned(),
             },
-            ScopeOption {
+            SelectOption {
                 value: "tv",
                 label: "TV only".to_owned(),
             },
-            ScopeOption {
+            SelectOption {
                 value: "movies",
                 label: "Films only".to_owned(),
             },
@@ -920,14 +915,12 @@ fn peers_page() -> PeersPage {
             id: 1,
             label: "Sam".to_owned(),
             key: "sam-9f2a7c4e1b6d3f80".to_owned(),
-            invite: Some(
-                crate::pairing::Invite::new(
-                    "http://seed.example.com:8477".to_owned(),
-                    "sam-9f2a7c4e1b6d3f80".to_owned(),
-                    Some("a1b2c3d4".repeat(8)),
-                )
-                .encode(),
-            ),
+            invite: crate::pairing::Invite::new(
+                "http://seed.example.com:8477".to_owned(),
+                "sam-9f2a7c4e1b6d3f80".to_owned(),
+                Some("a1b2c3d4".repeat(8)),
+            )
+            .encode(),
         }),
         paired: Some(PairedPeer {
             label: "Alex".to_owned(),
@@ -1070,153 +1063,170 @@ fn items_page() -> ItemsPage {
         ],
         items: vec![
             ItemRow {
-                title: "Lanternwick Hollow S01E01".to_owned(),
-                release_title: "Lanternwick.Hollow.S01E01.1080p.WEB-DL.DD5.1.H.264-SYNTH"
-                    .to_owned(),
+                facts: ItemFacts {
+                    title: "Lanternwick Hollow S01E01".to_owned(),
+                    release_title: "Lanternwick.Hollow.S01E01.1080p.WEB-DL.DD5.1.H.264-SYNTH"
+                        .to_owned(),
+                    kind: "episode",
+                    source_label: "Sonarr".to_owned(),
+                    size: "1.9 GiB".to_owned(),
+                    state_label: "Seeding".to_owned(),
+                    state_hint: None,
+                    ratio: "1.85".to_owned(),
+                    ratio_hint: "Per-torrent limit the client is enforcing: 2.00".to_owned(),
+                    visible_to: "Sam, Alex".to_owned(),
+                    since: "3 months ago".to_owned(),
+                    info_hash: Some("ab".repeat(20)),
+                    source_hint: "Sonarr series 42, file 1337".to_owned(),
+                    announce_url: Some(
+                        "http://seed.example.com:51413/announce/9f2a7c4e".to_owned(),
+                    ),
+                    token_fp: Some("9f2a7c4e".to_owned()),
+                    token_status: TokenStatus::Valid,
+                    ids: "tvdb 361753 · imdb tt1000001".to_owned(),
+                    last_error: None,
+                    created_by_sharerr: true,
+                    since_absolute: "2024-02-14 09:21:07 UTC".to_owned(),
+                    source: "sonarr",
+                    file_id: 1337,
+                },
                 arr_path: "/data/tv/Lanternwick Hollow/Season 01/Lanternwick Hollow S01E01.mkv"
                     .to_owned(),
-                kind: "episode",
-                source_label: "Sonarr".to_owned(),
-                size: "1.9 GiB".to_owned(),
-                state_label: "Seeding".to_owned(),
-                state_hint: None,
-                ratio: "1.85".to_owned(),
-                ratio_hint: "Per-torrent limit the client is enforcing: 2.00".to_owned(),
-                visible_to: "Sam, Alex".to_owned(),
-                since: "3 months ago".to_owned(),
-                info_hash: Some("ab".repeat(20)),
                 info_hash_short: Some("abababababab".to_owned()),
                 peers: "2↑ 1↓".to_owned(),
                 peers_hint: "2 seeding · 1 downloading".to_owned(),
-                source_hint: "Sonarr series 42, file 1337".to_owned(),
-                announce_url: Some("http://seed.example.com:51413/announce/9f2a7c4e".to_owned()),
-                token_fp: Some("9f2a7c4e".to_owned()),
-                token_status: TokenStatus::Valid,
-                ids: "tvdb 361753 · imdb tt1000001".to_owned(),
-                last_error: None,
-                created_by_sharerr: true,
-                since_absolute: "2024-02-14 09:21:07 UTC".to_owned(),
-                source: "sonarr",
-                file_id: 1337,
             },
             ItemRow {
-                title: "Harborlight (2019)".to_owned(),
-                release_title: "Harborlight.2019.2160p.UHD.BluRay.x265-SYNTH".to_owned(),
-                arr_path: "/data/movies/Harborlight (2019)/Harborlight (2019).mkv".to_owned(),
-                kind: "movie",
-                source_label: "Radarr".to_owned(),
-                size: "8.1 GiB".to_owned(),
-                state_label: "Seeding".to_owned(),
-                state_hint: None,
-                ratio: "0.42".to_owned(),
-                ratio_hint: "The client is not holding this torrent to a fixed per-torrent limit \
+                facts: ItemFacts {
+                    title: "Harborlight (2019)".to_owned(),
+                    release_title: "Harborlight.2019.2160p.UHD.BluRay.x265-SYNTH".to_owned(),
+                    kind: "movie",
+                    source_label: "Radarr".to_owned(),
+                    size: "8.1 GiB".to_owned(),
+                    state_label: "Seeding".to_owned(),
+                    state_hint: None,
+                    ratio: "0.42".to_owned(),
+                    ratio_hint:
+                        "The client is not holding this torrent to a fixed per-torrent limit \
                              — its own global default, unlimited, or (on some backends) not \
                              something it can report"
-                    .to_owned(),
-                visible_to: "Sam".to_owned(),
-                since: "1 month ago".to_owned(),
-                info_hash: Some("cd".repeat(20)),
+                            .to_owned(),
+                    visible_to: "Sam".to_owned(),
+                    since: "1 month ago".to_owned(),
+                    info_hash: Some("cd".repeat(20)),
+                    source_hint: "Radarr movie 7, file 91".to_owned(),
+                    announce_url: Some(
+                        "http://seed.example.com:51413/announce/OLDTOKEN12".to_owned(),
+                    ),
+                    token_fp: Some("OLDTOKEN12".to_owned()),
+                    token_status: TokenStatus::Stale,
+                    ids: String::new(),
+                    last_error: None,
+                    created_by_sharerr: false,
+                    since_absolute: "2024-04-02 17:44:55 UTC".to_owned(),
+                    source: "radarr",
+                    file_id: 91,
+                },
+                arr_path: "/data/movies/Harborlight (2019)/Harborlight (2019).mkv".to_owned(),
                 info_hash_short: Some("cdcdcdcdcdcd".to_owned()),
                 peers: "1↑ 0↓".to_owned(),
                 peers_hint: "1 seeding · 0 downloading".to_owned(),
-                source_hint: "Radarr movie 7, file 91".to_owned(),
-                announce_url: Some("http://seed.example.com:51413/announce/OLDTOKEN12".to_owned()),
-                token_fp: Some("OLDTOKEN12".to_owned()),
-                token_status: TokenStatus::Stale,
-                ids: String::new(),
-                last_error: None,
-                created_by_sharerr: false,
-                since_absolute: "2024-04-02 17:44:55 UTC".to_owned(),
-                source: "radarr",
-                file_id: 91,
             },
             ItemRow {
-                title: "Lanternwick Hollow S02E04".to_owned(),
-                release_title: "Lanternwick.Hollow.S02E04.1080p.WEB-DL.DD5.1.H.264-SYNTH"
-                    .to_owned(),
+                facts: ItemFacts {
+                    title: "Lanternwick Hollow S02E04".to_owned(),
+                    release_title: "Lanternwick.Hollow.S02E04.1080p.WEB-DL.DD5.1.H.264-SYNTH"
+                        .to_owned(),
+                    kind: "episode",
+                    source_label: "Sonarr".to_owned(),
+                    size: "2.0 GiB".to_owned(),
+                    state_label: "Pending".to_owned(),
+                    state_hint: Some("waiting for the next sync"),
+                    ratio: String::new(),
+                    ratio_hint: String::new(),
+                    visible_to: String::new(),
+                    since: "2 minutes ago".to_owned(),
+                    info_hash: None,
+                    source_hint: "Sonarr series 42, file 2051".to_owned(),
+                    announce_url: None,
+                    token_fp: None,
+                    token_status: TokenStatus::None,
+                    ids: String::new(),
+                    last_error: None,
+                    created_by_sharerr: false,
+                    since_absolute: "2024-05-06 11:20:31 UTC".to_owned(),
+                    source: "sonarr",
+                    file_id: 2051,
+                },
                 arr_path: "/data/tv/Lanternwick Hollow/Season 02/Lanternwick Hollow S02E04.mkv"
                     .to_owned(),
-                kind: "episode",
-                source_label: "Sonarr".to_owned(),
-                size: "2.0 GiB".to_owned(),
-                state_label: "Pending".to_owned(),
-                state_hint: Some("waiting for the next sync"),
-                ratio: String::new(),
-                ratio_hint: String::new(),
-                visible_to: String::new(),
-                since: "2 minutes ago".to_owned(),
-                info_hash: None,
                 info_hash_short: None,
                 peers: String::new(),
                 peers_hint: String::new(),
-                source_hint: "Sonarr series 42, file 2051".to_owned(),
-                announce_url: None,
-                token_fp: None,
-                token_status: TokenStatus::None,
-                ids: String::new(),
-                last_error: None,
-                created_by_sharerr: false,
-                since_absolute: "2024-05-06 11:20:31 UTC".to_owned(),
-                source: "sonarr",
-                file_id: 2051,
             },
             ItemRow {
-                title: "Midnight Frequency".to_owned(),
-                release_title: "Midnight.Frequency-2023-FLAC-SYNTH".to_owned(),
+                facts: ItemFacts {
+                    title: "Midnight Frequency".to_owned(),
+                    release_title: "Midnight.Frequency-2023-FLAC-SYNTH".to_owned(),
+                    kind: "track",
+                    source_label: "Lidarr".to_owned(),
+                    size: "8.4 MiB".to_owned(),
+                    state_label: "Failed".to_owned(),
+                    state_hint: None,
+                    ratio: String::new(),
+                    ratio_hint: String::new(),
+                    visible_to: String::new(),
+                    since: "40 minutes ago".to_owned(),
+                    info_hash: None,
+                    source_hint: "Lidarr artist 5, file 610".to_owned(),
+                    announce_url: None,
+                    token_fp: None,
+                    token_status: TokenStatus::None,
+                    ids: String::new(),
+                    last_error: Some(
+                        "qBittorrent rejected the add: category does not exist".to_owned(),
+                    ),
+                    created_by_sharerr: false,
+                    since_absolute: "2024-05-06 10:42:12 UTC".to_owned(),
+                    source: "lidarr",
+                    file_id: 610,
+                },
                 arr_path: "/data/music/Static Meridian/Midnight Frequency.flac".to_owned(),
-                kind: "track",
-                source_label: "Lidarr".to_owned(),
-                size: "8.4 MiB".to_owned(),
-                state_label: "Failed".to_owned(),
-                state_hint: None,
-                ratio: String::new(),
-                ratio_hint: String::new(),
-                visible_to: String::new(),
-                since: "40 minutes ago".to_owned(),
-                info_hash: None,
                 info_hash_short: None,
                 peers: String::new(),
                 peers_hint: String::new(),
-                source_hint: "Lidarr artist 5, file 610".to_owned(),
-                announce_url: None,
-                token_fp: None,
-                token_status: TokenStatus::None,
-                ids: String::new(),
-                last_error: Some(
-                    "qBittorrent rejected the add: category does not exist".to_owned(),
-                ),
-                created_by_sharerr: false,
-                since_absolute: "2024-05-06 10:42:12 UTC".to_owned(),
-                source: "lidarr",
-                file_id: 610,
             },
             ItemRow {
-                title: "Seaglass & Static".to_owned(),
-                release_title: "Seaglass.and.Static.2021.RETAIL.EPUB-SYNTH".to_owned(),
+                facts: ItemFacts {
+                    title: "Seaglass & Static".to_owned(),
+                    release_title: "Seaglass.and.Static.2021.RETAIL.EPUB-SYNTH".to_owned(),
+                    kind: "book",
+                    source_label: "Readarr".to_owned(),
+                    size: "1.2 MiB".to_owned(),
+                    state_label: "Seeding".to_owned(),
+                    state_hint: None,
+                    ratio: "∞".to_owned(),
+                    ratio_hint: "Per-torrent limit the client is enforcing: 0.50".to_owned(),
+                    visible_to: "no friend's scope covers it".to_owned(),
+                    since: "6 days ago".to_owned(),
+                    info_hash: Some("ef".repeat(20)),
+                    source_hint: "Readarr author 3, file 12".to_owned(),
+                    announce_url: Some(
+                        "http://seed.example.com:51413/announce/9f2a7c4e".to_owned(),
+                    ),
+                    token_fp: Some("OLDTOKEN12".to_owned()),
+                    token_status: TokenStatus::Rotating,
+                    ids: String::new(),
+                    last_error: None,
+                    created_by_sharerr: false,
+                    since_absolute: "2024-04-30 08:05:44 UTC".to_owned(),
+                    source: "readarr",
+                    file_id: 12,
+                },
                 arr_path: "/data/books/Seaglass & Static/Seaglass & Static.epub".to_owned(),
-                kind: "book",
-                source_label: "Readarr".to_owned(),
-                size: "1.2 MiB".to_owned(),
-                state_label: "Seeding".to_owned(),
-                state_hint: None,
-                ratio: "∞".to_owned(),
-                ratio_hint: "Per-torrent limit the client is enforcing: 0.50".to_owned(),
-                visible_to: "no friend's scope covers it".to_owned(),
-                since: "6 days ago".to_owned(),
-                info_hash: Some("ef".repeat(20)),
                 info_hash_short: Some("efefefefefef".to_owned()),
                 peers: "".to_owned(),
                 peers_hint: "".to_owned(),
-                source_hint: "Readarr author 3, file 12".to_owned(),
-                announce_url: Some("http://seed.example.com:51413/announce/9f2a7c4e".to_owned()),
-                token_fp: Some("OLDTOKEN12".to_owned()),
-                token_status: TokenStatus::Rotating,
-                ids: String::new(),
-                last_error: None,
-                created_by_sharerr: false,
-                since_absolute: "2024-04-30 08:05:44 UTC".to_owned(),
-                source: "readarr",
-                file_id: 12,
             },
         ],
         total: 132,
@@ -1225,56 +1235,28 @@ fn items_page() -> ItemsPage {
         shown_size: "12.0 GiB".to_owned(),
         composition: composition_fixture(),
         source_options: vec![
-            FilterOption {
+            SelectOption {
                 value: "",
                 label: "All sources".to_owned(),
             },
-            FilterOption {
-                value: "sonarr",
-                label: "Sonarr".to_owned(),
-            },
-            FilterOption {
-                value: "radarr",
-                label: "Radarr".to_owned(),
-            },
-            FilterOption {
-                value: "lidarr",
-                label: "Lidarr".to_owned(),
-            },
-            FilterOption {
-                value: "readarr",
-                label: "Readarr".to_owned(),
-            },
+            SelectOption::named("sonarr"),
+            SelectOption::named("radarr"),
+            SelectOption::named("lidarr"),
+            SelectOption::named("readarr"),
         ],
         state_options: vec![
-            FilterOption {
+            SelectOption {
                 value: "",
                 label: "All states".to_owned(),
             },
-            FilterOption {
-                value: "seeding",
-                label: "Seeding".to_owned(),
-            },
-            FilterOption {
-                value: "pending",
-                label: "Pending".to_owned(),
-            },
-            FilterOption {
-                value: "failed",
-                label: "Failed".to_owned(),
-            },
+            SelectOption::named("seeding"),
+            SelectOption::named("pending"),
+            SelectOption::named("failed"),
         ],
         kind_options: sharerr_core::MediaSpec::KIND_TAGS
             .iter()
-            .map(|k| FilterOption {
-                value: k,
-                label: format!("{}{}", k[..1].to_uppercase(), &k[1..]),
-            })
+            .map(|k| SelectOption::named(k))
             .collect(),
-        source_filter: String::new(),
-        state_filter: String::new(),
-        kind_filter: String::new(),
-        q: String::new(),
         // Built from the real column list rather than a hand-written subset:
         // the table's header count has to match its body's cell count, and a
         // fixture listing three of the five columns rendered every header

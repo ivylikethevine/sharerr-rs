@@ -189,11 +189,7 @@ async fn a_base_url_with_a_subpath_is_preserved() {
 #[tokio::test]
 async fn a_malformed_payload_names_the_endpoint_that_produced_it() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v3/tag"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("{ this is not json"))
-        .mount(&server)
-        .await;
+    sharerr_testkit::mock::mount_text(&server, "GET", "/api/v3/tag", "{ this is not json").await;
 
     let err = client(MediaSource::Sonarr, &server)
         .tag_id("sharerr")
@@ -239,7 +235,7 @@ async fn system_status_probes_liveness() {
     mount_json(
         &server,
         "/api/v3/system/status",
-        json!({ "appName": "Sonarr", "version": "4.0.15.2941", "instanceName": "Sonarr" }),
+        sharerr_testkit::library::system_status_json("Sonarr"),
     )
     .await;
 
@@ -258,23 +254,7 @@ async fn mount_sonarr_library(server: &MockServer) {
     mount_json(
         server,
         "/api/v3/series",
-        json!([
-            {
-                "id": 11,
-                "title": "Lanternwick Hollow",
-                "tvdbId": 918_273,
-                "tvMazeId": 4242,
-                "imdbId": "tt7654321",
-                "tags": [TAG_ID],
-            },
-            {
-                // Untagged: must not appear in the results at all.
-                "id": 12,
-                "title": "Copper Vale Station",
-                "tvdbId": 112_233,
-                "tags": [1],
-            },
-        ]),
+        sharerr_testkit::library::series_json(),
     )
     .await;
 

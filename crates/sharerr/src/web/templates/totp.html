@@ -1,13 +1,12 @@
 {% extends "layout.html" %}
+{% import "macros.html" as ui %}
 {% block title %}Two-step sign-in · sharerr{% endblock %}
 
 {% block content %}
 <h1>Two-step sign-in</h1>
 <p class="hint"><a href="/settings#your-account">Back to Settings</a></p>
 
-{% if let Some(message) = error %}
-<p class="error" role="alert">{{ message }}</p>
-{% endif %}
+{% call ui::flash_error(error) %}{% endcall %}
 {% if let Some(saved) = saved %}
 <p class="ok" role="status">{% if saved == "on" %}Two-step sign-in is on. Every other session was signed out.{% else %}Two-step sign-in is off.{% endif %}</p>
 {% endif %}

@@ -2692,6 +2692,9 @@ version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "url",
 ]
@@ -2837,6 +2840,7 @@ version = "0.0.0-dev"
 dependencies = [
  "async-trait",
  "hex",
+ "percent-encoding",
  "sha1",
  "sha2 0.11.1",
  "sharerr-core",

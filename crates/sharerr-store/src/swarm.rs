@@ -10,17 +10,7 @@
 
 use sqlx::Row;
 
-use crate::db::{Store, StoreError};
-
-type Result<T> = std::result::Result<T, StoreError>;
-
-/// How many samples are kept, total. Unlike `peer_endpoints`'s `MAX_HISTORY`
-/// there is no per-key partition here, so this bounds the whole table.
-///
-/// Sized against `crate::swarm_history`'s one-hour sample interval so the
-/// window is genuinely the fortnight the feature exists to show: 14 days *
-/// 24 samples/day = 336.
-pub const MAX_SAMPLES: i64 = sharerr_core::config::DEFAULT_SWARM_SAMPLES as i64;
+use crate::db::{Result, Store};
 
 /// One sample of the tracker's live swarm totals, with when it was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,8 +22,7 @@ pub struct SwarmSample {
 }
 
 impl Store {
-    /// Record one sample, then prune to the newest `retention.swarm_samples`
-    /// ([`MAX_SAMPLES`] unless `[retention]` says otherwise).
+    /// Record one sample, then prune to the newest `retention.swarm_samples`.
     ///
     /// Pruning on every insert rather than gating it on "did this change
     /// anything" — [`Self::record_peer_endpoint`] gates because an upsert
@@ -96,10 +85,11 @@ impl Store {
     /// whatever the sampler's own interval is — coarse by design, since this
     /// answers "roughly how long", not "since when exactly".
     pub async fn last_active_swarm_sample_at(&self) -> Result<Option<i64>> {
-        let row = sqlx::query("SELECT MAX(sampled_at) AS at FROM swarm_samples WHERE peers > 0")
-            .fetch_one(self.pool())
-            .await?;
-        Ok(row.try_get("at")?)
+        Ok(
+            sqlx::query_scalar("SELECT MAX(sampled_at) FROM swarm_samples WHERE peers > 0")
+                .fetch_one(self.pool())
+                .await?,
+        )
     }
 }
 
@@ -160,18 +150,21 @@ mod tests {
     #[tokio::test]
     async fn the_history_is_bounded_to_max_samples() {
         let store = Store::open_in_memory().await.unwrap();
-        for at in 0..(MAX_SAMPLES + 20) {
+        for at in 0..((sharerr_core::config::DEFAULT_SWARM_SAMPLES as i64) + 20) {
             store.record_swarm_sample(sample(at, 0)).await.unwrap();
         }
-        let recent = store.recent_swarm_samples(MAX_SAMPLES + 100).await.unwrap();
+        let recent = store
+            .recent_swarm_samples((sharerr_core::config::DEFAULT_SWARM_SAMPLES as i64) + 100)
+            .await
+            .unwrap();
         assert_eq!(
             recent.len() as i64,
-            MAX_SAMPLES,
+            (sharerr_core::config::DEFAULT_SWARM_SAMPLES as i64),
             "old samples must be pruned"
         );
         assert_eq!(
             recent.last().unwrap().sampled_at,
-            MAX_SAMPLES + 19,
+            (sharerr_core::config::DEFAULT_SWARM_SAMPLES as i64) + 19,
             "the newest must survive"
         );
     }

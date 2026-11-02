@@ -145,7 +145,7 @@ impl FakeQbit {
         Mock::given(method("POST"))
             .and(route("/api/v2/torrents/add"))
             .respond_with(move |request: &Request| {
-                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let body = mock::body_text(request);
                 let mut state = state.lock().unwrap();
                 state.add_calls += 1;
                 // The Seeder names the part `<info_hash>.torrent`, so the mock can
@@ -240,7 +240,7 @@ impl FakeQbit {
         Mock::given(method("POST"))
             .and(route("/api/v2/torrents/delete"))
             .respond_with(move |request: &Request| {
-                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let body = mock::body_text(request);
                 if let Some(hashes) = form_field(&body, "hashes=") {
                     state.lock().unwrap().removed.push(hashes.to_owned());
                 }
@@ -257,7 +257,7 @@ impl FakeQbit {
             Mock::given(method("POST"))
                 .and(route(format!("/api/v2/torrents/{endpoint}")))
                 .respond_with(move |request: &Request| {
-                    let body = String::from_utf8_lossy(&request.body).into_owned();
+                    let body = mock::body_text(request);
                     let mut state = state.lock().unwrap();
                     let hash = form_field(&body, "hashes=").unwrap_or_default().to_owned();
                     if let Some(t) = state.torrents.iter_mut().find(|t| t.hash == hash) {
@@ -306,7 +306,7 @@ impl FakeQbit {
         Mock::given(method("POST"))
             .and(route("/api/v2/torrents/addTrackers"))
             .respond_with(move |request: &Request| {
-                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let body = mock::body_text(request);
                 state.lock().unwrap().trackers_added.push(body);
                 ResponseTemplate::new(200)
             })
@@ -338,7 +338,7 @@ impl FakeQbit {
         Mock::given(method("POST"))
             .and(route("/api/v2/torrents/removeTrackers"))
             .respond_with(move |request: &Request| {
-                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let body = mock::body_text(request);
                 state.lock().unwrap().trackers_removed.push(body);
                 ResponseTemplate::new(200)
             })
@@ -469,7 +469,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
     let lib = library::tv_library(media.path()).unwrap();
 
     let sonarr_server = MockServer::start().await;
-    let series_json = series_json.unwrap_or_else(|| lib.series_json());
+    let series_json = series_json.unwrap_or_else(library::series_json);
     for (path, body) in [
         (
             "/api/v3/system/status",
@@ -478,7 +478,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         ("/api/v3/tag", library::tag_json()),
         ("/api/v3/series", series_json),
         ("/api/v3/episodefile", lib.episodefile_json()),
-        ("/api/v3/episode", lib.episode_json()),
+        ("/api/v3/episode", library::episode_json()),
     ] {
         mock::mount_json(&sonarr_server, path, body).await;
     }
@@ -524,9 +524,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         category: "sharerr".to_owned(),
         tag: "sharerr".to_owned(),
         skip_checking: false,
-        upload_limit_kib: seeding.upload_limit_kib,
-        ratio_limit: seeding.ratio_limit,
-        private: seeding.private,
+        seeding,
         sidecar_roots: Vec::new(),
         torrent_dir: torrents.path().to_path_buf(),
     };
@@ -572,9 +570,7 @@ impl Harness {
             category: "sharerr".to_owned(),
             tag: "sharerr".to_owned(),
             skip_checking: false,
-            upload_limit_kib: seeding.upload_limit_kib,
-            ratio_limit: seeding.ratio_limit,
-            private: seeding.private,
+            seeding,
             sidecar_roots: Vec::new(),
             torrent_dir: self.torrents.path().to_path_buf(),
         };
@@ -1515,11 +1511,14 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
         .syncer
         .share(
             &item,
-            &announce,
-            &HashMap::new(),
-            &super::seed::KnownTorrents::default(),
+            &super::PassContext {
+                announce: &announce,
+                token_fp: None,
+                live: &HashMap::new(),
+                torrents: &[],
+                dry_run: false,
+            },
             None,
-            false,
         )
         .await;
     let Err(err) = result else {
@@ -2699,9 +2698,7 @@ async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
         category: "sharerr".to_owned(),
         tag: "sharerr".to_owned(),
         skip_checking: false,
-        upload_limit_kib: None,
-        ratio_limit: None,
-        private: true,
+        seeding: SeedingConfig::default(),
         sidecar_roots: Vec::new(),
         torrent_dir: PathBuf::from("/torrents"),
     };
@@ -2716,31 +2713,10 @@ async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
 
 /// A row for a torrent this instance added and is seeding.
 fn seeding_item() -> sharerr_core::SharedItem {
-    use sharerr_core::model::{ExternalIds, MediaSpec, SharedItem};
-    SharedItem {
-        id: None,
-        source: MediaSource::Sonarr,
-        source_id: 1,
-        file_id: 1,
-        spec: MediaSpec::Episode {
-            series_title: "Lanternwick Hollow".to_owned(),
-            season: 1,
-            episode: 1,
-        },
-        release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-        arr_path: PathBuf::from("/tv/s01e01.mkv"),
-        size: 1,
-        ids: ExternalIds::default(),
-        media: None,
+    sharerr_core::SharedItem {
         info_hash: Some("ab".repeat(20)),
-        announce_token_fp: None,
-        created_by_sharerr: true,
-        private: true,
         state: ShareState::Seeding,
-        last_error: None,
-        created_at: None,
-        achieved_ratio: None,
-        ratio_limit_reported: None,
+        ..crate::test_support::shared_item()
     }
 }
 

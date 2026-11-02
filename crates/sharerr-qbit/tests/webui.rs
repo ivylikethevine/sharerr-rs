@@ -9,6 +9,7 @@
 
 use secrecy::SecretString;
 use serde_json::json;
+use sharerr_client::TorrentClient;
 use sharerr_qbit::{AddRequest, QbitClient, QbitError};
 use sharerr_testkit::mock::{
     QBIT_API_KEY as API_KEY, base_url, body_text, mount_ok, multipart_field, requests_to,
@@ -35,11 +36,7 @@ async fn an_api_key_client_sends_a_bearer_header_and_never_logs_in() {
         .expect(0)
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/version"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
-        .mount(&server)
-        .await;
+    sharerr_testkit::mock::mount_text(&server, "GET", "/api/v2/app/version", "v5.2.3").await;
 
     let client = client(&server);
     // A no-op that must still succeed, so callers do not have to know which mode
@@ -143,11 +140,7 @@ async fn an_unreachable_host_is_reported_as_such() {
 #[tokio::test]
 async fn every_request_carries_a_referer_matching_the_webui() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/version"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("v5.0.4"))
-        .mount(&server)
-        .await;
+    sharerr_testkit::mock::mount_text(&server, "GET", "/api/v2/app/version", "v5.0.4").await;
 
     assert_eq!(client(&server).version().await.unwrap(), "v5.0.4");
 
@@ -176,9 +169,10 @@ async fn every_request_carries_a_referer_matching_the_webui() {
 #[tokio::test]
 async fn torrents_info_decodes_state_and_tags() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    sharerr_testkit::mock::mount_json(
+        &server,
+        "/api/v2/torrents/info",
+        json!([
             {
                 "hash": "aabbccddeeff00112233445566778899aabbccdd",
                 "name": "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-FAKEGRP",
@@ -196,11 +190,11 @@ async fn torrents_info_decodes_state_and_tags() {
                 "progress": 0.42,
                 "tags": "",
             },
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
-    let torrents = client(&server).torrents_info(None, None).await.unwrap();
+    let torrents = client(&server).torrents_info(None).await.unwrap();
     assert_eq!(torrents.len(), 2);
 
     assert!(torrents[0].is_seeding());
@@ -223,14 +217,13 @@ async fn torrents_info_narrows_by_category_and_tag_server_side() {
     Mock::given(method("GET"))
         .and(path("/api/v2/torrents/info"))
         .and(query_param("category", "sharerr"))
-        .and(query_param("tag", "sharerr"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .expect(1)
         .mount(&server)
         .await;
 
     let found = client(&server)
-        .torrents_info(Some("sharerr"), Some("sharerr"))
+        .torrents_info(Some("sharerr"))
         .await
         .unwrap();
     assert!(found.is_empty());
@@ -381,11 +374,7 @@ async fn skip_checking_is_opt_in() {
 #[tokio::test]
 async fn a_rejected_torrent_is_an_error_despite_the_200() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/add"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("Fails."))
-        .mount(&server)
-        .await;
+    sharerr_testkit::mock::mount_text(&server, "POST", "/api/v2/torrents/add", "Fails.").await;
 
     let err = client(&server)
         .add_torrent(&AddRequest::new(
@@ -426,14 +415,15 @@ async fn remove_torrent_never_deletes_files() {
 #[tokio::test]
 async fn categories_decodes_the_name_keyed_map() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/categories"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    sharerr_testkit::mock::mount_json(
+        &server,
+        "/api/v2/torrents/categories",
+        json!({
             "sharerr": {"name": "sharerr", "savePath": ""},
             "Movies": {"name": "Movies", "savePath": "/movies"},
-        })))
-        .mount(&server)
-        .await;
+        }),
+    )
+    .await;
 
     let categories = client(&server).categories().await.unwrap();
 
@@ -521,13 +511,14 @@ async fn set_torrent_trackers_adds_then_removes_and_skips_pseudo_entries() {
 async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
     let server = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/trackers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    sharerr_testkit::mock::mount_json(
+        &server,
+        "/api/v2/torrents/trackers",
+        json!([
             { "url": "http://current.example:8477/announce", "status": 2 },
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
     Mock::given(method("POST"))
         .and(path("/api/v2/torrents/addTrackers"))
@@ -560,13 +551,15 @@ async fn set_torrent_trackers_is_a_no_op_when_the_list_already_matches() {
 #[tokio::test]
 async fn a_body_that_is_not_the_expected_json_is_a_decode_error_naming_the_path() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<html>login please</html>"))
-        .mount(&server)
-        .await;
+    sharerr_testkit::mock::mount_text(
+        &server,
+        "GET",
+        "/api/v2/torrents/info",
+        "<html>login please</html>",
+    )
+    .await;
 
-    let err = client(&server).torrents_info(None, None).await.unwrap_err();
+    let err = client(&server).torrents_info(None).await.unwrap_err();
     match &err {
         QbitError::Decode { path, .. } => assert!(path.contains("torrents/info"), "{path}"),
         other => panic!("expected Decode, got {other:?}"),

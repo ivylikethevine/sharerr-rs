@@ -78,13 +78,11 @@ pub fn probe(path: &Path) -> Option<MediaMeta> {
 
 /// MKV and WebM, via EBML track headers.
 fn matroska_meta(path: &Path) -> Option<MediaMeta> {
-    let file = match matroska::open(path) {
-        Ok(file) => file,
-        Err(err) => {
-            tracing::debug!(file = %path.display(), %err, "not readable as matroska");
-            return None;
-        }
-    };
+    let file = matroska::open(path)
+        .inspect_err(
+            |err| tracing::debug!(file = %path.display(), %err, "not readable as matroska"),
+        )
+        .ok()?;
 
     let mut meta = MediaMeta {
         runtime: file.info.duration.map(format_runtime),
@@ -137,32 +135,20 @@ fn matroska_meta(path: &Path) -> Option<MediaMeta> {
 }
 
 /// Open `path`, or `None` with a debug log if it cannot be read.
-///
-/// Shared by [`isobmff_meta`] and [`symphonia_meta`], the two backends that
-/// open the file themselves before handing it to their container reader.
-/// [`matroska_meta`] does not use this: `matroska::open` combines the open
-/// and the parse into one fallible step, so there is no separate open to
-/// share.
 fn open_logged(path: &Path) -> Option<std::fs::File> {
-    match std::fs::File::open(path) {
-        Ok(file) => Some(file),
-        Err(err) => {
-            tracing::debug!(file = %path.display(), %err, "not readable");
-            None
-        }
-    }
+    std::fs::File::open(path)
+        .inspect_err(|err| tracing::debug!(file = %path.display(), %err, "not readable"))
+        .ok()
 }
 
 /// MP4, M4V and MOV, via ISO base media file format boxes.
 fn isobmff_meta(path: &Path) -> Option<MediaMeta> {
     let file = open_logged(path)?;
-    let reader = match mp4::read_mp4(file) {
-        Ok(reader) => reader,
-        Err(err) => {
-            tracing::debug!(file = %path.display(), %err, "not readable as ISO-BMFF");
-            return None;
-        }
-    };
+    let reader = mp4::read_mp4(file)
+        .inspect_err(
+            |err| tracing::debug!(file = %path.display(), %err, "not readable as ISO-BMFF"),
+        )
+        .ok()?;
 
     let mut meta = MediaMeta {
         runtime: Some(format_runtime(reader.duration())),
@@ -219,18 +205,12 @@ fn symphonia_meta(path: &Path, extension: &str) -> Option<MediaMeta> {
     let mut hint = symphonia::core::formats::probe::Hint::new();
     hint.with_extension(extension);
 
-    let format = match symphonia::default::get_probe().probe(
-        &hint,
-        mss,
-        Default::default(),
-        Default::default(),
-    ) {
-        Ok(format) => format,
-        Err(err) => {
-            tracing::debug!(file = %path.display(), %err, "not readable by symphonia");
-            return None;
-        }
-    };
+    let format = symphonia::default::get_probe()
+        .probe(&hint, mss, Default::default(), Default::default())
+        .inspect_err(
+            |err| tracing::debug!(file = %path.display(), %err, "not readable by symphonia"),
+        )
+        .ok()?;
 
     let Some((track, audio)) = format
         .tracks()
@@ -257,7 +237,7 @@ fn symphonia_meta(path: &Path, extension: &str) -> Option<MediaMeta> {
 
     if let (Some(time_base), Some(num_frames)) = (track.time_base, track.num_frames)
         && let Some(time) = time_base.calc_time(symphonia::core::units::Timestamp::new(
-            i64::try_from(num_frames).unwrap_or(i64::MAX),
+            sharerr_core::saturating_i64(num_frames),
         ))
     {
         meta.runtime = Some(format_runtime(Duration::from_secs_f64(time.as_secs_f64())));
@@ -780,8 +760,8 @@ mod tests {
     fn extension_matching_ignores_case() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Film.MKV");
-        std::fs::write(&path, b"not a container").unwrap();
-        assert_eq!(probe(&path), None);
+        write_mkv(&path);
+        assert!(probe(&path).is_some());
     }
 
     #[test]

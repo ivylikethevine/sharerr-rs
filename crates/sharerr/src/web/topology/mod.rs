@@ -138,29 +138,24 @@ pub(crate) struct FriendNode {
     pub(crate) tracker: Channel,
 }
 
-/// One address channel on a [`FriendNode`]: `addr` is `None` when nothing
-/// has been observed on this channel yet, in which case no edge is drawn for
-/// it at all — matching Friends' own "not yet introduced" treatment.
-pub(crate) struct Channel {
-    pub(crate) addr: Option<String>,
+/// One address channel on a [`FriendNode`]: `None` when nothing has been
+/// observed on this channel yet, in which case no edge is drawn for it at all
+/// — matching Friends' own "not yet introduced" treatment.
+pub(crate) struct Channel(pub(crate) Option<Seen>);
+
+/// What a channel's latest sighting says.
+pub(crate) struct Seen {
+    pub(crate) addr: String,
     pub(crate) style: EdgeStyle,
     pub(crate) edge_label: String,
 }
 
 impl Channel {
-    fn unseen() -> Self {
-        Self {
-            addr: None,
-            style: EdgeStyle::None,
-            edge_label: String::new(),
-        }
-    }
-
     /// One detail row, tagged with which channel it is — an address with no
     /// word beside it was the single hardest thing to read on this diagram.
     fn row(&self, tag: &'static str) -> NodeLine {
-        match &self.addr {
-            Some(addr) => address_line(tag, addr.clone()),
+        match &self.0 {
+            Some(seen) => address_line(tag, seen.addr.clone()),
             None => line(tag, "Not seen"),
         }
     }
@@ -350,7 +345,6 @@ pub(crate) fn reconcile(
     ClientCheck {
         expected: expected.len(),
         confirmed,
-        healthy: more_absent == 0 && more_idle == 0 && absent.is_empty() && idle.is_empty(),
         absent,
         more_absent,
         idle,
@@ -364,14 +358,8 @@ pub(crate) fn reconcile(
 /// all — here sharerr *can* talk to it and still cannot say what it holds.
 fn client_check_failed(reason: String) -> ClientCheck {
     ClientCheck {
-        expected: 0,
-        confirmed: 0,
-        absent: Vec::new(),
-        more_absent: 0,
-        idle: Vec::new(),
-        more_idle: 0,
         error: Some(reason),
-        healthy: false,
+        ..ClientCheck::default()
     }
 }
 
@@ -558,7 +546,7 @@ async fn client_node(
                     format!("{} of {}", reconciled.confirmed, reconciled.expected)
                 },
             ));
-            let degraded = !reconciled.healthy;
+            let degraded = !reconciled.healthy();
             check = Some(reconciled);
             // A client that is reachable but not seeding what sharerr thinks
             // is not "Ok" — that is exactly the state this check exists to
@@ -727,13 +715,9 @@ async fn friend_nodes(state: &WebState) -> Vec<FriendNode> {
     let Ok(store) = state.serve.store().await else {
         return Vec::new();
     };
-    let Ok(peers) = store.list_peers().await else {
+    let Ok(active) = store.active_peers().await else {
         return Vec::new();
     };
-    let active: Vec<_> = peers
-        .into_iter()
-        .filter(|peer| !peer.is_revoked())
-        .collect();
 
     // Every active friend's endpoint history in one round trip rather than
     // one per friend.
@@ -767,7 +751,7 @@ fn friend_node(label: &str, endpoints: &[PeerEndpoint], accent: &'static str) ->
 /// [`Channel`] ready to become one row and (when observed) one edge.
 fn channel(endpoints: &[PeerEndpoint], kind: EndpointKind) -> Channel {
     let Some(latest) = crate::web::peers::latest_endpoint(endpoints, kind) else {
-        return Channel::unseen();
+        return Channel(None);
     };
 
     let style = match latest.via {
@@ -777,15 +761,15 @@ fn channel(endpoints: &[PeerEndpoint], kind: EndpointKind) -> Channel {
         ObservedVia::Restored => EdgeStyle::Sparse,
     };
 
-    Channel {
-        addr: Some(latest.addr.clone()),
+    Channel(Some(Seen {
+        addr: latest.addr.clone(),
         style,
         edge_label: format!(
             "{} {}",
             latest.via.as_str(),
             compact_ago(latest.observed_at)
         ),
-    }
+    }))
 }
 
 /// A relative time short enough to fit beside a line in a fixed-width
@@ -814,17 +798,6 @@ fn truncate_to(label: &str, max: usize) -> String {
     short
 }
 
-/// Redact the identifying half of an address: in an IPv4 literal the last two
-/// octets (`1.2.3.4` keeps `1.2`, hides `3` and `4`), and in a port the
-/// trailing half of its digits.
-///
-/// The split is where it is because the first two octets are what an operator
-/// recognises as *their own network*, while the last two are what identifies
-/// one machine on it — so a redacted diagram is still readable to the person
-/// who owns it, and still safe to screenshot.
-///
-/// A no-op on text with no address in it (a version string, "Not seen"), so
-/// it is safe to call unconditionally.
 /// A swarm's first [`MAX_SWARM_PEERS`] addresses as table cells, and how many were
 /// left out.
 pub(crate) fn capped_peers(peers: &[std::net::SocketAddr]) -> (Vec<AddressCell>, usize) {
@@ -842,6 +815,17 @@ pub(crate) fn capped_peers(peers: &[std::net::SocketAddr]) -> (Vec<AddressCell>,
     (cells, peers.len().saturating_sub(MAX_SWARM_PEERS))
 }
 
+/// Redact the identifying half of an address: in an IPv4 literal the last two
+/// octets (`1.2.3.4` keeps `1.2`, hides `3` and `4`), and in a port the
+/// trailing half of its digits.
+///
+/// The split is where it is because the first two octets are what an operator
+/// recognises as *their own network*, while the last two are what identifies
+/// one machine on it — so a redacted diagram is still readable to the person
+/// who owns it, and still safe to screenshot.
+///
+/// A no-op on text with no address in it (a version string, "Not seen"), so
+/// it is safe to call unconditionally.
 pub(crate) fn mask_address(text: &str) -> String {
     let toks = tokenize(text);
 
@@ -1054,7 +1038,7 @@ pub(crate) fn layout(input: LayoutInput<'_>) -> Layout {
 
     let mut y = MARGIN + center_offset(friends_h, content_h);
     for ((friend, lines), h) in friends.iter().zip(friend_lines).zip(&friend_hs) {
-        let status = if friend.channels().iter().any(|c| c.addr.is_some()) {
+        let status = if friend.channels().iter().any(|c| c.0.is_some()) {
             NodeStatus::Ok
         } else {
             NodeStatus::Unknown
@@ -1067,7 +1051,7 @@ pub(crate) fn layout(input: LayoutInput<'_>) -> Layout {
             icon: NodeIcon::Friend,
             label: truncate(&friend.label),
             full_label: friend.label.clone(),
-            lines: place(lines, y),
+            lines: placed(&lines, y),
             status,
             accent: friend.accent,
             lane: Lane::Friend,
@@ -1076,22 +1060,22 @@ pub(crate) fn layout(input: LayoutInput<'_>) -> Layout {
         // Each channel's edge lands on its own row, so which line a given
         // connection belongs to is readable without counting.
         //
-        // The two edges converge on the same point at the sharerr end, so when
-        // both channels were learned the same way at the same time — the
-        // common case, since one gossip exchange carries both — their labels
-        // landed on top of each other and rendered as unreadable doubled text.
-        // Identical labels are drawn once.
+        // The three edges converge on the same point at the sharerr end, so when
+        // channels were learned the same way at the same time — the common case,
+        // since one gossip exchange carries them all — their labels landed on
+        // top of each other and rendered as unreadable doubled text. Identical
+        // labels are drawn once.
         let row_y = |index: i32| y + NODE_HEAD_H + index * NODE_LINE_H - NODE_LINE_H / 3;
         let mut drawn_labels: Vec<&str> = Vec::new();
         for (index, channel) in friend.channels().into_iter().enumerate() {
-            if channel.style == EdgeStyle::None {
+            let Some(seen) = &channel.0 else {
                 continue;
-            }
-            let label = if drawn_labels.contains(&channel.edge_label.as_str()) {
+            };
+            let label = if drawn_labels.contains(&seen.edge_label.as_str()) {
                 String::new()
             } else {
-                drawn_labels.push(&channel.edge_label);
-                channel.edge_label.clone()
+                drawn_labels.push(&seen.edge_label);
+                seen.edge_label.clone()
             };
             edges.push(Edge {
                 x1: sharerr_right,
@@ -1099,7 +1083,7 @@ pub(crate) fn layout(input: LayoutInput<'_>) -> Layout {
                 x2: friends_x,
                 y2: row_y(index as i32),
                 label,
-                style: channel.style,
+                style: seen.style,
                 accent: friend.accent,
                 kind: EdgeKind::Friend,
             });
@@ -1118,17 +1102,12 @@ pub(crate) fn layout(input: LayoutInput<'_>) -> Layout {
 /// Stamp each detail row with its baseline, now that the node's own position
 /// is known — see [`NodeLine::y`].
 fn placed(lines: &[NodeLine], node_y: i32) -> Vec<NodeLine> {
-    place(lines.to_vec(), node_y)
-}
-
-/// [`placed`] for rows already owned — no second copy of each line.
-fn place(lines: Vec<NodeLine>, node_y: i32) -> Vec<NodeLine> {
     lines
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(i, l)| NodeLine {
             y: node_y + NODE_HEAD_H + i as i32 * NODE_LINE_H + 14,
-            ..l
+            ..l.clone()
         })
         .collect()
 }
