@@ -19,12 +19,15 @@ impl Tagged for Movie {
     }
 }
 
-pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
+pub(crate) async fn discover(
+    client: &ArrClient,
+    tag_ids: &[i64],
+) -> Result<Vec<(Discovered, Vec<i64>)>> {
     let movies: Vec<Movie> = client.get("movie", &()).await?;
     // Most movies carry their file embedded and this makes no HTTP call at
     // all, but the fallback lookup for the rest runs concurrently rather than
     // one at a time — see `fetch_tagged`.
-    let fetched = fetch_tagged(client, &movies, tag_id, "radarr movies", movie_file).await?;
+    let fetched = fetch_tagged(client, &movies, tag_ids, "radarr movies", movie_file).await?;
 
     let mut discovered = Vec::new();
     for (movie, fetched) in fetched {
@@ -33,7 +36,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             continue;
         };
 
-        discovered.push(Discovered {
+        let item = Discovered {
             // `client.kind()`, not a hardcoded Radarr: Whisparr v3 shares this
             // walk, and mislabelling its items would put adult content in the
             // Movies category and hand it to a friend scoped to films.
@@ -55,7 +58,8 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
             original_path: non_empty(file.original_file_path.clone()).map(PathBuf::from),
             media: file.media_info.clone().and_then(MediaInfo::into_meta),
             scene: scene(movie),
-        });
+        };
+        discovered.push((item, movie.tags.clone()));
     }
 
     Ok(discovered)

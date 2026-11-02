@@ -62,9 +62,9 @@ future source would plug in; none is currently planned.
 
 ### Torrent clients (what actually seeds)
 
-**qBittorrent**, **Transmission**, and **rTorrent / ruTorrent**, behind the
-`TorrentClient` trait in `sharerr-client`. The trait is deliberately narrow,
-which is what made a second and third client tractable: clients disagree
+**qBittorrent**, **Transmission**, **rTorrent / ruTorrent** and **Deluge**,
+behind the `TorrentClient` trait in `sharerr-client`. The trait is deliberately
+narrow, which is what made every client after the first tractable: clients disagree
 about almost everything except "add this torrent, with the data already at
 this path". Announces always go to sharerr's own tracker, so a client needs
 no tracker of its own.
@@ -78,7 +78,7 @@ already holds (`export`); and how it expresses `upload_limit_kib` and
 `ratio_limit`, at add time and again on an existing torrent (`set_limits`,
 for a goal that changed), through whatever native mechanism it offers.
 
-Where the three differ:
+Where they differ:
 
 |                            | qBittorrent                                                             | Transmission                                                                        | rTorrent                                                                                                                                                                     |
 | -------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -90,13 +90,19 @@ Where the three differ:
 | `export` a held `.torrent` | Yes (`torrents/export`)                                                 | No, returns `Ok(None)`                                                              | No, returns `Ok(None)`                                                                                                                                                       |
 | Replace trackers in place  | Yes                                                                     | Yes                                                                                 | Partial: XML-RPC has no way to remove a tracker ([rakshasa/rtorrent#165](https://github.com/rakshasa/rtorrent/issues/165)), so a new tier is inserted ahead of the stale one |
 
-The `export` gap costs Transmission and rTorrent one narrow case: a torrent
+**Deluge** (2.0 and newer, through its web UI) differs from the table this way:
+a password and no accounts; one label, through the Label plugin, and a torrent
+seeds unlabelled with the plugin off; upload cap, ratio goal and tracker
+replacement all work; `export` returns `Ok(None)`; and although Deluge can skip
+the hash check, sharerr has no setting for it, so it always verifies on add.
+
+The `export` gap costs every client but qBittorrent one narrow case: a torrent
 that already covers a file, that sharerr did not create and has no cached
-copy of, cannot be shared on those two. sharerr fails the item with a message
+copy of, cannot be shared on those. sharerr fails the item with a message
 naming the choice rather than advertise a release with no `.torrent` behind
 it.
 
-All three are driven through the real tier-2 stack; see
+All of them are driven through the real tier-2 stack; see
 [`docs/TESTING.md`](TESTING.md#tier-2-the-compose-stacks).
 
 ### Indexers (what consumes the feed)
@@ -181,7 +187,7 @@ accounts on yours.
 ### Publishing to crates.io
 
 Decided against. `cargo install sharerr` was investigated and found feasible,
-but the project is not taking on an eleven-crate dependency-ordered release
+but the project is not taking on a thirteen-crate dependency-ordered release
 process for a distribution path it does not intend to support. Nothing in
 the manifests enforces this (only `sharerr-testkit` carries
 `publish = false`); it is a decision, not a guard. The Docker image is the

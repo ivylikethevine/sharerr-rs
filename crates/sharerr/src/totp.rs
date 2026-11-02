@@ -40,13 +40,8 @@ pub fn verify(secret: &str, code: &str, now: i64) -> Option<i64> {
     let key = base32_decode(secret)?;
     let current = now.div_euclid(STEP_SECS);
     (current - SKEW_STEPS..=current + SKEW_STEPS).find(|&step| {
-        u64::try_from(step).is_ok_and(|counter| {
-            let expected = format!(
-                "{:0DIGITS$}",
-                hotp(&key, counter) % 10u32.pow(DIGITS as u32)
-            );
-            constant_time_eq(expected.as_bytes(), code.as_bytes())
-        })
+        u64::try_from(step)
+            .is_ok_and(|counter| crate::secrets::constant_time_eq(&code_for(&key, counter), &code))
     })
 }
 
@@ -79,10 +74,12 @@ pub fn qr_svg(uri: &str) -> Result<String, String> {
 pub(crate) fn code_at(secret: &str, now: i64) -> String {
     let key = base32_decode(secret).unwrap_or_default();
     let counter = u64::try_from(now.div_euclid(STEP_SECS)).unwrap_or_default();
-    format!(
-        "{:0DIGITS$}",
-        hotp(&key, counter) % 10u32.pow(DIGITS as u32)
-    )
+    code_for(&key, counter)
+}
+
+/// The code a counter value renders to.
+fn code_for(key: &[u8], counter: u64) -> String {
+    format!("{:0DIGITS$}", hotp(key, counter) % 10u32.pow(DIGITS as u32))
 }
 
 /// RFC 4226's dynamically truncated HOTP value, before reduction to digits.
@@ -116,12 +113,6 @@ fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
     let mut mac = [0u8; 20];
     mac.copy_from_slice(&outer.finalize());
     mac
-}
-
-/// Equal length is public (six digits); the bytes are compared without an
-/// early exit.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// RFC 4648 base32, without padding, as `otpauth://` URIs carry it.

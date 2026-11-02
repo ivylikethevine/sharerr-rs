@@ -34,20 +34,22 @@ async fn fetch_series(client: &ArrClient, series: &Series) -> Result<SeriesPaylo
     // Independent lookups, so they run concurrently — per tagged series this
     // halves the round trips paid in sequence.
     let by_series = [("seriesId", series.id)];
-    let (files, episodes) = tokio::try_join!(
+    tokio::try_join!(
         client.get::<Vec<EpisodeFile>, _>("episodefile", &by_series),
         client.get::<Vec<Episode>, _>("episode", &by_series),
-    )?;
-    Ok((files, episodes))
+    )
 }
 
-pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
+pub(crate) async fn discover(
+    client: &ArrClient,
+    tag_ids: &[i64],
+) -> Result<Vec<(Discovered, Vec<i64>)>> {
     let mut series: Vec<Series> = client.get("series", &()).await?;
     // A release title carries `SxxEyy` and nothing saying which order it counts
     // in, so a friend's Sonarr would read an alternate order's numbers as the
     // official ones and import the file as the wrong episode.
     series.retain(|show| {
-        let skip = show.tags.contains(&tag_id) && show.uses_alternate_order();
+        let skip = show.tags.iter().any(|tag| tag_ids.contains(tag)) && show.uses_alternate_order();
         if skip {
             tracing::warn!(
                 series = %show.title,
@@ -60,7 +62,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
     });
     // The per-series lookups run concurrently across series as well as within
     // one — see `fetch_tagged`.
-    let fetched = fetch_tagged(client, &series, tag_id, "sonarr series", fetch_series).await?;
+    let fetched = fetch_tagged(client, &series, tag_ids, "sonarr series", fetch_series).await?;
 
     let mut discovered = Vec::new();
     for (show, (files, episodes)) in fetched {
@@ -91,7 +93,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 continue;
             };
 
-            discovered.push(Discovered {
+            let item = Discovered {
                 // `client.kind()`, not a hardcoded Sonarr: Whisparr shares this
                 // walk, and mislabelling its items would put adult content in the
                 // TV category and hand it to a friend scoped to TV.
@@ -103,7 +105,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                     season,
                     episode,
                 },
-                arr_path: PathBuf::from(&file.path),
+                arr_path: PathBuf::from(file.path),
                 size: file.size,
                 ids: ids.clone(),
                 scene_name: non_empty(file.scene_name),
@@ -112,7 +114,8 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 // Radarr records where the file was before the import rename.
                 original_path: None,
                 scene: None,
-            });
+            };
+            discovered.push((item, show.tags.clone()));
         }
     }
 

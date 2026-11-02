@@ -335,6 +335,14 @@ impl From<&sharerr_core::config::PathMapping> for PathRow {
     }
 }
 
+/// One notification trigger's checkbox.
+#[derive(Debug, Clone)]
+pub struct TriggerRow {
+    pub value: &'static str,
+    pub prompt: &'static str,
+    pub checked: bool,
+}
+
 /// One row of the `[[library]]` table — form state, same as [`PathRow`].
 #[derive(Debug, Clone)]
 pub struct LibraryRow {
@@ -430,9 +438,9 @@ pub struct SettingsPage {
     /// `[[library]]` directories — for the chip beside the section heading.
     pub library_sources_configured: usize,
 
-    /// `"qbittorrent"`, `"transmission"`, or `"rtorrent"` — which client
-    /// `torrent_backend` currently selects to actually seed. Only this one's
-    /// settings render inline; the other two sit behind a fold.
+    /// `"qbittorrent"`, `"transmission"`, `"rtorrent"` or `"deluge"` — which
+    /// client `torrent_backend` currently selects to actually seed. Only this
+    /// one's settings render inline; the others sit behind a fold.
     pub torrent_backend: &'static str,
     /// Whether a torrent client *other* than the selected one already holds a
     /// credential — the fold those live in starts open in that case, same
@@ -465,6 +473,12 @@ pub struct SettingsPage {
     pub rtorrent_password_set: bool,
     pub rtorrent_label: String,
 
+    pub deluge_url: String,
+    /// Whether the Deluge web UI's password is stored — it has no accounts, so
+    /// there is no username beside it.
+    pub deluge_password_set: bool,
+    pub deluge_label: String,
+
     /// Per-torrent upload cap in KiB/s, applied at add time. Empty when unset —
     /// see [`sharerr_core::config::SeedingConfig::upload_limit_kib`].
     pub seeding_upload_limit_kib: String,
@@ -479,6 +493,8 @@ pub struct SettingsPage {
     /// Whether newly built torrents set BEP 27's private flag. On by default
     /// — see [`sharerr_core::config::SeedingConfig::private`].
     pub seeding_private: bool,
+    /// See [`sharerr_core::config::SeedingConfig::sidecars`].
+    pub seeding_sidecars: bool,
     /// Whether the feeds may advertise a magnet per item. Off by default, and
     /// only takes effect for a non-private item even when on — see
     /// [`sharerr_core::config::FeedConfig::magnet_links`].
@@ -538,18 +554,7 @@ pub struct SettingsPage {
     pub notifications_webhook_set: bool,
     pub notifications_kind: &'static str,
     pub notifications_peer_quiet_secs: u64,
-    pub notifications_trigger_sync_failed: bool,
-    pub notifications_trigger_peer_quiet: bool,
-    pub notifications_trigger_endpoint_rotated: bool,
-    pub notifications_trigger_items_shared: bool,
-    pub notifications_trigger_item_failed: bool,
-    pub notifications_trigger_peer_revoked: bool,
-    pub notifications_trigger_peer_first_contact: bool,
-    pub notifications_trigger_tracker_unreachable: bool,
-    pub notifications_trigger_library_unreadable: bool,
-    pub notifications_trigger_torrent_interrupted: bool,
-    pub notifications_trigger_file_changed: bool,
-    pub notifications_trigger_heartbeat: bool,
+    pub notification_triggers: Vec<TriggerRow>,
     /// Whether an Uptime-Kuma-style push URL is stored — see
     /// `secret_keys::NOTIFICATIONS_HEARTBEAT_URL`.
     pub notifications_heartbeat_set: bool,
@@ -594,8 +599,15 @@ pub struct SelectOption {
     pub label: String,
 }
 
-/// One `<option>` in a peer-scope selector.
-pub type ScopeOption = SelectOption;
+impl SelectOption {
+    /// An option labelled with its own value, capitalised.
+    pub fn named(value: &'static str) -> Self {
+        Self {
+            value,
+            label: crate::web::settings::title_case(value),
+        }
+    }
+}
 
 /// One *arr app's section on the settings page.
 #[derive(Debug)]
@@ -643,6 +655,8 @@ pub struct GluetunSection {
     pub enabled_path: &'static str,
     pub control_url_path: &'static str,
     pub poll_secs_path: &'static str,
+    /// What this section's input ids start with.
+    pub id_prefix: &'static str,
     /// What this poller last saw and last failed with, rendered for the
     /// settings page's own small status line — the fuller version lives on
     /// Diagnostics.
@@ -672,6 +686,10 @@ impl GluetunSection {
             enabled_path,
             control_url_path,
             poll_secs_path,
+            id_prefix: match target {
+                crate::gluetun::GluetunTarget::Tracker => "gluetun",
+                crate::gluetun::GluetunTarget::Client => "gluetun_client",
+            },
             last_observed,
             last_error,
         }
@@ -896,6 +914,13 @@ pub struct PeerRow {
     pub scope: &'static str,
     /// How to say it to a person — "everything", "TV only", "films only".
     pub scope_label: &'static str,
+    /// The largest file they are offered in GiB, empty for no cap.
+    pub max_size_gib: String,
+    /// The highest resolution they are offered as a height, 0 for no cap.
+    pub max_height: i64,
+    /// The *arr tag that shares an item with this friend alone, empty when their
+    /// name has nothing a tag can carry.
+    pub friend_tag: String,
     pub created: String,
     /// The absolute instant behind `created`, for a `title=` tooltip.
     pub created_absolute: String,
@@ -974,7 +999,7 @@ pub struct PeersPage {
     /// `<select>`s render from the enum — a scope added there appears here
     /// without editing HTML, and the strict form decoder can never 400 on a
     /// value this page itself offered.
-    pub scope_options: Vec<ScopeOption>,
+    pub scope_options: Vec<SelectOption>,
     pub signed_in: bool,
     pub peers: Vec<PeerRow>,
     pub error: Option<String>,
@@ -995,8 +1020,8 @@ pub struct RevealedPeer {
     pub label: String,
     pub key: String,
     /// The same key, address and identity as one invite string for a friend
-    /// who also runs sharerr. `None` when no instance address could be built.
-    pub invite: Option<String>,
+    /// who also runs sharerr.
+    pub invite: String,
 }
 
 /// A friend just paired from an invite. `return_failure` is why their sharerr
@@ -1007,9 +1032,6 @@ pub struct PairedPeer {
     pub label: String,
     pub return_failure: Option<String>,
 }
-
-/// One `<option>` in the items page's source/state filters.
-pub type FilterOption = SelectOption;
 
 /// One column header on the items page, pre-rendered as a link that toggles
 /// direction on the next click — the template has no scripting to do this
@@ -1031,16 +1053,30 @@ pub struct SortLink {
 /// in whatever state it is in.
 #[derive(Debug)]
 pub struct ItemRow {
+    pub facts: ItemFacts,
+    /// The path exactly as the *arr app reported it, before any mapping. The
+    /// first thing to check when an item will not share, and previously
+    /// visible only as the single `sample` row on the status page.
+    pub arr_path: String,
+    /// The first twelve characters of `info_hash`, for the cell itself; the
+    /// full value rides on the tooltip and the copy button.
+    pub info_hash_short: Option<String>,
+    /// `"2↑ 1↓"`: who the tracker currently sees in this torrent's swarm.
+    /// Empty when nobody is announcing, which the template shows as a dash.
+    pub peers: String,
+    /// The long form of `peers` — `"2 seeding · 1 downloading"` — for hover.
+    pub peers_hint: String,
+}
+
+/// What the items list and an item's own page both say about it.
+#[derive(Debug)]
+pub struct ItemFacts {
     pub title: String,
     /// The scene-style name the feed advertises. `items::page` already filters
     /// on it, so leaving it unrendered meant matching against a string the
     /// operator could not see. Distinct from `title` by design — see
     /// `sharerr-torrent` on why conflating the two stalls seeding at 0%.
     pub release_title: String,
-    /// The path exactly as the *arr app reported it, before any mapping. The
-    /// first thing to check when an item will not share, and previously
-    /// visible only as the single `sample` row on the status page.
-    pub arr_path: String,
     /// `episode` / `movie` / `track` / `book`, for the small kind badge.
     pub kind: &'static str,
     pub source_label: String,
@@ -1067,14 +1103,6 @@ pub struct ItemRow {
     pub since: String,
     /// The full 40-character hash, or `None` before a torrent exists.
     pub info_hash: Option<String>,
-    /// The first twelve characters of `info_hash`, for the cell itself; the
-    /// full value rides on the tooltip and the copy button.
-    pub info_hash_short: Option<String>,
-    /// `"2↑ 1↓"`: who the tracker currently sees in this torrent's swarm.
-    /// Empty when nobody is announcing, which the template shows as a dash.
-    pub peers: String,
-    /// The long form of `peers` — `"2 seeding · 1 downloading"` — for hover.
-    pub peers_hint: String,
     /// `"Sonarr series 42, file 1337"`: the *arr's own identifiers, shown on
     /// hover over the source cell because they are what an operator greps
     /// the *arr's logs for.
@@ -1206,13 +1234,9 @@ pub struct ItemsPage {
     /// across the rows currently shown — both via `web::items::human_size`.
     pub seeding_size: String,
     pub shown_size: String,
-    pub source_options: Vec<FilterOption>,
-    pub state_options: Vec<FilterOption>,
-    pub kind_options: Vec<FilterOption>,
-    pub source_filter: String,
-    pub state_filter: String,
-    pub kind_filter: String,
-    pub q: String,
+    pub source_options: Vec<SelectOption>,
+    pub state_options: Vec<SelectOption>,
+    pub kind_options: Vec<SelectOption>,
     pub sort_links: Vec<SortLink>,
     /// How the whole library breaks down by format, state and source — counted
     /// over the same unfiltered rows `state_counts` is, and `None` when there is
@@ -1231,6 +1255,20 @@ pub struct FilterState {
     pub dir: String,
 }
 
+impl FilterState {
+    /// The four filters as a query string, for a link back to this view.
+    pub fn query(&self) -> String {
+        use crate::torznab::encode_component as urlencode;
+        format!(
+            "source={}&state={}&kind={}&q={}",
+            urlencode(&self.source),
+            urlencode(&self.state),
+            urlencode(&self.kind),
+            urlencode(&self.q),
+        )
+    }
+}
+
 /// Everything about one item, reached from a row on [`ItemsPage`] — built
 /// specifically to put **release title against the file's actual name,
 /// side by side**, the reason worth building a whole page for: conflating
@@ -1242,12 +1280,8 @@ pub struct FilterState {
 #[template(path = "item_detail.html")]
 pub struct ItemDetailPage {
     pub signed_in: bool,
-    /// The natural key, for the three action forms' `action=` URLs.
-    pub source: &'static str,
-    pub file_id: i64,
+    pub facts: ItemFacts,
 
-    pub title: String,
-    pub release_title: String,
     /// How a friend's Sonarr or Radarr reads the release title, from
     /// `sharerr_torrent::title::check`. `None` for music and books, which it
     /// does not check.
@@ -1263,28 +1297,6 @@ pub struct ItemDetailPage {
     /// name always describes the file where it sits. `None` only if the path
     /// somehow has no final component.
     pub file_name: Option<String>,
-    pub kind: &'static str,
-    pub source_label: String,
-    pub source_hint: String,
-    pub size: String,
-    pub state_label: String,
-    pub state_hint: Option<&'static str>,
-    /// The failure reason in full — [`ItemRow::last_error`] is the same
-    /// string, but rendered here without the table cell's width constraint.
-    pub last_error: Option<String>,
-    pub since: String,
-    pub since_absolute: String,
-    pub info_hash: Option<String>,
-    pub created_by_sharerr: bool,
-    pub ratio: String,
-    pub ratio_hint: String,
-    pub token_fp: Option<String>,
-    pub token_status: TokenStatus,
-    pub announce_url: Option<String>,
-    pub ids: String,
-    /// Which friends' scopes admit this item — empty unless it is actually
-    /// seeding, same rule [`ItemRow::visible_to`] follows.
-    pub visible_to: String,
     /// Present only when the item carries something — a probe or an *arr's
     /// own `mediaInfo` found nothing, or nothing has looked yet.
     pub media: Option<sharerr_core::MediaMeta>,
@@ -1378,14 +1390,16 @@ mod tests {
     fn every_lock_key_in_the_template_is_a_known_config_path() {
         use sharerr_core::config::config_paths;
 
-        let template = include_str!("settings.html");
+        let templates = [include_str!("settings.html"), include_str!("macros.html")];
         let mut found = std::collections::BTreeSet::new();
 
-        for line in template.lines() {
+        for line in templates.iter().flat_map(|template| template.lines()) {
             let mut rest = line;
             while let Some(at) = rest
-                .find("call lock_attr(\"")
-                .or_else(|| rest.find("call locked(\""))
+                .find("call ui::lock_attr(locks, \"")
+                .or_else(|| rest.find("call ui::locked(locks, \""))
+                .or_else(|| rest.find("call ui::text_field(locks, \""))
+                .or_else(|| rest.find("call ui::check_field(locks, \""))
             {
                 let after = &rest[at..];
                 let Some(open) = after.find('"') else { break };
@@ -1428,10 +1442,8 @@ mod tests {
             EdgeStyle::Dotted,
             EdgeStyle::Sparse,
         ] {
-            assert!(style.dasharray().is_some(), "{style:?}");
+            assert!(!style.dasharray().is_empty(), "{style:?}");
             assert!(!style.describe().is_empty(), "{style:?}");
         }
-        assert_eq!(EdgeStyle::None.dasharray(), None);
-        assert_eq!(EdgeStyle::None.describe(), "");
     }
 }

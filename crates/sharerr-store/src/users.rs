@@ -14,15 +14,12 @@ use std::time::Duration;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::Row;
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
 use sharerr_core::endpoint::now_epoch;
 
-use crate::db::{Store, StoreError};
-
-type Result<T> = std::result::Result<T, StoreError>;
+use crate::db::{Result, Store, StoreError};
 
 /// Length of the raw salt before base64 encoding. 16 bytes is the Argon2
 /// reference implementation's recommendation and matches the vault's salt.
@@ -59,10 +56,9 @@ impl Store {
     /// How many accounts exist. Zero means the instance is unclaimed and the
     /// first-run setup page should be reachable.
     pub async fn user_count(&self) -> Result<i64> {
-        let row = sqlx::query("SELECT COUNT(*) AS n FROM users")
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(self.pool())
-            .await?;
-        Ok(row.try_get::<i64, _>("n")?)
+            .await?)
     }
 
     /// Create an account. Fails if the username is taken.
@@ -75,7 +71,7 @@ impl Store {
         // The UNIQUE constraint is what actually decides this, not a prior SELECT:
         // two setup form submissions racing each other would both pass a check-then-
         // insert, and only one can win the constraint.
-        let row = sqlx::query(
+        sqlx::query_scalar(
             "INSERT INTO users (username, password_hash, created_at, updated_at) \
              VALUES (?1, ?2, ?3, ?3) RETURNING id",
         )
@@ -84,28 +80,18 @@ impl Store {
         .bind(now)
         .fetch_one(self.pool())
         .await
-        .map_err(|err| match &err {
-            sqlx::Error::Database(db) if db.is_unique_violation() => StoreError::UserExists {
-                username: username.clone(),
-            },
-            _ => StoreError::Sql(err),
-        })?;
-
-        Ok(row.try_get::<i64, _>("id")?)
+        .map_err(|err| StoreError::from_insert(err, &username))
     }
 
     /// Check a login. `false` covers both a wrong password and an unknown user —
     /// the caller must not distinguish them in what it renders.
     pub async fn verify_password(&self, username: &str, password: &SecretString) -> Result<bool> {
-        let row = sqlx::query("SELECT password_hash FROM users WHERE username = ?1")
-            .bind(username)
-            .fetch_optional(self.pool())
-            .await?;
-
-        let stored = match &row {
-            Some(row) => Some(row.try_get::<String, _>("password_hash")?),
-            None => None,
-        };
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE username = ?1")
+                .bind(username)
+                .fetch_optional(self.pool())
+                .await?;
+        let known = stored.is_some();
 
         // An unknown username still pays for a full Argon2 verification against a
         // throwaway hash. Returning early would make "no such user" measurably
@@ -113,7 +99,7 @@ impl Store {
         // enumerate account names. The decoy is substituted inside the blocking
         // task, so forcing it never costs the runtime worker a hash.
         let verified = verify_password(self, password, stored).await?;
-        Ok(verified && row.is_some())
+        Ok(verified && known)
     }
 
     /// Replace an account's password. Returns whether the account existed.
@@ -121,45 +107,40 @@ impl Store {
         validate_password(password)?;
         let hash = hash_password(self, password).await?;
 
-        let affected =
+        self.changed(
             sqlx::query("UPDATE users SET password_hash = ?1, updated_at = ?2 WHERE username = ?3")
                 .bind(&hash)
                 .bind(now_epoch())
-                .bind(username)
-                .execute(self.pool())
-                .await?
-                .rows_affected();
-
-        Ok(affected > 0)
+                .bind(username),
+        )
+        .await
     }
 
     /// The account's base32 TOTP secret, or `None` when it has no second
     /// factor (or does not exist). See `migrations/0015_totp.sql`.
     pub async fn totp_secret(&self, username: &str) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT totp_secret FROM users WHERE username = ?1")
-            .bind(username)
-            .fetch_optional(self.pool())
-            .await?;
-        match row {
-            Some(row) => Ok(row.try_get::<Option<String>, _>("totp_secret")?),
-            None => Ok(None),
-        }
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT totp_secret FROM users WHERE username = ?1",
+        )
+        .bind(username)
+        .fetch_optional(self.pool())
+        .await?
+        .flatten())
     }
 
     /// Turn the second factor on with `secret`, or off with `None`. Either
     /// way the replay guard starts over. Returns whether the account existed.
     pub async fn set_totp_secret(&self, username: &str, secret: Option<&str>) -> Result<bool> {
-        let affected = sqlx::query(
-            "UPDATE users SET totp_secret = ?1, totp_last_step = NULL, updated_at = ?2 \
+        self.changed(
+            sqlx::query(
+                "UPDATE users SET totp_secret = ?1, totp_last_step = NULL, updated_at = ?2 \
              WHERE username = ?3",
+            )
+            .bind(secret)
+            .bind(now_epoch())
+            .bind(username),
         )
-        .bind(secret)
-        .bind(now_epoch())
-        .bind(username)
-        .execute(self.pool())
-        .await?
-        .rows_affected();
-        Ok(affected > 0)
+        .await
     }
 
     /// Record `step` as used, if it is later than the last one accepted.
@@ -167,16 +148,15 @@ impl Store {
     /// the caller must refuse it. One conditional `UPDATE`, so two requests
     /// racing the same code cannot both win.
     pub async fn claim_totp_step(&self, username: &str, step: i64) -> Result<bool> {
-        let affected = sqlx::query(
-            "UPDATE users SET totp_last_step = ?1 \
+        self.changed(
+            sqlx::query(
+                "UPDATE users SET totp_last_step = ?1 \
              WHERE username = ?2 AND (totp_last_step IS NULL OR totp_last_step < ?1)",
+            )
+            .bind(step)
+            .bind(username),
         )
-        .bind(step)
-        .bind(username)
-        .execute(self.pool())
-        .await?
-        .rows_affected();
-        Ok(affected > 0)
+        .await
     }
 }
 
@@ -287,8 +267,7 @@ async fn verify_password(
     let _permit = store.hash_slot().await?;
     let password = clone_secret(password);
     tokio::task::spawn_blocking(move || {
-        let stored = stored.unwrap_or_else(|| DECOY_HASH.clone());
-        blocking_verify(&password, &stored)
+        blocking_verify(&password, stored.as_deref().unwrap_or(&DECOY_HASH))
     })
     .await
     .map_err(|_| StoreError::PasswordHash("verification task panicked".to_owned()))
@@ -332,6 +311,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use std::time::Instant;
+
+    use sqlx::Row;
 
     use super::*;
     use sharerr_testkit::secrets::fresh_password;

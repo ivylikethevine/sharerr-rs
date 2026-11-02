@@ -23,8 +23,8 @@
 
 use std::collections::BTreeSet;
 
+use anyhow::Context as _;
 use axum::extract::{Query, State};
-use axum::http::header;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::{ExposeSecret, SecretString};
@@ -246,32 +246,14 @@ pub struct NotificationsForm {
     heartbeat_url: String,
     clear_heartbeat_url: Option<String>,
     heartbeat_secs: String,
-    trigger_sync_failed: Option<String>,
-    trigger_peer_quiet: Option<String>,
-    trigger_endpoint_rotated: Option<String>,
-    trigger_items_shared: Option<String>,
-    trigger_item_failed: Option<String>,
-    trigger_peer_revoked: Option<String>,
-    trigger_peer_first_contact: Option<String>,
-    trigger_tracker_unreachable: Option<String>,
-    trigger_library_unreadable: Option<String>,
-    trigger_torrent_interrupted: Option<String>,
-    trigger_file_changed: Option<String>,
-    trigger_heartbeat: Option<String>,
+    /// The checked boxes, one [`sharerr_core::config::NotificationTrigger`] name per value.
+    triggers: Vec<String>,
 }
 
+/// A switch and a bearer token: `/metrics` and the management API.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct MetricsForm {
-    enabled: Option<String>,
-    token: String,
-    clear_token: Option<String>,
-}
-
-/// The management API's switch and token, the same shape as [`MetricsForm`].
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct ApiForm {
+pub struct TokenToggleForm {
     enabled: Option<String>,
     token: String,
     clear_token: Option<String>,
@@ -430,8 +412,17 @@ pub async fn save_rtorrent(
     save_rpc_client(&state, next.next, form, TorrentBackend::Rtorrent).await
 }
 
-/// The save both RPC-style clients share — only the config paths, the vault
-/// key and the wording of the missing-URL error differ between them.
+pub async fn save_deluge(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<RpcClientForm>,
+) -> Response {
+    save_rpc_client(&state, next.next, form, TorrentBackend::Deluge).await
+}
+
+/// The save the RPC-style clients share — only the config paths, the vault
+/// key and the wording of the missing-URL error differ between them. Deluge's
+/// web UI has no accounts, so it has no username path and its form no field.
 async fn save_rpc_client(
     state: &WebState,
     next: Option<String>,
@@ -442,7 +433,7 @@ async fn save_rpc_client(
         TorrentBackend::Transmission => (
             "transmission",
             config_paths::TRANSMISSION_URL,
-            config_paths::TRANSMISSION_USERNAME,
+            Some(config_paths::TRANSMISSION_USERNAME),
             config_paths::TRANSMISSION_LABEL,
             secret_keys::TRANSMISSION_PASSWORD,
             "Transmission's URL is required — sharerr cannot seed without it",
@@ -450,11 +441,19 @@ async fn save_rpc_client(
         TorrentBackend::Rtorrent => (
             "rtorrent",
             config_paths::RTORRENT_URL,
-            config_paths::RTORRENT_USERNAME,
+            Some(config_paths::RTORRENT_USERNAME),
             config_paths::RTORRENT_LABEL,
             secret_keys::RTORRENT_PASSWORD,
             "rTorrent's URL is required — sharerr cannot seed without it. This is the \
              exact XML-RPC endpoint your reverse proxy answers on, not a base address.",
+        ),
+        TorrentBackend::Deluge => (
+            "deluge",
+            config_paths::DELUGE_URL,
+            None,
+            config_paths::DELUGE_LABEL,
+            secret_keys::DELUGE_PASSWORD,
+            "Deluge's URL is required — sharerr cannot seed without it",
         ),
         TorrentBackend::Qbittorrent => {
             return reject(state, "There is no such service to configure.").await;
@@ -476,9 +475,11 @@ async fn save_rpc_client(
                 // touched (locked, or no master key yet) and should fall back to
                 // the compiled default, not store a literal empty username/label —
                 // same reasoning as qBittorrent's category and tag above.
-                Edit::str_or_unset(username_path, form.username.trim()),
                 Edit::str_or_unset(label_path, form.label.trim()),
             ]);
+            if let Some(username_path) = username_path {
+                file.apply([Edit::str_or_unset(username_path, form.username.trim())]);
+            }
             Ok(())
         },
         password_key,
@@ -536,18 +537,13 @@ pub async fn save_tracker(
             edits.push(Edit::int(config_paths::TRACKER_PORT, i64::from(parsed)));
         }
 
-        let advertised_url = form.advertised_url.trim();
-        if advertised_url.is_empty() {
-            edits.push(Edit::unset(config_paths::TRACKER_ADVERTISED_URL));
-        } else {
-            // Validated here rather than at the next sync: a URL that does not
-            // parse would otherwise store fine and surface later as torrents
-            // nobody can announce to.
-            edits.push(Edit::str(
-                config_paths::TRACKER_ADVERTISED_URL,
-                normalise_url(advertised_url)?,
-            ));
-        }
+        // Validated here rather than at the next sync: a URL that does not
+        // parse would otherwise store fine and surface later as torrents
+        // nobody can announce to.
+        edits.push(url_or_unset(
+            config_paths::TRACKER_ADVERTISED_URL,
+            &form.advertised_url,
+        )?);
 
         file.apply(edits);
         Ok(())
@@ -626,38 +622,66 @@ pub struct SeedingForm {
     /// A checkbox: present (any value) when checked, absent when not — see
     /// `CLAUDE.md`'s note on why every field here needs `#[serde(default)]`.
     private: Option<String>,
+    sidecars: Option<String>,
     magnet_links: Option<String>,
     quiet_hours: String,
     quiet_upload_limit_kib: String,
+}
+
+/// `None` for a blank field; anything else goes through `parse`.
+fn parse_optional<T>(
+    raw: &str,
+    parse: impl FnOnce(&str) -> anyhow::Result<T>,
+) -> anyhow::Result<Option<T>> {
+    match raw.trim() {
+        "" => Ok(None),
+        text => parse(text).map(Some),
+    }
 }
 
 /// A blank field means no goal; anything else must be a whole number of
 /// KiB/s. Named in the error the same way [`parse_lighthouse_urls`] names a
 /// bad line, rather than silently discarding an unparseable value.
 fn parse_upload_limit_kib(raw: &str) -> anyhow::Result<Option<u64>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|_| anyhow::anyhow!("the upload limit must be a whole number of KiB/s"))
+    parse_optional(raw, |text| {
+        text.parse()
+            .map_err(|_| anyhow::anyhow!("the upload limit must be a whole number of KiB/s"))
+    })
 }
 
 /// A blank field means no goal; anything else must be a positive ratio.
 fn parse_ratio_limit(raw: &str) -> anyhow::Result<Option<f64>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let ratio: f64 = trimmed
-        .parse()
-        .map_err(|_| anyhow::anyhow!("the ratio limit must be a number, e.g. 2.0"))?;
-    if !ratio.is_finite() || ratio <= 0.0 {
-        anyhow::bail!("the ratio limit must be a positive number");
-    }
-    Ok(Some(ratio))
+    parse_optional(raw, |text| {
+        let ratio: f64 = text
+            .parse()
+            .map_err(|_| anyhow::anyhow!("the ratio limit must be a number, e.g. 2.0"))?;
+        if !ratio.is_finite() || ratio <= 0.0 {
+            anyhow::bail!("the ratio limit must be a positive number");
+        }
+        Ok(ratio)
+    })
+}
+
+/// The form's fields that can be refused, parsed.
+struct SeedingLimits {
+    upload_limit_kib: Option<u64>,
+    ratio_limit: Option<f64>,
+    quiet_upload_limit_kib: Option<u64>,
+    quiet_hours: Option<sharerr_core::config::QuietHours>,
+}
+
+fn parse_seeding(form: &SeedingForm) -> anyhow::Result<SeedingLimits> {
+    Ok(SeedingLimits {
+        upload_limit_kib: parse_upload_limit_kib(&form.upload_limit_kib)?,
+        ratio_limit: parse_ratio_limit(&form.ratio_limit)?,
+        quiet_upload_limit_kib: parse_upload_limit_kib(&form.quiet_upload_limit_kib)
+            .context("quiet hours")?,
+        quiet_hours: parse_optional(&form.quiet_hours, |text| {
+            text.parse::<sharerr_core::config::QuietHours>()
+                .map_err(|err| anyhow::anyhow!("{err}"))
+        })
+        .context("quiet hours")?,
+    })
 }
 
 /// A per-torrent upload cap and seed-ratio goal, applied once when sharerr
@@ -674,56 +698,38 @@ pub async fn save_seeding(
     State(state): State<WebState>,
     Form(form): Form<SeedingForm>,
 ) -> Response {
-    let upload_limit_kib = match parse_upload_limit_kib(&form.upload_limit_kib) {
-        Ok(v) => v,
+    let limits = match parse_seeding(&form) {
+        Ok(limits) => limits,
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
-    let ratio_limit = match parse_ratio_limit(&form.ratio_limit) {
-        Ok(v) => v,
-        Err(err) => return reject(&state, &format!("{err:#}")).await,
-    };
-    let quiet_upload_limit_kib = match parse_upload_limit_kib(&form.quiet_upload_limit_kib) {
-        Ok(v) => v,
-        Err(err) => return reject(&state, &format!("quiet hours: {err:#}")).await,
-    };
-    let quiet_hours = match form.quiet_hours.trim() {
-        "" => None,
-        text => match text.parse::<sharerr_core::config::QuietHours>() {
-            Ok(window) => Some(window),
-            Err(err) => return reject(&state, &format!("quiet hours: {err}")).await,
-        },
-    };
-    let private = form.private.is_some();
-    let magnet_links = form.magnet_links.is_some();
+    let kib_edit =
+        |path: &'static str, kib: u64| Edit::int(path, sharerr_core::saturating_i64(kib));
 
     write_config(&state, "seeding", None, move |file| {
         file.apply([
-            match quiet_hours {
-                Some(window) => Edit::str(config_paths::SEEDING_QUIET_HOURS, window.to_string()),
-                None => Edit::unset(config_paths::SEEDING_QUIET_HOURS),
-            },
-            match quiet_upload_limit_kib {
-                Some(kib) => Edit::int(
-                    config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB,
-                    i64::try_from(kib).unwrap_or(i64::MAX),
-                ),
-                None => Edit::unset(config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB),
-            },
-        ]);
-        file.apply([
-            match upload_limit_kib {
-                Some(kib) => Edit::int(
-                    config_paths::SEEDING_UPLOAD_LIMIT_KIB,
-                    i64::try_from(kib).unwrap_or(i64::MAX),
-                ),
-                None => Edit::unset(config_paths::SEEDING_UPLOAD_LIMIT_KIB),
-            },
-            match ratio_limit {
-                Some(ratio) => Edit::float(config_paths::SEEDING_RATIO_LIMIT, ratio),
-                None => Edit::unset(config_paths::SEEDING_RATIO_LIMIT),
-            },
-            Edit::bool(config_paths::SEEDING_PRIVATE, private),
-            Edit::bool(config_paths::FEED_MAGNET_LINKS, magnet_links),
+            Edit::or_unset(
+                config_paths::SEEDING_QUIET_HOURS,
+                limits.quiet_hours,
+                |path, window| Edit::str(path, window.to_string()),
+            ),
+            Edit::or_unset(
+                config_paths::SEEDING_QUIET_UPLOAD_LIMIT_KIB,
+                limits.quiet_upload_limit_kib,
+                kib_edit,
+            ),
+            Edit::or_unset(
+                config_paths::SEEDING_UPLOAD_LIMIT_KIB,
+                limits.upload_limit_kib,
+                kib_edit,
+            ),
+            Edit::or_unset(
+                config_paths::SEEDING_RATIO_LIMIT,
+                limits.ratio_limit,
+                Edit::float,
+            ),
+            Edit::bool(config_paths::SEEDING_PRIVATE, form.private.is_some()),
+            Edit::bool(config_paths::SEEDING_SIDECARS, form.sidecars.is_some()),
+            Edit::bool(config_paths::FEED_MAGNET_LINKS, form.magnet_links.is_some()),
         ]);
         Ok(())
     })
@@ -762,14 +768,10 @@ async fn save_gluetun_section(
         section,
         None,
         |file| {
-            file.apply([Edit::bool(enabled_path, form.enabled.is_some())]);
-
-            let url = form.control_url.trim();
-            if url.is_empty() {
-                file.apply([Edit::unset(control_url_path)]);
-            } else {
-                file.apply([Edit::str(control_url_path, normalise_url(url)?)]);
-            }
+            file.apply([
+                Edit::bool(enabled_path, form.enabled.is_some()),
+                url_or_unset(control_url_path, &form.control_url)?,
+            ]);
 
             let poll = form.poll_secs.trim();
             if !poll.is_empty() {
@@ -877,7 +879,7 @@ pub async fn save_notifications(
         },
     };
 
-    if let Err(message) = apply_secret(
+    let heartbeat_changed = match apply_secret(
         &state,
         secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
         heartbeat,
@@ -885,10 +887,11 @@ pub async fn save_notifications(
     )
     .await
     {
-        return reject(&state, &message).await;
-    }
+        Ok(changed) => changed,
+        Err(message) => return reject(&state, &message).await,
+    };
 
-    write_config_and_secret(
+    let response = write_config_and_secret(
         &state,
         "notifications",
         None,
@@ -912,42 +915,15 @@ pub async fn save_notifications(
                 )]);
             }
 
-            use sharerr_core::config::NotificationTrigger as Trigger;
-            let selected: Vec<&'static str> = [
-                (form.trigger_sync_failed.is_some(), Trigger::SyncFailed),
-                (form.trigger_peer_quiet.is_some(), Trigger::PeerQuiet),
-                (
-                    form.trigger_endpoint_rotated.is_some(),
-                    Trigger::EndpointRotated,
-                ),
-                (form.trigger_items_shared.is_some(), Trigger::ItemsShared),
-                (form.trigger_item_failed.is_some(), Trigger::ItemFailed),
-                (form.trigger_peer_revoked.is_some(), Trigger::PeerRevoked),
-                (
-                    form.trigger_peer_first_contact.is_some(),
-                    Trigger::PeerFirstContact,
-                ),
-                (
-                    form.trigger_tracker_unreachable.is_some(),
-                    Trigger::TrackerUnreachable,
-                ),
-                (
-                    form.trigger_library_unreadable.is_some(),
-                    Trigger::LibraryUnreadable,
-                ),
-                (
-                    form.trigger_torrent_interrupted.is_some(),
-                    Trigger::TorrentInterrupted,
-                ),
-                (form.trigger_file_changed.is_some(), Trigger::FileChanged),
-                (form.trigger_heartbeat.is_some(), Trigger::Heartbeat),
-            ]
-            .into_iter()
-            .filter_map(|(checked, trigger)| checked.then_some(trigger.as_str()))
-            .collect();
+            let selected = sharerr_core::config::NotificationTrigger::ALL
+                .iter()
+                .map(|trigger| trigger.as_str())
+                .filter(|name| form.triggers.iter().any(|checked| checked == name))
+                .map(str::to_owned)
+                .collect();
             file.apply([Edit::str_list(
                 config_paths::NOTIFICATIONS_TRIGGERS,
-                selected.into_iter().map(str::to_owned).collect(),
+                selected,
             )]);
             Ok(())
         },
@@ -955,7 +931,9 @@ pub async fn save_notifications(
         webhook,
         form.clear_webhook_url.is_some(),
     )
-    .await
+    .await;
+    invalidate_unless_committed(&state, heartbeat_changed, response.status()).await;
+    response
 }
 
 /// `/metrics` and the dashboard-widget endpoint. Same two-write shape as
@@ -966,39 +944,48 @@ pub async fn save_notifications(
 /// silent one, matching how `[gluetun]` can be enabled with no API key yet.
 pub async fn save_metrics(
     State(state): State<WebState>,
-    Form(form): Form<MetricsForm>,
+    Form(form): Form<TokenToggleForm>,
 ) -> Response {
-    write_config_and_secret(
+    save_token_toggle(
         &state,
         "metrics",
-        None,
-        |file| {
-            file.apply([Edit::bool(
-                config_paths::METRICS_ENABLED,
-                form.enabled.is_some(),
-            )]);
-            Ok(())
-        },
+        config_paths::METRICS_ENABLED,
         secret_keys::METRICS_TOKEN,
-        form.token.trim(),
-        form.clear_token.is_some(),
+        form,
     )
     .await
 }
 
-pub async fn save_api(State(state): State<WebState>, Form(form): Form<ApiForm>) -> Response {
-    write_config_and_secret(
+pub async fn save_api(
+    State(state): State<WebState>,
+    Form(form): Form<TokenToggleForm>,
+) -> Response {
+    save_token_toggle(
         &state,
         "api",
+        config_paths::API_ENABLED,
+        secret_keys::API_TOKEN,
+        form,
+    )
+    .await
+}
+
+async fn save_token_toggle(
+    state: &WebState,
+    section: &str,
+    enabled_path: &'static str,
+    key: &'static str,
+    form: TokenToggleForm,
+) -> Response {
+    write_config_and_secret(
+        state,
+        section,
         None,
         |file| {
-            file.apply([Edit::bool(
-                config_paths::API_ENABLED,
-                form.enabled.is_some(),
-            )]);
+            file.apply([Edit::bool(enabled_path, form.enabled.is_some())]);
             Ok(())
         },
-        secret_keys::API_TOKEN,
+        key,
         form.token.trim(),
         form.clear_token.is_some(),
     )
@@ -1024,17 +1011,7 @@ pub async fn export_config(State(state): State<WebState>) -> Response {
         Err(err) => return reject(&state, &format!("could not export the config: {err}")).await,
     };
 
-    (
-        [
-            (header::CONTENT_TYPE, "application/toml".to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"sharerr-config.toml\"".to_owned(),
-            ),
-        ],
-        text,
-    )
-        .into_response()
+    super::toml_download("sharerr-config.toml", text)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1072,31 +1049,23 @@ pub async fn import_config(
         Err(err) => return reject(&state, &format!("{err:#}")).await,
     };
 
-    let guard = state.serve.lock_config_write().await;
     let path = state.serve.config_path().to_path_buf();
-    let file = ConfigFile::replacing(&path);
-
-    let write_path = path.clone();
-    let written = {
-        let text = text.clone();
-        tokio::task::spawn_blocking(move || file.write_validated(&text))
-            .await
-            .map_err(|err| format!("writing the config file: {err}"))
-            .and_then(|result| result.map_err(|err| format!("{err:#}")))
+    let pending = PendingConfig {
+        _guard: state.serve.lock_config_write().await,
+        file: ConfigFile::replacing(&path),
+        text,
+        config,
+        path: path.clone(),
     };
-    drop(guard);
+    let response = commit_config(&state, "config", None, pending).await;
 
-    match written {
-        Ok(()) => {
-            state.serve.replace_config(config).await;
-            // A no-op unless the pasted document itself carried a pending
-            // `[[peers]]` block — see this function's own doc comment.
-            crate::commands::serve::import_peers(&state.serve).await;
-            tracing::info!(path = %write_path.display(), "config imported through the web ui");
-            Redirect::to("/settings?saved=config").into_response()
-        }
-        Err(message) => reject(&state, &message).await,
+    if response.status().is_redirection() {
+        // A no-op unless the pasted document itself carried a pending
+        // `[[peers]]` block — see this function's own doc comment.
+        crate::commands::serve::import_peers(&state.serve).await;
+        tracing::info!(path = %path.display(), "config imported through the web ui");
     }
+    response
 }
 
 pub async fn save_libraries(
@@ -1202,11 +1171,27 @@ where
         Err(message) => return reject(state, &message).await,
     };
 
-    if let Err(message) = apply_secret(state, key, value, clear).await {
-        return reject(state, &message).await;
-    }
+    let changed = match apply_secret(state, key, value, clear).await {
+        Ok(changed) => changed,
+        Err(message) => return reject(state, &message).await,
+    };
 
-    commit_config(state, section, next, pending).await
+    let response = commit_config(state, section, next, pending).await;
+    invalidate_unless_committed(state, changed, response.status()).await;
+    response
+}
+
+/// A changed credential is worthless until the syncer is rebuilt with it. A commit
+/// does that once it holds the new config, so only a save that stored a secret and
+/// then failed still has to.
+async fn invalidate_unless_committed(
+    state: &WebState,
+    changed: bool,
+    status: axum::http::StatusCode,
+) {
+    if changed && !status.is_redirection() {
+        state.serve.invalidate("a credential changed").await;
+    }
 }
 
 /// An edited, validated `sharerr.toml` that has not been written yet.
@@ -1336,16 +1321,20 @@ async fn replacement_for(state: &WebState, path: &std::path::Path) -> ConfigFile
 ///
 /// `clear` is the explicit checkbox — an HTML checkbox submits nothing at all
 /// when unticked, so callers pass `field.is_some()`.
+///
+/// Returns whether the vault changed, for [`invalidate_unless_committed`]: this does
+/// not drop the syncer itself, which would wake the loop to rebuild against the old
+/// config while the save is still in progress.
 async fn apply_secret(
     state: &WebState,
     key: &'static str,
     value: &str,
     clear: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let value = value.trim().to_owned();
 
     if !clear && value.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut vault = state.serve.open_vault().await?;
@@ -1362,11 +1351,7 @@ async fn apply_secret(
         tracing::info!(key, "secret stored through the web ui");
     }
 
-    // A changed credential is worthless until the syncer is rebuilt with it —
-    // `ensure_ready` caches the first syncer that works and would otherwise keep
-    // authenticating with the old value.
-    state.serve.invalidate("a credential changed").await;
-    Ok(())
+    Ok(true)
 }
 
 /// The vault-mutation core of a rotation, over a plain `&mut Vault` rather
@@ -1532,6 +1517,20 @@ fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool)
         })
 }
 
+/// Every notification trigger as a checkbox, ticked when in `selected`.
+pub(crate) fn trigger_rows(
+    selected: &[sharerr_core::config::NotificationTrigger],
+) -> Vec<crate::web::templates::TriggerRow> {
+    sharerr_core::config::NotificationTrigger::ALL
+        .iter()
+        .map(|trigger| crate::web::templates::TriggerRow {
+            value: trigger.as_str(),
+            prompt: trigger.prompt(),
+            checked: selected.contains(trigger),
+        })
+        .collect()
+}
+
 /// An unset URL renders as an empty field, not `None`.
 pub(super) fn url_or_empty(url: Option<&url::Url>) -> String {
     url.map(url::Url::to_string).unwrap_or_default()
@@ -1559,6 +1558,24 @@ pub(super) async fn gluetun_last_error(
     target: GluetunTarget,
 ) -> Option<String> {
     state.gluetun_status(target).snapshot().await.last_error
+}
+
+async fn gluetun_section(
+    state: &WebState,
+    config: &Config,
+    target: GluetunTarget,
+    is_set: &impl Fn(&str) -> bool,
+) -> GluetunSection {
+    let gluetun = target.config(config);
+    GluetunSection::new(
+        target,
+        url_or_empty(gluetun.control_url.as_ref()),
+        gluetun.enabled,
+        is_set(target.credential_key()),
+        gluetun.poll_secs,
+        gluetun_last_observed(&state.serve.endpoint_for(target)),
+        gluetun_last_error(&state.serve, target).await,
+    )
 }
 
 /// Reject a `tracker.advertised_host` that could never work for anyone outside
@@ -1622,9 +1639,19 @@ fn normalise_url(raw: &str) -> anyhow::Result<String> {
         .map_err(|err| anyhow::anyhow!("{raw:?} is not a valid URL: {err}"))
 }
 
+/// A URL field: normalised, or the key removed when the input is blank.
+fn url_or_unset(path: &'static str, raw: &str) -> anyhow::Result<Edit> {
+    let url = raw.trim();
+    if url.is_empty() {
+        Ok(Edit::unset(path))
+    } else {
+        Ok(Edit::str(path, normalise_url(url)?))
+    }
+}
+
 /// How the app's name is written, for headings — `as_str` is the lowercase
 /// wire/storage form.
-pub(super) fn title_case(name: &str) -> String {
+pub(crate) fn title_case(name: &str) -> String {
     let mut chars = name.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -1764,6 +1791,10 @@ async fn build_page(
         rtorrent_password_set: is_set(secret_keys::RTORRENT_PASSWORD),
         rtorrent_label: config.rtorrent.label.clone(),
 
+        deluge_url: config.deluge.url.to_string(),
+        deluge_password_set: is_set(secret_keys::DELUGE_PASSWORD),
+        deluge_label: config.deluge.label.clone(),
+
         seeding_upload_limit_kib: config
             .seeding
             .upload_limit_kib
@@ -1785,6 +1816,7 @@ async fn build_page(
             .map(|kib| kib.to_string())
             .unwrap_or_default(),
         seeding_private: config.seeding.private,
+        seeding_sidecars: config.seeding.sidecars,
         feed_magnet_links: config.feed.magnet_links,
 
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
@@ -1812,24 +1844,8 @@ async fn build_page(
             .collect::<Vec<_>>()
             .join("\n"),
         lighthouse_url_count: config.lighthouse.urls.len(),
-        gluetun: GluetunSection::new(
-            GluetunTarget::Tracker,
-            url_or_empty(config.gluetun.control_url.as_ref()),
-            config.gluetun.enabled,
-            is_set(secret_keys::GLUETUN_API_KEY),
-            config.gluetun.poll_secs,
-            gluetun_last_observed(&state.serve.endpoint()),
-            gluetun_last_error(&state.serve, GluetunTarget::Tracker).await,
-        ),
-        gluetun_client: GluetunSection::new(
-            GluetunTarget::Client,
-            url_or_empty(config.gluetun_client.control_url.as_ref()),
-            config.gluetun_client.enabled,
-            is_set(secret_keys::GLUETUN_CLIENT_API_KEY),
-            config.gluetun_client.poll_secs,
-            gluetun_last_observed(&state.serve.client_endpoint()),
-            gluetun_last_error(&state.serve, GluetunTarget::Client).await,
-        ),
+        gluetun: gluetun_section(state, &config, GluetunTarget::Tracker, &is_set).await,
+        gluetun_client: gluetun_section(state, &config, GluetunTarget::Client, &is_set).await,
         gluetun_client_configured: config.gluetun_client.control_url.is_some(),
 
         revealed: None,
@@ -1841,54 +1857,7 @@ async fn build_page(
         notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),
         notifications_kind: config.notifications.kind.as_str(),
         notifications_peer_quiet_secs: config.notifications.peer_quiet_secs,
-        notifications_trigger_sync_failed: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::SyncFailed),
-        notifications_trigger_peer_quiet: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::PeerQuiet),
-        notifications_trigger_endpoint_rotated: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::EndpointRotated),
-        notifications_trigger_items_shared: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::ItemsShared),
-        notifications_trigger_item_failed: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::ItemFailed),
-        notifications_trigger_peer_revoked: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::PeerRevoked),
-        notifications_trigger_peer_first_contact: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::PeerFirstContact),
-        notifications_trigger_tracker_unreachable: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::TrackerUnreachable),
-        notifications_trigger_library_unreadable: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::LibraryUnreadable),
-        notifications_trigger_torrent_interrupted: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::TorrentInterrupted),
-        notifications_trigger_file_changed: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::FileChanged),
-        notifications_trigger_heartbeat: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::Heartbeat),
+        notification_triggers: trigger_rows(&config.notifications.triggers),
         notifications_heartbeat_set: is_set(secret_keys::NOTIFICATIONS_HEARTBEAT_URL),
         notifications_heartbeat_secs: config.notifications.heartbeat_secs,
 

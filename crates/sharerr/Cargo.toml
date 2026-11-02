@@ -42,6 +42,7 @@ sharerr-client = { workspace = true }
 sharerr-core = { workspace = true }
 sharerr-lighthouse = { workspace = true }
 sharerr-qbit = { workspace = true }
+sharerr-deluge = { workspace = true }
 sharerr-rtorrent = { workspace = true }
 sharerr-store = { workspace = true }
 sharerr-probe = { workspace = true }

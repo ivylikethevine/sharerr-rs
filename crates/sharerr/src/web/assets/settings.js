@@ -98,6 +98,47 @@ var RAIL = "(min-width: 64rem)";
   window.addEventListener("hashchange", reveal);
 })();
 
+// Warns before leaving with typed changes no save has taken. Each section is
+// its own form, so saving one reloads the page and would drop the others: the
+// form being submitted is the only one exempt. Compared by value, so typing
+// something and undoing it is not a change; `current-password` is left out
+// because a browser autofills it without anyone typing.
+(function () {
+  var forms = document.querySelectorAll("main form[method='post']");
+  if (!forms.length) return;
+
+  var values = function (form) {
+    var out = [];
+    new FormData(form).forEach(function (value, name) {
+      var field = form.elements[name];
+      if (typeof value !== "string") return;
+      if (field && field.autocomplete === "current-password") return;
+      out.push(name + "=" + value);
+    });
+    return out.join("&");
+  };
+
+  var loaded = [];
+  for (var i = 0; i < forms.length; i++) loaded.push(values(forms[i]));
+
+  var submitting = null;
+  document.addEventListener("submit", function (event) {
+    submitting = event.target;
+  });
+  // Back to a page kept in memory: the save that left it is no longer pending.
+  window.addEventListener("pageshow", function () {
+    submitting = null;
+  });
+  window.addEventListener("beforeunload", function (event) {
+    for (var j = 0; j < forms.length; j++) {
+      if (forms[j] !== submitting && values(forms[j]) !== loaded[j]) {
+        event.preventDefault();
+        return;
+      }
+    }
+  });
+})();
+
 // A file input with `data-fills` reads the chosen file into the textarea that
 // attribute names, so a restore can be picked rather than pasted.
 document.addEventListener("change", function (event) {

@@ -63,10 +63,10 @@ pub(crate) fn compose(items: &[SharedItem]) -> Option<Composition> {
                 "State",
                 "Where each file is in the share cycle",
                 items,
-                |item| item.state.as_str().to_owned(),
+                |item| item.state.as_str(),
             ),
             breakdown("Source", "Which app or directory found it", items, |item| {
-                item.source.as_str().to_owned()
+                item.source.as_str()
             }),
         ],
     })
@@ -81,7 +81,7 @@ pub(crate) fn compose(items: &[SharedItem]) -> Option<Composition> {
 /// what a friend's Lidarr filters on. Anything that is neither is `unknown`,
 /// which is a fact worth showing rather than hiding: a large `unknown` slice
 /// means the *arr apps never analysed those files and no probe covered them.
-fn format_label(item: &SharedItem) -> String {
+fn format_label(item: &SharedItem) -> &'static str {
     item.media
         .as_ref()
         .and_then(|media| {
@@ -90,7 +90,13 @@ fn format_label(item: &SharedItem) -> String {
                 .or_else(|| MediaMeta::scene_audio_format(media))
         })
         .unwrap_or("unknown")
-        .to_owned()
+}
+
+/// The files of one kind, and how much they add up to.
+struct Bucket {
+    label: &'static str,
+    count: usize,
+    bytes: u64,
 }
 
 /// One roll-up: bucket, sort, lay out the bar, and pre-render every string.
@@ -98,20 +104,24 @@ fn breakdown(
     title: &'static str,
     hint: &'static str,
     items: &[SharedItem],
-    label_of: impl Fn(&SharedItem) -> String,
+    label_of: impl Fn(&SharedItem) -> &'static str,
 ) -> Breakdown {
-    // A `Vec` of pairs rather than a map: the bucket count is small (six
-    // resolutions, four states, six sources), and this keeps insertion order
-    // available as the tie-break below.
-    let mut buckets: Vec<(String, usize, u64)> = Vec::new();
+    // A `Vec` rather than a map: the bucket count is small (six resolutions,
+    // four states, six sources), and this keeps insertion order available as
+    // the tie-break below.
+    let mut buckets: Vec<Bucket> = Vec::new();
     for item in items {
         let label = label_of(item);
-        match buckets.iter_mut().find(|(name, _, _)| *name == label) {
-            Some((_, count, bytes)) => {
-                *count += 1;
-                *bytes += item.size;
+        match buckets.iter_mut().find(|bucket| bucket.label == label) {
+            Some(bucket) => {
+                bucket.count += 1;
+                bucket.bytes += item.size;
             }
-            None => buckets.push((label, 1, item.size)),
+            None => buckets.push(Bucket {
+                label,
+                count: 1,
+                bytes: item.size,
+            }),
         }
     }
 
@@ -120,20 +130,25 @@ fn breakdown(
     // the absence of an answer, not one of the answers.
     buckets.sort_by(|a, b| {
         let unknown = |name: &str| name == "unknown";
-        unknown(&a.0)
-            .cmp(&unknown(&b.0))
-            .then(b.2.cmp(&a.2))
-            .then(a.0.cmp(&b.0))
+        unknown(a.label)
+            .cmp(&unknown(b.label))
+            .then(b.bytes.cmp(&a.bytes))
+            .then(a.label.cmp(b.label))
     });
 
-    let total_bytes: u64 = buckets.iter().map(|(_, _, bytes)| bytes).sum();
+    let total_bytes: u64 = buckets.iter().map(|bucket| bucket.bytes).sum();
     let percentages = whole_percentages(&buckets, total_bytes);
 
     let mut segments = Vec::with_capacity(buckets.len());
     let mut rows = Vec::with_capacity(buckets.len());
     let mut x = 0;
 
-    for (index, (label, count, bytes)) in buckets.iter().enumerate() {
+    for (index, bucket) in buckets.iter().enumerate() {
+        let Bucket {
+            label,
+            count,
+            bytes,
+        } = bucket;
         let accent = ACCENTS[index % ACCENTS.len()];
         let percent = percentages[index];
         // The bar keeps the exact fraction; only the printed figure is rounded.
@@ -208,7 +223,7 @@ fn breakdown(
 /// 101% reads as broken arithmetic rather than as rounding. Largest remainder —
 /// floor everything, then hand the leftover points to the buckets that lost the
 /// most to the floor — is the standard fix and is what an apportionment does.
-fn whole_percentages(buckets: &[(String, usize, u64)], total: u64) -> Vec<u32> {
+fn whole_percentages(buckets: &[Bucket], total: u64) -> Vec<u32> {
     if total == 0 {
         return vec![0; buckets.len()];
     }
@@ -216,7 +231,7 @@ fn whole_percentages(buckets: &[(String, usize, u64)], total: u64) -> Vec<u32> {
     #[allow(clippy::cast_precision_loss)]
     let exact: Vec<f64> = buckets
         .iter()
-        .map(|(_, _, bytes)| *bytes as f64 / total as f64 * 100.0)
+        .map(|bucket| bucket.bytes as f64 / total as f64 * 100.0)
         .collect();
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

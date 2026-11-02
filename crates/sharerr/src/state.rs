@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
@@ -18,7 +19,6 @@ use sharerr_store::{Store, Vault};
 use tokio::sync::{Notify, RwLock};
 
 use crate::gluetun::{GluetunStatus, GluetunTarget};
-use crate::notify::QuietNotified;
 use crate::sync::Syncer;
 use crate::system_stats::SystemStatus;
 use crate::tracker::LegacyTokenStatus;
@@ -76,38 +76,17 @@ pub struct ServeState {
     /// [`Self::recovery_delay`] backs off on. Reset the moment one succeeds, and by
     /// [`Self::invalidate`] — a credential was just written, so the next attempt is
     /// a fresh question rather than a continuation of the old one.
-    recovery_failures: RwLock<u32>,
+    recovery_failures: AtomicU32,
     /// Consecutive sync *passes* that failed outright once a syncer had already
     /// built — distinct from `recovery_failures`, which is about never having
     /// built one at all. [`Self::sync_retry_delay`] backs off on this the same
     /// way, so a torrent client or *arr app that dies mid-pass is retried within
     /// seconds instead of waiting out the rest of the configured interval.
     /// Reset on any pass that returns `Ok`, and by [`Self::invalidate`].
-    sync_failures: RwLock<u32>,
-    /// The builtin tracker's announce token, cached because it is consulted on
-    /// every announce from every peer and reading it means an Argon2 derivation.
-    ///
-    /// `None` outer means "not looked up yet"; `Some(None)` means "looked up, and
-    /// there is no token". Cleared by [`Self::invalidate`], so changing it through
-    /// the UI takes effect without a restart.
-    tracker_token: RwLock<Option<Option<String>>>,
-    /// The tracker token a rotation just replaced, cached the same way and
-    /// for the same reason as `tracker_token` — see
-    /// `crate::web::settings::rotate_tracker_token`.
-    tracker_token_previous: RwLock<Option<Option<String>>>,
-    /// This instance's gossip signing identity, cached for the same reason as
-    /// `tracker_token` — loading it means opening the vault, and the pull side of
-    /// gossip is asked on every friend's poll.
-    gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
-    /// The bearer token `/metrics` requires, cached the same way and for the
-    /// same reason as `tracker_token` — a scrape target is polled on
-    /// whatever interval the operator's Prometheus uses, often as tight as
-    /// every 15 seconds. See [`Self::try_metrics_token`] for the fail-closed
-    /// contract this cache exists to serve, not just to speed up.
-    metrics_token: RwLock<Option<Option<String>>>,
-    /// The management API's bearer token, cached the same way and for the
-    /// same reason as `metrics_token`.
-    api_token: RwLock<Option<Option<String>>>,
+    sync_failures: AtomicU32,
+    /// Everything cached out of the vault. [`Self::invalidate`] swaps in an empty
+    /// set, so a cache added to [`VaultCaches`] cannot be missed there.
+    vault_caches: RwLock<Arc<VaultCaches>>,
     /// The embedded lighthouse's state, built lazily the first time
     /// `[lighthouse] enabled = true` is actually observed — see
     /// [`Self::lighthouse_state`]. Same `Option<Option<_>>` shape as
@@ -127,7 +106,7 @@ pub struct ServeState {
     /// periodic sync off. Separate from `wake` because an invalidation or an
     /// endpoint change wakes the loop too, and neither asks for a pass on an
     /// instance that does not sync on a timer.
-    pass_requested: std::sync::atomic::AtomicBool,
+    pass_requested: AtomicBool,
     /// The tracker-facing gluetun poller's slot. Its endpoint is the live
     /// externally reachable address a friend reaches this instance on — one
     /// value for the whole process: the syncer's tracker provider reads it,
@@ -155,11 +134,40 @@ pub struct ServeState {
     /// because two consumers need one copy: however many listeners carry
     /// `/announce`, and the status page's "n peers connected" line.
     swarms: Arc<sharerr_torrent::Swarms>,
-    /// Dedupe for the peer-quiet notification — see [`crate::notify`].
-    quiet_notified: Arc<QuietNotified>,
     /// What the CPU/memory/disk sampler last measured — see
     /// [`crate::system_stats`].
     system_status: Arc<SystemStatus>,
+}
+
+/// The tracker's announce tokens, `(current, previous)`.
+type TrackerTokens = (Option<String>, Option<String>);
+
+/// Values read out of the vault and kept, because reading one means an Argon2
+/// derivation.
+///
+/// In each, outer `None` means "not looked up yet" and `Some(None)` means "looked
+/// up, and there is none". Dropped whole by [`ServeState::invalidate`], so a
+/// credential changed through the UI takes effect without a restart.
+#[derive(Debug, Default)]
+struct VaultCaches {
+    /// The builtin tracker's announce tokens, `(current, previous)`: consulted on
+    /// every announce from every peer. `previous` is the one a rotation just
+    /// replaced; see `crate::web::settings::rotate_tracker_token`.
+    tracker_tokens: RwLock<Option<Option<TrackerTokens>>>,
+    /// This instance's gossip signing identity: the pull side of gossip is asked
+    /// on every friend's poll.
+    gossip_identity: RwLock<Option<Option<Arc<crate::gossip::Identity>>>>,
+    /// The bearer token `/metrics` requires: a scrape target is polled on whatever
+    /// interval the operator's Prometheus uses, often as tight as every 15 seconds.
+    /// See [`ServeState::try_metrics_token`] for the fail-closed contract this
+    /// cache exists to serve, not just to speed up.
+    metrics_token: RwLock<Option<Option<String>>>,
+    /// The management API's bearer token, for the same reason as `metrics_token`.
+    api_token: RwLock<Option<Option<String>>>,
+    /// The gluetun pollers' control-server API keys: a poller re-reads its key every
+    /// interval, so a default 60-second poll would pay 1,440 derivations a day.
+    tracker_gluetun_key: RwLock<Option<Option<SecretString>>>,
+    client_gluetun_key: RwLock<Option<Option<SecretString>>>,
 }
 
 /// Everything one gluetun poller reads and writes, one per [`GluetunTarget`].
@@ -179,13 +187,6 @@ struct GluetunSlot {
     /// What the poller last saw and last failed with — the "when did gluetun
     /// last actually tell sharerr something" the Diagnostics page answers.
     status: Arc<GluetunStatus>,
-    /// The poller's control-server API key, cached like `tracker_token` and
-    /// for a sharper version of the same reason: the poller re-read it every
-    /// interval, so a default 60-second poll paid 1,440 Argon2 derivations a
-    /// day, and both pollers run. Cleared by [`ServeState::invalidate`], so a
-    /// key saved through Settings still takes effect on the next pass without
-    /// a restart.
-    api_key: RwLock<Option<Option<SecretString>>>,
 }
 
 impl GluetunSlot {
@@ -194,7 +195,6 @@ impl GluetunSlot {
             endpoint: Arc::new(AdvertisedEndpoint::new(static_base)),
             refresh: Notify::new(),
             status: Arc::new(GluetunStatus::default()),
-            api_key: RwLock::new(None),
         }
     }
 }
@@ -218,22 +218,17 @@ impl ServeState {
             // the moment `run` starts polling it. Only observable in the sliver
             // between binding the listener and that first attempt finishing.
             syncer: RwLock::new(Err("still starting up".to_owned())),
-            recovery_failures: RwLock::new(0),
-            sync_failures: RwLock::new(0),
-            tracker_token: RwLock::new(None),
-            tracker_token_previous: RwLock::new(None),
-            gossip_identity: RwLock::new(None),
-            metrics_token: RwLock::new(None),
-            api_token: RwLock::new(None),
+            recovery_failures: AtomicU32::new(0),
+            sync_failures: AtomicU32::new(0),
+            vault_caches: RwLock::default(),
             lighthouse_state: RwLock::new(None),
             wake: Notify::new(),
-            pass_requested: std::sync::atomic::AtomicBool::new(false),
+            pass_requested: AtomicBool::new(false),
             tracker,
             client: GluetunSlot::new(None),
             lighthouse_status: Arc::new(crate::lighthouse_client::LighthouseStatus::default()),
             legacy_token_status: Arc::new(LegacyTokenStatus::default()),
             swarms: Arc::new(sharerr_torrent::Swarms::default()),
-            quiet_notified: Arc::new(QuietNotified::default()),
             system_status: Arc::new(SystemStatus::default()),
         }
     }
@@ -242,11 +237,6 @@ impl ServeState {
     /// page alike.
     pub fn swarms(&self) -> Arc<sharerr_torrent::Swarms> {
         Arc::clone(&self.swarms)
-    }
-
-    /// Dedupe state for the peer-quiet notification.
-    pub fn quiet_notified(&self) -> Arc<QuietNotified> {
-        Arc::clone(&self.quiet_notified)
     }
 
     /// What the CPU/memory/disk sampler last measured.
@@ -322,15 +312,13 @@ impl ServeState {
     /// while a pass runs coalesce into one more pass after it, so a season
     /// import's burst of webhooks never runs passes side by side.
     pub fn request_pass(&self) {
-        self.pass_requested
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.pass_requested.store(true, Ordering::Release);
         self.wake.notify_one();
     }
 
     /// Whether a pass was requested since the last call, clearing the request.
     pub fn take_pass_request(&self) -> bool {
-        self.pass_requested
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        self.pass_requested.swap(false, Ordering::AcqRel)
     }
 
     /// Ask `target`'s gluetun poller to re-resolve its endpoint now.
@@ -429,7 +417,7 @@ impl ServeState {
     /// Read `cache`, or fill it by opening the vault and deriving a value with
     /// `load`, caching the result.
     ///
-    /// The shape shared by [`Self::tracker_token`], [`Self::gossip_identity`],
+    /// The shape shared by [`Self::tracker_tokens`], [`Self::gossip_identity`],
     /// and [`Self::lighthouse_state`]: each differs only in which lock it
     /// touches and how it derives a value from an opened vault. The outer
     /// `None` means "not looked up yet", `Some(None)` means "looked up, and
@@ -495,12 +483,15 @@ impl ServeState {
     /// tracker goes through [`Self::tracker_tokens`], which keeps the two
     /// apart.
     pub async fn tracker_token(&self) -> Option<String> {
-        self.try_tracker_token().await.unwrap_or_default()
+        self.tracker_tokens()
+            .await
+            .ok()
+            .and_then(|(current, _)| current)
     }
 
-    async fn try_tracker_token(&self) -> Result<Option<String>, String> {
-        self.try_vault_string(&self.tracker_token, secret_keys::TRACKER_TOKEN)
-            .await
+    /// The current set of vault caches.
+    async fn vault_caches(&self) -> Arc<VaultCaches> {
+        Arc::clone(&*self.vault_caches.read().await)
     }
 
     /// Both announce tokens — `(current, previous)` — for the tracker's
@@ -509,50 +500,20 @@ impl ServeState {
     /// that will not open. `Ok((None, _))` is the genuine "no token
     /// required" answer and only ever comes from an opened vault.
     ///
-    /// A cold miss fills both caches from one vault open rather than two —
-    /// this is asked on every announce, and the miss is what every peer's
-    /// first announce after a settings save hits at once.
-    pub async fn tracker_tokens(&self) -> Result<(Option<String>, Option<String>), String> {
-        if let (Some(current), Some(previous)) = (
-            &*self.tracker_token.read().await,
-            &*self.tracker_token_previous.read().await,
-        ) {
-            return Ok((current.clone(), previous.clone()));
-        }
-
-        // Both write guards held across the open, in the same order as the
-        // reads above, so concurrent misses queue behind one derivation —
-        // same reasoning as `try_cached_from_vault`.
-        let mut current = self.tracker_token.write().await;
-        let mut previous = self.tracker_token_previous.write().await;
-        if let (Some(current), Some(previous)) = (&*current, &*previous) {
-            return Ok((current.clone(), previous.clone()));
-        }
-        let vault = self.open_vault().await?;
-        let tokens = (
-            vault_string(&vault, secret_keys::TRACKER_TOKEN),
-            vault_string(&vault, secret_keys::TRACKER_TOKEN_PREVIOUS),
-        );
-        *current = Some(tokens.0.clone());
-        *previous = Some(tokens.1.clone());
-        Ok(tokens)
-    }
-
-    /// The token a rotation just replaced, still accepted alongside
-    /// [`Self::tracker_token`] until the operator finalizes it away — see
-    /// [`crate::tracker::authenticate_token`].
-    #[cfg(test)]
-    pub async fn tracker_token_previous(&self) -> Option<String> {
-        self.try_tracker_token_previous().await.unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    async fn try_tracker_token_previous(&self) -> Result<Option<String>, String> {
-        self.try_vault_string(
-            &self.tracker_token_previous,
-            secret_keys::TRACKER_TOKEN_PREVIOUS,
-        )
-        .await
+    /// One cache for both, so a cold miss is one vault open rather than two: this
+    /// is asked on every announce, and the miss is what every peer's first announce
+    /// after a settings save hits at once.
+    pub async fn tracker_tokens(&self) -> Result<TrackerTokens, String> {
+        let caches = self.vault_caches().await;
+        let tokens = self
+            .try_cached_from_vault(&caches.tracker_tokens, |vault| {
+                Some((
+                    vault_string(&vault, secret_keys::TRACKER_TOKEN),
+                    vault_string(&vault, secret_keys::TRACKER_TOKEN_PREVIOUS),
+                ))
+            })
+            .await?;
+        Ok(tokens.unwrap_or_default())
     }
 
     /// The bearer token `/metrics` requires, or `Err` when the vault could not
@@ -562,14 +523,16 @@ impl ServeState {
     /// transient vault error cannot be mistaken for "there is no token" and
     /// admit an unauthenticated scrape.
     pub async fn try_metrics_token(&self) -> Result<Option<String>, String> {
-        self.try_vault_string(&self.metrics_token, secret_keys::METRICS_TOKEN)
+        let caches = self.vault_caches().await;
+        self.try_vault_string(&caches.metrics_token, secret_keys::METRICS_TOKEN)
             .await
     }
 
     /// The management API's bearer token, failing closed exactly as
     /// [`Self::try_metrics_token`] does.
     pub async fn try_api_token(&self) -> Result<Option<String>, String> {
-        self.try_vault_string(&self.api_token, secret_keys::API_TOKEN)
+        let caches = self.vault_caches().await;
+        self.try_vault_string(&caches.api_token, secret_keys::API_TOKEN)
             .await
     }
 
@@ -580,12 +543,13 @@ impl ServeState {
 
     /// A gluetun poller's control-server API key, cached after the first read.
     ///
-    /// Same shape and same reasoning as [`Self::tracker_token`]: the outer
-    /// `None` means "not looked up yet", `Some(None)` means "looked up, and
-    /// there is none". The poller calls this every interval, so without the
-    /// cache each call was an Argon2 derivation on a timer.
     pub async fn gluetun_api_key(&self, target: GluetunTarget) -> Option<SecretString> {
-        self.cached_from_vault(&self.slot(target).api_key, |vault| {
+        let caches = self.vault_caches().await;
+        let cache = match target {
+            GluetunTarget::Tracker => &caches.tracker_gluetun_key,
+            GluetunTarget::Client => &caches.client_gluetun_key,
+        };
+        self.cached_from_vault(cache, |vault| {
             vault.get(target.credential_key()).ok().flatten()
         })
         .await
@@ -596,7 +560,8 @@ impl ServeState {
     /// Loading means opening the vault — an Argon2 derivation — and
     /// `self_record` is asked on every pull request a friend makes.
     pub async fn gossip_identity(&self) -> Option<Arc<crate::gossip::Identity>> {
-        self.cached_from_vault(&self.gossip_identity, |mut vault| {
+        let caches = self.vault_caches().await;
+        self.cached_from_vault(&caches.gossip_identity, |mut vault| {
             crate::gossip::Identity::load_or_create(&mut vault)
                 .ok()
                 .map(Arc::new)
@@ -682,23 +647,17 @@ impl ServeState {
         *self.syncer.write().await = Err(format!("reloading — {reason}"));
         // These are vault values too, so a credential change has to drop them or
         // the tracker and the feed keep enforcing the old ones.
-        *self.tracker_token.write().await = None;
-        *self.tracker_token_previous.write().await = None;
-        *self.gossip_identity.write().await = None;
-        *self.metrics_token.write().await = None;
-        *self.api_token.write().await = None;
-        *self.tracker.api_key.write().await = None;
-        *self.client.api_key.write().await = None;
+        *self.vault_caches.write().await = Arc::default();
         // `lighthouse_state` is not cleared here: its only vault input is the
         // decoy seed, which is minted once and never written by any settings
         // page, so there is no newer value for a rebuild to pick up.
         // Back to the fast retry. Someone has just changed something, so the next
         // attempt is a new question — making them wait out a backoff earned by the
         // *previous* configuration would be the opposite of what they expect.
-        *self.recovery_failures.write().await = 0;
+        self.recovery_failures.store(0, Ordering::Relaxed);
         // Same reasoning: a rebuilt syncer has run no passes yet, so a backoff
         // earned by the syncer this replaces must not carry over.
-        *self.sync_failures.write().await = 0;
+        self.sync_failures.store(0, Ordering::Relaxed);
         self.wake.notify_one();
     }
 
@@ -713,22 +672,22 @@ impl ServeState {
     /// Backing off costs nothing in responsiveness because [`Self::invalidate`]
     /// both resets the counter and wakes the loop, so the moment an operator
     /// actually changes something the next attempt is immediate.
-    pub async fn recovery_delay(&self) -> Duration {
-        let failures = *self.recovery_failures.read().await;
+    pub fn recovery_delay(&self) -> Duration {
+        let failures = self.recovery_failures.load(Ordering::Relaxed);
         backoff_for(failures)
     }
 
     /// Record that a sync pass returned successfully, clearing any backoff a
     /// prior failed pass built up.
-    pub async fn note_sync_success(&self) {
-        *self.sync_failures.write().await = 0;
+    pub fn note_sync_success(&self) {
+        self.sync_failures.store(0, Ordering::Relaxed);
     }
 
     /// Record that a sync pass failed outright, so [`Self::sync_retry_delay`]
     /// backs off the next attempt instead of repeating the same failure on a
     /// fixed schedule.
-    pub async fn note_sync_failure(&self) {
-        *self.sync_failures.write().await += 1;
+    pub fn note_sync_failure(&self) {
+        self.sync_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     /// How long to wait before the next sync attempt, given `interval` — the
@@ -745,8 +704,8 @@ impl ServeState {
     /// it. A torrent client or *arr app that comes back after a brief restart
     /// is then retried within seconds rather than whatever is left of a
     /// 15-minute interval.
-    pub async fn sync_retry_delay(&self, interval: Duration) -> Duration {
-        let failures = *self.sync_failures.read().await;
+    pub fn sync_retry_delay(&self, interval: Duration) -> Duration {
+        let failures = self.sync_failures.load(Ordering::Relaxed);
         if failures == 0 {
             return interval;
         }
@@ -782,27 +741,28 @@ impl ServeState {
         // that actually stopped the file loading.
         if let Some(reason) = self.config_error().await {
             *self.syncer.write().await = Err(format!("{}: {reason}", self.config_path.display()));
-            *self.recovery_failures.write().await += 1;
+            self.recovery_failures.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         let config = self.config().await;
-        match Syncer::build(&config, self.endpoint()).await {
+        let store = async { self.store().await.map_err(|reason| anyhow::anyhow!(reason)) };
+        match Syncer::build_with_store(&config, self.endpoint(), store).await {
             Ok(syncer) => {
                 let syncer = Arc::new(syncer);
                 tracing::info!("credentials accepted; reconciliation is available");
                 *self.syncer.write().await = Ok(Arc::clone(&syncer));
-                *self.recovery_failures.write().await = 0;
+                self.recovery_failures.store(0, Ordering::Relaxed);
                 Some(syncer)
             }
             Err(err) => {
                 // `warn`, not `error`: an unpopulated vault is the expected state of
                 // a container on its very first start, not a malfunction.
                 let reason = format!("{err:#}");
-                *self.recovery_failures.write().await += 1;
+                self.recovery_failures.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     reason,
-                    retry_secs = self.recovery_delay().await.as_secs(),
+                    retry_secs = self.recovery_delay().as_secs(),
                     "cannot reconcile yet — fix this and it will be picked up without a restart"
                 );
                 *self.syncer.write().await = Err(reason);
@@ -833,7 +793,7 @@ fn backoff_for(failures: u32) -> Duration {
 /// One function for both the startup read and the post-save refresh, so this
 /// match is not duplicated for a value this load-bearing.
 fn static_base(config: &Config) -> Option<url::Url> {
-    match sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port()) {
+    match config.advertised_base() {
         Ok(base) => base,
         Err(err) => {
             tracing::warn!(%err, "the advertised address is unusable");
@@ -857,7 +817,7 @@ pub(crate) mod fixtures {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::test_support::{AlwaysEmptyQbit, AlwaysReadyTracker};
+    use crate::test_support::{AlwaysReadyTracker, StubClient};
 
     /// A config pointing at an empty directory: no vault, no credentials. This is a
     /// fresh container's first start, and it is independent of whether a master key
@@ -905,6 +865,36 @@ pub(crate) mod fixtures {
         (dir, Arc::new(ServeState::new(config, path, None)))
     }
 
+    /// `config` in a `Jail` with a master key set, so the vault really opens:
+    /// `seed` fills it, then `body` runs against the state. `data_dir` is replaced
+    /// with the Jail's directory.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn with_open_vault<F, Fut>(
+        config: Config,
+        seed: impl FnOnce(&mut sharerr_store::Vault),
+        body: F,
+    ) where
+        F: FnOnce(Arc<ServeState>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("SHARERR_MASTER_KEY", "fixture-master-key");
+            let config = Config {
+                data_dir: jail.directory().to_path_buf(),
+                ..config
+            };
+            let path = jail.directory().join("sharerr.toml");
+            let state = Arc::new(ServeState::new(config, path, None));
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut vault = state.open_vault().await.unwrap();
+                seed(&mut vault);
+                drop(vault);
+                body(state).await;
+            });
+            Ok(())
+        });
+    }
+
     /// [`unconfigured`], with its store opened and then closed: `ServeState::store`
     /// keeps handing out the cached handle, and every query on it fails. This
     /// is the fault [`store_unopenable`] cannot inject — a database that
@@ -938,15 +928,18 @@ pub(crate) mod fixtures {
         let path = dir.path().join("sharerr.toml");
         let state = ServeState::new(config.clone(), path, None);
 
-        let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(AlwaysEmptyQbit);
+        let qbit: Arc<dyn sharerr_client::TorrentClient> = Arc::new(StubClient::default());
         let seeder = crate::sync::seed::Seeder {
             qbit,
             category: "sharerr".to_owned(),
             tag: "sharerr".to_owned(),
             skip_checking: true,
-            upload_limit_kib: None,
-            ratio_limit: None,
-            private: config.seeding.private,
+            seeding: sharerr_core::config::SeedingConfig {
+                upload_limit_kib: None,
+                ratio_limit: None,
+                ..config.seeding
+            },
+            sidecar_roots: Vec::new(),
             torrent_dir: dir.path().to_path_buf(),
         };
         // Opened from `config.database_path()`, the same path `ServeState::store`
@@ -1157,7 +1150,7 @@ mod tests {
     async fn the_first_retry_is_the_advertised_interval() {
         let (_dir, state) = unconfigured();
 
-        assert_eq!(state.recovery_delay().await, RECOVERY_INTERVAL);
+        assert_eq!(state.recovery_delay(), RECOVERY_INTERVAL);
     }
 
     /// The point of the backoff: a permanently blocked instance must stop
@@ -1168,15 +1161,15 @@ mod tests {
 
         // Two failed attempts: 15s, then 30s.
         state.ensure_ready().await;
-        assert_eq!(state.recovery_delay().await, Duration::from_secs(30));
+        assert_eq!(state.recovery_delay(), Duration::from_secs(30));
         state.ensure_ready().await;
-        assert_eq!(state.recovery_delay().await, Duration::from_secs(60));
+        assert_eq!(state.recovery_delay(), Duration::from_secs(60));
 
         for _ in 0..20 {
             state.ensure_ready().await;
         }
         assert_eq!(
-            state.recovery_delay().await,
+            state.recovery_delay(),
             RECOVERY_INTERVAL_MAX,
             "the delay must be capped, and must not overflow on the way there"
         );
@@ -1190,11 +1183,11 @@ mod tests {
         for _ in 0..5 {
             state.ensure_ready().await;
         }
-        assert!(state.recovery_delay().await > RECOVERY_INTERVAL);
+        assert!(state.recovery_delay() > RECOVERY_INTERVAL);
 
         state.invalidate("credentials changed").await;
 
-        assert_eq!(state.recovery_delay().await, RECOVERY_INTERVAL);
+        assert_eq!(state.recovery_delay(), RECOVERY_INTERVAL);
     }
 
     /// The case that matters most: a healthy instance with nothing to recover
@@ -1206,7 +1199,7 @@ mod tests {
         let (_dir, state) = unconfigured();
         let interval = Duration::from_secs(900);
 
-        assert_eq!(state.sync_retry_delay(interval).await, interval);
+        assert_eq!(state.sync_retry_delay(interval), interval);
     }
 
     /// The point of the fix: a pass that fails outright is retried within
@@ -1216,17 +1209,11 @@ mod tests {
         let (_dir, state) = unconfigured();
         let interval = Duration::from_secs(900);
 
-        state.note_sync_failure().await;
-        assert_eq!(
-            state.sync_retry_delay(interval).await,
-            Duration::from_secs(30)
-        );
+        state.note_sync_failure();
+        assert_eq!(state.sync_retry_delay(interval), Duration::from_secs(30));
 
-        state.note_sync_failure().await;
-        assert_eq!(
-            state.sync_retry_delay(interval).await,
-            Duration::from_secs(60)
-        );
+        state.note_sync_failure();
+        assert_eq!(state.sync_retry_delay(interval), Duration::from_secs(60));
     }
 
     /// Backoff must never make a pass wait *longer* than it would have on a
@@ -1238,10 +1225,10 @@ mod tests {
         let interval = Duration::from_secs(45);
 
         for _ in 0..10 {
-            state.note_sync_failure().await;
+            state.note_sync_failure();
         }
 
-        assert_eq!(state.sync_retry_delay(interval).await, interval);
+        assert_eq!(state.sync_retry_delay(interval), interval);
     }
 
     /// A pass that succeeds clears whatever backoff earlier failures built up
@@ -1251,13 +1238,13 @@ mod tests {
         let (_dir, state) = unconfigured();
         let interval = Duration::from_secs(900);
 
-        state.note_sync_failure().await;
-        state.note_sync_failure().await;
-        assert!(state.sync_retry_delay(interval).await < interval);
+        state.note_sync_failure();
+        state.note_sync_failure();
+        assert!(state.sync_retry_delay(interval) < interval);
 
-        state.note_sync_success().await;
+        state.note_sync_success();
 
-        assert_eq!(state.sync_retry_delay(interval).await, interval);
+        assert_eq!(state.sync_retry_delay(interval), interval);
     }
 
     /// Invalidating rebuilds the syncer from scratch, so a backoff earned by
@@ -1268,26 +1255,22 @@ mod tests {
         let (_dir, state) = unconfigured();
         let interval = Duration::from_secs(900);
 
-        state.note_sync_failure().await;
-        state.note_sync_failure().await;
-        assert!(state.sync_retry_delay(interval).await < interval);
+        state.note_sync_failure();
+        state.note_sync_failure();
+        assert!(state.sync_retry_delay(interval) < interval);
 
         state.invalidate("credentials changed").await;
 
-        assert_eq!(state.sync_retry_delay(interval).await, interval);
+        assert_eq!(state.sync_retry_delay(interval), interval);
     }
 
-    /// `quiet_notified` and `swarms` both hand out one shared handle for the
+    /// `swarms` and `system_status` both hand out one shared handle for the
     /// whole process — asserting `Arc::ptr_eq` is what proves a second call
     /// reuses it rather than building a fresh, disconnected one.
     #[tokio::test]
-    async fn quiet_notified_and_swarms_are_shared_handles() {
+    async fn swarms_and_system_status_are_shared_handles() {
         let (_dir, state) = unconfigured();
 
-        assert!(Arc::ptr_eq(
-            &state.quiet_notified(),
-            &state.quiet_notified()
-        ));
         assert!(Arc::ptr_eq(&state.swarms(), &state.swarms()));
         assert!(Arc::ptr_eq(&state.system_status(), &state.system_status()));
     }
@@ -1407,8 +1390,8 @@ mod tests {
                 assert!(state.tracker_token().await.is_none());
 
                 // Same shape, same reasoning, no rotation in progress yet.
-                assert!(state.tracker_token_previous().await.is_none());
-                assert!(state.tracker_token_previous().await.is_none());
+                assert_eq!(state.tracker_tokens().await.unwrap(), (None, None));
+                assert_eq!(state.tracker_tokens().await.unwrap(), (None, None));
 
                 assert!(
                     state

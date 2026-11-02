@@ -21,12 +21,14 @@
 //! on a home connection is a liability, not a feature.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use sharerr_core::endpoint::is_private_ip;
 use tokio::sync::RwLock;
+
+use crate::bencode::{Value, write_bytes, write_int, write_len};
 
 /// How long a client is told to wait before re-announcing.
 const INTERVAL: Duration = Duration::from_secs(1800);
@@ -410,6 +412,35 @@ impl Swarms {
         result
     }
 
+    /// One swarm's [`SwarmView`], if it has a live peer right now.
+    pub async fn snapshot(&self, info_hash: &InfoHash) -> Option<SwarmView> {
+        let swarms = self.inner.read().await;
+        let swarm = swarms.get(info_hash)?;
+        let now = Instant::now();
+        let peers: Vec<SocketAddr> = live(swarm, now).map(|(_, peer)| peer.addr).collect();
+        if peers.is_empty() {
+            return None;
+        }
+        let (complete, incomplete) = tally(swarm, now);
+        Some(SwarmView {
+            info_hash: *info_hash,
+            peers,
+            complete,
+            incomplete,
+        })
+    }
+
+    /// Seeder and leecher counts of every swarm with a live peer right now.
+    pub async fn counts(&self) -> HashMap<InfoHash, (usize, usize)> {
+        let swarms = self.inner.read().await;
+        let now = Instant::now();
+        swarms
+            .iter()
+            .map(|(info_hash, swarm)| (*info_hash, tally(swarm, now)))
+            .filter(|(_, counts)| *counts != (0, 0))
+            .collect()
+    }
+
     /// Seeder and leecher counts for one hash, for `/scrape`.
     pub async fn scrape(&self, info_hash: &InfoHash) -> (usize, usize) {
         let swarms = self.inner.read().await;
@@ -433,9 +464,9 @@ impl Swarms {
 
 /// Bencode a tracker response.
 ///
-/// Written by hand rather than through serde. The format has four constructs, and
-/// the one that matters — `peers` as a byte string of packed addresses, not a
-/// UTF-8 string — is precisely the thing a serde derive makes awkward.
+/// Streamed through [`crate::bencode`]'s writers rather than built as a value: `peers`
+/// packs straight into the output behind its own length prefix, on the tracker's
+/// busiest path.
 impl AnnounceResponse {
     /// Render as the bencoded response a BitTorrent client expects.
     ///
@@ -459,9 +490,9 @@ impl AnnounceResponse {
         let v4 = || self.peers.iter().filter(|a| a.is_ipv4());
         let v6 = || self.peers.iter().filter(|a| a.is_ipv6());
 
-        put_key(&mut out, "peers");
+        write_bytes(b"peers", &mut out);
         if compact {
-            put_len(&mut out, v4_count * 6);
+            write_len(v4_count * 6, &mut out);
             v4().for_each(|addr| pack_compact(&mut out, addr));
         } else {
             // The dictionary form has no separate `peers6`: every peer goes
@@ -470,10 +501,10 @@ impl AnnounceResponse {
             out.push(b'l');
             for addr in v4().chain(v6()) {
                 out.push(b'd');
-                put_key(&mut out, "ip");
-                put_bytes(&mut out, addr.ip().to_string().as_bytes());
-                put_key(&mut out, "port");
-                put_raw_int(&mut out, i64::from(addr.port()));
+                write_bytes(b"ip", &mut out);
+                write_bytes(addr.ip().to_string().as_bytes(), &mut out);
+                write_bytes(b"port", &mut out);
+                write_int(i64::from(addr.port()), &mut out);
                 out.push(b'e');
             }
             out.push(b'e');
@@ -482,8 +513,8 @@ impl AnnounceResponse {
         // Only emitted when there is something to put in it. An empty `peers6` is
         // harmless but some older clients are happier without the key at all.
         if compact && v6_count > 0 {
-            put_key(&mut out, "peers6");
-            put_len(&mut out, v6_count * 18);
+            write_bytes(b"peers6", &mut out);
+            write_len(v6_count * 18, &mut out);
             v6().for_each(|addr| pack_compact(&mut out, addr));
         }
 
@@ -498,57 +529,28 @@ impl AnnounceResponse {
 /// non-200 as a transport failure and retry forever without ever surfacing the
 /// reason to the user.
 pub fn failure_bencode(reason: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(reason.len() + 32);
-    out.push(b'd');
-    put_key(&mut out, "failure reason");
-    put_bytes(&mut out, reason.as_bytes());
-    out.push(b'e');
-    out
+    let body = [(b"failure reason".to_vec(), Value::string(reason))];
+    Value::Dict(BTreeMap::from(body)).encode()
 }
 
 /// Bencode a `/scrape` response for a set of hashes.
 pub fn scrape_bencode(files: &[(InfoHash, usize, usize)]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64 + files.len() * 96);
-    out.push(b'd');
-    put_key(&mut out, "files");
-    out.push(b'd');
-    for (hash, complete, incomplete) in files {
-        put_bytes(&mut out, hash);
-        out.push(b'd');
-        put_int(&mut out, "complete", *complete as i64);
-        put_int(&mut out, "downloaded", *complete as i64);
-        put_int(&mut out, "incomplete", *incomplete as i64);
-        out.push(b'e');
-    }
-    out.push(b'e');
-    out.push(b'e');
-    out
-}
-
-fn put_key(out: &mut Vec<u8>, key: &str) {
-    put_bytes(out, key.as_bytes());
-}
-
-fn put_bytes(out: &mut Vec<u8>, value: &[u8]) {
-    put_len(out, value.len());
-    out.extend_from_slice(value);
-}
-
-/// The `<len>:` prefix of a byte string, for a payload written afterwards.
-fn put_len(out: &mut Vec<u8>, len: usize) {
-    out.extend_from_slice(len.to_string().as_bytes());
-    out.push(b':');
-}
-
-fn put_raw_int(out: &mut Vec<u8>, value: i64) {
-    out.push(b'i');
-    out.extend_from_slice(value.to_string().as_bytes());
-    out.push(b'e');
+    let count = |n: usize| Value::Int(n as i64);
+    let entries = files.iter().map(|(hash, complete, incomplete)| {
+        let stats = BTreeMap::from([
+            (b"complete".to_vec(), count(*complete)),
+            (b"downloaded".to_vec(), count(*complete)),
+            (b"incomplete".to_vec(), count(*incomplete)),
+        ]);
+        (hash.to_vec(), Value::Dict(stats))
+    });
+    let files = Value::Dict(entries.collect());
+    Value::Dict(BTreeMap::from([(b"files".to_vec(), files)])).encode()
 }
 
 fn put_int(out: &mut Vec<u8>, key: &str, value: i64) {
-    put_key(out, key);
-    put_raw_int(out, value);
+    write_bytes(key.as_bytes(), out);
+    write_int(value, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -590,41 +592,17 @@ pub fn parse_query(query: &[u8]) -> HashMap<&str, Cow<'_, [u8]>> {
 /// `%` or `+` in it, so `port`, `left`, `event`, `compact` and `numwant` cost
 /// no allocation on the hot path every announce takes.
 fn percent_decode(raw: &[u8]) -> Cow<'_, [u8]> {
-    if !raw.contains(&b'%') && !raw.contains(&b'+') {
-        return Cow::Borrowed(raw);
+    // Replaced first, so a `%2B` still decodes to a literal `+`.
+    if raw.contains(&b'+') {
+        let spaced: Vec<u8> = raw
+            .iter()
+            .map(|&byte| if byte == b'+' { b' ' } else { byte })
+            .collect();
+        return Cow::Owned(percent_encoding::percent_decode(&spaced).collect());
     }
-
-    let mut out = Vec::with_capacity(raw.len());
-    let mut i = 0;
-
-    while i < raw.len() {
-        match raw[i] {
-            b'%' if i + 2 < raw.len() => {
-                match (hex_nibble(raw[i + 1]), hex_nibble(raw[i + 2])) {
-                    (Some(hi), Some(lo)) => {
-                        out.push((hi << 4) | lo);
-                        i += 3;
-                    }
-                    // A stray `%` is kept verbatim rather than dropped; dropping it
-                    // would shorten a hash and produce a confusing length error.
-                    _ => {
-                        out.push(raw[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-
-    Cow::Owned(out)
+    // A stray `%` is kept verbatim rather than dropped; dropping it would shorten
+    // a hash and produce a confusing length error.
+    percent_encoding::percent_decode(raw).into()
 }
 
 /// Append one peer in BEP 23/7 compact form: address octets then a big-endian
@@ -636,15 +614,6 @@ fn pack_compact(out: &mut Vec<u8>, addr: &SocketAddr) {
         IpAddr::V6(ip) => out.extend_from_slice(&ip.octets()),
     }
     out.extend_from_slice(&addr.port().to_be_bytes());
-}
-
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Parse a hex info hash — the form sharerr stores and the Torznab feed publishes.
@@ -1121,5 +1090,15 @@ mod tests {
             }
         );
         assert_eq!(swarms.snapshots().await.len(), 2);
+
+        let view = swarms.snapshot(&seeder.info_hash).await.unwrap();
+        assert_eq!(
+            (view.complete, view.incomplete, view.peers.len()),
+            (1, 1, 2)
+        );
+        assert!(swarms.snapshot(&[0; 20]).await.is_none());
+        let counts = swarms.counts().await;
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts.get(&seeder.info_hash), Some(&(1, 1)));
     }
 }

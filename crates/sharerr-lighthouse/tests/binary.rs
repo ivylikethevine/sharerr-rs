@@ -92,10 +92,9 @@ impl Lighthouse {
     fn wait_until_ready(&self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok()
-                && self
-                    .get("/lighthouse/v1/health")
-                    .starts_with("HTTP/1.1 200")
+            if self
+                .get("/lighthouse/v1/health")
+                .starts_with("HTTP/1.1 200")
             {
                 return true;
             }

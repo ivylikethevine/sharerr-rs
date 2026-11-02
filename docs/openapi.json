@@ -1562,7 +1562,7 @@
         "tags": [
           "ops"
         ],
-        "summary": "in this handler turns a fixable configuration gap into a restart loop.",
+        "summary": "Liveness, not correctness — this answers \"should this container be restarted?\",\nand the answer is no even when the vault is empty, because a restart cannot\npopulate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional\nin this handler turns a fixable configuration gap into a restart loop.",
         "operationId": "health",
         "responses": {
           "200": {

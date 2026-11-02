@@ -42,7 +42,7 @@ use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::{join_path, now_epoch};
 use sharerr_lighthouse::EndpointRecord as LighthouseRecord;
-use sharerr_store::{EndpointKind, ObservedVia, Peer, Store, Vault};
+use sharerr_store::{ObservedVia, Peer, Store, Vault};
 use url::Url;
 
 use crate::gossip;
@@ -73,24 +73,7 @@ use crate::state::ServeState;
 /// them.
 #[derive(Debug, Default)]
 pub struct LighthouseStatus {
-    inner: tokio::sync::RwLock<StatusInner>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct StatusInner {
-    last_pass_at: Option<i64>,
-    /// Keyed by lighthouse URL. A `BTreeMap` so the rendered order is stable
-    /// between page loads rather than following a hash seed.
-    reports: std::collections::BTreeMap<String, ReportOutcome>,
-    last_recovery_at: Option<i64>,
-    last_recovery_peer: Option<String>,
-    lookups_attempted: usize,
-}
-
-#[derive(Debug, Default, Clone)]
-struct ReportOutcome {
-    last_success_at: Option<i64>,
-    last_error: Option<String>,
+    inner: tokio::sync::RwLock<LighthouseSnapshot>,
 }
 
 /// A read-only snapshot of a [`LighthouseStatus`], for rendering.
@@ -100,8 +83,10 @@ pub struct LighthouseSnapshot {
     /// the first one, which — with a 15 minute interval — is a real state an
     /// operator can land on right after configuring one.
     pub last_pass_at: Option<i64>,
-    /// One row per lighthouse this instance has actually tried, newest state.
-    pub lighthouses: Vec<LighthouseReport>,
+    /// One row per lighthouse this instance has actually tried, newest state, keyed
+    /// by URL. A `BTreeMap` so the rendered order is stable between page loads
+    /// rather than following a hash seed.
+    pub lighthouses: std::collections::BTreeMap<String, LighthouseReport>,
     /// When a lookup last recovered a friend's address, and whose. The only
     /// evidence a lighthouse has ever earned its keep — everything else here
     /// says the machinery is running, not that it has helped.
@@ -113,9 +98,8 @@ pub struct LighthouseSnapshot {
 }
 
 /// One lighthouse's report state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct LighthouseReport {
-    pub url: String,
     pub last_success_at: Option<i64>,
     /// The refusal, verbatim — a 403 (the key hash is pinned to a different
     /// keypair) and a 503 (that lighthouse is full) have entirely different
@@ -130,14 +114,18 @@ impl LighthouseStatus {
 
     async fn record_report_ok(&self, url: &Url) {
         let mut inner = self.inner.write().await;
-        let entry = inner.reports.entry(url.to_string()).or_default();
+        let entry = inner.lighthouses.entry(url.to_string()).or_default();
         entry.last_success_at = Some(now_epoch());
         entry.last_error = None;
     }
 
     async fn record_report_err(&self, url: &Url, reason: String) {
         let mut inner = self.inner.write().await;
-        inner.reports.entry(url.to_string()).or_default().last_error = Some(reason);
+        inner
+            .lighthouses
+            .entry(url.to_string())
+            .or_default()
+            .last_error = Some(reason);
     }
 
     async fn record_lookups(&self, attempted: usize) {
@@ -151,22 +139,7 @@ impl LighthouseStatus {
     }
 
     pub async fn snapshot(&self) -> LighthouseSnapshot {
-        let inner = self.inner.read().await;
-        LighthouseSnapshot {
-            last_pass_at: inner.last_pass_at,
-            lighthouses: inner
-                .reports
-                .iter()
-                .map(|(url, outcome)| LighthouseReport {
-                    url: url.clone(),
-                    last_success_at: outcome.last_success_at,
-                    last_error: outcome.last_error.clone(),
-                })
-                .collect(),
-            last_recovery_at: inner.last_recovery_at,
-            last_recovery_peer: inner.last_recovery_peer.clone(),
-            lookups_attempted: inner.lookups_attempted,
-        }
+        self.inner.read().await.clone()
     }
 }
 
@@ -211,7 +184,7 @@ async fn run(state: &Arc<ServeState>, http: &reqwest::Client) {
     let Ok(vault) = state.open_vault().await else {
         return;
     };
-    let Ok(peers) = store.list_peers().await else {
+    let Ok(peers) = store.active_peers().await else {
         return;
     };
 
@@ -248,7 +221,7 @@ async fn report(
     };
 
     let mut attempts = Vec::new();
-    for peer in peers.iter().filter(|p| !p.is_revoked()) {
+    for peer in peers {
         for url in urls {
             attempts.push(report_one(http, url, &peer.key_hash, record, status));
         }
@@ -328,11 +301,10 @@ async fn lookup_quiet(
     status: &LighthouseStatus,
 ) {
     let now = now_epoch();
-    let quiet_secs = i64::try_from(quiet_secs).unwrap_or(i64::MAX);
+    let quiet_secs = sharerr_core::saturating_i64(quiet_secs);
 
     let quiet: Vec<&Peer> = peers
         .iter()
-        .filter(|p| !p.is_revoked())
         .filter(|p| is_quiet(p, now, quiet_secs))
         .collect();
     // Counted here rather than inside the per-peer call, so the number means
@@ -376,7 +348,13 @@ async fn lookup_quiet_one(
     for url in urls {
         match lookup_one(http, url, &hash, pubkey).await {
             Ok(Some(record)) => {
-                apply_lookup(store, peer.id, &record).await;
+                crate::gossip::record_endpoints(
+                    store,
+                    peer.id,
+                    &record.endpoints,
+                    ObservedVia::Lighthouse,
+                )
+                .await;
                 status.record_recovery(&peer.label).await;
                 tracing::info!(peer = peer.id, url = %url, "recorded an endpoint via lighthouse");
                 break;
@@ -416,26 +394,6 @@ async fn lookup_one(
         return Ok(None);
     }
     Ok(Some(record))
-}
-
-async fn apply_lookup(store: &Store, peer_id: i64, record: &LighthouseRecord) {
-    for endpoint in &record.endpoints {
-        let Some(kind) = EndpointKind::parse(&endpoint.kind) else {
-            continue;
-        };
-        if let Err(err) = store
-            .record_peer_endpoint(
-                peer_id,
-                kind,
-                &endpoint.addr,
-                Some(endpoint.observed_at),
-                ObservedVia::Lighthouse,
-            )
-            .await
-        {
-            tracing::warn!(error = %err, "could not record a lighthouse-observed endpoint");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -487,11 +445,7 @@ mod tests {
         let snapshot = status.snapshot().await;
         assert_eq!(snapshot.lighthouses.len(), 2);
 
-        let bad_row = snapshot
-            .lighthouses
-            .iter()
-            .find(|r| r.url.contains("bad.example"))
-            .unwrap();
+        let bad_row = &snapshot.lighthouses[&bad.to_string()];
         assert_eq!(
             bad_row.last_error.as_deref(),
             Some("answered 403: pinned elsewhere")
@@ -499,11 +453,7 @@ mod tests {
 
         // The healthy one must not inherit the other's failure — with two
         // configured, an aggregate error reads as though both are broken.
-        let good_row = snapshot
-            .lighthouses
-            .iter()
-            .find(|r| r.url.contains("good.example"))
-            .unwrap();
+        let good_row = &snapshot.lighthouses[&good.to_string()];
         assert!(good_row.last_error.is_none());
         assert!(good_row.last_success_at.is_some());
     }
@@ -522,7 +472,15 @@ mod tests {
 
         let snapshot = status.snapshot().await;
         assert_eq!(snapshot.lighthouses.len(), 1);
-        assert!(snapshot.lighthouses[0].last_error.is_none());
+        assert!(
+            snapshot
+                .lighthouses
+                .values()
+                .next()
+                .unwrap()
+                .last_error
+                .is_none()
+        );
     }
 
     /// A failure after a success keeps the success timestamp: "last accepted 2
@@ -538,8 +496,24 @@ mod tests {
             .await;
 
         let snapshot = status.snapshot().await;
-        assert!(snapshot.lighthouses[0].last_success_at.is_some());
-        assert!(snapshot.lighthouses[0].last_error.is_some());
+        assert!(
+            snapshot
+                .lighthouses
+                .values()
+                .next()
+                .unwrap()
+                .last_success_at
+                .is_some()
+        );
+        assert!(
+            snapshot
+                .lighthouses
+                .values()
+                .next()
+                .unwrap()
+                .last_error
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -643,9 +617,9 @@ mod tests {
         )
         .await;
 
-        let for_alex = lighthouse.lookup(&alex.key_hash).await;
+        let for_alex = lighthouse.lookup(&alex.key_hash);
         assert_eq!(for_alex, own);
-        let for_blair = lighthouse.lookup(&blair.key_hash).await;
+        let for_blair = lighthouse.lookup(&blair.key_hash);
         assert_eq!(for_blair, own);
     }
 
@@ -670,7 +644,6 @@ mod tests {
                 &alex.key_hash,
                 signed_lighthouse_record(9, "198.51.100.4:6881", now),
             )
-            .await
             .unwrap();
 
         let own = signed_lighthouse_record(1, "203.0.113.9:41234", now);
@@ -685,12 +658,12 @@ mod tests {
         .await;
 
         assert_eq!(
-            lighthouse.lookup(&alex.key_hash).await.endpoints[0].addr,
+            lighthouse.lookup(&alex.key_hash).endpoints[0].addr,
             "198.51.100.4:6881",
             "the squatter's record stands; ours was refused"
         );
         assert_eq!(
-            lighthouse.lookup(&blair.key_hash).await,
+            lighthouse.lookup(&blair.key_hash),
             own,
             "Blair's key hash was never claimed, so that report must still land"
         );
@@ -706,7 +679,7 @@ mod tests {
         report(&http, &[url], &peers, None, &LighthouseStatus::default()).await;
 
         // Nothing was ever reported, so a lookup surfaces only a decoy.
-        let looked_up = lighthouse.lookup(&alex.key_hash).await;
+        let looked_up = lighthouse.lookup(&alex.key_hash);
         assert!(sharerr_lighthouse::verify(&looked_up).is_err());
     }
 
@@ -733,7 +706,6 @@ mod tests {
             .unwrap();
         lighthouse
             .report(&sharerr_lighthouse::hash_key(raw_key), record.clone())
-            .await
             .unwrap();
 
         let peers = store.list_peers().await.unwrap();
@@ -749,7 +721,12 @@ mod tests {
         )
         .await;
 
-        let endpoints = store.peer_endpoints(peer.id).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer.id])
+            .await
+            .unwrap()
+            .remove(&peer.id)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].addr, "http://203.0.113.9:41234");
         assert_eq!(endpoints[0].via, ObservedVia::Lighthouse);
@@ -788,7 +765,15 @@ mod tests {
         )
         .await;
 
-        assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
+        assert!(
+            store
+                .peer_endpoints_for(&[peer.id])
+                .await
+                .unwrap()
+                .remove(&peer.id)
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -812,7 +797,6 @@ mod tests {
                 &sharerr_lighthouse::hash_key(raw_key),
                 signed_lighthouse_record(1, "http://203.0.113.9:1", 1000),
             )
-            .await
             .unwrap();
 
         let peers = store.list_peers().await.unwrap();
@@ -829,7 +813,13 @@ mod tests {
         .await;
 
         assert!(
-            store.peer_endpoints(peer.id).await.unwrap().is_empty(),
+            store
+                .peer_endpoints_for(&[peer.id])
+                .await
+                .unwrap()
+                .remove(&peer.id)
+                .unwrap_or_default()
+                .is_empty(),
             "no known pubkey means nothing to verify a result against"
         );
     }
@@ -918,9 +908,17 @@ mod tests {
                 let snapshot = state.lighthouse_status().snapshot().await;
                 assert!(snapshot.last_pass_at.is_some(), "{snapshot:?}");
                 assert_eq!(snapshot.lighthouses.len(), 1);
-                assert!(snapshot.lighthouses[0].last_success_at.is_some());
                 assert!(
-                    sharerr_lighthouse::verify(&lighthouse.lookup(&alex.key_hash).await).is_ok(),
+                    snapshot
+                        .lighthouses
+                        .values()
+                        .next()
+                        .unwrap()
+                        .last_success_at
+                        .is_some()
+                );
+                assert!(
+                    sharerr_lighthouse::verify(&lighthouse.lookup(&alex.key_hash)).is_ok(),
                     "our signed record is filed under Alex's key hash"
                 );
             });
@@ -930,8 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_report_to_nothing_listening_is_recorded_as_that_lighthouses_failure() {
-        let port = sharerr_testkit::net::closed_port();
-        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let url = sharerr_testkit::net::closed_url();
         let (store, _alex) = store_with_peer("Alex", "alex-key").await;
         let peers = store.list_peers().await.unwrap();
         let own = signed_lighthouse_record(1, "203.0.113.9:41234", 1000);
@@ -948,9 +945,29 @@ mod tests {
 
         let snapshot = status.snapshot().await;
         assert_eq!(snapshot.lighthouses.len(), 1);
-        assert_eq!(snapshot.lighthouses[0].url, url.to_string());
-        assert!(snapshot.lighthouses[0].last_error.is_some(), "{snapshot:?}");
-        assert!(snapshot.lighthouses[0].last_success_at.is_none());
+        assert_eq!(
+            snapshot.lighthouses.keys().next().unwrap(),
+            &url.to_string()
+        );
+        assert!(
+            snapshot
+                .lighthouses
+                .values()
+                .next()
+                .unwrap()
+                .last_error
+                .is_some(),
+            "{snapshot:?}"
+        );
+        assert!(
+            snapshot
+                .lighthouses
+                .values()
+                .next()
+                .unwrap()
+                .last_success_at
+                .is_none()
+        );
     }
 
     /// A lookup that fails on the wire or with a non-2xx answer is a debug
@@ -963,9 +980,8 @@ mod tests {
             .respond_with(wiremock::ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let answered_500 = Url::parse(&server.uri()).unwrap();
-        let port = sharerr_testkit::net::closed_port();
-        let nothing_listening = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let answered_500 = sharerr_testkit::mock::base_url(&server);
+        let nothing_listening = sharerr_testkit::net::closed_url();
         let http = reqwest::Client::new();
 
         let err = lookup_one(&http, &answered_500, "hash", "pk")
@@ -1001,7 +1017,15 @@ mod tests {
         )
         .await;
 
-        assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
+        assert!(
+            store
+                .peer_endpoints_for(&[peer.id])
+                .await
+                .unwrap()
+                .remove(&peer.id)
+                .unwrap_or_default()
+                .is_empty()
+        );
         assert!(status.snapshot().await.last_recovery_at.is_none());
     }
 

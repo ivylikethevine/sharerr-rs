@@ -81,10 +81,9 @@ impl Store {
             dead.close().await;
             let _ = self.fault.dead.set(dead);
         }
-        self.fault.pool_calls_left.store(
-            i64::try_from(answered).unwrap_or(i64::MAX),
-            Ordering::SeqCst,
-        );
+        self.fault
+            .pool_calls_left
+            .store(sharerr_core::saturating_i64(answered), Ordering::SeqCst);
         Ok(())
     }
 
@@ -95,6 +94,6 @@ impl Store {
     pub fn busy_after(&self, granted: usize) {
         self.fault
             .hash_calls_left
-            .store(i64::try_from(granted).unwrap_or(i64::MAX), Ordering::SeqCst);
+            .store(sharerr_core::saturating_i64(granted), Ordering::SeqCst);
     }
 }

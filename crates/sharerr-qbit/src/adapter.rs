@@ -19,13 +19,13 @@ use sharerr_client::{
 use crate::QbitClient;
 use crate::error::QbitError;
 
-/// Translate a qBittorrent error into the shared shape.
-///
-/// The two predicates this crate already exposes are exactly the distinction the
-/// shared error preserves, so nothing is lost — an unreachable service and a
-/// rejected password stay apart, and everything else becomes an API error carrying
-/// the original text.
 impl QbitClient {
+    /// Translate a qBittorrent error into the shared shape.
+    ///
+    /// The two predicates this crate already exposes are exactly the distinction the
+    /// shared error preserves, so nothing is lost: an unreachable service and a
+    /// rejected password stay apart, and everything else becomes an API error carrying
+    /// the original text.
     fn translate(&self, err: QbitError) -> ClientError {
         let kind = ClientKind::QBittorrent;
         if err.is_auth_failure() {
@@ -43,6 +43,10 @@ impl QbitClient {
             detail: err.to_string(),
         }
     }
+
+    fn lift<T>(&self, result: std::result::Result<T, QbitError>) -> Result<T> {
+        result.map_err(|e| self.translate(e))
+    }
 }
 
 #[async_trait]
@@ -51,21 +55,18 @@ impl TorrentClient for QbitClient {
         ClientKind::QBittorrent
     }
 
+    /// Nothing to establish: the key is stateless and `auth/login` rejects it
+    /// outright, so proving the key is left to the first real call.
     async fn login(&self) -> Result<()> {
-        QbitClient::login(self).await.map_err(|e| self.translate(e))
+        Ok(())
     }
 
     async fn version(&self) -> Result<String> {
-        QbitClient::version(self)
-            .await
-            .map_err(|e| self.translate(e))
+        self.lift(QbitClient::version(self).await)
     }
 
     async fn list(&self, category: Option<&str>) -> Result<Vec<TorrentSummary>> {
-        let torrents = self
-            .torrents_info(category, None)
-            .await
-            .map_err(|e| self.translate(e))?;
+        let torrents = self.lift(self.torrents_info(category).await)?;
 
         Ok(torrents
             .into_iter()
@@ -86,10 +87,7 @@ impl TorrentClient for QbitClient {
     }
 
     async fn files(&self, hash: &str) -> Result<Vec<TorrentFileEntry>> {
-        let files = self
-            .torrent_files(hash)
-            .await
-            .map_err(|e| self.translate(e))?;
+        let files = self.lift(self.torrent_files(hash).await)?;
 
         Ok(files
             .into_iter()
@@ -101,41 +99,28 @@ impl TorrentClient for QbitClient {
     }
 
     async fn add(&self, request: &AddRequest<'_>) -> Result<()> {
-        self.add_torrent(request)
-            .await
-            .map_err(|e| self.translate(e))
+        self.lift(self.add_torrent(request).await)
     }
 
     async fn remove(&self, hash: &str) -> Result<()> {
         // `remove_torrent` already passes `deleteFiles=false`; the media is the
         // operator's and predates sharerr knowing about it.
-        self.remove_torrent(hash)
-            .await
-            .map_err(|e| self.translate(e))
+        self.lift(self.remove_torrent(hash).await)
     }
 
     async fn set_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
-        self.set_torrent_trackers(hash, urls)
-            .await
-            .map_err(|e| self.translate(e))
+        self.lift(self.set_torrent_trackers(hash, urls).await)
     }
 
     async fn add_trackers(&self, hash: &str, urls: &[url::Url]) -> Result<()> {
-        self.add_torrent_trackers(hash, urls)
-            .await
-            .map_err(|e| self.translate(e))
+        self.lift(self.add_torrent_trackers(hash, urls).await)
     }
 
-    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
-        self.set_torrent_limits(hash, limits)
-            .await
-            .map_err(|e| self.translate(e))
+    async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        self.lift(self.set_torrent_limits(hash, limits).await)
     }
 
     async fn export(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        self.export_torrent(hash)
-            .await
-            .map(Some)
-            .map_err(|e| self.translate(e))
+        self.lift(self.export_torrent(hash).await.map(Some))
     }
 }

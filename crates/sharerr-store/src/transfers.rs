@@ -7,9 +7,7 @@
 use sharerr_core::endpoint::now_epoch;
 use sqlx::Row;
 
-use crate::db::{Store, StoreError};
-
-type Result<T> = std::result::Result<T, StoreError>;
+use crate::db::{Result, Store};
 
 /// The instance-wide running totals, across every admitted announce.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -21,12 +19,6 @@ pub struct TransferTotals {
     pub uploaded: i64,
     /// When a non-zero delta last landed, or `None` if none ever has.
     pub updated_at: Option<i64>,
-}
-
-/// Saturating rather than wrapping: a client reporting more than `i64::MAX`
-/// bytes is lying, and a clamped total is less wrong than a negative one.
-fn clamp(bytes: u64) -> i64 {
-    i64::try_from(bytes).unwrap_or(i64::MAX)
 }
 
 impl Store {
@@ -50,7 +42,10 @@ impl Store {
         if downloaded == 0 && uploaded == 0 {
             return Ok(());
         }
-        let (downloaded, uploaded) = (clamp(downloaded), clamp(uploaded));
+        let (downloaded, uploaded) = (
+            sharerr_core::saturating_i64(downloaded),
+            sharerr_core::saturating_i64(uploaded),
+        );
 
         let mut tx = self.pool().begin().await?;
         sqlx::query(
@@ -177,7 +172,7 @@ mod tests {
 
     #[test]
     fn an_absurd_delta_saturates_rather_than_wrapping() {
-        assert_eq!(clamp(u64::MAX), i64::MAX);
-        assert_eq!(clamp(7), 7);
+        assert_eq!(sharerr_core::saturating_i64(u64::MAX), i64::MAX);
+        assert_eq!(sharerr_core::saturating_i64(7), 7);
     }
 }

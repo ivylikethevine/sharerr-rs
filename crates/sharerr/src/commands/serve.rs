@@ -33,7 +33,6 @@ use utoipa_axum::routes;
 
 use crate::gluetun::GluetunTarget;
 use crate::state::ServeState;
-use crate::tracker::TrackerState;
 
 /// Whether the embedded lighthouse belongs on the *frontend* listener rather
 /// than the tracker's.
@@ -56,32 +55,31 @@ fn lighthouse_belongs_on_frontend(
 }
 
 pub async fn run(config: &Config, config_path: &Path, config_error: Option<String>) -> Result<()> {
-    let state = Arc::new(ServeState::new(
-        config.clone(),
-        config_path,
-        config_error.clone(),
-    ));
+    let degraded = config_error.is_some();
+    let state = Arc::new(ServeState::new(config.clone(), config_path, config_error));
 
     // A one-time restore, before anything else touches the store — see
     // `sharerr_core::config::PeerImport`. Almost always a no-op: the field is
     // empty unless an operator hand-restored a `[[peers]]` block.
     import_peers(&state).await;
 
-    // One tracker state for however many listeners carry it — two swarm maps
-    // would keep peers arriving on different listeners from meeting.
-    let tracker = Arc::new(TrackerState::new(Arc::clone(&state)));
-
     // The embedded lighthouse, if `[lighthouse] enabled = true` — see
     // `sharerr_lighthouse` for the protocol and `ServeState::lighthouse_state`
     // for why this can come back `None` even when enabled (an unopenable
-    // vault). `mount` decides which listener below actually carries the
-    // routes; building the router once here means both listeners share one
-    // `LighthouseState`, same reasoning as sharing one `Swarms` map.
+    // vault). Exactly one listener carries its routes: the frontend either because
+    // that is literally what was chosen, or because "the tracker port" was chosen but
+    // there is no *dedicated* tracker listener below to put it on, so this is where a
+    // peer reaching "the tracker port" actually lands.
     let lighthouse_routes = state
         .lighthouse_state()
         .await
         .map(sharerr_lighthouse::routes);
-    let lighthouse_mount = config.lighthouse.mount;
+    let (frontend_lighthouse, tracker_lighthouse) =
+        if lighthouse_belongs_on_frontend(config.lighthouse.mount, config.tracker.bind) {
+            (lighthouse_routes, None)
+        } else {
+            (None, lighthouse_routes)
+        };
 
     // The probes keep their own state and stay outside the web UI's auth layer.
     // `/health` in particular is what the Dockerfile's HEALTHCHECK curls, with no
@@ -97,19 +95,11 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         .with_state(Arc::clone(&state))
         .split_for_parts();
     let mut app = ops
-        .merge(crate::tracker::routes(Arc::clone(&tracker)))
+        .merge(crate::tracker::routes(Arc::clone(&state)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
 
-    // The frontend listener carries the lighthouse either because that is
-    // literally what was chosen, or because "the tracker port" was chosen but
-    // there is no *dedicated* tracker listener below to put it on — the
-    // tracker's routes live here too in that case, so this is where a peer
-    // reaching "the tracker port" actually lands. See
-    // [`lighthouse_belongs_on_frontend`] for the standalone logic.
-    if lighthouse_belongs_on_frontend(lighthouse_mount, config.tracker.bind)
-        && let Some(routes) = lighthouse_routes.clone()
-    {
+    if let Some(routes) = frontend_lighthouse {
         app = app.merge(routes);
     }
 
@@ -135,7 +125,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // Stated at startup rather than from inside the loop: it is true regardless of
     // whether any credentials load, and an operator reading the first few lines of
     // the log should not have to wait for a vault fix to learn it.
-    if config_error.is_some() {
+    if degraded {
         tracing::warn!(
             config = %config_path.display(),
             "serving only so the configuration can be repaired — open the web UI"
@@ -157,10 +147,8 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     let tracker_serve = async {
         match tracker_listener {
             Some(listener) => {
-                let mut router = crate::tracker::routes(tracker);
-                if !lighthouse_belongs_on_frontend(lighthouse_mount, config.tracker.bind)
-                    && let Some(routes) = lighthouse_routes
-                {
+                let mut router = crate::tracker::routes(Arc::clone(&state));
+                if let Some(routes) = tracker_lighthouse {
                     router = router.merge(routes);
                 }
                 let service = router.into_make_service_with_connect_info::<SocketAddr>();
@@ -192,7 +180,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         () = crate::gossip::exchange_loop(Arc::clone(&state)) => Ok(()),
         () = crate::system_stats::poll_loop(Arc::clone(&state)) => Ok(()),
         () = crate::swarm_history::poll_loop(Arc::clone(&state)) => Ok(()),
-        () = crate::lighthouse_client::sync_loop(state) => Ok(()),
+        () = crate::lighthouse_client::sync_loop(Arc::clone(&state)) => Ok(()),
     }
 }
 
@@ -306,6 +294,12 @@ async fn import_one_peer(
         .create_peer(&peer.label, &secrecy::SecretString::from(key), scope)
         .await?;
 
+    if peer.max_size_bytes.is_some() || peer.max_height.is_some() {
+        store
+            .set_peer_limits(created.id, peer.max_size_bytes, peer.max_height)
+            .await?;
+    }
+
     if let Some(url) = present(&peer.gossip_url) {
         store.set_peer_gossip_url(created.id, Some(url)).await?;
     }
@@ -369,6 +363,13 @@ struct GluetunQuery {
     target: Option<String>,
 }
 
+/// The refusal for a caller not on a private address, which every local hook
+/// shares.
+fn refuse_public(remote: SocketAddr) -> Option<(StatusCode, &'static str)> {
+    (!sharerr_core::endpoint::is_private_ip(remote.ip()))
+        .then_some((StatusCode::FORBIDDEN, "refused"))
+}
+
 /// `GET|POST /gluetun/refresh[?target=client]` — the push half of endpoint
 /// resolution.
 ///
@@ -401,8 +402,8 @@ async fn gluetun_refresh(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     Query(query): Query<GluetunQuery>,
 ) -> (StatusCode, &'static str) {
-    if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
-        return (StatusCode::FORBIDDEN, "refused");
+    if let Some(refusal) = refuse_public(remote) {
+        return refusal;
     }
     state.nudge_endpoint(GluetunTarget::from_query(query.target.as_deref()));
     (StatusCode::OK, "refreshing")
@@ -442,8 +443,8 @@ async fn gluetun_down(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     Query(query): Query<GluetunQuery>,
 ) -> (StatusCode, &'static str) {
-    if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
-        return (StatusCode::FORBIDDEN, "refused");
+    if let Some(refusal) = refuse_public(remote) {
+        return refusal;
     }
     let target = GluetunTarget::from_query(query.target.as_deref());
     state.endpoint_for(target).forget_dynamic();
@@ -487,8 +488,8 @@ async fn arr_webhook(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     body: axum::body::Bytes,
 ) -> (StatusCode, &'static str) {
-    if !sharerr_core::endpoint::is_private_ip(remote.ip()) {
-        return (StatusCode::FORBIDDEN, "refused");
+    if let Some(refusal) = refuse_public(remote) {
+        return refusal;
     }
     let event = serde_json::from_slice::<ArrEvent>(&body).unwrap_or_default();
     if event.event_type == "Test" {
@@ -525,14 +526,14 @@ async fn background(state: Arc<ServeState>) {
             // when it comes back — so the retry has to be on a timer. The delay
             // grows with consecutive failures so a permanently misconfigured
             // instance stops burning an Argon2 derivation every fifteen seconds.
-            let delay = state.recovery_delay().await;
+            let delay = state.recovery_delay();
             state.sleep_or_wake(delay).await;
             continue;
         };
 
         // Re-read every pass rather than once: the UI can enable sync, or change
         // the interval, without a restart.
-        let sync = state.config().await.sync;
+        let sync = state.with_config(|c| c.sync.clone()).await;
         // Taken before the pass, so a request that lands during it asks for one
         // more pass after it rather than being consumed by this one.
         let requested = state.take_pass_request();
@@ -540,14 +541,14 @@ async fn background(state: Arc<ServeState>) {
             // Parking on the notify alone would be wrong even here: `ensure_ready`
             // is what makes `/ready` start telling the truth, and it should keep
             // being retried on an instance that never syncs on a timer.
-            state.sleep_or_wake(state.recovery_delay().await).await;
+            state.sleep_or_wake(state.recovery_delay()).await;
             continue;
         }
 
         match syncer.run(false).await {
             Ok(report) => {
                 tracing::info!(%report, "sync complete");
-                state.note_sync_success().await;
+                state.note_sync_success();
                 notify_sync_report(&state, &report, &mut notified).await;
             }
             Err(err) => {
@@ -559,7 +560,7 @@ async fn background(state: Arc<ServeState>) {
                     &reason,
                 )
                 .await;
-                state.note_sync_failure().await;
+                state.note_sync_failure();
             }
         }
 
@@ -569,9 +570,7 @@ async fn background(state: Arc<ServeState>) {
         // see `ServeState::sync_retry_delay` — so a torrent client or *arr app
         // that comes back after a brief restart is caught up within seconds.
         let interval = Duration::from_secs(sync.effective_interval_secs());
-        state
-            .sleep_or_wake(state.sync_retry_delay(interval).await)
-            .await;
+        state.sleep_or_wake(state.sync_retry_delay(interval)).await;
     }
 }
 
@@ -697,9 +696,6 @@ fn fresh(seen: &mut HashSet<String>, flagged: &[(&crate::sync::Flagged, &str)]) 
     Some(message)
 }
 
-/// Liveness, not correctness — this answers "should this container be restarted?",
-/// and the answer is no even when the vault is empty, because a restart cannot
-/// populate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional
 /// The operational endpoints, without state, so [`crate::openapi`] reads the
 /// document off the same declaration that mounts them.
 pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
@@ -713,6 +709,9 @@ pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
         .merge(crate::api::routes())
 }
 
+/// Liveness, not correctness — this answers "should this container be restarted?",
+/// and the answer is no even when the vault is empty, because a restart cannot
+/// populate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional
 /// in this handler turns a fixable configuration gap into a restart loop.
 #[utoipa::path(
     get,
@@ -1023,7 +1022,7 @@ mod tests {
         let (_dir, state) = crate::state::fixtures::ready().await;
         let interval = Duration::from_secs(state.config().await.sync.effective_interval_secs());
         assert_eq!(
-            state.sync_retry_delay(interval).await,
+            state.sync_retry_delay(interval),
             interval,
             "setup: no failures recorded yet"
         );
@@ -1041,7 +1040,7 @@ mod tests {
             tokio::select! {
                 () = background(Arc::clone(&state)) => {}
                 () = async {
-                    while state.sync_retry_delay(interval).await >= interval {
+                    while state.sync_retry_delay(interval) >= interval {
                         tokio::task::yield_now().await;
                     }
                 } => {}
@@ -1050,7 +1049,7 @@ mod tests {
         .await;
 
         assert!(
-            state.sync_retry_delay(interval).await < interval,
+            state.sync_retry_delay(interval) < interval,
             "a failed pass must shorten the next attempt's wait"
         );
     }
@@ -1076,14 +1075,14 @@ mod tests {
             tokio::select! {
                 () = background(Arc::clone(&state)) => {}
                 () = async {
-                    while state.sync_retry_delay(interval).await >= interval {
+                    while state.sync_retry_delay(interval) >= interval {
                         tokio::task::yield_now().await;
                     }
                 } => {}
             }
         })
         .await;
-        state.sync_retry_delay(interval).await < interval
+        state.sync_retry_delay(interval) < interval
     }
 
     #[tokio::test]
@@ -1438,9 +1437,9 @@ mod tests {
     async fn a_successful_pass_clears_the_backoff() {
         let (_dir, state) = crate::state::fixtures::ready_with_source().await;
         let interval = Duration::from_secs(state.config().await.sync.effective_interval_secs());
-        state.note_sync_failure().await;
+        state.note_sync_failure();
         assert!(
-            state.sync_retry_delay(interval).await < interval,
+            state.sync_retry_delay(interval) < interval,
             "setup: a failure must be recorded first"
         );
 
@@ -1448,7 +1447,7 @@ mod tests {
             tokio::select! {
                 () = background(Arc::clone(&state)) => {}
                 () = async {
-                    while state.sync_retry_delay(interval).await < interval {
+                    while state.sync_retry_delay(interval) < interval {
                         tokio::task::yield_now().await;
                     }
                 } => {}
@@ -1457,7 +1456,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            state.sync_retry_delay(interval).await,
+            state.sync_retry_delay(interval),
             interval,
             "a successful pass must clear the backoff"
         );
@@ -1517,6 +1516,8 @@ mod tests {
         let (_dir, state) = state_with_pending_peers(vec![sharerr_core::config::PeerImport {
             label: "Sam".to_owned(),
             scope: "tv".to_owned(),
+            max_size_bytes: Some(1024),
+            max_height: Some(720),
             last_addr: Some("203.0.113.5:51413".to_owned()),
             gossip_url: Some("https://sam.example/sharerr".to_owned()),
             gossip_key: None,
@@ -1529,12 +1530,19 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].label, "Sam");
         assert_eq!(listed[0].scope, sharerr_store::PeerScope::Tv);
+        assert_eq!(listed[0].max_size_bytes, Some(1024), "a restore keeps caps");
+        assert_eq!(listed[0].max_height, Some(720));
         assert_eq!(
             listed[0].gossip_url.as_deref(),
             Some("https://sam.example/sharerr")
         );
 
-        let endpoints = store.peer_endpoints(listed[0].id).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[listed[0].id])
+            .await
+            .unwrap()
+            .remove(&listed[0].id)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].addr, "203.0.113.5:51413");
         assert_eq!(

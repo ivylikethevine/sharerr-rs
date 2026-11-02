@@ -251,6 +251,34 @@ async fn save_transmission_writes_url_username_and_label_to_the_config_file() {
     assert!(written.contains(r#"label = "shared""#), "{written}");
 }
 
+/// Deluge's web UI has no accounts, so a stray `username` must not reach a
+/// `[deluge]` table whose `deny_unknown_fields` would then refuse to load.
+#[tokio::test]
+async fn save_deluge_writes_url_and_label_and_never_a_username() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let config_path = serve.config_path().to_path_buf();
+    let state = web_state(serve);
+
+    let response = save_deluge(
+        State(state),
+        Query(NextQuery::default()),
+        Form(RpcClientForm {
+            url: "deluge:8112".to_owned(),
+            username: "sam".to_owned(),
+            password: String::new(),
+            clear_password: None,
+            label: "shared".to_owned(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+    let written = std::fs::read_to_string(&config_path).expect("save_deluge writes the file");
+    assert!(written.contains("http://deluge:8112/"), "{written}");
+    assert!(written.contains(r#"label = "shared""#), "{written}");
+    assert!(!written.contains("username"), "{written}");
+}
+
 // Same race as `save_arr_rejects_when_the_vault_will_not_open_...` above —
 // `Jail`-wrapped so no other Jail test's `SHARERR_MASTER_KEY` can be live
 // while this one relies on it being absent.
@@ -427,7 +455,7 @@ async fn save_torrent_backend_rejects_a_value_that_is_not_a_known_client() {
         State(state),
         Query(NextQuery::default()),
         Form(TorrentBackendForm {
-            backend: "deluge".to_owned(),
+            backend: "vuze".to_owned(),
         }),
     )
     .await;
@@ -1472,10 +1500,12 @@ async fn save_notifications_writes_the_heartbeat_interval_and_new_triggers() {
             kind: "generic".to_owned(),
             peer_quiet_secs: "3600".to_owned(),
             heartbeat_secs: "120".to_owned(),
-            trigger_heartbeat: Some("1".to_owned()),
-            trigger_library_unreadable: Some("1".to_owned()),
-            trigger_torrent_interrupted: Some("1".to_owned()),
-            trigger_file_changed: Some("1".to_owned()),
+            triggers: vec![
+                "heartbeat".to_owned(),
+                "library_unreadable".to_owned(),
+                "torrent_interrupted".to_owned(),
+                "file_changed".to_owned(),
+            ],
             ..Default::default()
         }),
     )
@@ -1681,11 +1711,13 @@ fn export_config_serves_the_effective_config_as_a_downloadable_attachment() {
             assert_eq!(response.status(), axum::http::StatusCode::OK);
             let headers = response.headers().clone();
             assert_eq!(
-                headers.get(header::CONTENT_TYPE).unwrap(),
+                headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
                 "application/toml"
             );
             assert_eq!(
-                headers.get(header::CONTENT_DISPOSITION).unwrap(),
+                headers
+                    .get(axum::http::header::CONTENT_DISPOSITION)
+                    .unwrap(),
                 "attachment; filename=\"sharerr-config.toml\""
             );
 
@@ -1791,27 +1823,19 @@ where
     F: FnOnce(WebState, std::path::PathBuf) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    figment::Jail::expect_with(|jail| {
-        jail.set_env("SHARERR_MASTER_KEY", "settings-tests-master-key");
-        let config = sharerr_core::Config {
-            data_dir: jail.directory().to_path_buf(),
-            ..Default::default()
-        };
-        let path = jail.directory().join("sharerr.toml");
-        // A save reloads the config from this file, and a reload that
-        // forgot `data_dir` would move the vault path out from under the
-        // very secret the save just wrote.
-        std::fs::write(
-            &path,
-            format!("data_dir = {:?}\n", jail.directory().display().to_string()),
-        )
-        .unwrap();
-        let serve = std::sync::Arc::new(crate::state::ServeState::new(config, path.clone(), None));
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(body(web_state(serve), path));
-        Ok(())
-    });
+    crate::state::fixtures::with_open_vault(
+        sharerr_core::Config::default(),
+        |_| {},
+        |serve| {
+            let path = serve.config_path().to_path_buf();
+            // A save reloads the config from this file, and a reload that
+            // forgot `data_dir` would move the vault path out from under the
+            // very secret the save just wrote.
+            let data_dir = path.parent().unwrap().display().to_string();
+            std::fs::write(&path, format!("data_dir = {data_dir:?}\n")).unwrap();
+            body(web_state(serve), path)
+        },
+    );
 }
 
 async fn stored(state: &WebState, key: &str) -> Option<String> {
@@ -1932,7 +1956,7 @@ fn save_metrics_writes_the_flag_and_stores_then_clears_the_token() {
     with_open_vault(|state, config_path| async move {
         let response = save_metrics(
             State(state.clone()),
-            Form(MetricsForm {
+            Form(TokenToggleForm {
                 enabled: Some("on".to_owned()),
                 token: "scrape-me".to_owned(),
                 clear_token: None,
@@ -1950,7 +1974,7 @@ fn save_metrics_writes_the_flag_and_stores_then_clears_the_token() {
 
         let response = save_metrics(
             State(state.clone()),
-            Form(MetricsForm {
+            Form(TokenToggleForm {
                 enabled: None,
                 token: String::new(),
                 clear_token: Some("on".to_owned()),
@@ -1967,7 +1991,7 @@ fn save_api_writes_its_own_flag_and_token_and_leaves_metrics_alone() {
     with_open_vault(|state, config_path| async move {
         let response = save_api(
             State(state.clone()),
-            Form(ApiForm {
+            Form(TokenToggleForm {
                 enabled: Some("on".to_owned()),
                 token: "manage-me".to_owned(),
                 clear_token: None,
@@ -1986,7 +2010,7 @@ fn save_api_writes_its_own_flag_and_token_and_leaves_metrics_alone() {
 
         let response = save_api(
             State(state.clone()),
-            Form(ApiForm {
+            Form(TokenToggleForm {
                 enabled: None,
                 token: String::new(),
                 clear_token: Some("on".to_owned()),

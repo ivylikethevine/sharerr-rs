@@ -7,7 +7,7 @@
 //! `/v1/openvpn/portforwarded` the forwarded port, for OpenVPN *and* WireGuard
 //! despite the path's name.
 //!
-//! Two update paths feed the same [`AdvertisedEndpoint`]:
+//! Two update paths feed the same [`sharerr_core::endpoint::AdvertisedEndpoint`]:
 //!
 //! * **The poll** ([`poll_loop`]) asks on a timer. It is the floor — it recovers
 //!   a missed push and needs nothing configured on the gluetun side.
@@ -16,7 +16,7 @@
 //!   `/gluetun/down`, on this server. Both only *nudge* the poller — the up
 //!   command asks it to resolve now instead of at the next tick, and the down
 //!   command additionally forgets the dynamic history first
-//!   ([`AdvertisedEndpoint::forget_dynamic`]), since the port it names is about
+//!   ([`sharerr_core::endpoint::AdvertisedEndpoint::forget_dynamic`]), since the port it names is about
 //!   to stop working and must not linger as a fallback for a resolve that can
 //!   only refresh the exit address. The control server stays the single source
 //!   of truth; nothing pushed is trusted directly, so neither endpoint needs
@@ -52,7 +52,7 @@ use serde::Deserialize;
 use sharerr_client::error_chain;
 use sharerr_core::Config;
 use sharerr_core::config::{GluetunConfig, config_paths, secret_keys};
-use sharerr_core::endpoint::{AdvertisedEndpoint, now_epoch};
+use sharerr_core::endpoint::now_epoch;
 use url::Url;
 
 use crate::state::ServeState;
@@ -142,18 +142,25 @@ pub struct GluetunSnapshot {
 }
 
 impl GluetunStatus {
-    async fn record_ok(&self) {
+    /// Record a success, reporting whether it cleared an error.
+    async fn record_ok(&self) -> bool {
         let now = now_epoch();
         let mut inner = self.inner.write().await;
         inner.last_poll_at = Some(now);
         inner.last_success_at = Some(now);
-        inner.last_error = None;
+        inner.last_error.take().is_some()
     }
 
-    async fn record_err(&self, message: String) {
+    /// Record `message` as this poll's failure, and report whether it is new since
+    /// the last one. Callers log once per transition rather than once per poll, or
+    /// a steady failure (no port granted, control server down) turns into a warning
+    /// every interval forever.
+    async fn record_err(&self, message: String) -> bool {
         let mut inner = self.inner.write().await;
         inner.last_poll_at = Some(now_epoch());
+        let changed = inner.last_error.as_deref() != Some(message.as_str());
         inner.last_error = Some(message);
+        changed
     }
 
     pub async fn snapshot(&self) -> GluetunSnapshot {
@@ -345,12 +352,6 @@ impl GluetunClient {
 /// torrent from it today, only gossip's self-record reads it, and that reads
 /// live.
 pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
-    // Logged once per transition, not per poll: a provider that grants no port
-    // is a steady state, and one warning per minute forever is how a log stops
-    // being read.
-    let mut last_error: Option<String> = None;
-    let status = state.gluetun_status(target);
-    let endpoint = state.endpoint_for(target);
     // Built once and reused for the life of the poller: `reqwest::Client` is an
     // Arc internally, so cloning it per poll shares its connection pool rather
     // than discarding one every interval. A build failure is kept rather than
@@ -358,7 +359,7 @@ pub async fn poll_loop(state: Arc<ServeState>, target: GluetunTarget) {
     let http = GluetunClient::http_client().map_err(|err| err.to_string());
 
     loop {
-        let interval = poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+        let interval = poll_once(&state, target, &http).await;
 
         tokio::select! {
             () = tokio::time::sleep(interval) => {}
@@ -378,10 +379,9 @@ async fn poll_once(
     state: &ServeState,
     target: GluetunTarget,
     http: &std::result::Result<reqwest::Client, String>,
-    status: &GluetunStatus,
-    endpoint: &AdvertisedEndpoint,
-    last_error: &mut Option<String>,
 ) -> Duration {
+    let status = state.gluetun_status(target);
+    let endpoint = state.endpoint_for(target);
     let config = state.config().await;
     let gluetun_cfg = target.config(&config);
     let interval = Duration::from_secs(gluetun_cfg.effective_poll_secs());
@@ -409,7 +409,7 @@ async fn poll_once(
              request that would only come back 401",
             target.credential_key()
         );
-        if record_error(status, last_error, rendered.clone()).await {
+        if status.record_err(rendered.clone()).await {
             tracing::warn!(target = target.label(), "{rendered}");
         }
         return interval;
@@ -445,8 +445,7 @@ async fn poll_once(
 
     match resolved {
         Ok(base) => {
-            status.record_ok().await;
-            if last_error.take().is_some() {
+            if status.record_ok().await {
                 tracing::info!(target = target.label(), %base, "gluetun endpoint resolution recovered");
             }
             if endpoint.observe(base.clone()) {
@@ -465,31 +464,13 @@ async fn poll_once(
         }
         Err(err) => {
             let rendered = err.to_string();
-            if record_error(status, last_error, rendered.clone()).await {
+            if status.record_err(rendered.clone()).await {
                 tracing::warn!(target = target.label(), error = %rendered, "could not resolve the endpoint from gluetun");
             }
         }
     }
 
     interval
-}
-
-/// Record `rendered` as this poll's failure, and report whether it is new
-/// since the last one. The comparison, not just the recording, is what has
-/// to happen identically at every failure site — logged once per transition
-/// rather than once per poll, or a steady failure (no port granted, control
-/// server down) turns into a warning every interval forever.
-async fn record_error(
-    status: &GluetunStatus,
-    last_error: &mut Option<String>,
-    rendered: String,
-) -> bool {
-    status.record_err(rendered.clone()).await;
-    let changed = last_error.as_deref() != Some(&rendered);
-    if changed {
-        *last_error = Some(rendered);
-    }
-    changed
 }
 
 #[cfg(test)]
@@ -516,7 +497,7 @@ mod tests {
     }
 
     fn client(server: &MockServer) -> GluetunClient {
-        GluetunClient::new(&server.uri().parse().unwrap(), None).unwrap()
+        GluetunClient::new(&sharerr_testkit::mock::base_url(server), None).unwrap()
     }
 
     /// The faked gluetun control server the roadmap called for: the whole
@@ -696,7 +677,7 @@ mod tests {
             .await;
 
         let keyed = GluetunClient::new(
-            &server.uri().parse().unwrap(),
+            &sharerr_testkit::mock::base_url(&server),
             Some(secrecy::SecretString::from("s3cret")),
         )
         .unwrap();
@@ -805,13 +786,12 @@ mod tests {
     /// The de-dup that keeps a steady failure (no port granted, control server
     /// down) from becoming a warning on every single poll forever.
     #[tokio::test]
-    async fn record_error_only_reports_the_first_occurrence_of_a_message() {
+    async fn record_err_only_reports_the_first_occurrence_of_a_message() {
         let status = GluetunStatus::default();
-        let mut last_error = None;
 
-        assert!(record_error(&status, &mut last_error, "boom".to_owned()).await);
-        assert!(!record_error(&status, &mut last_error, "boom".to_owned()).await);
-        assert!(record_error(&status, &mut last_error, "different boom".to_owned()).await);
+        assert!(status.record_err("boom".to_owned()).await);
+        assert!(!status.record_err("boom".to_owned()).await);
+        assert!(status.record_err("different boom".to_owned()).await);
     }
 
     /// An inactive poller — the default, with no `control_url` configured —
@@ -821,11 +801,9 @@ mod tests {
         let (_dir, state) = crate::state::fixtures::unconfigured();
         let target = GluetunTarget::Tracker;
         let status = state.gluetun_status(target);
-        let endpoint = state.endpoint_for(target);
         let http = GluetunClient::http_client().map_err(|e| e.to_string());
-        let mut last_error = None;
 
-        let interval = poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+        let interval = poll_once(&state, target, &http).await;
 
         assert_eq!(interval, Duration::from_secs(60), "default poll_secs");
         assert!(status.snapshot().await.last_poll_at.is_none());
@@ -843,11 +821,9 @@ mod tests {
         state.replace_config(config).await;
 
         let status = state.gluetun_status(target);
-        let endpoint = state.endpoint_for(target);
         let http = GluetunClient::http_client().map_err(|e| e.to_string());
-        let mut last_error = None;
 
-        poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+        poll_once(&state, target, &http).await;
 
         let snapshot = status.snapshot().await;
         assert!(snapshot.last_poll_at.is_some());
@@ -858,10 +834,6 @@ mod tests {
                 .is_some_and(|e| e.contains(target.credential_key())),
             "{:?}",
             snapshot.last_error
-        );
-        assert!(
-            last_error.is_some(),
-            "the loop's own dedup state must be updated too"
         );
     }
 
@@ -899,7 +871,7 @@ mod tests {
                 let config = Config {
                     data_dir: jail.directory().to_path_buf(),
                     gluetun: GluetunConfig {
-                        control_url: Some(server.uri().parse().unwrap()),
+                        control_url: Some(sharerr_testkit::mock::base_url(&server)),
                         ..GluetunConfig::default()
                     },
                     ..Config::default()
@@ -930,9 +902,8 @@ mod tests {
                 let status = state.gluetun_status(target);
                 let endpoint = state.endpoint_for(target);
                 let http = GluetunClient::http_client().map_err(|e| e.to_string());
-                let mut last_error = None;
 
-                poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+                poll_once(&state, target, &http).await;
 
                 let snapshot = status.snapshot().await;
                 assert!(snapshot.last_poll_at.is_some());
@@ -987,14 +958,12 @@ mod tests {
                 let status = state.gluetun_status(target);
                 let endpoint = state.endpoint_for(target);
                 let http = GluetunClient::http_client().map_err(|e| e.to_string());
-                let mut last_error = None;
 
-                poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+                poll_once(&state, target, &http).await;
 
                 let snapshot = status.snapshot().await;
                 assert!(snapshot.last_poll_at.is_some());
                 assert!(snapshot.last_error.is_some());
-                assert!(last_error.is_some());
                 assert!(endpoint.current().is_none());
             });
             Ok(())
@@ -1015,7 +984,7 @@ mod tests {
                 let config = Config {
                     data_dir: jail.directory().to_path_buf(),
                     gluetun: GluetunConfig {
-                        control_url: Some(server.uri().parse().unwrap()),
+                        control_url: Some(sharerr_testkit::mock::base_url(&server)),
                         ..GluetunConfig::default()
                     },
                     ..Config::default()
@@ -1039,19 +1008,11 @@ mod tests {
                 );
                 let status = state.gluetun_status(target);
                 let endpoint = state.endpoint_for(target);
-                let mut last_error = None;
 
                 let no_client: std::result::Result<reqwest::Client, String> =
                     Err("no TLS backend".to_owned());
-                poll_once(
-                    &state,
-                    target,
-                    &no_client,
-                    &status,
-                    &endpoint,
-                    &mut last_error,
-                )
-                .await;
+                poll_once(&state, target, &no_client).await;
+                let last_error = status.snapshot().await.last_error;
                 assert!(
                     last_error
                         .as_deref()
@@ -1078,9 +1039,8 @@ mod tests {
                     .mount(&server)
                     .await;
                 let http = GluetunClient::http_client().map_err(|e| e.to_string());
-                poll_once(&state, target, &http, &status, &endpoint, &mut last_error).await;
+                poll_once(&state, target, &http).await;
 
-                assert!(last_error.is_none());
                 assert!(status.snapshot().await.last_error.is_none());
                 assert_eq!(
                     endpoint.current().map(|u| u.to_string()).as_deref(),

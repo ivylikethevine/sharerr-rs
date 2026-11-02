@@ -12,9 +12,10 @@
 
 use anyhow::{Result, bail};
 
-use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome, chain};
+use crate::checks::{self, ArrOutcome, DirOutcome, QbitOutcome};
 use secrecy::SecretString;
 use sharerr_arr::Discovered;
+use sharerr_client::error_chain;
 use sharerr_core::config::{ServiceConfig, TorrentBackend, secret_keys};
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::{Store, Vault};
@@ -61,13 +62,6 @@ enum Level {
 }
 
 impl Report {
-    fn for_json() -> Self {
-        Self {
-            json: true,
-            ..Self::default()
-        }
-    }
-
     fn section(&mut self, title: &str) {
         self.sections.push(Section {
             title: title.to_owned(),
@@ -153,8 +147,7 @@ pub async fn run(
     config_error: Option<&str>,
     args: &crate::cli::DoctorArgs,
 ) -> Result<()> {
-    let suggest = args.suggest_paths.then_some(args.search_root.as_deref());
-    let report = checks(config, config_error, args.fix, suggest, args.json).await;
+    let report = checks(config, config_error, args).await;
     if report.json {
         println!("{}", serde_json::to_string_pretty(&report.json())?);
     } else {
@@ -166,22 +159,23 @@ pub async fn run(
 /// The same checks as `doctor --json`, read-only (no `--fix`, no path
 /// suggestions), for the management API's `GET /api/v1/doctor`.
 pub(crate) async fn json_report(config: &Config, config_error: Option<&str>) -> serde_json::Value {
-    checks(config, config_error, false, None, true).await.json()
+    let args = crate::cli::DoctorArgs {
+        json: true,
+        ..Default::default()
+    };
+    checks(config, config_error, &args).await.json()
 }
 
-/// Every check, in order. `suggest` is `--suggest-paths` and its
-/// `--search-root`; `json` holds the lines back instead of printing them.
+/// Every check, in order. `args.json` holds the lines back instead of printing them.
 async fn checks(
     config: &Config,
     config_error: Option<&str>,
-    fix: bool,
-    suggest: Option<Option<&std::path::Path>>,
-    json: bool,
+    args: &crate::cli::DoctorArgs,
 ) -> Report {
-    let mut report = if json {
-        Report::for_json()
-    } else {
-        Report::default()
+    let fix = args.fix;
+    let mut report = Report {
+        json: args.json,
+        ..Report::default()
     };
 
     report.section("configuration");
@@ -223,29 +217,21 @@ async fn checks(
     report.section(config.torrent_backend.as_str());
     check_qbit(config, torrent_credential, fix, &mut report).await;
 
-    if config.gluetun.control_url.is_some() {
-        report.section("gluetun");
-        check_gluetun(
-            config,
-            vault.as_ref(),
-            crate::gluetun::GluetunTarget::Tracker,
-            &mut report,
-        )
-        .await;
-    }
-    // Independent of the tracker's tunnel above — a dual-VPN deployment keeps
-    // the torrent client behind its own, and a broken client-tunnel key would
-    // otherwise never surface here, only in `serve`'s live poller (see
-    // `web/diagnostics.rs`, which already checks both).
-    if config.gluetun_client.control_url.is_some() {
-        report.section("gluetun (torrent client)");
-        check_gluetun(
-            config,
-            vault.as_ref(),
+    // Independent of each other: a dual-VPN deployment keeps the torrent client behind
+    // its own tunnel, and a broken client-tunnel key would otherwise never surface
+    // here, only in `serve`'s live poller (see `web/diagnostics.rs`, which already
+    // checks both).
+    for (target, title) in [
+        (crate::gluetun::GluetunTarget::Tracker, "gluetun"),
+        (
             crate::gluetun::GluetunTarget::Client,
-            &mut report,
-        )
-        .await;
+            "gluetun (torrent client)",
+        ),
+    ] {
+        if let Some(control) = &target.config(config).control_url {
+            report.section(title);
+            check_gluetun(config, vault.as_ref(), target, control, &mut report).await;
+        }
     }
 
     report.section("tracker");
@@ -255,9 +241,14 @@ async fn checks(
     report.section("paths");
     check_paths(config, &discovered, &mut report);
 
-    if let Some(search_root) = suggest {
+    if args.suggest_paths {
         report.section("path suggestions");
-        suggest_paths(config, &discovered, search_root, &mut report);
+        suggest_paths(
+            config,
+            &discovered,
+            args.search_root.as_deref(),
+            &mut report,
+        );
     }
 
     report
@@ -323,10 +314,8 @@ fn check_vault(
         .into_iter()
         .filter_map(secret_keys::credential_for)
     {
-        match vault.get(key) {
-            Ok(Some(_)) => report.ok(format!("{key} is set")),
-            Ok(None) => fail_missing(report, key),
-            Err(err) => fail_unreadable(report, key, err),
+        if credential(Some(&vault), key, report).is_some() {
+            report.ok(format!("{key} is set"));
         }
     }
 
@@ -350,7 +339,7 @@ fn check_torrent_credential(
     let stored = |key: &'static str| -> Result<Option<SecretString>, String> {
         vault
             .get(key)
-            .map_err(|err| format!("{key} could not be read: {}", chain(&err)))
+            .map_err(|err| format!("{key} could not be read: {}", error_chain(&err)))
     };
 
     match checks::resolve_torrent_credential(client, &stored) {
@@ -378,7 +367,7 @@ fn check_torrent_credential(
         // has that concept; qBittorrent authenticates by API key alone, so a
         // missing key there is the whole story.
         Ok(None) => {
-            if let Some(key) = client.fallback_credential.or(client.primary_credential) {
+            if let Some(key) = client.credential_name() {
                 fail_missing(report, key);
             }
             None
@@ -407,7 +396,7 @@ fn fail_missing(report: &mut Report, key: &str) {
 /// vault errors wrap a source (a decryption or I/O failure), and that source is
 /// what actually tells the operator what to go and fix.
 fn fail_unreadable(report: &mut Report, key: &str, err: impl std::error::Error) {
-    report.fail(format!("{key} could not be read: {}", chain(&err)));
+    report.fail(format!("{key} could not be read: {}", error_chain(&err)));
 }
 
 /// Fetch an *optional* secret without reporting its absence.
@@ -453,12 +442,15 @@ async fn check_database(config: &Config, report: &mut Report) {
     match Store::open(&path).await {
         Ok(store) => {
             report.ok(format!("opened {} and applied migrations", path.display()));
-            match store.all_items().await {
-                Ok(items) => report.info(format!("{} item(s) on record", items.len())),
+            match store.counts_by_state().await {
+                Ok(counts) => {
+                    let total: i64 = counts.iter().map(|(_, count)| count).sum();
+                    report.info(format!("{total} item(s) on record"));
+                }
                 Err(err) => report.fail(format!("reading shared_items: {err}")),
             }
         }
-        Err(err) => report.fail(format!("{}: {}", path.display(), chain(&err))),
+        Err(err) => report.fail(format!("{}: {}", path.display(), error_chain(&err))),
     }
 }
 
@@ -501,7 +493,8 @@ async fn check_arr(
     // the tag turns it into `TagUnused` (or `Ready`, if content already carries
     // it by the time this runs) without a restart or a second invocation.
     if fix && let ArrOutcome::TagMissing { .. } = &outcome {
-        return fix_missing_tag(kind, service, config, credential_for_fix, report).await;
+        fix_missing_tag(kind, service, config, credential_for_fix, report).await;
+        return Vec::new();
     }
 
     // The rendering is this command's own — a terminal report in the third person,
@@ -525,7 +518,7 @@ async fn check_arr(
                     "note: {kind} tags are not per-item, so tagging one thing shares everything under it"
                 ));
             }
-            items
+            return items;
         }
         ArrOutcome::TagUnused { version } => {
             report.ok(format!("{} responded ({version})", service.url));
@@ -533,7 +526,6 @@ async fn check_arr(
                 "tag {:?} exists but nothing carries it — apply it to content you want to share",
                 config.tag
             ));
-            Vec::new()
         }
         // Distinct from TagUnused above: a tag that does not exist needs
         // creating, not applying.
@@ -544,49 +536,42 @@ async fn check_arr(
                 config.tag,
                 kind.as_str()
             ));
-            Vec::new()
         }
         ArrOutcome::AuthRejected => {
             report.fail(format!(
                 "{} rejected the API key — check {key_name}",
                 service.url
             ));
-            Vec::new()
         }
         ArrOutcome::Unreachable(reason) => {
             report.fail(format!("{} could not be reached: {reason}", service.url));
-            Vec::new()
         }
-        ArrOutcome::BadUrl(reason) | ArrOutcome::Failed(reason) => {
-            report.fail(reason);
-            Vec::new()
-        }
+        ArrOutcome::BadUrl(reason)
+        | ArrOutcome::Failed(reason)
+        | ArrOutcome::CredentialUnreadable(reason) => report.fail(reason),
         // Both are unreachable from here: the credential was resolved above.
-        ArrOutcome::NotConfigured | ArrOutcome::NoCredential => Vec::new(),
-        ArrOutcome::CredentialUnreadable(reason) => {
-            report.fail(reason);
-            Vec::new()
-        }
+        ArrOutcome::NotConfigured | ArrOutcome::NoCredential => {}
     }
+    Vec::new()
 }
 
 /// Create the configured tag in `kind`, for `check_arr`'s `--fix` path.
 ///
-/// Never returns any discovered items: a tag that had to be created cannot yet
-/// carry any content, so there is nothing new to walk this run — the operator
-/// still has to go and apply it, same as [`ArrOutcome::TagUnused`] already says.
+/// A tag that had to be created cannot yet carry any content, so there is nothing
+/// new to walk this run: the operator still has to go and apply it, same as
+/// [`ArrOutcome::TagUnused`] already says.
 async fn fix_missing_tag(
     kind: MediaSource,
     service: &ServiceConfig,
     config: &Config,
     credential: SecretString,
     report: &mut Report,
-) -> Vec<Discovered> {
+) {
     let client = match sharerr_arr::ArrClient::new(kind, &service.url, credential) {
         Ok(client) => client,
         Err(err) => {
             report.fail(format!("could not create tag {:?}: {err}", config.tag));
-            return Vec::new();
+            return;
         }
     };
 
@@ -597,7 +582,6 @@ async fn fix_missing_tag(
         }
         Err(err) => report.fail(format!("could not create tag {:?}: {err}", config.tag)),
     }
-    Vec::new()
 }
 
 // ------------------------------------------------------------------ library
@@ -612,25 +596,21 @@ fn check_library(
                 "{} does not exist as sharerr sees it — check the mount",
                 library.path.display()
             ));
-            Vec::new()
         }
         DirOutcome::NotADirectory => {
             report.fail(format!(
                 "{} is not a directory — [[library]] shares a folder, not a file",
                 library.path.display()
             ));
-            Vec::new()
         }
         DirOutcome::Unreadable(reason) => {
             report.fail(format!("could not scan: {reason}"));
-            Vec::new()
         }
         DirOutcome::Empty => {
             report.warn(format!(
                 "no {} files found — anything placed here is shared automatically",
                 library.kind.as_str()
             ));
-            Vec::new()
         }
         DirOutcome::Ready { skipped, items } => {
             report.ok(format!(
@@ -645,9 +625,10 @@ fn check_library(
                 ));
             }
             report.info("note: no external ids — a friend's app matches these by name alone");
-            items
+            return items;
         }
     }
+    Vec::new()
 }
 
 // ------------------------------------------------------------ torrent client
@@ -672,10 +653,7 @@ async fn check_qbit(
     let (url, label) = (settings.url, settings.category);
 
     let Some(credential) = credential else {
-        let key = settings
-            .fallback_credential
-            .or(settings.primary_credential)
-            .unwrap_or("the credential");
+        let key = settings.credential_name().unwrap_or("the credential");
         report.fail(format!(
             "skipped: {key} is unavailable — see the vault section above"
         ));
@@ -686,9 +664,9 @@ async fn check_qbit(
     // further down needs its own qBittorrent-specific client, since "category"
     // is not a concept the generic `TorrentClient` trait carries — Transmission
     // has none.
-    let category_credential = match &credential {
-        checks::TorrentCredential::ApiKey(key) => Some(key.clone()),
-        checks::TorrentCredential::Password(_) => None,
+    let (category_credential, checked_key) = match &credential {
+        checks::TorrentCredential::ApiKey(key) => (Some(key.clone()), settings.primary_credential),
+        checks::TorrentCredential::Password(_) => (None, settings.fallback_credential),
     };
     let noun = credential.noun();
 
@@ -720,14 +698,9 @@ async fn check_qbit(
             client
         }
         QbitOutcome::AuthRejected => {
-            let checked = if noun == "API key" {
-                settings.primary_credential
-            } else {
-                settings.fallback_credential
-            };
             report.fail(format!(
                 "{url} rejected the {noun} — check {}",
-                checked.unwrap_or("the stored credential")
+                checked_key.unwrap_or("the stored credential")
             ));
             return;
         }
@@ -836,7 +809,7 @@ fn check_tracker(config: &Config, vault: Option<&Vault>, report: &mut Report) {
         );
     }
 
-    match advertised_base(config) {
+    match config.advertised_base() {
         Ok(Some(base)) => report.ok(format!(
             "advertised endpoint: {}",
             sharerr_core::endpoint::base_string(&base)
@@ -869,13 +842,9 @@ async fn check_gluetun(
     config: &Config,
     vault: Option<&Vault>,
     target: crate::gluetun::GluetunTarget,
+    control: &Url,
     report: &mut Report,
 ) {
-    // Guarded by the caller; the arm exists because the function is total.
-    let Some(control) = &target.config(config).control_url else {
-        return;
-    };
-
     let credential = quiet_credential(vault, target.credential_key());
     let client = match crate::gluetun::GluetunClient::new(control, credential) {
         Ok(client) => client,
@@ -931,18 +900,16 @@ async fn check_gluetun(
 /// warning rather than a failure — some networks cannot hairpin their own
 /// public address even when it works from outside.
 async fn check_reachability(config: &Config, report: &mut Report) {
-    let base = match advertised_base(config) {
+    let base = match config.advertised_base() {
         Ok(Some(base)) => base,
         // Already reported by check_tracker.
         _ => return,
     };
-    // Dialled the same way `checks::check_reachable` does, so the message
-    // names the exact host:port it tried.
-    let target = format!(
-        "{}:{}",
-        base.host_str().unwrap_or_default().trim_matches(['[', ']']),
-        base.port_or_known_default().unwrap_or_default()
-    );
+    // An address with no host or port is `check_tracker`'s finding, not this one's:
+    // nothing is dialled and nothing is said.
+    let Ok(target) = checks::dial_target(&base) else {
+        return;
+    };
 
     match checks::check_reachable(Some(&base)).await {
         checks::ReachOutcome::Reachable => {
@@ -962,16 +929,10 @@ async fn check_reachability(config: &Config, report: &mut Report) {
     }
 }
 
-/// The advertised endpoint the config resolves to, via the one resolver the
-/// tracker itself uses — see `sharerr_core::endpoint::advertised_base`.
-fn advertised_base(config: &Config) -> Result<Option<Url>, sharerr_core::endpoint::EndpointError> {
-    sharerr_core::endpoint::advertised_base(&config.tracker, config.server.bind.port())
-}
-
 /// The advertised endpoint rendered for a summary line: the address, or why
 /// there is none.
 fn describe_advertised(config: &Config) -> String {
-    match advertised_base(config) {
+    match config.advertised_base() {
         Ok(Some(base)) => sharerr_core::endpoint::base_string(&base),
         Ok(None) => "(unset)".to_owned(),
         Err(err) => format!("(invalid: {err})"),

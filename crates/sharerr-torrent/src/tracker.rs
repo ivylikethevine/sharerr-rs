@@ -24,23 +24,35 @@ use crate::error::{Result, TorrentError};
 
 /// The announce URLs one torrent carries.
 ///
-/// `primary` is the current endpoint; `tiers` spans the recently held ones,
-/// current first, so a friend's client whose primary goes stale after a VPN
-/// reconnect has older tiers to fall back through. `tiers` always contains
-/// `primary`.
+/// The tiers span the recently held endpoints, current first, so a friend's client
+/// whose primary goes stale after a VPN reconnect has older tiers to fall back
+/// through. Never empty: the first tier is the primary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnounceSet {
-    pub primary: Url,
-    pub tiers: Vec<Url>,
+    tiers: Vec<Url>,
 }
 
 impl AnnounceSet {
     /// A set with no fallback tiers — the static-endpoint case.
     pub fn single(primary: Url) -> Self {
         Self {
-            tiers: vec![primary.clone()],
-            primary,
+            tiers: vec![primary],
         }
+    }
+
+    /// A set of `tiers`, current first, or `None` when there are none.
+    pub fn from_tiers(tiers: Vec<Url>) -> Option<Self> {
+        (!tiers.is_empty()).then_some(Self { tiers })
+    }
+
+    /// The current endpoint.
+    pub fn primary(&self) -> &Url {
+        &self.tiers[0]
+    }
+
+    /// Every tier, the primary first.
+    pub fn tiers(&self) -> &[Url] {
+        &self.tiers
     }
 
     /// The BEP 12 announce-list — one URL per tier, in order — or `None` when
@@ -129,18 +141,14 @@ impl TrackerProvider for BuiltinTracker {
 /// `TrackerProvider`. See `crate::tracker::torrent_file` in the `sharerr`
 /// binary.
 pub fn announce_set_for(endpoint: &AdvertisedEndpoint, token: Option<&str>) -> Result<AnnounceSet> {
-    let current = endpoint.current().ok_or(TorrentError::NoAdvertisedHost)?;
-    let primary = announce_url(&current, token)?;
-
-    let mut tiers = Vec::new();
-    for base in endpoint.recent() {
-        tiers.push(announce_url(&base, token)?);
-    }
-    if tiers.is_empty() {
-        tiers.push(primary.clone());
-    }
-
-    Ok(AnnounceSet { primary, tiers })
+    // `recent()` is newest first, so one read gives the primary and its tiers
+    // together, and the primary is always among them.
+    let tiers = endpoint
+        .recent()
+        .iter()
+        .map(|base| announce_url(base, token))
+        .collect::<Result<Vec<_>>>()?;
+    AnnounceSet::from_tiers(tiers).ok_or(TorrentError::NoAdvertisedHost)
 }
 
 /// The URL paths peers announce and scrape on.
@@ -214,14 +222,17 @@ mod tests {
     async fn the_builtin_tracker_still_produces_its_announce_url() {
         let tracker = BuiltinTracker::new(endpoint("http://sharerr.example:8477"), None);
         let set = tracker.announce_set().await.unwrap();
-        assert_eq!(set.primary.as_str(), "http://sharerr.example:8477/announce");
-        assert_eq!(set.tiers, vec![set.primary.clone()]);
+        assert_eq!(
+            set.primary().as_str(),
+            "http://sharerr.example:8477/announce"
+        );
+        assert_eq!(set.tiers(), [set.primary().clone()]);
         assert_eq!(set.tier_list(), None, "one endpoint means no announce-list");
 
         let with_token =
             BuiltinTracker::new(endpoint("http://sharerr.example:8477"), Some("s3cret"));
         assert_eq!(
-            with_token.announce_set().await.unwrap().primary.as_str(),
+            with_token.announce_set().await.unwrap().primary().as_str(),
             "http://sharerr.example:8477/announce/s3cret"
         );
     }
@@ -232,7 +243,7 @@ mod tests {
     async fn a_path_prefixed_base_keeps_its_prefix_in_the_announce_url() {
         let tracker = BuiltinTracker::new(endpoint("https://proxy.example/sharerr"), None);
         assert_eq!(
-            tracker.announce_set().await.unwrap().primary.as_str(),
+            tracker.announce_set().await.unwrap().primary().as_str(),
             "https://proxy.example/sharerr/announce"
         );
     }
@@ -247,9 +258,9 @@ mod tests {
         let tracker = BuiltinTracker::new(Arc::clone(&live), None);
         let set = tracker.announce_set().await.unwrap();
 
-        assert_eq!(set.primary.as_str(), "http://203.0.113.9:41234/announce");
+        assert_eq!(set.primary().as_str(), "http://203.0.113.9:41234/announce");
         assert_eq!(
-            set.tiers,
+            set.tiers(),
             vec![
                 url("http://203.0.113.9:41234/announce"),
                 url("http://static.example:8477/announce"),

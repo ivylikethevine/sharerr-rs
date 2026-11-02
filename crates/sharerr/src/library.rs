@@ -266,6 +266,45 @@ fn has_media_extension(path: &Path, kind: LibraryKind) -> bool {
         .is_some_and(|ext| allowed.iter().any(|a| ext.eq_ignore_ascii_case(a)))
 }
 
+/// The subtitle files beside a media file and named after it, sorted so a rebuild
+/// lists them in the same order and gets the same info hash: `Show.S01E01.srt`
+/// and `Show.S01E01.en.srt` for `Show.S01E01.mkv`.
+///
+/// Empty rather than an error on anything unreadable: the file still shares, just
+/// without them. An empty file is left out because clients handle a zero-length
+/// torrent entry differently, and a name that is not UTF-8 because a torrent's
+/// path cannot carry it.
+pub(crate) fn subtitles_beside(path: &Path) -> Vec<String> {
+    const SUBTITLES: &[&str] = &["srt", "ass", "ssa", "sub", "idx", "vtt", "sup"];
+
+    let (Some(dir), Some(stem)) = (path.parent(), path.file_stem().and_then(|s| s.to_str())) else {
+        return Vec::new();
+    };
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(dir = %dir.display(), %err, "could not look for subtitles");
+            return Vec::new();
+        }
+    };
+
+    let prefix = format!("{stem}.");
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            let extension = Path::new(&name).extension()?.to_str()?;
+            let wanted = name.starts_with(&prefix)
+                && SUBTITLES.iter().any(|s| extension.eq_ignore_ascii_case(s));
+            // `fs::metadata` follows a symlink, the same as the scan does for a file.
+            (wanted && fs::metadata(entry.path()).is_ok_and(|m| m.is_file() && m.len() > 0))
+                .then_some(name)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// Build the [`MediaSpec`] a bare file can support, or `None` when it cannot
 /// support one at all.
 ///
@@ -323,7 +362,7 @@ fn spec_for(root: &Path, path: &Path, kind: LibraryKind) -> Option<MediaSpec> {
         }
         LibraryKind::Book => Some(MediaSpec::Book {
             author: dir_name(root, path, 1).unwrap_or_else(|| "Unknown Author".to_owned()),
-            title: humanize(&stem),
+            title: sharerr_torrent::humanize(&stem),
         }),
     }
 }
@@ -345,19 +384,7 @@ fn dir_name(root: &Path, path: &Path, levels: usize) -> Option<String> {
 /// `01 - Something.flac` -> `1`; a stem with no leading digits has no track.
 fn leading_number(stem: &str) -> Option<u32> {
     let digits: String = stem.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        return None;
-    }
     digits.parse().ok()
-}
-
-/// Dots and underscores back to spaces — the inverse of scene-style naming,
-/// for stems that are about to become display titles.
-///
-/// `sharerr_torrent::humanize` rather than a second copy of the same
-/// substitution: that crate already owns "what a release name looks like".
-fn humanize(stem: &str) -> String {
-    sharerr_torrent::humanize(stem)
 }
 
 /// Tokens that mark where a filename stops being a title and starts being
@@ -377,7 +404,7 @@ const RELEASE_TOKENS: &[&str] = &[
 /// The humanized stem, cut at the first release-cruft token — for movie names
 /// with no year, where the whole stem would otherwise become the title.
 fn display_title(stem: &str) -> String {
-    let normalised = humanize(stem);
+    let normalised = sharerr_torrent::humanize(stem);
     let is_cruft = |word: &str| {
         let lowered = word.to_ascii_lowercase();
         let head = lowered.split('-').next().unwrap_or(&lowered);
@@ -799,6 +826,33 @@ mod tests {
             matches!(outcome, Err(ScanError::Unreadable { .. })),
             "{outcome:?}"
         );
+    }
+
+    #[test]
+    fn subtitles_are_the_nonempty_ones_named_after_the_media_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let media = root.join("Show.S01E01.mkv");
+        touch(&media, 16);
+        touch(&root.join("Show.S01E01.srt"), 8);
+        touch(&root.join("Show.S01E01.en.SRT"), 8);
+        touch(&root.join("Show.S01E01.nfo"), 8);
+        touch(&root.join("Show.S01E01.empty.srt"), 0);
+        touch(&root.join("Show.S01E02.srt"), 8);
+        // Prefixed but not at a dot: another episode's name, not this one's.
+        touch(&root.join("Show.S01E011.srt"), 8);
+        touch(&root.join("Show.S01E01.dir.srt/x"), 8);
+
+        assert_eq!(
+            subtitles_beside(&media),
+            vec!["Show.S01E01.en.SRT", "Show.S01E01.srt"]
+        );
+    }
+
+    #[test]
+    fn subtitles_beside_a_file_in_an_unreadable_place_are_none() {
+        assert!(subtitles_beside(Path::new("/nonexistent/a.mkv")).is_empty());
+        assert!(subtitles_beside(Path::new("/")).is_empty());
     }
 
     /// A run of leading digits too long to be a track number is no track,

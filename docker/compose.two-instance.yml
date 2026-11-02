@@ -24,17 +24,17 @@
 
 name: sharerr-two-instance
 
-x-puid: &puid "${SHARERR_TEST_UID:-1000}"
-x-pgid: &pgid "${SHARERR_TEST_GID:-1000}"
+x-lsio-env: &lsio-env
+  PUID: "${SHARERR_TEST_UID:-1000}"
+  PGID: "${SHARERR_TEST_GID:-1000}"
+  TZ: Etc/UTC
 
 services:
   radarr-a:
     image: lscr.io/linuxserver/radarr:6.4.4@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: sharerr-two-instance-radarr-a
     environment:
-      PUID: *puid
-      PGID: *pgid
-      TZ: Etc/UTC
+      <<: *lsio-env
     volumes:
       - ./state-two-instance/a/radarr:/config
       # Instance A shares a file that already exists — same fixture the
@@ -47,9 +47,7 @@ services:
     image: lscr.io/linuxserver/radarr:6.4.4@sha256:084b3b2ab1d0ef930660727259546a241f2bdf67c9ed085d54bf1486a6887c9b
     container_name: sharerr-two-instance-radarr-b
     environment:
-      PUID: *puid
-      PGID: *pgid
-      TZ: Etc/UTC
+      <<: *lsio-env
     volumes:
       - ./state-two-instance/b/radarr:/config
       # Deliberately no media mount: instance B never has the file until it
@@ -63,9 +61,7 @@ services:
     image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:caab2ebce30799ab342c374ea268fef4ec063a8ec3733a4e5d4a8e856ee32ce8
     container_name: sharerr-two-instance-qbittorrent-a
     environment:
-      PUID: *puid
-      PGID: *pgid
-      TZ: Etc/UTC
+      <<: *lsio-env
       WEBUI_PORT: "8080"
     volumes:
       - qbit-config-a:/config
@@ -77,9 +73,7 @@ services:
     image: lscr.io/linuxserver/qbittorrent:5.2.3@sha256:caab2ebce30799ab342c374ea268fef4ec063a8ec3733a4e5d4a8e856ee32ce8
     container_name: sharerr-two-instance-qbittorrent-b
     environment:
-      PUID: *puid
-      PGID: *pgid
-      TZ: Etc/UTC
+      <<: *lsio-env
       WEBUI_PORT: "8080"
     volumes:
       - qbit-config-b:/config
@@ -102,9 +96,7 @@ services:
     image: lscr.io/linuxserver/prowlarr:2.6.5@sha256:f9151e5bc1025c6d0a630d503210cdcb6bb55a7cc098562609d96a408d838902
     container_name: sharerr-two-instance-prowlarr
     environment:
-      PUID: *puid
-      PGID: *pgid
-      TZ: Etc/UTC
+      <<: *lsio-env
     volumes:
       - ./state-two-instance/prowlarr:/config
     ports:

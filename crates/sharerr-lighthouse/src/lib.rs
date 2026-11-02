@@ -152,10 +152,11 @@ pub fn verify(record: &EndpointRecord) -> Result<(), &'static str> {
         .map_err(|_| "signature does not verify")
 }
 
-/// A key hash is a lowercase-hex SHA-256 digest — the form both sides derive
-/// from the shared API key without either needing to send it.
-fn valid_key_hash(key_hash: &str) -> bool {
-    key_hash.len() == 64 && key_hash.bytes().all(|b| b.is_ascii_hexdigit())
+/// Whether `value` has the shape of 32 bytes in hex: an Ed25519 public key, or a
+/// key hash, the SHA-256 digest both sides derive from the shared API key without
+/// either needing to send it.
+pub fn is_hex_32_bytes(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 pub fn hash_key(raw_key: &str) -> String {
@@ -306,14 +307,7 @@ impl LighthouseState {
     ///   key, which is a new key hash. Trust-on-first-use has no better answer
     ///   than that, and the window is the gap between issuing a key and the
     ///   instance's next report.
-    #[allow(
-        clippy::unused_async,
-        reason = "public API called with .await from two route handlers and \
-                  both crates' tests; the L1 lock-model change made the body \
-                  synchronous, but changing the signature to match is a \
-                  wider ripple than that refactor calls for"
-    )]
-    pub async fn report(
+    pub fn report(
         &self,
         key_hash: &str,
         record: EndpointRecord,
@@ -322,7 +316,7 @@ impl LighthouseState {
         // mixed-case entry would be unreachable *and* bypass the per-hash
         // staleness check (2^64 case variants of one logical hash).
         let key_hash = key_hash.to_ascii_lowercase();
-        if !valid_key_hash(&key_hash) {
+        if !is_hex_32_bytes(&key_hash) {
             return Err(ReportError::BadKeyHash);
         }
         verify(&record).map_err(|_| ReportError::InvalidRecord)?;
@@ -377,12 +371,7 @@ impl LighthouseState {
     /// otherwise a fabricated one of the same shape, stable across repeated
     /// probes of the same key hash. Never fails and never distinguishes the
     /// two cases in its return type — that is the entire privacy property.
-    #[allow(
-        clippy::unused_async,
-        reason = "public API called with .await from a route handler and \
-                  both crates' tests, matching report()'s reasoning above"
-    )]
-    pub async fn lookup(&self, key_hash: &str) -> EndpointRecord {
+    pub fn lookup(&self, key_hash: &str) -> EndpointRecord {
         let records = self.records.read().unwrap_or_else(PoisonError::into_inner);
         if let Some(stored) = records.map.get(key_hash) {
             return stored.clone();
@@ -497,7 +486,7 @@ async fn report(
     Path(key_hash): Path<String>,
     axum::Json(record): axum::Json<EndpointRecord>,
 ) -> Response {
-    match state.report(&key_hash, record).await {
+    match state.report(&key_hash, record) {
         Ok(ReportOutcome::Accepted) => (StatusCode::OK, "accepted").into_response(),
         Ok(ReportOutcome::Stale) => (StatusCode::OK, "stale").into_response(),
         Err(ReportError::BadKeyHash) => (
@@ -551,7 +540,7 @@ async fn lookup(
     Path(key_hash): Path<String>,
 ) -> Response {
     let key_hash = key_hash.to_lowercase();
-    let key_hash = if valid_key_hash(&key_hash) {
+    let key_hash = if is_hex_32_bytes(&key_hash) {
         key_hash
     } else {
         // Not a real lookup key, but still hashed through so the fabricated
@@ -559,7 +548,7 @@ async fn lookup(
         // some other shape of response.
         hash_key(&key_hash)
     };
-    axum::Json(state.lookup(&key_hash).await).into_response()
+    axum::Json(state.lookup(&key_hash)).into_response()
 }
 
 /// `GET /lighthouse/v1/health` — liveness only, no state consulted. Under the
@@ -729,23 +718,20 @@ mod tests {
 
         let outcome = state
             .report(&key_hash, signed_record(1, "203.0.113.9:41234", 1000))
-            .await
             .unwrap();
         assert_eq!(outcome, ReportOutcome::Accepted);
 
         let stale = state
             .report(&key_hash, signed_record(1, "203.0.113.9:1", 500))
-            .await
             .unwrap();
         assert_eq!(stale, ReportOutcome::Stale);
 
         let fresher = state
             .report(&key_hash, signed_record(1, "203.0.113.9:2", 2000))
-            .await
             .unwrap();
         assert_eq!(fresher, ReportOutcome::Accepted);
 
-        let record = state.lookup(&key_hash).await;
+        let record = state.lookup(&key_hash);
         assert_eq!(record.endpoints[0].addr, "203.0.113.9:2");
     }
 
@@ -763,17 +749,16 @@ mod tests {
         let now = now_epoch();
         state
             .report(&key_hash, signed_record(1, "203.0.113.9:41234", now))
-            .await
             .unwrap();
 
         // Signed, self-consistent, and newer — everything `verify` checks. The
         // only thing wrong with it is whose key signed it.
         let attacker = signed_record(2, "198.51.100.4:6881", now + 60);
         assert!(verify(&attacker).is_ok(), "the attack is a *valid* record");
-        let err = state.report(&key_hash, attacker).await.unwrap_err();
+        let err = state.report(&key_hash, attacker).unwrap_err();
         assert_eq!(err, ReportError::PubkeyMismatch);
 
-        let record = state.lookup(&key_hash).await;
+        let record = state.lookup(&key_hash);
         assert_eq!(
             record.endpoints[0].addr, "203.0.113.9:41234",
             "the genuine record must still be there"
@@ -791,12 +776,10 @@ mod tests {
         let now = now_epoch();
         state
             .report(&key_hash, signed_record(1, "203.0.113.9:1", now))
-            .await
             .unwrap();
 
         let err = state
             .report(&key_hash, signed_record(2, "198.51.100.4:1", now - 5000))
-            .await
             .unwrap_err();
         assert_eq!(err, ReportError::PubkeyMismatch);
     }
@@ -815,16 +798,14 @@ mod tests {
         let expired = now_epoch() - RECORD_TTL_SECS - 86_400;
         state
             .report(&key_hash, signed_record(1, "203.0.113.9:1", expired))
-            .await
             .unwrap();
 
         let outcome = state
             .report(&key_hash, signed_record(2, "198.51.100.4:1", now_epoch()))
-            .await
             .unwrap();
         assert_eq!(outcome, ReportOutcome::Accepted);
         assert_eq!(
-            state.lookup(&key_hash).await.pubkey,
+            state.lookup(&key_hash).pubkey,
             signed_record(2, "x", 0).pubkey
         );
     }
@@ -838,16 +819,10 @@ mod tests {
 
         let now = now_epoch();
         for (at, addr) in [(now - 300, "203.0.113.9:1"), (now, "203.0.113.9:2")] {
-            let outcome = state
-                .report(&key_hash, signed_record(1, addr, at))
-                .await
-                .unwrap();
+            let outcome = state.report(&key_hash, signed_record(1, addr, at)).unwrap();
             assert_eq!(outcome, ReportOutcome::Accepted);
         }
-        assert_eq!(
-            state.lookup(&key_hash).await.endpoints[0].addr,
-            "203.0.113.9:2"
-        );
+        assert_eq!(state.lookup(&key_hash).endpoints[0].addr, "203.0.113.9:2");
     }
 
     /// Hex case is not identity. A record whose pubkey differs from the pinned
@@ -860,7 +835,6 @@ mod tests {
         let now = now_epoch();
         state
             .report(&key_hash, signed_record(1, "203.0.113.9:1", now - 300))
-            .await
             .unwrap();
 
         let mut same_key = signed_record(1, "203.0.113.9:2", now);
@@ -873,7 +847,7 @@ mod tests {
             signable_bytes(&same_key.pubkey, &same_key.endpoints, same_key.signed_at).unwrap();
         same_key.signature = hex::encode(signing.sign(&bytes).to_bytes());
 
-        let outcome = state.report(&key_hash, same_key).await.unwrap();
+        let outcome = state.report(&key_hash, same_key).unwrap();
         assert_eq!(outcome, ReportOutcome::Accepted);
     }
 
@@ -887,23 +861,11 @@ mod tests {
         let now = now_epoch();
         state
             .report(&key_hash, signed_record(1, "203.0.113.9:1", now))
-            .await
             .unwrap();
 
-        let app = routes(state);
-        let body = serde_json::to_vec(&signed_record(2, "198.51.100.4:1", now + 60)).unwrap();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/lighthouse/v1/report/{key_hash}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let record = signed_record(2, "198.51.100.4:1", now + 60);
+        let (status, _) = post_report(state, &key_hash, &record).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -912,7 +874,7 @@ mod tests {
         let mut record = signed_record(1, "203.0.113.9:1", 1000);
         record.signature = "00".repeat(64);
 
-        let err = state.report(&hash_key("k"), record).await.unwrap_err();
+        let err = state.report(&hash_key("k"), record).unwrap_err();
         assert_eq!(err, ReportError::InvalidRecord);
     }
 
@@ -921,8 +883,8 @@ mod tests {
         let state = state();
         let key_hash = hash_key("nobody-has-registered-this");
 
-        let first = state.lookup(&key_hash).await;
-        let second = state.lookup(&key_hash).await;
+        let first = state.lookup(&key_hash);
+        let second = state.lookup(&key_hash);
         assert_eq!(first, second, "a repeated probe must see the same decoy");
         assert!(
             verify(&first).is_err(),
@@ -930,7 +892,7 @@ mod tests {
         );
 
         // Different key hashes must not collide on the same fabricated answer.
-        let other = state.lookup(&hash_key("a-different-key")).await;
+        let other = state.lookup(&hash_key("a-different-key"));
         assert_ne!(first.endpoints[0].addr, other.endpoints[0].addr);
     }
 
@@ -940,7 +902,6 @@ mod tests {
         let real_hash = hash_key("real");
         state
             .report(&real_hash, signed_record(1, "203.0.113.9:1", 1000))
-            .await
             .unwrap();
 
         let app = routes(state);
@@ -972,16 +933,8 @@ mod tests {
         let mut record = signed_record(1, "203.0.113.9:1", 1000);
         record.signature = "00".repeat(64);
 
-        let response = routes(state)
-            .oneshot(
-                Request::post(format!("/lighthouse/v1/report/{}", hash_key("k")))
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&record).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let (status, _) = post_report(state, &hash_key("k"), &record).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     // ------------------------------------------------------ the long tail
@@ -1000,7 +953,6 @@ mod tests {
 
         let err = state
             .report("not-hex", signed_record(1, "203.0.113.9:1", now))
-            .await
             .unwrap_err();
         assert_eq!(err, ReportError::BadKeyHash);
 
@@ -1009,7 +961,6 @@ mod tests {
                 &hash_key("k"),
                 signed_record(1, "203.0.113.9:1", now + MAX_FUTURE_SKEW_SECS + 60),
             )
-            .await
             .unwrap_err();
         assert_eq!(err, ReportError::FutureTimestamp);
     }
@@ -1110,12 +1061,12 @@ mod tests {
 
         let newcomer = format!("{MAX_RECORDS:064x}");
         assert_eq!(
-            state.report(&newcomer, record.clone()).await,
+            state.report(&newcomer, record.clone()),
             Err(ReportError::Full),
             "nothing has expired, so the sweep frees nothing"
         );
         assert_eq!(
-            state.report(&newcomer, record.clone()).await,
+            state.report(&newcomer, record.clone()),
             Err(ReportError::Full),
             "inside the sweep interval the table is not swept again"
         );
@@ -1131,7 +1082,7 @@ mod tests {
 
         let newer = signed_record(1, "http://203.0.113.9:41234", now + 1);
         assert_eq!(
-            state.report(&format!("{:064x}", 0), newer).await,
+            state.report(&format!("{:064x}", 0), newer),
             Ok(ReportOutcome::Accepted),
             "a reporter already held updates in place regardless of the cap"
         );

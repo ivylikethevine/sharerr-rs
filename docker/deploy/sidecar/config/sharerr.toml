@@ -40,8 +40,8 @@ tag = "sharerr"
 # than seeding the wrong bytes.
 skip_checking = true
 
-# Running Transmission or rTorrent instead? Set
-#   torrent_backend = "transmission"   (or "rtorrent")
+# Running Transmission, rTorrent or Deluge instead? Set
+#   torrent_backend = "transmission"   (or "rtorrent", "deluge")
 # at the top level and configure the matching section. See docs/SETTINGS.md.
 
 [tracker]

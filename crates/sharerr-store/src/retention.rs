@@ -9,16 +9,16 @@
 //! `ServeState::replace_config` applying a saved `[retention]` reaches the
 //! handles the background loops already hold.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 /// The limits, as a plain value. `0` means unbounded where a table was
 /// never pruned before (`sync_runs`); the other two always had a cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retention {
-    /// Swarm samples kept in total. See [`crate::swarm::MAX_SAMPLES`].
+    /// Swarm samples kept in total: by default a fortnight of hourly samples.
     pub swarm_samples: i64,
-    /// Addresses kept per `(friend, kind)`. See `endpoints::MAX_HISTORY`.
+    /// Addresses kept per `(friend, kind)`: enough to span a few reconnects; more
+    /// would be a location log.
     pub endpoint_history: i64,
     /// Sync runs kept, newest first; `0` keeps every run.
     pub sync_runs: i64,
@@ -26,71 +26,39 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
-        Self {
-            swarm_samples: crate::swarm::MAX_SAMPLES,
-            endpoint_history: crate::endpoints::MAX_HISTORY as i64,
-            sync_runs: 0,
-        }
+        Self::from(&sharerr_core::config::RetentionConfig::default())
     }
 }
 
 impl From<&sharerr_core::config::RetentionConfig> for Retention {
     fn from(config: &sharerr_core::config::RetentionConfig) -> Self {
-        let clamp = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
         Self {
-            swarm_samples: clamp(config.swarm_samples),
-            endpoint_history: clamp(config.endpoint_history),
-            sync_runs: clamp(config.sync_runs),
+            swarm_samples: sharerr_core::saturating_i64(config.swarm_samples),
+            endpoint_history: sharerr_core::saturating_i64(config.endpoint_history),
+            sync_runs: sharerr_core::saturating_i64(config.sync_runs),
         }
     }
 }
 
-/// The shared, lock-free cell behind every clone of one `Store`.
-#[derive(Debug)]
-pub(crate) struct RetentionCell {
-    swarm_samples: AtomicI64,
-    endpoint_history: AtomicI64,
-    sync_runs: AtomicI64,
-}
-
-impl RetentionCell {
-    pub(crate) fn new(retention: Retention) -> Arc<Self> {
-        let cell = Self {
-            swarm_samples: AtomicI64::new(0),
-            endpoint_history: AtomicI64::new(0),
-            sync_runs: AtomicI64::new(0),
-        };
-        cell.set(retention);
-        Arc::new(cell)
-    }
-
-    pub(crate) fn set(&self, retention: Retention) {
-        self.swarm_samples
-            .store(retention.swarm_samples, Ordering::Relaxed);
-        self.endpoint_history
-            .store(retention.endpoint_history, Ordering::Relaxed);
-        self.sync_runs.store(retention.sync_runs, Ordering::Relaxed);
-    }
-
-    pub(crate) fn get(&self) -> Retention {
-        Retention {
-            swarm_samples: self.swarm_samples.load(Ordering::Relaxed),
-            endpoint_history: self.endpoint_history.load(Ordering::Relaxed),
-            sync_runs: self.sync_runs.load(Ordering::Relaxed),
-        }
-    }
-}
+/// The shared cell behind every clone of one `Store`.
+pub(crate) type RetentionCell = Arc<RwLock<Retention>>;
 
 impl crate::Store {
     /// Replace the limits every later write prunes to. Nothing is pruned
     /// here: a lowered limit takes effect at the next write to each table.
     pub fn set_retention(&self, retention: Retention) {
-        self.retention.set(retention);
+        *self
+            .retention
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = retention;
     }
 
     /// The limits in force.
     pub fn retention(&self) -> Retention {
-        self.retention.get()
+        *self
+            .retention
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 

@@ -1,5 +1,19 @@
 {
   "enabledPlugins": {
     "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "enabledMcpjsonServers": [
+    "chrome-devtools"
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(cargo *)"
+    ]
+  },
+  "sandbox": {
+    "excludedCommands": ["cargo *"],
+    "filesystem": {
+      "allowRead": ["~/.local/share/rustup"]
+    }
   }
 }

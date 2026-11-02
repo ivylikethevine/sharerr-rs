@@ -26,6 +26,55 @@ pub(crate) fn vault_in(dir: &tempfile::TempDir) -> sharerr_store::Vault {
         .expect("opening a fresh vault file cannot fail")
 }
 
+/// A pending episode row, for a test to override what it is about.
+pub(crate) fn shared_item() -> sharerr_core::model::SharedItem {
+    use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+    SharedItem {
+        id: None,
+        source: MediaSource::Sonarr,
+        source_id: 1,
+        file_id: 1,
+        spec: MediaSpec::Episode {
+            series_title: "Lanternwick Hollow".to_owned(),
+            season: 1,
+            episode: 1,
+        },
+        release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
+        arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
+        size: 1,
+        ids: ExternalIds::default(),
+        media: None,
+        info_hash: None,
+        announce_token_fp: None,
+        created_by_sharerr: true,
+        private: true,
+        state: ShareState::Pending,
+        last_error: None,
+        created_at: None,
+        achieved_ratio: None,
+        ratio_limit_reported: None,
+    }
+}
+
+/// A friend who has never connected, for a test to override what it is about.
+pub(crate) fn peer(label: &str, scope: sharerr_store::PeerScope) -> sharerr_store::Peer {
+    sharerr_store::Peer {
+        id: 1,
+        label: label.to_owned(),
+        created_at: 0,
+        last_seen_at: None,
+        revoked_at: None,
+        scope,
+        pubkey: None,
+        gossip_url: None,
+        key_hash: "hash".to_owned(),
+        downloaded: 0,
+        uploaded: 0,
+        max_size_bytes: None,
+        max_height: None,
+    }
+}
+
 /// Install a process-wide `tracing` subscriber at `TRACE`, once, capturing
 /// output per test the way `cargo test` captures `println!`.
 ///
@@ -61,62 +110,6 @@ impl sharerr_torrent::TrackerProvider for AlwaysReadyTracker {
     }
 }
 
-/// A qBittorrent stand-in that answers `list` with nothing and never
-/// dials out — standing in for the real client neither `state::tests::ready` nor
-/// `state::tests::ready_with_source` has a live qBittorrent to reach. Everything
-/// besides `kind`/`list` is `unimplemented!()`: a pass with no discovered
-/// items never calls them, and a test that starts needing one is a sign
-/// this stub has outgrown its purpose, not a reason to fill them in blind.
-#[derive(Debug, Default)]
-pub(crate) struct AlwaysEmptyQbit;
-
-#[async_trait::async_trait]
-impl sharerr_client::TorrentClient for AlwaysEmptyQbit {
-    fn kind(&self) -> sharerr_client::ClientKind {
-        sharerr_client::ClientKind::QBittorrent
-    }
-    async fn login(&self) -> sharerr_client::Result<()> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn version(&self) -> sharerr_client::Result<String> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn list(
-        &self,
-        _category: Option<&str>,
-    ) -> sharerr_client::Result<Vec<sharerr_client::TorrentSummary>> {
-        Ok(Vec::new())
-    }
-    async fn files(
-        &self,
-        _hash: &str,
-    ) -> sharerr_client::Result<Vec<sharerr_client::TorrentFileEntry>> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn add(&self, _request: &sharerr_client::AddRequest<'_>) -> sharerr_client::Result<()> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn set_trackers(&self, _hash: &str, _urls: &[url::Url]) -> sharerr_client::Result<()> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn add_trackers(&self, _hash: &str, _urls: &[url::Url]) -> sharerr_client::Result<()> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn set_limits(
-        &self,
-        _hash: &str,
-        _limits: &sharerr_client::SeedingLimits,
-    ) -> sharerr_client::Result<()> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-    async fn export(&self, _hash: &str) -> sharerr_client::Result<Option<Vec<u8>>> {
-        unimplemented!("not needed by the fixtures that use this stub")
-    }
-}
-
 /// An in-process `TorrentClient` double — no HTTP, so `Seeder`'s own logic
 /// (as opposed to any one client's wire format) can be exercised alone.
 /// `files_result` is a closure so a test can fail for one hash and succeed
@@ -130,6 +123,8 @@ pub(crate) struct StubClient {
     pub(crate) set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
     pub(crate) add_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
     pub(crate) add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    /// Each add's save path and multi-file root, in the same order.
+    pub(crate) add_locations: std::sync::Mutex<Vec<(String, Option<String>)>>,
     pub(crate) set_limits_calls: std::sync::Mutex<Vec<(String, sharerr_client::SeedingLimits)>>,
     /// `.torrent` bytes `export` hands back, or `None` for a client that
     /// has no such call — the Transmission and rTorrent case.
@@ -179,6 +174,10 @@ impl TorrentClient for StubClient {
             .lock()
             .unwrap()
             .push((request.info_hash.to_owned(), request.data.to_vec()));
+        self.add_locations.lock().unwrap().push((
+            request.save_path.to_owned(),
+            request.root_folder.map(str::to_owned),
+        ));
         Ok(())
     }
     async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
@@ -204,7 +203,7 @@ impl TorrentClient for StubClient {
             .push((hash.to_owned(), urls.to_vec()));
         Ok(())
     }
-    async fn set_limits(
+    async fn apply_limits(
         &self,
         hash: &str,
         limits: &sharerr_client::SeedingLimits,

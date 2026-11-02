@@ -57,6 +57,22 @@
 
 name: sharerr-mesh
 
+x-node: &node
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  depends_on: [lighthouse]
+  environment:
+    SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+    RUST_LOG: sharerr=debug,info
+    # Convergence in seconds rather than the production default's fifteen
+    # minutes — see the file header. `SHARERR_LIGHTHOUSE__QUIET_SECS` is
+    # deliberately short enough that a link severed mid-test goes quiet
+    # well within the script's own wait budget.
+    SHARERR_GOSSIP__EXCHANGE_SECS: "3"
+    SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
+    SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
+
 services:
   lighthouse:
     build:
@@ -73,21 +89,8 @@ services:
       - "127.0.0.1:63878:7878"
 
   sharerr-a:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    <<: *node
     container_name: sharerr-mesh-sharerr-a
-    depends_on: [lighthouse]
-    environment:
-      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
-      RUST_LOG: sharerr=debug,info
-      # Convergence in seconds rather than the production default's fifteen
-      # minutes — see the file header. `SHARERR_LIGHTHOUSE__QUIET_SECS` is
-      # deliberately short enough that a link severed mid-test goes quiet
-      # well within the script's own wait budget.
-      SHARERR_GOSSIP__EXCHANGE_SECS: "3"
-      SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
-      SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
     volumes:
       - ./state-mesh/config-a:/config
       - sharerr-mesh-data-a:/data
@@ -95,17 +98,8 @@ services:
       - "127.0.0.1:63481:8477"
 
   sharerr-b:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    <<: *node
     container_name: sharerr-mesh-sharerr-b
-    depends_on: [lighthouse]
-    environment:
-      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
-      RUST_LOG: sharerr=debug,info
-      SHARERR_GOSSIP__EXCHANGE_SECS: "3"
-      SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
-      SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
     volumes:
       - ./state-mesh/config-b:/config
       - sharerr-mesh-data-b:/data
@@ -113,17 +107,8 @@ services:
       - "127.0.0.1:63482:8477"
 
   sharerr-c:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    <<: *node
     container_name: sharerr-mesh-sharerr-c
-    depends_on: [lighthouse]
-    environment:
-      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
-      RUST_LOG: sharerr=debug,info
-      SHARERR_GOSSIP__EXCHANGE_SECS: "3"
-      SHARERR_LIGHTHOUSE__INTERVAL_SECS: "3"
-      SHARERR_LIGHTHOUSE__QUIET_SECS: "8"
     volumes:
       - ./state-mesh/config-c:/config
       - sharerr-mesh-data-c:/data

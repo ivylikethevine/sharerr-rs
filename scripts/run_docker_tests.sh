@@ -7,6 +7,7 @@
 #   ./scripts/run_docker_tests.sh --vpn          qBittorrent behind gluetun
 #   ./scripts/run_docker_tests.sh --transmission Transmission instead of qBittorrent
 #   ./scripts/run_docker_tests.sh --rtorrent     rTorrent instead of qBittorrent
+#   ./scripts/run_docker_tests.sh --deluge       Deluge instead of qBittorrent
 #   ./scripts/run_docker_tests.sh --sonarr-v5    the plain stack on Sonarr v5
 #
 # The --vpn variant is the same suite against a genuinely different topology: the
@@ -42,15 +43,17 @@ curl() { command curl -q "$@"; }
 VPN=0
 TM=0
 RT=0
+DL=0
 SV5=0
 case "${1:-}" in
     --vpn) VPN=1 ;;
     --transmission) TM=1 ;;
     --rtorrent) RT=1 ;;
+    --deluge) DL=1 ;;
     --sonarr-v5) SV5=1 ;;
     "") ;;
     *)
-        echo "usage: $0 [--vpn|--transmission|--rtorrent|--sonarr-v5]" >&2
+        echo "usage: $0 [--vpn|--transmission|--rtorrent|--deluge|--sonarr-v5]" >&2
         exit 2
         ;;
 esac
@@ -72,6 +75,12 @@ elif ((RT)); then
     # rTorrent's RPC are ready, which makes it the honest readiness signal.
     QBIT_PORT=48080
     QBIT_SERVICE=rtorrent
+    LIDARR=0 READARR=0
+elif ((DL)); then
+    COMPOSE=(docker compose -f docker/compose.deluge.yml)
+    STATE=docker/state-dl
+    SONARR_PORT=57989 RADARR_PORT=57878 QBIT_PORT=57112 SHARERR_PORT=57477
+    QBIT_SERVICE=deluge
     LIDARR=0 READARR=0
 elif ((VPN)); then
     COMPOSE=(docker compose -f docker/compose.vpn.yml)
@@ -313,6 +322,9 @@ elif ((RT)); then
     # whatever Basic Auth it is sent — see compose.rtorrent.yml. Nothing to
     # scrape; the vault entry only has to exist.
     QBITTORRENT_PW=rtorrent-test-password
+elif ((DL)); then
+    # What the web UI ships with; the image takes no password from the environment.
+    QBITTORRENT_PW=deluge
 else
     if ! QBITTORRENT_PW=$("${COMPOSE[@]}" logs qbittorrent 2>/dev/null |
         grep -i 'temporary password' | awk '{print $NF}' | tail -n 1) ||
@@ -341,6 +353,8 @@ if ((TM)); then
     vault_set transmission.password "$QBITTORRENT_PW"
 elif ((RT)); then
     vault_set rtorrent.password "$QBITTORRENT_PW"
+elif ((DL)); then
+    vault_set deluge.password "$QBITTORRENT_PW"
 else
     vault_set qbittorrent.api_key "$QBITTORRENT_KEY"
 fi
@@ -465,7 +479,8 @@ echo "jackett admin ok"
 #     is worth knowing in its own right, and it is why this step syncs rather than
 #     relying on the suite below to do it.
 "${COMPOSE[@]}" exec -T sharerr sharerr sync >/dev/null
-sonarr_indexer=$(cat <<JSON
+sonarr_indexer=$(
+    cat <<JSON
 {
   "enableRss": true, "enableAutomaticSearch": true, "enableInteractiveSearch": true,
   "supportsRss": true, "supportsSearch": true, "protocol": "torrent", "priority": 25,
@@ -500,7 +515,8 @@ echo "sonarr accepts sharerr as an indexer ok"
 #     already covers Lidarr — `sharerr sync` walks every configured *arr source in
 #     one pass.
 if ((LIDARR)); then
-    lidarr_indexer=$(cat <<JSON
+    lidarr_indexer=$(
+        cat <<JSON
 {
   "enableRss": true, "enableAutomaticSearch": true, "enableInteractiveSearch": true,
   "supportsRss": true, "supportsSearch": true, "protocol": "torrent", "priority": 25,
@@ -516,7 +532,7 @@ if ((LIDARR)); then
   ]
 }
 JSON
-)
+    )
     indexer_test=$(curl -s -w '\n%{http_code}' -X POST \
         -H "X-Api-Key: $LIDARR_KEY" -H 'Content-Type: application/json' \
         --data "$lidarr_indexer" "http://127.0.0.1:$LIDARR_PORT/api/v1/indexer/test")
@@ -614,6 +630,31 @@ if ((RT)); then
     echo "rtorrent: torrents carry an announce URL from sharerr's own tracker"
 fi
 
+# 6f3. What only the Deluge stack can prove: the real JSON-RPC session, the web UI
+#      attaching to its daemon, and real status shapes — see compose.deluge.yml.
+if ((DL)); then
+    doctor_out=$("${COMPOSE[@]}" exec -T sharerr sharerr doctor 2>&1 || true)
+    if ! grep -qi "deluge" <<<"$doctor_out"; then
+        echo "error: doctor did not report Deluge — is torrent_backend being read?" >&2
+        echo "$doctor_out" >&2
+        exit 1
+    fi
+    echo "deluge: doctor reports the configured client"
+
+    hash=$("${COMPOSE[@]}" exec -T sharerr sh -c 'ls /data/torrents/*.torrent 2>/dev/null | head -1')
+    if [[ -z $hash ]]; then
+        echo "error: no .torrent was built, so the announce URL cannot be checked" >&2
+        exit 1
+    fi
+    if ! "${COMPOSE[@]}" exec -T sharerr \
+        grep -aq "localhost:$SHARERR_PORT/announce" "$hash"; then
+        echo "error: the built torrent does not announce to sharerr's own tracker" >&2
+        "${COMPOSE[@]}" exec -T sharerr sh -c "grep -ao 'http[^\"]*announce[^\"]*' '$hash'" >&2 || true
+        exit 1
+    fi
+    echo "deluge: torrents carry an announce URL from sharerr's own tracker"
+fi
+
 # 6d. The assertions that only mean something in the VPN topology.
 if ((VPN)); then
     # qBittorrent has no address of its own here, so the name in sharerr.toml has
@@ -670,6 +711,8 @@ if ((TM)); then
     export SHARERR_E2E_COMPOSE=docker/compose.transmission.yml
 elif ((RT)); then
     export SHARERR_E2E_COMPOSE=docker/compose.rtorrent.yml
+elif ((DL)); then
+    export SHARERR_E2E_COMPOSE=docker/compose.deluge.yml
 elif ((VPN)); then
     export SHARERR_E2E_COMPOSE=docker/compose.vpn.yml
 fi

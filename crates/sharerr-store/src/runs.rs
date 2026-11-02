@@ -5,18 +5,17 @@ use sqlx::Row;
 
 use sharerr_core::endpoint::now_epoch;
 
-use crate::db::{Store, StoreError};
-
-type Result<T> = std::result::Result<T, StoreError>;
+use crate::db::{Result, Store};
 
 impl Store {
     /// Open a reconciliation run, returning its id for [`Self::finish_run`].
     pub async fn begin_run(&self) -> Result<i64> {
-        let row = sqlx::query("INSERT INTO sync_runs (started_at) VALUES (?1) RETURNING id")
-            .bind(now_epoch())
-            .fetch_one(self.pool())
-            .await?;
-        Ok(row.try_get::<i64, _>("id")?)
+        Ok(
+            sqlx::query_scalar("INSERT INTO sync_runs (started_at) VALUES (?1) RETURNING id")
+                .bind(now_epoch())
+                .fetch_one(self.pool())
+                .await?,
+        )
     }
 
     /// Close a run and record what it did, then prune to the newest

@@ -87,7 +87,7 @@ const LEGEND: &[LegendEntry] = &[
         lane: Lane::Client,
         accent: "var(--topo-client)",
         name: "Torrent client",
-        meaning: "The client that actually seeds — qBittorrent, Transmission or rTorrent",
+        meaning: "The client that actually seeds — qBittorrent, Transmission, rTorrent or Deluge",
     },
     LegendEntry {
         icon: NodeIcon::Friend,
@@ -309,8 +309,6 @@ pub enum EdgeStyle {
     /// `sharerr_store::ObservedVia::Restored`): sharerr never saw this
     /// address itself, only an operator's word that it was once current.
     Sparse,
-    /// Nothing observed yet — no line at all, just the two boxes.
-    None,
 }
 
 impl EdgeStyle {
@@ -323,19 +321,16 @@ impl EdgeStyle {
             Self::Dashed => "Learned through gossip: another friend relayed their address",
             Self::Dotted => "Learned from a lighthouse: the fallback when nobody has seen them",
             Self::Sparse => "Restored from a backup: nobody has actually seen this address yet",
-            Self::None => "",
         }
     }
 
-    /// The SVG `stroke-dasharray` value, or `None` when [`Self::None`] means
-    /// the edge should not be drawn at all.
-    pub fn dasharray(self) -> Option<&'static str> {
+    /// The SVG `stroke-dasharray` value.
+    pub fn dasharray(self) -> &'static str {
         match self {
-            Self::Solid => Some("none"),
-            Self::Dashed => Some("6 4"),
-            Self::Dotted => Some("1.5 4"),
-            Self::Sparse => Some("1 7"),
-            Self::None => None,
+            Self::Solid => "none",
+            Self::Dashed => "6 4",
+            Self::Dotted => "1.5 4",
+            Self::Sparse => "1 7",
         }
     }
 }
@@ -347,7 +342,7 @@ impl EdgeStyle {
 /// believes. This one asks the client what it is *doing*, which is the only
 /// way to notice a torrent removed from the client behind sharerr's back —
 /// the store still says `Seeding` and nothing else contradicts it.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ClientCheck {
     /// Torrents the store says are seeding, i.e. what should be there.
     pub expected: usize,
@@ -364,8 +359,13 @@ pub struct ClientCheck {
     /// Set when the listing itself failed, in which case every count above is
     /// zero and means nothing — distinct from "asked, and found nothing wrong".
     pub error: Option<String>,
+}
+
+impl ClientCheck {
     /// Whether the client agrees with the store. Drives the one-line verdict.
-    pub healthy: bool,
+    pub fn healthy(&self) -> bool {
+        self.error.is_none() && self.absent.is_empty() && self.idle.is_empty()
+    }
 }
 
 /// One torrent the client and the store disagree about.

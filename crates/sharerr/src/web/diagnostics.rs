@@ -14,7 +14,6 @@
 //! a second page to click through to answered no one's question.
 
 use secrecy::SecretString;
-use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::{Config, MediaSource};
 use sharerr_store::Peer;
 
@@ -54,26 +53,14 @@ pub(super) async fn gather(state: &WebState) -> DiagnosticsData {
     // being duplicated per page. The run history and the two poller rows do
     // not depend on it, so they are gathered alongside rather than after.
     let config = &config;
-    let tracker_endpoint = state.serve.endpoint_for(GluetunTarget::Tracker);
-    let client_endpoint = state.serve.endpoint_for(GluetunTarget::Client);
     let (snapshot, torrent_client, runs, swarm_samples, friends, tracker, client) = tokio::join!(
         checks::snapshot(config, &api_key),
         torrent_client_line(config, &api_key),
         recent_run_rows(state),
         swarm_sample_rows(state),
         active_friends(state),
-        endpoint_status(
-            display_label(GluetunTarget::Tracker),
-            GluetunTarget::Tracker.config(config),
-            &tracker_endpoint,
-            state.serve.gluetun_status(GluetunTarget::Tracker),
-        ),
-        endpoint_status(
-            display_label(GluetunTarget::Client),
-            GluetunTarget::Client.config(config),
-            &client_endpoint,
-            state.serve.gluetun_status(GluetunTarget::Client),
-        ),
+        endpoint_status(&state.serve, config, GluetunTarget::Tracker),
+        endpoint_status(&state.serve, config, GluetunTarget::Client),
     );
     let gluetun = vec![tracker, client];
     let checks::Snapshot {
@@ -154,13 +141,7 @@ async fn active_friends(state: &WebState) -> Vec<Peer> {
     let Ok(store) = state.serve.store().await else {
         return Vec::new();
     };
-    store
-        .list_peers()
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|peer| !peer.is_revoked())
-        .collect()
+    store.active_peers().await.unwrap_or_default()
 }
 
 /// The setup checklist, read off checks this page already ran rather than
@@ -280,8 +261,8 @@ async fn lighthouse_view(
     let rows: Vec<LighthouseRow> = snapshot
         .lighthouses
         .iter()
-        .map(|report| LighthouseRow {
-            url: report.url.clone(),
+        .map(|(url, report)| LighthouseRow {
+            url: url.clone(),
             last_success: report.last_success_at.map(ago),
             last_error: report.last_error.clone(),
         })
@@ -406,15 +387,7 @@ pub(crate) fn run_chart(runs: &[RunRow]) -> Option<RunChart> {
         .enumerate()
         .map(|(index, run)| {
             let index = i32::try_from(index).unwrap_or(i32::MAX);
-            // Every pass sits at the floor until one of them has actually
-            // discovered something, rather than dividing by zero to get there.
-            let scaled = if tallest > 0 {
-                let ratio = run.discovered as f64 / tallest as f64;
-                (ratio * f64::from(PLOT_H)).round() as i32
-            } else {
-                0
-            };
-            let h = scaled.clamp(MIN_BAR_H, PLOT_H);
+            let h = bar_height(run.discovered as f64, tallest as f64, PLOT_H, MIN_BAR_H);
             RunBar {
                 x: index * (BAR_W + BAR_GAP),
                 y: PAD_TOP + PLOT_H - h,
@@ -444,6 +417,17 @@ pub(crate) fn run_chart(runs: &[RunRow]) -> Option<RunChart> {
     })
 }
 
+/// One bar's height, scaled against the tallest. Every bar sits at the floor
+/// until one has a value, rather than dividing by zero to get there.
+fn bar_height(value: f64, tallest: f64, plot: i32, floor: i32) -> i32 {
+    let scaled = if tallest > 0.0 {
+        (value / tallest * f64::from(plot)).round() as i32
+    } else {
+        0
+    };
+    scaled.clamp(floor, plot)
+}
+
 /// Fixed total width for the swarm-history strip, however many samples it
 /// holds — see [`crate::web::templates::SwarmChart`]'s own doc for why this
 /// differs from the run-history strip's fixed per-bar width and gap above.
@@ -471,13 +455,12 @@ pub(crate) fn swarm_chart(samples: &[sharerr_store::SwarmSample]) -> Option<Swar
         .enumerate()
         .map(|(index, sample)| {
             let index = i32::try_from(index).unwrap_or(i32::MAX);
-            let scaled = if busiest > 0 {
-                let ratio = sample.peers as f64 / busiest as f64;
-                (ratio * f64::from(SWARM_CHART_H)).round() as i32
-            } else {
-                0
-            };
-            let h = scaled.clamp(SWARM_MIN_BAR_H, SWARM_CHART_H);
+            let h = bar_height(
+                sample.peers as f64,
+                busiest as f64,
+                SWARM_CHART_H,
+                SWARM_MIN_BAR_H,
+            );
             SwarmBar {
                 x: index * w,
                 y: SWARM_CHART_H - h,
@@ -552,18 +535,19 @@ async fn torrent_client_line(
 
 /// One gluetun poller's row, pre-rendered for the template.
 async fn endpoint_status(
-    label: &'static str,
-    gluetun_config: &sharerr_core::config::GluetunConfig,
-    endpoint: &AdvertisedEndpoint,
-    status: std::sync::Arc<crate::gluetun::GluetunStatus>,
+    serve: &crate::state::ServeState,
+    config: &Config,
+    target: GluetunTarget,
 ) -> EndpointStatus {
-    let snapshot = status.snapshot().await;
+    let gluetun_config = target.config(config);
+    let endpoint = serve.endpoint_for(target);
+    let snapshot = serve.gluetun_status(target).snapshot().await;
     EndpointStatus {
-        label,
+        label: display_label(target),
         enabled: gluetun_config.enabled,
         configured: gluetun_config.control_url.is_some(),
         current: endpoint.current().map(|base| base.to_string()),
-        last_observed: super::settings::gluetun_last_observed(endpoint),
+        last_observed: super::settings::gluetun_last_observed(&endpoint),
         last_poll: snapshot.last_poll_at.map(ago),
         last_success: snapshot.last_success_at.map(ago),
         last_error: snapshot.last_error,
@@ -668,8 +652,6 @@ fn describe_library(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::sync::Arc;
-
     use sharerr_core::config::{GluetunConfig, LibraryConfig, LibraryKind, ServiceConfig};
     use sharerr_store::runs::RunSummary;
     use url::Url;
@@ -682,17 +664,8 @@ mod tests {
 
     fn friend(last_seen_at: Option<i64>) -> Peer {
         Peer {
-            id: 1,
-            label: "Sam".to_owned(),
-            created_at: 0,
             last_seen_at,
-            revoked_at: None,
-            scope: sharerr_store::PeerScope::All,
-            pubkey: None,
-            gossip_url: None,
-            key_hash: "hash".to_owned(),
-            downloaded: 0,
-            uploaded: 0,
+            ..crate::test_support::peer("Sam", sharerr_store::PeerScope::All)
         }
     }
 
@@ -1419,13 +1392,11 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_status_reports_nothing_configured_and_never_observed() {
-        let gluetun_config = GluetunConfig::default();
-        let endpoint = AdvertisedEndpoint::new(None);
-        let status = Arc::new(crate::gluetun::GluetunStatus::default());
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
 
-        let row = endpoint_status("Tracker/feed", &gluetun_config, &endpoint, status).await;
+        let row = endpoint_status(&serve, &Config::default(), GluetunTarget::Tracker).await;
 
-        assert_eq!(row.label, "Tracker/feed");
+        assert_eq!(row.label, display_label(GluetunTarget::Tracker));
         // `enabled` defaults to true — it's independent of `control_url`.
         assert!(row.enabled);
         assert!(!row.configured);
@@ -1437,18 +1408,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn endpoint_status_prefers_the_dynamic_observation_over_the_static_base() {
-        let gluetun_config = GluetunConfig {
-            enabled: true,
-            control_url: Some(Url::parse("http://127.0.0.1:8000").unwrap()),
-            ..GluetunConfig::default()
+    async fn endpoint_status_reports_what_the_targets_poller_observed() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let config = Config {
+            gluetun_client: GluetunConfig {
+                enabled: true,
+                control_url: Some(Url::parse("http://127.0.0.1:8000").unwrap()),
+                ..GluetunConfig::default()
+            },
+            ..Config::default()
         };
-        let endpoint = AdvertisedEndpoint::new(Some(Url::parse("http://static.example").unwrap()));
-        endpoint.observe(Url::parse("http://dynamic.example").unwrap());
-        let status = Arc::new(crate::gluetun::GluetunStatus::default());
+        serve
+            .endpoint_for(GluetunTarget::Client)
+            .observe(Url::parse("http://dynamic.example").unwrap());
 
-        let row = endpoint_status("Torrent client", &gluetun_config, &endpoint, status).await;
+        let row = endpoint_status(&serve, &config, GluetunTarget::Client).await;
 
+        assert_eq!(row.label, display_label(GluetunTarget::Client));
         assert!(row.enabled);
         assert!(row.configured);
         assert_eq!(row.current.as_deref(), Some("http://dynamic.example/"));
@@ -1548,8 +1524,7 @@ mod tests {
 
     #[tokio::test]
     async fn torrent_client_line_reports_nothing_listening_as_unreachable() {
-        let port = sharerr_testkit::net::closed_port();
-        let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let url = sharerr_testkit::net::closed_url();
         let line = torrent_client_line(&transmission_config(&url), &password).await;
         assert!(!line.ok);
         assert!(line.message.starts_with("could not reach it:"), "{line:?}");

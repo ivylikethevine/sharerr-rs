@@ -30,7 +30,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
@@ -134,12 +133,12 @@ impl Invite {
         validate_url(&invite.url)?;
         validate_key(&invite.key)?;
         if let Some(pubkey) = &invite.pubkey
-            && !is_hex_pubkey(pubkey)
+            && !sharerr_lighthouse::is_hex_32_bytes(pubkey)
         {
             return Err("that invite carries an identity key of the wrong shape".to_owned());
         }
         if let Some(hash) = &invite.in_reply_to
-            && (hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            && !sharerr_lighthouse::is_hex_32_bytes(hash)
         {
             return Err("that reply names a key hash of the wrong shape".to_owned());
         }
@@ -164,16 +163,6 @@ fn validate_key(key: &str) -> Result<(), String> {
         return Err("the key is longer than any sharerr issues".to_owned());
     }
     Ok(())
-}
-
-fn is_hex_pubkey(pubkey: &str) -> bool {
-    pubkey.len() == 64 && pubkey.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Lowercase hex SHA-256 of a peer key: the value `peers.key_hash` holds, and
-/// so what a reply's `in_reply_to` has to equal.
-pub fn key_hash(key: &str) -> String {
-    hex::encode(Sha256::digest(key.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +243,7 @@ pub struct PairRequest {
          "The address does not parse, the key is empty or oversized, or the \
           record's signature does not verify.", body = String),
         (status = 401, content_type = "application/xml",
-         description = "No `apikey`, or one that matches no active peer.", body = String),
+         description = crate::torznab::NO_ACTIVE_PEER, body = String),
         (status = 409, description =
          "This peer's outbound half is already set, or the record names a \
           different identity from the one pinned. Pairing fills an empty row \
@@ -409,11 +398,11 @@ mod tests {
     #[test]
     fn a_reply_keeps_what_it_answers() {
         let mut reply = invite();
-        reply.in_reply_to = Some(key_hash("their-key"));
+        reply.in_reply_to = Some(sharerr_lighthouse::hash_key("their-key"));
         let decoded = Invite::decode(&reply.encode()).unwrap();
         assert_eq!(
             decoded.in_reply_to.as_deref(),
-            Some(key_hash("their-key").as_str())
+            Some(sharerr_lighthouse::hash_key("their-key").as_str())
         );
     }
 
@@ -496,7 +485,7 @@ mod tests {
         // `Store::create_peer` hashes the same way; this pins the encoding so
         // a reply's `in_reply_to` keeps finding the row.
         assert_eq!(
-            key_hash("abc"),
+            sharerr_lighthouse::hash_key("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
@@ -593,7 +582,12 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(secrecy::ExposeSecret::expose_secret(&stored), request.key);
-                let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+                let endpoints = store
+                    .peer_endpoints_for(&[sam.id])
+                    .await
+                    .unwrap()
+                    .remove(&sam.id)
+                    .unwrap_or_default();
                 assert_eq!(endpoints.len(), 1, "the record's endpoint was recorded too");
 
                 let (status, body) = post_pair(&state, "sam-key", &request).await;

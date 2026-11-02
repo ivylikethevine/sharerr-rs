@@ -1,0 +1,45 @@
+# Configuration for the Deluge compose test stack.
+#
+# Identical to docker/config/sharerr.toml except for what choosing a different
+# torrent client actually changes.
+#
+# Secrets are deliberately absent: they live in the encrypted vault, loaded once
+# the stack is up. See docker/README.md.
+
+data_dir = "/data"
+tag = "sharerr"
+
+torrent_backend = "deluge"
+
+[server]
+bind = "0.0.0.0:8477"
+
+[sonarr]
+url = "http://sonarr:8989"
+
+[radarr]
+url = "http://radarr:7878"
+
+[deluge]
+url = "http://deluge:8112"
+label = "sharerr"
+
+[tracker]
+advertised_host = "localhost"
+port = 57477
+
+[sync]
+enabled = false
+interval_secs = 900
+
+# The same deliberately-disagreeing mounts as the plain stack: Sonarr says /tv,
+# sharerr reads /media/tv, Deluge is told /downloads/tv.
+[[path_map]]
+arr = "/tv"
+sharerr = "/media/tv"
+qbit = "/downloads/tv"
+
+[[path_map]]
+arr = "/movies"
+sharerr = "/media/movies"
+qbit = "/downloads/movies"

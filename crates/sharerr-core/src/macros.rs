@@ -33,7 +33,7 @@
 ///   that acts on it, not lost in the commit that introduced this macro.
 #[macro_export]
 macro_rules! str_enum {
-    ($ty:ty { $($variant:ident => $str:literal),+ $(,)? }) => {
+    (@common $ty:ty { $($variant:ident => $str:literal),+ }) => {
         impl $ty {
             /// Every variant, in declaration order.
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
@@ -43,27 +43,16 @@ macro_rules! str_enum {
                 match self {
                     $(Self::$variant => $str,)+
                 }
-            }
-
-            /// Inverse of [`Self::as_str`], derived from it so the two
-            /// cannot drift.
-            pub fn parse(value: &str) -> Option<Self> {
-                Self::ALL.iter().copied().find(|v| v.as_str() == value)
             }
         }
     };
+    ($ty:ty { $($variant:ident => $str:literal),+ $(,)? }) => {
+        $crate::str_enum!($ty { $($variant => $str),+ }, "");
+    };
     ($ty:ty { $($variant:ident => $str:literal),+ $(,)? }, $reason:literal) => {
+        $crate::str_enum!(@common $ty { $($variant => $str),+ });
+
         impl $ty {
-            /// Every variant, in declaration order.
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
-
-            /// The wire/storage spelling.
-            pub fn as_str(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $str,)+
-                }
-            }
-
             #[doc = concat!(
                 "Inverse of [`Self::as_str`], derived from it so the two cannot drift.\n\n",
                 $reason
@@ -74,17 +63,9 @@ macro_rules! str_enum {
         }
     };
     ($ty:ty { $($variant:ident => $str:literal),+ $(,)? }, lenient = $default:ident, $reason:literal) => {
+        $crate::str_enum!(@common $ty { $($variant => $str),+ });
+
         impl $ty {
-            /// Every variant, in declaration order.
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
-
-            /// The wire/storage spelling.
-            pub fn as_str(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $str,)+
-                }
-            }
-
             #[doc = concat!(
                 "Inverse of [`Self::as_str`], derived from it so the two cannot drift.\n\n",
                 $reason

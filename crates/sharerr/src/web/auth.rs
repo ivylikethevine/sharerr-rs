@@ -41,7 +41,8 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use secrecy::SecretString;
 use serde::Deserialize;
 use sharerr_core::config::ServerConfig;
-use sharerr_store::StoreError;
+use sharerr_core::saturating_i64;
+use sharerr_store::{Store, StoreError};
 use tokio::sync::RwLock;
 
 use crate::web::WebState;
@@ -411,7 +412,7 @@ pub async fn require_auth(
         // The database is the thing that knows whether an account exists. If it
         // cannot be opened, sending the visitor to a login form they can never
         // satisfy would hide the actual fault behind a password prompt.
-        Err(reason) => (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+        Err(reason) => super::unavailable(reason),
     }
 }
 
@@ -459,7 +460,7 @@ pub async fn setup_page(State(state): State<WebState>) -> Response {
     match instance_is_claimed(&state).await {
         Ok(true) => Redirect::to("/login").into_response(),
         Ok(false) => render(&SetupPage::blank()),
-        Err(reason) => (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+        Err(reason) => super::unavailable(reason),
     }
 }
 
@@ -475,10 +476,7 @@ pub async fn setup_submit(
         return reject(&message);
     }
 
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
     // Re-checked here and not only in `setup_page`: two people racing the form on an
     // unclaimed instance would both have been shown it.
@@ -488,7 +486,7 @@ pub async fn setup_submit(
         Err(err) => return internal(&format!("reading accounts: {err}")),
     }
 
-    let password = SecretString::from(form.password.clone());
+    let password = SecretString::from(form.password);
     match store.create_user(&form.username, &password).await {
         Ok(_) => {}
         // Both of these are the user's mistake and safe to show verbatim.
@@ -514,7 +512,7 @@ pub async fn login_page(State(state): State<WebState>, jar: CookieJar) -> Respon
     match instance_is_claimed(&state).await {
         Ok(true) => render(&LoginPage::blank()),
         Ok(false) => Redirect::to("/setup").into_response(),
-        Err(reason) => (StatusCode::SERVICE_UNAVAILABLE, reason).into_response(),
+        Err(reason) => super::unavailable(reason),
     }
 }
 
@@ -524,12 +522,9 @@ pub async fn login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
-    let password = SecretString::from(form.password.clone());
+    let password = SecretString::from(form.password);
     match store.verify_password(&form.username, &password).await {
         Ok(true) => match store.totp_secret(&form.username).await {
             Ok(None) => sign_in(&state, jar, &headers, &form.username, "/").await,
@@ -616,25 +611,20 @@ pub async fn change_password(
         return settings_error(&state, &message).await;
     }
 
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
     // Verified before anything is written, and reported in the same words as a
     // failed sign-in.
-    let current = SecretString::from(form.current_password.clone());
-    match store.verify_password(&username, &current).await {
+    match password_ok(&store, &username, form.current_password).await {
         Ok(true) => {}
         Ok(false) => {
             tracing::warn!(%username, "rejected a password change: wrong current password");
             return settings_error(&state, "That is not your current password.").await;
         }
-        Err(StoreError::TooBusy) => return too_busy(),
-        Err(err) => return internal(&format!("checking the password: {err}")),
+        Err(response) => return *response,
     }
 
-    let new = SecretString::from(form.new_password.clone());
+    let new = SecretString::from(form.new_password);
     match store.set_password(&username, &new).await {
         Ok(true) => {}
         // The account vanished between the two queries, which means someone is
@@ -652,6 +642,20 @@ pub async fn change_password(
 
     tracing::info!(%username, "password changed");
     Redirect::to("/settings?saved=account").into_response()
+}
+
+/// Boxed like `WebState::store_or_503`'s error, to keep the `Result` small.
+pub(crate) async fn password_ok(
+    store: &Store,
+    username: &str,
+    password: String,
+) -> Result<bool, Box<Response>> {
+    let password = SecretString::from(password);
+    match store.verify_password(username, &password).await {
+        Ok(verified) => Ok(verified),
+        Err(StoreError::TooBusy) => Err(Box::new(too_busy())),
+        Err(err) => Err(Box::new(internal(&format!("checking the password: {err}")))),
+    }
 }
 
 pub(crate) async fn sign_in(
@@ -672,8 +676,26 @@ pub(crate) async fn sign_in(
 }
 
 fn session_cookie(token: String, secure: bool) -> Cookie<'static> {
-    Cookie::build((COOKIE_NAME, token))
-        .path("/")
+    base_cookie(COOKIE_NAME, token, "/", secure)
+}
+
+/// The pending-sign-in cookie: scoped to `/login`, gone when the step is.
+pub(crate) fn pending_cookie(token: String, secure: bool) -> Cookie<'static> {
+    let mut cookie = base_cookie(PENDING_COOKIE, token, "/login", secure);
+    cookie.set_max_age(time::Duration::seconds(saturating_i64(
+        PENDING_TTL.as_secs(),
+    )));
+    cookie
+}
+
+fn base_cookie(
+    name: &'static str,
+    token: String,
+    path: &'static str,
+    secure: bool,
+) -> Cookie<'static> {
+    Cookie::build((name, token))
+        .path(path)
         .http_only(true)
         // Strict, not Lax: this is what makes a cross-site POST unable to carry the
         // session, which is the whole of the CSRF defence for the settings forms.
@@ -1157,7 +1179,7 @@ mod tests {
     // A `WebState` over `state::fixtures::unconfigured()`, same as web/settings.rs's
     // handler tests — a real sqlite-backed `Store` (no vault involved), so account
     // creation, login, and password change all exercise the genuine store queries.
-    use crate::web::{body_of, web_state};
+    use crate::web::{body_of, location, web_state};
 
     /// Create `operator` with a generated password on `serve`'s store, and hand the
     /// password back for whichever form field needs it — the shape underneath
@@ -1188,13 +1210,7 @@ mod tests {
 
         let response = setup_page(State(web_state(serve))).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/login"
-        );
+        assert_eq!(location(&response), "/login");
     }
 
     #[tokio::test]
@@ -1231,20 +1247,13 @@ mod tests {
             State(state),
             CookieJar::new(),
             HeaderMap::new(),
-            Form(SetupForm {
-                username: "operator".to_owned(),
-                password: password.clone(),
-                confirm: password,
-            }),
+            setup_form(&password),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
+            location(&response),
             "/wizard",
             "a fresh instance lands on the wizard, not the status page"
         );
@@ -1282,13 +1291,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/login"
-        );
+        assert_eq!(location(&response), "/login");
         assert_eq!(store.user_count().await.unwrap(), 1);
     }
 
@@ -1297,13 +1300,7 @@ mod tests {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let response = login_page(State(web_state(serve)), CookieJar::new()).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/setup"
-        );
+        assert_eq!(location(&response), "/setup");
     }
 
     #[tokio::test]
@@ -1324,21 +1321,12 @@ mod tests {
             State(web_state(serve)),
             CookieJar::new(),
             HeaderMap::new(),
-            Form(LoginForm {
-                username: "operator".to_owned(),
-                password,
-            }),
+            login_form(&password),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/"
-        );
+        assert_eq!(location(&response), "/");
     }
 
     /// With two-step sign-in on, the right password grants no session yet:
@@ -1359,21 +1347,12 @@ mod tests {
             State(web_state(serve)),
             CookieJar::new(),
             HeaderMap::new(),
-            Form(LoginForm {
-                username: "operator".to_owned(),
-                password,
-            }),
+            login_form(&password),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/login/totp"
-        );
+        assert_eq!(location(&response), "/login/totp");
         assert!(session_set_cookie(&response).is_none(), "no session yet");
         let cookies: Vec<_> = response
             .headers()
@@ -1398,10 +1377,7 @@ mod tests {
             State(web_state(serve)),
             CookieJar::new(),
             HeaderMap::new(),
-            Form(LoginForm {
-                username: "operator".to_owned(),
-                password: fresh_password(),
-            }),
+            login_form(&fresh_password()),
         )
         .await;
 
@@ -1431,10 +1407,7 @@ mod tests {
             State(web_state(serve)),
             CookieJar::new(),
             headers(&[("host", "box.lan:8477")]),
-            Form(LoginForm {
-                username: "operator".to_owned(),
-                password,
-            }),
+            login_form(&password),
         )
         .await;
 
@@ -1455,10 +1428,7 @@ mod tests {
             State(web_state(serve)),
             CookieJar::new(),
             headers(&[("host", "sharerr.example"), ("x-forwarded-proto", "https")]),
-            Form(LoginForm {
-                username: "operator".to_owned(),
-                password,
-            }),
+            login_form(&password),
         )
         .await;
 
@@ -1481,11 +1451,7 @@ mod tests {
             State(state),
             CookieJar::new(),
             headers(&[("forwarded", "proto=https")]),
-            Form(SetupForm {
-                username: "operator".to_owned(),
-                password: password.clone(),
-                confirm: password,
-            }),
+            setup_form(&password),
         )
         .await;
 
@@ -1555,13 +1521,7 @@ mod tests {
         let response = logout(State(state.clone()), jar, HeaderMap::new()).await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/login"
-        );
+        assert_eq!(location(&response), "/login");
         assert!(state.sessions.touch(&token).await.is_none());
     }
 
@@ -1580,13 +1540,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/login"
-        );
+        assert_eq!(location(&response), "/login");
     }
 
     #[tokio::test]
@@ -1640,13 +1594,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::LOCATION)
-                .unwrap(),
-            "/settings?saved=account"
-        );
+        assert_eq!(location(&response), "/settings?saved=account");
         assert!(
             store
                 .verify_password("operator", &SecretString::from(new_password))
@@ -1673,7 +1621,7 @@ mod tests {
 
         let response = login_page(State(state), jar).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(super::super::location(&response), "/");
+        assert_eq!(location(&response), "/");
     }
 
     // ------------------------------------------- the store stops answering
@@ -1848,7 +1796,7 @@ mod tests {
 
         let response = guarded(state, None).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(super::super::location(&response), "/login");
+        assert_eq!(location(&response), "/login");
     }
 
     #[tokio::test]
@@ -2014,7 +1962,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        assert_eq!(super::super::location(&response), "/login");
+        assert_eq!(location(&response), "/login");
     }
 
     #[tokio::test]

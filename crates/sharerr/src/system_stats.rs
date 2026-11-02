@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sysinfo::{Disks, System};
+use sysinfo::{Disk, Disks, System};
 
 use crate::state::ServeState;
 
@@ -26,7 +26,7 @@ pub struct SystemStatus {
     inner: tokio::sync::RwLock<Option<SystemSnapshot>>,
 }
 
-/// One sample. `disk_used`/`disk_total` are `None` when no mounted
+/// One sample. `disk` is `(used, total)`, or `None` when no mounted
 /// filesystem was found covering the data directory — not expected in the
 /// documented Docker deployment, but rendered as an honest blank rather than
 /// a wrong number if it happens.
@@ -35,8 +35,7 @@ pub struct SystemSnapshot {
     pub cpu_percent: f32,
     pub memory_used: u64,
     pub memory_total: u64,
-    pub disk_used: Option<u64>,
-    pub disk_total: Option<u64>,
+    pub disk: Option<(u64, u64)>,
 }
 
 impl SystemStatus {
@@ -56,9 +55,20 @@ pub async fn poll_loop(state: Arc<ServeState>) {
     let status = state.system_status();
     let mut sys = System::new();
     let data_dir = state.data_dir().await;
+    // The one disk the page reports. Resolved once, off the runtime, and only that
+    // disk refreshed per sample: re-listing means re-reading the mount table and a
+    // statvfs on every mount, which a hung network mount would stall.
+    let mut disk = None;
 
     loop {
-        let snapshot = sample(&mut sys, &data_dir).await;
+        let dir = data_dir.clone();
+        let held = disk.take();
+        let refreshed = tokio::task::spawn_blocking(move || refresh_disk(held, &dir)).await;
+        disk = refreshed.unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "could not read the data directory's disk");
+            None
+        });
+        let snapshot = sample(&mut sys, disk.as_ref()).await;
         status.record(snapshot).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -67,7 +77,7 @@ pub async fn poll_loop(state: Arc<ServeState>) {
 /// One sample. Two `refresh_cpu_usage` calls a short gap apart are what
 /// sysinfo needs to report a real delta-based percentage rather than `0.0`
 /// on a single-shot read — see `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`.
-async fn sample(sys: &mut System, data_dir: &Path) -> SystemSnapshot {
+async fn sample(sys: &mut System, disk: Option<&Disk>) -> SystemSnapshot {
     sys.refresh_cpu_usage();
     tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
     sys.refresh_cpu_usage();
@@ -77,15 +87,16 @@ async fn sample(sys: &mut System, data_dir: &Path) -> SystemSnapshot {
     let memory_used = sys.used_memory();
     let memory_total = sys.total_memory();
 
-    let disks = Disks::new_with_refreshed_list();
-    let (disk_used, disk_total) = disk_usage_for(&disks, data_dir);
+    let disk = disk.map(|disk| {
+        let total = disk.total_space();
+        (total.saturating_sub(disk.available_space()), total)
+    });
 
     SystemSnapshot {
         cpu_percent,
         memory_used,
         memory_total,
-        disk_used,
-        disk_total,
+        disk,
     }
 }
 
@@ -99,65 +110,67 @@ pub fn format(snapshot: SystemSnapshot) -> (String, String, Option<String>) {
         crate::web::items::human_size(snapshot.memory_used),
         crate::web::items::human_size(snapshot.memory_total)
     );
-    let disk_usage = match (snapshot.disk_used, snapshot.disk_total) {
-        (Some(used), Some(total)) => Some(format!(
+    let disk_usage = snapshot.disk.map(|(used, total)| {
+        format!(
             "{} of {}",
             crate::web::items::human_size(used),
             crate::web::items::human_size(total)
-        )),
-        _ => None,
-    };
+        )
+    });
     (cpu_percent, memory_usage, disk_usage)
+}
+
+/// `held` brought up to date, or the disk covering `path` when there is none yet.
+/// Blocking; [`poll_loop`] runs it off the runtime.
+fn refresh_disk(held: Option<Disk>, path: &Path) -> Option<Disk> {
+    if let Some(mut disk) = held {
+        disk.refresh();
+        return Some(disk);
+    }
+    disk_covering(Vec::from(Disks::new_with_refreshed_list()), path)
 }
 
 /// The disk covering `path` — the mount point that is the longest prefix of
 /// `path` among everything sysinfo enumerated, the same "most specific mount
 /// wins" rule `/proc/mounts` itself follows. `None` if nothing matched.
-fn disk_usage_for(disks: &Disks, path: &Path) -> (Option<u64>, Option<u64>) {
+fn disk_covering(disks: Vec<Disk>, path: &Path) -> Option<Disk> {
     disks
-        .list()
-        .iter()
+        .into_iter()
         .filter(|d| path.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map_or((None, None), |d| {
-            let total = d.total_space();
-            let used = total.saturating_sub(d.available_space());
-            (Some(used), Some(total))
-        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn snapshot(disk_used: Option<u64>, disk_total: Option<u64>) -> SystemSnapshot {
+    fn snapshot(disk: Option<(u64, u64)>) -> SystemSnapshot {
         SystemSnapshot {
             cpu_percent: 12.34,
             memory_used: 4 * 1024 * 1024 * 1024,
             memory_total: 16 * 1024 * 1024 * 1024,
-            disk_used,
-            disk_total,
+            disk,
         }
     }
 
     #[test]
     fn format_renders_cpu_to_one_decimal() {
-        let (cpu, _, _) = format(snapshot(None, None));
+        let (cpu, _, _) = format(snapshot(None));
         assert_eq!(cpu, "12.3%");
     }
 
     #[test]
     fn format_renders_memory_as_used_of_total() {
-        let (_, memory, _) = format(snapshot(None, None));
+        let (_, memory, _) = format(snapshot(None));
         assert_eq!(memory, "4.0 GiB of 16.0 GiB");
     }
 
     #[test]
     fn format_renders_disk_when_a_mount_was_found() {
-        let (_, _, disk) = format(snapshot(
-            Some(120 * 1024 * 1024 * 1024),
-            Some(500 * 1024 * 1024 * 1024),
-        ));
+        let (_, _, disk) = format(snapshot(Some((
+            120 * 1024 * 1024 * 1024,
+            500 * 1024 * 1024 * 1024,
+        ))));
         assert_eq!(disk.as_deref(), Some("120.0 GiB of 500.0 GiB"));
     }
 
@@ -165,7 +178,7 @@ mod tests {
     /// tile must not fabricate a "0 B of 0 B" that reads as a real answer.
     #[test]
     fn format_leaves_disk_blank_when_nothing_matched() {
-        let (_, _, disk) = format(snapshot(None, None));
+        let (_, _, disk) = format(snapshot(None));
         assert_eq!(disk, None);
     }
 
@@ -177,7 +190,8 @@ mod tests {
     #[tokio::test]
     async fn sample_reads_real_memory_and_a_disk_covering_tmp() {
         let mut sys = System::new();
-        let snapshot = sample(&mut sys, std::env::temp_dir().as_path()).await;
+        let disk = refresh_disk(None, std::env::temp_dir().as_path());
+        let snapshot = sample(&mut sys, disk.as_ref()).await;
 
         assert!(snapshot.memory_total > 0, "a host always has some memory");
         assert!(
@@ -185,7 +199,7 @@ mod tests {
             "used must not exceed total"
         );
         assert!(
-            snapshot.disk_total.is_some(),
+            snapshot.disk.is_some(),
             "/tmp must resolve to a mounted filesystem"
         );
     }

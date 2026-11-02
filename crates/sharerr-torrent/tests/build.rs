@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use sharerr_testkit::{deterministic_bytes, write_media_file};
 use sharerr_torrent::{
     AnnounceSet, Torrent, TorrentError, TorrentFactory, TorrentRequest, piece_length_for,
-    read_announce, rewrite_announce,
+    rewrite_announce,
 };
 use url::Url;
 
@@ -37,11 +37,7 @@ fn fixture(name: &str, size: usize, seed: u64) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn tiered(urls: &[&str]) -> AnnounceSet {
-    let tiers: Vec<Url> = urls.iter().map(|u| Url::parse(u).unwrap()).collect();
-    AnnounceSet {
-        primary: tiers[0].clone(),
-        tiers,
-    }
+    AnnounceSet::from_tiers(urls.iter().map(|u| Url::parse(u).unwrap()).collect()).unwrap()
 }
 
 #[test]
@@ -154,7 +150,8 @@ fn the_piece_count_matches_the_file_size() {
     let decoded = Torrent::read_from_bytes(&built.data).unwrap();
 
     let expected = (700 * 1024_u64).div_ceil(piece_length_for(built.size));
-    assert_eq!(decoded.piece_count() as u64, expected);
+    let pieces = decoded.info.get(b"pieces".as_slice()).unwrap();
+    assert_eq!(pieces.as_bytes().unwrap().len() as u64 / 20, expected);
     assert_eq!(decoded.length(), Some(i64::try_from(built.size).unwrap()));
 }
 
@@ -252,7 +249,10 @@ fn rewriting_the_announce_keeps_the_info_hash() {
 
     let built = build(&path);
     assert_eq!(
-        read_announce(&built.data).unwrap().as_deref(),
+        sharerr_torrent::Torrent::read_from_bytes(&built.data)
+            .unwrap()
+            .announce
+            .as_deref(),
         Some("http://sharerr.example:9000/announce")
     );
 

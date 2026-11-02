@@ -304,7 +304,12 @@ async fn check(store: &Store, version: i64) {
             "the revoked key must still be refused"
         );
 
-        let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[sam.id])
+            .await
+            .unwrap()
+            .remove(&sam.id)
+            .unwrap_or_default();
         if version >= 6 {
             assert_eq!(endpoints.len(), 1);
             assert_eq!(endpoints[0].kind, EndpointKind::Client);
@@ -368,10 +373,25 @@ async fn writes_still_work(store: &Store, version: i64) {
         )
         .await
         .unwrap();
-    assert_eq!(store.peer_endpoints(sam.id).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .peer_endpoints_for(&[sam.id])
+            .await
+            .unwrap()
+            .remove(&sam.id)
+            .unwrap_or_default()
+            .len(),
+        1
+    );
     assert!(store.delete_peer(sam.id).await.unwrap());
     assert!(
-        store.peer_endpoints(sam.id).await.unwrap().is_empty(),
+        store
+            .peer_endpoints_for(&[sam.id])
+            .await
+            .unwrap()
+            .remove(&sam.id)
+            .unwrap_or_default()
+            .is_empty(),
         "the endpoint cascade must hold on the upgraded file"
     );
     assert_eq!(

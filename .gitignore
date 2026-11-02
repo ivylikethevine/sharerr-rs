@@ -95,6 +95,7 @@ _site/
 /docker/state-vpn
 /docker/state-tm
 /docker/state-rt
+/docker/state-dl
 /docker/state-two-instance
 # The mesh stack's own live config copies: scratch copies of
 # docker/config-mesh-*/sharerr.toml (run_docker_tests_mesh.sh says why), since

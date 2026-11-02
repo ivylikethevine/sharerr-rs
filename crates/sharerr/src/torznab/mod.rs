@@ -33,7 +33,7 @@ use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
 
 use secrecy::SecretString;
 
-use sharerr_store::PeerScope;
+use sharerr_store::{PeerLimits, PeerScope};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -58,6 +58,9 @@ pub(crate) const CATEGORIES: &[(u32, &str)] = &[
     (CAT_XXX, "XXX"),
     (CAT_BOOKS, "Books"),
 ];
+
+/// What every peer-keyed route documents for its 401.
+pub(crate) const NO_ACTIVE_PEER: &str = "No `apikey`, or one that matches no active peer.";
 
 /// The swarm figures every renderer advertises: one seeder — this instance —
 /// and free downloads. Constants rather than tracker truth because Prowlarr
@@ -138,7 +141,7 @@ pub(crate) fn category_for(item: &SharedItem) -> u32 {
 /// Whether an item's category falls in one of `groups`, from
 /// [`SearchQuery::category_groups`]; no groups means no filter.
 fn in_category_groups(groups: Option<&[u32]>, item: &SharedItem) -> bool {
-    groups.is_none_or(|groups| groups.contains(&(category_for(item) / 1000 * 1000)))
+    groups.is_none_or(|groups| groups.contains(&category_for(item)))
 }
 
 /// Torznab's own error format. Prowlarr surfaces the description verbatim, which
@@ -164,9 +167,14 @@ fn error_xml(code: u32, description: &str) -> String {
 /// items per request, so always allocating meant tens of thousands of throwaway
 /// `String`s on every Prowlarr sync from every friend.
 fn escape(raw: &str) -> Cow<'_, str> {
+    // Control characters are not legal in XML 1.0 at all, and a stray one from a
+    // filename would make the whole document unparseable at the far end rather
+    // than merely mangling one title.
+    fn is_illegal_control(ch: char) -> bool {
+        (ch as u32) < 0x20 && ch != '\t' && ch != '\n' && ch != '\r'
+    }
     fn needs_escaping(ch: char) -> bool {
-        matches!(ch, '&' | '<' | '>' | '"' | '\'')
-            || ((ch as u32) < 0x20 && ch != '\t' && ch != '\n' && ch != '\r')
+        matches!(ch, '&' | '<' | '>' | '"' | '\'') || is_illegal_control(ch)
     }
 
     if !raw.contains(needs_escaping) {
@@ -181,10 +189,7 @@ fn escape(raw: &str) -> Cow<'_, str> {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            // Control characters are not legal in XML 1.0 at all, and a stray one
-            // from a filename would make the whole document unparseable at the far
-            // end rather than merely mangling one title.
-            c if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' => out.push(' '),
+            c if is_illegal_control(c) => out.push(' '),
             c => out.push(c),
         }
     }
@@ -641,7 +646,14 @@ pub async fn api(
     if query.t == "caps" {
         xml(caps_xml())
     } else if is_search_function(&query.t) {
-        search(&state, &query, caller.scope(), caller.key_hash()).await
+        search(
+            &state,
+            &query,
+            caller.scope(),
+            caller.limits(),
+            caller.key_hash(),
+        )
+        .await
     } else {
         xml_status(
             StatusCode::BAD_REQUEST,
@@ -727,6 +739,7 @@ pub(crate) async fn collect(
     state: &ServeState,
     query: &SearchQuery,
     scope: PeerScope,
+    limits: &PeerLimits,
     peer_token: &str,
 ) -> Result<Matched, (StatusCode, String)> {
     let store = state.store().await.map_err(|reason| {
@@ -739,14 +752,17 @@ pub(crate) async fn collect(
     // The scope is applied by the store itself, in SQL, before any row is
     // decoded. What a friend may see is not a search filter they could widen —
     // it is decided by who they are, and it never reaches this function's query
-    // logic at all.
-    let items = store.seeding_items(scope).await.map_err(|err| {
-        tracing::error!(error = %err, "torznab search failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read the library".to_owned(),
-        )
-    })?;
+    // logic at all. Their limits work the same way, from the same place.
+    let items = store
+        .seeding_items_for(scope, limits)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "torznab search failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the library".to_owned(),
+            )
+        })?;
 
     let total = items.len();
     // The needle is constant across the whole request, so it is normalised once
@@ -761,7 +777,7 @@ pub(crate) async fn collect(
         })
         .collect();
 
-    let magnet_links_enabled = state.config().await.feed.magnet_links;
+    let magnet_links_enabled = state.with_config(|c| c.feed.magnet_links).await;
 
     // The magnet's `tr` tiers: every recently held endpoint, the same list a
     // freshly built torrent carries, with an announce token when one is set —
@@ -830,9 +846,10 @@ async fn search(
     state: &ServeState,
     query: &SearchQuery,
     scope: PeerScope,
+    limits: &PeerLimits,
     peer_token: &str,
 ) -> Response {
-    let matched = match collect(state, query, scope, peer_token).await {
+    let matched = match collect(state, query, scope, limits, peer_token).await {
         Ok(matched) => matched,
         Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
     };
@@ -854,6 +871,7 @@ async fn search(
 /// would mean two lookups that could disagree.
 pub(crate) struct Caller {
     scope: PeerScope,
+    limits: PeerLimits,
     /// Which peer row authenticated. There is no unauthenticated path, so
     /// every caller is a real peer, and the gossip endpoints — which require
     /// one, to know who said what — can always resolve it.
@@ -867,6 +885,10 @@ pub(crate) struct Caller {
 impl Caller {
     pub fn scope(&self) -> PeerScope {
         self.scope
+    }
+
+    pub fn limits(&self) -> &PeerLimits {
+        &self.limits
     }
 
     pub fn peer_id(&self) -> i64 {
@@ -969,6 +991,7 @@ async fn check_api_key(
                 );
                 return Ok(Caller {
                     scope: peer.scope,
+                    limits: peer.limits(),
                     peer_id: peer.id,
                     key_hash: peer.key_hash,
                 });

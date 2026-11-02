@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use serde::Deserialize;
 use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
-use sharerr_store::{Peer, PeerScope, Store};
+use sharerr_store::{Audiences, Peer, Store};
 
 use std::collections::HashMap;
 
@@ -23,7 +23,7 @@ use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
 use super::templates::{
-    AddressCell, FilterOption, FilterState, ItemDetailPage, ItemRow, ItemsPage, SortLink, SwarmRow,
+    FilterState, ItemDetailPage, ItemFacts, ItemRow, ItemsPage, SelectOption, SortLink, SwarmRow,
     TokenStatus, render,
 };
 
@@ -76,9 +76,14 @@ pub(crate) const SORT_COLUMNS: &[(&str, &str)] = &[
 ];
 
 pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
+    let store = ok_or_return!(state.store_or_503().await);
+    let filters = FilterState {
+        q: query.q,
+        source: query.source,
+        state: query.state,
+        kind: query.kind,
+        sort: query.sort,
+        dir: query.dir,
     };
 
     let (mut items, error) = match store.all_items().await {
@@ -113,31 +118,31 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
     // would answer a different question on every page load.
     let composition = crate::web::composition::compose(&items);
 
-    let needle = query.q.trim().to_lowercase();
+    let needle = filters.q.trim().to_lowercase();
     if !needle.is_empty() {
         items.retain(|item| {
             item.spec.title().to_lowercase().contains(&needle)
                 || item.release_title.to_lowercase().contains(&needle)
         });
     }
-    if !query.source.is_empty() {
-        items.retain(|item| item.source.as_str() == query.source);
+    if !filters.source.is_empty() {
+        items.retain(|item| item.source.as_str() == filters.source);
     }
-    if !query.state.is_empty() {
-        items.retain(|item| item.state.as_str() == query.state);
+    if !filters.state.is_empty() {
+        items.retain(|item| item.state.as_str() == filters.state);
     }
-    if !query.kind.is_empty() {
-        items.retain(|item| item.spec.kind_tag() == query.kind);
+    if !filters.kind.is_empty() {
+        items.retain(|item| item.spec.kind_tag() == filters.kind);
     }
     let shown_bytes: u64 = items.iter().map(|item| item.size).sum();
 
     // Default view is newest first, matching the order the sync log reports
     // things in. An explicit sort overrides it; the header links below always
     // carry `dir` explicitly, so there is never an ambiguous third click.
-    let (sort, desc) = if query.sort.is_empty() {
+    let (sort, desc) = if filters.sort.is_empty() {
         ("since", true)
     } else {
-        (query.sort.as_str(), query.dir == "desc")
+        (filters.sort.as_str(), filters.dir == "desc")
     };
     // `sort_by_cached_key` computes each item's key once, rather than
     // re-lowercasing the title on every comparison the sort makes.
@@ -152,41 +157,30 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         items.reverse();
     }
 
-    let peers = store.list_peers().await.unwrap_or_default();
-    let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
+    let context = ItemContext::gather(&state, &store).await;
+    let audiences = store.audiences().await.unwrap_or_default();
 
-    // Same instance-wide-not-per-row reasoning for both: every seeding
-    // torrent announces to the same live endpoint and is checked against the
-    // same admitted tokens, so there is exactly one answer to compute for the
-    // whole page rather than once per row.
-    let (current_token_fp, previous_token_fp) = token_fingerprints(&state.serve).await;
-    // `None` when nothing is configured to announce to yet — the same
-    // condition that blocks the tracker itself (`TorrentError::NoAdvertisedHost`).
-    let announce_url = current_announce_url(&state.serve, current_token_fp.is_some());
-    let tokens = TokenFps {
-        current: current_token_fp.as_deref(),
-        previous: previous_token_fp.as_deref(),
-    };
     // The tracker's own view of who is in each swarm right now — first-hand,
     // in memory, and only present for torrents with at least one live peer,
     // so a miss below means "nobody", not "unknown".
     let swarms: HashMap<String, SwarmCount> = state
         .serve
         .swarms()
-        .snapshots()
+        .counts()
         .await
         .into_iter()
-        .map(|swarm| {
+        .map(|(info_hash, (complete, incomplete))| {
             (
-                hex::encode(swarm.info_hash),
+                hex::encode(info_hash),
                 SwarmCount {
-                    complete: swarm.complete,
-                    incomplete: swarm.incomplete,
+                    complete,
+                    incomplete,
                 },
             )
         })
         .collect();
 
+    let filter_query = filters.query();
     let sort_links = SORT_COLUMNS
         .iter()
         .map(|(field, label)| {
@@ -206,13 +200,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
             SortLink {
                 label,
                 hint: column_hint(field),
-                href: format!(
-                    "?source={}&state={}&kind={}&q={}&sort={field}&dir={next_dir}",
-                    urlencode(&query.source),
-                    urlencode(&query.state),
-                    urlencode(&query.kind),
-                    urlencode(&query.q),
-                ),
+                href: format!("?{filter_query}&sort={field}&dir={next_dir}"),
                 active,
                 dir: if active {
                     if desc { "desc" } else { "asc" }
@@ -227,14 +215,6 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
         signed_in: true,
         error,
         ok: non_empty(&query.ok),
-        filters: FilterState {
-            q: query.q.clone(),
-            source: query.source.clone(),
-            state: query.state.clone(),
-            kind: query.kind.clone(),
-            sort: query.sort.clone(),
-            dir: query.dir.clone(),
-        },
         total,
         shown: items.len(),
         state_counts,
@@ -249,58 +229,70 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                     .as_deref()
                     .and_then(|hash| swarms.get(&hash.to_lowercase()))
                     .copied();
-                row(item, &active, announce_url.as_deref(), tokens, swarm)
+                row(
+                    item,
+                    &context.active,
+                    &audiences,
+                    context.announce_url.as_deref(),
+                    context.tokens(),
+                    swarm,
+                )
             })
             .collect(),
         source_options: MediaSource::ALL
             .iter()
-            .map(|s| FilterOption {
-                value: s.as_str(),
-                label: title_case(s.as_str()),
-            })
+            .map(|s| SelectOption::named(s.as_str()))
             .collect(),
         state_options: ShareState::ALL
             .iter()
-            .map(|s| FilterOption {
-                value: s.as_str(),
-                label: title_case(s.as_str()),
-            })
+            .map(|s| SelectOption::named(s.as_str()))
             .collect(),
         kind_options: MediaSpec::KIND_TAGS
             .iter()
-            .map(|k| FilterOption {
-                value: k,
-                label: title_case(k),
-            })
+            .map(|k| SelectOption::named(k))
             .collect(),
-        source_filter: query.source,
-        state_filter: query.state,
-        kind_filter: query.kind,
-        q: query.q,
         sort_links,
+        filters,
     })
+}
+
+/// What every item on a page is rendered against. Instance-wide rather than
+/// per row: every seeding torrent announces to the same live endpoint and is
+/// checked against the same admitted tokens.
+struct ItemContext {
+    active: Vec<Peer>,
+    current_token_fp: Option<String>,
+    previous_token_fp: Option<String>,
+    /// `None` when nothing is configured to announce to yet — the same
+    /// condition that blocks the tracker itself (`TorrentError::NoAdvertisedHost`).
+    announce_url: Option<String>,
+}
+
+impl ItemContext {
+    async fn gather(state: &WebState, store: &Store) -> Self {
+        let active = store.active_peers().await.unwrap_or_default();
+        let (current_token_fp, previous_token_fp) = token_fingerprints(&state.serve).await;
+        let announce_url = current_announce_url(&state.serve, current_token_fp.is_some());
+        Self {
+            active,
+            current_token_fp,
+            previous_token_fp,
+            announce_url,
+        }
+    }
+
+    fn tokens(&self) -> TokenFps<'_> {
+        TokenFps {
+            current: self.current_token_fp.as_deref(),
+            previous: self.previous_token_fp.as_deref(),
+        }
+    }
 }
 
 use crate::torznab::encode_component as urlencode;
 
-/// Whether `scope` would show `item` in the Torznab feed — the same rule
-/// `Store::seeding_items` applies in SQL, restated over an in-memory item so this
-/// page can answer "who sees this" without a query per row.
-fn scope_admits(scope: PeerScope, item: &SharedItem) -> bool {
-    if scope.allows(item.source) {
-        return true;
-    }
-    if !MediaSource::KIND_SCOPED.contains(&item.source) {
-        return false;
-    }
-    let Some(kind) = scope.directory_kind() else {
-        return false;
-    };
-    item.spec.kind_tag() == kind
-}
-
 /// A short explanation for a state that would otherwise read as a dead end —
-/// see the field comment on [`crate::web::templates::ItemRow::state_hint`].
+/// see the field comment on [`crate::web::templates::ItemFacts::state_hint`].
 ///
 /// `Pending` genuinely should not linger: `Syncer::share` records it, then
 /// immediately either fails (which sets `Failed` with a reason) or reaches
@@ -322,13 +314,13 @@ fn state_hint(state: ShareState) -> Option<&'static str> {
 /// Who can currently find this item in their feed. Only meaningful once an item
 /// is `Seeding` — `Store::seeding_items` excludes everything else, so a pending
 /// or failed item is invisible to every friend regardless of scope.
-fn visible_to(item: &SharedItem, peers: &[Peer]) -> String {
+fn visible_to(item: &SharedItem, peers: &[Peer], audience: Option<&[String]>) -> String {
     if item.state != ShareState::Seeding {
         return String::new();
     }
     let names: Vec<&str> = peers
         .iter()
-        .filter(|peer| scope_admits(peer.scope, item))
+        .filter(|peer| peer.scope.admits(item) && peer.limits().admits(item, audience))
         .map(|peer| peer.label.as_str())
         .collect();
     if names.is_empty() {
@@ -418,16 +410,33 @@ fn short_hash(hash: &str) -> String {
 fn row(
     item: &SharedItem,
     peers: &[Peer],
+    audiences: &Audiences,
     announce_url: Option<&str>,
     tokens: TokenFps<'_>,
     swarm: Option<SwarmCount>,
 ) -> ItemRow {
     let (peers_live, peers_hint) = peers_cell(swarm);
-    let (ratio, ratio_hint) = ratio_cell(item);
+    let audience = audiences.get(&item.key()).map(Vec::as_slice);
     ItemRow {
+        facts: facts(item, peers, audience, announce_url, tokens),
+        arr_path: item.arr_path.display().to_string(),
+        info_hash_short: item.info_hash.as_deref().map(short_hash),
+        peers: peers_live,
+        peers_hint,
+    }
+}
+
+fn facts(
+    item: &SharedItem,
+    peers: &[Peer],
+    audience: Option<&[String]>,
+    announce_url: Option<&str>,
+    tokens: TokenFps<'_>,
+) -> ItemFacts {
+    let (ratio, ratio_hint) = ratio_cell(item);
+    ItemFacts {
         title: item.spec.title().to_owned(),
         release_title: item.release_title.clone(),
-        arr_path: item.arr_path.display().to_string(),
         kind: item.spec.kind_tag(),
         source_label: title_case(item.source.as_str()),
         size: human_size(item.size),
@@ -435,12 +444,9 @@ fn row(
         state_hint: state_hint(item.state),
         ratio,
         ratio_hint,
-        visible_to: visible_to(item, peers),
+        visible_to: visible_to(item, peers, audience),
         since: item.created_at.map(ago).unwrap_or_default(),
         info_hash: item.info_hash.clone(),
-        info_hash_short: item.info_hash.as_deref().map(short_hash),
-        peers: peers_live,
-        peers_hint,
         // The *arr's own identifiers — the join key an operator greps its
         // logs for when a row here and an entry there disagree.
         source_hint: source_hint(item),
@@ -602,14 +608,7 @@ pub async fn detail(
     Path((source, file_id)): Path<(MediaSource, i64)>,
     Query(query): Query<DetailQuery>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
-    let item = match fetch(&store, source, file_id).await {
-        Ok(item) => item,
-        Err(response) => return *response,
-    };
+    let (store, item) = ok_or_return!(load_item(&state, source, file_id).await);
 
     render(&build_detail(&state, &store, item, query).await)
 }
@@ -624,13 +623,7 @@ pub async fn retry(
     State(state): State<WebState>,
     Path((source, file_id)): Path<(MediaSource, i64)>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
-    if let Err(response) = fetch(&store, source, file_id).await {
-        return *response;
-    }
+    ok_or_return!(load_item(&state, source, file_id).await);
 
     tracing::info!(%source, file_id, "retry requested — running a sync pass now");
     redirect_with_outcome(source, file_id, trigger_sync_now(&state).await)
@@ -643,14 +636,7 @@ pub async fn rebuild(
     State(state): State<WebState>,
     Path((source, file_id)): Path<(MediaSource, i64)>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
-    let item = match fetch(&store, source, file_id).await {
-        Ok(item) => item,
-        Err(response) => return *response,
-    };
+    let (_, item) = ok_or_return!(load_item(&state, source, file_id).await);
 
     let syncer = match state.serve.syncer().await {
         Ok(syncer) => syncer,
@@ -680,10 +666,7 @@ pub async fn share_until(
     Path((source, file_id)): Path<(MediaSource, i64)>,
     Form(form): Form<ShareUntilForm>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let until = if form.clear.is_some() || form.date.trim().is_empty() {
         None
     } else {
@@ -712,14 +695,7 @@ pub async fn unshare(
     State(state): State<WebState>,
     Path((source, file_id)): Path<(MediaSource, i64)>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
-    let item = match fetch(&store, source, file_id).await {
-        Ok(item) => item,
-        Err(response) => return *response,
-    };
+    let (_, item) = ok_or_return!(load_item(&state, source, file_id).await);
     if item.state == ShareState::Unshared {
         // Already unshared is not an error worth showing — same convention
         // `peers::revoke` follows for an already-revoked key.
@@ -768,13 +744,17 @@ pub struct BulkForm {
 /// retry and rebuild then share one sync pass rather than one per item, since a
 /// pass already reprocesses everything pending or failed.
 pub async fn bulk(State(state): State<WebState>, Form(form): Form<BulkForm>) -> Response {
+    let filter_query = FilterState {
+        q: form.q.clone(),
+        source: form.source.clone(),
+        state: form.state.clone(),
+        kind: form.kind.clone(),
+        ..FilterState::default()
+    }
+    .query();
     let back = |key: &str, message: &str| {
         Redirect::to(&format!(
-            "/items?q={}&source={}&state={}&kind={}&sort={}&dir={}&{key}={}",
-            urlencode(&form.q),
-            urlencode(&form.source),
-            urlencode(&form.state),
-            urlencode(&form.kind),
+            "/items?{filter_query}&sort={}&dir={}&{key}={}",
             urlencode(&form.sort),
             urlencode(&form.dir),
             urlencode(message),
@@ -798,10 +778,7 @@ pub async fn bulk(State(state): State<WebState>, Form(form): Form<BulkForm>) -> 
             ),
         );
     }
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
     let mut selected = Vec::new();
     let mut missing = 0;
@@ -904,18 +881,19 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-/// One item, or the 404/500 response every action and the detail page answer
-/// with identically when it is missing or unreadable.
+/// The store and one item, or the 503/404/500 response every action and the
+/// detail page answer with identically when either is unavailable.
 ///
 /// Boxed for the same reason `WebState::store_or_503` is: `Response` alone is
 /// well over clippy's `result_large_err` threshold.
-async fn fetch(
-    store: &Store,
+async fn load_item(
+    state: &WebState,
     source: MediaSource,
     file_id: i64,
-) -> Result<SharedItem, Box<Response>> {
+) -> Result<(Store, SharedItem), Box<Response>> {
+    let store = state.store_or_503().await?;
     match store.get(source, file_id).await {
-        Ok(Some(item)) => Ok(item),
+        Ok(Some(item)) => Ok((store, item)),
         Ok(None) => Err(Box::new(
             (StatusCode::NOT_FOUND, "no such item").into_response(),
         )),
@@ -983,32 +961,14 @@ fn redirect_with_error(source: MediaSource, file_id: i64, message: &str) -> Resp
 /// The tracker's own live view of this item's swarm — `None` before a
 /// torrent exists or when nobody is announcing right now.
 async fn swarm_for(state: &WebState, item: &SharedItem) -> Option<SwarmRow> {
-    let hash = item.info_hash.as_deref()?;
-    let target = hash.to_lowercase();
+    let hash = hex::decode(item.info_hash.as_deref()?).ok()?;
     let swarm = state
         .serve
         .swarms()
-        .snapshots()
-        .await
-        .into_iter()
-        .find(|s| hex::encode(s.info_hash) == target)?;
+        .snapshot(&hash.try_into().ok()?)
+        .await?;
 
-    let more = swarm
-        .peers
-        .len()
-        .saturating_sub(super::topology::MAX_SWARM_PEERS);
-    let peers = swarm
-        .peers
-        .iter()
-        .take(super::topology::MAX_SWARM_PEERS)
-        .map(|addr| {
-            let full = addr.to_string();
-            AddressCell {
-                masked: super::topology::mask_address(&full),
-                full,
-            }
-        })
-        .collect();
+    let (peers, more) = super::topology::capped_peers(&swarm.peers);
 
     Some(SwarmRow {
         title: item.spec.title().to_owned(),
@@ -1026,16 +986,7 @@ async fn build_detail(
     query: DetailQuery,
 ) -> ItemDetailPage {
     let config = state.serve.config().await;
-    let peers = store.list_peers().await.unwrap_or_default();
-    let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
-
-    let (current_token_fp, previous_token_fp) = token_fingerprints(&state.serve).await;
-    let announce_url = current_announce_url(&state.serve, current_token_fp.is_some());
-    let tokens = TokenFps {
-        current: current_token_fp.as_deref(),
-        previous: previous_token_fp.as_deref(),
-    };
-    let (ratio, ratio_hint) = ratio_cell(&item);
+    let context = ItemContext::gather(state, store).await;
 
     // A path that fails to resolve at all (a non-absolute `arr_path`) is a
     // configuration problem `doctor` already reports; the detail page shows
@@ -1062,17 +1013,25 @@ async fn build_detail(
     let swarm = swarm_for(state, &item).await;
     let checked = sharerr_torrent::title::check(&item.release_title, &item.spec);
     let until = store
-        .share_ends()
+        .share_end(item.source, item.file_id)
         .await
         .ok()
-        .and_then(|ends| ends.get(&item.key()).copied());
+        .flatten();
+    let audience = store
+        .audience(item.source, item.file_id)
+        .await
+        .ok()
+        .flatten();
 
     ItemDetailPage {
         signed_in: true,
-        source: item.source.as_str(),
-        file_id: item.file_id,
-        title: item.spec.title().to_owned(),
-        release_title: item.release_title.clone(),
+        facts: facts(
+            &item,
+            &context.active,
+            audience.as_deref(),
+            context.announce_url.as_deref(),
+            context.tokens(),
+        ),
         title_reads_as: checked.as_ref().map(|c| c.parsed.summary()),
         title_problems: checked
             .map(|c| c.problems.iter().map(|p| p.describe()).collect())
@@ -1086,31 +1045,6 @@ async fn build_detail(
             .arr_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned()),
-        kind: item.spec.kind_tag(),
-        source_label: title_case(item.source.as_str()),
-        source_hint: source_hint(&item),
-        size: human_size(item.size),
-        state_label: title_case(item.state.as_str()),
-        state_hint: state_hint(item.state),
-        last_error: item.last_error.clone(),
-        since: item.created_at.map(ago).unwrap_or_default(),
-        since_absolute: item
-            .created_at
-            .map(super::peers::absolute)
-            .unwrap_or_default(),
-        info_hash: item.info_hash.clone(),
-        created_by_sharerr: item.created_by_sharerr,
-        ratio,
-        ratio_hint,
-        token_fp: item.announce_token_fp.clone(),
-        token_status: token_status(&item, tokens),
-        announce_url: item
-            .info_hash
-            .as_ref()
-            .and(announce_url.as_deref())
-            .map(str::to_owned),
-        ids: ids_summary(&item.ids),
-        visible_to: visible_to(&item, &active),
         media: item.media.clone(),
         arr_path,
         sharerr_path,

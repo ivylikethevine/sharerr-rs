@@ -16,9 +16,7 @@
   else.
 </p>
 
-{% if let Some(message) = error %}
-<p class="error" role="alert">{{ message }}</p>
-{% endif %}
+{% call ui::flash_error(error) %}{% endcall %}
 
 {% if let Some(done) = paired %}
 <div class="ok" role="status">
@@ -70,11 +68,10 @@
               aria-label="Copy the feed URL">copy</button>
       <span class="hint" data-copy-note></span>
     </dd>
-    {% if let Some(invite) = new.invite %}
     <dt>Invite</dt>
     <dd>
-      <code class="invite">{{ invite }}</code>
-      <button type="button" class="link micro" data-copy-text="{{ invite }}"
+      <code class="invite">{{ new.invite }}</code>
+      <button type="button" class="link micro" data-copy-text="{{ new.invite }}"
               aria-label="Copy the invite">copy</button>
       <span class="hint" data-copy-note></span>
       <p class="hint">
@@ -84,7 +81,6 @@
         refused after seven days; a fresh one means deleting and re-adding them.
       </p>
     </dd>
-    {% endif %}
   </dl>
 </div>
 {% endif %}
@@ -187,6 +183,22 @@
             </select>
             <noscript><button type="submit" class="link">Set</button></noscript>
           </form>
+          <form method="post" action="/peers/{{ peer.id }}/limits" class="inline">
+            <input name="max_size_gib" value="{{ peer.max_size_gib }}" size="4" placeholder="any"
+                   aria-label="Largest file {{ peer.label }} is offered, in GiB"
+                   title="Largest file they are offered, in GiB; blank for any size"> GiB
+            <select name="max_height" data-autosubmit aria-label="Highest resolution {{ peer.label }} is offered"
+                    title="Highest resolution they are offered. A file with none, such as music, stays offered.">
+              <option value=""{% if peer.max_height == 0 %} selected{% endif %}>Any resolution</option>
+              {% for height in [2160, 1080, 720, 480] %}
+              <option value="{{ height }}"{% if peer.max_height == *height %} selected{% endif %}>Up to {{ height }}p</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="link">Set</button>
+          </form>
+          {% if !peer.friend_tag.is_empty() %}
+          <span class="hint" title="An item carrying only this tag in an *arr app is shared with this friend alone">Tag: <code>{{ peer.friend_tag }}</code></span>
+          {% endif %}
           {% endif %}
         </td>
         <td class="nowrap">{% if let Some(n) = peer.sharing %}{{ n }} item(s){% if !peer.sharing_size.is_empty() %} <span class="hint">· {{ peer.sharing_size }}</span>{% endif %}{% else %}<span class="hint">—</span>{% endif %}</td>
@@ -262,11 +274,7 @@
       <ul class="checklist">
         {% for step in peer.setup %}
         <li>
-          {% if step.done %}
-          <span class="ok" aria-hidden="true">&#10003;</span><span class="visually-hidden">Done:</span>
-          {% else %}
-          <span class="hint" aria-hidden="true">&#9675;</span><span class="visually-hidden">To do:</span>
-          {% endif %}
+          {% call ui::step_mark(step.done) %}{% endcall %}
           {{ step.label }}
           {% if !step.done %}<br><span class="hint">{{ step.hint }}</span>{% endif %}
         </li>

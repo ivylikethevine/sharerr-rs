@@ -61,14 +61,6 @@ use crate::state::ServeState;
 /// endpoint by hand should not be offered a download prompt.
 const BENCODE: &str = "text/plain; charset=utf-8";
 
-/// Everything the tracker handlers need.
-#[derive(Debug)]
-pub struct TrackerState {
-    /// The swarms this router writes are [`ServeState::swarms`]'s — the
-    /// status page reads the same ones.
-    pub serve: Arc<ServeState>,
-}
-
 /// When the previous (rotated-out) shared tracker token was last actually
 /// used, so an operator deciding whether to finalize a rotation — see
 /// `crate::web::settings::finalize_tracker_token` — can tell "nothing has
@@ -99,24 +91,18 @@ impl LegacyTokenStatus {
     }
 }
 
-impl TrackerState {
-    pub fn new(serve: Arc<ServeState>) -> Self {
-        Self { serve }
-    }
-}
-
 /// Every route the tracker serves.
 ///
-/// Takes the state rather than building it, because the same `Swarms` may be
-/// mounted on *two* listeners — the main router and an optional dedicated
-/// `tracker.bind` — and two independent swarm maps would stop peers arriving on
-/// different listeners from ever being introduced to each other.
+/// Takes the state rather than building it, because the routes may be mounted on
+/// *two* listeners — the main router and an optional dedicated `tracker.bind` — and
+/// both have to see [`ServeState::swarms`] so peers arriving on either are
+/// introduced to each other.
 ///
 /// The token variants are separate routes rather than one optional path segment:
 /// axum resolves `/announce` and `/announce/{token}` as distinct patterns, and
 /// spelling them out keeps the tokenless case from depending on how an optional
 /// extractor behaves when the segment is missing.
-pub fn routes(state: Arc<TrackerState>) -> axum::Router {
+pub fn routes(state: Arc<ServeState>) -> axum::Router {
     let (router, _) = api_router().with_state(state).split_for_parts();
     router
 }
@@ -131,7 +117,7 @@ pub fn routes(state: Arc<TrackerState>) -> axum::Router {
 /// attributes instead, listed in `crate::openapi`, and
 /// `the_documented_tracker_paths_match_the_constants` holds the literal and
 /// the constant together.
-pub(crate) fn api_router() -> OpenApiRouter<Arc<TrackerState>> {
+pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
     OpenApiRouter::new()
         .route(sharerr_torrent::ANNOUNCE_PATH, axum::routing::get(announce))
         .route(
@@ -208,6 +194,11 @@ pub struct ScrapeParams {
     info_hash: Option<String>,
 }
 
+/// What every tracker route documents about its one status code.
+const ALWAYS_200: &str = "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
+     reports refusal as a bencoded `failure reason` key, not as an HTTP status, so a \
+     client that only checks the status code will read an error as a swarm.";
+
 /// `GET /announce`.
 #[utoipa::path(
     get,
@@ -215,14 +206,10 @@ pub struct ScrapeParams {
     tag = "tracker",
     operation_id = "announce",
     params(AnnounceParams),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn announce(
-    State(state): State<Arc<TrackerState>>,
+    State(state): State<Arc<ServeState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     RawQuery(query): RawQuery,
 ) -> Response {
@@ -242,14 +229,10 @@ pub async fn announce(
           revoked without disturbing anyone else's."),
         AnnounceParams,
     ),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn announce_with_token(
-    State(state): State<Arc<TrackerState>>,
+    State(state): State<Arc<ServeState>>,
     Path(token): Path<String>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     RawQuery(query): RawQuery,
@@ -258,7 +241,7 @@ pub async fn announce_with_token(
 }
 
 async fn respond(
-    state: &TrackerState,
+    state: &ServeState,
     token: Option<String>,
     remote: SocketAddr,
     query: Option<String>,
@@ -278,7 +261,7 @@ async fn respond(
 }
 
 async fn handle_announce(
-    state: &TrackerState,
+    state: &ServeState,
     token: Option<String>,
     remote: SocketAddr,
     query: &[u8],
@@ -300,11 +283,11 @@ async fn handle_announce(
     }
 
     let addr = request.resolve_addr(remote.ip());
-    let response = state.serve.swarms().announce(&request, addr).await;
+    let response = state.swarms().announce(&request, addr).await;
 
     if let Some(peer_id) = auth.attributed_to {
         crate::torznab::record_sighting(
-            &state.serve,
+            state,
             &store,
             peer_id,
             EndpointKind::Client,
@@ -343,13 +326,9 @@ async fn handle_announce(
     tag = "tracker",
     operation_id = "scrape",
     params(ScrapeParams),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
-pub async fn scrape(State(state): State<Arc<TrackerState>>, RawQuery(query): RawQuery) -> Response {
+pub async fn scrape(State(state): State<Arc<ServeState>>, RawQuery(query): RawQuery) -> Response {
     handle_scrape(&state, None, query).await
 }
 
@@ -363,14 +342,10 @@ pub async fn scrape(State(state): State<Arc<TrackerState>>, RawQuery(query): Raw
         ("token" = String, Path, description = "As on `/announce/{token}`."),
         ScrapeParams,
     ),
-    responses((status = 200, content_type = "text/plain", body = String, description =
-             "A bencoded dictionary. **Always 200** — the BitTorrent tracker protocol \
-              reports refusal as a bencoded `failure reason` key, not as an HTTP \
-              status, so a client that only checks the status code will read an \
-              error as a swarm.")),
+    responses((status = 200, content_type = "text/plain", body = String, description = ALWAYS_200)),
 )]
 pub async fn scrape_with_token(
-    State(state): State<Arc<TrackerState>>,
+    State(state): State<Arc<ServeState>>,
     Path(token): Path<String>,
     RawQuery(query): RawQuery,
 ) -> Response {
@@ -378,7 +353,7 @@ pub async fn scrape_with_token(
 }
 
 async fn handle_scrape(
-    state: &TrackerState,
+    state: &ServeState,
     token: Option<String>,
     query: Option<String>,
 ) -> Response {
@@ -413,7 +388,7 @@ async fn handle_scrape(
         return bencode(scrape_bencode(&[]));
     }
 
-    let (complete, incomplete) = state.serve.swarms().scrape(&info_hash).await;
+    let (complete, incomplete) = state.swarms().scrape(&info_hash).await;
     bencode(scrape_bencode(&[(info_hash, complete, incomplete)]))
 }
 
@@ -422,8 +397,8 @@ async fn handle_scrape(
 /// A database that cannot be read is treated as "not served". Announcing peers to
 /// each other on the strength of an unverified hash is the one thing this check
 /// exists to prevent, so failing open would defeat it.
-async fn is_served(state: &TrackerState, info_hash: &InfoHash) -> bool {
-    let Ok(store) = state.serve.store().await else {
+async fn is_served(state: &ServeState, info_hash: &InfoHash) -> bool {
+    let Ok(store) = state.store().await else {
         tracing::warn!("refusing announces: the database is unavailable");
         return false;
     };
@@ -483,28 +458,24 @@ struct TokenAuth {
 /// configured" from "could not read the vault", and admitting on the latter
 /// silently turned enforcement off after a transient error.
 async fn authenticate(
-    state: &TrackerState,
+    state: &ServeState,
     supplied: Option<&str>,
 ) -> Result<(Store, TokenAuth), AnnounceError> {
-    let store = state
-        .serve
-        .store()
-        .await
-        .map_err(|_| AnnounceError::BadToken)?;
-    let (current, previous) = state.serve.tracker_tokens().await.map_err(|err| {
+    let store = state.store().await.map_err(|_| AnnounceError::BadToken)?;
+    let (current, previous) = state.tracker_tokens().await.map_err(|err| {
         tracing::warn!(error = %err, "refusing announces: the vault could not be opened");
         AnnounceError::BadToken
     })?;
     let auth =
         authenticate_token(&store, current.as_deref(), previous.as_deref(), supplied).await?;
     if auth.via_previous {
-        state.serve.legacy_token_status().record_used().await;
+        state.legacy_token_status().record_used().await;
     }
     Ok((store, auth))
 }
 
 /// Takes `store`, `required`, and `previous` as plain parameters rather than
-/// reaching into `TrackerState` itself: the peer-hash branch is exactly the
+/// reaching into `ServeState` itself: the peer-hash branch is exactly the
 /// part worth testing directly against an in-memory `Store`, with no vault or
 /// master key needed to exercise it.
 async fn authenticate_token(
@@ -601,17 +572,16 @@ pub struct TorrentFileQuery {
     ),
 )]
 pub async fn torrent_file(
-    State(state): State<Arc<TrackerState>>,
+    State(state): State<Arc<ServeState>>,
     Path(name): Path<String>,
     Query(query): Query<TorrentFileQuery>,
 ) -> Response {
-    let Some(hex_hash) = name.strip_suffix(".torrent") else {
-        return (StatusCode::NOT_FOUND, "not a torrent").into_response();
-    };
-
     // Parsed as a hash rather than used as a path component. `..` and `/` cannot
     // survive this, so the filename below is always exactly 40 hex characters.
-    let Some(info_hash) = announce::info_hash_from_hex(hex_hash) else {
+    let Some(info_hash) = name
+        .strip_suffix(".torrent")
+        .and_then(announce::info_hash_from_hex)
+    else {
         return (StatusCode::NOT_FOUND, "not a torrent").into_response();
     };
 
@@ -619,10 +589,8 @@ pub async fn torrent_file(
         return (StatusCode::NOT_FOUND, "not shared").into_response();
     }
 
-    let path = sharerr_torrent::torrent_file_path(
-        &state.serve.torrent_dir().await,
-        &hex::encode(info_hash),
-    );
+    let hex_hash = hex::encode(info_hash);
+    let path = sharerr_torrent::torrent_file_path(&state.torrent_dir().await, &hex_hash);
 
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
@@ -646,8 +614,8 @@ pub async fn torrent_file(
             (
                 header::CONTENT_DISPOSITION,
                 format!(
-                    "attachment; filename=\"{}.torrent\"",
-                    hex::encode(info_hash)
+                    "attachment; filename=\"{}\"",
+                    sharerr_torrent::torrent_file_name(&hex_hash)
                 ),
             ),
         ],
@@ -665,8 +633,8 @@ pub async fn torrent_file(
 ///
 /// Takes `bytes` by value so every fallback arm hands the same buffer back
 /// rather than copying it.
-async fn attributed_bytes(state: &TrackerState, bytes: Vec<u8>, supplied: &str) -> Vec<u8> {
-    let store = match state.serve.store().await {
+async fn attributed_bytes(state: &ServeState, bytes: Vec<u8>, supplied: &str) -> Vec<u8> {
+    let store = match state.store().await {
         Ok(store) => store,
         Err(_) => return bytes,
     };
@@ -680,14 +648,14 @@ async fn attributed_bytes(state: &TrackerState, bytes: Vec<u8>, supplied: &str) 
         }
     };
 
-    let announce =
-        match sharerr_torrent::announce_set_for(&state.serve.endpoint(), Some(&peer.key_hash)) {
-            Ok(announce) => announce,
-            Err(err) => {
-                tracing::warn!(error = %err, "could not build a per-peer announce set");
-                return bytes;
-            }
-        };
+    let announce = match sharerr_torrent::announce_set_for(&state.endpoint(), Some(&peer.key_hash))
+    {
+        Ok(announce) => announce,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not build a per-peer announce set");
+            return bytes;
+        }
+    };
 
     match sharerr_torrent::rewrite_announce(&bytes, &announce) {
         Ok(rewritten) => rewritten,
@@ -857,7 +825,12 @@ mod tests {
         )
         .await;
 
-        let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[sam.id])
+            .await
+            .unwrap()
+            .remove(&sam.id)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].kind, EndpointKind::Client);
         assert_eq!(endpoints[0].via, ObservedVia::Direct);
@@ -889,23 +862,11 @@ mod tests {
         F: FnOnce(Arc<crate::state::ServeState>) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("SHARERR_MASTER_KEY", "tracker-tests-master-key");
-            let config = sharerr_core::Config {
-                data_dir: jail.directory().to_path_buf(),
-                ..Default::default()
-            };
-            let path = jail.directory().join("sharerr.toml");
-            let state = Arc::new(crate::state::ServeState::new(config, path, None));
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(body(state));
-            Ok(())
-        });
+        crate::state::fixtures::with_open_vault(sharerr_core::Config::default(), |_| {}, body);
     }
 
     async fn get(state: &Arc<crate::state::ServeState>, uri: &str) -> (StatusCode, String) {
-        let state = Arc::new(TrackerState::new(Arc::clone(state)));
+        let state = Arc::clone(state);
         let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
         // The announce handler records the address a peer actually reached us from,
         // which `serve` supplies via `into_make_service_with_connect_info`. Driving
@@ -963,41 +924,12 @@ mod tests {
     #[test]
     fn an_announce_for_a_shared_torrent_is_admitted_and_answered() {
         with_open_vault(|state| async move {
-            use sharerr_core::model::{
-                ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem,
-            };
+            use sharerr_core::model::MediaSource;
 
             let store = state.store().await.unwrap();
 
             let hash_hex = "00".repeat(20);
-            store
-                .upsert(&SharedItem {
-                    id: None,
-                    source: MediaSource::Sonarr,
-                    source_id: 1,
-                    file_id: 1,
-                    spec: MediaSpec::Episode {
-                        series_title: "Lanternwick Hollow".to_owned(),
-                        season: 1,
-                        episode: 1,
-                    },
-                    release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                    arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                    size: 1,
-                    ids: ExternalIds::default(),
-                    media: None,
-                    info_hash: None,
-                    announce_token_fp: None,
-                    created_by_sharerr: true,
-                    private: true,
-                    state: ShareState::Pending,
-                    last_error: None,
-                    created_at: None,
-                    achieved_ratio: None,
-                    ratio_limit_reported: None,
-                })
-                .await
-                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
             store
                 .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true, Some(true))
                 .await
@@ -1151,11 +1083,14 @@ mod tests {
             dir.path(),
             "http://seed.example:8477/announce/shared-secret",
         );
-        let tracker_state = TrackerState::new(Arc::clone(&state));
+        let tracker_state = Arc::clone(&state);
 
         let rewritten = attributed_bytes(&tracker_state, built.data.clone(), &sam.key_hash).await;
 
-        let announce = sharerr_torrent::read_announce(&rewritten).unwrap().unwrap();
+        let announce = sharerr_torrent::Torrent::read_from_bytes(&rewritten)
+            .unwrap()
+            .announce
+            .unwrap();
         assert!(
             announce.contains(&sam.key_hash),
             "expected Sam's own token in {announce}"
@@ -1182,7 +1117,7 @@ mod tests {
         store.revoke_peer(alex.id).await.unwrap();
 
         let built = built_torrent(dir.path(), "http://seed.example:8477/announce");
-        let tracker_state = TrackerState::new(Arc::clone(&state));
+        let tracker_state = Arc::clone(&state);
 
         for token in ["not-a-real-token", &alex.key_hash] {
             let result = attributed_bytes(&tracker_state, built.data.clone(), token).await;
@@ -1204,7 +1139,7 @@ mod tests {
             .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
             .await
             .unwrap();
-        let tracker_state = TrackerState::new(Arc::clone(&state));
+        let tracker_state = Arc::clone(&state);
 
         let garbage = b"not a bencoded torrent".to_vec();
         let result = attributed_bytes(&tracker_state, garbage.clone(), &sam.key_hash).await;
@@ -1261,41 +1196,12 @@ mod tests {
     #[test]
     fn scrape_for_a_shared_torrent_reports_it() {
         with_open_vault(|state| async move {
-            use sharerr_core::model::{
-                ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem,
-            };
+            use sharerr_core::model::MediaSource;
 
             let store = state.store().await.unwrap();
 
             let hash_hex = "00".repeat(20);
-            store
-                .upsert(&SharedItem {
-                    id: None,
-                    source: MediaSource::Sonarr,
-                    source_id: 1,
-                    file_id: 1,
-                    spec: MediaSpec::Episode {
-                        series_title: "Lanternwick Hollow".to_owned(),
-                        season: 1,
-                        episode: 1,
-                    },
-                    release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                    arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                    size: 1,
-                    ids: ExternalIds::default(),
-                    media: None,
-                    info_hash: None,
-                    announce_token_fp: None,
-                    created_by_sharerr: true,
-                    private: true,
-                    state: ShareState::Pending,
-                    last_error: None,
-                    created_at: None,
-                    achieved_ratio: None,
-                    ratio_limit_reported: None,
-                })
-                .await
-                .unwrap();
+            store.upsert(&shared_item()).await.unwrap();
             store
                 .set_seeding(MediaSource::Sonarr, 1, &hash_hex, None, true, Some(true))
                 .await
@@ -1315,7 +1221,7 @@ mod tests {
     /// per-peer token is supplied.
     #[tokio::test]
     async fn torrent_file_serves_the_cached_bytes_for_a_shared_torrent() {
-        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
+        use sharerr_core::model::MediaSource;
 
         let (dir, state) = unconfigured();
         let store = state.store().await.unwrap();
@@ -1331,34 +1237,7 @@ mod tests {
         .await
         .unwrap();
 
-        store
-            .upsert(&SharedItem {
-                id: None,
-                source: MediaSource::Sonarr,
-                source_id: 1,
-                file_id: 1,
-                spec: MediaSpec::Episode {
-                    series_title: "Lanternwick Hollow".to_owned(),
-                    season: 1,
-                    episode: 1,
-                },
-                release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-                arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-                size: 1,
-                ids: ExternalIds::default(),
-                media: None,
-                info_hash: None,
-                announce_token_fp: None,
-                created_by_sharerr: true,
-                private: true,
-                state: ShareState::Pending,
-                last_error: None,
-                created_at: None,
-                achieved_ratio: None,
-                ratio_limit_reported: None,
-            })
-            .await
-            .unwrap();
+        store.upsert(&shared_item()).await.unwrap();
         store
             .set_seeding(
                 MediaSource::Sonarr,
@@ -1372,7 +1251,7 @@ mod tests {
             .unwrap();
 
         let uri = format!("/torrents/{}.torrent", built.info_hash);
-        let state_arc = Arc::new(TrackerState::new(Arc::clone(&state)));
+        let state_arc = Arc::clone(&state);
         let request = Request::builder().uri(&uri).body(Body::empty()).unwrap();
         let response = routes(state_arc).oneshot(request).await.unwrap();
 
@@ -1400,34 +1279,7 @@ mod tests {
 
     // ------------------------------------------------------ the long tail
 
-    fn shared_item() -> sharerr_core::model::SharedItem {
-        use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, ShareState, SharedItem};
-        SharedItem {
-            id: None,
-            source: MediaSource::Sonarr,
-            source_id: 1,
-            file_id: 1,
-            spec: MediaSpec::Episode {
-                series_title: "Lanternwick Hollow".to_owned(),
-                season: 1,
-                episode: 1,
-            },
-            release_title: "Lanternwick.Hollow.S01E01.WEB-DL.x264-SHARERR".to_owned(),
-            arr_path: std::path::PathBuf::from("/tv/s01e01.mkv"),
-            size: 1,
-            ids: ExternalIds::default(),
-            media: None,
-            info_hash: None,
-            announce_token_fp: None,
-            created_by_sharerr: true,
-            private: true,
-            state: ShareState::Pending,
-            last_error: None,
-            created_at: None,
-            achieved_ratio: None,
-            ratio_limit_reported: None,
-        }
-    }
+    use crate::test_support::shared_item;
 
     /// An announce carrying a friend's own key hash, through the real router:
     /// admitted, answered, and the address it came from recorded against that
@@ -1477,7 +1329,12 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert!(!body.contains("failure reason"), "{body}");
 
-            let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+            let endpoints = store
+                .peer_endpoints_for(&[sam.id])
+                .await
+                .unwrap()
+                .remove(&sam.id)
+                .unwrap_or_default();
             assert_eq!(endpoints.len(), 1, "{endpoints:?}");
             assert_eq!(endpoints[0].kind, EndpointKind::Client);
             assert!(
@@ -1674,7 +1531,7 @@ mod tests {
 
         let (_dir, state) = crate::state::fixtures::store_closed().await;
         let store = state.store().await.unwrap();
-        let tracker_state = TrackerState::new(Arc::clone(&state));
+        let tracker_state = Arc::clone(&state);
         assert!(!is_served(&tracker_state, &[0u8; 20]).await);
         assert_eq!(
             authenticate_token(&store, Some("s3cret"), None, Some("not-the-token")).await,
@@ -1686,7 +1543,7 @@ mod tests {
         );
 
         let (_dir, state) = crate::state::fixtures::store_unopenable();
-        let tracker_state = TrackerState::new(Arc::clone(&state));
+        let tracker_state = Arc::clone(&state);
         assert!(!is_served(&tracker_state, &[0u8; 20]).await);
         assert_eq!(
             attributed_bytes(&tracker_state, bytes.clone(), "any-token").await,

@@ -49,7 +49,7 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
 use utoipa::{Modify, OpenApi};
 
 /// The parts of the document that are not derived from a handler: the
-/// preamble, the tag descriptions, the security scheme, and the three
+/// preamble, the tag descriptions, the security schemes, and the
 /// hand-mounted routes.
 #[derive(OpenApi)]
 #[openapi(
@@ -106,7 +106,7 @@ The read-only management API: items, friends, sync runs and doctor results. \
 Off until `[api] enabled = true`, and behind its own bearer token, never the \
 metrics one."),
     ),
-    modifiers(&PeerApiKey, &MetricsToken, &ApiToken),
+    modifiers(&SecuritySchemes),
     paths(
         // See the module docs: mounted by hand, so listed by hand.
         crate::tracker::announce,
@@ -119,18 +119,17 @@ metrics one."),
 )]
 struct ApiDoc;
 
-/// The `apikey` query parameter every feed and gossip endpoint takes.
-///
 /// Declared here rather than on each operation because a security scheme is a
 /// document-level object; the operations only reference it by name.
-struct PeerApiKey;
+struct SecuritySchemes;
 
-impl Modify for PeerApiKey {
+impl Modify for SecuritySchemes {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         // `components` is always populated by the derive above — every tagged
         // surface has at least one schema — but building it here rather than
         // unwrapping keeps this correct if that ever stops being true.
         let components = openapi.components.get_or_insert_with(Default::default);
+        // The `apikey` query parameter every feed and gossip endpoint takes.
         components.add_security_scheme(
             "peerApiKey",
             SecurityScheme::ApiKey(ApiKey::Query(ApiKeyValue::with_description(
@@ -141,33 +140,15 @@ impl Modify for PeerApiKey {
                  bearer credential.",
             ))),
         );
-    }
-}
-
-/// The `Authorization: Bearer` token `/metrics` and `/dashboard` require —
-/// see [`crate::metrics`]. A separate scheme from [`PeerApiKey`] because it is
-/// a different credential entirely: one shared secret for every caller, set
-/// from Settings → Metrics, not one key per friend.
-struct MetricsToken;
-
-impl Modify for MetricsToken {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.get_or_insert_with(Default::default);
+        // The bearer token `/metrics` and `/dashboard` require, see [`crate::metrics`]:
+        // one shared secret for every caller, set from Settings → Metrics, not one
+        // key per friend.
         components.add_security_scheme(
             "metricsToken",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
         );
-    }
-}
-
-/// The `Authorization: Bearer` token the management API requires — see
-/// [`crate::api`]. Its own scheme, because it is its own credential: set from
-/// Settings → Management API, and never the same secret as [`MetricsToken`].
-struct ApiToken;
-
-impl Modify for ApiToken {
-    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
-        let components = openapi.components.get_or_insert_with(Default::default);
+        // The bearer token the management API requires, see [`crate::api`]: set from
+        // Settings → Management API, and never the same secret as `metricsToken`.
         components.add_security_scheme(
             "apiToken",
             SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
@@ -195,23 +176,12 @@ pub fn document() -> utoipa::openapi::OpenApi {
 /// The document as pretty JSON, which is what `sharerr openapi` prints and what
 /// `docs/openapi.json` holds.
 pub fn to_json() -> anyhow::Result<String> {
-    Ok(doc_to_json(&document())?)
-}
-
-fn doc_to_json(doc: &utoipa::openapi::OpenApi) -> serde_json::Result<String> {
-    serde_json::to_string_pretty(doc)
+    Ok(serde_json::to_string_pretty(&document())?)
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    /// See `sharerr-lighthouse`'s tests: never a fixed array.
-    fn random_secret() -> [u8; 32] {
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).expect("the OS RNG is available");
-        secret
-    }
 
     use super::*;
 
@@ -359,7 +329,7 @@ mod tests {
         use tower::ServiceExt;
 
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let tracker = std::sync::Arc::new(crate::tracker::TrackerState::new(serve.clone()));
+        let tracker = serve.clone();
 
         for (method, path) in documented() {
             // Substitute something plausible for each templated segment. What
@@ -387,7 +357,9 @@ mod tests {
                 // in the tree is exactly what a copy-paste turns into a
                 // production default.
                 sharerr_lighthouse::routes(std::sync::Arc::new(
-                    sharerr_lighthouse::LighthouseState::new(random_secret()),
+                    sharerr_lighthouse::LighthouseState::new(
+                        crate::secrets::random_bytes().unwrap(),
+                    ),
                 ))
             } else if path.starts_with("/api") && !path.starts_with("/api/v1/") {
                 crate::torznab::routes(serve.clone())

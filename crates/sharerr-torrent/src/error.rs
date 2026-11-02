@@ -28,7 +28,7 @@ pub enum TorrentError {
 
     #[error("could not parse a stored .torrent: {source}")]
     Reparse {
-        #[source]
+        #[from]
         source: crate::metainfo::MetainfoError,
     },
 

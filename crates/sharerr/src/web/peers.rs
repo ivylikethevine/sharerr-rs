@@ -23,18 +23,18 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::now_epoch;
-use sharerr_store::{EndpointKind, Peer, PeerScope, SeedingSummary};
+use sharerr_store::{EndpointKind, Peer, PeerLimits, PeerScope, SeedingSummary};
 
 use super::WebState;
 use super::settings::title_case;
 use super::templates::{
-    PairedPeer, PeerEndpointView, PeerGuidePage, PeerRow, PeersPage, RevealedPeer, ScopeOption,
+    PairedPeer, PeerEndpointView, PeerGuidePage, PeerRow, PeersPage, RevealedPeer, SelectOption,
     SetupStep, render,
 };
 use crate::pairing::Invite;
 
 pub async fn page(State(state): State<WebState>) -> Response {
-    render(&build(&state, None, None).await)
+    render(&build(&state, None).await)
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,49 +54,53 @@ pub struct ScopeForm {
 
 /// Mint a key, record the peer, and reveal the key exactly once.
 pub async fn add(State(state): State<WebState>, Form(form): Form<AddForm>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
-    let key = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
-        Ok(key) => key,
-        Err(reason) => return rejected(&state, &reason).await,
-    };
+    let (peer, key) = ok_or_return!(mint_peer(&state, &store, form.label.trim(), form.scope).await);
+    tracing::info!(peer = %peer.label, scope = peer.scope.as_str(), "added a friend");
+    let invite = own_invite(&state, &key, None).await;
+    let mut page = build(&state, None).await;
+    page.revealed = Some(RevealedPeer {
+        id: peer.id,
+        label: peer.label,
+        key,
+        invite,
+    });
+    render(&page)
+}
 
-    let label = form.label.trim().to_owned();
-    match store
-        .create_peer(&label, &SecretString::from(key.clone()), form.scope)
-        .await
-    {
-        Ok(peer) => {
-            tracing::info!(peer = %peer.label, scope = peer.scope.as_str(), "added a friend");
-            let invite = own_invite(&state, &key, None).await;
-            let mut page = build(&state, None, None).await;
-            page.revealed = Some(RevealedPeer {
-                id: peer.id,
-                label: peer.label,
-                key,
-                invite,
-            });
-            render(&page)
-        }
-        Err(sharerr_store::StoreError::UserExists { username }) => {
-            rejected(
-                &state,
-                &format!("There is already a friend called {username:?}."),
-            )
+/// Mint a key and record a friend holding it, or the page saying why not.
+async fn mint_peer(
+    state: &WebState,
+    store: &sharerr_store::Store,
+    label: &str,
+    scope: PeerScope,
+) -> Result<(Peer, String), Box<Response>> {
+    let minted = async {
+        let key = crate::secrets::random_hex(crate::secrets::KEY_BYTES)?;
+        let peer = store
+            .create_peer(label, &SecretString::from(key.clone()), scope)
             .await
-        }
-        Err(sharerr_store::StoreError::InvalidUser(message)) => rejected(&state, message).await,
-        Err(err) => rejected(&state, &format!("could not add that friend: {err}")).await,
+            .map_err(|err| match err {
+                sharerr_store::StoreError::UserExists { username } => {
+                    format!("There is already a friend called {username:?}.")
+                }
+                sharerr_store::StoreError::InvalidUser(message) => message.to_owned(),
+                err => format!("could not add that friend: {err}"),
+            })?;
+        Ok::<_, String>((peer, key))
+    }
+    .await;
+    match minted {
+        Ok(minted) => Ok(minted),
+        Err(reason) => Err(Box::new(rejected(state, &reason).await)),
     }
 }
 
 /// This instance's side of a friendship as one string: where it is, the key
 /// it issued, and its gossip identity when the vault is open. `in_reply_to`
 /// names the friend's key the string answers, on a reply.
-async fn own_invite(state: &WebState, key: &str, in_reply_to: Option<String>) -> Option<String> {
+async fn own_invite(state: &WebState, key: &str, in_reply_to: Option<String>) -> String {
     let pubkey = state
         .serve
         .gossip_identity()
@@ -104,7 +108,7 @@ async fn own_invite(state: &WebState, key: &str, in_reply_to: Option<String>) ->
         .map(|identity| identity.pubkey_hex());
     let mut invite = Invite::new(state.serve.public_base_url().await, key.to_owned(), pubkey);
     invite.in_reply_to = in_reply_to;
-    Some(invite.encode())
+    invite.encode()
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,10 +124,7 @@ pub struct PairForm {
 /// returns ours to their sharerr over HTTP; a reply fills the row its
 /// `in_reply_to` names instead. See [`crate::pairing`].
 pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let invite = match Invite::decode(&form.invite) {
         Ok(invite) => invite,
         Err(reason) => return rejected(&state, &reason).await,
@@ -158,7 +159,7 @@ pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> 
             return rejected(&state, &reason).await;
         }
         tracing::info!(peer = %peer.label, "paired: applied a friend's reply");
-        let mut page = build(&state, None, None).await;
+        let mut page = build(&state, None).await;
         page.paired = Some(PairedPeer {
             label: peer.label,
             return_failure: None,
@@ -170,27 +171,7 @@ pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> 
     if label.is_empty() {
         return rejected(&state, "give this friend a name before pairing").await;
     }
-    let key = match crate::secrets::random_hex(crate::secrets::KEY_BYTES) {
-        Ok(key) => key,
-        Err(reason) => return rejected(&state, &reason).await,
-    };
-    let peer = match store
-        .create_peer(&label, &SecretString::from(key.clone()), form.scope)
-        .await
-    {
-        Ok(peer) => peer,
-        Err(sharerr_store::StoreError::UserExists { username }) => {
-            return rejected(
-                &state,
-                &format!("There is already a friend called {username:?}."),
-            )
-            .await;
-        }
-        Err(sharerr_store::StoreError::InvalidUser(message)) => {
-            return rejected(&state, message).await;
-        }
-        Err(err) => return rejected(&state, &format!("could not add that friend: {err}")).await,
-    };
+    let (peer, key) = ok_or_return!(mint_peer(&state, &store, &label, form.scope).await);
     if let Err(reason) = crate::pairing::apply_invite(&store, &mut vault, &peer, &invite).await {
         return rejected(&state, &reason).await;
     }
@@ -204,21 +185,19 @@ pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> 
         record: crate::gossip::self_record(&state.serve).await,
     };
     let return_failure = crate::pairing::send_pair(&invite, &request).await.err();
-    let reply = match &return_failure {
-        Some(reason) => {
-            tracing::info!(peer = %peer.label, reason, "paired: could not return our side automatically");
-            own_invite(&state, &key, Some(crate::pairing::key_hash(&invite.key))).await
-        }
-        None => None,
-    };
-
-    let mut page = build(&state, None, None).await;
-    if return_failure.is_some() {
+    let mut page = build(&state, None).await;
+    if let Some(reason) = &return_failure {
+        tracing::info!(peer = %peer.label, reason, "paired: could not return our side automatically");
         page.revealed = Some(RevealedPeer {
             id: peer.id,
             label: peer.label.clone(),
+            invite: own_invite(
+                &state,
+                &key,
+                Some(sharerr_lighthouse::hash_key(&invite.key)),
+            )
+            .await,
             key,
-            invite: reply,
         });
     }
     page.paired = Some(PairedPeer {
@@ -232,10 +211,7 @@ pub async fn pair(State(state): State<WebState>, Form(form): Form<PairForm>) -> 
 /// happened. `revoke_peer`'s `false` — already revoked — is not an error worth
 /// showing.
 pub async fn revoke(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let result = store.revoke_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "revoked a friend's key");
@@ -249,16 +225,83 @@ pub async fn revoke(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
     applied(&state, result, "revoke that key").await
 }
 
+/// A blank field means no cap, as a select's "any resolution" does.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct LimitsForm {
+    max_size_gib: String,
+    max_height: String,
+}
+
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// Whole GiB render without a fraction, and anything else to one decimal place.
+fn format_gib(bytes: i64) -> String {
+    #[allow(clippy::cast_precision_loss, reason = "a display value")]
+    let gib = bytes as f64 / GIB;
+    if gib.fract() == 0.0 {
+        format!("{gib:.0}")
+    } else {
+        format!("{gib:.1}")
+    }
+}
+
+fn parse_limits(form: &LimitsForm) -> Result<(Option<i64>, Option<i64>), String> {
+    let max_size = match form.max_size_gib.trim() {
+        "" => None,
+        text => {
+            let gib: f64 = text
+                .parse()
+                .ok()
+                .filter(|gib: &f64| gib.is_finite() && *gib > 0.0)
+                .ok_or_else(|| "the size cap must be a positive number of GiB".to_owned())?;
+            // Saturates at the top of `i64`, which is no file's size anyway.
+            #[allow(clippy::cast_possible_truncation, reason = "see the comment above")]
+            Some((gib * GIB) as i64)
+        }
+    };
+    let max_height = match form.max_height.trim() {
+        "" => None,
+        text => Some(
+            text.parse::<i64>()
+                .ok()
+                .filter(|height| *height > 0)
+                .ok_or_else(|| "the resolution cap must be a height such as 1080".to_owned())?,
+        ),
+    };
+    Ok((max_size, max_height))
+}
+
+/// Change the largest file and highest resolution a friend is offered.
+pub async fn set_limits(
+    State(state): State<WebState>,
+    Path(id): Path<i64>,
+    Form(form): Form<LimitsForm>,
+) -> Response {
+    let (max_size, max_height) = match parse_limits(&form) {
+        Ok(limits) => limits,
+        Err(reason) => return rejected(&state, &reason).await,
+    };
+    let store = ok_or_return!(state.store_or_503().await);
+    let result = store.set_peer_limits(id, max_size, max_height).await;
+    if result.is_ok() {
+        tracing::info!(
+            peer_id = id,
+            max_size,
+            max_height,
+            "changed a friend's caps"
+        );
+    }
+    applied(&state, result, "change that").await
+}
+
 /// Change what a friend is allowed to see.
 pub async fn set_scope(
     State(state): State<WebState>,
     Path(id): Path<i64>,
     Form(form): Form<ScopeForm>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let result = store.set_peer_scope(id, form.scope).await;
     if result.is_ok() {
         tracing::info!(
@@ -286,10 +329,7 @@ pub async fn set_gossip(
     Path(id): Path<i64>,
     Form(form): Form<GossipForm>,
 ) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
     // The URL is written first, and only then the key: `set_peer_gossip_url`
     // answers whether the peer exists at all, so a `POST` for a peer deleted
@@ -331,10 +371,7 @@ pub async fn set_gossip(
 
 /// Remove a friend entirely, freeing the name for reuse.
 pub async fn delete(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let result = store.delete_peer(id).await;
     if result.is_ok() {
         tracing::info!(peer_id = id, "deleted a friend");
@@ -368,20 +405,15 @@ pub async fn delete(State(state): State<WebState>, Path(id): Path<i64>) -> Respo
 /// honest test of scoping is not what the rules *say* a friend can see, but
 /// literally what the feed *serves* them, byte for byte.
 pub async fn feed_preview(State(state): State<WebState>, Path(id): Path<i64>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
+    let store = ok_or_return!(state.store_or_503().await);
+
+    let peer = match store.peer(id).await {
+        Ok(Some(peer)) => peer,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such friend").into_response(),
+        Err(err) => return rejected_response(&format!("could not read that friend: {err}")),
     };
 
-    let peers = match store.list_peers().await {
-        Ok(peers) => peers,
-        Err(err) => return rejected_response(&format!("could not list friends: {err}")),
-    };
-    let Some(peer) = peers.into_iter().find(|p| p.id == id) else {
-        return (StatusCode::NOT_FOUND, "no such friend").into_response();
-    };
-
-    render_preview(&state, peer.scope, &peer.key_hash).await
+    render_preview(&state, peer.scope, &peer.limits(), &peer.key_hash).await
 }
 
 /// Stands in for a friend's `key_hash` on the links of a scope preview, where
@@ -395,14 +427,20 @@ pub async fn scope_preview(
     State(state): State<WebState>,
     Query(form): Query<ScopeForm>,
 ) -> Response {
-    render_preview(&state, form.scope, PREVIEW_TOKEN).await
+    render_preview(&state, form.scope, &PeerLimits::default(), PREVIEW_TOKEN).await
 }
 
-async fn render_preview(state: &WebState, scope: PeerScope, token: &str) -> Response {
+async fn render_preview(
+    state: &WebState,
+    scope: PeerScope,
+    limits: &PeerLimits,
+    token: &str,
+) -> Response {
     let matched = match crate::torznab::collect(
         &state.serve,
         &crate::torznab::SearchQuery::default(),
         scope,
+        limits,
         token,
     )
     .await
@@ -419,7 +457,7 @@ async fn render_preview(state: &WebState, scope: PeerScope, token: &str) -> Resp
 /// `observed_at DESC, id DESC` ordering — so the *first* match here is
 /// already the newest, and re-deriving that with `max_by_key` would in fact
 /// pick the *oldest* of a tied `observed_at`.
-fn latest_endpoint(
+pub(crate) fn latest_endpoint(
     endpoints: &[sharerr_store::PeerEndpoint],
     kind: EndpointKind,
 ) -> Option<&sharerr_store::PeerEndpoint> {
@@ -440,19 +478,12 @@ fn latest_endpoint(
 /// hash of it was ever stored, so there is nothing to export; a restore
 /// always mints a fresh one, exactly like adding a friend normally.
 pub async fn export(State(state): State<WebState>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
 
-    let peers = match store.list_peers().await {
-        Ok(peers) => peers,
+    let active = match store.active_peers().await {
+        Ok(active) => active,
         Err(err) => return rejected(&state, &format!("could not list friends: {err}")).await,
     };
-    let active: Vec<Peer> = peers
-        .into_iter()
-        .filter(|peer| !peer.is_revoked())
-        .collect();
 
     let peer_ids: Vec<i64> = active.iter().map(|peer| peer.id).collect();
     let endpoints_by_peer = store
@@ -472,14 +503,12 @@ pub async fn export(State(state): State<WebState>) -> Response {
     let any_gossip_key = active
         .iter()
         .any(|peer| stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id)));
-    let (vault, vault_unavailable) = if !any_gossip_key {
-        (None, false)
+    let vault = if any_gossip_key {
+        state.serve.open_vault().await.ok()
     } else {
-        match state.serve.open_vault().await {
-            Ok(vault) => (Some(vault), false),
-            Err(_) => (None, true),
-        }
+        None
     };
+    let vault_unavailable = any_gossip_key && vault.is_none();
 
     let imports: Vec<sharerr_core::config::PeerImport> = active
         .iter()
@@ -500,6 +529,8 @@ pub async fn export(State(state): State<WebState>) -> Response {
             sharerr_core::config::PeerImport {
                 label: peer.label.clone(),
                 scope: peer.scope.as_str().to_owned(),
+                max_size_bytes: peer.max_size_bytes,
+                max_height: peer.max_height,
                 last_addr,
                 gossip_url: peer.gossip_url.clone(),
                 gossip_key,
@@ -543,84 +574,75 @@ async fn applied<T>(
 
 async fn rejected(state: &WebState, message: &str) -> Response {
     tracing::warn!(message, "rejected a peers change");
-    let page = build(state, Some(message.to_owned()), None).await;
+    let page = build(state, Some(message.to_owned())).await;
     (axum::http::StatusCode::BAD_REQUEST, render(&page)).into_response()
 }
 
-async fn build(
-    state: &WebState,
-    error: Option<String>,
-    revealed: Option<RevealedPeer>,
-) -> PeersPage {
+/// Every friend's row. Their endpoint history comes in one round trip rather than
+/// one per friend. The seeding count rides alongside, per friend since their caps and
+/// tags make it theirs alone: it is the concrete answer to what "Can see: TV only"
+/// means.
+async fn rows(
+    store: &sharerr_store::Store,
+    config: &sharerr_core::Config,
+) -> Result<Vec<PeerRow>, String> {
+    let peers = store
+        .list_peers()
+        .await
+        .map_err(|err| format!("could not list friends: {err}"))?;
+    let peer_ids: Vec<i64> = peers.iter().map(|peer| peer.id).collect();
+    let (endpoints_by_peer, counts) = tokio::join!(
+        store.peer_endpoints_for(&peer_ids),
+        store.seeding_summaries(&peers),
+    );
+    let endpoints_by_peer = endpoints_by_peer.unwrap_or_default();
+    let counts = counts.ok();
+    let stored_secrets = super::settings::secrets_present(config).await;
+    Ok(peers
+        .iter()
+        .enumerate()
+        .map(|(index, peer)| {
+            let endpoints = endpoints_by_peer
+                .get(&peer.id)
+                .map_or(&[][..], Vec::as_slice);
+            let key_set = stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id));
+            let sharing = counts.as_ref().map(|counts| counts[index]);
+            PeerRow {
+                friend_tag: peer
+                    .limits()
+                    .friend
+                    .map(|friend| format!("{}-{friend}", config.tag.to_ascii_lowercase()))
+                    .unwrap_or_default(),
+                ..row(peer, endpoints, key_set, sharing)
+            }
+        })
+        .collect())
+}
+
+async fn build(state: &WebState, error: Option<String>) -> PeersPage {
     let config = state.serve.config().await;
 
-    let (peers, endpoints, list_error) = match state.serve.store().await {
-        Ok(store) => match store.list_peers().await {
-            Ok(peers) => {
-                // Every friend's endpoint history in one round trip rather
-                // than one per friend. The seeding count per scope rides
-                // alongside, once per distinct scope rather than once per
-                // friend: it is the concrete answer to what "Can see: TV
-                // only" means.
-                let mut scopes: Vec<PeerScope> = Vec::new();
-                for peer in &peers {
-                    if !scopes.contains(&peer.scope) {
-                        scopes.push(peer.scope);
-                    }
-                }
-                let peer_ids: Vec<i64> = peers.iter().map(|peer| peer.id).collect();
-                let (endpoints_by_peer, counts) =
-                    tokio::join!(
-                        store.peer_endpoints_for(&peer_ids),
-                        futures::future::join_all(scopes.iter().map(|scope| async {
-                            (*scope, store.seeding_summary(*scope).await.ok())
-                        })),
-                    );
-                let endpoints_by_peer = endpoints_by_peer.unwrap_or_default();
-                let endpoints = peers
-                    .iter()
-                    .map(|peer| {
-                        let sharing = counts
-                            .iter()
-                            .find(|(scope, _)| *scope == peer.scope)
-                            .and_then(|(_, sharing)| *sharing);
-                        let endpoints =
-                            endpoints_by_peer.get(&peer.id).cloned().unwrap_or_default();
-                        (endpoints, sharing)
-                    })
-                    .collect::<Vec<_>>();
-                (peers, endpoints, None)
-            }
-            Err(err) => (
-                Vec::new(),
-                Vec::new(),
-                Some(format!("could not list friends: {err}")),
-            ),
-        },
-        Err(reason) => (Vec::new(), Vec::new(), Some(reason)),
+    let listed = match state.serve.store().await {
+        Ok(store) => rows(&store, &config).await,
+        Err(reason) => Err(reason),
     };
-
-    let stored_secrets = super::settings::secrets_present(&config).await;
+    let (peers, list_error) = match listed {
+        Ok(peers) => (peers, None),
+        Err(reason) => (Vec::new(), Some(reason)),
+    };
 
     PeersPage {
         signed_in: true,
         scope_options: PeerScope::ALL
             .iter()
-            .map(|scope| ScopeOption {
+            .map(|scope| SelectOption {
                 value: scope.as_str(),
                 label: title_case(scope.label()),
             })
             .collect(),
-        peers: peers
-            .iter()
-            .zip(&endpoints)
-            .map(|(peer, (endpoints, sharing))| {
-                let key_set = stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id));
-                row(peer, endpoints, key_set, *sharing)
-            })
-            .collect(),
+        peers,
         error: error.or(list_error),
-        revealed,
+        revealed: None,
         paired: None,
         // The live endpoint, not `config.public_base_url()` — see
         // `ServeState::public_base_url`'s docs: a gluetun-only deployment
@@ -635,11 +657,11 @@ fn row(
     gossip_key_set: bool,
     sharing: Option<SeedingSummary>,
 ) -> PeerRow {
+    let setup = setup_steps(peer, endpoints);
     PeerRow {
         sharing: sharing.map(|summary| summary.count.unsigned_abs() as usize),
         sharing_size: sharing
-            .filter(|summary| summary.size > 0)
-            .map(|summary| super::items::human_size(summary.size.unsigned_abs()))
+            .map(|summary| bytes_or_empty(summary.size))
             .unwrap_or_default(),
         served: bytes_or_empty(peer.downloaded),
         shared_on: bytes_or_empty(peer.uploaded),
@@ -647,6 +669,9 @@ fn row(
         label: peer.label.clone(),
         scope: peer.scope.as_str(),
         scope_label: peer.scope.label(),
+        max_size_gib: peer.max_size_bytes.map(format_gib).unwrap_or_default(),
+        max_height: peer.max_height.unwrap_or(0),
+        friend_tag: String::new(),
         created: ago(peer.created_at),
         created_absolute: absolute(peer.created_at),
         last_seen: match peer.last_seen_at {
@@ -675,11 +700,8 @@ fn row(
                 via: e.via.as_str(),
             })
             .collect(),
-        setup_done: setup_steps(peer, endpoints)
-            .iter()
-            .filter(|step| step.done)
-            .count(),
-        setup: setup_steps(peer, endpoints),
+        setup_done: setup.iter().filter(|step| step.done).count(),
+        setup,
     }
 }
 
@@ -748,10 +770,7 @@ pub struct GuideForm {
 }
 
 async fn render_guide(state: &WebState, id: i64, key: Option<String>) -> Response {
-    let store = match state.store_or_503().await {
-        Ok(store) => store,
-        Err(response) => return *response,
-    };
+    let store = ok_or_return!(state.store_or_503().await);
     let peer = match store.peer(id).await {
         Ok(Some(peer)) => peer,
         Ok(None) => return (StatusCode::NOT_FOUND, "no such friend").into_response(),
@@ -768,7 +787,7 @@ async fn render_guide(state: &WebState, id: i64, key: Option<String>) -> Respons
 
 /// A byte count rendered for a cell, or empty for zero so the template can
 /// show a dash: "0 B served" reads as a measurement, and it is not one yet.
-fn bytes_or_empty(bytes: i64) -> String {
+pub(crate) fn bytes_or_empty(bytes: i64) -> String {
     if bytes > 0 {
         super::items::human_size(bytes.unsigned_abs())
     } else {
@@ -902,19 +921,7 @@ mod tests {
 
     #[test]
     fn a_peer_that_has_never_connected_says_so() {
-        let peer = Peer {
-            id: 1,
-            label: "Sam".to_owned(),
-            created_at: 0,
-            last_seen_at: None,
-            revoked_at: None,
-            scope: PeerScope::All,
-            pubkey: None,
-            gossip_url: None,
-            key_hash: "hash".to_owned(),
-            downloaded: 0,
-            uploaded: 0,
-        };
+        let peer = crate::test_support::peer("Sam", PeerScope::All);
 
         assert_eq!(row(&peer, &[], false, None).last_seen, "never");
         assert!(!row(&peer, &[], false, None).revoked);
@@ -942,17 +949,8 @@ mod tests {
             via,
         };
         let mut peer = Peer {
-            id: 1,
-            label: "Sam".to_owned(),
-            created_at: 0,
             last_seen_at: Some(0),
-            revoked_at: None,
-            scope: PeerScope::All,
-            pubkey: None,
-            gossip_url: None,
-            key_hash: "hash".to_owned(),
-            downloaded: 0,
-            uploaded: 0,
+            ..crate::test_support::peer("Sam", PeerScope::All)
         };
 
         let relayed = [endpoint(
@@ -983,19 +981,8 @@ mod tests {
         let peer = Peer {
             downloaded: 3 * 1024 * 1024 * 1024 + 200 * 1024 * 1024,
             uploaded: 512,
-            ..Peer {
-                id: 1,
-                label: "Sam".to_owned(),
-                created_at: 0,
-                last_seen_at: Some(0),
-                revoked_at: None,
-                scope: PeerScope::All,
-                pubkey: None,
-                gossip_url: None,
-                key_hash: "hash".to_owned(),
-                downloaded: 0,
-                uploaded: 0,
-            }
+            last_seen_at: Some(0),
+            ..crate::test_support::peer("Sam", PeerScope::All)
         };
 
         let rendered = row(&peer, &[], false, None);
@@ -1006,17 +993,9 @@ mod tests {
     #[test]
     fn a_revoked_peer_is_marked_as_such() {
         let peer = Peer {
-            id: 1,
-            label: "Sam".to_owned(),
-            created_at: 0,
             last_seen_at: Some(0),
             revoked_at: Some(1),
-            scope: PeerScope::Tv,
-            pubkey: None,
-            gossip_url: None,
-            key_hash: "hash".to_owned(),
-            downloaded: 0,
-            uploaded: 0,
+            ..crate::test_support::peer("Sam", PeerScope::Tv)
         };
 
         assert!(row(&peer, &[], false, None).revoked);
@@ -1031,6 +1010,13 @@ mod tests {
     // open one.
 
     use super::super::{body_of, web_state};
+
+    async fn seed_sam(store: &sharerr_store::Store) -> Peer {
+        store
+            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
+            .await
+            .unwrap()
+    }
 
     /// The `store_or_503`/`build`'s "store unavailable" branches, reached
     /// hermetically — see `state::fixtures::store_unopenable`.
@@ -1135,7 +1121,7 @@ mod tests {
             .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
         let state = web_state(serve);
 
-        let page = build(&state, None, None).await;
+        let page = build(&state, None).await;
         assert_eq!(page.feed_url, "http://203.0.113.9:41234/api");
     }
 
@@ -1265,10 +1251,7 @@ mod tests {
     async fn build_renders_a_peer_with_a_recorded_endpoint() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let peer = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let peer = seed_sam(&store).await;
         store
             .record_peer_endpoint(
                 peer.id,
@@ -1281,7 +1264,7 @@ mod tests {
             .unwrap();
 
         let state = web_state(serve);
-        let page = build(&state, None, None).await;
+        let page = build(&state, None).await;
         let row = page
             .peers
             .iter()
@@ -1340,10 +1323,7 @@ mod tests {
     async fn revoke_marks_the_peer_revoked_and_redirects() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = seed_sam(&store).await;
         let state = web_state(serve);
 
         let response = revoke(State(state), Path(sam.id)).await;
@@ -1366,13 +1346,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_limits_stores_the_caps_and_a_blank_form_clears_them() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = seed_sam(&store).await;
+        let state = web_state(serve);
+
+        let response = set_limits(
+            State(state.clone()),
+            Path(sam.id),
+            Form(LimitsForm {
+                max_size_gib: "1.5".to_owned(),
+                max_height: "1080".to_owned(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+        let listed = store.list_peers().await.unwrap();
+        assert_eq!(listed[0].max_size_bytes, Some(1_610_612_736));
+        assert_eq!(listed[0].max_height, Some(1080));
+        assert_eq!(format_gib(1_610_612_736), "1.5");
+        assert_eq!(format_gib(5_368_709_120), "5");
+
+        set_limits(State(state), Path(sam.id), Form(LimitsForm::default())).await;
+        let listed = store.list_peers().await.unwrap();
+        assert_eq!(listed[0].max_size_bytes, None);
+        assert_eq!(listed[0].max_height, None);
+    }
+
+    #[tokio::test]
+    async fn set_limits_refuses_what_is_not_a_cap_and_changes_nothing() {
+        let (_dir, serve) = crate::state::fixtures::unconfigured();
+        let store = serve.store().await.unwrap();
+        let sam = seed_sam(&store).await;
+        let state = web_state(serve);
+
+        for (size, height) in [("-1", ""), ("lots", ""), ("inf", ""), ("", "0"), ("", "hd")] {
+            let response = set_limits(
+                State(state.clone()),
+                Path(sam.id),
+                Form(LimitsForm {
+                    max_size_gib: size.to_owned(),
+                    max_height: height.to_owned(),
+                }),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{size:?} {height:?}"
+            );
+        }
+        assert_eq!(store.list_peers().await.unwrap()[0].max_height, None);
+    }
+
+    #[tokio::test]
     async fn set_scope_changes_what_a_friend_can_see() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = seed_sam(&store).await;
         let state = web_state(serve);
 
         let response = set_scope(
@@ -1393,10 +1425,7 @@ mod tests {
     async fn delete_removes_the_peer_entirely() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = seed_sam(&store).await;
         let state = web_state(serve);
 
         let response = delete(State(state), Path(sam.id)).await;
@@ -1409,10 +1438,7 @@ mod tests {
     async fn set_gossip_stores_a_valid_url_with_no_key_involved() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = seed_sam(&store).await;
         let state = web_state(serve);
 
         let response = set_gossip(
@@ -1438,10 +1464,7 @@ mod tests {
     async fn set_gossip_rejects_a_url_that_does_not_parse() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = seed_sam(&store).await;
         let state = web_state(serve);
 
         let response = set_gossip(
@@ -1478,10 +1501,7 @@ mod tests {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 let store = serve.store().await.unwrap();
-                let sam = store
-                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-                    .await
-                    .unwrap();
+                let sam = seed_sam(&store).await;
 
                 let response = set_gossip(
                     State(state),
@@ -1517,10 +1537,7 @@ mod tests {
     async fn feed_preview_renders_an_empty_feed_for_a_known_peer_with_nothing_shared() {
         let (_dir, serve) = crate::state::fixtures::unconfigured();
         let store = serve.store().await.unwrap();
-        let sam = store
-            .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-            .await
-            .unwrap();
+        let sam = seed_sam(&store).await;
         let state = web_state(serve);
 
         let response = feed_preview(State(state), Path(sam.id)).await;
@@ -1844,10 +1861,7 @@ mod tests {
 
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let store = serve.store().await.unwrap();
-                let sam = store
-                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-                    .await
-                    .unwrap();
+                let sam = seed_sam(&store).await;
                 let vault_key = secret_keys::peer_gossip_key(sam.id);
                 async fn stored(serve: &crate::state::ServeState, key: &str) -> bool {
                     serve
@@ -1920,7 +1934,7 @@ mod tests {
     async fn the_page_reports_when_friends_cannot_be_listed() {
         let (_dir, state) = web_state_with_closed_store().await;
 
-        let page = build(&state, None, None).await;
+        let page = build(&state, None).await;
         assert!(page.peers.is_empty());
         let error = page.error.expect("the failure must be named on the page");
         assert!(error.contains("could not list friends"), "{error}");
@@ -1998,7 +2012,11 @@ mod tests {
 
         let response = feed_preview(State(state.clone()), Path(1)).await;
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
-        assert!(body_of(response).await.contains("could not list friends"));
+        assert!(
+            body_of(response)
+                .await
+                .contains("could not read that friend")
+        );
 
         let response = export(State(state)).await;
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -2023,10 +2041,7 @@ mod tests {
 
             tokio::runtime::Runtime::new().unwrap().block_on(async {
                 let store = serve.store().await.unwrap();
-                let sam = store
-                    .create_peer("Sam", &SecretString::from("sam-key"), PeerScope::All)
-                    .await
-                    .unwrap();
+                let sam = seed_sam(&store).await;
 
                 let response = set_gossip(
                     State(state.clone()),
@@ -2189,7 +2204,7 @@ mod tests {
                 let sent: crate::pairing::PairRequest =
                     serde_json::from_slice(&received[0].body).unwrap();
                 assert_eq!(
-                    crate::pairing::key_hash(&sent.key),
+                    sharerr_lighthouse::hash_key(&sent.key),
                     peer.key_hash,
                     "the key sent back is the one Sam's row was created under"
                 );
@@ -2221,9 +2236,9 @@ mod tests {
                 let reply = invite_in(&body).expect("a reply is shown");
                 assert_eq!(
                     reply.in_reply_to.as_deref(),
-                    Some(crate::pairing::key_hash("the-key-sam-issued-us").as_str())
+                    Some(sharerr_lighthouse::hash_key("the-key-sam-issued-us").as_str())
                 );
-                assert_eq!(crate::pairing::key_hash(&reply.key), peer.key_hash);
+                assert_eq!(sharerr_lighthouse::hash_key(&reply.key), peer.key_hash);
                 assert!(body.contains(&reply.key), "the key itself is revealed too");
             });
             Ok(())
@@ -2248,7 +2263,7 @@ mod tests {
                     .await
                     .unwrap();
                 let mut reply = sams_invite("http://sam.example:8477");
-                reply.in_reply_to = Some(crate::pairing::key_hash("key-we-issued-sam"));
+                reply.in_reply_to = Some(sharerr_lighthouse::hash_key("key-we-issued-sam"));
 
                 let response = pair(State(state), pair_form(&reply, "ignored")).await;
                 assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -2291,7 +2306,7 @@ mod tests {
                     .unwrap();
                 store.revoke_peer(sam.id).await.unwrap();
                 let mut reply = sams_invite("http://sam.example:8477");
-                reply.in_reply_to = Some(crate::pairing::key_hash("key-we-issued-sam"));
+                reply.in_reply_to = Some(sharerr_lighthouse::hash_key("key-we-issued-sam"));
 
                 let response = pair(State(state), pair_form(&reply, "")).await;
                 assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -2338,7 +2353,7 @@ mod tests {
                         .unwrap()
                 );
                 let mut reply = sams_invite("http://sam.example:8477");
-                reply.in_reply_to = Some(crate::pairing::key_hash("key-we-issued-sam"));
+                reply.in_reply_to = Some(sharerr_lighthouse::hash_key("key-we-issued-sam"));
 
                 let response = pair(State(state), pair_form(&reply, "")).await;
                 assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
@@ -2414,6 +2429,6 @@ mod tests {
         // `Jail` test elsewhere in the binary can flip under a bare
         // `#[tokio::test]` (see CLAUDE.md); not asserted either way.
         let peer = store.list_peers().await.unwrap().remove(0);
-        assert_eq!(crate::pairing::key_hash(&invite.key), peer.key_hash);
+        assert_eq!(sharerr_lighthouse::hash_key(&invite.key), peer.key_hash);
     }
 }

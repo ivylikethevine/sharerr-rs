@@ -17,3 +17,9 @@ pub use model::{
     Discovered, ExternalIds, MediaMeta, MediaSource, MediaSpec, SceneMeta, ShareState, SharedItem,
 };
 pub use paths::{PathError, PathResolver};
+
+/// `n` as the `i64` SQLite stores, saturating rather than wrapping: a clamped
+/// figure is less wrong than a negative one.
+pub fn saturating_i64<T: TryInto<i64>>(n: T) -> i64 {
+    n.try_into().unwrap_or(i64::MAX)
+}

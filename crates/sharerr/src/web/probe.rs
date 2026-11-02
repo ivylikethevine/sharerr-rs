@@ -24,8 +24,7 @@ use std::fmt::Write as _;
 
 use super::WebState;
 use crate::checks::{
-    ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_library, check_qbit,
-    resolve_torrent_credential,
+    ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_qbit, resolve_torrent_credential,
 };
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
@@ -43,13 +42,7 @@ pub async fn test(State(state): State<WebState>, Path(service): Path<String>) ->
     } else if service == "notifications" {
         notifications_badge(&state).await
     } else if let Some(kind) = MediaSource::parse(&service) {
-        // "directory" parses as a MediaSource but is not a probeable service;
-        // its button is the "library" one above.
-        if kind == MediaSource::Directory {
-            Outcome::Bad("Unknown service.".to_owned())
-        } else {
-            arr_badge(kind, &state, &config).await
-        }
+        arr_badge(kind, &state, &config).await
     } else {
         Outcome::Bad("Unknown service.".to_owned())
     };
@@ -94,7 +87,8 @@ async fn notifications_badge(state: &WebState) -> Outcome {
 
 async fn arr_badge(kind: MediaSource, state: &WebState, config: &Config) -> Outcome {
     let service = config.service(kind);
-    // The caller filtered Directory out, and every *arr app has a vault key.
+    // Every *arr app has a vault key. "directory" parses as a MediaSource but is
+    // not a probeable service; its button is the "library" one.
     let Some(key) = secret_keys::credential_for(kind) else {
         return Outcome::Bad("Unknown service.".to_owned());
     };
@@ -147,20 +141,7 @@ async fn library_badge(config: &Config) -> Outcome {
         return Outcome::Bad("No library directories configured. Save one first.".to_owned());
     }
 
-    let libraries = config.library.clone();
-    // The scans stat every file; off the async loop so a slow mount cannot
-    // stall the single worker thread this may be running on.
-    let outcomes = match tokio::task::spawn_blocking(move || {
-        libraries
-            .into_iter()
-            .map(|library| {
-                let outcome = check_library(&library);
-                (library, outcome)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    {
+    let outcomes = match crate::checks::scan_libraries(config.library.clone()).await {
         Ok(outcomes) => outcomes,
         // A panicked or cancelled scan must not render as a green "0 folders
         // found" badge asserting the configuration is fine.
@@ -447,6 +428,7 @@ mod tests {
             "qbittorrent",
             "transmission",
             "rtorrent",
+            "deluge",
             "library",
             "sonarr",
             "directory",
@@ -468,8 +450,6 @@ mod tests {
     // the badge gets past credential resolution and the *arr or client
     // outcome it renders is the one under test.
 
-    use std::sync::Arc;
-
     use sharerr_testkit::mock::{base_url, mount_json};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -483,19 +463,7 @@ mod tests {
         F: FnOnce(WebState) -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("SHARERR_MASTER_KEY", "probe-tests-master-key");
-            let config = Config {
-                data_dir: jail.directory().to_path_buf(),
-                ..config
-            };
-            let path = jail.directory().join("sharerr.toml");
-            let serve = Arc::new(crate::state::ServeState::new(config, path, None));
-            tokio::runtime::Runtime::new()
-                .unwrap()
-                .block_on(body(web_state(serve)));
-            Ok(())
-        });
+        crate::state::fixtures::with_open_vault(config, |_| {}, |serve| body(web_state(serve)));
     }
 
     async fn store(state: &WebState, key: &str, value: &str) {
@@ -626,8 +594,7 @@ mod tests {
             .await;
             assert!(html.contains("class=\"error\""), "{html}");
 
-            let port = sharerr_testkit::net::closed_port();
-            let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let url = sharerr_testkit::net::closed_url();
             let html =
                 body_of(arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&url)).await).await;
             assert!(html.contains("Could not reach it"), "{html}");
@@ -664,9 +631,19 @@ mod tests {
             let server = MockServer::start().await;
             mount_sonarr_status(&server).await;
             mount_json(&server, "/api/v3/tag", sharerr_testkit::library::tag_json()).await;
-            mount_json(&server, "/api/v3/series", library.series_json()).await;
+            mount_json(
+                &server,
+                "/api/v3/series",
+                sharerr_testkit::library::series_json(),
+            )
+            .await;
             mount_json(&server, "/api/v3/episodefile", library.episodefile_json()).await;
-            mount_json(&server, "/api/v3/episode", library.episode_json()).await;
+            mount_json(
+                &server,
+                "/api/v3/episode",
+                sharerr_testkit::library::episode_json(),
+            )
+            .await;
             let html = body_of(
                 arr_badge(MediaSource::Sonarr, &state, &sonarr_at(&base_url(&server))).await,
             )
@@ -728,8 +705,7 @@ mod tests {
             let html = badge(transmission_at(&base_url(&server)), state.clone()).await;
             assert!(html.contains("Signed in, but:"), "{html}");
 
-            let port = sharerr_testkit::net::closed_port();
-            let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+            let url = sharerr_testkit::net::closed_url();
             let html = badge(transmission_at(&url), state.clone()).await;
             assert!(html.contains("Could not reach it"), "{html}");
 

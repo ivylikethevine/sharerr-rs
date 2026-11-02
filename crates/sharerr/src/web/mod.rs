@@ -13,6 +13,19 @@
 //! shipping files alongside the binary that the Dockerfile deliberately does not
 //! copy.
 
+/// The value of a `Result` whose `Err` is a boxed response, or that response
+/// returned from the handler. A macro because `Box<Response>` is not `IntoResponse`,
+/// so `?` cannot carry it, and an extractor would run ahead of `Form` and the checks
+/// done before the store, changing which response wins.
+macro_rules! ok_or_return {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(response) => return *response,
+        }
+    };
+}
+
 pub mod auth;
 pub mod composition;
 pub mod config_io;
@@ -88,8 +101,13 @@ impl WebState {
         self.serve
             .store()
             .await
-            .map_err(|reason| Box::new((StatusCode::SERVICE_UNAVAILABLE, reason).into_response()))
+            .map_err(|reason| Box::new(unavailable(reason)))
     }
+}
+
+/// The 503 a handler answers with when something it needs is unavailable.
+pub(crate) fn unavailable(reason: String) -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, reason).into_response()
 }
 
 /// Every route the browser talks to, ready to merge into the server's router.
@@ -129,6 +147,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/peers/pair", post(peers::pair))
         .route("/peers/preview", get(peers::scope_preview))
         .route("/peers/{id}/scope", post(peers::set_scope))
+        .route("/peers/{id}/limits", post(peers::set_limits))
         .route("/peers/{id}/gossip", post(peers::set_gossip))
         .route("/peers/{id}/revoke", post(peers::revoke))
         .route("/peers/{id}/delete", post(peers::delete))
@@ -148,6 +167,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
         .route("/settings/transmission", post(settings::save_transmission))
         .route("/settings/rtorrent", post(settings::save_rtorrent))
+        .route("/settings/deluge", post(settings::save_deluge))
         .route(
             "/settings/torrent-backend",
             post(settings::save_torrent_backend),
@@ -274,10 +294,12 @@ async fn status_page(State(state): State<WebState>, Query(query): Query<StatusQu
     let config = state.serve.config().await;
     // Concurrently, because they share no data and `gather` is the expensive
     // half — it probes every *arr over HTTP and stats every discovered file,
-    // while `glance` is two store queries. Run in series the cheap one sat
+    // while `glance` only reads local state. Run in series the cheap one sat
     // behind the slow one on the page an operator lands on.
-    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
-    let (diag, glance) = tokio::join!(diagnostics::gather(&state), glance(&state, sync_every));
+    let (diag, glance) = tokio::join!(
+        diagnostics::gather(&state),
+        glance(&state, config.sync_every())
+    );
 
     render(&StatusPage {
         signed_in: true,
@@ -326,8 +348,10 @@ async fn sync_now(State(state): State<WebState>) -> Redirect {
 /// on screen looking current. The `None` branch of the partial says "unavailable"
 /// instead, which is the truth.
 async fn stat_tiles(State(state): State<WebState>) -> Response {
-    let config = state.serve.config().await;
-    let sync_every = config.sync.enabled.then_some(config.sync.interval_secs);
+    let sync_every = state
+        .serve
+        .with_config(sharerr_core::Config::sync_every)
+        .await;
 
     render(&crate::web::templates::StatTiles {
         glance: glance(&state, sync_every).await,
@@ -401,30 +425,13 @@ async fn glance(
     sync_every: Option<u64>,
 ) -> Option<crate::web::templates::Glance> {
     let store = state.serve.store().await.ok()?;
+    let snapshot = crate::metrics::gather(&state.serve).await;
 
-    // One aggregate for both the count and the size — `PeerScope::All`
-    // admits every source, so this is the whole seeding set.
-    let seeding = store
-        .seeding_summary(sharerr_store::PeerScope::All)
-        .await
-        .unwrap_or_default();
-    let items_shared = seeding.count;
-    let shared_size = if seeding.size > 0 {
-        items::human_size(seeding.size.unsigned_abs())
-    } else {
-        String::new()
-    };
+    let items_shared = snapshot.seeding_count;
+    let shared_size = peers::bytes_or_empty(snapshot.seeding_bytes);
 
-    // The most recent *finished* run. An in-flight run has no outcome yet, and
-    // "last sync: just now" while it still churns would overpromise.
-    let last_run = store
-        .recent_runs(1)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .next()
-        .filter(|run| run.finished_at.is_some());
-    let (last_sync, last_sync_note, last_sync_failed) = match &last_run {
+    let last_run = &snapshot.last_run;
+    let (last_sync, last_sync_note, last_sync_failed) = match last_run {
         Some(run) => {
             let when = run.finished_at.map(peers::ago);
             // The glance leads with the timestamp, so the discovered count is
@@ -449,7 +456,6 @@ async fn glance(
             let every = state
                 .serve
                 .sync_retry_delay(Duration::from_secs(every))
-                .await
                 .as_secs() as i64;
             let due_in = finished + every - now;
             if due_in <= 0 {
@@ -464,14 +470,7 @@ async fn glance(
         }
         _ => String::new(),
     };
-    let peers = store.list_peers().await.unwrap_or_default();
-    let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
-    let friends_recent = active
-        .iter()
-        .filter(|p| p.last_seen_at.is_some_and(|at| now - at < 3600))
-        .count();
-
-    let swarm = state.serve.swarms().stats().await;
+    let swarm = snapshot.swarm;
 
     // Only worth asking when the swarm is quiet right now — a peer visibly
     // announcing needs no "since when" to tell it apart from a fortnight of
@@ -490,13 +489,9 @@ async fn glance(
 
     // All-time, from the announces themselves. Zero reads as "nothing to
     // say yet" rather than "0 B": a figure only appears once it is one.
-    let bytes_served = match store.transfer_totals().await {
-        Ok(totals) if totals.downloaded > 0 => items::human_size(totals.downloaded.unsigned_abs()),
-        _ => String::new(),
-    };
+    let bytes_served = peers::bytes_or_empty(snapshot.transfer.downloaded);
 
-    let (cpu_percent, memory_usage, disk_usage) = match state.serve.system_status().snapshot().await
-    {
+    let (cpu_percent, memory_usage, disk_usage) = match snapshot.system {
         Some(sample) => {
             let (cpu, memory, disk) = crate::system_stats::format(sample);
             (Some(cpu), Some(memory), disk)
@@ -510,8 +505,8 @@ async fn glance(
         last_sync,
         last_sync_note,
         last_sync_failed,
-        friends_recent,
-        friends_total: active.len(),
+        friends_recent: snapshot.peers_recent,
+        friends_total: snapshot.peers_total,
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
         swarm_torrents: swarm.swarms,
@@ -772,7 +767,7 @@ mod tests {
             )
             .await
             .unwrap();
-        serve.note_sync_failure().await;
+        serve.note_sync_failure();
 
         let state = web_state(serve);
         // A 15-minute interval: if this ignored the backoff it would say

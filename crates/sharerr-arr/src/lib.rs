@@ -44,8 +44,8 @@ pub(crate) trait Tagged {
     fn tags(&self) -> &[i64];
 }
 
-/// The discovery scaffold every walk shares: keep the entities carrying
-/// `tag_id`, run `fetch` over them [`DISCOVERY_CONCURRENCY`] at a time, and hand
+/// The discovery scaffold every walk shares: keep the entities carrying any of
+/// `tag_ids`, run `fetch` over them [`DISCOVERY_CONCURRENCY`] at a time, and hand
 /// back each tagged entity paired with what was fetched for it.
 ///
 /// `buffered` preserves input order, which is what makes the zip sound — and
@@ -55,7 +55,7 @@ pub(crate) trait Tagged {
 pub(crate) async fn fetch_tagged<'a, E, P, F>(
     client: &'a ArrClient,
     entities: &'a [E],
-    tag_id: i64,
+    tag_ids: &[i64],
     what: &'static str,
     fetch: F,
 ) -> Result<Vec<(&'a E, P)>>
@@ -65,7 +65,7 @@ where
 {
     let tagged: Vec<&'a E> = entities
         .iter()
-        .filter(|e| e.tags().contains(&tag_id))
+        .filter(|e| e.tags().iter().any(|tag| tag_ids.contains(tag)))
         .collect();
 
     tracing::debug!(
@@ -127,7 +127,7 @@ pub(crate) fn join_by_parent<'a, C, F>(
         .collect()
 }
 
-pub use client::{ArrClient, whisparr_walks_like_radarr};
+pub use client::{ArrClient, TaggedFiles, whisparr_walks_like_radarr};
 pub use error::{ArrError, Result};
 pub use models::SystemStatus;
 // Re-exported from core (it moved there for the directory source, which is not
