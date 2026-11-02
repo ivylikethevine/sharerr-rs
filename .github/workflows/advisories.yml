@@ -105,12 +105,11 @@ jobs:
             echo "::error title=npm audit::the audit did not run (exit $rc)"
             exit 1
           fi
-          # An advisory is its GHSA id, the last segment of the url npm reports
-          # it under. Ids listed in osv-scanner.toml are left out; one
-          # listed there that the audit no longer reports is stale.
-          jq -r '[.vulnerabilities[]?.via[] | objects | .url | sub(".*/"; "")] | unique[]' \
-            "$RUNNER_TEMP/npm-audit.json" >"$RUNNER_TEMP/npm-reported.txt"
-          sed -n 's/^id = "\(GHSA[-0-9a-z]*\)"$/\1/p' .github/osv-scanner.toml | sort -u >"$RUNNER_TEMP/npm-ignored.txt" || true
+          # Ids listed in osv-scanner.toml are left out; one listed there that
+          # the audit no longer reports is stale.
+          source .github/scripts/lib.sh
+          _ci_npm_audit_reported "$RUNNER_TEMP/npm-audit.json" >"$RUNNER_TEMP/npm-reported.txt"
+          _ci_npm_audit_accepted .github/osv-scanner.toml >"$RUNNER_TEMP/npm-ignored.txt" || true
           open="$(grep -vxFf "$RUNNER_TEMP/npm-ignored.txt" "$RUNNER_TEMP/npm-reported.txt" || true)"
           stale="$(grep -vxFf "$RUNNER_TEMP/npm-reported.txt" "$RUNNER_TEMP/npm-ignored.txt" || true)"
           for id in $stale; do
