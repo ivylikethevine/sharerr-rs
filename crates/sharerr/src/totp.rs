@@ -45,7 +45,7 @@ pub fn verify(secret: &str, code: &str, now: i64) -> Option<i64> {
                 "{:0DIGITS$}",
                 hotp(&key, counter) % 10u32.pow(DIGITS as u32)
             );
-            constant_time_eq(expected.as_bytes(), code.as_bytes())
+            crate::secrets::constant_time_eq(&expected, &code)
         })
     })
 }
@@ -116,12 +116,6 @@ fn hmac_sha1(key: &[u8], message: &[u8]) -> [u8; 20] {
     let mut mac = [0u8; 20];
     mac.copy_from_slice(&outer.finalize());
     mac
-}
-
-/// Equal length is public (six digits); the bytes are compared without an
-/// early exit.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// RFC 4648 base32, without padding, as `otpauth://` URIs carry it.

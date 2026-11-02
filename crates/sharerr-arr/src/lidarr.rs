@@ -93,10 +93,13 @@ async fn fetch_artist(client: &ArrClient, artist: &Artist) -> Result<ArtistPaylo
     Ok((albums, files, tracks))
 }
 
-pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
+pub(crate) async fn discover(
+    client: &ArrClient,
+    tag_ids: &[i64],
+) -> Result<Vec<(Discovered, Vec<i64>)>> {
     let artists: Vec<Artist> = client.get("artist", &()).await?;
     // Concurrent across artists as well as within one — see `fetch_tagged`.
-    let fetched = fetch_tagged(client, &artists, tag_id, "lidarr artists", fetch_artist).await?;
+    let fetched = fetch_tagged(client, &artists, tag_ids, "lidarr artists", fetch_artist).await?;
 
     let mut discovered = Vec::new();
     for (artist, (albums, files, tracks)) in fetched {
@@ -119,7 +122,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
         for (album, file) in joined {
             let track = track_number(numbers_by_file.get(&file.id).map(Vec::as_slice));
 
-            discovered.push(Discovered {
+            let item = Discovered {
                 source: MediaSource::Lidarr,
                 source_id: artist.id,
                 file_id: file.id,
@@ -128,7 +131,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                     album: album.title.clone(),
                     track,
                 },
-                arr_path: file.path.clone().into(),
+                arr_path: file.path.into(),
                 size: file.size,
                 ids: ExternalIds {
                     // Lidarr's foreign ids are MusicBrainz. The album's is the one a
@@ -137,14 +140,15 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                         .or_else(|| non_empty(artist.foreign_artist_id.clone())),
                     ..ExternalIds::default()
                 },
-                scene_name: non_empty(file.scene_name.clone()),
+                scene_name: non_empty(file.scene_name),
                 // Lidarr and Readarr report no pre-rename path.
                 original_path: None,
                 // Lidarr has already analysed the file, so this costs nothing:
                 // it arrives in the same JSON as everything else above.
                 media: file.media_info.and_then(MediaInfo::into_meta),
                 scene: None,
-            });
+            };
+            discovered.push((item, artist.tags.clone()));
         }
     }
 

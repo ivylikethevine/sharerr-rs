@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use serde::Deserialize;
 use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
-use sharerr_store::{Peer, PeerScope, Store};
+use sharerr_store::{Audiences, Peer, PeerScope, Store};
 
 use std::collections::HashMap;
 
@@ -23,8 +23,8 @@ use super::WebState;
 use super::peers::ago;
 use super::settings::title_case;
 use super::templates::{
-    AddressCell, FilterOption, FilterState, ItemDetailPage, ItemRow, ItemsPage, SortLink, SwarmRow,
-    TokenStatus, render,
+    FilterOption, FilterState, ItemDetailPage, ItemRow, ItemsPage, SortLink, SwarmRow, TokenStatus,
+    render,
 };
 
 #[derive(Debug, Default, Deserialize)]
@@ -154,6 +154,7 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
 
     let peers = store.list_peers().await.unwrap_or_default();
     let active: Vec<Peer> = peers.into_iter().filter(|p| !p.is_revoked()).collect();
+    let audiences = store.audiences().await.unwrap_or_default();
 
     // Same instance-wide-not-per-row reasoning for both: every seeding
     // torrent announces to the same live endpoint and is checked against the
@@ -249,7 +250,14 @@ pub async fn page(State(state): State<WebState>, Query(query): Query<ItemsQuery>
                     .as_deref()
                     .and_then(|hash| swarms.get(&hash.to_lowercase()))
                     .copied();
-                row(item, &active, announce_url.as_deref(), tokens, swarm)
+                row(
+                    item,
+                    &active,
+                    &audiences,
+                    announce_url.as_deref(),
+                    tokens,
+                    swarm,
+                )
             })
             .collect(),
         source_options: MediaSource::ALL
@@ -322,13 +330,14 @@ fn state_hint(state: ShareState) -> Option<&'static str> {
 /// Who can currently find this item in their feed. Only meaningful once an item
 /// is `Seeding` — `Store::seeding_items` excludes everything else, so a pending
 /// or failed item is invisible to every friend regardless of scope.
-fn visible_to(item: &SharedItem, peers: &[Peer]) -> String {
+fn visible_to(item: &SharedItem, peers: &[Peer], audiences: &Audiences) -> String {
     if item.state != ShareState::Seeding {
         return String::new();
     }
+    let audience = audiences.get(&item.key()).map(Vec::as_slice);
     let names: Vec<&str> = peers
         .iter()
-        .filter(|peer| scope_admits(peer.scope, item))
+        .filter(|peer| scope_admits(peer.scope, item) && peer.limits().admits(item, audience))
         .map(|peer| peer.label.as_str())
         .collect();
     if names.is_empty() {
@@ -418,6 +427,7 @@ fn short_hash(hash: &str) -> String {
 fn row(
     item: &SharedItem,
     peers: &[Peer],
+    audiences: &Audiences,
     announce_url: Option<&str>,
     tokens: TokenFps<'_>,
     swarm: Option<SwarmCount>,
@@ -435,7 +445,7 @@ fn row(
         state_hint: state_hint(item.state),
         ratio,
         ratio_hint,
-        visible_to: visible_to(item, peers),
+        visible_to: visible_to(item, peers, audiences),
         since: item.created_at.map(ago).unwrap_or_default(),
         info_hash: item.info_hash.clone(),
         info_hash_short: item.info_hash.as_deref().map(short_hash),
@@ -993,22 +1003,7 @@ async fn swarm_for(state: &WebState, item: &SharedItem) -> Option<SwarmRow> {
         .into_iter()
         .find(|s| hex::encode(s.info_hash) == target)?;
 
-    let more = swarm
-        .peers
-        .len()
-        .saturating_sub(super::topology::MAX_SWARM_PEERS);
-    let peers = swarm
-        .peers
-        .iter()
-        .take(super::topology::MAX_SWARM_PEERS)
-        .map(|addr| {
-            let full = addr.to_string();
-            AddressCell {
-                masked: super::topology::mask_address(&full),
-                full,
-            }
-        })
-        .collect();
+    let (peers, more) = super::topology::capped_peers(&swarm.peers);
 
     Some(SwarmRow {
         title: item.spec.title().to_owned(),
@@ -1110,7 +1105,7 @@ async fn build_detail(
             .and(announce_url.as_deref())
             .map(str::to_owned),
         ids: ids_summary(&item.ids),
-        visible_to: visible_to(&item, &active),
+        visible_to: visible_to(&item, &active, &store.audiences().await.unwrap_or_default()),
         media: item.media.clone(),
         arr_path,
         sharerr_path,

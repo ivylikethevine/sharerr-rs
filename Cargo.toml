@@ -144,6 +144,7 @@ sharerr-client = { version = "0.0.0-dev", path = "crates/sharerr-client" }
 sharerr-core = { version = "0.0.0-dev", path = "crates/sharerr-core" }
 sharerr-lighthouse = { version = "0.0.0-dev", path = "crates/sharerr-lighthouse" }
 sharerr-qbit = { version = "0.0.0-dev", path = "crates/sharerr-qbit" }
+sharerr-deluge = { version = "0.0.0-dev", path = "crates/sharerr-deluge" }
 sharerr-rtorrent = { version = "0.0.0-dev", path = "crates/sharerr-rtorrent" }
 sharerr-probe = { version = "0.0.0-dev", path = "crates/sharerr-probe" }
 sharerr-store = { version = "0.0.0-dev", path = "crates/sharerr-store" }

@@ -126,7 +126,7 @@ impl TorrentClient for QbitClient {
             .map_err(|e| self.translate(e))
     }
 
-    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+    async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
         self.set_torrent_limits(hash, limits)
             .await
             .map_err(|e| self.translate(e))

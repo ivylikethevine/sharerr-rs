@@ -87,7 +87,7 @@ const LEGEND: &[LegendEntry] = &[
         lane: Lane::Client,
         accent: "var(--topo-client)",
         name: "Torrent client",
-        meaning: "The client that actually seeds — qBittorrent, Transmission or rTorrent",
+        meaning: "The client that actually seeds — qBittorrent, Transmission, rTorrent or Deluge",
     },
     LegendEntry {
         icon: NodeIcon::Friend,

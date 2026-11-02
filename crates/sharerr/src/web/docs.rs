@@ -37,6 +37,8 @@ pub const CONFIG_TRANSMISSION: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#transmission";
 pub const CONFIG_RTORRENT: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#rtorrent";
+pub const CONFIG_DELUGE: &str =
+    "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#deluge";
 pub const CONFIG_SEEDING: &str =
     "https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#seeding";
 pub const CONFIG_FEED: &str =
@@ -116,6 +118,7 @@ pub const QBITTORRENT_API: &str =
 pub const TRANSMISSION_RPC: &str =
     "https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md";
 pub const RTORRENT_RPC: &str = "https://rtorrent-docs.readthedocs.io/en/latest/cmd-ref.html";
+pub const DELUGE_RPC: &str = "https://deluge.readthedocs.io/en/latest/reference/webapi.html";
 
 pub const GLUETUN_CONTROL_SERVER: &str =
     "https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/control-server.md";
@@ -177,6 +180,7 @@ mod tests {
             ("CONFIG_QBITTORRENT", super::CONFIG_QBITTORRENT),
             ("CONFIG_TRANSMISSION", super::CONFIG_TRANSMISSION),
             ("CONFIG_RTORRENT", super::CONFIG_RTORRENT),
+            ("CONFIG_DELUGE", super::CONFIG_DELUGE),
             ("CONFIG_SEEDING", super::CONFIG_SEEDING),
             ("CONFIG_FEED", super::CONFIG_FEED),
             ("CONFIG_TRACKER", super::CONFIG_TRACKER),

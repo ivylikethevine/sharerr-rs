@@ -28,8 +28,8 @@ pub use announce::{
 };
 pub use error::{Result, TorrentError};
 pub use factory::{
-    BuiltTorrent, Retargeted, TorrentFactory, TorrentRequest, piece_length_for, read_announce,
-    read_info_hash, retarget_announce, rewrite_announce, torrent_file_path,
+    BuiltTorrent, Retargeted, SidecarRequest, TorrentFactory, TorrentRequest, piece_length_for,
+    retarget_announce, rewrite_announce, torrent_file_path,
 };
 pub use metainfo::{MetainfoError, Torrent};
 pub use title::{ParsedTitle, humanize, join_title, parse, resolve, synthesize};

@@ -24,3 +24,18 @@
   <p>{{ detail }}</p>
 </div>
 {%- endmacro %}
+
+{#- A settings field's lock and stored state, shared by the settings page and the
+    wizard. `locks` maps a config path to the variable pinning it. -#}
+{% macro lock_attr(locks, key) %}{% if locks.contains_key(*key) %}disabled{% endif %}{% endmacro %}
+{%- macro locked(locks, key) %}
+{%- if let Some(var) = locks.get(*key) %}
+  <p class="locked">Pinned by <code>{{ var }}</code>. Unset that variable to edit this here.</p>
+{%- endif %}
+{%- endmacro %}
+{%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
+{%- macro field_status(is_set) %}
+{%- if is_set %}<span class="field-status field-status--set">&#10003; set</span>
+{%- else %}<span class="field-status field-status--unset">not set</span>
+{%- endif %}
+{%- endmacro %}

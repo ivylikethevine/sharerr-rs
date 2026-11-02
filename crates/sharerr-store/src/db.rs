@@ -238,16 +238,12 @@ impl Store {
     /// for a narrowly-scoped friend.
     pub async fn seeding_items(&self, scope: crate::PeerScope) -> Result<Vec<SharedItem>> {
         let filter = scope_filter(scope);
-        let sql = format!(
-            "{SELECT_COLUMNS} WHERE {} ORDER BY created_at DESC, id DESC",
-            filter.clause
-        );
         // `AssertSqlSafe`: everything interpolated is this module's own
-        // constants — `SELECT_COLUMNS` and `scope_filter`'s clause; the peer
-        // scope itself travels through `.bind()`.
-        let mut query = sqlx::query(AssertSqlSafe(sql));
-        for value in filter.binds() {
-            query = query.bind(value);
+        // constants — see `ScopeFilter::new`; the peer scope itself travels
+        // through `.bind()`.
+        let mut query = sqlx::query(AssertSqlSafe(filter.items_sql.as_str()));
+        for value in &filter.binds {
+            query = query.bind(*value);
         }
         let rows = query.fetch_all(self.pool()).await?;
         rows.iter().map(row_to_item).collect()
@@ -255,18 +251,13 @@ impl Store {
 
     /// How many items `scope` may see right now, and their total size in bytes
     /// — the same rows [`Self::seeding_items`] returns, aggregated in SQL
-    /// rather than decoded. The friends page asks this once per distinct
-    /// scope on every load, and the status page asks it for
+    /// rather than decoded. The status page and metrics ask it for
     /// [`crate::PeerScope::All`]; neither needs the rows themselves.
     pub async fn seeding_summary(&self, scope: crate::PeerScope) -> Result<SeedingSummary> {
         let filter = scope_filter(scope);
-        let sql = format!(
-            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM shared_items WHERE {}",
-            filter.clause
-        );
-        let mut query = sqlx::query_as(AssertSqlSafe(sql));
-        for value in filter.binds() {
-            query = query.bind(value);
+        let mut query = sqlx::query_as(AssertSqlSafe(filter.summary_sql.as_str()));
+        for value in &filter.binds {
+            query = query.bind(*value);
         }
         let (count, size): (i64, i64) = query.fetch_one(self.pool()).await?;
         Ok(SeedingSummary { count, size })
@@ -378,9 +369,8 @@ impl Store {
     /// — and execute. The tail every single-row updater in this file
     /// shares: [`Self::set_state`], [`Self::set_seeding`],
     /// [`Self::confirm_seeding`], [`Self::set_ratio`],
-    /// [`Self::set_info_hash`], [`Self::reset_for_rebuild`] each built this
-    /// identically by hand, so changing the natural key or its `WHERE`
-    /// clause was six edits instead of one.
+    /// [`Self::reset_for_rebuild`] each built this identically by hand, so changing
+    /// the natural key or its `WHERE` clause was six edits instead of one.
     ///
     /// `query` is the caller's own `UPDATE shared_items SET ...` text, SET
     /// clause values already bound, ending in exactly `, updated_at = ?
@@ -390,14 +380,14 @@ impl Store {
         query: SqliteQuery<'q>,
         source: MediaSource,
         file_id: i64,
-    ) -> Result<()> {
-        query
+    ) -> Result<u64> {
+        Ok(query
             .bind(now_epoch())
             .bind(source.as_str())
             .bind(file_id)
             .execute(self.pool())
-            .await?;
-        Ok(())
+            .await?
+            .rows_affected())
     }
 
     /// Record a state transition, clearing or setting the error message with it.
@@ -419,6 +409,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 
     /// Mark an item seeding under `info_hash`, in one write.
@@ -469,6 +460,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 
     /// [`Self::set_ratio`], plus recording which token an already-seeding
@@ -504,6 +496,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 
     /// Record what the torrent client itself reports for an already-seeding
@@ -531,6 +524,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 
     /// Record the file's identity on disk for the torrent sharerr just built
@@ -553,6 +547,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 
     /// Every recorded [`FileStamp`], keyed like [`SharedItem::key`], for one
@@ -566,19 +561,13 @@ impl Store {
         .await?;
         let mut stamps = HashMap::with_capacity(rows.len());
         for row in &rows {
-            let source: String = row.try_get("source")?;
-            let file_id: i64 = row.try_get("file_id")?;
-            let source = MediaSource::parse(&source).ok_or_else(|| StoreError::Malformed {
-                id: file_id,
-                detail: format!("unknown source {source:?}"),
-            })?;
             let stamp = FileStamp {
                 inode: row
                     .try_get::<Option<i64>, _>("file_inode")?
-                    .map(|raw| u64::from_ne_bytes(raw.to_ne_bytes())),
+                    .map(inode_from_sql),
                 mtime_ns: row.try_get("file_mtime_ns")?,
             };
-            stamps.insert((source, file_id), stamp);
+            stamps.insert(row_key(row)?, stamp);
         }
         Ok(stamps)
     }
@@ -591,17 +580,11 @@ impl Store {
         file_id: i64,
         until: Option<i64>,
     ) -> Result<bool> {
-        let affected = sqlx::query(
+        let query = sqlx::query(
             "UPDATE shared_items SET share_until = ?, updated_at = ? \
              WHERE source = ? AND file_id = ?",
-        )
-        .bind(until)
-        .bind(now_epoch())
-        .bind(source.as_str())
-        .bind(file_id)
-        .execute(self.pool())
-        .await?
-        .rows_affected();
+        );
+        let affected = self.update_item(query.bind(until), source, file_id).await?;
         Ok(affected > 0)
     }
 
@@ -615,21 +598,14 @@ impl Store {
         .await?;
         let mut ends = HashMap::with_capacity(rows.len());
         for row in &rows {
-            let source: String = row.try_get("source")?;
-            let file_id: i64 = row.try_get("file_id")?;
-            let source = MediaSource::parse(&source).ok_or_else(|| StoreError::Malformed {
-                id: file_id,
-                detail: format!("unknown source {source:?}"),
-            })?;
-            ends.insert((source, file_id), row.try_get("share_until")?);
+            ends.insert(row_key(row)?, row.try_get("share_until")?);
         }
         Ok(ends)
     }
 
-    /// Record the info hash of the torrent built for an item.
-    ///
-    /// A seeding item must have one: it is what the tracker admits announces against
-    /// and what the feed publishes.
+    /// Give an item an info hash with no other change, for a test setting up a row.
+    /// Production records one through [`Self::set_seeding`].
+    #[cfg(any(test, feature = "fault-injection"))]
     pub async fn set_info_hash(
         &self,
         source: MediaSource,
@@ -643,6 +619,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 
     /// Clear an item's torrent identity back to "never shared", so a fresh
@@ -664,6 +641,7 @@ impl Store {
             file_id,
         )
         .await
+        .map(|_| ())
     }
 }
 
@@ -700,6 +678,21 @@ fn inode_to_sql(inode: u64) -> i64 {
     i64::from_ne_bytes(inode.to_ne_bytes())
 }
 
+fn inode_from_sql(raw: i64) -> u64 {
+    u64::from_ne_bytes(raw.to_ne_bytes())
+}
+
+/// A row's `source` and `file_id`, keyed like [`SharedItem::key`].
+fn row_key(row: &sqlx::sqlite::SqliteRow) -> Result<(MediaSource, i64)> {
+    let source: String = row.try_get("source")?;
+    let file_id: i64 = row.try_get("file_id")?;
+    let source = MediaSource::parse(&source).ok_or_else(|| StoreError::Malformed {
+        id: file_id,
+        detail: format!("unknown source {source:?}"),
+    })?;
+    Ok((source, file_id))
+}
+
 /// What is seeding within one scope, aggregated — see [`Store::seeding_summary`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SeedingSummary {
@@ -716,9 +709,11 @@ pub struct SeedingSummary {
 /// what "TV only" admits, and two hand-written copies of this clause would
 /// not stay agreeing.
 struct ScopeFilter {
-    clause: String,
-    allowed: Vec<&'static str>,
-    directory_kind: Option<&'static str>,
+    items_sql: String,
+    summary_sql: String,
+    /// Every placeholder value in either statement, in the order they name them.
+    /// All are static strings, so one list serves `query` and `query_as` alike.
+    binds: Vec<&'static str>,
 }
 
 /// The cached [`ScopeFilter`] for `scope`, built once on first use rather
@@ -770,22 +765,13 @@ impl ScopeFilter {
             ),
             None => String::new(),
         };
+        let clause = format!(
+            "state = ? AND info_hash IS NOT NULL AND (source IN ({placeholders}){kind_arm})"
+        );
 
-        Self {
-            clause: format!(
-                "state = ? AND info_hash IS NOT NULL AND (source IN ({placeholders}){kind_arm})"
-            ),
-            allowed,
-            directory_kind,
-        }
-    }
-
-    /// Every placeholder value in `clause`, in the order it names them. All
-    /// are static strings, so one list serves `query` and `query_as` alike.
-    fn binds(&self) -> Vec<&'static str> {
         let mut binds = vec![ShareState::Seeding.as_str()];
-        binds.extend(&self.allowed);
-        if let Some(kind) = self.directory_kind {
+        binds.extend(allowed);
+        if let Some(kind) = directory_kind {
             binds.extend(
                 MediaSource::KIND_SCOPED
                     .iter()
@@ -793,7 +779,14 @@ impl ScopeFilter {
             );
             binds.push(kind);
         }
-        binds
+
+        Self {
+            items_sql: format!("{SELECT_COLUMNS} WHERE {clause} ORDER BY created_at DESC, id DESC"),
+            summary_sql: format!(
+                "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM shared_items WHERE {clause}"
+            ),
+            binds,
+        }
     }
 }
 
@@ -1755,6 +1748,120 @@ mod tests {
 
         let all = store.seeding_items(crate::PeerScope::All).await.unwrap();
         assert_eq!(ids(all), vec![1, 2, 3, 4]);
+    }
+
+    /// A friend's feed is their scope, then their caps, then who an item is for —
+    /// with the count beside their name agreeing with it.
+    #[tokio::test]
+    async fn a_friends_limits_narrow_what_their_scope_admits() {
+        use crate::{PeerLimits, PeerScope};
+        use secrecy::SecretString;
+        use sharerr_core::MediaMeta;
+        use std::collections::HashMap;
+
+        let store = Store::open_in_memory().await.unwrap();
+        let with = |mut item: SharedItem, hash: &str, size: u64, resolution: Option<&str>| {
+            item.info_hash = Some(hash.repeat(20));
+            item.state = ShareState::Seeding;
+            item.size = size;
+            item.media = resolution.map(|r| MediaMeta {
+                resolution: Some(r.to_owned()),
+                ..MediaMeta::default()
+            });
+            item
+        };
+        store
+            .upsert(&with(episode(1), "aa", 100, Some("1280x720")))
+            .await
+            .unwrap();
+        store
+            .upsert(&with(episode(2), "bb", 900, Some("3840x2160")))
+            .await
+            .unwrap();
+        // No known resolution: a cap on video must not hide it.
+        store
+            .upsert(&with(episode(3), "cc", 100, None))
+            .await
+            .unwrap();
+        // For Sam alone.
+        store
+            .upsert(&with(episode(4), "dd", 100, Some("1280x720")))
+            .await
+            .unwrap();
+        store
+            .replace_audience(
+                MediaSource::Sonarr,
+                &HashMap::from([(4, vec!["sam".to_owned()])]),
+            )
+            .await
+            .unwrap();
+
+        let ids_for = async |limits: PeerLimits| {
+            let mut ids: Vec<i64> = store
+                .seeding_items_for(PeerScope::All, &limits)
+                .await
+                .unwrap()
+                .iter()
+                .map(|i| i.file_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        let sam = || Some("sam".to_owned());
+
+        assert_eq!(ids_for(PeerLimits::default()).await, vec![1, 2, 3]);
+        assert_eq!(
+            ids_for(PeerLimits {
+                friend: sam(),
+                ..PeerLimits::default()
+            })
+            .await,
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            ids_for(PeerLimits {
+                friend: Some("alex".to_owned()),
+                ..PeerLimits::default()
+            })
+            .await,
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ids_for(PeerLimits {
+                max_height: Some(1080),
+                ..PeerLimits::default()
+            })
+            .await,
+            vec![1, 3]
+        );
+        assert_eq!(
+            ids_for(PeerLimits {
+                max_size_bytes: Some(500),
+                friend: sam(),
+                ..PeerLimits::default()
+            })
+            .await,
+            vec![1, 3, 4]
+        );
+
+        let capped = store
+            .create_peer("Capped", &SecretString::from("k"), PeerScope::All)
+            .await
+            .unwrap();
+        store
+            .set_peer_limits(capped.id, Some(500), None)
+            .await
+            .unwrap();
+        let peers = store.list_peers().await.unwrap();
+        let summaries = store.seeding_summaries(&peers).await.unwrap();
+        assert_eq!((summaries[0].count, summaries[0].size), (2, 200));
+
+        // The next pass's answer replaces the last one: Sam's item is now for all.
+        store
+            .replace_audience(MediaSource::Sonarr, &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(ids_for(PeerLimits::default()).await, vec![1, 2, 3, 4]);
     }
 
     #[tokio::test]

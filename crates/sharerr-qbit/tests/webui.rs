@@ -295,6 +295,11 @@ async fn add_torrent_always_disables_automatic_torrent_management() {
         "body was:\n{body}"
     );
     assert_eq!(
+        field("contentLayout").as_deref(),
+        Some("Original"),
+        "body was:\n{body}"
+    );
+    assert_eq!(
         field("savepath").as_deref(),
         Some("/downloads/tv/Lanternwick Hollow"),
         "savepath must be where the content already lives"

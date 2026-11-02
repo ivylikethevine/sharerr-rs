@@ -23,7 +23,9 @@ use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
 use sharerr_core::MediaMeta;
 use sharerr_core::paths::ResolvedPaths;
-use sharerr_torrent::{AnnounceSet, TorrentFactory, TorrentRequest, torrent_file_path};
+use sharerr_torrent::{
+    AnnounceSet, SidecarRequest, TorrentFactory, TorrentRequest, torrent_file_path,
+};
 
 /// What [`Seeder::refresh_announce`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +83,10 @@ pub struct Seeder {
     /// `.torrent` build, so a config change only affects torrents built
     /// after it lands — existing shares keep whatever they were built with.
     pub private: bool,
+    /// Directory libraries whose files' torrents also carry the subtitles beside
+    /// them, from `SeedingConfig::sidecars`. Read once per `.torrent` build, the
+    /// same as `private`.
+    pub sidecar_roots: Vec<PathBuf>,
     /// Where sharerr keeps a copy of each `.torrent` it builds.
     pub torrent_dir: PathBuf,
 }
@@ -94,6 +100,7 @@ impl std::fmt::Debug for Seeder {
             .field("upload_limit_kib", &self.upload_limit_kib)
             .field("ratio_limit", &self.ratio_limit)
             .field("private", &self.private)
+            .field("sidecar_roots", &self.sidecar_roots)
             .field("torrent_dir", &self.torrent_dir)
             .finish_non_exhaustive()
     }
@@ -107,8 +114,9 @@ impl Seeder {
     /// reconciliation pass by the caller — refetching it here per item would
     /// cost a first sync of a large library one full-library round trip per
     /// file. A snapshot is
-    /// sound: torrents this pass adds are single-file and each discovered item is
-    /// a distinct file, so a later item can never be covered by an earlier add.
+    /// sound: a torrent this pass adds holds one media file, plus at most its
+    /// subtitles, and each discovered item is a distinct media file, so a later
+    /// item can never be covered by an earlier add.
     ///
     /// `known_info_hash` is the hash sharerr last recorded for this item, if
     /// any — set when the client no longer has the torrent (a reinstall, a
@@ -145,12 +153,26 @@ impl Seeder {
             }
         };
 
-        // qBittorrent needs the directory the content sits in, not the file.
-        let save_path = paths
-            .qbit
-            .parent()
-            .map(Path::to_path_buf)
-            .with_context(|| format!("{} has no parent directory", paths.qbit.display()))?;
+        // Read from the bytes rather than the current config: a cached `.torrent`
+        // may predate a later change, and this is what the client is handed. An
+        // unparseable one falls back to conservative answers — it should not
+        // happen, and privateness is not something to guess public.
+        let parsed = sharerr_torrent::Torrent::read_from_bytes(&data).ok();
+        let private = parsed
+            .as_ref()
+            .is_none_or(sharerr_torrent::Torrent::is_private);
+        let root_folder = parsed
+            .as_ref()
+            .filter(|t| !t.is_single_file())
+            .and_then(|t| t.name());
+
+        // qBittorrent needs the directory the content sits in, not the file: for
+        // a multi-file torrent, the parent of the root directory it names.
+        let no_parent = || format!("{} has no parent directory", paths.qbit.display());
+        let mut save_path = paths.qbit.parent().with_context(no_parent)?;
+        if root_folder.is_some() {
+            save_path = save_path.parent().with_context(no_parent)?;
+        }
 
         let filename = format!("{info_hash}.torrent");
         let save_path = save_path.to_string_lossy();
@@ -158,25 +180,17 @@ impl Seeder {
             .category(&self.category)
             .tags(&self.tag)
             .skip_checking(self.skip_checking);
-        if let Some(kib) = self.upload_limit_kib {
-            request = request.upload_limit_kib(kib);
+        if let Some(root) = root_folder {
+            request = request.root_folder(root);
         }
-        if let Some(ratio) = self.ratio_limit {
-            request = request.ratio_limit(ratio);
-        }
+        request = request.limits(sharerr_client::SeedingLimits {
+            upload_limit_kib: self.upload_limit_kib,
+            ratio_limit: self.ratio_limit,
+        });
         self.qbit
             .add(&request)
             .await
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
-
-        // Decoded from the bytes just built (or reused from sharerr's own
-        // cache) rather than taken from `self.private`: a cached `.torrent`
-        // may predate a later config change, and this is what actually got
-        // handed to the client. Falls back to the conservative `true` if the
-        // bytes this function itself just produced somehow fail to decode —
-        // should not happen, but privateness is not something to guess public.
-        let private = sharerr_torrent::Torrent::read_from_bytes(&data)
-            .map_or(true, |torrent| torrent.is_private());
 
         Ok(SeedOutcome::Added { info_hash, private })
     }
@@ -236,9 +250,9 @@ impl Seeder {
                     // Already correct — a prior `adopt` already verified and
                     // wrote this cache entry, so there is nothing left to do.
                     sharerr_torrent::Retargeted::Current { .. } => return Ok(()),
-                    sharerr_torrent::Retargeted::Updated {
-                        data, info_hash, ..
-                    } => (data, info_hash),
+                    sharerr_torrent::Retargeted::Updated { data, torrent, .. } => {
+                        (data, torrent.info_hash())
+                    }
                 }
             }
             None => {
@@ -263,10 +277,12 @@ impl Seeder {
                 match sharerr_torrent::retarget_announce(&exported, announce)
                     .with_context(|| format!("rewriting the announce URLs of {info_hash}"))?
                 {
-                    sharerr_torrent::Retargeted::Current { info_hash, .. } => (exported, info_hash),
-                    sharerr_torrent::Retargeted::Updated {
-                        data, info_hash, ..
-                    } => (data, info_hash),
+                    sharerr_torrent::Retargeted::Current { torrent, .. } => {
+                        (exported, torrent.info_hash())
+                    }
+                    sharerr_torrent::Retargeted::Updated { data, torrent, .. } => {
+                        (data, torrent.info_hash())
+                    }
                 }
             }
         };
@@ -350,12 +366,14 @@ impl Seeder {
         // the wrong content. Catching it here means the next scheduled sync
         // pass rebuilds it automatically, instead of the operator needing to
         // notice and click Force rebuild.
-        let length = match &outcome {
-            sharerr_torrent::Retargeted::Current { length, .. }
-            | sharerr_torrent::Retargeted::Updated { length, .. } => *length,
+        let (torrent, length) = match &outcome {
+            sharerr_torrent::Retargeted::Current { torrent, length }
+            | sharerr_torrent::Retargeted::Updated {
+                torrent, length, ..
+            } => (torrent, *length),
         };
         if self
-            .cached_size_is_stale(&paths.sharerr, length, hash, &path)
+            .cached_size_is_stale(&paths.sharerr, &torrent.file_paths(), length, hash, &path)
             .await
         {
             return None;
@@ -399,19 +417,22 @@ impl Seeder {
 
     /// `true` when the cached `.torrent`'s recorded size no longer matches
     /// the file `sharerr_path` now points at — an in-place upgrade under the
-    /// same path, with the same info hash still recorded. A metadata read
+    /// same path, with the same info hash still recorded. `files` are a
+    /// multi-file torrent's names, beside `sharerr_path`, whose sizes are summed
+    /// instead; a subtitle since deleted is the same stale cache. A metadata read
     /// failure is treated the same way: not proof of anything on its own,
     /// but not worth trusting the cache over either, so it falls back to the
     /// same rebuild that would hit the file's real state regardless.
     async fn cached_size_is_stale(
         &self,
         sharerr_path: &Path,
+        files: &[String],
         cached_length: u64,
         hash: &str,
         cache_path: &Path,
     ) -> bool {
-        let on_disk = match tokio::fs::metadata(sharerr_path).await {
-            Ok(meta) => meta.len(),
+        let on_disk = match content_size(sharerr_path, files).await {
+            Ok(size) => size,
             Err(err) => {
                 tracing::warn!(
                     info_hash = hash,
@@ -502,18 +523,43 @@ impl Seeder {
         let private = self.private;
         // Owned: the closure below outlives this frame on a blocking thread.
         let media = media.cloned();
+        let wants_sidecars = self.sidecar_roots.iter().any(|root| path.starts_with(root));
+        // The client's view of the directory, since that is where it will look. A
+        // file at that filesystem's root has no directory to name, so it stays a
+        // single-file torrent.
+        let root_name = paths
+            .qbit
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
 
         // Hashing a media file is gigabytes of CPU work, and the cache write can
         // block for tens of milliseconds on the network mounts these deployments
         // sit on. Both stay off the runtime; doing either inline would stall
         // every other task — /health and /announce included — for the duration.
         let built = tokio::task::spawn_blocking(move || {
-            let built = TorrentFactory.create(&TorrentRequest {
-                path: &path,
-                announce: &announce,
-                media: media.as_ref(),
-                private,
-            })?;
+            let sidecars = if wants_sidecars && root_name.is_some() {
+                crate::library::subtitles_beside(&path)
+            } else {
+                Vec::new()
+            };
+            let built = match root_name.as_deref().filter(|_| !sidecars.is_empty()) {
+                Some(root_name) => TorrentFactory.create_with_sidecars(&SidecarRequest {
+                    path: &path,
+                    sidecars: &sidecars,
+                    root_name,
+                    announce: &announce,
+                    media: media.as_ref(),
+                    private,
+                })?,
+                None => TorrentFactory.create(&TorrentRequest {
+                    path: &path,
+                    announce: &announce,
+                    media: media.as_ref(),
+                    private,
+                })?,
+            };
 
             // Best-effort: the torrent is already in memory and about to be
             // handed over, so a failure to cache it must not fail the share.
@@ -614,6 +660,20 @@ impl From<&TorrentSummary> for KnownTorrent {
     }
 }
 
+/// The size of a torrent's content on disk: the file at `path`, or with `files`
+/// (a multi-file torrent's names, in the same directory) the sum of those.
+async fn content_size(path: &Path, files: &[String]) -> std::io::Result<u64> {
+    if files.is_empty() {
+        return Ok(tokio::fs::metadata(path).await?.len());
+    }
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let mut total = 0u64;
+    for name in files {
+        total = total.saturating_add(tokio::fs::metadata(dir.join(name)).await?.len());
+    }
+    Ok(total)
+}
+
 /// Write a `.torrent` into the cache, creating `torrent_dir` if this is the
 /// first one. Blocking; callers run it off the runtime.
 fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -685,6 +745,7 @@ mod tests {
             upload_limit_kib: None,
             ratio_limit: None,
             private: true,
+            sidecar_roots: Vec::new(),
             torrent_dir,
         }
     }
@@ -777,7 +838,9 @@ mod tests {
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
 
         let rewritten = std::fs::read(torrent_file_path(&torrent_dir, &built.info_hash)).unwrap();
-        let current = sharerr_torrent::read_announce(&rewritten).unwrap();
+        let current = sharerr_torrent::Torrent::read_from_bytes(&rewritten)
+            .unwrap()
+            .announce;
         assert_eq!(current.as_deref(), Some("http://new.example/announce"));
 
         // Running it again against the now-current file must be a no-op.
@@ -932,7 +995,9 @@ mod tests {
         let add_calls = client.add_calls.lock().unwrap();
         assert_eq!(add_calls.len(), 1);
         assert_eq!(add_calls[0].0, built.info_hash);
-        let handed_to_client = sharerr_torrent::read_announce(&add_calls[0].1).unwrap();
+        let handed_to_client = sharerr_torrent::Torrent::read_from_bytes(&add_calls[0].1)
+            .unwrap()
+            .announce;
         assert_eq!(
             handed_to_client.as_deref(),
             Some("http://new.example/announce")
@@ -940,7 +1005,10 @@ mod tests {
 
         let cached = std::fs::read(torrent_file_path(&torrent_dir, &built.info_hash)).unwrap();
         assert_eq!(
-            sharerr_torrent::read_announce(&cached).unwrap().as_deref(),
+            sharerr_torrent::Torrent::read_from_bytes(&cached)
+                .unwrap()
+                .announce
+                .as_deref(),
             Some("http://new.example/announce"),
             "the on-disk cache must be refreshed too, not just the bytes sent to the client"
         );
@@ -1139,14 +1207,19 @@ mod tests {
         // And the feed now has something to serve, announcing to sharerr.
         let cached = std::fs::read(torrent_file_path(&torrent_dir, &theirs.info_hash)).unwrap();
         assert_eq!(
-            sharerr_torrent::read_announce(&cached).unwrap().as_deref(),
+            sharerr_torrent::Torrent::read_from_bytes(&cached)
+                .unwrap()
+                .announce
+                .as_deref(),
             Some(announce.primary.as_str())
         );
         // Rewriting the announce must not disturb the info dict — a cached
         // file under a different infohash than the torrent being seeded is
         // exactly the 404 this is here to prevent.
         assert_eq!(
-            sharerr_torrent::read_info_hash(&cached).unwrap(),
+            sharerr_torrent::Torrent::read_from_bytes(&cached)
+                .unwrap()
+                .info_hash(),
             theirs.info_hash
         );
     }
@@ -1396,8 +1469,9 @@ mod tests {
 
         let rewritten = std::fs::read(&cached).unwrap();
         assert_eq!(
-            sharerr_torrent::read_announce(&rewritten)
+            sharerr_torrent::Torrent::read_from_bytes(&rewritten)
                 .unwrap()
+                .announce
                 .as_deref(),
             Some(announce.primary.as_str())
         );
@@ -1507,11 +1581,194 @@ mod tests {
             seeder
                 .cached_size_is_stale(
                     Path::new("/nonexistent/movie.mkv"),
+                    &[],
                     1,
                     "hash",
                     Path::new("/torrents/hash.torrent"),
                 )
                 .await
+        );
+    }
+
+    /// A media file and its subtitles, in a directory the client sees under
+    /// another name, with what `seed` handed the client for it.
+    async fn seed_with_sidecars(
+        media_dir: &Path,
+        torrent_dir: PathBuf,
+        client: Arc<StubClient>,
+        sidecar_roots: Vec<PathBuf>,
+        known_hash: Option<&str>,
+    ) -> SeedOutcome {
+        let mut seeder = seeder(client, torrent_dir);
+        seeder.sidecar_roots = sidecar_roots;
+        let media = media_dir.join("Show.S01E01.mkv");
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media,
+            qbit: PathBuf::from("/downloads/tv/Season 01/Show.S01E01.mkv"),
+            mapping_applied: true,
+        };
+        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        seeder
+            .seed(
+                &paths,
+                &announce,
+                &KnownTorrents::default(),
+                known_hash,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    fn media_with_subtitle(dir: &Path) {
+        std::fs::write(dir.join("Show.S01E01.mkv"), b"pretend media bytes").unwrap();
+        std::fs::write(dir.join("Show.S01E01.en.srt"), b"pretend subtitles").unwrap();
+    }
+
+    /// The whole feature: a multi-file torrent over the files where they sit,
+    /// with the client told the parent of the directory the torrent names.
+    #[tokio::test]
+    async fn sidecars_build_a_multi_file_torrent_the_client_finds_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        media_with_subtitle(dir.path());
+        let client = Arc::new(StubClient::default());
+
+        let outcome = seed_with_sidecars(
+            dir.path(),
+            dir.path().join("torrents"),
+            client.clone(),
+            vec![dir.path().to_path_buf()],
+            None,
+        )
+        .await;
+        assert!(matches!(outcome, SeedOutcome::Added { private: true, .. }));
+
+        let add_calls = client.add_calls.lock().unwrap();
+        let torrent = sharerr_torrent::Torrent::read_from_bytes(&add_calls[0].1).unwrap();
+        assert_eq!(torrent.name(), Some("Season 01"), "the client's directory");
+        assert_eq!(
+            torrent.file_paths(),
+            vec!["Show.S01E01.mkv", "Show.S01E01.en.srt"]
+        );
+        assert_eq!(
+            *client.add_locations.lock().unwrap(),
+            vec![("/downloads/tv".to_owned(), Some("Season 01".to_owned()))]
+        );
+    }
+
+    /// Opt-in: the same files outside any sidecar root build what they always did.
+    #[tokio::test]
+    async fn without_a_sidecar_root_the_torrent_stays_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        media_with_subtitle(dir.path());
+        let client = Arc::new(StubClient::default());
+
+        seed_with_sidecars(
+            dir.path(),
+            dir.path().join("torrents"),
+            client.clone(),
+            vec![PathBuf::from("/somewhere/else")],
+            None,
+        )
+        .await;
+
+        let add_calls = client.add_calls.lock().unwrap();
+        let torrent = sharerr_torrent::Torrent::read_from_bytes(&add_calls[0].1).unwrap();
+        assert!(torrent.is_single_file());
+        assert_eq!(
+            *client.add_locations.lock().unwrap(),
+            vec![("/downloads/tv/Season 01".to_owned(), None)]
+        );
+    }
+
+    /// Nothing to include means the same torrent, and so the same info hash, as
+    /// with the setting off.
+    #[tokio::test]
+    async fn a_file_with_no_subtitles_stays_single_file_under_a_sidecar_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Show.S01E01.mkv"), b"bytes").unwrap();
+        let client = Arc::new(StubClient::default());
+
+        seed_with_sidecars(
+            dir.path(),
+            dir.path().join("torrents"),
+            client.clone(),
+            vec![dir.path().to_path_buf()],
+            None,
+        )
+        .await;
+
+        let add_calls = client.add_calls.lock().unwrap();
+        assert!(
+            sharerr_torrent::Torrent::read_from_bytes(&add_calls[0].1)
+                .unwrap()
+                .is_single_file()
+        );
+    }
+
+    /// A client that lost the torrent gets the cached multi-file one back with the
+    /// save path its shape needs, whatever the setting says now.
+    #[tokio::test]
+    async fn a_cached_multi_file_torrent_is_reused_with_its_own_save_path() {
+        let dir = tempfile::tempdir().unwrap();
+        media_with_subtitle(dir.path());
+        let torrents = dir.path().join("torrents");
+        let first = Arc::new(StubClient::default());
+        let outcome = seed_with_sidecars(
+            dir.path(),
+            torrents.clone(),
+            first.clone(),
+            vec![dir.path().to_path_buf()],
+            None,
+        )
+        .await;
+        let hash = outcome.info_hash().to_owned();
+
+        let second = Arc::new(StubClient::default());
+        let reused = seed_with_sidecars(
+            dir.path(),
+            torrents,
+            second.clone(),
+            Vec::new(),
+            Some(&hash),
+        )
+        .await;
+
+        assert_eq!(reused.info_hash(), hash);
+        assert_eq!(
+            *second.add_locations.lock().unwrap(),
+            vec![("/downloads/tv".to_owned(), Some("Season 01".to_owned()))]
+        );
+    }
+
+    /// A subtitle deleted since the build leaves a torrent no client can complete,
+    /// so the cache is stale the same as a resized media file.
+    #[tokio::test]
+    async fn a_cached_multi_file_torrent_with_a_file_gone_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        media_with_subtitle(dir.path());
+        let torrents = dir.path().join("torrents");
+        let roots = vec![dir.path().to_path_buf()];
+        let outcome = seed_with_sidecars(
+            dir.path(),
+            torrents.clone(),
+            Arc::new(StubClient::default()),
+            roots.clone(),
+            None,
+        )
+        .await;
+        let hash = outcome.info_hash().to_owned();
+        std::fs::remove_file(dir.path().join("Show.S01E01.en.srt")).unwrap();
+
+        let client = Arc::new(StubClient::default());
+        let rebuilt =
+            seed_with_sidecars(dir.path(), torrents, client.clone(), roots, Some(&hash)).await;
+
+        assert_ne!(rebuilt.info_hash(), hash);
+        assert_eq!(
+            *client.add_locations.lock().unwrap(),
+            vec![("/downloads/tv/Season 01".to_owned(), None)]
         );
     }
 

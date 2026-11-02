@@ -129,16 +129,14 @@ impl TrackerProvider for BuiltinTracker {
 /// `TrackerProvider`. See `crate::tracker::torrent_file` in the `sharerr`
 /// binary.
 pub fn announce_set_for(endpoint: &AdvertisedEndpoint, token: Option<&str>) -> Result<AnnounceSet> {
-    let current = endpoint.current().ok_or(TorrentError::NoAdvertisedHost)?;
-    let primary = announce_url(&current, token)?;
-
+    // `recent()` is newest first, so one read gives the primary and its tiers
+    // together, and the primary is always among them.
     let mut tiers = Vec::new();
     for base in endpoint.recent() {
         tiers.push(announce_url(&base, token)?);
     }
-    if tiers.is_empty() {
-        tiers.push(primary.clone());
-    }
+    let primary = tiers.first().cloned();
+    let primary = primary.ok_or(TorrentError::NoAdvertisedHost)?;
 
     Ok(AnnounceSet { primary, tiers })
 }

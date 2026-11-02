@@ -23,16 +23,14 @@
 //! sharerr's category and tags both land there. That means a category filter is
 //! applied by this crate rather than by the server — see [`TransmissionClient::list`].
 
-use std::sync::Mutex;
-
 use async_trait::async_trait;
 use base64::Engine as _;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sharerr_client::{
-    AddRequest, ClientError, ClientKind, Result, SeedingLimits, TorrentClient, TorrentFileEntry,
-    TorrentSummary, http_client, normalise_base,
+    AddRequest, ClientError, ClientKind, Result, SeedingLimits, SessionSlot, TorrentClient,
+    TorrentFileEntry, TorrentSummary, http_client, rpc_endpoint,
 };
 use url::Url;
 
@@ -53,9 +51,8 @@ pub struct TransmissionClient {
     endpoint: Url,
     username: String,
     password: SecretString,
-    /// Learned from a 409 and replayed on every later request. A plain mutex:
-    /// it is only ever held for a clone or a store, never across an await.
-    session: Mutex<Option<String>>,
+    /// Learned from a 409 and replayed on every later request.
+    session: SessionSlot,
 }
 
 impl std::fmt::Debug for TransmissionClient {
@@ -80,29 +77,13 @@ impl TransmissionClient {
     /// suffix is appended here so an operator cannot get it subtly wrong. A base
     /// with a path (a reverse-proxy subpath) is preserved.
     pub fn new(base: &Url, username: &str, password: SecretString) -> Result<Self> {
-        let http = http_client()?;
-        let base = normalise_base(base);
-        let endpoint = base
-            .join(RPC_PATH)
-            .map_err(|e| ClientError::Config(format!("{base} is not a usable base URL: {e}")))?;
-
         Ok(Self {
-            http,
-            endpoint,
+            http: http_client()?,
+            endpoint: rpc_endpoint(base, RPC_PATH)?,
             username: username.to_owned(),
             password,
-            session: Mutex::new(None),
+            session: SessionSlot::default(),
         })
-    }
-
-    /// The session lock. A poisoned mutex only means another task panicked
-    /// mid-store of a `String`; the value is still a valid (if stale) token,
-    /// and a stale token is exactly what the 409 handshake already recovers
-    /// from.
-    fn session(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Issue one RPC call, paying the session handshake if the server asks.
@@ -114,13 +95,12 @@ impl TransmissionClient {
         let body = json!({ "method": method, "arguments": arguments });
 
         for attempt in 0..2 {
-            let session = self.session().clone();
             let mut request = self
                 .http
                 .post(self.endpoint.clone())
                 .basic_auth(&self.username, Some(self.password.expose_secret()))
                 .json(&body);
-            if let Some(session) = &session {
+            if let Some(session) = self.session.get() {
                 request = request.header(SESSION_HEADER, session);
             }
 
@@ -140,7 +120,7 @@ impl TransmissionClient {
                 match token {
                     Some(token) => {
                         tracing::debug!("picked up a Transmission session id");
-                        *self.session() = Some(token);
+                        self.session.set(token);
                         continue;
                     }
                     None => {
@@ -305,10 +285,7 @@ struct TrackerListTorrent {
 
 /// Decode one RPC response body, naming the call on failure.
 fn decode<T: serde::de::DeserializeOwned>(call: &str, arguments: Value) -> Result<T> {
-    serde_json::from_value(arguments).map_err(|err| ClientError::Malformed {
-        kind: KIND,
-        detail: format!("reading the {call} response: {err}"),
-    })
+    serde_json::from_value(arguments).map_err(|err| sharerr_client::malformed(KIND, call, err))
 }
 
 /// Transmission's numeric status values that mean "complete and uploading".
@@ -325,14 +302,10 @@ impl TorrentClient for TransmissionClient {
         KIND
     }
 
-    async fn login(&self) -> Result<()> {
-        // Transmission has no login call; `session-get` is the cheapest request
-        // that proves both reachability and credentials, and it also primes the
-        // session id so the first real call does not pay the handshake.
-        self.rpc("session-get", json!({})).await.map(|_| ())
-    }
-
     async fn version(&self) -> Result<String> {
+        // Also what signing in amounts to: Transmission has no login call, and
+        // `session-get` proves reachability and credentials and primes the
+        // session id, so the first real call does not pay the handshake.
         let arguments = self.rpc("session-get", json!({})).await?;
         Ok(arguments
             .get("version")
@@ -354,11 +327,6 @@ impl TorrentClient for TransmissionClient {
             .await?;
         let listed: Torrents<ListedTorrent> = decode("torrent-get", arguments)?;
 
-        // Loop-invariant — `category` does not change per torrent — hoisted
-        // out of the loop so listing a large library allocates it once
-        // rather than on every row.
-        let category_owned = category.unwrap_or_default().to_owned();
-
         let mut out = Vec::with_capacity(listed.torrents.len());
         for torrent in listed.torrents {
             // Transmission has no categories, so sharerr's category is simply one
@@ -370,20 +338,7 @@ impl TorrentClient for TransmissionClient {
                 continue;
             }
 
-            // Transmission has no `content_path`. Joining the download directory
-            // with the torrent name reconstructs it, which is what qBittorrent
-            // reports directly — so cross-seed detection behaves the same on both
-            // clients rather than silently degrading here.
-            let content_path = if torrent.download_dir.is_empty() || torrent.name.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "{}/{}",
-                    torrent.download_dir.trim_end_matches('/'),
-                    torrent.name
-                )
-            };
-
+            let content_path = sharerr_client::content_path(&torrent.download_dir, &torrent.name);
             let ratio_limit = ratio_limit_reported(&torrent);
             let upload_limit_kib = upload_limit_reported(&torrent);
             out.push(TorrentSummary {
@@ -393,7 +348,7 @@ impl TorrentClient for TransmissionClient {
                 name: torrent.name,
                 save_path: torrent.download_dir,
                 content_path,
-                category: category_owned.clone(),
+                category: category.unwrap_or_default().to_owned(),
                 is_seeding: is_seeding_status(torrent.status),
                 // 0 is `TR_STATUS_STOPPED`.
                 is_stopped: torrent.status == 0,
@@ -465,37 +420,9 @@ impl TorrentClient for TransmissionClient {
 
         // `torrent-add` itself takes no ratio/speed arguments — Transmission
         // only exposes those on `torrent-set`, the same call `set_trackers`
-        // below already uses. Skipped entirely when no goal is configured,
-        // so an ordinary add costs exactly one RPC call as it always has.
-        if request.upload_limit_kib.is_some() || request.ratio_limit.is_some() {
-            let hash = result
-                .get("torrent-added")
-                .or_else(|| result.get("torrent-duplicate"))
-                .and_then(|t| t.get("hashString"))
-                .and_then(Value::as_str);
-            let Some(hash) = hash else {
-                // The add itself already succeeded; a missing hash just means
-                // there is nothing to attach a limit to.
-                tracing::warn!(
-                    "could not read the added torrent's hash — seeding goal not applied"
-                );
-                return Ok(());
-            };
-
-            let mut limits = json!({ "ids": [hash] });
-            if let Some(kib) = request.upload_limit_kib {
-                limits["uploadLimit"] = json!(kib);
-                limits["uploadLimited"] = json!(true);
-            }
-            if let Some(ratio) = request.ratio_limit {
-                limits["seedRatioLimit"] = json!(ratio);
-                // 1 = this torrent's own limit, overriding the session default.
-                limits["seedRatioMode"] = json!(1);
-            }
-            self.rpc("torrent-set", limits).await?;
-        }
-
-        Ok(())
+        // below already uses. Sends nothing when no goal is configured, so an
+        // ordinary add costs exactly one RPC call as it always has.
+        self.set_limits(request.info_hash, &request.limits).await
     }
 
     async fn remove(&self, hash: &str) -> Result<()> {
@@ -510,13 +437,9 @@ impl TorrentClient for TransmissionClient {
         .map(|_| ())
     }
 
-    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
-        if limits.is_empty() {
-            return Ok(());
-        }
-        // The same `torrent-set` arguments `add` sends for a configured goal,
-        // carrying only the fields with an opinion — a `None` field is left
-        // as the torrent has it.
+    async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        // Carrying only the fields with an opinion — a `None` field is left as
+        // the torrent has it.
         let mut arguments = json!({ "ids": [hash] });
         if let Some(kib) = limits.upload_limit_kib {
             arguments["uploadLimit"] = json!(kib);
@@ -565,11 +488,11 @@ impl TorrentClient for TransmissionClient {
         // tried before whatever the torrent already carried — and the existing
         // list is appended verbatim, tier boundaries and all, because it is the
         // operator's and this call must not reorder or drop any of it.
-        let mut tiers: Vec<String> = urls
-            .iter()
-            .map(Url::to_string)
-            .filter(|url| !existing.lines().any(|line| line.trim() == url))
-            .collect();
+        let mut tiers: Vec<String> =
+            sharerr_client::missing_urls(urls, |url| existing.lines().any(|l| l.trim() == url))
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
         if tiers.is_empty() {
             return Ok(());
         }
@@ -578,15 +501,6 @@ impl TorrentClient for TransmissionClient {
         }
 
         self.write_tracker_list(hash, &tiers).await
-    }
-
-    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
-        // `torrent-get`'s `torrentFile` field is a *path* on the daemon's own
-        // filesystem, and Transmission has no call that returns the bytes. In
-        // the deployments this targets the daemon is a separate container, so
-        // that path is not one sharerr can open — and guessing when it might
-        // be would make this succeed or fail on layout rather than on the API.
-        Ok(None)
     }
 }
 

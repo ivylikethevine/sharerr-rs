@@ -655,7 +655,6 @@ mod tests {
 
         let meta = probe(&path).unwrap();
         assert_eq!(meta.scene_audio_format(), Some("FLAC"));
-        assert_eq!(meta.is_lossless(), Some(true));
     }
 
     #[test]

@@ -33,7 +33,6 @@ use utoipa_axum::routes;
 
 use crate::gluetun::GluetunTarget;
 use crate::state::ServeState;
-use crate::tracker::TrackerState;
 
 /// Whether the embedded lighthouse belongs on the *frontend* listener rather
 /// than the tracker's.
@@ -67,9 +66,8 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
     // empty unless an operator hand-restored a `[[peers]]` block.
     import_peers(&state).await;
 
-    // One tracker state for however many listeners carry it — two swarm maps
-    // would keep peers arriving on different listeners from meeting.
-    let tracker = Arc::new(TrackerState::new(Arc::clone(&state)));
+    // The dedicated tracker listener's own handle on the state, moved into its task.
+    let tracker = Arc::clone(&state);
 
     // The embedded lighthouse, if `[lighthouse] enabled = true` — see
     // `sharerr_lighthouse` for the protocol and `ServeState::lighthouse_state`
@@ -97,7 +95,7 @@ pub async fn run(config: &Config, config_path: &Path, config_error: Option<Strin
         .with_state(Arc::clone(&state))
         .split_for_parts();
     let mut app = ops
-        .merge(crate::tracker::routes(Arc::clone(&tracker)))
+        .merge(crate::tracker::routes(Arc::clone(&state)))
         .merge(crate::torznab::routes(Arc::clone(&state)))
         .merge(crate::web::routes(Arc::clone(&state)));
 
@@ -305,6 +303,12 @@ async fn import_one_peer(
     let created = store
         .create_peer(&peer.label, &secrecy::SecretString::from(key), scope)
         .await?;
+
+    if peer.max_size_bytes.is_some() || peer.max_height.is_some() {
+        store
+            .set_peer_limits(created.id, peer.max_size_bytes, peer.max_height)
+            .await?;
+    }
 
     if let Some(url) = present(&peer.gossip_url) {
         store.set_peer_gossip_url(created.id, Some(url)).await?;
@@ -532,7 +536,7 @@ async fn background(state: Arc<ServeState>) {
 
         // Re-read every pass rather than once: the UI can enable sync, or change
         // the interval, without a restart.
-        let sync = state.config().await.sync;
+        let sync = state.with_config(|c| c.sync.clone()).await;
         // Taken before the pass, so a request that lands during it asks for one
         // more pass after it rather than being consumed by this one.
         let requested = state.take_pass_request();
@@ -697,9 +701,6 @@ fn fresh(seen: &mut HashSet<String>, flagged: &[(&crate::sync::Flagged, &str)]) 
     Some(message)
 }
 
-/// Liveness, not correctness — this answers "should this container be restarted?",
-/// and the answer is no even when the vault is empty, because a restart cannot
-/// populate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional
 /// The operational endpoints, without state, so [`crate::openapi`] reads the
 /// document off the same declaration that mounts them.
 pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
@@ -713,6 +714,9 @@ pub(crate) fn ops_router() -> OpenApiRouter<Arc<ServeState>> {
         .merge(crate::api::routes())
 }
 
+/// Liveness, not correctness — this answers "should this container be restarted?",
+/// and the answer is no even when the vault is empty, because a restart cannot
+/// populate it. The Dockerfile's HEALTHCHECK is wired here, so anything conditional
 /// in this handler turns a fixable configuration gap into a restart loop.
 #[utoipa::path(
     get,
@@ -1517,6 +1521,8 @@ mod tests {
         let (_dir, state) = state_with_pending_peers(vec![sharerr_core::config::PeerImport {
             label: "Sam".to_owned(),
             scope: "tv".to_owned(),
+            max_size_bytes: Some(1024),
+            max_height: Some(720),
             last_addr: Some("203.0.113.5:51413".to_owned()),
             gossip_url: Some("https://sam.example/sharerr".to_owned()),
             gossip_key: None,
@@ -1529,12 +1535,19 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].label, "Sam");
         assert_eq!(listed[0].scope, sharerr_store::PeerScope::Tv);
+        assert_eq!(listed[0].max_size_bytes, Some(1024), "a restore keeps caps");
+        assert_eq!(listed[0].max_height, Some(720));
         assert_eq!(
             listed[0].gossip_url.as_deref(),
             Some("https://sam.example/sharerr")
         );
 
-        let endpoints = store.peer_endpoints(listed[0].id).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[listed[0].id])
+            .await
+            .unwrap()
+            .remove(&listed[0].id)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].addr, "203.0.113.5:51413");
         assert_eq!(

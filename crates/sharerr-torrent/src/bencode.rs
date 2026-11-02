@@ -59,11 +59,7 @@ impl Value {
 
     fn write(&self, out: &mut Vec<u8>) {
         match self {
-            Value::Int(n) => {
-                out.push(b'i');
-                out.extend_from_slice(n.to_string().as_bytes());
-                out.push(b'e');
-            }
+            Value::Int(n) => write_int(*n, out),
             Value::Bytes(bytes) => write_bytes(bytes, out),
             Value::List(items) => {
                 out.push(b'l');
@@ -72,16 +68,7 @@ impl Value {
                 }
                 out.push(b'e');
             }
-            Value::Dict(entries) => {
-                out.push(b'd');
-                // BTreeMap<Vec<u8>, _> iterates in raw-byte order, which is
-                // exactly BEP 3's "sorted as raw strings".
-                for (key, value) in entries {
-                    write_bytes(key, out);
-                    value.write(out);
-                }
-                out.push(b'e');
-            }
+            Value::Dict(entries) => write_dict(entries, out),
         }
     }
 
@@ -141,9 +128,51 @@ impl Value {
     }
 }
 
-fn write_bytes(bytes: &[u8], out: &mut Vec<u8>) {
-    out.extend_from_slice(bytes.len().to_string().as_bytes());
+/// One value of a dictionary being written, borrowed so that writing never has to
+/// clone an info dictionary and its whole `pieces` string.
+pub(crate) enum Field<'a> {
+    Value(&'a Value),
+    Dict(&'a BTreeMap<Vec<u8>, Value>),
+}
+
+/// A dictionary from borrowed parts, sorted the way [`write_dict`] sorts.
+pub(crate) fn write_fields(fields: &BTreeMap<&[u8], Field<'_>>, out: &mut Vec<u8>) {
+    out.push(b'd');
+    for (key, field) in fields {
+        write_bytes(key, out);
+        match field {
+            Field::Value(value) => value.write(out),
+            Field::Dict(entries) => write_dict(entries, out),
+        }
+    }
+    out.push(b'e');
+}
+
+pub(crate) fn write_dict(entries: &BTreeMap<Vec<u8>, Value>, out: &mut Vec<u8>) {
+    out.push(b'd');
+    // BTreeMap<Vec<u8>, _> iterates in raw-byte order, which is
+    // exactly BEP 3's "sorted as raw strings".
+    for (key, value) in entries {
+        write_bytes(key, out);
+        value.write(out);
+    }
+    out.push(b'e');
+}
+
+pub(crate) fn write_int(value: i64, out: &mut Vec<u8>) {
+    out.push(b'i');
+    out.extend_from_slice(value.to_string().as_bytes());
+    out.push(b'e');
+}
+
+/// The `<len>:` prefix of a byte string, for a payload written afterwards.
+pub(crate) fn write_len(len: usize, out: &mut Vec<u8>) {
+    out.extend_from_slice(len.to_string().as_bytes());
     out.push(b':');
+}
+
+pub(crate) fn write_bytes(bytes: &[u8], out: &mut Vec<u8>) {
+    write_len(bytes.len(), out);
     out.extend_from_slice(bytes);
 }
 

@@ -125,11 +125,17 @@ fn names_hardcover(metadata_source: &str) -> bool {
         .is_some_and(|host| host.contains("hardcover"))
 }
 
-pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Discovered>> {
+pub(crate) async fn discover(
+    client: &ArrClient,
+    tag_ids: &[i64],
+) -> Result<Vec<(Discovered, Vec<i64>)>> {
     let authors: Vec<Author> = client.get("author", &()).await?;
-    let hardcover = uses_hardcover(client).await;
     // Concurrent across authors as well as within one — see `fetch_tagged`.
-    let fetched = fetch_tagged(client, &authors, tag_id, "readarr authors", fetch_author).await?;
+    let fetched = fetch_tagged(client, &authors, tag_ids, "readarr authors", fetch_author).await?;
+    if fetched.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hardcover = uses_hardcover(client).await;
 
     let mut discovered = Vec::new();
     for (author, (books, files)) in fetched {
@@ -157,7 +163,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                 (work_id, None)
             };
 
-            discovered.push(Discovered {
+            let item = Discovered {
                 source: MediaSource::Readarr,
                 source_id: author.id,
                 file_id: file.id,
@@ -165,7 +171,7 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                     author: author.author_name.clone(),
                     title: book.title.clone(),
                 },
-                arr_path: file.path.clone().into(),
+                arr_path: file.path.into(),
                 size: file.size,
                 ids: ExternalIds {
                     goodreads,
@@ -173,13 +179,14 @@ pub(crate) async fn discover(client: &ArrClient, tag_id: i64) -> Result<Vec<Disc
                     isbn,
                     ..ExternalIds::default()
                 },
-                scene_name: non_empty(file.scene_name.clone()),
+                scene_name: non_empty(file.scene_name),
                 // Lidarr and Readarr report no pre-rename path.
                 original_path: None,
                 // Populated for an audiobook, `None` for an ebook.
                 media: file.media_info.and_then(MediaInfo::into_meta),
                 scene: None,
-            });
+            };
+            discovered.push((item, author.tags.clone()));
         }
     }
 

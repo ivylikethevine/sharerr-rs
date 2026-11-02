@@ -108,7 +108,9 @@ impl AddedTorrent {
     /// path. What the bytes contain is still fiction: `files` and
     /// `content_path` are what detection reads, and they stay hand-written.
     fn preexisting_exportable(data: Vec<u8>, save_path: &str, files: &[&str]) -> Self {
-        let hash = sharerr_torrent::read_info_hash(&data).unwrap();
+        let hash = sharerr_torrent::Torrent::read_from_bytes(&data)
+            .unwrap()
+            .info_hash();
         Self {
             data,
             ..Self::preexisting(&hash, save_path, files)
@@ -525,6 +527,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         upload_limit_kib: seeding.upload_limit_kib,
         ratio_limit: seeding.ratio_limit,
         private: seeding.private,
+        sidecar_roots: Vec::new(),
         torrent_dir: torrents.path().to_path_buf(),
     };
 
@@ -572,6 +575,7 @@ impl Harness {
             upload_limit_kib: seeding.upload_limit_kib,
             ratio_limit: seeding.ratio_limit,
             private: seeding.private,
+            sidecar_roots: Vec::new(),
             torrent_dir: self.torrents.path().to_path_buf(),
         };
         Syncer::new(
@@ -672,7 +676,10 @@ async fn a_rotated_endpoint_rewrites_torrents_and_repoints_the_client() {
         let path = sharerr_torrent::torrent_file_path(h.torrents.path(), hash);
         let data = std::fs::read(&path).unwrap();
         assert_eq!(
-            sharerr_torrent::read_announce(&data).unwrap().as_deref(),
+            sharerr_torrent::Torrent::read_from_bytes(&data)
+                .unwrap()
+                .announce
+                .as_deref(),
             Some("http://203.0.113.9:41234/announce")
         );
     }
@@ -1560,7 +1567,9 @@ async fn a_pre_existing_torrent_is_reused_rather_than_duplicated() {
     // A single-file torrent already seeding one of the files. Detection should
     // catch this on the cheap pass, straight from `content_path`.
     let theirs = a_real_torrent(h.library.root.parent().unwrap(), "theirs.mkv");
-    let their_hash = sharerr_torrent::read_info_hash(&theirs).unwrap();
+    let their_hash = sharerr_torrent::Torrent::read_from_bytes(&theirs)
+        .unwrap()
+        .info_hash();
     {
         let mut state = h.qbit.state.lock().unwrap();
         state.torrents.push(AddedTorrent::preexisting_exportable(
@@ -1620,8 +1629,9 @@ async fn a_pre_existing_torrent_is_reused_rather_than_duplicated() {
         cached.display()
     );
     assert_eq!(
-        sharerr_torrent::read_announce(&std::fs::read(&cached).unwrap())
+        sharerr_torrent::Torrent::read_from_bytes(&std::fs::read(&cached).unwrap())
             .unwrap()
+            .announce
             .as_deref(),
         Some(STUB_ANNOUNCE),
         "the cached copy must announce to sharerr, not to whoever built it"
@@ -1683,6 +1693,104 @@ fn with_movie_library(h: &mut Harness) -> tempfile::TempDir {
             },
         ])));
     extras
+}
+
+/// A source that answers with one file for one friend, and then nothing.
+struct OneFriendsFile {
+    item: sharerr_core::Discovered,
+    audience: HashMap<i64, Vec<String>>,
+}
+
+#[async_trait]
+impl super::LibrarySource for OneFriendsFile {
+    fn kind(&self) -> MediaSource {
+        self.item.source
+    }
+
+    async fn discover(&self, _tag: &str) -> anyhow::Result<super::SourceScan> {
+        Ok(super::SourceScan {
+            items: vec![self.item.clone()],
+            complete: true,
+            audience: self.audience.clone(),
+        })
+    }
+}
+
+/// An item for one friend must never reach the feed as an item for everyone, so
+/// who it is for is on record once the pass that shares it has run, and a dry run
+/// records nothing.
+#[tokio::test]
+async fn a_sync_pass_records_who_a_friends_item_is_for() {
+    let mut h = tagged_harness().await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Gilded.Ferry.2019.mkv");
+    std::fs::write(&file, vec![7u8; 1024]).unwrap();
+    let directory = sharerr_core::Discovered {
+        source: MediaSource::Directory,
+        source_id: 1,
+        file_id: 777,
+        spec: sharerr_core::MediaSpec::Movie {
+            title: "Gilded Ferry".to_owned(),
+            year: Some(2019),
+        },
+        arr_path: file,
+        size: 1024,
+        ids: sharerr_core::ExternalIds::default(),
+        media: None,
+        scene_name: None,
+        original_path: None,
+        scene: None,
+    };
+    let key = (directory.source, directory.file_id);
+    h.syncer.sources.push(Box::new(OneFriendsFile {
+        audience: HashMap::from([(directory.file_id, vec!["sam".to_owned()])]),
+        item: directory,
+    }));
+
+    h.syncer.run(true).await.unwrap();
+    assert!(h.syncer.store.audiences().await.unwrap().is_empty());
+
+    h.syncer.run(false).await.unwrap();
+    let audiences = h.syncer.store.audiences().await.unwrap();
+    assert_eq!(audiences.get(&key).unwrap(), &vec!["sam".to_owned()]);
+
+    let everyone = h
+        .syncer
+        .store
+        .seeding_items_for(
+            sharerr_store::PeerScope::All,
+            &sharerr_store::PeerLimits::default(),
+        )
+        .await
+        .unwrap();
+    assert!(everyone.iter().all(|item| item.key() != key));
+}
+
+/// Sidecars are opt-in, and only for the libraries that have subtitles at all.
+#[test]
+fn sidecar_roots_are_the_video_libraries_once_opted_in() {
+    use sharerr_core::config::{LibraryConfig, LibraryKind};
+
+    let library = |path: &str, kind| LibraryConfig {
+        path: PathBuf::from(path),
+        kind,
+    };
+    let mut config = Config {
+        library: vec![
+            library("/tv", LibraryKind::Tv),
+            library("/films", LibraryKind::Movie),
+            library("/music", LibraryKind::Music),
+            library("/books", LibraryKind::Book),
+        ],
+        ..Config::default()
+    };
+    assert!(super::sidecar_roots(&config).is_empty(), "off by default");
+
+    config.seeding.sidecars = true;
+    assert_eq!(
+        super::sidecar_roots(&config),
+        vec![PathBuf::from("/tv"), PathBuf::from("/films")]
+    );
 }
 
 /// The zero-dependency source: a plain directory shares alongside a Sonarr,
@@ -2594,6 +2702,7 @@ async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
         upload_limit_kib: None,
         ratio_limit: None,
         private: true,
+        sidecar_roots: Vec::new(),
         torrent_dir: PathBuf::from("/torrents"),
     };
     Syncer::new(
@@ -2756,14 +2865,29 @@ async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
     let h = tagged_harness().await;
     h.syncer.run(false).await.unwrap();
     let known_before = known(&h).await;
-    // `begin_run` and the pass's three reads (`all_items`, `file_stamps`,
-    // `share_ends`) answer; every confirmation after fails.
-    h.syncer.store().fail_after(4).await.unwrap();
+    // `begin_run`, the pass's three reads (`all_items`, `file_stamps`,
+    // `share_ends`) and one `replace_audience` per source answer; every
+    // confirmation after fails.
+    let answered = 4 + h.syncer.sources.len();
+    h.syncer.store().fail_after(answered).await.unwrap();
 
     let report = h.syncer.run(false).await.unwrap();
 
     assert_eq!(report.failed, 0, "{report}");
     assert_eq!(report.unchanged, known_before.len(), "{report}");
+}
+
+/// A pass that cannot record who items are for stops before sharing anything, or a
+/// friend's item would reach everyone's feed.
+#[tokio::test]
+async fn a_pass_that_cannot_record_an_audience_stops() {
+    let h = tagged_harness().await;
+    // `begin_run` and the pass's three reads answer; the audience write does not.
+    h.syncer.store().fail_after(4).await.unwrap();
+
+    let err = h.syncer.run(false).await.unwrap_err();
+
+    assert!(format!("{err:#}").contains("who"), "{err:#}");
 }
 
 // ------------------------------------------------------------ quiet hours

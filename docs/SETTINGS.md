@@ -16,6 +16,7 @@ default, and what sets it.
   - [`[qbittorrent]`](#qbittorrent)
   - [`[transmission]`](#transmission)
   - [`[rtorrent]`](#rtorrent)
+  - [`[deluge]`](#deluge)
 - [`[seeding]`](#seeding)
 - [`[feed]`](#feed)
 - [`[tracker]`](#tracker)
@@ -143,13 +144,13 @@ kind = "movie"
 
 ## Torrent client
 
-`torrent_backend` selects which of the three sections below actually seeds.
-All three sections' settings are kept regardless of which is selected, so a
-client can be filled in and tested before switching to it.
+`torrent_backend` selects which of the sections below actually seeds. Every
+section's settings are kept regardless of which is selected, so a client can
+be filled in and tested before switching to it.
 
-| TOML key          | Type                                          | Default       |
-| ----------------- | --------------------------------------------- | ------------- |
-| `torrent_backend` | `qbittorrent` \| `transmission` \| `rtorrent` | `qbittorrent` |
+| TOML key          | Type                                                      | Default       |
+| ----------------- | --------------------------------------------------------- | ------------- |
+| `torrent_backend` | `qbittorrent` \| `transmission` \| `rtorrent` \| `deluge` | `qbittorrent` |
 
 ### `[qbittorrent]`
 
@@ -190,6 +191,16 @@ For what rTorrent cannot do (skip the hash check, honour a per-torrent ratio
 limit, remove a stale tracker) see
 [`COMPATIBILITY.md`](COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
+### `[deluge]`
+
+| TOML key       | Type   | Default                 | Notes                                                                                                           |
+| -------------- | ------ | ----------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `deluge.url`   | url    | `http://localhost:8112` | The web UI's root, not the `/json` endpoint. Deluge 2 only.                                                     |
+| `deluge.label` | string | `sharerr`               | Stands in for both category and tag, through Deluge's Label plugin. Without the plugin, torrents go unlabelled. |
+
+Vault secret: `deluge.password`, the web UI's password. It has no accounts, so
+there is no username.
+
 ## `[seeding]`
 
 Applied when sharerr hands a torrent to whichever client is selected, and
@@ -206,6 +217,7 @@ touched. The client's own engine does the enforcing. See the README's
 | `seeding.ratio_limit`            | float  | unset   | Seed-ratio goal. Not honoured by rTorrent — see above.                                                                                                                                                                                                                                                                                                                |
 | `seeding.quiet_hours`            | string | unset   | A daily window, `HH:MM-HH:MM` in the container's time zone (`TZ`); `22:00-06:00` wraps past midnight.                                                                                                                                                                                                                                                                 |
 | `seeding.quiet_upload_limit_kib` | int    | unset   | The upload cap inside `quiet_hours`, KiB/s.                                                                                                                                                                                                                                                                                                                           |
+| `seeding.sidecars`               | bool   | `false` | Build a tv or movie `[[library]]` file's torrent over it and the subtitle files beside it named after it (`Show.S01E01.en.srt`). Applies only to future builds, like `seeding.private`; a file with no subtitles builds the same single-file torrent either way. Only `srt`, `ass`, `ssa`, `sub`, `idx`, `vtt` and `sup`, in the same directory.                      |
 | `seeding.private`                | bool   | `true`  | BEP 27's private flag on torrents built from then on. Applies only to future builds — flipping it changes the info hash, so existing shares keep whatever they were built with. Off lets a client also use DHT/PEX, so **revoking a friend no longer removes them from that torrent's swarm**. See [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#the-feeds-magnet-link). |
 
 Quiet hours take effect only with `upload_limit_kib`, `quiet_hours` and
@@ -557,6 +569,8 @@ exported:
 [[peers]]
 label = "sam"
 scope = "all"                                 # "all", "tv", "movies", "music", or "books"
+max_size_bytes = 5368709120                   # optional: the largest file offered
+max_height = 1080                             # optional: the highest resolution offered
 last_addr = "203.0.113.5:51413"               # optional
 gossip_url = "https://sam.example/sharerr"    # optional
 gossip_key = "the key sam issued this instance"  # optional
@@ -594,6 +608,7 @@ sharerr vault remove <key>
 | `qbittorrent.api_key`         | qBittorrent 5.2+ WebUI API key                                                                      |
 | `transmission.password`       | Transmission RPC password                                                                           |
 | `rtorrent.password`           | rTorrent Basic Auth password (see [`[rtorrent]`](#rtorrent))                                        |
+| `deluge.password`             | Deluge web UI password                                                                              |
 | `tracker.token`               | Built-in tracker announce token                                                                     |
 | `gluetun.api_key`             | Tracker-facing gluetun control server API key                                                       |
 | `gluetun_client.api_key`      | Torrent-client-facing gluetun control server API key                                                |
@@ -602,7 +617,7 @@ sharerr vault remove <key>
 | `metrics.token`               | Bearer token `/metrics` and the dashboard widget require (see [`[metrics]`](#metrics))              |
 | `api.token`                   | Bearer token the management API requires (see [`[api]`](#api))                                      |
 
-Those fifteen are the keys `sharerr vault set` accepts. `sharerr vault list`
+Those sixteen are the keys `sharerr vault set` accepts. `sharerr vault list`
 shows every key the vault holds, which includes a few sharerr manages
 itself and `vault set` refuses: `tracker.token_previous` (the rotated-out
 announce token, see [`[tracker]`](#tracker)), `identity.signing_key` (this

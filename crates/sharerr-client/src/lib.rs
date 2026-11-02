@@ -23,6 +23,7 @@
 //! enforcement, the same as it would for a torrent added by hand.
 
 use std::fmt::Debug;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -198,6 +199,59 @@ pub fn normalise_base(base: &Url) -> Url {
     base
 }
 
+/// The fixed RPC path under a client's web root, keeping any reverse-proxy
+/// subpath the operator configured.
+pub fn rpc_endpoint(base: &Url, path: &str) -> Result<Url> {
+    let base = normalise_base(base);
+    base.join(path)
+        .map_err(|e| ClientError::Config(format!("{base} is not a usable base URL: {e}")))
+}
+
+/// The session token a stateful RPC client learned and replays on every request.
+///
+/// A plain mutex: only ever held for a clone or a store, never across an await. A
+/// poisoned one only means another task panicked mid-store of a `String`, and a
+/// stale token is what a client's own re-handshake already recovers from.
+#[derive(Debug, Default)]
+pub struct SessionSlot(Mutex<Option<String>>);
+
+impl SessionSlot {
+    pub fn get(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn set(&self, token: String) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(token);
+    }
+}
+
+/// [`TorrentSummary::content_path`] for a client that reports only a directory and
+/// a name. The same thing qBittorrent reports directly, so cross-seed detection
+/// behaves alike on every client. Empty when either half is unknown.
+pub fn content_path(dir: &str, name: &str) -> String {
+    if dir.is_empty() || name.is_empty() {
+        String::new()
+    } else {
+        format!("{}/{name}", dir.trim_end_matches('/'))
+    }
+}
+
+/// The `wanted` URLs `listed` does not already hold: what
+/// [`TorrentClient::add_trackers`]' no-duplicates rule leaves to send.
+pub fn missing_urls(wanted: &[Url], listed: impl Fn(&str) -> bool) -> Vec<&str> {
+    wanted
+        .iter()
+        .map(Url::as_str)
+        .filter(|url| !listed(url))
+        .collect()
+}
+
 /// Which client an error or message is about.
 ///
 /// Carried so that a failure can name the thing the operator has to go and look at,
@@ -207,6 +261,7 @@ pub enum ClientKind {
     QBittorrent,
     Transmission,
     Rtorrent,
+    Deluge,
 }
 
 impl ClientKind {
@@ -216,6 +271,7 @@ impl ClientKind {
             Self::QBittorrent => "qBittorrent",
             Self::Transmission => "Transmission",
             Self::Rtorrent => "rTorrent",
+            Self::Deluge => "Deluge",
         }
     }
 }
@@ -383,8 +439,13 @@ pub struct AddRequest<'a> {
     pub info_hash: &'a str,
     /// Filename for the upload. Cosmetic, but clients log it.
     pub filename: &'a str,
-    /// Directory holding the existing content, as the *client* sees it.
+    /// Directory holding the existing content, as the *client* sees it. For a
+    /// multi-file torrent, the parent of [`Self::root_folder`].
     pub save_path: &'a str,
+    /// A multi-file torrent's root directory name, inside `save_path`. `None`
+    /// for a single-file torrent. Only a client whose add call takes the
+    /// content's own directory rather than its parent needs this (rTorrent).
+    pub root_folder: Option<&'a str>,
     /// qBittorrent's category; Transmission has no equivalent and folds it into
     /// labels.
     pub category: Option<&'a str>,
@@ -398,16 +459,13 @@ pub struct AddRequest<'a> {
     pub skip_checking: bool,
     /// Add without starting. Used by dry runs and tests.
     pub stopped: bool,
-    /// Per-torrent upload cap in KiB/s, applied at add time. The one
-    /// exception to this trait's "ratios and scheduling belong to the
-    /// client" rule at the module level: sharerr states the goal here (and
-    /// restates it through [`TorrentClient::set_limits`] if the configured
-    /// goal later changes), and the client's own seeding engine enforces it
-    /// from then on — sharerr never polls for it.
-    pub upload_limit_kib: Option<u64>,
-    /// Seed-ratio goal, applied at add time — same caveat as
-    /// [`Self::upload_limit_kib`].
-    pub ratio_limit: Option<f64>,
+    /// The seeding goal, applied at add time. The one exception to this trait's
+    /// "ratios and scheduling belong to the client" rule at the module level:
+    /// sharerr states the goal here (and restates it through
+    /// [`TorrentClient::set_limits`] if the configured goal later changes), and
+    /// the client's own seeding engine enforces it from then on — sharerr never
+    /// polls for it.
+    pub limits: SeedingLimits,
 }
 
 impl<'a> AddRequest<'a> {
@@ -417,13 +475,19 @@ impl<'a> AddRequest<'a> {
             info_hash,
             filename,
             save_path,
+            root_folder: None,
             category: None,
             tags: None,
             skip_checking: false,
             stopped: false,
-            upload_limit_kib: None,
-            ratio_limit: None,
+            limits: SeedingLimits::default(),
         }
+    }
+
+    /// Name a multi-file torrent's root directory, inside the save path.
+    pub fn root_folder(mut self, root: &'a str) -> Self {
+        self.root_folder = Some(root);
+        self
     }
 
     /// Set the category the client files this torrent under.
@@ -453,13 +517,19 @@ impl<'a> AddRequest<'a> {
     /// Cap this torrent's upload speed at `kib` KiB/s, from the moment it is
     /// added.
     pub fn upload_limit_kib(mut self, kib: u64) -> Self {
-        self.upload_limit_kib = Some(kib);
+        self.limits.upload_limit_kib = Some(kib);
         self
     }
 
     /// Set this torrent's seed-ratio goal, from the moment it is added.
     pub fn ratio_limit(mut self, ratio: f64) -> Self {
-        self.ratio_limit = Some(ratio);
+        self.limits.ratio_limit = Some(ratio);
+        self
+    }
+
+    /// Set this torrent's whole seeding goal, from the moment it is added.
+    pub fn limits(mut self, limits: SeedingLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -483,7 +553,12 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// Called explicitly rather than lazily so that "reached it but the password is
     /// wrong" and "could not reach it" can be reported separately — an implicit
     /// login reports them identically, and they have different fixes.
-    async fn login(&self) -> Result<()>;
+    ///
+    /// A client with no login call proves both by asking its version, the
+    /// cheapest call that needs them.
+    async fn login(&self) -> Result<()> {
+        self.version().await.map(|_| ())
+    }
 
     /// The client's version string. Proof of both reachability and authentication.
     async fn version(&self) -> Result<String>;
@@ -536,7 +611,7 @@ pub trait TorrentClient: Send + Sync + Debug {
 
     /// Apply the `Some` fields of `limits` to a torrent the client already
     /// holds; a `None` field is left untouched (see [`SeedingLimits`]). With
-    /// both `None` this is a no-op and must not reach the wire.
+    /// both `None` this is a no-op that never reaches the wire.
     ///
     /// The retroactive half of [`AddRequest::upload_limit_kib`] and
     /// [`AddRequest::ratio_limit`]. Only ever pointed at a torrent sharerr
@@ -545,7 +620,15 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// trackers. A client that cannot express one of the two (rTorrent has
     /// no per-torrent ratio) applies what it can and logs the rest, matching
     /// what its `add` does.
-    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()>;
+    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+        if limits.is_empty() {
+            return Ok(());
+        }
+        self.apply_limits(hash, limits).await
+    }
+
+    /// [`Self::set_limits`] with at least one field set: the client's own call.
+    async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()>;
 
     /// The `.torrent` bytes for a torrent the client already holds.
     ///
@@ -558,7 +641,9 @@ pub trait TorrentClient: Send + Sync + Debug {
     /// the feed serves downloads out of its own `.torrent` cache, so a torrent
     /// with nothing cached under its infohash is a release every friend gets a
     /// 404 for.
-    async fn export(&self, hash: &str) -> Result<Option<Vec<u8>>>;
+    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]

@@ -22,6 +22,14 @@ fn as_str(value: &XmlValue) -> &str {
     }
 }
 
+/// [`as_str`], taking the owned value a row hands over rather than copying it.
+fn into_string(value: XmlValue) -> String {
+    match value {
+        XmlValue::Str(s) => s,
+        XmlValue::Int(_) | XmlValue::Array(_) | XmlValue::Struct(_) => String::new(),
+    }
+}
+
 fn as_bool(value: &XmlValue) -> bool {
     match value {
         XmlValue::Int(n) => *n != 0,
@@ -77,16 +85,10 @@ impl TorrentClient for RtorrentClient {
         KIND
     }
 
-    async fn login(&self) -> Result<()> {
-        // rTorrent's XML-RPC has no session or login call; `system.client_version`
-        // is the cheapest call that proves both reachability and (when the proxy
-        // in front enforces it) the credential.
-        self.call_str("system.client_version", &[])
-            .await
-            .map(|_| ())
-    }
-
     async fn version(&self) -> Result<String> {
+        // Also what signing in amounts to: rTorrent's XML-RPC has no session or
+        // login call, and this proves reachability and (when the proxy in front
+        // enforces it) the credential.
         self.call_str("system.client_version", &[]).await
     }
 
@@ -128,18 +130,18 @@ impl TorrentClient for RtorrentClient {
                 ratio,
             ] = take("d.multicall2", row)?;
 
-            let tag = as_str(&custom1).to_owned();
             if let Some(wanted) = category
-                && tag != wanted
+                && as_str(&custom1) != wanted
             {
                 continue;
             }
+            let tag = into_string(custom1);
 
             out.push(TorrentSummary {
                 hash: as_str(&hash).to_ascii_lowercase(),
-                name: as_str(&name).to_owned(),
-                save_path: as_str(&directory).to_owned(),
-                content_path: as_str(&base_path).to_owned(),
+                name: into_string(name),
+                save_path: into_string(directory),
+                content_path: into_string(base_path),
                 category: category.unwrap_or_default().to_owned(),
                 is_seeding: as_bool(&complete) && as_bool(&active),
                 // Stopped and paused downloads are both inactive.
@@ -182,7 +184,7 @@ impl TorrentClient for RtorrentClient {
             .map(|row| {
                 let [path, size] = take("f.multicall", row)?;
                 Ok(TorrentFileEntry {
-                    name: as_str(&path).to_owned(),
+                    name: into_string(path),
                     size: as_u64(&size),
                 })
             })
@@ -197,9 +199,15 @@ impl TorrentClient for RtorrentClient {
             tracing::warn!("rTorrent has no skip-checking; it will verify the existing data");
         }
 
+        // `directory_base` is the content's own directory: rTorrent appends no
+        // torrent name to it, so a multi-file torrent's root goes on here.
+        let directory = match request.root_folder {
+            Some(root) => format!("{}/{root}", request.save_path.trim_end_matches('/')),
+            None => request.save_path.to_owned(),
+        };
         let mut commands = vec![format!(
             "d.directory_base.set={}",
-            quote_command_arg(request.save_path)
+            quote_command_arg(&directory)
         )];
         let tag = request
             .category
@@ -218,7 +226,7 @@ impl TorrentClient for RtorrentClient {
         params.extend(commands.iter().map(|c| Param::Str(c.as_str())));
         self.call(method, &params).await?;
 
-        if let Some(kib) = request.upload_limit_kib {
+        if let Some(kib) = request.limits.upload_limit_kib {
             // Using `request.info_hash` rather than asking rTorrent which
             // torrent it loaded last avoids a race: `load.raw_start` loads
             // asynchronously, so immediately afterward "last loaded" is not
@@ -228,14 +236,14 @@ impl TorrentClient for RtorrentClient {
                 .await?;
         }
 
-        if request.ratio_limit.is_some() {
+        if request.limits.ratio_limit.is_some() {
             warn_no_ratio_limit();
         }
 
         Ok(())
     }
 
-    async fn set_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
+    async fn apply_limits(&self, hash: &str, limits: &SeedingLimits) -> Result<()> {
         // Re-defining the hash-named throttle at the new rate is how a
         // changed cap reaches a download already assigned to it.
         if let Some(kib) = limits.upload_limit_kib {
@@ -301,14 +309,6 @@ impl TorrentClient for RtorrentClient {
         // caller, which is why the trait keeps them apart: on qBittorrent and
         // Transmission they are genuinely different operations.
         self.set_trackers(hash, urls).await
-    }
-
-    async fn export(&self, _hash: &str) -> Result<Option<Vec<u8>>> {
-        // `d.loaded_file` names the `.torrent` inside rTorrent's session
-        // directory, which is a path on the daemon's filesystem rather than
-        // bytes on the wire — the same limitation the Transmission client has,
-        // and unreadable for the same reason.
-        Ok(None)
     }
 }
 
@@ -573,6 +573,25 @@ mod tests {
         assert!(body.contains("d.custom1.set=&quot;sharerr&quot;"), "{body}");
         let encoded = base64::engine::general_purpose::STANDARD.encode(data);
         assert!(body.contains(&encoded), "{body}");
+    }
+
+    /// `directory_base` takes no torrent name, so a multi-file torrent has to
+    /// name its root or rTorrent looks for the files one directory too high.
+    #[tokio::test]
+    async fn a_multi_file_add_points_at_its_root_directory() {
+        let server = MockServer::start().await;
+        mount_scalar(&server).await;
+
+        let request =
+            AddRequest::new(b"x", "abc123", "x.torrent", "/downloads/tv/").root_folder("Season 01");
+        client(&server).add(&request).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let body = sharerr_testkit::mock::body_text(requests.last().unwrap());
+        assert!(
+            body.contains("d.directory_base.set=&quot;/downloads/tv/Season 01&quot;"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

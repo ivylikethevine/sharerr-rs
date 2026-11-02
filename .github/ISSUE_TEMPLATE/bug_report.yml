@@ -58,6 +58,7 @@ body:
         - qBittorrent
         - Transmission
         - rTorrent / ruTorrent
+        - Deluge
         - something else / not sure
     validations:
       required: true

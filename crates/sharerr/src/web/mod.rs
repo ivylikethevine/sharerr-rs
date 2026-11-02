@@ -129,6 +129,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/peers/pair", post(peers::pair))
         .route("/peers/preview", get(peers::scope_preview))
         .route("/peers/{id}/scope", post(peers::set_scope))
+        .route("/peers/{id}/limits", post(peers::set_limits))
         .route("/peers/{id}/gossip", post(peers::set_gossip))
         .route("/peers/{id}/revoke", post(peers::revoke))
         .route("/peers/{id}/delete", post(peers::delete))
@@ -148,6 +149,7 @@ pub fn routes(serve: Arc<ServeState>) -> Router {
         .route("/settings/qbittorrent", post(settings::save_qbittorrent))
         .route("/settings/transmission", post(settings::save_transmission))
         .route("/settings/rtorrent", post(settings::save_rtorrent))
+        .route("/settings/deluge", post(settings::save_deluge))
         .route(
             "/settings/torrent-backend",
             post(settings::save_torrent_backend),
@@ -401,30 +403,17 @@ async fn glance(
     sync_every: Option<u64>,
 ) -> Option<crate::web::templates::Glance> {
     let store = state.serve.store().await.ok()?;
+    let snapshot = crate::metrics::gather(&state.serve).await;
 
-    // One aggregate for both the count and the size — `PeerScope::All`
-    // admits every source, so this is the whole seeding set.
-    let seeding = store
-        .seeding_summary(sharerr_store::PeerScope::All)
-        .await
-        .unwrap_or_default();
-    let items_shared = seeding.count;
-    let shared_size = if seeding.size > 0 {
-        items::human_size(seeding.size.unsigned_abs())
+    let items_shared = snapshot.seeding_count;
+    let shared_size = if snapshot.seeding_bytes > 0 {
+        items::human_size(snapshot.seeding_bytes.unsigned_abs())
     } else {
         String::new()
     };
 
-    // The most recent *finished* run. An in-flight run has no outcome yet, and
-    // "last sync: just now" while it still churns would overpromise.
-    let last_run = store
-        .recent_runs(1)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .next()
-        .filter(|run| run.finished_at.is_some());
-    let (last_sync, last_sync_note, last_sync_failed) = match &last_run {
+    let last_run = &snapshot.last_run;
+    let (last_sync, last_sync_note, last_sync_failed) = match last_run {
         Some(run) => {
             let when = run.finished_at.map(peers::ago);
             // The glance leads with the timestamp, so the discovered count is
@@ -464,14 +453,7 @@ async fn glance(
         }
         _ => String::new(),
     };
-    let peers = store.list_peers().await.unwrap_or_default();
-    let active: Vec<_> = peers.iter().filter(|p| !p.is_revoked()).collect();
-    let friends_recent = active
-        .iter()
-        .filter(|p| p.last_seen_at.is_some_and(|at| now - at < 3600))
-        .count();
-
-    let swarm = state.serve.swarms().stats().await;
+    let swarm = snapshot.swarm;
 
     // Only worth asking when the swarm is quiet right now — a peer visibly
     // announcing needs no "since when" to tell it apart from a fortnight of
@@ -490,13 +472,13 @@ async fn glance(
 
     // All-time, from the announces themselves. Zero reads as "nothing to
     // say yet" rather than "0 B": a figure only appears once it is one.
-    let bytes_served = match store.transfer_totals().await {
-        Ok(totals) if totals.downloaded > 0 => items::human_size(totals.downloaded.unsigned_abs()),
-        _ => String::new(),
+    let bytes_served = if snapshot.transfer.downloaded > 0 {
+        items::human_size(snapshot.transfer.downloaded.unsigned_abs())
+    } else {
+        String::new()
     };
 
-    let (cpu_percent, memory_usage, disk_usage) = match state.serve.system_status().snapshot().await
-    {
+    let (cpu_percent, memory_usage, disk_usage) = match snapshot.system {
         Some(sample) => {
             let (cpu, memory, disk) = crate::system_stats::format(sample);
             (Some(cpu), Some(memory), disk)
@@ -510,8 +492,8 @@ async fn glance(
         last_sync,
         last_sync_note,
         last_sync_failed,
-        friends_recent,
-        friends_total: active.len(),
+        friends_recent: snapshot.peers_recent,
+        friends_total: snapshot.peers_total,
         swarm_peers: swarm.peers,
         swarm_seeders: swarm.seeders,
         swarm_torrents: swarm.swarms,

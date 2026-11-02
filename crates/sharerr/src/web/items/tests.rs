@@ -40,6 +40,8 @@ fn peer(label: &str, scope: PeerScope) -> Peer {
         key_hash: "hash".to_owned(),
         downloaded: 0,
         uploaded: 0,
+        max_size_bytes: None,
+        max_height: None,
     }
 }
 
@@ -60,7 +62,10 @@ fn only_seeding_items_show_anyone_as_able_to_see_them() {
         },
         ShareState::Pending,
     );
-    assert_eq!(visible_to(&it, &[peer("Sam", PeerScope::All)]), "");
+    assert_eq!(
+        visible_to(&it, &[peer("Sam", PeerScope::All)], &Default::default()),
+        ""
+    );
 }
 
 #[test]
@@ -88,10 +93,37 @@ fn a_narrow_scope_excludes_a_source_it_does_not_cover() {
         ShareState::Seeding,
     );
     assert_eq!(
-        visible_to(&it, &[peer("Sam", PeerScope::Tv)]),
+        visible_to(&it, &[peer("Sam", PeerScope::Tv)], &Default::default()),
         "no friend's scope covers it"
     );
-    assert_eq!(visible_to(&it, &[peer("Sam", PeerScope::Movies)]), "Sam");
+    assert_eq!(
+        visible_to(&it, &[peer("Sam", PeerScope::Movies)], &Default::default()),
+        "Sam"
+    );
+
+    // Who it answers for has to match the feed: an item for one friend names them
+    // alone, however wide anyone else's scope is.
+    let audiences = sharerr_store::Audiences::from([(it.key(), vec!["alex".to_owned()])]);
+    assert_eq!(
+        visible_to(
+            &it,
+            &[peer("Sam", PeerScope::All), peer("Alex", PeerScope::All)],
+            &audiences
+        ),
+        "Alex"
+    );
+    let capped = Peer {
+        max_size_bytes: Some(0),
+        ..peer("Sam", PeerScope::All)
+    };
+    assert_eq!(
+        visible_to(
+            &SharedItem { size: 1, ..it },
+            &[capped],
+            &Default::default()
+        ),
+        "no friend's scope covers it"
+    );
 }
 
 fn seeding_with_hash(hash: &str) -> SharedItem {
@@ -314,7 +346,14 @@ fn a_row_names_the_arr_identifiers_in_the_source_hint() {
             ShareState::Seeding,
         )
     };
-    let row = row(&it, &[], None, TokenFps::default(), None);
+    let row = row(
+        &it,
+        &[],
+        &Default::default(),
+        None,
+        TokenFps::default(),
+        None,
+    );
     assert_eq!(row.source_hint, "Sonarr series 42, file 1337");
     assert_eq!(row.info_hash_short, None);
 }
@@ -366,7 +405,14 @@ fn a_row_carries_the_release_title_and_the_arr_path() {
     source_item.release_title = "Harborlight.2019.2160p-SYNTH".to_owned();
     source_item.arr_path = "/data/movies/Harborlight (2019)/Harborlight.mkv".into();
 
-    let row = row(&source_item, &[], None, TokenFps::default(), None);
+    let row = row(
+        &source_item,
+        &[],
+        &Default::default(),
+        None,
+        TokenFps::default(),
+        None,
+    );
 
     assert_eq!(row.release_title, "Harborlight.2019.2160p-SYNTH");
     assert_eq!(
@@ -388,14 +434,34 @@ fn a_row_says_whether_sharerr_created_the_torrent() {
     };
 
     let mine = item(MediaSource::Radarr, spec.clone(), ShareState::Seeding);
-    assert!(row(&mine, &[], None, TokenFps::default(), None).created_by_sharerr);
+    assert!(
+        row(
+            &mine,
+            &[],
+            &Default::default(),
+            None,
+            TokenFps::default(),
+            None
+        )
+        .created_by_sharerr
+    );
 
     let reused = SharedItem {
         created_by_sharerr: false,
         private: true,
         ..item(MediaSource::Radarr, spec, ShareState::Seeding)
     };
-    assert!(!row(&reused, &[], None, TokenFps::default(), None).created_by_sharerr);
+    assert!(
+        !row(
+            &reused,
+            &[],
+            &Default::default(),
+            None,
+            TokenFps::default(),
+            None
+        )
+        .created_by_sharerr
+    );
 }
 
 #[tokio::test]

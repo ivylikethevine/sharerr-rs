@@ -9,21 +9,22 @@
 //! here: this crate has no opinion about how long a bearer token should be, and the
 //! same generator already mints the Torznab and tracker secrets.
 
+use std::collections::{HashMap, HashSet};
+
 use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
-use sharerr_core::MediaSource;
 use sharerr_core::endpoint::now_epoch;
+use sharerr_core::{MediaSource, SharedItem};
 use sqlx::{AssertSqlSafe, Row};
 
-use crate::db::{Store, StoreError};
+use crate::db::{SeedingSummary, Store, StoreError};
 
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// What a friend is allowed to see.
 ///
 /// A closed set rather than free-form rules: this is the choice an operator
-/// actually makes, and three options cover it. Anything finer — per-series, per-tag
-/// — would want a join table and is a different feature.
+/// actually makes. Anything finer is [`PeerLimits`], applied on top of it.
 ///
 /// Two decoders, two boundaries, on purpose. `Deserialize` is strict and guards
 /// the web form: a stale `<select>` value must be rejected, not silently widened
@@ -123,6 +124,64 @@ impl PeerScope {
     }
 }
 
+/// Which friends each item carrying only `<tag>-<friend>` tags is for. An item
+/// absent from this is for everyone their scope admits.
+pub type Audiences = HashMap<(MediaSource, i64), Vec<String>>;
+
+/// What narrows one friend's feed beyond their [`PeerScope`]. The default narrows
+/// nothing by size or resolution and names no friend, so it sees no item that is
+/// for particular friends: what a feed preview shows before a friend exists.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PeerLimits {
+    /// The largest file offered, in bytes.
+    pub max_size_bytes: Option<i64>,
+    /// The highest resolution offered, as a height. A file with no known
+    /// resolution stays offered: music and books have none, and a cap on video
+    /// should not hide them.
+    pub max_height: Option<i64>,
+    /// The name `<tag>-<friend>` tags call this friend, from [`friend_slug`].
+    pub friend: Option<String>,
+}
+
+impl PeerLimits {
+    /// Whether an item in this friend's scope reaches their feed. `audience` is
+    /// its entry in [`Audiences`].
+    pub fn admits(&self, item: &SharedItem, audience: Option<&[String]>) -> bool {
+        if let Some(audience) = audience
+            && !self.friend.as_ref().is_some_and(|f| audience.contains(f))
+        {
+            return false;
+        }
+        let size_ok = self
+            .max_size_bytes
+            .is_none_or(|max| i64::try_from(item.size).is_ok_and(|size| size <= max));
+        let height_ok = self.max_height.is_none_or(|max| {
+            item.media
+                .as_ref()
+                .and_then(sharerr_core::MediaMeta::nominal_height)
+                .is_none_or(|height| i64::from(height) <= max)
+        });
+        size_ok && height_ok
+    }
+}
+
+/// A friend's name as an *arr tag can carry it: lowercase, with anything else
+/// folded to single dashes, since the *arr apps lowercase a tag and allow little
+/// else. `Sam B.` is `sam-b`, tagged `sharerr-sam-b`. Empty for a name with no
+/// ASCII letter or digit, which no tag can then name.
+pub fn friend_slug(label: &str) -> String {
+    let mut slug = String::with_capacity(label.len());
+    for c in label.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.truncate(slug.trim_end_matches('-').len());
+    slug
+}
+
 /// One friend, as the UI lists them. Never carries the key — it cannot, and that
 /// is the point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,9 +214,22 @@ pub struct Peer {
     pub downloaded: i64,
     /// Bytes that same client reports having uploaded on to others.
     pub uploaded: i64,
+    /// See [`PeerLimits::max_size_bytes`].
+    pub max_size_bytes: Option<i64>,
+    /// See [`PeerLimits::max_height`].
+    pub max_height: Option<i64>,
 }
 
 impl Peer {
+    /// What narrows this friend's feed beyond their scope.
+    pub fn limits(&self) -> PeerLimits {
+        PeerLimits {
+            max_size_bytes: self.max_size_bytes,
+            max_height: self.max_height,
+            friend: Some(friend_slug(&self.label)).filter(|slug| !slug.is_empty()),
+        }
+    }
+
     /// Whether this friend's key has been withdrawn. Revoked rows stay in the list
     /// so the operator can see it happened.
     pub fn is_revoked(&self) -> bool {
@@ -208,7 +280,7 @@ impl Touch {
 }
 
 const PEER_COLUMNS: &str = "id, label, created_at, last_seen_at, revoked_at, scope, pubkey, \
-     gossip_url, key_hash, downloaded, uploaded";
+     gossip_url, key_hash, downloaded, uploaded, max_size_bytes, max_height";
 
 fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
     Ok(Peer {
@@ -223,6 +295,8 @@ fn row_to_peer(row: &sqlx::sqlite::SqliteRow) -> Result<Peer> {
         key_hash: row.try_get("key_hash")?,
         downloaded: row.try_get("downloaded")?,
         uploaded: row.try_get("uploaded")?,
+        max_size_bytes: row.try_get("max_size_bytes")?,
+        max_height: row.try_get("max_height")?,
     })
 }
 
@@ -327,8 +401,20 @@ impl Store {
     /// (`last_seen_at IS NULL`), so exactly one of any number of concurrent
     /// first sightings observes [`Touch::First`] — a `SELECT` then `UPDATE`
     /// would let two announces in the same instant both report it.
+    ///
+    /// A read first, though, so a sighting inside the window takes no write lock:
+    /// SQLite takes it for an `UPDATE` even when no row matches, and this runs on
+    /// every authenticated feed request.
     pub async fn touch_peer(&self, id: i64) -> Result<Touch> {
         let now = now_epoch();
+        let seen: Option<i64> = sqlx::query_scalar("SELECT last_seen_at FROM peers WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await?
+            .flatten();
+        if seen.is_some_and(|seen| seen >= now - 300) {
+            return Ok(Touch::Throttled);
+        }
         let first = sqlx::query(
             "UPDATE peers SET last_seen_at = ?1 WHERE id = ?2 AND last_seen_at IS NULL",
         )
@@ -385,6 +471,136 @@ impl Store {
     }
 
     /// Change what a friend is allowed to see. Returns whether anything changed.
+    pub async fn set_peer_limits(
+        &self,
+        id: i64,
+        max_size_bytes: Option<i64>,
+        max_height: Option<i64>,
+    ) -> Result<bool> {
+        let affected =
+            sqlx::query("UPDATE peers SET max_size_bytes = ?1, max_height = ?2 WHERE id = ?3")
+                .bind(max_size_bytes)
+                .bind(max_height)
+                .bind(id)
+                .execute(self.pool())
+                .await?
+                .rows_affected();
+        Ok(affected > 0)
+    }
+
+    /// Which friends every item that is for particular friends is for.
+    pub async fn audiences(&self) -> Result<Audiences> {
+        let rows = sqlx::query("SELECT source, file_id, friend FROM item_audience")
+            .fetch_all(self.pool())
+            .await?;
+        let mut audiences = Audiences::new();
+        for row in &rows {
+            let source: &str = row.try_get("source")?;
+            // An unknown source is a row a newer version wrote, for an item this
+            // version cannot be serving.
+            let Some(source) = MediaSource::parse(source) else {
+                continue;
+            };
+            audiences
+                .entry((source, row.try_get("file_id")?))
+                .or_default()
+                .push(row.try_get("friend")?);
+        }
+        Ok(audiences)
+    }
+
+    /// Replace which friends `source`'s items are for with what its discovery just
+    /// found, all at once: a reader never sees an item between audiences, when it
+    /// would read as being for everyone.
+    pub async fn replace_audience(
+        &self,
+        source: MediaSource,
+        audience: &HashMap<i64, Vec<String>>,
+    ) -> Result<()> {
+        // Read first: this runs per source on every pass, and the answer rarely
+        // changes, so the usual case takes no write transaction.
+        let rows = sqlx::query("SELECT file_id, friend FROM item_audience WHERE source = ?1")
+            .bind(source.as_str())
+            .fetch_all(self.pool())
+            .await?;
+        let mut current = HashSet::with_capacity(rows.len());
+        for row in &rows {
+            current.insert((row.try_get::<i64, _>("file_id")?, row.try_get("friend")?));
+        }
+        let wanted: HashSet<(i64, String)> = audience
+            .iter()
+            .flat_map(|(file_id, friends)| friends.iter().map(|f| (*file_id, f.clone())))
+            .collect();
+        if current == wanted {
+            return Ok(());
+        }
+
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("DELETE FROM item_audience WHERE source = ?1")
+            .bind(source.as_str())
+            .execute(&mut *tx)
+            .await?;
+        for (file_id, friends) in audience {
+            for friend in friends {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO item_audience (source, file_id, friend) \
+                     VALUES (?1, ?2, ?3)",
+                )
+                .bind(source.as_str())
+                .bind(file_id)
+                .bind(friend)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// [`Self::seeding_items`] narrowed by a friend's [`PeerLimits`]: what their
+    /// feed publishes.
+    pub async fn seeding_items_for(
+        &self,
+        scope: PeerScope,
+        limits: &PeerLimits,
+    ) -> Result<Vec<SharedItem>> {
+        let (mut items, audiences) = tokio::try_join!(self.seeding_items(scope), self.audiences())?;
+        items.retain(|item| limits.admits(item, audiences.get(&item.key()).map(Vec::as_slice)));
+        Ok(items)
+    }
+
+    /// The count and size of each friend's [`Self::seeding_items_for`], in order, so
+    /// the number next to their name agrees with what their feed serves. The
+    /// Friends page asks on every load, so each distinct scope and the audiences
+    /// are read once rather than once per friend.
+    pub async fn seeding_summaries(&self, peers: &[Peer]) -> Result<Vec<SeedingSummary>> {
+        let audiences = self.audiences().await?;
+        let mut by_scope: HashMap<&str, Vec<SharedItem>> = HashMap::new();
+        for peer in peers {
+            if !by_scope.contains_key(peer.scope.as_str()) {
+                let items = self.seeding_items(peer.scope).await?;
+                by_scope.insert(peer.scope.as_str(), items);
+            }
+        }
+        Ok(peers
+            .iter()
+            .map(|peer| {
+                let limits = peer.limits();
+                let mut summary = SeedingSummary::default();
+                let admitted = by_scope[peer.scope.as_str()].iter().filter(|item| {
+                    limits.admits(item, audiences.get(&item.key()).map(Vec::as_slice))
+                });
+                for item in admitted {
+                    summary.count += 1;
+                    summary.size = summary
+                        .size
+                        .saturating_add(i64::try_from(item.size).unwrap_or(i64::MAX));
+                }
+                summary
+            })
+            .collect())
+    }
+
     pub async fn set_peer_scope(&self, id: i64, scope: PeerScope) -> Result<bool> {
         let affected = sqlx::query("UPDATE peers SET scope = ?1 WHERE id = ?2")
             .bind(scope.as_str())
@@ -422,6 +638,37 @@ mod tests {
 
     /// `directory_kind` hands raw strings to `json_extract(spec_json, '$.kind')`,
     /// so each must be a tag `MediaSpec` actually serializes. A rename in
+    /// What an *arr tag can carry: the same rules the apps apply when saving one.
+    #[test]
+    fn a_friends_tag_name_folds_their_label_to_what_a_tag_can_carry() {
+        assert_eq!(friend_slug("Sam"), "sam");
+        assert_eq!(friend_slug("Sam B."), "sam-b");
+        assert_eq!(friend_slug("  ~Alex__K~ "), "alex-k");
+        assert_eq!(friend_slug("日本"), "");
+    }
+
+    #[tokio::test]
+    async fn a_friends_caps_are_stored_and_a_name_no_tag_can_carry_names_no_friend() {
+        let store = Store::open_in_memory().await.unwrap();
+        let peer = store
+            .create_peer("日本", &key("one"), PeerScope::All)
+            .await
+            .unwrap();
+        assert_eq!(peer.limits(), PeerLimits::default());
+
+        assert!(
+            store
+                .set_peer_limits(peer.id, Some(5), Some(1080))
+                .await
+                .unwrap()
+        );
+        assert!(!store.set_peer_limits(404, None, None).await.unwrap());
+
+        let listed = store.list_peers().await.unwrap();
+        assert_eq!(listed[0].limits().max_size_bytes, Some(5));
+        assert_eq!(listed[0].limits().max_height, Some(1080));
+    }
+
     /// `sharerr-core` fails here instead of silently emptying a scoped peer's feed.
     #[test]
     fn every_scope_names_a_real_media_kind() {

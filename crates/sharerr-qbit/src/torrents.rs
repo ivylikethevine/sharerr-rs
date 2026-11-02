@@ -17,11 +17,7 @@ const TORRENT_MIME: &str = "application/x-bittorrent";
 /// half shared by [`QbitClient::set_torrent_trackers`] and
 /// [`QbitClient::add_torrent_trackers`].
 fn missing_from<'a>(existing: &[TrackerEntry], wanted: &'a [Url]) -> Vec<&'a str> {
-    wanted
-        .iter()
-        .map(Url::as_str)
-        .filter(|url| !existing.iter().any(|t| t.url == *url))
-        .collect()
+    sharerr_client::missing_urls(wanted, |url| existing.iter().any(|t| t.url == url))
 }
 
 impl QbitClient {
@@ -88,6 +84,10 @@ impl QbitClient {
                 .text("savepath", request.save_path.to_owned())
                 // Never configurable. See the doc comment above.
                 .text("autoTMM", "false")
+                // Also never configurable: the operator's "Subfolder" or "Don't
+                // create subfolder" default would have qBittorrent look for the
+                // data somewhere other than where it sits.
+                .text("contentLayout", "Original")
                 .text("skip_checking", request.skip_checking.to_string())
                 .text("stopped", request.stopped.to_string())
                 // `paused` is the pre-5.0 spelling of `stopped`; sending both keeps
@@ -100,12 +100,12 @@ impl QbitClient {
             if let Some(tags) = request.tags {
                 form = form.text("tags", tags.to_owned());
             }
-            if let Some(kib) = request.upload_limit_kib {
+            if let Some(kib) = request.limits.upload_limit_kib {
                 // `upLimit` is bytes/s; sharerr's config is KiB/s, matching
                 // qBittorrent's own UI convention.
                 form = form.text("upLimit", (kib * 1024).to_string());
             }
-            if let Some(ratio) = request.ratio_limit {
+            if let Some(ratio) = request.limits.ratio_limit {
                 form = form.text("ratioLimit", ratio.to_string());
             }
 

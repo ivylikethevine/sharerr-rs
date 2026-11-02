@@ -33,7 +33,7 @@ use sharerr_core::model::{ExternalIds, MediaSource, MediaSpec, SharedItem};
 
 use secrecy::SecretString;
 
-use sharerr_store::PeerScope;
+use sharerr_store::{PeerLimits, PeerScope};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
@@ -641,7 +641,14 @@ pub async fn api(
     if query.t == "caps" {
         xml(caps_xml())
     } else if is_search_function(&query.t) {
-        search(&state, &query, caller.scope(), caller.key_hash()).await
+        search(
+            &state,
+            &query,
+            caller.scope(),
+            caller.limits(),
+            caller.key_hash(),
+        )
+        .await
     } else {
         xml_status(
             StatusCode::BAD_REQUEST,
@@ -727,6 +734,7 @@ pub(crate) async fn collect(
     state: &ServeState,
     query: &SearchQuery,
     scope: PeerScope,
+    limits: &PeerLimits,
     peer_token: &str,
 ) -> Result<Matched, (StatusCode, String)> {
     let store = state.store().await.map_err(|reason| {
@@ -739,14 +747,17 @@ pub(crate) async fn collect(
     // The scope is applied by the store itself, in SQL, before any row is
     // decoded. What a friend may see is not a search filter they could widen —
     // it is decided by who they are, and it never reaches this function's query
-    // logic at all.
-    let items = store.seeding_items(scope).await.map_err(|err| {
-        tracing::error!(error = %err, "torznab search failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read the library".to_owned(),
-        )
-    })?;
+    // logic at all. Their limits work the same way, from the same place.
+    let items = store
+        .seeding_items_for(scope, limits)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "torznab search failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not read the library".to_owned(),
+            )
+        })?;
 
     let total = items.len();
     // The needle is constant across the whole request, so it is normalised once
@@ -761,7 +772,7 @@ pub(crate) async fn collect(
         })
         .collect();
 
-    let magnet_links_enabled = state.config().await.feed.magnet_links;
+    let magnet_links_enabled = state.with_config(|c| c.feed.magnet_links).await;
 
     // The magnet's `tr` tiers: every recently held endpoint, the same list a
     // freshly built torrent carries, with an announce token when one is set —
@@ -830,9 +841,10 @@ async fn search(
     state: &ServeState,
     query: &SearchQuery,
     scope: PeerScope,
+    limits: &PeerLimits,
     peer_token: &str,
 ) -> Response {
-    let matched = match collect(state, query, scope, peer_token).await {
+    let matched = match collect(state, query, scope, limits, peer_token).await {
         Ok(matched) => matched,
         Err((status, reason)) => return xml_status(status, error_xml(900, &reason)),
     };
@@ -854,6 +866,7 @@ async fn search(
 /// would mean two lookups that could disagree.
 pub(crate) struct Caller {
     scope: PeerScope,
+    limits: PeerLimits,
     /// Which peer row authenticated. There is no unauthenticated path, so
     /// every caller is a real peer, and the gossip endpoints — which require
     /// one, to know who said what — can always resolve it.
@@ -867,6 +880,10 @@ pub(crate) struct Caller {
 impl Caller {
     pub fn scope(&self) -> PeerScope {
         self.scope
+    }
+
+    pub fn limits(&self) -> &PeerLimits {
+        &self.limits
     }
 
     pub fn peer_id(&self) -> i64 {
@@ -969,6 +986,7 @@ async fn check_api_key(
                 );
                 return Ok(Caller {
                     scope: peer.scope,
+                    limits: peer.limits(),
                     peer_id: peer.id,
                     key_hash: peer.key_hash,
                 });

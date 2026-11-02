@@ -5,7 +5,7 @@
 //! **`Referer` is mandatory.** qBittorrent's CSRF check rejects any request whose
 //! `Referer`/`Origin` host does not match the WebUI address. A client that omits it
 //! authenticates fine and then fails on everything afterwards. It is set in
-//! [`QbitClient::dispatch`] and nowhere else, so no call site can forget.
+//! [`QbitClient::send_checked`] and nowhere else, so no call site can forget.
 //!
 //! # Authentication is an API key, not a session
 //!
@@ -146,52 +146,6 @@ impl QbitClient {
 
     // ------------------------------------------------------------ transport
 
-    fn dispatch(
-        &self,
-        method: Method,
-        url: Url,
-        build: impl FnOnce(RequestBuilder) -> RequestBuilder,
-    ) -> RequestBuilder {
-        // The one place `Referer` is attached. Do not set it anywhere else.
-        // Attached per request rather than as a default header on the
-        // `reqwest::Client`, so the secret lives in one place and `Debug` on the
-        // client cannot leak it through the header map.
-        let request = self
-            .http
-            .request(method, url)
-            .header(REFERER, self.referer.clone())
-            .header(AUTHORIZATION, self.bearer.clone());
-
-        build(request)
-    }
-
-    pub(crate) async fn send(
-        &self,
-        method: Method,
-        path: &str,
-        build: impl FnOnce(RequestBuilder) -> RequestBuilder + Send,
-    ) -> Result<Response> {
-        let url = self.endpoint(path)?;
-
-        let response = self
-            .dispatch(method, url.clone(), build)
-            .send()
-            .await
-            .map_err(|source| QbitError::Unreachable {
-                url: url.to_string(),
-                detail: sharerr_client::error_chain(&source),
-            })?;
-
-        // A rejected key never becomes accepted by asking again, and there is no
-        // session to renew — retrying would only walk towards qBittorrent's ban
-        // counter for nothing.
-        if sharerr_client::is_auth_rejection(response.status()) {
-            return Err(QbitError::ApiKeyRejected);
-        }
-
-        Ok(response)
-    }
-
     /// Send and require a 2xx, handing the response back unread so the caller
     /// chooses how to consume the body — text for the API's plain replies,
     /// bytes for a `.torrent` export.
@@ -201,8 +155,33 @@ impl QbitClient {
         path: &str,
         build: impl FnOnce(RequestBuilder) -> RequestBuilder + Send,
     ) -> Result<Response> {
-        let response = self.send(method, path, build).await?;
+        let url = self.endpoint(path)?;
+
+        // The one place `Referer` is attached. Do not set it anywhere else.
+        // Attached per request rather than as a default header on the
+        // `reqwest::Client`, so the secret lives in one place and `Debug` on the
+        // client cannot leak it through the header map.
+        let request = self
+            .http
+            .request(method, url.clone())
+            .header(REFERER, self.referer.clone())
+            .header(AUTHORIZATION, self.bearer.clone());
+
+        let response = build(request)
+            .send()
+            .await
+            .map_err(|source| QbitError::Unreachable {
+                url: url.to_string(),
+                detail: sharerr_client::error_chain(&source),
+            })?;
         let status = response.status();
+
+        // A rejected key never becomes accepted by asking again, and there is no
+        // session to renew — retrying would only walk towards qBittorrent's ban
+        // counter for nothing.
+        if sharerr_client::is_auth_rejection(status) {
+            return Err(QbitError::ApiKeyRejected);
+        }
 
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();

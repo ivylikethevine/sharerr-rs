@@ -47,27 +47,15 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for ApiAuth {
         parts: &mut axum::http::request::Parts,
         state: &Arc<ServeState>,
     ) -> Result<Self, Self::Rejection> {
-        let refused = || StatusCode::NOT_FOUND.into_response();
-        if !state.config().await.api.enabled {
-            return Err(refused());
+        let enabled = state.with_config(|config| config.api.enabled).await;
+        if !enabled {
+            return Err(crate::metrics::refused());
         }
-        let required = match state.try_api_token().await {
-            Ok(token) => token,
-            Err(err) => {
-                tracing::warn!(error = %err, "refusing the management API: the vault could not be opened");
-                return Err(refused());
-            }
-        };
-        let Some(required) = required.filter(|token| !token.is_empty()) else {
-            return Err(refused());
-        };
-        let Some(supplied) = crate::metrics::bearer_token(&parts.headers) else {
-            return Err(refused());
-        };
-        if crate::secrets::constant_time_eq(&required, &supplied) {
+        let token = state.try_api_token().await;
+        if crate::metrics::bearer_admitted(&parts.headers, token, "the management API") {
             Ok(Self)
         } else {
-            Err(refused())
+            Err(crate::metrics::refused())
         }
     }
 }
@@ -296,8 +284,23 @@ async fn sync(State(state): State<Arc<ServeState>>, _auth: ApiAuth) -> Response 
 async fn doctor(State(state): State<Arc<ServeState>>, _auth: ApiAuth) -> Response {
     let config = state.config().await;
     let config_error = state.config_error().await;
-    axum::Json(crate::commands::doctor::json_report(&config, config_error.as_deref()).await)
-        .into_response()
+    // Off the runtime: the report opens the vault (Argon2) and walks libraries
+    // inline, as suits the CLI, and that must not stall `/health` here.
+    let handle = tokio::runtime::Handle::current();
+    let report = tokio::task::spawn_blocking(move || {
+        handle.block_on(crate::commands::doctor::json_report(
+            &config,
+            config_error.as_deref(),
+        ))
+    })
+    .await;
+    match report {
+        Ok(report) => axum::Json(report).into_response(),
+        Err(err) => {
+            tracing::error!(error = %err, "the doctor report panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[cfg(test)]

@@ -787,7 +787,8 @@ impl ServeState {
         }
 
         let config = self.config().await;
-        match Syncer::build(&config, self.endpoint()).await {
+        let store = async { self.store().await.map_err(|reason| anyhow::anyhow!(reason)) };
+        match Syncer::build_with_store(&config, self.endpoint(), store).await {
             Ok(syncer) => {
                 let syncer = Arc::new(syncer);
                 tracing::info!("credentials accepted; reconciliation is available");
@@ -947,6 +948,7 @@ pub(crate) mod fixtures {
             upload_limit_kib: None,
             ratio_limit: None,
             private: config.seeding.private,
+            sidecar_roots: Vec::new(),
             torrent_dir: dir.path().to_path_buf(),
         };
         // Opened from `config.database_path()`, the same path `ServeState::store`

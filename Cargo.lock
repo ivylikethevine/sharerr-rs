@@ -2643,6 +2643,7 @@ dependencies = [
  "sharerr-arr",
  "sharerr-client",
  "sharerr-core",
+ "sharerr-deluge",
  "sharerr-lighthouse",
  "sharerr-probe",
  "sharerr-qbit",
@@ -2705,6 +2706,24 @@ dependencies = [
  "time",
  "toml_edit 0.25.15+spec-1.1.0",
  "url",
+]
+
+[[package]]
+name = "sharerr-deluge"
+version = "0.0.0-dev"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sharerr-client",
+ "sharerr-testkit",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

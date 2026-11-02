@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use sha1::{Digest, Sha1};
 
-use crate::bencode::{BencodeError, Value};
+use crate::bencode::{BencodeError, Field, Value, write_dict, write_fields};
 
 /// A parsed `.torrent`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,23 +75,32 @@ impl Torrent {
     /// Canonical bytes for this torrent.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut top = self.extra.clone();
-        if let Some(announce) = &self.announce {
-            top.insert(b"announce".to_vec(), Value::string(announce));
+        let announce = self.announce.as_deref().map(Value::string);
+        let announce_list = self.announce_list.as_ref().map(|tiers| {
+            Value::List(
+                tiers
+                    .iter()
+                    .map(|tier| Value::List(tier.iter().map(|u| Value::string(u)).collect()))
+                    .collect(),
+            )
+        });
+
+        let mut top: BTreeMap<&[u8], Field<'_>> = self
+            .extra
+            .iter()
+            .map(|(key, value)| (key.as_slice(), Field::Value(value)))
+            .collect();
+        if let Some(announce) = &announce {
+            top.insert(b"announce", Field::Value(announce));
         }
-        if let Some(tiers) = &self.announce_list {
-            top.insert(
-                b"announce-list".to_vec(),
-                Value::List(
-                    tiers
-                        .iter()
-                        .map(|tier| Value::List(tier.iter().map(|u| Value::string(u)).collect()))
-                        .collect(),
-                ),
-            );
+        if let Some(tiers) = &announce_list {
+            top.insert(b"announce-list", Field::Value(tiers));
         }
-        top.insert(b"info".to_vec(), Value::Dict(self.info.clone()));
-        Value::Dict(top).encode()
+        top.insert(b"info", Field::Dict(&self.info));
+
+        let mut out = Vec::new();
+        write_fields(&top, &mut out);
+        out
     }
 
     /// Lowercase hex SHA-1 of the canonical info dictionary (BEP 3).
@@ -99,7 +108,9 @@ impl Torrent {
     /// SHA-1 here is the protocol's identifier, not a security decision.
     #[must_use]
     pub fn info_hash(&self) -> String {
-        hex::encode(Sha1::digest(Value::Dict(self.info.clone()).encode()))
+        let mut out = Vec::new();
+        write_dict(&self.info, &mut out);
+        hex::encode(Sha1::digest(out))
     }
 
     fn info_field(&self, key: &str) -> Option<&Value> {
@@ -132,18 +143,27 @@ impl Torrent {
         self.info_field("files").is_none()
     }
 
+    /// A multi-file torrent's files, relative to its root and `/`-joined, in
+    /// the order the pieces hash them. Empty for a single-file torrent.
+    #[must_use]
+    pub fn file_paths(&self) -> Vec<String> {
+        let Some(files) = self.info_field("files").and_then(Value::as_list) else {
+            return Vec::new();
+        };
+        files
+            .iter()
+            .filter_map(|file| {
+                let parts = file.as_dict()?.get(b"path".as_slice())?.as_list()?;
+                let parts: Option<Vec<&str>> = parts.iter().map(Value::as_str).collect();
+                Some(parts?.join("/"))
+            })
+            .collect()
+    }
+
     /// The BEP 27 private flag.
     #[must_use]
     pub fn is_private(&self) -> bool {
         self.info_field("private").and_then(Value::as_int) == Some(1)
-    }
-
-    /// How many 20-byte SHA-1 entries the `pieces` string holds.
-    #[must_use]
-    pub fn piece_count(&self) -> usize {
-        self.info_field("pieces")
-            .and_then(Value::as_bytes)
-            .map_or(0, |pieces| pieces.len() / 20)
     }
 }
 
@@ -184,7 +204,6 @@ mod tests {
         assert_eq!(torrent.length(), Some(3));
         assert!(torrent.is_single_file());
         assert!(!torrent.is_private());
-        assert_eq!(torrent.piece_count(), 1);
     }
 
     #[test]
@@ -228,6 +247,13 @@ mod tests {
         let torrent = Torrent::read_from_bytes(multi).unwrap();
         assert!(!torrent.is_single_file());
         assert_eq!(torrent.length(), Some(12));
+        assert_eq!(torrent.file_paths(), vec!["a", "b"]);
+        assert!(
+            Torrent::read_from_bytes(MINIMAL)
+                .unwrap()
+                .file_paths()
+                .is_empty()
+        );
     }
 
     #[test]

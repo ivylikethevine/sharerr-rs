@@ -289,23 +289,7 @@ pub async fn ingest(
         } else {
             ObservedVia::Gossip
         };
-        for endpoint in &record.endpoints {
-            let Some(kind) = EndpointKind::parse(&endpoint.kind) else {
-                continue;
-            };
-            if let Err(err) = store
-                .record_peer_endpoint(
-                    subject_id,
-                    kind,
-                    &endpoint.addr,
-                    Some(endpoint.observed_at),
-                    via,
-                )
-                .await
-            {
-                tracing::warn!(error = %err, "could not record a gossiped endpoint");
-            }
-        }
+        record_endpoints(store, subject_id, &record.endpoints, via).await;
 
         match serde_json::to_string(&record) {
             Ok(raw) => {
@@ -330,6 +314,34 @@ pub struct PullQuery {
     /// Comma-separated hex pubkeys the caller already knows.
     #[serde(default)]
     peers: String,
+}
+
+/// Record each endpoint a signed record names for one friend. A kind this build does
+/// not know is skipped, and a failed write only warns: the record stays good for the
+/// other endpoints.
+pub(crate) async fn record_endpoints(
+    store: &Store,
+    peer_id: i64,
+    endpoints: &[RecordEndpoint],
+    via: ObservedVia,
+) {
+    for endpoint in endpoints {
+        let Some(kind) = EndpointKind::parse(&endpoint.kind) else {
+            continue;
+        };
+        let recorded = store
+            .record_peer_endpoint(
+                peer_id,
+                kind,
+                &endpoint.addr,
+                Some(endpoint.observed_at),
+                via,
+            )
+            .await;
+        if let Err(err) = recorded {
+            tracing::warn!(error = %err, via = via.as_str(), "could not record an endpoint");
+        }
+    }
 }
 
 /// `GET /api/gossip/endpoints?peers=pk1,pk2` — the pull side.
@@ -746,7 +758,12 @@ mod tests {
         .await;
         assert_eq!(summary.accepted, 1);
 
-        let endpoints = store.peer_endpoints(ids[0]).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[ids[0]])
+            .await
+            .unwrap()
+            .remove(&ids[0])
+            .unwrap_or_default();
         assert_eq!(endpoints[0].addr, "http://new:2");
         assert_eq!(endpoints[0].via, ObservedVia::Gossip);
     }
@@ -772,7 +789,12 @@ mod tests {
 
         assert_eq!(summary.accepted, 0);
         assert_eq!(summary.stale, 1);
-        let endpoints = store.peer_endpoints(ids[0]).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[ids[0]])
+            .await
+            .unwrap()
+            .remove(&ids[0])
+            .unwrap_or_default();
         assert_eq!(endpoints[0].addr, "http://new:2");
     }
 
@@ -795,7 +817,15 @@ mod tests {
 
         assert_eq!(summary.accepted, 0);
         assert_eq!(summary.invalid, 1);
-        assert!(store.peer_endpoints(ids[0]).await.unwrap().is_empty());
+        assert!(
+            store
+                .peer_endpoints_for(&[ids[0]])
+                .await
+                .unwrap()
+                .remove(&ids[0])
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 
     /// A record about a pubkey no peer row carries is ignored: gossip must not
@@ -1229,7 +1259,12 @@ mod tests {
         let summary = ingest(&store, ids[0], vec![record]).await;
         assert_eq!(summary.accepted, 1);
 
-        let endpoints = store.peer_endpoints(ids[0]).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[ids[0]])
+            .await
+            .unwrap()
+            .remove(&ids[0])
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1, "only the recognised kind is stored");
         assert_eq!(endpoints[0].addr, "http://sam:1");
     }

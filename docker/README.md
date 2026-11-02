@@ -33,6 +33,7 @@ Everything in `tests/fixtures/media` is synthetic (see
 ./scripts/run_docker_tests.sh --vpn
 ./scripts/run_docker_tests.sh --transmission
 ./scripts/run_docker_tests.sh --rtorrent
+./scripts/run_docker_tests.sh --deluge
 ./scripts/run_docker_tests.sh --sonarr-v5     # plain stack, Sonarr v5
 ./scripts/run_docker_tests_two_instance.sh
 ```
@@ -163,28 +164,29 @@ kernel enforces.
 | VPN          | `compose.vpn.yml`          | qBittorrent inside a gluetun namespace. A genuinely different topology: qBittorrent has no network or DNS name of its own, so its address is `http://gluetun:8080` and its ports are published by gluetun. The run asserts `qbittorrent:8080` does _not_ resolve. A WireGuard server inside the stack terminates a real tunnel that goes nowhere, so the suite needs no subscription and no egress; keys in `docker/wireguard/wg0.conf` are committed on purpose. The compose file's header and `wg0.conf` explain the rest, including the in-tunnel listener gluetun's health check needs. |
 | Transmission | `compose.transmission.yml` | Seeds through Transmission. Credentials given up front by compose; it always verifies on add.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | rTorrent     | `compose.rtorrent.yml`     | Seeds through `crazymax/rtorrent-rutorrent`, which bundles rTorrent, ruTorrent, and an nginx proxy answering HTTP XML-RPC over rTorrent's SCGI socket. No `.htpasswd`, so Basic Auth is off and the configured credentials are placeholders. Exists because `sharerr-rtorrent`'s unit tests run against a hand-mocked server, which proves the crate parses what it _expects_, not what a real rTorrent sends.                                                                                                                                                                              |
+| Deluge       | `compose.deluge.yml`       | Seeds through Deluge with the image's defaults: the web UI's stock password, no daemon attached, the Label plugin off. Exists for the same reason as the rTorrent stack: `sharerr-deluge`'s unit tests run against a hand-mocked server.                                                                                                                                                                                                                                                                                                                                                    |
 | Two-instance | `compose.two-instance.yml` | Two sharerr + Radarr + qBittorrent stacks wired together as friends, plus a Prowlarr. [Below](#the-two-instance-stack).                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Mesh         | `compose.mesh.yml`         | Three independent sharerr nodes and one independent lighthouse — no *arr app, no torrent client. Proves the gossip/reconnection mesh instead of the media path. [Below](#the-mesh-stack).                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 Every stack asserts the same thing about the tracker: built torrents carry
 an announce URL from sharerr's own tracker, regardless of `torrent_backend`.
-How the three clients differ is tabulated in
+How the clients differ is tabulated in
 [`docs/COMPATIBILITY.md`](../docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## Ports
 
-All bound to `127.0.0.1`. Each stack takes its own leading digit so any
+All bound to `127.0.0.1`. Each stack takes its own leading digits so any
 combination can run at once.
 
-| Service              | Plain                                                            | VPN                 | Transmission | rTorrent                           | Two-instance A | Two-instance B |
-| -------------------- | ---------------------------------------------------------------- | ------------------- | ------------ | ---------------------------------- | -------------- | -------------- |
-| Sonarr               | 18989                                                            | 28989               | 38989        | 48989                              |                |                |
-| Radarr               | 17878                                                            | 27878               | 37878        | 47878                              | 58878          | 59878          |
-| Lidarr               | 18686                                                            |                     |              |                                    |                |                |
-| Readarr              | 18787                                                            |                     |              |                                    |                |                |
-| Torrent client WebUI | 18080                                                            | 28080 (via gluetun) | 39091        | 48080 (ruTorrent), 48000 (XML-RPC) | 58080          | 59080          |
-| Prowlarr             | 19696 (opt-in, [above](#exercising-the-indexer-and-the-tracker)) |                     |              |                                    |                | 59696          |
-| sharerr              | 18477                                                            | 28477               | 38477        | 48477                              | 58477          | 59477          |
+| Service              | Plain                                                            | VPN                 | Transmission | rTorrent                           | Deluge | Two-instance A | Two-instance B |
+| -------------------- | ---------------------------------------------------------------- | ------------------- | ------------ | ---------------------------------- | ------ | -------------- | -------------- |
+| Sonarr               | 18989                                                            | 28989               | 38989        | 48989                              | 57989  |                |                |
+| Radarr               | 17878                                                            | 27878               | 37878        | 47878                              | 57878  | 58878          | 59878          |
+| Lidarr               | 18686                                                            |                     |              |                                    |        |                |                |
+| Readarr              | 18787                                                            |                     |              |                                    |        |                |                |
+| Torrent client WebUI | 18080                                                            | 28080 (via gluetun) | 39091        | 48080 (ruTorrent), 48000 (XML-RPC) | 57112  | 58080          | 59080          |
+| Prowlarr             | 19696 (opt-in, [above](#exercising-the-indexer-and-the-tracker)) |                     |              |                                    |        |                | 59696          |
+| sharerr              | 18477                                                            | 28477               | 38477        | 48477                              | 57477  | 58477          | 59477          |
 
 sharerr's port doubles as the tracker: friends announce to it directly, so
 in a real deployment it has to be reachable from outside the container.
@@ -276,6 +278,7 @@ docker compose -f docker/compose.test.yml --profile indexer down -v && rm -rf do
 docker compose -f docker/compose.vpn.yml down -v          && rm -rf docker/state-vpn
 docker compose -f docker/compose.transmission.yml down -v && rm -rf docker/state-tm
 docker compose -f docker/compose.rtorrent.yml down -v     && rm -rf docker/state-rt
+docker compose -f docker/compose.deluge.yml down -v       && rm -rf docker/state-dl
 docker compose -f docker/compose.two-instance.yml down -v && rm -rf docker/state-two-instance
 docker compose -f docker/compose.mesh.yml down -v         && rm -rf docker/state-mesh
 ```

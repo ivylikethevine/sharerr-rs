@@ -251,6 +251,34 @@ async fn save_transmission_writes_url_username_and_label_to_the_config_file() {
     assert!(written.contains(r#"label = "shared""#), "{written}");
 }
 
+/// Deluge's web UI has no accounts, so a stray `username` must not reach a
+/// `[deluge]` table whose `deny_unknown_fields` would then refuse to load.
+#[tokio::test]
+async fn save_deluge_writes_url_and_label_and_never_a_username() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let config_path = serve.config_path().to_path_buf();
+    let state = web_state(serve);
+
+    let response = save_deluge(
+        State(state),
+        Query(NextQuery::default()),
+        Form(RpcClientForm {
+            url: "deluge:8112".to_owned(),
+            username: "sam".to_owned(),
+            password: String::new(),
+            clear_password: None,
+            label: "shared".to_owned(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), axum::http::StatusCode::SEE_OTHER);
+    let written = std::fs::read_to_string(&config_path).expect("save_deluge writes the file");
+    assert!(written.contains("http://deluge:8112/"), "{written}");
+    assert!(written.contains(r#"label = "shared""#), "{written}");
+    assert!(!written.contains("username"), "{written}");
+}
+
 // Same race as `save_arr_rejects_when_the_vault_will_not_open_...` above —
 // `Jail`-wrapped so no other Jail test's `SHARERR_MASTER_KEY` can be live
 // while this one relies on it being absent.
@@ -427,7 +455,7 @@ async fn save_torrent_backend_rejects_a_value_that_is_not_a_known_client() {
         State(state),
         Query(NextQuery::default()),
         Form(TorrentBackendForm {
-            backend: "deluge".to_owned(),
+            backend: "vuze".to_owned(),
         }),
     )
     .await;
@@ -1472,10 +1500,12 @@ async fn save_notifications_writes_the_heartbeat_interval_and_new_triggers() {
             kind: "generic".to_owned(),
             peer_quiet_secs: "3600".to_owned(),
             heartbeat_secs: "120".to_owned(),
-            trigger_heartbeat: Some("1".to_owned()),
-            trigger_library_unreadable: Some("1".to_owned()),
-            trigger_torrent_interrupted: Some("1".to_owned()),
-            trigger_file_changed: Some("1".to_owned()),
+            triggers: vec![
+                "heartbeat".to_owned(),
+                "library_unreadable".to_owned(),
+                "torrent_interrupted".to_owned(),
+                "file_changed".to_owned(),
+            ],
             ..Default::default()
         }),
     )
@@ -1681,11 +1711,13 @@ fn export_config_serves_the_effective_config_as_a_downloadable_attachment() {
             assert_eq!(response.status(), axum::http::StatusCode::OK);
             let headers = response.headers().clone();
             assert_eq!(
-                headers.get(header::CONTENT_TYPE).unwrap(),
+                headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
                 "application/toml"
             );
             assert_eq!(
-                headers.get(header::CONTENT_DISPOSITION).unwrap(),
+                headers
+                    .get(axum::http::header::CONTENT_DISPOSITION)
+                    .unwrap(),
                 "attachment; filename=\"sharerr-config.toml\""
             );
 

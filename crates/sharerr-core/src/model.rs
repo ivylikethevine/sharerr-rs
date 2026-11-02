@@ -36,26 +36,6 @@ crate::str_enum!(
 );
 
 impl MediaSource {
-    /// Which version of the *arr HTTP API this app speaks.
-    ///
-    /// Not cosmetic: Sonarr, Radarr and Whisparr are on `v3` while Lidarr and
-    /// Readarr are on `v1`. Hardcoding one prefix is why the client could only ever
-    /// have talked to the first two, and getting it wrong presents as a 404 that
-    /// looks like a wrong URL rather than a wrong version. The arr client matches
-    /// on the source itself rather than this string when building its prefix;
-    /// this is the one place the split is stated for everything else.
-    pub fn api_version(self) -> &'static str {
-        match self {
-            Self::Sonarr | Self::Radarr | Self::Whisparr => "v3",
-            Self::Lidarr | Self::Readarr => "v1",
-            // Directory does not speak the *arr API; only `ArrClient` reads
-            // this, and one is never built for it. The arm exists because the
-            // function is total, and panicking here would let a future caller
-            // take the whole process down over a label.
-            Self::Directory => "none",
-        }
-    }
-
     /// The sources whose items are admitted to a narrow peer scope by the
     /// declared kind in their spec rather than by which app produced them —
     /// because a directory has no single kind: it is whatever the operator
@@ -169,9 +149,25 @@ pub struct MediaMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_sample_rate: Option<String>,
     /// Bits per sample, e.g. `16` or `24`. Absent for a lossy codec, which has no
-    /// bit depth to report — see [`Self::is_lossless`].
+    /// bit depth to report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_bit_depth: Option<String>,
+}
+
+/// The standard resolution a frame sits on, as its height and scene name.
+fn rung(width: u32, height: u32) -> Option<(u32, &'static str)> {
+    const LADDER: [(u32, u32, &str); 6] = [
+        (7680, 4320, "4320p"),
+        (3840, 2160, "2160p"),
+        (1920, 1080, "1080p"),
+        (1280, 720, "720p"),
+        (720, 576, "576p"),
+        (720, 480, "480p"),
+    ];
+    LADDER
+        .iter()
+        .find(|(w, h, _)| width == *w || height == *h)
+        .map(|(_, h, name)| (*h, *name))
 }
 
 impl MediaMeta {
@@ -194,18 +190,15 @@ impl MediaMeta {
     /// first and falls back to height.
     pub fn scene_resolution(&self) -> Option<&'static str> {
         let (width, height) = self.dimensions()?;
-        let ladder = [
-            (7680, 4320, "4320p"),
-            (3840, 2160, "2160p"),
-            (1920, 1080, "1080p"),
-            (1280, 720, "720p"),
-            (720, 576, "576p"),
-            (720, 480, "480p"),
-        ];
-        ladder
-            .iter()
-            .find(|(w, h, _)| width == *w || height == *h)
-            .map(|(_, _, name)| *name)
+        Some(rung(width, height)?.1)
+    }
+
+    /// The height a resolution cap compares: the ladder's, so a cropped 1920x816
+    /// film counts as the 1080p everyone calls it, or the file's own off the
+    /// ladder.
+    pub fn nominal_height(&self) -> Option<u32> {
+        let (width, height) = self.dimensions()?;
+        Some(rung(width, height).map_or(height, |(ladder, _)| ladder))
     }
 
     /// [`Self::resolution`] split into numbers, when it has the expected shape.
@@ -259,20 +252,10 @@ impl MediaMeta {
     /// token far more strictly than a video one is: a Lidarr quality profile
     /// distinguishes FLAC from MP3 and nothing else in the name substitutes.
     pub fn scene_audio_format(&self) -> Option<&'static str> {
-        Self::audio_format(self.audio_codec.as_deref()?).map(|(token, _)| token)
+        Self::audio_format(self.audio_codec.as_deref()?)
     }
 
-    /// Whether the audio is stored losslessly, when the codec says so.
-    ///
-    /// Derived from [`Self::audio_codec`] rather than stored beside it: a stored
-    /// flag can end up contradicting the codec it sits next to, and no producer
-    /// this project reads reports the two independently anyway.
-    pub fn is_lossless(&self) -> Option<bool> {
-        Self::audio_format(self.audio_codec.as_deref()?).map(|(_, lossless)| lossless)
-    }
-
-    /// One lookup behind [`Self::scene_audio_format`] and [`Self::is_lossless`], so
-    /// the token and the lossless flag cannot disagree about the same codec.
+    /// The lookup behind [`Self::scene_audio_format`].
     ///
     /// Matching is `contains` over the codec with separators stripped, because the
     /// same codec arrives spelled several ways: `A_AC3` from a Matroska header,
@@ -280,36 +263,36 @@ impl MediaMeta {
     /// bearing — a needle that is a substring of another codec's name must be
     /// tried after it, which is why `eac3` precedes `ac3` and `wavpack` precedes
     /// `wav`.
-    fn audio_format(codec: &str) -> Option<(&'static str, bool)> {
+    fn audio_format(codec: &str) -> Option<&'static str> {
         let raw: String = codec
             .chars()
             .filter(char::is_ascii_alphanumeric)
             .map(|c| c.to_ascii_lowercase())
             .collect();
-        for (needle, token, lossless) in [
-            ("wavpack", "WV", true),
-            ("truehd", "TrueHD", true),
-            ("dtshd", "DTS-HD", true),
-            ("flac", "FLAC", true),
-            ("alac", "ALAC", true),
-            ("eac3", "EAC3", false),
-            ("ac3", "AC3", false),
-            ("dts", "DTS", false),
-            ("mp3", "MP3", false),
+        for (needle, token) in [
+            ("wavpack", "WV"),
+            ("truehd", "TrueHD"),
+            ("dtshd", "DTS-HD"),
+            ("flac", "FLAC"),
+            ("alac", "ALAC"),
+            ("eac3", "EAC3"),
+            ("ac3", "AC3"),
+            ("dts", "DTS"),
+            ("mp3", "MP3"),
             // `A_MPEG/L3` from a Matroska header, `MPEG Audio (Layer 3)` from
             // MediaInfo — the same codec, and neither spelling contains `mp3`.
-            ("mpegl3", "MP3", false),
-            ("layer3", "MP3", false),
-            ("aac", "AAC", false),
-            ("opus", "OPUS", false),
-            ("vorbis", "VORBIS", false),
-            ("wma", "WMA", false),
-            ("ape", "APE", true),
-            ("pcm", "PCM", true),
-            ("wav", "WAV", true),
+            ("mpegl3", "MP3"),
+            ("layer3", "MP3"),
+            ("aac", "AAC"),
+            ("opus", "OPUS"),
+            ("vorbis", "VORBIS"),
+            ("wma", "WMA"),
+            ("ape", "APE"),
+            ("pcm", "PCM"),
+            ("wav", "WAV"),
         ] {
             if raw.contains(needle) {
-                return Some((token, lossless));
+                return Some(token);
             }
         }
         None
@@ -702,6 +685,14 @@ mod tests {
     /// Off-ladder yields nothing rather than an invented token: `816p` in a
     /// release title communicates nothing a parser on the far end can use.
     #[test]
+    fn nominal_height_is_the_ladders_and_otherwise_the_files_own() {
+        assert_eq!(meta("1920x816", "").nominal_height(), Some(1080));
+        assert_eq!(meta("1024x768", "").nominal_height(), Some(768));
+        assert_eq!(meta("garbage", "").nominal_height(), None);
+        assert_eq!(MediaMeta::default().nominal_height(), None);
+    }
+
+    #[test]
     fn an_off_ladder_resolution_is_not_named() {
         assert_eq!(meta("1024x768", "").scene_resolution(), None);
         assert_eq!(meta("garbage", "").scene_resolution(), None);
@@ -762,27 +753,26 @@ mod tests {
     /// music release turns on.
     #[test]
     fn audio_codecs_reduce_to_the_token_a_release_uses() {
-        for (reported, token, lossless) in [
-            ("FLAC", "FLAC", true),
-            ("flac", "FLAC", true),
-            ("A_FLAC", "FLAC", true),
-            ("ALAC", "ALAC", true),
-            ("MP3", "MP3", false),
-            ("MPEG Audio (Layer 3)", "MP3", false),
-            ("A_MPEG/L3", "MP3", false),
-            ("AAC", "AAC", false),
-            ("Opus", "OPUS", false),
-            ("Vorbis", "VORBIS", false),
-            ("WavPack", "WV", true),
-            ("TrueHD", "TrueHD", true),
-            ("DTS-HD MA", "DTS-HD", true),
+        for (reported, token) in [
+            ("FLAC", "FLAC"),
+            ("flac", "FLAC"),
+            ("A_FLAC", "FLAC"),
+            ("ALAC", "ALAC"),
+            ("MP3", "MP3"),
+            ("MPEG Audio (Layer 3)", "MP3"),
+            ("A_MPEG/L3", "MP3"),
+            ("AAC", "AAC"),
+            ("Opus", "OPUS"),
+            ("Vorbis", "VORBIS"),
+            ("WavPack", "WV"),
+            ("TrueHD", "TrueHD"),
+            ("DTS-HD MA", "DTS-HD"),
         ] {
             let meta = MediaMeta {
                 audio_codec: Some(reported.to_owned()),
                 ..MediaMeta::default()
             };
             assert_eq!(meta.scene_audio_format(), Some(token), "{reported}");
-            assert_eq!(meta.is_lossless(), Some(lossless), "{reported}");
         }
     }
 
@@ -814,8 +804,6 @@ mod tests {
             ..MediaMeta::default()
         };
         assert_eq!(meta.scene_audio_format(), None);
-        assert_eq!(meta.is_lossless(), None);
-        assert_eq!(MediaMeta::default().is_lossless(), None);
     }
 
     #[test]
@@ -913,16 +901,6 @@ mod tests {
         assert!(MediaSource::Readarr.has_coarse_tagging());
         assert!(!MediaSource::Radarr.has_coarse_tagging());
         assert!(!MediaSource::Directory.has_coarse_tagging());
-    }
-
-    #[test]
-    fn api_version_matches_the_arr_app() {
-        assert_eq!(MediaSource::Sonarr.api_version(), "v3");
-        assert_eq!(MediaSource::Radarr.api_version(), "v3");
-        assert_eq!(MediaSource::Whisparr.api_version(), "v3");
-        assert_eq!(MediaSource::Lidarr.api_version(), "v1");
-        assert_eq!(MediaSource::Readarr.api_version(), "v1");
-        assert_eq!(MediaSource::Directory.api_version(), "none");
     }
 
     fn episode() -> MediaSpec {

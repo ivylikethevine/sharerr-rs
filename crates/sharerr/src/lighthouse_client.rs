@@ -42,7 +42,7 @@ use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::{join_path, now_epoch};
 use sharerr_lighthouse::EndpointRecord as LighthouseRecord;
-use sharerr_store::{EndpointKind, ObservedVia, Peer, Store, Vault};
+use sharerr_store::{ObservedVia, Peer, Store, Vault};
 use url::Url;
 
 use crate::gossip;
@@ -419,23 +419,8 @@ async fn lookup_one(
 }
 
 async fn apply_lookup(store: &Store, peer_id: i64, record: &LighthouseRecord) {
-    for endpoint in &record.endpoints {
-        let Some(kind) = EndpointKind::parse(&endpoint.kind) else {
-            continue;
-        };
-        if let Err(err) = store
-            .record_peer_endpoint(
-                peer_id,
-                kind,
-                &endpoint.addr,
-                Some(endpoint.observed_at),
-                ObservedVia::Lighthouse,
-            )
-            .await
-        {
-            tracing::warn!(error = %err, "could not record a lighthouse-observed endpoint");
-        }
-    }
+    crate::gossip::record_endpoints(store, peer_id, &record.endpoints, ObservedVia::Lighthouse)
+        .await;
 }
 
 #[cfg(test)]
@@ -749,7 +734,12 @@ mod tests {
         )
         .await;
 
-        let endpoints = store.peer_endpoints(peer.id).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer.id])
+            .await
+            .unwrap()
+            .remove(&peer.id)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].addr, "http://203.0.113.9:41234");
         assert_eq!(endpoints[0].via, ObservedVia::Lighthouse);
@@ -788,7 +778,15 @@ mod tests {
         )
         .await;
 
-        assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
+        assert!(
+            store
+                .peer_endpoints_for(&[peer.id])
+                .await
+                .unwrap()
+                .remove(&peer.id)
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -829,7 +827,13 @@ mod tests {
         .await;
 
         assert!(
-            store.peer_endpoints(peer.id).await.unwrap().is_empty(),
+            store
+                .peer_endpoints_for(&[peer.id])
+                .await
+                .unwrap()
+                .remove(&peer.id)
+                .unwrap_or_default()
+                .is_empty(),
             "no known pubkey means nothing to verify a result against"
         );
     }
@@ -1001,7 +1005,15 @@ mod tests {
         )
         .await;
 
-        assert!(store.peer_endpoints(peer.id).await.unwrap().is_empty());
+        assert!(
+            store
+                .peer_endpoints_for(&[peer.id])
+                .await
+                .unwrap()
+                .remove(&peer.id)
+                .unwrap_or_default()
+                .is_empty()
+        );
         assert!(status.snapshot().await.last_recovery_at.is_none());
     }
 

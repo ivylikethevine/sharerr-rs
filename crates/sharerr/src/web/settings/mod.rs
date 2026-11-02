@@ -24,7 +24,6 @@
 use std::collections::BTreeSet;
 
 use axum::extract::{Query, State};
-use axum::http::header;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use secrecy::{ExposeSecret, SecretString};
@@ -246,18 +245,8 @@ pub struct NotificationsForm {
     heartbeat_url: String,
     clear_heartbeat_url: Option<String>,
     heartbeat_secs: String,
-    trigger_sync_failed: Option<String>,
-    trigger_peer_quiet: Option<String>,
-    trigger_endpoint_rotated: Option<String>,
-    trigger_items_shared: Option<String>,
-    trigger_item_failed: Option<String>,
-    trigger_peer_revoked: Option<String>,
-    trigger_peer_first_contact: Option<String>,
-    trigger_tracker_unreachable: Option<String>,
-    trigger_library_unreadable: Option<String>,
-    trigger_torrent_interrupted: Option<String>,
-    trigger_file_changed: Option<String>,
-    trigger_heartbeat: Option<String>,
+    /// The checked boxes, one [`sharerr_core::config::NotificationTrigger`] name per value.
+    triggers: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -430,8 +419,17 @@ pub async fn save_rtorrent(
     save_rpc_client(&state, next.next, form, TorrentBackend::Rtorrent).await
 }
 
-/// The save both RPC-style clients share — only the config paths, the vault
-/// key and the wording of the missing-URL error differ between them.
+pub async fn save_deluge(
+    State(state): State<WebState>,
+    Query(next): Query<NextQuery>,
+    Form(form): Form<RpcClientForm>,
+) -> Response {
+    save_rpc_client(&state, next.next, form, TorrentBackend::Deluge).await
+}
+
+/// The save the RPC-style clients share — only the config paths, the vault
+/// key and the wording of the missing-URL error differ between them. Deluge's
+/// web UI has no accounts, so it has no username path and its form no field.
 async fn save_rpc_client(
     state: &WebState,
     next: Option<String>,
@@ -442,7 +440,7 @@ async fn save_rpc_client(
         TorrentBackend::Transmission => (
             "transmission",
             config_paths::TRANSMISSION_URL,
-            config_paths::TRANSMISSION_USERNAME,
+            Some(config_paths::TRANSMISSION_USERNAME),
             config_paths::TRANSMISSION_LABEL,
             secret_keys::TRANSMISSION_PASSWORD,
             "Transmission's URL is required — sharerr cannot seed without it",
@@ -450,11 +448,19 @@ async fn save_rpc_client(
         TorrentBackend::Rtorrent => (
             "rtorrent",
             config_paths::RTORRENT_URL,
-            config_paths::RTORRENT_USERNAME,
+            Some(config_paths::RTORRENT_USERNAME),
             config_paths::RTORRENT_LABEL,
             secret_keys::RTORRENT_PASSWORD,
             "rTorrent's URL is required — sharerr cannot seed without it. This is the \
              exact XML-RPC endpoint your reverse proxy answers on, not a base address.",
+        ),
+        TorrentBackend::Deluge => (
+            "deluge",
+            config_paths::DELUGE_URL,
+            None,
+            config_paths::DELUGE_LABEL,
+            secret_keys::DELUGE_PASSWORD,
+            "Deluge's URL is required — sharerr cannot seed without it",
         ),
         TorrentBackend::Qbittorrent => {
             return reject(state, "There is no such service to configure.").await;
@@ -476,9 +482,11 @@ async fn save_rpc_client(
                 // touched (locked, or no master key yet) and should fall back to
                 // the compiled default, not store a literal empty username/label —
                 // same reasoning as qBittorrent's category and tag above.
-                Edit::str_or_unset(username_path, form.username.trim()),
                 Edit::str_or_unset(label_path, form.label.trim()),
             ]);
+            if let Some(username_path) = username_path {
+                file.apply([Edit::str_or_unset(username_path, form.username.trim())]);
+            }
             Ok(())
         },
         password_key,
@@ -626,6 +634,7 @@ pub struct SeedingForm {
     /// A checkbox: present (any value) when checked, absent when not — see
     /// `CLAUDE.md`'s note on why every field here needs `#[serde(default)]`.
     private: Option<String>,
+    sidecars: Option<String>,
     magnet_links: Option<String>,
     quiet_hours: String,
     quiet_upload_limit_kib: String,
@@ -694,6 +703,7 @@ pub async fn save_seeding(
         },
     };
     let private = form.private.is_some();
+    let sidecars = form.sidecars.is_some();
     let magnet_links = form.magnet_links.is_some();
 
     write_config(&state, "seeding", None, move |file| {
@@ -723,6 +733,7 @@ pub async fn save_seeding(
                 None => Edit::unset(config_paths::SEEDING_RATIO_LIMIT),
             },
             Edit::bool(config_paths::SEEDING_PRIVATE, private),
+            Edit::bool(config_paths::SEEDING_SIDECARS, sidecars),
             Edit::bool(config_paths::FEED_MAGNET_LINKS, magnet_links),
         ]);
         Ok(())
@@ -877,7 +888,7 @@ pub async fn save_notifications(
         },
     };
 
-    if let Err(message) = apply_secret(
+    let heartbeat_changed = match apply_secret(
         &state,
         secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
         heartbeat,
@@ -885,10 +896,11 @@ pub async fn save_notifications(
     )
     .await
     {
-        return reject(&state, &message).await;
-    }
+        Ok(changed) => changed,
+        Err(message) => return reject(&state, &message).await,
+    };
 
-    write_config_and_secret(
+    let response = write_config_and_secret(
         &state,
         "notifications",
         None,
@@ -912,42 +924,15 @@ pub async fn save_notifications(
                 )]);
             }
 
-            use sharerr_core::config::NotificationTrigger as Trigger;
-            let selected: Vec<&'static str> = [
-                (form.trigger_sync_failed.is_some(), Trigger::SyncFailed),
-                (form.trigger_peer_quiet.is_some(), Trigger::PeerQuiet),
-                (
-                    form.trigger_endpoint_rotated.is_some(),
-                    Trigger::EndpointRotated,
-                ),
-                (form.trigger_items_shared.is_some(), Trigger::ItemsShared),
-                (form.trigger_item_failed.is_some(), Trigger::ItemFailed),
-                (form.trigger_peer_revoked.is_some(), Trigger::PeerRevoked),
-                (
-                    form.trigger_peer_first_contact.is_some(),
-                    Trigger::PeerFirstContact,
-                ),
-                (
-                    form.trigger_tracker_unreachable.is_some(),
-                    Trigger::TrackerUnreachable,
-                ),
-                (
-                    form.trigger_library_unreadable.is_some(),
-                    Trigger::LibraryUnreadable,
-                ),
-                (
-                    form.trigger_torrent_interrupted.is_some(),
-                    Trigger::TorrentInterrupted,
-                ),
-                (form.trigger_file_changed.is_some(), Trigger::FileChanged),
-                (form.trigger_heartbeat.is_some(), Trigger::Heartbeat),
-            ]
-            .into_iter()
-            .filter_map(|(checked, trigger)| checked.then_some(trigger.as_str()))
-            .collect();
+            let selected = sharerr_core::config::NotificationTrigger::ALL
+                .iter()
+                .map(|trigger| trigger.as_str())
+                .filter(|name| form.triggers.iter().any(|checked| checked == name))
+                .map(str::to_owned)
+                .collect();
             file.apply([Edit::str_list(
                 config_paths::NOTIFICATIONS_TRIGGERS,
-                selected.into_iter().map(str::to_owned).collect(),
+                selected,
             )]);
             Ok(())
         },
@@ -955,7 +940,9 @@ pub async fn save_notifications(
         webhook,
         form.clear_webhook_url.is_some(),
     )
-    .await
+    .await;
+    invalidate_unless_committed(&state, heartbeat_changed, response.status()).await;
+    response
 }
 
 /// `/metrics` and the dashboard-widget endpoint. Same two-write shape as
@@ -1024,17 +1011,7 @@ pub async fn export_config(State(state): State<WebState>) -> Response {
         Err(err) => return reject(&state, &format!("could not export the config: {err}")).await,
     };
 
-    (
-        [
-            (header::CONTENT_TYPE, "application/toml".to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"sharerr-config.toml\"".to_owned(),
-            ),
-        ],
-        text,
-    )
-        .into_response()
+    super::toml_download("sharerr-config.toml", text)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1202,11 +1179,27 @@ where
         Err(message) => return reject(state, &message).await,
     };
 
-    if let Err(message) = apply_secret(state, key, value, clear).await {
-        return reject(state, &message).await;
-    }
+    let changed = match apply_secret(state, key, value, clear).await {
+        Ok(changed) => changed,
+        Err(message) => return reject(state, &message).await,
+    };
 
-    commit_config(state, section, next, pending).await
+    let response = commit_config(state, section, next, pending).await;
+    invalidate_unless_committed(state, changed, response.status()).await;
+    response
+}
+
+/// A changed credential is worthless until the syncer is rebuilt with it. A commit
+/// does that once it holds the new config, so only a save that stored a secret and
+/// then failed still has to.
+async fn invalidate_unless_committed(
+    state: &WebState,
+    changed: bool,
+    status: axum::http::StatusCode,
+) {
+    if changed && !status.is_redirection() {
+        state.serve.invalidate("a credential changed").await;
+    }
 }
 
 /// An edited, validated `sharerr.toml` that has not been written yet.
@@ -1336,16 +1329,20 @@ async fn replacement_for(state: &WebState, path: &std::path::Path) -> ConfigFile
 ///
 /// `clear` is the explicit checkbox — an HTML checkbox submits nothing at all
 /// when unticked, so callers pass `field.is_some()`.
+///
+/// Returns whether the vault changed, for [`invalidate_unless_committed`]: this does
+/// not drop the syncer itself, which would wake the loop to rebuild against the old
+/// config while the save is still in progress.
 async fn apply_secret(
     state: &WebState,
     key: &'static str,
     value: &str,
     clear: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let value = value.trim().to_owned();
 
     if !clear && value.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut vault = state.serve.open_vault().await?;
@@ -1362,11 +1359,7 @@ async fn apply_secret(
         tracing::info!(key, "secret stored through the web ui");
     }
 
-    // A changed credential is worthless until the syncer is rebuilt with it —
-    // `ensure_ready` caches the first syncer that works and would otherwise keep
-    // authenticating with the old value.
-    state.serve.invalidate("a credential changed").await;
-    Ok(())
+    Ok(true)
 }
 
 /// The vault-mutation core of a rotation, over a plain `&mut Vault` rather
@@ -1530,6 +1523,20 @@ fn unselected_client_configured(config: &Config, is_set: &impl Fn(&str) -> bool)
             client.primary_credential.is_some_and(is_set)
                 || client.fallback_credential.is_some_and(is_set)
         })
+}
+
+/// Every notification trigger as a checkbox, ticked when in `selected`.
+pub(crate) fn trigger_rows(
+    selected: &[sharerr_core::config::NotificationTrigger],
+) -> Vec<crate::web::templates::TriggerRow> {
+    sharerr_core::config::NotificationTrigger::ALL
+        .iter()
+        .map(|trigger| crate::web::templates::TriggerRow {
+            value: trigger.as_str(),
+            prompt: trigger.prompt(),
+            checked: selected.contains(trigger),
+        })
+        .collect()
 }
 
 /// An unset URL renders as an empty field, not `None`.
@@ -1764,6 +1771,10 @@ async fn build_page(
         rtorrent_password_set: is_set(secret_keys::RTORRENT_PASSWORD),
         rtorrent_label: config.rtorrent.label.clone(),
 
+        deluge_url: config.deluge.url.to_string(),
+        deluge_password_set: is_set(secret_keys::DELUGE_PASSWORD),
+        deluge_label: config.deluge.label.clone(),
+
         seeding_upload_limit_kib: config
             .seeding
             .upload_limit_kib
@@ -1785,6 +1796,7 @@ async fn build_page(
             .map(|kib| kib.to_string())
             .unwrap_or_default(),
         seeding_private: config.seeding.private,
+        seeding_sidecars: config.seeding.sidecars,
         feed_magnet_links: config.feed.magnet_links,
 
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
@@ -1841,54 +1853,7 @@ async fn build_page(
         notifications_webhook_set: is_set(secret_keys::NOTIFICATIONS_WEBHOOK_URL),
         notifications_kind: config.notifications.kind.as_str(),
         notifications_peer_quiet_secs: config.notifications.peer_quiet_secs,
-        notifications_trigger_sync_failed: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::SyncFailed),
-        notifications_trigger_peer_quiet: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::PeerQuiet),
-        notifications_trigger_endpoint_rotated: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::EndpointRotated),
-        notifications_trigger_items_shared: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::ItemsShared),
-        notifications_trigger_item_failed: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::ItemFailed),
-        notifications_trigger_peer_revoked: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::PeerRevoked),
-        notifications_trigger_peer_first_contact: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::PeerFirstContact),
-        notifications_trigger_tracker_unreachable: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::TrackerUnreachable),
-        notifications_trigger_library_unreadable: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::LibraryUnreadable),
-        notifications_trigger_torrent_interrupted: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::TorrentInterrupted),
-        notifications_trigger_file_changed: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::FileChanged),
-        notifications_trigger_heartbeat: config
-            .notifications
-            .triggers
-            .contains(&sharerr_core::config::NotificationTrigger::Heartbeat),
+        notification_triggers: trigger_rows(&config.notifications.triggers),
         notifications_heartbeat_set: is_set(secret_keys::NOTIFICATIONS_HEARTBEAT_URL),
         notifications_heartbeat_secs: config.notifications.heartbeat_secs,
 

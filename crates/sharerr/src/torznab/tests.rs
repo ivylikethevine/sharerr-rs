@@ -339,9 +339,15 @@ async fn the_download_base_tracks_the_live_endpoint_not_localhost() {
         .endpoint()
         .observe(url::Url::parse("http://203.0.113.9:41234/").unwrap());
 
-    let matched = collect(&state, &SearchQuery::default(), PeerScope::All, "sam-key")
-        .await
-        .unwrap();
+    let matched = collect(
+        &state,
+        &SearchQuery::default(),
+        PeerScope::All,
+        &sharerr_store::PeerLimits::default(),
+        "sam-key",
+    )
+    .await
+    .unwrap();
 
     assert_eq!(matched.base, "http://203.0.113.9:41234");
 }
@@ -1324,7 +1330,15 @@ async fn an_unknown_function_is_a_torznab_error_not_a_404() {
 #[tokio::test]
 async fn collect_reports_an_unready_store_and_a_release_without_a_torrent_has_no_magnet() {
     let (_dir, state) = crate::state::fixtures::store_unopenable();
-    let Err(err) = collect(&state, &SearchQuery::default(), PeerScope::All, "fp").await else {
+    let Err(err) = collect(
+        &state,
+        &SearchQuery::default(),
+        PeerScope::All,
+        &sharerr_store::PeerLimits::default(),
+        "fp",
+    )
+    .await
+    else {
         panic!("a store that will not open cannot answer a search");
     };
     assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
@@ -1337,9 +1351,15 @@ async fn collect_reports_an_unready_store_and_a_release_without_a_torrent_has_no
     item.state = ShareState::Seeding;
     item.private = false;
     store.upsert(&item).await.unwrap();
-    let matched = collect(&state, &SearchQuery::default(), PeerScope::All, "fp")
-        .await
-        .unwrap();
+    let matched = collect(
+        &state,
+        &SearchQuery::default(),
+        PeerScope::All,
+        &sharerr_store::PeerLimits::default(),
+        "fp",
+    )
+    .await
+    .unwrap();
     assert_eq!(matched.items.len(), 1);
     assert!(matched.magnet_url(&matched.items[0]).starts_with("magnet:"));
     // A release the store lists but whose torrent is not built yet has
@@ -1376,8 +1396,14 @@ async fn a_store_that_stops_answering_is_a_503_on_auth_and_a_500_on_search() {
         caps_with_key(&state, Some("sam-key")).await,
         StatusCode::SERVICE_UNAVAILABLE
     );
-    let Err((status, reason)) =
-        collect(&state, &SearchQuery::default(), PeerScope::All, "token").await
+    let Err((status, reason)) = collect(
+        &state,
+        &SearchQuery::default(),
+        PeerScope::All,
+        &sharerr_store::PeerLimits::default(),
+        "token",
+    )
+    .await
     else {
         panic!("a closed store cannot answer a search");
     };
@@ -1385,8 +1411,14 @@ async fn a_store_that_stops_answering_is_a_503_on_auth_and_a_500_on_search() {
     assert!(reason.contains("could not read"), "{reason}");
 
     let (_dir, state) = crate::state::fixtures::store_unopenable();
-    let Err((status, reason)) =
-        collect(&state, &SearchQuery::default(), PeerScope::All, "token").await
+    let Err((status, reason)) = collect(
+        &state,
+        &SearchQuery::default(),
+        PeerScope::All,
+        &sharerr_store::PeerLimits::default(),
+        "token",
+    )
+    .await
     else {
         panic!("an unopenable store cannot answer a search");
     };

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sysinfo::{Disks, System};
+use sysinfo::{Disk, Disks, System};
 
 use crate::state::ServeState;
 
@@ -56,9 +56,20 @@ pub async fn poll_loop(state: Arc<ServeState>) {
     let status = state.system_status();
     let mut sys = System::new();
     let data_dir = state.data_dir().await;
+    // The one disk the page reports. Resolved once, off the runtime, and only that
+    // disk refreshed per sample: re-listing means re-reading the mount table and a
+    // statvfs on every mount, which a hung network mount would stall.
+    let mut disk = None;
 
     loop {
-        let snapshot = sample(&mut sys, &data_dir).await;
+        let dir = data_dir.clone();
+        let held = disk.take();
+        let refreshed = tokio::task::spawn_blocking(move || refresh_disk(held, &dir)).await;
+        disk = refreshed.unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "could not read the data directory's disk");
+            None
+        });
+        let snapshot = sample(&mut sys, disk.as_ref()).await;
         status.record(snapshot).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -67,7 +78,7 @@ pub async fn poll_loop(state: Arc<ServeState>) {
 /// One sample. Two `refresh_cpu_usage` calls a short gap apart are what
 /// sysinfo needs to report a real delta-based percentage rather than `0.0`
 /// on a single-shot read — see `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL`.
-async fn sample(sys: &mut System, data_dir: &Path) -> SystemSnapshot {
+async fn sample(sys: &mut System, disk: Option<&Disk>) -> SystemSnapshot {
     sys.refresh_cpu_usage();
     tokio::time::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL).await;
     sys.refresh_cpu_usage();
@@ -77,8 +88,11 @@ async fn sample(sys: &mut System, data_dir: &Path) -> SystemSnapshot {
     let memory_used = sys.used_memory();
     let memory_total = sys.total_memory();
 
-    let disks = Disks::new_with_refreshed_list();
-    let (disk_used, disk_total) = disk_usage_for(&disks, data_dir);
+    let (disk_used, disk_total) = disk.map_or((None, None), |disk| {
+        let total = disk.total_space();
+        let used = total.saturating_sub(disk.available_space());
+        (Some(used), Some(total))
+    });
 
     SystemSnapshot {
         cpu_percent,
@@ -110,20 +124,24 @@ pub fn format(snapshot: SystemSnapshot) -> (String, String, Option<String>) {
     (cpu_percent, memory_usage, disk_usage)
 }
 
+/// `held` brought up to date, or the disk covering `path` when there is none yet.
+/// Blocking; [`poll_loop`] runs it off the runtime.
+fn refresh_disk(held: Option<Disk>, path: &Path) -> Option<Disk> {
+    if let Some(mut disk) = held {
+        disk.refresh();
+        return Some(disk);
+    }
+    disk_covering(Vec::from(Disks::new_with_refreshed_list()), path)
+}
+
 /// The disk covering `path` — the mount point that is the longest prefix of
 /// `path` among everything sysinfo enumerated, the same "most specific mount
 /// wins" rule `/proc/mounts` itself follows. `None` if nothing matched.
-fn disk_usage_for(disks: &Disks, path: &Path) -> (Option<u64>, Option<u64>) {
+fn disk_covering(disks: Vec<Disk>, path: &Path) -> Option<Disk> {
     disks
-        .list()
-        .iter()
+        .into_iter()
         .filter(|d| path.starts_with(d.mount_point()))
         .max_by_key(|d| d.mount_point().as_os_str().len())
-        .map_or((None, None), |d| {
-            let total = d.total_space();
-            let used = total.saturating_sub(d.available_space());
-            (Some(used), Some(total))
-        })
 }
 
 #[cfg(test)]
@@ -177,7 +195,8 @@ mod tests {
     #[tokio::test]
     async fn sample_reads_real_memory_and_a_disk_covering_tmp() {
         let mut sys = System::new();
-        let snapshot = sample(&mut sys, std::env::temp_dir().as_path()).await;
+        let disk = refresh_disk(None, std::env::temp_dir().as_path());
+        let snapshot = sample(&mut sys, disk.as_ref()).await;
 
         assert!(snapshot.memory_total > 0, "a host always has some memory");
         assert!(

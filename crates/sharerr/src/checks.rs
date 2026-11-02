@@ -30,6 +30,7 @@ use sharerr_client::{ClientKind, TorrentClient};
 use sharerr_core::config::{TorrentBackend, TorrentClientConfig};
 use sharerr_core::paths::{PathResolver, ResolvedPaths};
 use sharerr_core::{Config, MediaSource};
+use sharerr_deluge::DelugeClient;
 use sharerr_qbit::QbitClient;
 use sharerr_rtorrent::RtorrentClient;
 use sharerr_transmission::TransmissionClient;
@@ -303,24 +304,7 @@ pub async fn snapshot(
         .await
     };
 
-    // Filesystem-bound, off the async loop: a container pinned to one CPU has
-    // exactly one runtime worker, and a slow mount must not stall /health and
-    // every other request for the duration of the walk.
-    let libraries_fut = async {
-        let libraries = config.library.clone();
-        tokio::task::spawn_blocking(move || {
-            libraries
-                .into_iter()
-                .map(|library| {
-                    let outcome = check_library(&library);
-                    (library, outcome)
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-    };
-
-    let (sources, libraries) = tokio::join!(sources_fut, libraries_fut);
+    let (sources, libraries) = tokio::join!(sources_fut, scan_libraries(config.library.clone()));
 
     let libraries = match libraries {
         Ok(scanned) => LibraryScan::Scanned(scanned),
@@ -463,6 +447,24 @@ impl DirOutcome {
 }
 
 /// Scan one `[[library]]` directory and establish what sharerr would share.
+pub async fn scan_libraries(
+    libraries: Vec<sharerr_core::config::LibraryConfig>,
+) -> Result<Vec<(sharerr_core::config::LibraryConfig, DirOutcome)>, tokio::task::JoinError> {
+    // Filesystem-bound, off the async loop: a container pinned to one CPU has
+    // exactly one runtime worker, and a slow mount must not stall /health and
+    // every other request for the duration of the walk.
+    tokio::task::spawn_blocking(move || {
+        libraries
+            .into_iter()
+            .map(|library| {
+                let outcome = check_library(&library);
+                (library, outcome)
+            })
+            .collect()
+    })
+    .await
+}
+
 pub fn check_library(library: &sharerr_core::config::LibraryConfig) -> DirOutcome {
     use crate::library::ScanError;
 
@@ -553,6 +555,16 @@ pub fn build_torrent_client(
             return Err(
                 "rTorrent has no API key — this authenticates with a username and password \
                  sent as HTTP Basic Auth. Clear rtorrent's API key, or select qBittorrent."
+                    .to_owned(),
+            );
+        }
+        (TorrentBackend::Deluge, TorrentCredential::Password(password)) => {
+            Arc::new(DelugeClient::new(url, password).map_err(|e| chain(&e))?)
+        }
+        (TorrentBackend::Deluge, TorrentCredential::ApiKey(_)) => {
+            return Err(
+                "Deluge has no API key — its web UI authenticates with a password. Clear \
+                 deluge's API key, or select qBittorrent."
                     .to_owned(),
             );
         }
@@ -1131,6 +1143,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("username and password"), "{err}");
+
+        let err = build_torrent_client(
+            TorrentBackend::Deluge,
+            &url,
+            None,
+            TorrentCredential::ApiKey(SecretString::from(API_KEY)),
+        )
+        .unwrap_err();
+        assert!(err.contains("password"), "{err}");
+    }
+
+    #[test]
+    fn build_torrent_client_builds_a_deluge_client_from_a_password() {
+        let url = Url::parse("http://localhost:8112").unwrap();
+        let client = build_torrent_client(
+            TorrentBackend::Deluge,
+            &url,
+            None,
+            TorrentCredential::Password(SecretString::from(
+                sharerr_testkit::secrets::fresh_password(),
+            )),
+        )
+        .unwrap();
+        assert_eq!(client.kind(), sharerr_client::ClientKind::Deluge);
     }
 
     #[test]

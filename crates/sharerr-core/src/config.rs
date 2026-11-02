@@ -66,6 +66,9 @@ pub mod secret_keys {
             /// rTorrent's own XML-RPC has no credential of its own; this authenticates
             /// against whatever reverse proxy fronts it — see `sharerr_rtorrent`.
             RTORRENT_PASSWORD = "rtorrent.password";
+            /// The Deluge web UI's password, when Deluge is the selected backend.
+            /// That UI has no accounts, so this is its whole credential.
+            DELUGE_PASSWORD = "deluge.password";
             /// Shared secret embedded in builtin-tracker announce URLs.
             TRACKER_TOKEN = "tracker.token";
             /// gluetun's control server API key, sent as `X-Api-Key`. Required since
@@ -212,6 +215,8 @@ pub mod config_paths {
         RTORRENT_URL = "rtorrent.url";
         RTORRENT_USERNAME = "rtorrent.username";
         RTORRENT_LABEL = "rtorrent.label";
+        DELUGE_URL = "deluge.url";
+        DELUGE_LABEL = "deluge.label";
 
         TRACKER_ADVERTISED_HOST = "tracker.advertised_host";
         TRACKER_ADVERTISED_URL = "tracker.advertised_url";
@@ -224,6 +229,9 @@ pub mod config_paths {
         /// BEP 27's private flag on newly built torrents — see
         /// [`super::SeedingConfig::private`].
         SEEDING_PRIVATE = "seeding.private";
+        /// Subtitle files in a directory library's torrents — see
+        /// [`super::SeedingConfig::sidecars`].
+        SEEDING_SIDECARS = "seeding.sidecars";
         /// The quiet-hours window — see [`super::SeedingConfig::quiet_hours`].
         SEEDING_QUIET_HOURS = "seeding.quiet_hours";
         /// The cap inside it — see [`super::SeedingConfig::quiet_upload_limit_kib`].
@@ -333,6 +341,7 @@ pub struct Config {
     pub transmission: TransmissionConfig,
     /// Only read when `torrent_backend` selects it.
     pub rtorrent: RtorrentConfig,
+    pub deluge: DelugeConfig,
     pub tracker: TrackerConfig,
     /// A per-torrent upload/ratio goal, applied at add time and restated on
     /// sharerr's own already-seeding torrents when it changes — see
@@ -407,6 +416,7 @@ impl Default for Config {
             qbittorrent: QbitConfig::default(),
             transmission: TransmissionConfig::default(),
             rtorrent: RtorrentConfig::default(),
+            deluge: DelugeConfig::default(),
             tracker: TrackerConfig::default(),
             seeding: SeedingConfig::default(),
             gossip: GossipConfig::default(),
@@ -533,8 +543,6 @@ impl Config {
                 category: &self.qbittorrent.category,
                 tag: &self.qbittorrent.tag,
                 skip_checking: self.qbittorrent.skip_checking,
-                upload_limit_kib: self.seeding.upload_limit_kib,
-                ratio_limit: self.seeding.ratio_limit,
             },
             TorrentBackend::Transmission => TorrentClientConfig {
                 url: &self.transmission.url,
@@ -548,10 +556,6 @@ impl Config {
                 category: &self.transmission.label,
                 tag: &self.transmission.label,
                 skip_checking: false,
-                // Seeding goals are backend-agnostic — see `SeedingConfig` — so
-                // the same values apply regardless of which client is selected.
-                upload_limit_kib: self.seeding.upload_limit_kib,
-                ratio_limit: self.seeding.ratio_limit,
             },
             TorrentBackend::Rtorrent => TorrentClientConfig {
                 url: &self.rtorrent.url,
@@ -567,8 +571,17 @@ impl Config {
                 // rTorrent always verifies a torrent's data on start; there is
                 // no documented way to skip it.
                 skip_checking: false,
-                upload_limit_kib: self.seeding.upload_limit_kib,
-                ratio_limit: self.seeding.ratio_limit,
+            },
+            TorrentBackend::Deluge => TorrentClientConfig {
+                url: &self.deluge.url,
+                // The web UI has a password and no accounts.
+                login: None,
+                fallback_credential: Some(secret_keys::DELUGE_PASSWORD),
+                primary_credential: None,
+                // Same collapse as Transmission: one label plugin slot.
+                category: &self.deluge.label,
+                tag: &self.deluge.label,
+                skip_checking: false,
             },
         }
     }
@@ -617,11 +630,6 @@ pub struct TorrentClientConfig<'a> {
     /// Whether to skip hash-checking on add. Always `false` for Transmission,
     /// which has no such switch.
     pub skip_checking: bool,
-    /// Per-torrent upload cap in KiB/s — see
-    /// [`SeedingConfig::upload_limit_kib`].
-    pub upload_limit_kib: Option<u64>,
-    /// Seed-ratio goal — see [`SeedingConfig::ratio_limit`].
-    pub ratio_limit: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -796,12 +804,14 @@ pub enum TorrentBackend {
     Qbittorrent,
     Transmission,
     Rtorrent,
+    Deluge,
 }
 
 crate::str_enum!(TorrentBackend {
     Qbittorrent => "qbittorrent",
     Transmission => "transmission",
     Rtorrent => "rtorrent",
+    Deluge => "deluge",
 });
 
 impl TorrentBackend {
@@ -813,6 +823,7 @@ impl TorrentBackend {
             Self::Qbittorrent => "qBittorrent",
             Self::Transmission => "Transmission",
             Self::Rtorrent => "rTorrent",
+            Self::Deluge => "Deluge",
         }
     }
 }
@@ -881,6 +892,30 @@ impl Default for RtorrentConfig {
         Self {
             url: Url::parse("http://localhost/RPC2").expect("valid literal url"),
             login: "rtorrent".to_owned(),
+            label: "sharerr".to_owned(),
+        }
+    }
+}
+
+/// How to reach Deluge's web UI, and what to label what sharerr puts there. The
+/// password is in the vault, not here — see [`secret_keys::DELUGE_PASSWORD`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DelugeConfig {
+    pub url: Url,
+    /// Applied through Deluge's Label plugin, which folds it to lowercase; it
+    /// stands in for qBittorrent's category *and* its tag, same as
+    /// [`TransmissionConfig::label`].
+    pub label: String,
+}
+
+impl Default for DelugeConfig {
+    // A compile-time literal; parsing cannot fail at runtime and `Url` has no const
+    // constructor to say so in the type system.
+    #[allow(clippy::expect_used)]
+    fn default() -> Self {
+        Self {
+            url: Url::parse("http://localhost:8112").expect("valid literal url"),
             label: "sharerr".to_owned(),
         }
     }
@@ -993,6 +1028,15 @@ pub struct SeedingConfig {
     /// keep whatever they were built with (see `shared_items.private` in the
     /// store).
     pub private: bool,
+    /// Build a `[[library]]` tv or movie file's torrent over it and the subtitle
+    /// files beside it named after it (`Show.S01E01.mkv`, `Show.S01E01.en.srt`).
+    ///
+    /// Off by default, and only for torrents built after the change: the files
+    /// are inside the info dictionary, so an existing share keeps what it was
+    /// built with. A file with no subtitles beside it builds the same single-file
+    /// torrent either way. An *arr's files are out of scope: an *arr imports
+    /// its own subtitles, and a friend's would not know this release has any.
+    pub sidecars: bool,
     /// A daily window, in the container's local time, during which
     /// [`Self::quiet_upload_limit_kib`] replaces [`Self::upload_limit_kib`]
     /// on every torrent sharerr created. Only in force while all three are
@@ -1100,6 +1144,7 @@ impl Default for SeedingConfig {
             // silently. Spelled out so `#[serde(default)]` on `Config` fills
             // a missing `[seeding]` block with `private: true`, not `false`.
             private: true,
+            sidecars: false,
         }
     }
 }
@@ -1157,11 +1202,17 @@ pub struct RetentionConfig {
     pub sync_runs: u64,
 }
 
+/// [`RetentionConfig::swarm_samples`]'s default.
+pub const DEFAULT_SWARM_SAMPLES: u64 = 336;
+
+/// [`RetentionConfig::endpoint_history`]'s default.
+pub const DEFAULT_ENDPOINT_HISTORY: u64 = 5;
+
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
-            swarm_samples: 336,
-            endpoint_history: 5,
+            swarm_samples: DEFAULT_SWARM_SAMPLES,
+            endpoint_history: DEFAULT_ENDPOINT_HISTORY,
             sync_runs: 0,
         }
     }
@@ -1519,6 +1570,34 @@ impl NotificationTrigger {
             Self::Heartbeat => "heartbeat push",
         }
     }
+
+    /// The trigger's wording beside its checkbox on the settings page.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            Self::SyncFailed => "A sync fails outright",
+            Self::PeerQuiet => "A friend has gone quiet",
+            Self::EndpointRotated => "The advertised endpoint rotates",
+            Self::ItemsShared => "Items are newly shared (once per sync pass)",
+            Self::ItemFailed => "Items fail to share (once per sync pass)",
+            Self::PeerRevoked => "A friend's key is revoked",
+            Self::PeerFirstContact => "A friend makes contact for the first time",
+            Self::TrackerUnreachable => {
+                "The advertised tracker address stops answering (needs the reachability \
+                 check under Automatic checks, above)"
+            }
+            Self::LibraryUnreadable => {
+                "A library path cannot be read (once per reason, not per pass)"
+            }
+            Self::TorrentInterrupted => {
+                "A torrent sharerr built is stopped in the client, or removed from it \
+                 (once per torrent)"
+            }
+            Self::FileChanged => {
+                "A shared file changes on disk after its torrent was built (once per torrent)"
+            }
+            Self::Heartbeat => "Heartbeat (the push below, not the webhook)",
+        }
+    }
 }
 
 /// The payload shape a notification is sent in — one per service this project
@@ -1647,6 +1726,11 @@ pub struct PeerImport {
     /// `PeerScope` directly: that type lives in `sharerr-store`, which
     /// depends on this crate, not the other way around.
     pub scope: String,
+    /// The largest file this friend is offered, in bytes. A restore has to carry
+    /// the caps: losing one would widen what the friend sees.
+    pub max_size_bytes: Option<i64>,
+    /// The highest resolution this friend is offered, as a height (`1080`).
+    pub max_height: Option<i64>,
     /// Where this friend was last reachable, as `host:port`. Seeded as a
     /// low-trust observation (see `sharerr_store::endpoints::ObservedVia`) —
     /// any real sighting after this friend's own sharerr next reaches out
@@ -1673,6 +1757,8 @@ impl std::fmt::Debug for PeerImport {
         f.debug_struct("PeerImport")
             .field("label", &self.label)
             .field("scope", &self.scope)
+            .field("max_size_bytes", &self.max_size_bytes)
+            .field("max_height", &self.max_height)
             .field("last_addr", &self.last_addr)
             .field("gossip_url", &self.gossip_url)
             .field(

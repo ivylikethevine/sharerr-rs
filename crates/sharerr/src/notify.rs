@@ -181,11 +181,8 @@ pub async fn send_test(state: &ServeState) -> Result<String, String> {
 /// costs nothing beyond reading the in-memory config.
 async fn trigger_enabled(state: &ServeState, trigger: NotificationTrigger) -> bool {
     state
-        .config()
+        .with_config(|c| c.notifications.triggers.contains(&trigger))
         .await
-        .notifications
-        .triggers
-        .contains(&trigger)
 }
 
 impl Webhook {
@@ -365,7 +362,7 @@ pub async fn reachability_loop(state: Arc<ServeState>) {
     let mut watch = ReachWatch::default();
     loop {
         let (enabled, trigger) = (
-            state.config().await.checks.reachability,
+            state.with_config(|c| c.checks.reachability).await,
             trigger_enabled(&state, NotificationTrigger::TrackerUnreachable).await,
         );
         if enabled && trigger {
@@ -435,7 +432,7 @@ impl ReachWatch {
 /// beat rather than after a restart.
 pub async fn heartbeat_loop(state: Arc<ServeState>) {
     loop {
-        let secs = state.config().await.notifications.heartbeat_secs;
+        let secs = state.with_config(|c| c.notifications.heartbeat_secs).await;
         if secs == 0 {
             tokio::time::sleep(Duration::from_secs(60)).await;
             continue;
@@ -502,7 +499,7 @@ pub async fn quiet_peers_loop(state: Arc<ServeState>) {
 }
 
 async fn check_quiet_peers(state: &Arc<ServeState>) -> Result<(), String> {
-    let threshold = state.config().await.notifications.peer_quiet_secs;
+    let threshold = state.with_config(|c| c.notifications.peer_quiet_secs).await;
     if threshold == 0 || !trigger_enabled(state, NotificationTrigger::PeerQuiet).await {
         return Ok(());
     }

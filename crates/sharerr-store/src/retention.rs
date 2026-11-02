@@ -26,11 +26,7 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
-        Self {
-            swarm_samples: crate::swarm::MAX_SAMPLES,
-            endpoint_history: crate::endpoints::MAX_HISTORY as i64,
-            sync_runs: 0,
-        }
+        Self::from(&sharerr_core::config::RetentionConfig::default())
     }
 }
 

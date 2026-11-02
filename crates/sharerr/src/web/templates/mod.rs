@@ -335,6 +335,14 @@ impl From<&sharerr_core::config::PathMapping> for PathRow {
     }
 }
 
+/// One notification trigger's checkbox.
+#[derive(Debug, Clone)]
+pub struct TriggerRow {
+    pub value: &'static str,
+    pub prompt: &'static str,
+    pub checked: bool,
+}
+
 /// One row of the `[[library]]` table — form state, same as [`PathRow`].
 #[derive(Debug, Clone)]
 pub struct LibraryRow {
@@ -430,9 +438,9 @@ pub struct SettingsPage {
     /// `[[library]]` directories — for the chip beside the section heading.
     pub library_sources_configured: usize,
 
-    /// `"qbittorrent"`, `"transmission"`, or `"rtorrent"` — which client
-    /// `torrent_backend` currently selects to actually seed. Only this one's
-    /// settings render inline; the other two sit behind a fold.
+    /// `"qbittorrent"`, `"transmission"`, `"rtorrent"` or `"deluge"` — which
+    /// client `torrent_backend` currently selects to actually seed. Only this
+    /// one's settings render inline; the others sit behind a fold.
     pub torrent_backend: &'static str,
     /// Whether a torrent client *other* than the selected one already holds a
     /// credential — the fold those live in starts open in that case, same
@@ -465,6 +473,12 @@ pub struct SettingsPage {
     pub rtorrent_password_set: bool,
     pub rtorrent_label: String,
 
+    pub deluge_url: String,
+    /// Whether the Deluge web UI's password is stored — it has no accounts, so
+    /// there is no username beside it.
+    pub deluge_password_set: bool,
+    pub deluge_label: String,
+
     /// Per-torrent upload cap in KiB/s, applied at add time. Empty when unset —
     /// see [`sharerr_core::config::SeedingConfig::upload_limit_kib`].
     pub seeding_upload_limit_kib: String,
@@ -479,6 +493,8 @@ pub struct SettingsPage {
     /// Whether newly built torrents set BEP 27's private flag. On by default
     /// — see [`sharerr_core::config::SeedingConfig::private`].
     pub seeding_private: bool,
+    /// See [`sharerr_core::config::SeedingConfig::sidecars`].
+    pub seeding_sidecars: bool,
     /// Whether the feeds may advertise a magnet per item. Off by default, and
     /// only takes effect for a non-private item even when on — see
     /// [`sharerr_core::config::FeedConfig::magnet_links`].
@@ -538,18 +554,7 @@ pub struct SettingsPage {
     pub notifications_webhook_set: bool,
     pub notifications_kind: &'static str,
     pub notifications_peer_quiet_secs: u64,
-    pub notifications_trigger_sync_failed: bool,
-    pub notifications_trigger_peer_quiet: bool,
-    pub notifications_trigger_endpoint_rotated: bool,
-    pub notifications_trigger_items_shared: bool,
-    pub notifications_trigger_item_failed: bool,
-    pub notifications_trigger_peer_revoked: bool,
-    pub notifications_trigger_peer_first_contact: bool,
-    pub notifications_trigger_tracker_unreachable: bool,
-    pub notifications_trigger_library_unreadable: bool,
-    pub notifications_trigger_torrent_interrupted: bool,
-    pub notifications_trigger_file_changed: bool,
-    pub notifications_trigger_heartbeat: bool,
+    pub notification_triggers: Vec<TriggerRow>,
     /// Whether an Uptime-Kuma-style push URL is stored — see
     /// `secret_keys::NOTIFICATIONS_HEARTBEAT_URL`.
     pub notifications_heartbeat_set: bool,
@@ -896,6 +901,13 @@ pub struct PeerRow {
     pub scope: &'static str,
     /// How to say it to a person — "everything", "TV only", "films only".
     pub scope_label: &'static str,
+    /// The largest file they are offered in GiB, empty for no cap.
+    pub max_size_gib: String,
+    /// The highest resolution they are offered as a height, 0 for no cap.
+    pub max_height: i64,
+    /// The *arr tag that shares an item with this friend alone, empty when their
+    /// name has nothing a tag can carry.
+    pub friend_tag: String,
     pub created: String,
     /// The absolute instant behind `created`, for a `title=` tooltip.
     pub created_absolute: String,
@@ -1384,8 +1396,8 @@ mod tests {
         for line in template.lines() {
             let mut rest = line;
             while let Some(at) = rest
-                .find("call lock_attr(\"")
-                .or_else(|| rest.find("call locked(\""))
+                .find("call ui::lock_attr(locks, \"")
+                .or_else(|| rest.find("call ui::locked(locks, \""))
             {
                 let after = &rest[at..];
                 let Some(open) = after.find('"') else { break };

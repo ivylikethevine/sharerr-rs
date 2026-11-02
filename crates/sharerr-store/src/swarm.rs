@@ -20,7 +20,7 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// Sized against `crate::swarm_history`'s one-hour sample interval so the
 /// window is genuinely the fortnight the feature exists to show: 14 days *
 /// 24 samples/day = 336.
-pub const MAX_SAMPLES: i64 = 336;
+pub const MAX_SAMPLES: i64 = sharerr_core::config::DEFAULT_SWARM_SAMPLES as i64;
 
 /// One sample of the tracker's live swarm totals, with when it was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

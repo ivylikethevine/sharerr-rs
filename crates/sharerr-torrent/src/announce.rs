@@ -21,12 +21,14 @@
 //! on a home connection is a liability, not a feature.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use sharerr_core::endpoint::is_private_ip;
 use tokio::sync::RwLock;
+
+use crate::bencode::{Value, write_bytes, write_int, write_len};
 
 /// How long a client is told to wait before re-announcing.
 const INTERVAL: Duration = Duration::from_secs(1800);
@@ -433,9 +435,9 @@ impl Swarms {
 
 /// Bencode a tracker response.
 ///
-/// Written by hand rather than through serde. The format has four constructs, and
-/// the one that matters — `peers` as a byte string of packed addresses, not a
-/// UTF-8 string — is precisely the thing a serde derive makes awkward.
+/// Streamed through [`crate::bencode`]'s writers rather than built as a value: `peers`
+/// packs straight into the output behind its own length prefix, on the tracker's
+/// busiest path.
 impl AnnounceResponse {
     /// Render as the bencoded response a BitTorrent client expects.
     ///
@@ -459,9 +461,9 @@ impl AnnounceResponse {
         let v4 = || self.peers.iter().filter(|a| a.is_ipv4());
         let v6 = || self.peers.iter().filter(|a| a.is_ipv6());
 
-        put_key(&mut out, "peers");
+        write_bytes(b"peers", &mut out);
         if compact {
-            put_len(&mut out, v4_count * 6);
+            write_len(v4_count * 6, &mut out);
             v4().for_each(|addr| pack_compact(&mut out, addr));
         } else {
             // The dictionary form has no separate `peers6`: every peer goes
@@ -470,10 +472,10 @@ impl AnnounceResponse {
             out.push(b'l');
             for addr in v4().chain(v6()) {
                 out.push(b'd');
-                put_key(&mut out, "ip");
-                put_bytes(&mut out, addr.ip().to_string().as_bytes());
-                put_key(&mut out, "port");
-                put_raw_int(&mut out, i64::from(addr.port()));
+                write_bytes(b"ip", &mut out);
+                write_bytes(addr.ip().to_string().as_bytes(), &mut out);
+                write_bytes(b"port", &mut out);
+                write_int(i64::from(addr.port()), &mut out);
                 out.push(b'e');
             }
             out.push(b'e');
@@ -482,8 +484,8 @@ impl AnnounceResponse {
         // Only emitted when there is something to put in it. An empty `peers6` is
         // harmless but some older clients are happier without the key at all.
         if compact && v6_count > 0 {
-            put_key(&mut out, "peers6");
-            put_len(&mut out, v6_count * 18);
+            write_bytes(b"peers6", &mut out);
+            write_len(v6_count * 18, &mut out);
             v6().for_each(|addr| pack_compact(&mut out, addr));
         }
 
@@ -498,57 +500,28 @@ impl AnnounceResponse {
 /// non-200 as a transport failure and retry forever without ever surfacing the
 /// reason to the user.
 pub fn failure_bencode(reason: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(reason.len() + 32);
-    out.push(b'd');
-    put_key(&mut out, "failure reason");
-    put_bytes(&mut out, reason.as_bytes());
-    out.push(b'e');
-    out
+    let body = [(b"failure reason".to_vec(), Value::string(reason))];
+    Value::Dict(BTreeMap::from(body)).encode()
 }
 
 /// Bencode a `/scrape` response for a set of hashes.
 pub fn scrape_bencode(files: &[(InfoHash, usize, usize)]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64 + files.len() * 96);
-    out.push(b'd');
-    put_key(&mut out, "files");
-    out.push(b'd');
-    for (hash, complete, incomplete) in files {
-        put_bytes(&mut out, hash);
-        out.push(b'd');
-        put_int(&mut out, "complete", *complete as i64);
-        put_int(&mut out, "downloaded", *complete as i64);
-        put_int(&mut out, "incomplete", *incomplete as i64);
-        out.push(b'e');
-    }
-    out.push(b'e');
-    out.push(b'e');
-    out
-}
-
-fn put_key(out: &mut Vec<u8>, key: &str) {
-    put_bytes(out, key.as_bytes());
-}
-
-fn put_bytes(out: &mut Vec<u8>, value: &[u8]) {
-    put_len(out, value.len());
-    out.extend_from_slice(value);
-}
-
-/// The `<len>:` prefix of a byte string, for a payload written afterwards.
-fn put_len(out: &mut Vec<u8>, len: usize) {
-    out.extend_from_slice(len.to_string().as_bytes());
-    out.push(b':');
-}
-
-fn put_raw_int(out: &mut Vec<u8>, value: i64) {
-    out.push(b'i');
-    out.extend_from_slice(value.to_string().as_bytes());
-    out.push(b'e');
+    let count = |n: usize| Value::Int(n as i64);
+    let entries = files.iter().map(|(hash, complete, incomplete)| {
+        let stats = BTreeMap::from([
+            (b"complete".to_vec(), count(*complete)),
+            (b"downloaded".to_vec(), count(*complete)),
+            (b"incomplete".to_vec(), count(*incomplete)),
+        ]);
+        (hash.to_vec(), Value::Dict(stats))
+    });
+    let files = Value::Dict(entries.collect());
+    Value::Dict(BTreeMap::from([(b"files".to_vec(), files)])).encode()
 }
 
 fn put_int(out: &mut Vec<u8>, key: &str, value: i64) {
-    put_key(out, key);
-    put_raw_int(out, value);
+    write_bytes(key.as_bytes(), out);
+    write_int(value, out);
 }
 
 // ---------------------------------------------------------------------------

@@ -504,6 +504,81 @@ async fn a_tag_that_nothing_carries_yields_an_empty_result_not_an_error() {
 
 // --------------------------------------------------------------- radarr
 
+/// A movie tagged `sharerr` is for everyone, even if a friend's tag is on it too; a
+/// movie carrying only friends' tags is for them; and a tag merely sharing the
+/// word, or a bare `sharerr-`, names nobody.
+#[tokio::test]
+async fn friend_tags_add_their_files_with_who_each_is_for() {
+    let server = MockServer::start().await;
+    mount_json(
+        &server,
+        "/api/v3/tag",
+        json!([
+            { "id": TAG_ID, "label": "Sharerr" },
+            { "id": 7, "label": "sharerr-sam" },
+            { "id": 8, "label": "SHARERR-Alex" },
+            { "id": 9, "label": "sharerrific" },
+            { "id": 10, "label": "sharerr-" },
+        ]),
+    )
+    .await;
+    let movie = |id: i64, tags: serde_json::Value| {
+        json!({
+            "id": id, "title": format!("Film {id}"), "year": 2019, "tags": tags, "hasFile": true,
+            "movieFile": { "id": id * 10, "path": format!("/movies/{id}.mkv"), "size": 100 },
+        })
+    };
+    mount_json(
+        &server,
+        "/api/v3/movie",
+        json!([
+            movie(1, json!([TAG_ID, 7])),
+            movie(2, json!([7, 8])),
+            movie(3, json!([8])),
+            movie(4, json!([9, 10])),
+        ]),
+    )
+    .await;
+
+    let found = client(MediaSource::Radarr, &server)
+        .discover_with_audience("sharerr")
+        .await
+        .unwrap();
+
+    let mut ids: Vec<i64> = found.items.iter().map(|item| item.file_id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![10, 20, 30], "each file once, and no decoy's");
+    assert_eq!(
+        found.audience.get(&10),
+        None,
+        "the plain tag is for everyone"
+    );
+    assert_eq!(
+        found.audience.get(&20).unwrap(),
+        &vec!["sam".to_owned(), "alex".to_owned()]
+    );
+    assert_eq!(found.audience.get(&30).unwrap(), &vec!["alex".to_owned()]);
+}
+
+/// The plain tag has to exist, so a typo keeps its own error rather than reading as
+/// an empty library.
+#[tokio::test]
+async fn friend_tags_alone_do_not_stand_in_for_the_plain_tag() {
+    let server = MockServer::start().await;
+    mount_json(
+        &server,
+        "/api/v3/tag",
+        json!([{ "id": 7, "label": "sharerr-sam" }]),
+    )
+    .await;
+
+    let err = client(MediaSource::Radarr, &server)
+        .discover_with_audience("sharerr")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ArrError::TagNotFound { .. }), "{err:?}");
+}
+
 #[tokio::test]
 async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
     let server = MockServer::start().await;
@@ -1080,7 +1155,6 @@ async fn lidarr_carries_the_media_info_it_already_computed() {
     assert_eq!(media.audio_sample_rate.as_deref(), Some("44100"));
     assert_eq!(media.sample_rate_khz().as_deref(), Some("44.1 kHz"));
     assert_eq!(media.scene_audio_format(), Some("FLAC"));
-    assert_eq!(media.is_lossless(), Some(true));
 
     let media = by_file(32).media.as_ref().expect("mediaInfo was reported");
     assert_eq!(
@@ -1097,7 +1171,6 @@ async fn lidarr_carries_the_media_info_it_already_computed() {
         .expect("the codec alone is metadata");
     assert_eq!(media.audio_bit_depth, None, "`0` bits is not a bit depth");
     assert_eq!(media.audio_sample_rate, None, "`0` Hz is not a sample rate");
-    assert_eq!(media.is_lossless(), Some(false), "MP3 is not lossless");
 
     assert_eq!(by_file(34).media, None, "an empty object is not metadata");
     assert_eq!(by_file(35).media, None, "an absent object is not metadata");
@@ -1259,7 +1332,6 @@ async fn readarr_carries_media_info_for_an_audiobook_and_none_for_an_ebook() {
         .expect("an audiobook was analysed");
     assert_eq!(media.audio_codec.as_deref(), Some("AAC"));
     assert_eq!(media.audio_sample_rate.as_deref(), Some("44100"));
-    assert_eq!(media.is_lossless(), Some(false));
 
     assert_eq!(by_file(62).media, None, "an ebook has nothing to report");
 }

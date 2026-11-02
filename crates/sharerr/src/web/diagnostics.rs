@@ -693,6 +693,8 @@ mod tests {
             key_hash: "hash".to_owned(),
             downloaded: 0,
             uploaded: 0,
+            max_size_bytes: None,
+            max_height: None,
         }
     }
 

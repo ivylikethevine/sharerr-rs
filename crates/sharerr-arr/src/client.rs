@@ -4,6 +4,7 @@
 //! `/tag` and `/system/status` identical — so the transport lives here once and
 //! [`crate::sonarr`] / [`crate::radarr`] only differ in which resources they walk.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Response};
@@ -18,9 +19,8 @@ use crate::models::{SystemStatus, Tag};
 use crate::{Discovered, lidarr, radarr, readarr, sonarr};
 
 /// The API prefix is per-source: Sonarr, Radarr and Whisparr are on `v3`, Lidarr
-/// and Readarr on `v1`. Matched on the source directly rather than through
-/// `MediaSource::api_version`, so a new source cannot fall into the wrong
-/// prefix by way of a string that no longer matches.
+/// and Readarr on `v1`. Getting it wrong presents as a 404 that looks like a wrong
+/// URL rather than a wrong version.
 fn api_prefix(kind: MediaSource) -> &'static str {
     match kind {
         MediaSource::Lidarr | MediaSource::Readarr => "api/v1/",
@@ -42,6 +42,15 @@ pub fn whisparr_walks_like_radarr(version: &str) -> bool {
 }
 
 use sharerr_client::clamp_body;
+
+/// What [`ArrClient::discover_with_audience`] found.
+#[derive(Debug)]
+pub struct TaggedFiles {
+    pub items: Vec<Discovered>,
+    /// The friends each `file_id` carrying only `<tag>-<friend>` tags is for. A
+    /// file not listed here is for everyone.
+    pub audience: HashMap<i64, Vec<String>>,
+}
 
 /// A Sonarr or Radarr v3 client.
 ///
@@ -135,16 +144,6 @@ impl ArrClient {
             .send()
             .await
             .map_err(|source| self.unreachable(url, &source))?;
-        self.check_status(response, path).await
-    }
-
-    /// Turn a non-2xx response into the matching [`ArrError`], `path` named for the
-    /// message; otherwise hand the response back for the caller to read the body.
-    async fn check_status(
-        &self,
-        response: reqwest::Response,
-        path: &str,
-    ) -> Result<reqwest::Response> {
         let status = response.status();
         if sharerr_client::is_auth_rejection(status) {
             return Err(ArrError::Unauthorized {
@@ -200,7 +199,10 @@ impl ArrClient {
     /// the most likely source of "sharerr does nothing" reports.
     pub async fn tag_id(&self, label: &str) -> Result<i64> {
         let tags: Vec<Tag> = self.get("tag", &()).await?;
+        self.find_tag(&tags, label)
+    }
 
+    fn find_tag(&self, tags: &[Tag], label: &str) -> Result<i64> {
         tags.iter()
             .find(|t| t.label.eq_ignore_ascii_case(label))
             .map(|t| t.id)
@@ -209,6 +211,46 @@ impl ArrClient {
                 label: label.to_owned(),
                 available: tags.iter().map(|t| t.label.clone()).collect(),
             })
+    }
+
+    /// [`Self::discover`] plus every file carrying a `<tag>-<friend>` tag, with
+    /// who each of those is for.
+    ///
+    /// A file also reachable through the plain tag is for everyone, so it gets no
+    /// audience: the plain tag is the wider grant, and wins. One walk over all the
+    /// tags at once, and any failure fails the source: sharing a partial answer
+    /// could leave a friend's item looking like it had no audience.
+    pub async fn discover_with_audience(&self, tag_label: &str) -> Result<TaggedFiles> {
+        let tags: Vec<Tag> = self.get("tag", &()).await?;
+        let plain = self.find_tag(&tags, tag_label)?;
+
+        let prefix = format!("{}-", tag_label.to_ascii_lowercase());
+        let friends: Vec<(i64, String)> = tags
+            .iter()
+            .filter_map(|tag| {
+                let label = tag.label.to_ascii_lowercase();
+                let friend = label.strip_prefix(&prefix).filter(|f| !f.is_empty())?;
+                Some((tag.id, friend.to_owned()))
+            })
+            .collect();
+
+        let mut tag_ids = vec![plain];
+        tag_ids.extend(friends.iter().map(|(id, _)| *id));
+
+        let mut items = Vec::new();
+        let mut audience = HashMap::new();
+        for (item, entity_tags) in self.walk(&tag_ids).await? {
+            if !entity_tags.contains(&plain) {
+                let names = friends
+                    .iter()
+                    .filter(|(id, _)| entity_tags.contains(id))
+                    .map(|(_, name)| name.clone())
+                    .collect();
+                audience.insert(item.file_id, names);
+            }
+            items.push(item);
+        }
+        Ok(TaggedFiles { items, audience })
     }
 
     /// Create a tag. Used only by `sharerr doctor --fix` — nothing in an ordinary
@@ -243,20 +285,27 @@ impl ArrClient {
     /// health checks do, and re-resolving here cost every probe a duplicate
     /// `/tag` round trip.
     pub async fn discover_with_tag_id(&self, tag_id: i64) -> Result<Vec<Discovered>> {
+        let walked = self.walk(&[tag_id]).await?;
+        Ok(walked.into_iter().map(|(item, _)| item).collect())
+    }
+
+    /// Every file of an entity carrying any of `tag_ids`, with the tags that
+    /// entity carries.
+    async fn walk(&self, tag_ids: &[i64]) -> Result<Vec<(Discovered, Vec<i64>)>> {
         match self.kind {
-            MediaSource::Sonarr => sonarr::discover(self, tag_id).await,
+            MediaSource::Sonarr => sonarr::discover(self, tag_ids).await,
             // Whisparr v2 is Sonarr's codebase and v3 is Radarr's, both on the
             // same `v3` prefix, so only the reported version tells them apart.
             MediaSource::Whisparr => {
                 if whisparr_walks_like_radarr(&self.system_status().await?.version) {
-                    radarr::discover(self, tag_id).await
+                    radarr::discover(self, tag_ids).await
                 } else {
-                    sonarr::discover(self, tag_id).await
+                    sonarr::discover(self, tag_ids).await
                 }
             }
-            MediaSource::Radarr => radarr::discover(self, tag_id).await,
-            MediaSource::Lidarr => lidarr::discover(self, tag_id).await,
-            MediaSource::Readarr => readarr::discover(self, tag_id).await,
+            MediaSource::Radarr => radarr::discover(self, tag_ids).await,
+            MediaSource::Lidarr => lidarr::discover(self, tag_ids).await,
+            MediaSource::Readarr => readarr::discover(self, tag_ids).await,
             // Unreachable: `Self::new` refuses to build a client for anything
             // that does not speak the *arr API.
             MediaSource::Directory => Err(ArrError::NotAnApp { service: self.kind }),

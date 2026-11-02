@@ -17,7 +17,7 @@ mod upgrade;
 
 pub use db::{FileStamp, SeedingSummary, Store, StoreError};
 pub use endpoints::{EndpointKind, ObservedVia, PeerEndpoint};
-pub use peers::{Peer, PeerScope, Touch};
+pub use peers::{Audiences, Peer, PeerLimits, PeerScope, Touch, friend_slug};
 pub use retention::Retention;
 pub use runs::{RunRecord, RunSummary};
 pub use swarm::SwarmSample;

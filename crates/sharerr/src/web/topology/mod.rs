@@ -419,19 +419,7 @@ async fn swarm_rows(state: &WebState, titles: &HashMap<&str, &str>) -> Vec<Swarm
             None => format!("torrent {}", &hex_hash[..8]),
         };
 
-        let more = swarm.peers.len().saturating_sub(MAX_SWARM_PEERS);
-        let peers = swarm
-            .peers
-            .iter()
-            .take(MAX_SWARM_PEERS)
-            .map(|addr| {
-                let full = addr.to_string();
-                AddressCell {
-                    masked: mask_address(&full),
-                    full,
-                }
-            })
-            .collect();
+        let (peers, more) = capped_peers(&swarm.peers);
 
         rows.push(SwarmRow {
             title,
@@ -778,11 +766,7 @@ fn friend_node(label: &str, endpoints: &[PeerEndpoint], accent: &'static str) ->
 /// The most-recently-observed sighting on one [`EndpointKind`], as a
 /// [`Channel`] ready to become one row and (when observed) one edge.
 fn channel(endpoints: &[PeerEndpoint], kind: EndpointKind) -> Channel {
-    let Some(latest) = endpoints
-        .iter()
-        .filter(|e| e.kind == kind)
-        .max_by_key(|e| e.observed_at)
-    else {
+    let Some(latest) = crate::web::peers::latest_endpoint(endpoints, kind) else {
         return Channel::unseen();
     };
 
@@ -841,6 +825,23 @@ fn truncate_to(label: &str, max: usize) -> String {
 ///
 /// A no-op on text with no address in it (a version string, "Not seen"), so
 /// it is safe to call unconditionally.
+/// A swarm's first [`MAX_SWARM_PEERS`] addresses as table cells, and how many were
+/// left out.
+pub(crate) fn capped_peers(peers: &[std::net::SocketAddr]) -> (Vec<AddressCell>, usize) {
+    let cells = peers
+        .iter()
+        .take(MAX_SWARM_PEERS)
+        .map(|addr| {
+            let full = addr.to_string();
+            AddressCell {
+                masked: mask_address(&full),
+                full,
+            }
+        })
+        .collect();
+    (cells, peers.len().saturating_sub(MAX_SWARM_PEERS))
+}
+
 pub(crate) fn mask_address(text: &str) -> String {
     let toks = tokenize(text);
 

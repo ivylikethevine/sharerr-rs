@@ -21,7 +21,7 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 use sharerr_arr::{ArrClient, Discovered};
 use sharerr_client::TorrentClient;
-use sharerr_core::config::secret_keys;
+use sharerr_core::config::{LibraryKind, secret_keys};
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
@@ -118,6 +118,9 @@ pub struct SourceScan {
     /// source's behalf: an absent item may simply have been in the part that
     /// was not seen.
     pub complete: bool,
+    /// Which friends each `file_id` is for, when it carries only `<tag>-<friend>`
+    /// tags. Empty for a source with no tags.
+    pub audience: HashMap<i64, Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -127,10 +130,12 @@ impl LibrarySource for ArrClient {
     }
 
     async fn discover(&self, tag: &str) -> Result<SourceScan> {
+        let found = self.discover_with_audience(tag).await?;
         Ok(SourceScan {
-            items: ArrClient::discover(self, tag).await?,
+            items: found.items,
             // An *arr answer is its whole database: there is no partial success.
             complete: true,
+            audience: found.audience,
         })
     }
 }
@@ -150,6 +155,7 @@ impl LibrarySource for DirectoryScanner {
         Ok(SourceScan {
             items: outcome.items,
             complete: outcome.incomplete == 0,
+            audience: HashMap::new(),
         })
     }
 }
@@ -293,6 +299,9 @@ struct Discovery {
     /// but could not list part of itself shares what it found and withdraws
     /// nothing.
     withdrawable: HashSet<MediaSource>,
+    /// Who each answering source's items are for, from [`SourceScan::audience`].
+    /// A source that failed has no entry, and keeps what it last recorded.
+    audiences: Vec<(MediaSource, HashMap<i64, Vec<String>>)>,
     failures: usize,
     /// The directory scanner's shortfall, if any — see
     /// [`SyncReport::library_unreadable`].
@@ -307,6 +316,26 @@ impl Syncer {
     /// rotated forwarded port reaches the next announce URL without rebuilding
     /// the syncer. One-shot commands build a static one from configuration.
     pub async fn build(config: &Config, endpoint: Arc<AdvertisedEndpoint>) -> Result<Self> {
+        Self::build_with_store(config, endpoint, async {
+            let store = Store::open(&config.database_path())
+                .await
+                .with_context(|| format!("opening {}", config.database_path().display()))?;
+            // This handle closes the runs it records, so it is the one that prunes
+            // them.
+            store.set_retention((&config.retention).into());
+            Ok(store)
+        })
+        .await
+    }
+
+    /// [`Self::build`] on a store the caller supplies, such as `serve`'s, which
+    /// already holds a pool for this file. `store` is only polled once every
+    /// credential has been read — see below.
+    pub async fn build_with_store(
+        config: &Config,
+        endpoint: Arc<AdvertisedEndpoint>,
+        store: impl Future<Output = Result<Store>>,
+    ) -> Result<Self> {
         // Off the runtime — `serve` calls this on a timer *while already serving
         // HTTP*. See `secrets::open_vault_async`.
         let vault = crate::secrets::open_vault_async(config).await?;
@@ -346,18 +375,14 @@ impl Syncer {
             category: client_config.category.to_owned(),
             tag: client_config.tag.to_owned(),
             skip_checking: client_config.skip_checking,
-            upload_limit_kib: client_config.upload_limit_kib,
-            ratio_limit: client_config.ratio_limit,
+            upload_limit_kib: config.seeding.upload_limit_kib,
+            ratio_limit: config.seeding.ratio_limit,
             private: config.seeding.private,
+            sidecar_roots: sidecar_roots(config),
             torrent_dir: config.torrent_dir(),
         };
 
-        let store = Store::open(&config.database_path())
-            .await
-            .with_context(|| format!("opening {}", config.database_path().display()))?;
-        // This handle closes the runs it records, so it is the one that prunes
-        // them; `ServeState::store()` sets the same limits on its own.
-        store.set_retention((&config.retention).into());
+        let store = store.await?;
 
         Ok(Self::new(config.clone(), store, sources, tracker, seeder))
     }
@@ -566,6 +591,17 @@ impl Syncer {
         let ends = ends.context("reading share-until dates")?;
         let now = sharerr_core::endpoint::now_epoch();
 
+        // Before anything is shared, and stopping the pass on failure: an item
+        // reaching the feed ahead of its audience would be offered to everyone.
+        if !dry_run {
+            for (kind, audience) in &discovery.audiences {
+                self.store
+                    .replace_audience(*kind, audience)
+                    .await
+                    .with_context(|| format!("recording who {kind}'s items are for"))?;
+            }
+        }
+
         let torrents =
             torrents.with_context(|| format!("listing torrents in {}", self.seeder.qbit.kind()))?;
         // Hashes are compared lowercase. Both sides are folded once here —
@@ -704,6 +740,7 @@ impl Syncer {
                         }
                     }
                     discovery.items.extend(scan.items);
+                    discovery.audiences.push((kind, scan.audience));
                 }
                 Err(err) => {
                     discovery.failures += 1;
@@ -1176,6 +1213,20 @@ enum Step {
     Added,
     Reused,
     Unchanged,
+}
+
+/// The directory libraries `SeedingConfig::sidecars` applies to: subtitles go
+/// with video, so a music or book library never has any to include.
+fn sidecar_roots(config: &Config) -> Vec<std::path::PathBuf> {
+    if !config.seeding.sidecars {
+        return Vec::new();
+    }
+    config
+        .library
+        .iter()
+        .filter(|library| matches!(library.kind, LibraryKind::Tv | LibraryKind::Movie))
+        .map(|library| library.path.clone())
+        .collect()
 }
 
 fn build_arr(kind: MediaSource, config: &Config, vault: &Vault) -> Result<Option<ArrClient>> {

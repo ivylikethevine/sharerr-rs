@@ -2,18 +2,6 @@
 {% import "macros.html" as ui %}
 {% block title %}Set up sharerr{% endblock %}
 
-{% macro lock_attr(key) %}{% if locks.contains_key(*key) %}disabled{% endif %}{% endmacro %}
-{%- macro locked(key) %}
-{%- if let Some(var) = locks.get(*key) %}
-  <p class="locked">Pinned by <code>{{ var }}</code>. Unset that variable to edit this here.</p>
-{%- endif %}
-{%- endmacro %}
-{%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
-{%- macro field_status(is_set) %}
-{%- if is_set %}<span class="field-status field-status--set">&#10003; set</span>
-{%- else %}<span class="field-status field-status--unset">not set</span>
-{%- endif %}
-{%- endmacro %}
 
 {% block content %}
 <h1>Set up sharerr</h1>
@@ -62,8 +50,8 @@
 <form method="post" action="/settings/general?next=/wizard/services" class="panel">
   <label for="tag">Tag to watch</label>
   <input id="tag" name="tag" value="{{ tag }}" required
-         {% call lock_attr("tag") %}{% endcall %}>
-  {% call locked("tag") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tag") %}{% endcall %}>
+  {% call ui::locked(locks, "tag") %}{% endcall %}
   <p class="hint">Sonarr and Radarr content carrying this tag is what gets shared.</p>
   <button type="submit">Save</button>
 </form>
@@ -77,13 +65,13 @@
 <form method="post" action="/settings/arr/{{ arr.source }}?next=/wizard/services" class="panel">
   <label for="{{ arr.source }}_url">URL</label>
   <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
-         {% call lock_attr(arr.url_path) %}{% endcall %}>
-  {% call locked(arr.url_path) %}{% endcall %}
+         {% call ui::lock_attr(locks, arr.url_path) %}{% endcall %}>
+  {% call ui::locked(locks, arr.url_path) %}{% endcall %}
   <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
 
-  <label for="{{ arr.source }}_key">API key {% call field_status(arr.key_set) %}{% endcall %}</label>
+  <label for="{{ arr.source }}_key">API key {% call ui::field_status(arr.key_set) %}{% endcall %}</label>
   <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(arr.key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if arr.key_set %}
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
@@ -103,12 +91,12 @@
 <form method="post" action="/settings/qbittorrent?next=/wizard/services" class="panel">
   <label for="qbit_url">URL</label>
   <input id="qbit_url" name="url" value="{{ qbit_url }}" required
-         {% call lock_attr("qbittorrent.url") %}{% endcall %}>
-  {% call locked("qbittorrent.url") %}{% endcall %}
+         {% call ui::lock_attr(locks, "qbittorrent.url") %}{% endcall %}>
+  {% call ui::locked(locks, "qbittorrent.url") %}{% endcall %}
 
-  <label for="qbit_api_key">API key {% call field_status(qbit_api_key_set) %}{% endcall %}</label>
+  <label for="qbit_api_key">API key {% call ui::field_status(qbit_api_key_set) %}{% endcall %}</label>
   <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(qbit_api_key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if qbit_api_key_set %}
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
@@ -120,20 +108,20 @@
 
   <label for="qbit_category">Category for sharerr's torrents</label>
   <input id="qbit_category" name="category" value="{{ qbit_category }}"
-         {% call lock_attr("qbittorrent.category") %}{% endcall %}>
-  {% call locked("qbittorrent.category") %}{% endcall %}
+         {% call ui::lock_attr(locks, "qbittorrent.category") %}{% endcall %}>
+  {% call ui::locked(locks, "qbittorrent.category") %}{% endcall %}
 
   <label for="qbit_tag">Tag for sharerr's torrents</label>
   <input id="qbit_tag" name="tag" value="{{ qbit_tag }}"
-         {% call lock_attr("qbittorrent.tag") %}{% endcall %}>
-  {% call locked("qbittorrent.tag") %}{% endcall %}
+         {% call ui::lock_attr(locks, "qbittorrent.tag") %}{% endcall %}>
+  {% call ui::locked(locks, "qbittorrent.tag") %}{% endcall %}
 
   <label class="hint">
     <input type="checkbox" name="skip_checking" value="1" {% if qbit_skip_checking %}checked{% endif %}
-           {% call lock_attr("qbittorrent.skip_checking") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "qbittorrent.skip_checking") %}{% endcall %}>
     Skip the hash check when adding a torrent
   </label>
-  {% call locked("qbittorrent.skip_checking") %}{% endcall %}
+  {% call ui::locked(locks, "qbittorrent.skip_checking") %}{% endcall %}
   <p class="hint">
     On by default. Turn it off while you're still confirming your path mappings
     on the next step: with it on, a wrong mapping seeds mismatched data instead
@@ -207,8 +195,8 @@
   <label for="advertised_host">Advertised host</label>
   <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
          placeholder="the name or IP your friends reach you on"
-         {% call lock_attr("tracker.advertised_host") %}{% endcall %}>
-  {% call locked("tracker.advertised_host") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tracker.advertised_host") %}{% endcall %}>
+  {% call ui::locked(locks, "tracker.advertised_host") %}{% endcall %}
   <p class="hint">
     Required for peers to announce successfully. Running behind gluetun with a
     forwarded port? Configure that from the Gluetun section on Settings instead —
@@ -218,12 +206,12 @@
   <label for="tracker_port">Announce port</label>
   <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"
          placeholder="default: this server's own port"
-         {% call lock_attr("tracker.port") %}{% endcall %}>
-  {% call locked("tracker.port") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tracker.port") %}{% endcall %}>
+  {% call ui::locked(locks, "tracker.port") %}{% endcall %}
 
-  <label for="tracker_token">Tracker token {% call field_status(tracker_token_set) %}{% endcall %}</label>
+  <label for="tracker_token">Tracker token {% call ui::field_status(tracker_token_set) %}{% endcall %}</label>
   <input id="tracker_token" name="token" type="password" autocomplete="off"
-         placeholder="{% call stored(tracker_token_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(tracker_token_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if tracker_token_set %}
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>

@@ -26,7 +26,7 @@ coverage.yml's artifact, so renaming either workflow breaks both badges. -->
 sharerr connects to your *arr apps (Sonarr, Radarr, Lidarr, Readarr,
 Whisparr), finds everything tagged `sharerr`, builds a torrent for each file
 **where it already sits**, seeds it through your torrent client (qBittorrent,
-Transmission or rTorrent), and publishes the lot as a Torznab feed. Your
+Transmission, rTorrent or Deluge), and publishes the lot as a Torznab feed. Your
 friend adds that feed to their Prowlarr; their Sonarr and Radarr then find
 your releases with the TVDB/TMDb/IMDb ids attached, so a release matches a
 known series or film rather than being guessed from its filename.
@@ -57,6 +57,7 @@ whole design is built around.
   - [If a correct key is rejected](#if-a-correct-key-is-rejected)
 - [Using Transmission instead of qBittorrent](#using-transmission-instead-of-qbittorrent)
 - [Using rTorrent / ruTorrent instead of qBittorrent](#using-rtorrent--rutorrent-instead-of-qbittorrent)
+- [Using Deluge instead of qBittorrent](#using-deluge-instead-of-qbittorrent)
 - [The CLI](#the-cli)
 - [Building and testing](#building-and-testing)
 - [Layout](#layout)
@@ -70,7 +71,7 @@ whole design is built around.
 - **Sources**: discovery by tag from Sonarr, Radarr, Lidarr, Readarr and
   Whisparr, or a plain directory with no *arr app at all.
 - **Seeding**: torrents built in place, files never moved; seeding through
-  qBittorrent, Transmission or rTorrent/ruTorrent; per-torrent upload cap and
+  qBittorrent, Transmission, rTorrent/ruTorrent or Deluge; per-torrent upload cap and
   seed-ratio goal; a built-in BitTorrent tracker served by sharerr itself.
 - **The feed**: Torznab for Prowlarr, Jackett-compatible URLs and JSON
   results, media metadata in the release (resolution, codecs, channels,
@@ -185,6 +186,17 @@ everything, or only TV, films, music or books. Content outside a friend's
 scope is never listed and never offered, and they cannot search their way
 around it. The add form previews the feed a chosen scope would serve before
 any key exists, and each friend's row links to the feed their key is served.
+
+Two more controls narrow one friend's feed. Each friend's row caps the largest
+file and highest resolution they are offered, for a friend on a metered line; a
+file with no known resolution, such as music, stays offered. And a tag named
+`sharerr-<friend>` in an *arr app (`sharerr-sam`, or `sharerr-sam-b` for a friend
+called "Sam B."; the row shows it) shares what carries it with that friend alone.
+The `sharerr` tag must still exist, and an item carrying it as well is for everyone
+in scope. Any `sharerr-` tag counts, so an item carrying one for nobody on the list
+is seeded and offered to no one. These decide what a friend's feed lists, as a
+scope does, rather than locking the torrent itself. The name comes from the
+friend's label, so renaming a friend needs the tag renamed too.
 
 > There is no shared feed key. A single `torznab.api_key` would open the
 > feed for everybody and make revoking one friend meaningless, so a
@@ -518,7 +530,7 @@ label = "sharerr"   # stands in for qBittorrent's category and tag
 
 Then store the password: `printf %s "$PW" | sharerr vault set transmission.password`.
 Transmission cannot skip the hash check, so the first add of a large library
-is slower; the full comparison of the three clients is in
+is slower; the full comparison of the clients is in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## Using rTorrent / ruTorrent instead of qBittorrent
@@ -542,6 +554,22 @@ Username and password are HTTP Basic Auth for the reverse proxy in front of
 the RPC endpoint; if yours has none, any placeholder values work. rTorrent
 always verifies on add, honours the upload cap but not the ratio limit, and
 cannot replace a stale tracker in place; see
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
+
+## Using Deluge instead of qBittorrent
+
+sharerr talks to Deluge 2's web UI, which has a password and no accounts:
+
+```toml
+torrent_backend = "deluge"
+
+[deluge]
+url = "http://localhost:8112"
+label = "sharerr"   # needs Deluge's Label plugin; without it, torrents go unlabelled
+```
+
+Then store the password: `printf %s "$PW" | sharerr vault set deluge.password`.
+The web UI attaches itself to the first daemon its Connection Manager lists. See
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md#torrent-clients-what-actually-seeds).
 
 ## The CLI

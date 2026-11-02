@@ -2,18 +2,6 @@
 {% import "macros.html" as ui %}
 {% block title %}sharerr settings{% endblock %}
 
-{% macro lock_attr(key) %}{% if locks.contains_key(*key) %}disabled{% endif %}{% endmacro %}
-{%- macro locked(key) %}
-{%- if let Some(var) = locks.get(*key) %}
-  <p class="locked">Pinned by <code>{{ var }}</code>. Unset that variable to edit this here.</p>
-{%- endif %}
-{%- endmacro %}
-{%- macro stored(is_set) %}{% if is_set %}stored — leave blank to keep it{% else %}not set{% endif %}{% endmacro %}
-{%- macro field_status(is_set) %}
-{%- if is_set %}<span class="field-status field-status--set">&#10003; set</span>
-{%- else %}<span class="field-status field-status--unset">not set</span>
-{%- endif %}
-{%- endmacro %}
 {#- A small right-aligned summary of a section's state, on its heading, so the
     page can be skimmed from the headings alone. `set` is healthy, `unset` is
     neutral (a feature simply not in use), `warn` is something to look at. #}
@@ -26,13 +14,13 @@
 <form method="post" action="/settings/arr/{{ arr.source }}" class="panel">
   <label for="{{ arr.source }}_url">URL</label>
   <input id="{{ arr.source }}_url" name="url" value="{{ arr.url }}" placeholder="{{ arr.placeholder }}"
-         {% call lock_attr(arr.url_path) %}{% endcall %}>
-  {% call locked(arr.url_path) %}{% endcall %}
+         {% call ui::lock_attr(locks, arr.url_path) %}{% endcall %}>
+  {% call ui::locked(locks, arr.url_path) %}{% endcall %}
   <p class="hint">Leave blank if this instance has no {{ arr.title }}.</p>
 
-  <label for="{{ arr.source }}_key">API key {% call field_status(arr.key_set) %}{% endcall %}</label>
+  <label for="{{ arr.source }}_key">API key {% call ui::field_status(arr.key_set) %}{% endcall %}</label>
   <input id="{{ arr.source }}_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(arr.key_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(arr.key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if arr.key_set %}
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
@@ -55,12 +43,12 @@
 <form method="post" action="/settings/qbittorrent" class="panel">
   <label for="qbit_url">URL</label>
   <input id="qbit_url" name="url" value="{{ qbit_url }}" required
-         {% call lock_attr("qbittorrent.url") %}{% endcall %}>
-  {% call locked("qbittorrent.url") %}{% endcall %}
+         {% call ui::lock_attr(locks, "qbittorrent.url") %}{% endcall %}>
+  {% call ui::locked(locks, "qbittorrent.url") %}{% endcall %}
 
-  <label for="qbit_api_key">API key {% call field_status(qbit_api_key_set) %}{% endcall %}</label>
+  <label for="qbit_api_key">API key {% call ui::field_status(qbit_api_key_set) %}{% endcall %}</label>
   <input id="qbit_api_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(qbit_api_key_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(qbit_api_key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if qbit_api_key_set %}
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored API key</label>
@@ -74,20 +62,20 @@
 
   <label for="qbit_category">Category for sharerr's torrents</label>
   <input id="qbit_category" name="category" value="{{ qbit_category }}"
-         {% call lock_attr("qbittorrent.category") %}{% endcall %}>
-  {% call locked("qbittorrent.category") %}{% endcall %}
+         {% call ui::lock_attr(locks, "qbittorrent.category") %}{% endcall %}>
+  {% call ui::locked(locks, "qbittorrent.category") %}{% endcall %}
 
   <label for="qbit_tag">Tag for sharerr's torrents</label>
   <input id="qbit_tag" name="tag" value="{{ qbit_tag }}"
-         {% call lock_attr("qbittorrent.tag") %}{% endcall %}>
-  {% call locked("qbittorrent.tag") %}{% endcall %}
+         {% call ui::lock_attr(locks, "qbittorrent.tag") %}{% endcall %}>
+  {% call ui::locked(locks, "qbittorrent.tag") %}{% endcall %}
 
   <label class="hint">
     <input type="checkbox" name="skip_checking" value="1" {% if qbit_skip_checking %}checked{% endif %}
-           {% call lock_attr("qbittorrent.skip_checking") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "qbittorrent.skip_checking") %}{% endcall %}>
     Skip the hash check when adding a torrent
   </label>
-  {% call locked("qbittorrent.skip_checking") %}{% endcall %}
+  {% call ui::locked(locks, "qbittorrent.skip_checking") %}{% endcall %}
   <p class="hint">
     On by default — faster on a large library. Turn it off while you're still
     confirming your path mappings: with it on, a wrong mapping seeds mismatched
@@ -108,17 +96,17 @@
 <form method="post" action="/settings/transmission" class="panel">
   <label for="transmission_url">URL</label>
   <input id="transmission_url" name="url" value="{{ transmission_url }}" required
-         {% call lock_attr("transmission.url") %}{% endcall %}>
-  {% call locked("transmission.url") %}{% endcall %}
+         {% call ui::lock_attr(locks, "transmission.url") %}{% endcall %}>
+  {% call ui::locked(locks, "transmission.url") %}{% endcall %}
 
   <label for="transmission_username">Username</label>
   <input id="transmission_username" name="username" value="{{ transmission_username }}"
-         {% call lock_attr("transmission.username") %}{% endcall %}>
-  {% call locked("transmission.username") %}{% endcall %}
+         {% call ui::lock_attr(locks, "transmission.username") %}{% endcall %}>
+  {% call ui::locked(locks, "transmission.username") %}{% endcall %}
 
-  <label for="transmission_password">Password {% call field_status(transmission_password_set) %}{% endcall %}</label>
+  <label for="transmission_password">Password {% call ui::field_status(transmission_password_set) %}{% endcall %}</label>
   <input id="transmission_password" name="password" type="password" autocomplete="off"
-         placeholder="{% call stored(transmission_password_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(transmission_password_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if transmission_password_set %}
   <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
@@ -126,8 +114,8 @@
 
   <label for="transmission_label">Label for sharerr's torrents</label>
   <input id="transmission_label" name="label" value="{{ transmission_label }}"
-         {% call lock_attr("transmission.label") %}{% endcall %}>
-  {% call locked("transmission.label") %}{% endcall %}
+         {% call ui::lock_attr(locks, "transmission.label") %}{% endcall %}>
+  {% call ui::locked(locks, "transmission.label") %}{% endcall %}
   <p class="hint">
     Transmission has no separate category and tag the way qBittorrent does —
     this one label stands in for both.
@@ -148,8 +136,8 @@
   <label for="rtorrent_url">RPC URL</label>
   <input id="rtorrent_url" name="url" value="{{ rtorrent_url }}" required
          placeholder="http://seedbox.example/RPC2"
-         {% call lock_attr("rtorrent.url") %}{% endcall %}>
-  {% call locked("rtorrent.url") %}{% endcall %}
+         {% call ui::lock_attr(locks, "rtorrent.url") %}{% endcall %}>
+  {% call ui::locked(locks, "rtorrent.url") %}{% endcall %}
   <p class="hint">
     rTorrent has no HTTP server of its own — this is the exact address your
     reverse proxy answers XML-RPC requests on (commonly <code>/RPC2</code>, or
@@ -159,12 +147,12 @@
 
   <label for="rtorrent_username">Username</label>
   <input id="rtorrent_username" name="username" value="{{ rtorrent_username }}"
-         {% call lock_attr("rtorrent.username") %}{% endcall %}>
-  {% call locked("rtorrent.username") %}{% endcall %}
+         {% call ui::lock_attr(locks, "rtorrent.username") %}{% endcall %}>
+  {% call ui::locked(locks, "rtorrent.username") %}{% endcall %}
 
-  <label for="rtorrent_password">Password {% call field_status(rtorrent_password_set) %}{% endcall %}</label>
+  <label for="rtorrent_password">Password {% call ui::field_status(rtorrent_password_set) %}{% endcall %}</label>
   <input id="rtorrent_password" name="password" type="password" autocomplete="off"
-         placeholder="{% call stored(rtorrent_password_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(rtorrent_password_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if rtorrent_password_set %}
   <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
@@ -178,8 +166,8 @@
 
   <label for="rtorrent_label">Label for sharerr's torrents</label>
   <input id="rtorrent_label" name="label" value="{{ rtorrent_label }}"
-         {% call lock_attr("rtorrent.label") %}{% endcall %}>
-  {% call locked("rtorrent.label") %}{% endcall %}
+         {% call ui::lock_attr(locks, "rtorrent.label") %}{% endcall %}>
+  {% call ui::locked(locks, "rtorrent.label") %}{% endcall %}
   <p class="hint">
     rTorrent has no separate category and tag either — this one label stands
     in for both, stored in rTorrent's <code>d.custom1</code> field.
@@ -188,6 +176,40 @@
   <button type="submit">Save</button>
   <button type="button" class="secondary" hx-post="/settings/test/rtorrent" hx-target="#test-rtorrent" hx-swap="innerHTML">Test connection</button>
   <span id="test-rtorrent"></span>
+</form>
+{% endmacro %}
+
+{% macro deluge_section() %}
+<div class="doclinks">
+  {% call ui::doc(crate::web::docs::CONFIG_DELUGE, "Deluge settings") %}{% endcall %}
+  {% call ui::doc(crate::web::docs::DELUGE_RPC, "Deluge Web API") %}{% endcall %}
+</div>
+<form method="post" action="/settings/deluge" class="panel">
+  <label for="deluge_url">Web UI URL</label>
+  <input id="deluge_url" name="url" value="{{ deluge_url }}" required
+         {% call ui::lock_attr(locks, "deluge.url") %}{% endcall %}>
+  {% call ui::locked(locks, "deluge.url") %}{% endcall %}
+
+  <label for="deluge_password">Web UI password {% call ui::field_status(deluge_password_set) %}{% endcall %}</label>
+  <input id="deluge_password" name="password" type="password" autocomplete="off"
+         placeholder="{% call ui::stored(deluge_password_set) %}{% endcall %}"
+         {% if !master_key_present %}disabled{% endif %}>
+  {% if deluge_password_set %}
+  <label class="hint"><input type="checkbox" name="clear_password" value="1"> Remove the stored password</label>
+  {% endif %}
+
+  <label for="deluge_label">Label for sharerr's torrents</label>
+  <input id="deluge_label" name="label" value="{{ deluge_label }}"
+         {% call ui::lock_attr(locks, "deluge.label") %}{% endcall %}>
+  {% call ui::locked(locks, "deluge.label") %}{% endcall %}
+  <p class="hint">
+    Labels come from Deluge's Label plugin, which is off by default. Without it
+    torrents still seed, just unlabelled.
+  </p>
+
+  <button type="submit">Save</button>
+  <button type="button" class="secondary" hx-post="/settings/test/deluge" hx-target="#test-deluge" hx-swap="innerHTML">Test connection</button>
+  <span id="test-deluge"></span>
 </form>
 {% endmacro %}
 
@@ -218,10 +240,10 @@
 
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if g.enabled %}checked{% endif %}
-           {% call lock_attr(g.enabled_path) %}{% endcall %}>
+           {% call ui::lock_attr(locks, g.enabled_path) %}{% endcall %}>
     {% if g.target == crate::gluetun::GluetunTarget::Tracker %}Poll gluetun{% else %}Poll the torrent client's gluetun{% endif %}
   </label>
-  {% call locked(g.enabled_path) %}{% endcall %}
+  {% call ui::locked(locks, g.enabled_path) %}{% endcall %}
   {% if g.target == crate::gluetun::GluetunTarget::Tracker %}
   <p class="hint">
     Unticking this pauses polling without losing the control server URL below —
@@ -232,12 +254,12 @@
   <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_control_url">Control server URL</label>
   <input id="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_control_url" name="control_url" value="{{ g.control_url }}"
          placeholder="{% if g.target == crate::gluetun::GluetunTarget::Client %}http://media-gluetun:8000{% else %}http://localhost:8000{% endif %} — leave empty to disable"
-         {% call lock_attr(g.control_url_path) %}{% endcall %}>
-  {% call locked(g.control_url_path) %}{% endcall %}
+         {% call ui::lock_attr(locks, g.control_url_path) %}{% endcall %}>
+  {% call ui::locked(locks, g.control_url_path) %}{% endcall %}
 
-  <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_api_key">Control server API key {% call field_status(g.api_key_set) %}{% endcall %}</label>
+  <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_api_key">Control server API key {% call ui::field_status(g.api_key_set) %}{% endcall %}</label>
   <input id="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_api_key" name="api_key" type="password" autocomplete="off"
-         placeholder="{% call stored(g.api_key_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(g.api_key_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if g.api_key_set %}
   <label class="hint"><input type="checkbox" name="clear_api_key" value="1"> Remove the stored key</label>
@@ -257,8 +279,8 @@
 
   <label for="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_poll_secs">Poll interval (seconds)</label>
   <input id="gluetun{% if g.target == crate::gluetun::GluetunTarget::Client %}_client{% endif %}_poll_secs" name="poll_secs" value="{{ g.poll_secs }}" inputmode="numeric"
-         {% call lock_attr(g.poll_secs_path) %}{% endcall %}>
-  {% call locked(g.poll_secs_path) %}{% endcall %}
+         {% call ui::lock_attr(locks, g.poll_secs_path) %}{% endcall %}>
+  {% call ui::locked(locks, g.poll_secs_path) %}{% endcall %}
   {% if g.target == crate::gluetun::GluetunTarget::Tracker %}
   <p class="hint">
     The poll is the safety net; for reconnects to be picked up in seconds, set
@@ -377,8 +399,8 @@
 <form method="post" action="/settings/general" class="panel">
   <label for="tag">Tag to watch</label>
   <input id="tag" name="tag" value="{{ tag }}" required
-         {% call lock_attr("tag") %}{% endcall %}>
-  {% call locked("tag") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tag") %}{% endcall %}>
+  {% call ui::locked(locks, "tag") %}{% endcall %}
   <p class="hint">Sonarr and Radarr content carrying this tag is what gets shared.</p>
   <button type="submit">Save</button>
 </form>
@@ -469,6 +491,9 @@
   {%- else if torrent_backend == "transmission" %}
     {%- if transmission_password_set %}{% call chip("set", "Transmission · password set") %}{% endcall %}
     {%- else %}{% call chip("warn", "Transmission · no password") %}{% endcall %}{% endif %}
+  {%- else if torrent_backend == "deluge" %}
+    {%- if deluge_password_set %}{% call chip("set", "Deluge · password set") %}{% endcall %}
+    {%- else %}{% call chip("warn", "Deluge · no password") %}{% endcall %}{% endif %}
   {%- else %}
     {%- if rtorrent_password_set %}{% call chip("set", "rTorrent · password set") %}{% endcall %}
     {%- else %}{% call chip("unset", "rTorrent · no password") %}{% endcall %}{% endif %}
@@ -481,12 +506,13 @@
 <form method="post" action="/settings/torrent-backend" class="panel">
   <label for="torrent_backend">Which client actually seeds</label>
   <select id="torrent_backend" name="backend"
-          {% call lock_attr("torrent_backend") %}{% endcall %}>
+          {% call ui::lock_attr(locks, "torrent_backend") %}{% endcall %}>
     <option value="qbittorrent" {% if torrent_backend == "qbittorrent" %}selected{% endif %}>qBittorrent</option>
     <option value="transmission" {% if torrent_backend == "transmission" %}selected{% endif %}>Transmission</option>
     <option value="rtorrent" {% if torrent_backend == "rtorrent" %}selected{% endif %}>rTorrent</option>
+    <option value="deluge" {% if torrent_backend == "deluge" %}selected{% endif %}>Deluge</option>
   </select>
-  {% call locked("torrent_backend") %}{% endcall %}
+  {% call ui::locked(locks, "torrent_backend") %}{% endcall %}
   <p class="hint">
     Saving a different client here swaps which settings show below. Every
     client's settings are kept either way, so nothing is lost by switching.
@@ -494,15 +520,18 @@
   <button type="submit">Save</button>
 </form>
 
-{# Only the selected client's settings render inline; the other two sit behind
-   the fold below. All three are still saved and kept — this is about which one
-   an operator is actually looking at, not about which are configurable. #}
+{# Only the selected client's settings render inline; the others sit behind the
+   fold below. All are still saved and kept — this is about which one an
+   operator is actually looking at, not about which are configurable. #}
 {% if torrent_backend == "qbittorrent" %}
 <h3 id="qbittorrent">qBittorrent</h3>
 {% call qbittorrent_section() %}{% endcall %}
 {% else if torrent_backend == "transmission" %}
 <h3 id="transmission">Transmission</h3>
 {% call transmission_section() %}{% endcall %}
+{% else if torrent_backend == "deluge" %}
+<h3 id="deluge">Deluge</h3>
+{% call deluge_section() %}{% endcall %}
 {% else %}
 <h3 id="rtorrent">rTorrent</h3>
 {% call rtorrent_section() %}{% endcall %}
@@ -529,6 +558,10 @@
   <h3>rTorrent</h3>
   {% call rtorrent_section() %}{% endcall %}
   {% endif %}
+  {% if torrent_backend != "deluge" %}
+  <h3>Deluge</h3>
+  {% call deluge_section() %}{% endcall %}
+  {% endif %}
 </details>
 
 <h2 id="tracker"><svg class="sec-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 9.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3M4.8 4.8a4.5 4.5 0 000 6.4M11.2 4.8a4.5 4.5 0 010 6.4M2.6 2.6a7.6 7.6 0 000 10.8M13.4 2.6a7.6 7.6 0 010 10.8"/></svg>Tracker
@@ -549,8 +582,8 @@
   <label for="advertised_host">Advertised host</label>
   <input id="advertised_host" name="advertised_host" value="{{ tracker_advertised_host }}"
          placeholder="{% if !gluetun.control_url.is_empty() && gluetun.enabled %}optional — gluetun below resolves this{% else %}the name or IP your friends reach you on{% endif %}"
-         {% call lock_attr("tracker.advertised_host") %}{% endcall %}>
-  {% call locked("tracker.advertised_host") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tracker.advertised_host") %}{% endcall %}>
+  {% call ui::locked(locks, "tracker.advertised_host") %}{% endcall %}
   {% if !gluetun.control_url.is_empty() && gluetun.enabled %}
   <p class="hint">
     Not required here: the Gluetun section below is configured to resolve this
@@ -574,22 +607,22 @@
   <label for="tracker_port">Announce port</label>
   <input id="tracker_port" name="port" value="{{ tracker_port }}" inputmode="numeric"
          placeholder="default: this server's own port"
-         {% call lock_attr("tracker.port") %}{% endcall %}>
-  {% call locked("tracker.port") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tracker.port") %}{% endcall %}>
+  {% call ui::locked(locks, "tracker.port") %}{% endcall %}
 
   <label for="advertised_url">Advertised URL (advanced)</label>
   <input id="advertised_url" name="advertised_url" value="{{ tracker_advertised_url }}"
          placeholder="e.g. https://example.com/sharerr — overrides host and port"
-         {% call lock_attr("tracker.advertised_url") %}{% endcall %}>
-  {% call locked("tracker.advertised_url") %}{% endcall %}
+         {% call ui::lock_attr(locks, "tracker.advertised_url") %}{% endcall %}>
+  {% call ui::locked(locks, "tracker.advertised_url") %}{% endcall %}
   <p class="hint">
     For reverse-proxied or IPv6 setups: a full base URL with scheme and any path
     prefix. When set, it wins over the host and port above.
   </p>
 
-  <label for="tracker_token">Tracker token {% call field_status(tracker_token_set) %}{% endcall %}</label>
+  <label for="tracker_token">Tracker token {% call ui::field_status(tracker_token_set) %}{% endcall %}</label>
   <input id="tracker_token" name="token" type="password" autocomplete="off"
-         placeholder="{% call stored(tracker_token_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(tracker_token_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if tracker_token_set %}
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
@@ -700,26 +733,26 @@
   <label for="seeding_upload_limit_kib">Upload limit (KiB/s)</label>
   <input id="seeding_upload_limit_kib" name="upload_limit_kib" value="{{ seeding_upload_limit_kib }}"
          inputmode="numeric" placeholder="unlimited"
-         {% call lock_attr("seeding.upload_limit_kib") %}{% endcall %}>
-  {% call locked("seeding.upload_limit_kib") %}{% endcall %}
+         {% call ui::lock_attr(locks, "seeding.upload_limit_kib") %}{% endcall %}>
+  {% call ui::locked(locks, "seeding.upload_limit_kib") %}{% endcall %}
 
   <label for="seeding_ratio_limit">Seed ratio goal</label>
   <input id="seeding_ratio_limit" name="ratio_limit" value="{{ seeding_ratio_limit }}"
          inputmode="decimal" placeholder="e.g. 2.0"
-         {% call lock_attr("seeding.ratio_limit") %}{% endcall %}>
-  {% call locked("seeding.ratio_limit") %}{% endcall %}
+         {% call ui::lock_attr(locks, "seeding.ratio_limit") %}{% endcall %}>
+  {% call ui::locked(locks, "seeding.ratio_limit") %}{% endcall %}
 
   <label for="seeding_quiet_hours">Quiet hours (local time)</label>
   <input id="seeding_quiet_hours" name="quiet_hours" value="{{ seeding_quiet_hours }}"
          placeholder="e.g. 01:00-07:00"
-         {% call lock_attr("seeding.quiet_hours") %}{% endcall %}>
-  {% call locked("seeding.quiet_hours") %}{% endcall %}
+         {% call ui::lock_attr(locks, "seeding.quiet_hours") %}{% endcall %}>
+  {% call ui::locked(locks, "seeding.quiet_hours") %}{% endcall %}
 
   <label for="seeding_quiet_upload_limit_kib">Upload limit during quiet hours (KiB/s)</label>
   <input id="seeding_quiet_upload_limit_kib" name="quiet_upload_limit_kib"
          value="{{ seeding_quiet_upload_limit_kib }}" inputmode="numeric"
-         {% call lock_attr("seeding.quiet_upload_limit_kib") %}{% endcall %}>
-  {% call locked("seeding.quiet_upload_limit_kib") %}{% endcall %}
+         {% call ui::lock_attr(locks, "seeding.quiet_upload_limit_kib") %}{% endcall %}>
+  {% call ui::locked(locks, "seeding.quiet_upload_limit_kib") %}{% endcall %}
   <p class="hint">
     Inside the window, sharerr's own torrents take this cap instead of the one above;
     after it, they go back to the one above. Needs the upload limit above too, so there
@@ -729,10 +762,10 @@
 
   <label class="hint">
     <input type="checkbox" name="private" value="1" {% if seeding_private %}checked{% endif %}
-           {% call lock_attr("seeding.private") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "seeding.private") %}{% endcall %}>
     Mark newly built torrents private (BEP 27)
   </label>
-  {% call locked("seeding.private") %}{% endcall %}
+  {% call ui::locked(locks, "seeding.private") %}{% endcall %}
   <p class="hint">
     On by default, and it is why sharerr's own tracker exists: with this on, a
     torrent's swarm is exactly the friends sharerr introduces it to, and
@@ -744,11 +777,24 @@
   </p>
 
   <label class="hint">
+    <input type="checkbox" name="sidecars" value="1" {% if seeding_sidecars %}checked{% endif %}
+           {% call ui::lock_attr(locks, "seeding.sidecars") %}{% endcall %}>
+    Include subtitle files in directory libraries' new torrents
+  </label>
+  {% call ui::locked(locks, "seeding.sidecars") %}{% endcall %}
+  <p class="hint">
+    For tv and movie <code>[[library]]</code> directories: a file's torrent also
+    carries the subtitles beside it named after it, such as
+    <code>Show.S01E01.en.srt</code>. Nothing is moved. Only applies to torrents
+    built after you change it.
+  </p>
+
+  <label class="hint">
     <input type="checkbox" name="magnet_links" value="1" {% if feed_magnet_links %}checked{% endif %}
-           {% call lock_attr("feed.magnet_links") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "feed.magnet_links") %}{% endcall %}>
     Advertise a magnet link in the feed, alongside the <code>.torrent</code>
   </label>
-  {% call locked("feed.magnet_links") %}{% endcall %}
+  {% call ui::locked(locks, "feed.magnet_links") %}{% endcall %}
   {% if feed_magnet_links && seeding_private %}
   <p class="warn">
     Private is still on above, so this has no effect yet: nothing in the
@@ -806,13 +852,13 @@
 
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if lighthouse_enabled %}checked{% endif %}
-           {% call lock_attr("lighthouse.enabled") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "lighthouse.enabled") %}{% endcall %}>
     Run the lighthouse on this instance
   </label>
-  {% call locked("lighthouse.enabled") %}{% endcall %}
+  {% call ui::locked(locks, "lighthouse.enabled") %}{% endcall %}
 
   <label for="lighthouse_mount">Listener</label>
-  <select id="lighthouse_mount" name="mount" {% call lock_attr("lighthouse.mount") %}{% endcall %}>
+  <select id="lighthouse_mount" name="mount" {% call ui::lock_attr(locks, "lighthouse.mount") %}{% endcall %}>
     <option value="frontend" {% if lighthouse_mount == "frontend" %}selected{% endif %}>
       Frontend — this server's own port
     </option>
@@ -820,7 +866,7 @@
       Tracker — the dedicated tracker listener if set, otherwise the frontend port
     </option>
   </select>
-  {% call locked("lighthouse.mount") %}{% endcall %}
+  {% call ui::locked(locks, "lighthouse.mount") %}{% endcall %}
   <p class="hint">
     Which port carries the lighthouse's routes. Its own image and port
     (<code>sharerr-lighthouse</code>) is the deployment the design is built
@@ -831,8 +877,8 @@
 
   <label for="lighthouse_urls">Lighthouses to use</label>
   <textarea id="lighthouse_urls" name="urls" rows="3" placeholder="https://lighthouse.example.com"
-            {% call lock_attr("lighthouse.urls") %}{% endcall %}>{{ lighthouse_urls }}</textarea>
-  {% call locked("lighthouse.urls") %}{% endcall %}
+            {% call ui::lock_attr(locks, "lighthouse.urls") %}{% endcall %}>{{ lighthouse_urls }}</textarea>
+  {% call ui::locked(locks, "lighthouse.urls") %}{% endcall %}
   <p class="hint">
     One URL per line. This instance reports its own endpoint to each of
     these, and queries each for a friend gossip can no longer reach —
@@ -853,15 +899,15 @@
 <form method="post" action="/settings/sync" class="panel">
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if sync_enabled %}checked{% endif %}
-           {% call lock_attr("sync.enabled") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "sync.enabled") %}{% endcall %}>
     Reconcile on a timer while sharerr is running
   </label>
-  {% call locked("sync.enabled") %}{% endcall %}
+  {% call ui::locked(locks, "sync.enabled") %}{% endcall %}
 
   <label for="interval">Interval (seconds)</label>
   <input id="interval" name="interval_secs" value="{{ sync_interval_secs }}" inputmode="numeric"
-         {% call lock_attr("sync.interval_secs") %}{% endcall %}>
-  {% call locked("sync.interval_secs") %}{% endcall %}
+         {% call ui::lock_attr(locks, "sync.interval_secs") %}{% endcall %}>
+  {% call ui::locked(locks, "sync.interval_secs") %}{% endcall %}
   <p class="hint">Minimum 60.</p>
 
   <button type="submit">Save</button>
@@ -881,10 +927,10 @@
 <form method="post" action="/settings/checks" class="panel">
   <label class="hint">
     <input type="checkbox" name="reachability" value="1" {% if checks_reachability %}checked{% endif %}
-           {% call lock_attr("checks.reachability") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "checks.reachability") %}{% endcall %}>
     Check that the advertised tracker and feed addresses accept connections
   </label>
-  {% call locked("checks.reachability") %}{% endcall %}
+  {% call ui::locked(locks, "checks.reachability") %}{% endcall %}
   <p class="hint">
     Off by default. When on, the Topology page dials this instance's own
     advertised tracker and feed addresses and reports whether they answer.
@@ -911,9 +957,9 @@
     URL blank to turn this off entirely, regardless of which triggers are set.
   </p>
 
-  <label for="notifications_webhook_url">Webhook URL {% call field_status(notifications_webhook_set) %}{% endcall %}</label>
+  <label for="notifications_webhook_url">Webhook URL {% call ui::field_status(notifications_webhook_set) %}{% endcall %}</label>
   <input id="notifications_webhook_url" name="webhook_url" type="password" autocomplete="off"
-         placeholder="{% call stored(notifications_webhook_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(notifications_webhook_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if notifications_webhook_set %}
   <label class="hint"><input type="checkbox" name="clear_webhook_url" value="1"> Remove the stored URL</label>
@@ -925,7 +971,7 @@
   </p>
 
   <label for="notifications_kind">Shape</label>
-  <select id="notifications_kind" name="kind" {% call lock_attr("notifications.kind") %}{% endcall %}>
+  <select id="notifications_kind" name="kind" {% call ui::lock_attr(locks, "notifications.kind") %}{% endcall %}>
     <option value="generic" {% if notifications_kind == "generic" %}selected{% endif %}>Generic JSON webhook</option>
     <option value="discord" {% if notifications_kind == "discord" %}selected{% endif %}>Discord</option>
     <option value="apprise" {% if notifications_kind == "apprise" %}selected{% endif %}>Apprise API server</option>
@@ -934,7 +980,7 @@
     <option value="telegram" {% if notifications_kind == "telegram" %}selected{% endif %}>Telegram</option>
     <option value="pushover" {% if notifications_kind == "pushover" %}selected{% endif %}>Pushover</option>
   </select>
-  {% call locked("notifications.kind") %}{% endcall %}
+  {% call ui::locked(locks, "notifications.kind") %}{% endcall %}
   <p class="hint">
     The URL carries everything the service needs. ntfy: the topic's URL, with
     <code>?auth=</code> for a protected one. Gotify:
@@ -946,8 +992,8 @@
 
   <label for="notifications_peer_quiet_secs">Peer-quiet threshold (seconds)</label>
   <input id="notifications_peer_quiet_secs" name="peer_quiet_secs" value="{{ notifications_peer_quiet_secs }}" inputmode="numeric"
-         {% call lock_attr("notifications.peer_quiet_secs") %}{% endcall %}>
-  {% call locked("notifications.peer_quiet_secs") %}{% endcall %}
+         {% call ui::lock_attr(locks, "notifications.peer_quiet_secs") %}{% endcall %}>
+  {% call ui::locked(locks, "notifications.peer_quiet_secs") %}{% endcall %}
   <p class="hint">
     How long a friend must go unseen before "a friend has gone quiet" (below)
     fires — once per quiet spell, not on a repeat. <code>0</code> turns just
@@ -955,58 +1001,16 @@
   </p>
 
   <p class="hint"><strong>Fires on:</strong></p>
+  {% for trigger in notification_triggers %}
   <label class="hint">
-    <input type="checkbox" name="trigger_sync_failed" value="1" {% if notifications_trigger_sync_failed %}checked{% endif %}>
-    A sync fails outright
+    <input type="checkbox" name="triggers" value="{{ trigger.value }}" {% if trigger.checked %}checked{% endif %}>
+    {{ trigger.prompt }}
   </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_peer_quiet" value="1" {% if notifications_trigger_peer_quiet %}checked{% endif %}>
-    A friend has gone quiet
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_endpoint_rotated" value="1" {% if notifications_trigger_endpoint_rotated %}checked{% endif %}>
-    The advertised endpoint rotates
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_items_shared" value="1" {% if notifications_trigger_items_shared %}checked{% endif %}>
-    Items are newly shared (once per sync pass)
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_item_failed" value="1" {% if notifications_trigger_item_failed %}checked{% endif %}>
-    Items fail to share (once per sync pass)
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_peer_revoked" value="1" {% if notifications_trigger_peer_revoked %}checked{% endif %}>
-    A friend's key is revoked
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_peer_first_contact" value="1" {% if notifications_trigger_peer_first_contact %}checked{% endif %}>
-    A friend makes contact for the first time
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_tracker_unreachable" value="1" {% if notifications_trigger_tracker_unreachable %}checked{% endif %}>
-    The advertised tracker address stops answering (needs the reachability check under Automatic checks, above)
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_library_unreadable" value="1" {% if notifications_trigger_library_unreadable %}checked{% endif %}>
-    A library path cannot be read (once per reason, not per pass)
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_torrent_interrupted" value="1" {% if notifications_trigger_torrent_interrupted %}checked{% endif %}>
-    A torrent sharerr built is stopped in the client, or removed from it (once per torrent)
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_file_changed" value="1" {% if notifications_trigger_file_changed %}checked{% endif %}>
-    A shared file changes on disk after its torrent was built (once per torrent)
-  </label>
-  <label class="hint">
-    <input type="checkbox" name="trigger_heartbeat" value="1" {% if notifications_trigger_heartbeat %}checked{% endif %}>
-    Heartbeat (the push below, not the webhook)
-  </label>
+  {% endfor %}
 
-  <label for="notifications_heartbeat_url">Heartbeat push URL {% call field_status(notifications_heartbeat_set) %}{% endcall %}</label>
+  <label for="notifications_heartbeat_url">Heartbeat push URL {% call ui::field_status(notifications_heartbeat_set) %}{% endcall %}</label>
   <input id="notifications_heartbeat_url" name="heartbeat_url" type="password" autocomplete="off"
-         placeholder="{% call stored(notifications_heartbeat_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(notifications_heartbeat_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if notifications_heartbeat_set %}
   <label class="hint"><input type="checkbox" name="clear_heartbeat_url" value="1"> Remove the stored URL</label>
@@ -1020,8 +1024,8 @@
 
   <label for="notifications_heartbeat_secs">Heartbeat interval (seconds)</label>
   <input id="notifications_heartbeat_secs" name="heartbeat_secs" value="{{ notifications_heartbeat_secs }}" inputmode="numeric"
-         {% call lock_attr("notifications.heartbeat_secs") %}{% endcall %}>
-  {% call locked("notifications.heartbeat_secs") %}{% endcall %}
+         {% call ui::lock_attr(locks, "notifications.heartbeat_secs") %}{% endcall %}>
+  {% call ui::locked(locks, "notifications.heartbeat_secs") %}{% endcall %}
   <p class="hint">
     Match the monitor's own heartbeat interval. <code>0</code> turns the push
     off without clearing the URL.
@@ -1055,14 +1059,14 @@
 
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if metrics_enabled %}checked{% endif %}
-           {% call lock_attr("metrics.enabled") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "metrics.enabled") %}{% endcall %}>
     Serve <code>/metrics</code> and the dashboard-widget endpoint
   </label>
-  {% call locked("metrics.enabled") %}{% endcall %}
+  {% call ui::locked(locks, "metrics.enabled") %}{% endcall %}
 
-  <label for="metrics_token">Bearer token {% call field_status(metrics_token_set) %}{% endcall %}</label>
+  <label for="metrics_token">Bearer token {% call ui::field_status(metrics_token_set) %}{% endcall %}</label>
   <input id="metrics_token" name="token" type="password" autocomplete="off"
-         placeholder="{% call stored(metrics_token_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(metrics_token_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if metrics_token_set %}
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>
@@ -1094,14 +1098,14 @@
 
   <label class="hint">
     <input type="checkbox" name="enabled" value="1" {% if api_enabled %}checked{% endif %}
-           {% call lock_attr("api.enabled") %}{% endcall %}>
+           {% call ui::lock_attr(locks, "api.enabled") %}{% endcall %}>
     Serve the management API
   </label>
-  {% call locked("api.enabled") %}{% endcall %}
+  {% call ui::locked(locks, "api.enabled") %}{% endcall %}
 
-  <label for="api_token">Bearer token {% call field_status(api_token_set) %}{% endcall %}</label>
+  <label for="api_token">Bearer token {% call ui::field_status(api_token_set) %}{% endcall %}</label>
   <input id="api_token" name="token" type="password" autocomplete="off"
-         placeholder="{% call stored(api_token_set) %}{% endcall %}"
+         placeholder="{% call ui::stored(api_token_set) %}{% endcall %}"
          {% if !master_key_present %}disabled{% endif %}>
   {% if api_token_set %}
   <label class="hint"><input type="checkbox" name="clear_token" value="1"> Remove the stored token</label>

@@ -30,6 +30,7 @@ on:
           - vpn
           - transmission
           - rtorrent
+          - deluge
           - sonarr-v5
           - two-instance
           - mesh
@@ -71,6 +72,7 @@ jobs:
             {"tier":"vpn","script":"scripts/run_docker_tests.sh","flag":"--vpn","timeout":60},
             {"tier":"transmission","script":"scripts/run_docker_tests.sh","flag":"--transmission","timeout":60},
             {"tier":"rtorrent","script":"scripts/run_docker_tests.sh","flag":"--rtorrent","timeout":60},
+            {"tier":"deluge","script":"scripts/run_docker_tests.sh","flag":"--deluge","timeout":60},
             {"tier":"sonarr-v5","script":"scripts/run_docker_tests.sh","flag":"--sonarr-v5","timeout":60},
             {"tier":"two-instance","script":"scripts/run_docker_tests_two_instance.sh","flag":"","timeout":75},
             {"tier":"mesh","script":"scripts/run_docker_tests_mesh.sh","flag":"","timeout":90}

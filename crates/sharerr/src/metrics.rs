@@ -4,14 +4,8 @@
 //! [`MetricsSnapshot`] is the one place that gathers raw numbers from the
 //! store, the live swarms, and the gluetun/lighthouse/system pollers; both
 //! endpoints render from it rather than each querying independently, so they
-//! cannot disagree about what "now" means. This is deliberately a separate
-//! aggregator from `crate::web::glance`, not a shared one: `glance` is
-//! polled by an open browser tab every 30 seconds and is documented as
-//! costing "two store queries and an in-memory swarm read" — building it from
-//! this module's snapshot would add a full item scan and two poller reads to
-//! that budget for numbers the status page never shows. A scrape target is
-//! pulled on whatever interval the operator's Prometheus is configured with,
-//! not this project's, so it pays its own cost independently.
+//! cannot disagree about what "now" means. `crate::web::glance` renders the status
+//! page from it too, for the same reason.
 //!
 //! Both endpoints are off by default and both require the bearer token in
 //! [`sharerr_core::config::secret_keys::METRICS_TOKEN`] — see [`MetricsAuth`]
@@ -48,27 +42,27 @@ pub(crate) fn routes() -> OpenApiRouter<Arc<ServeState>> {
         .routes(routes!(dashboard_endpoint))
 }
 
-/// Raw numbers, gathered once and shared by both endpoints below — see the
-/// module doc for why this is not also what `glance` renders from.
+/// Raw numbers, gathered once and shared by both endpoints below and
+/// `crate::web::glance`.
 #[derive(Debug, Clone)]
 pub(crate) struct MetricsSnapshot {
     /// Every lifecycle state, always present even at zero — see
     /// [`items_by_state`].
     items_by_state: Vec<(ShareState, i64)>,
-    seeding_count: i64,
-    seeding_bytes: i64,
+    pub(crate) seeding_count: i64,
+    pub(crate) seeding_bytes: i64,
     /// The most recent *finished* run, same filter `crate::web::glance`
     /// applies: an in-flight run has no outcome yet.
-    last_run: Option<sharerr_store::RunRecord>,
-    swarm: sharerr_torrent::announce::SwarmStats,
+    pub(crate) last_run: Option<sharerr_store::RunRecord>,
+    pub(crate) swarm: sharerr_torrent::announce::SwarmStats,
     /// All-time bytes the tracker's announces have accounted for.
-    transfer: sharerr_store::TransferTotals,
-    peers_total: usize,
-    peers_recent: usize,
+    pub(crate) transfer: sharerr_store::TransferTotals,
+    pub(crate) peers_total: usize,
+    pub(crate) peers_recent: usize,
     gluetun_tracker: GluetunSnapshot,
     gluetun_client: GluetunSnapshot,
     lighthouse: LighthouseSnapshot,
-    system: Option<SystemSnapshot>,
+    pub(crate) system: Option<SystemSnapshot>,
 }
 
 /// Every [`ShareState`] paired with its count, in declaration order — a store
@@ -515,33 +509,44 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for MetricsAuth {
         parts: &mut axum::http::request::Parts,
         state: &Arc<ServeState>,
     ) -> Result<Self, Self::Rejection> {
-        let refused = || StatusCode::NOT_FOUND.into_response();
-
-        if !state.config().await.metrics.enabled {
+        let enabled = state.with_config(|config| config.metrics.enabled).await;
+        if !enabled {
             return Err(refused());
         }
-
-        let required = match state.try_metrics_token().await {
-            Ok(token) => token,
-            Err(err) => {
-                tracing::warn!(error = %err, "refusing /metrics: the vault could not be opened");
-                return Err(refused());
-            }
-        };
-        let Some(required) = required.filter(|token| !token.is_empty()) else {
-            return Err(refused());
-        };
-
-        let Some(supplied) = bearer_token(&parts.headers) else {
-            return Err(refused());
-        };
-
-        if crate::secrets::constant_time_eq(&required, &supplied) {
+        let token = state.try_metrics_token().await;
+        if bearer_admitted(&parts.headers, token, "/metrics") {
             Ok(Self)
         } else {
             Err(refused())
         }
     }
+}
+
+/// The one answer to anything refused: disabled, missing and wrong look alike.
+pub(crate) fn refused() -> Response {
+    StatusCode::NOT_FOUND.into_response()
+}
+
+/// The fail-closed bearer check behind [`MetricsAuth`] and the management API:
+/// `token` is what the vault holds, and an unreadable vault, no token, or a missing
+/// or wrong header are all `false`. `what` names the surface in the log.
+pub(crate) fn bearer_admitted<E: std::fmt::Display>(
+    headers: &axum::http::HeaderMap,
+    token: Result<Option<String>, E>,
+    what: &str,
+) -> bool {
+    let required = match token {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::warn!(error = %err, "refusing {what}: the vault could not be opened");
+            return false;
+        }
+    };
+    let Some(required) = required.filter(|token| !token.is_empty()) else {
+        return false;
+    };
+    bearer_token(headers)
+        .is_some_and(|supplied| crate::secrets::constant_time_eq(&required, &supplied))
 }
 
 /// The `Authorization: Bearer <token>` header, if present and well-formed.

@@ -359,7 +359,7 @@ mod tests {
         use tower::ServiceExt;
 
         let (_dir, serve) = crate::state::fixtures::unconfigured();
-        let tracker = std::sync::Arc::new(crate::tracker::TrackerState::new(serve.clone()));
+        let tracker = serve.clone();
 
         for (method, path) in documented() {
             // Substitute something plausible for each templated segment. What

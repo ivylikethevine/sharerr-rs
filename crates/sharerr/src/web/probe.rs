@@ -24,8 +24,7 @@ use std::fmt::Write as _;
 
 use super::WebState;
 use crate::checks::{
-    ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_library, check_qbit,
-    resolve_torrent_credential,
+    ArrOutcome, DirOutcome, QbitOutcome, check_arr, check_qbit, resolve_torrent_credential,
 };
 
 /// Run one service's check and return the HTML fragment htmx swaps in.
@@ -147,20 +146,7 @@ async fn library_badge(config: &Config) -> Outcome {
         return Outcome::Bad("No library directories configured. Save one first.".to_owned());
     }
 
-    let libraries = config.library.clone();
-    // The scans stat every file; off the async loop so a slow mount cannot
-    // stall the single worker thread this may be running on.
-    let outcomes = match tokio::task::spawn_blocking(move || {
-        libraries
-            .into_iter()
-            .map(|library| {
-                let outcome = check_library(&library);
-                (library, outcome)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    {
+    let outcomes = match crate::checks::scan_libraries(config.library.clone()).await {
         Ok(outcomes) => outcomes,
         // A panicked or cancelled scan must not render as a green "0 folders
         // found" badge asserting the configuration is fine.
@@ -447,6 +433,7 @@ mod tests {
             "qbittorrent",
             "transmission",
             "rtorrent",
+            "deluge",
             "library",
             "sonarr",
             "directory",

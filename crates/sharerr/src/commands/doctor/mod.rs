@@ -453,8 +453,11 @@ async fn check_database(config: &Config, report: &mut Report) {
     match Store::open(&path).await {
         Ok(store) => {
             report.ok(format!("opened {} and applied migrations", path.display()));
-            match store.all_items().await {
-                Ok(items) => report.info(format!("{} item(s) on record", items.len())),
+            match store.counts_by_state().await {
+                Ok(counts) => {
+                    let total: i64 = counts.iter().map(|(_, count)| count).sum();
+                    report.info(format!("{total} item(s) on record"));
+                }
                 Err(err) => report.fail(format!("reading shared_items: {err}")),
             }
         }

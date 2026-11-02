@@ -36,6 +36,24 @@ pub struct TorrentRequest<'a> {
     pub private: bool,
 }
 
+/// What to build a multi-file torrent over: one media file and the sidecar files
+/// beside it, still exactly where they sit.
+///
+/// A multi-file torrent's data lives at `<save path>/<root_name>/<file>`, so
+/// `root_name` must be the name of the directory holding the files **as the
+/// client sees it**, and the client's save path is that directory's parent.
+#[derive(Debug, Clone)]
+pub struct SidecarRequest<'a> {
+    /// The media file, as **sharerr** sees it. Hashed first.
+    pub path: &'a Path,
+    /// The names of the files to include beside it, in hashing order.
+    pub sidecars: &'a [String],
+    pub root_name: &'a str,
+    pub announce: &'a crate::AnnounceSet,
+    pub media: Option<&'a sharerr_core::MediaMeta>,
+    pub private: bool,
+}
+
 /// A finished torrent, in memory.
 ///
 /// The filename inside the torrent equals the on-disk basename by design; it is
@@ -51,7 +69,8 @@ pub struct BuiltTorrent {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-/// Creates single-file v1 torrents over files exactly where they sit.
+/// Creates v1 torrents over files exactly where they sit: one file, or one
+/// media file and its sidecars.
 ///
 /// Hashing and bencoding are done in this crate (see [`crate::bencode`] and
 /// [`crate::metainfo`]); the output is byte-identical to what the
@@ -69,109 +88,191 @@ impl TorrentFactory {
     /// every other task. Callers offload it with `tokio::task::spawn_blocking`.
     pub fn create(self, request: &TorrentRequest<'_>) -> Result<BuiltTorrent> {
         let path = request.path;
+        let (size, name) = source_file(path)?;
 
-        let metadata = std::fs::metadata(path).map_err(|source| TorrentError::Unreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        if !metadata.is_file() {
-            return Err(TorrentError::NotAFile {
-                path: path.to_path_buf(),
-            });
-        }
-
-        // A path with no printable filename cannot name the file inside the
-        // torrent, so it is rejected before any hashing starts.
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            return Err(TorrentError::NoFileName {
-                path: path.to_path_buf(),
-            });
-        };
-
-        let size = metadata.len();
         let piece_length = piece_length_for(size);
+        let pieces = hash_pieces(path, &[], piece_length)?;
 
-        let pieces = hash_pieces(path, piece_length)?;
+        let mut info = base_info(name, piece_length, pieces, request.private);
+        info.insert(b"length".to_vec(), int_of(size));
 
-        // The info dictionary: exactly the fields BEP 3 needs for one file,
-        // plus BEP 27's private flag when `request.private` asks for it.
-        // Friend-to-friend sharing defaults to not leaking into the public
-        // DHT or PEX; that flag is the whole reason the tracker exists, and
-        // an operator has to opt out of it explicitly (see
-        // `sharerr_core::config::SeedingConfig::private`). Nothing else goes
-        // in here: the info hash is a function of the *file*, and adding
-        // metadata to this dictionary would make two torrents over one
-        // unchanged file stop matching, breaking the "reuse the torrent that
-        // already covers this file"
-        // path that keeps sharerr from re-adding media.
-        let mut info = BTreeMap::new();
-        info.insert(
-            b"length".to_vec(),
-            Value::Int(i64::try_from(size).unwrap_or(i64::MAX)),
-        );
-        info.insert(b"name".to_vec(), Value::string(name));
-        info.insert(
-            b"piece length".to_vec(),
-            Value::Int(i64::try_from(piece_length).unwrap_or(i64::MAX)),
-        );
-        info.insert(b"pieces".to_vec(), Value::Bytes(pieces));
-        // Omitted entirely when off, not written as `Value::Int(0)`: present-and-
-        // zero and absent are different bencodings, so writing a literal zero
-        // would still change the info hash relative to a build that never
-        // mentioned the key. Absent is the conventional encoding for "not private".
-        if request.private {
-            info.insert(b"private".to_vec(), Value::Int(1));
-        }
-
-        let mut extra = BTreeMap::new();
-        // `comment` lives outside the info dictionary by BEP 3, which is also
-        // what keeps it from moving the info hash.
-        if let Some(comment) = request.media.and_then(describe) {
-            extra.insert(b"comment".to_vec(), Value::string(&comment));
-        }
-
-        let torrent = Torrent {
-            announce: Some(request.announce.primary.to_string()),
-            // An announce *list* only when there is genuinely more than one
-            // endpoint: BEP 12 clients ignore `announce` the moment the list
-            // exists, so a one-entry list would only add bytes and change
-            // nothing.
-            announce_list: request.announce.tier_list(),
+        Ok(finish(
+            path,
             info,
-            extra,
-        };
-
-        let info_hash = torrent.info_hash();
-        let data = torrent.encode();
-
-        tracing::debug!(
-            file = %path.display(),
-            info_hash = %info_hash,
+            request.announce,
+            request.media,
             piece_length,
             size,
-            "built torrent"
-        );
+        ))
+    }
 
-        Ok(BuiltTorrent {
-            info_hash,
-            data,
+    /// [`Self::create`] for a media file and its sidecars: a multi-file torrent
+    /// over them, moving and rewriting nothing. Synchronous for the same reason.
+    pub fn create_with_sidecars(self, request: &SidecarRequest<'_>) -> Result<BuiltTorrent> {
+        let path = request.path;
+        let (mut size, name) = source_file(path)?;
+
+        let dir = path.parent().unwrap_or(Path::new(""));
+        let others: Vec<PathBuf> = request.sidecars.iter().map(|n| dir.join(n)).collect();
+
+        let file_entry = |name: &str, length: u64| {
+            let mut entry = BTreeMap::new();
+            entry.insert(b"length".to_vec(), int_of(length));
+            entry.insert(b"path".to_vec(), Value::List(vec![Value::string(name)]));
+            Value::Dict(entry)
+        };
+        let mut files = vec![file_entry(name, size)];
+        for (name, other) in request.sidecars.iter().zip(&others) {
+            let length = std::fs::metadata(other)
+                .map_err(|source| TorrentError::Unreadable {
+                    path: other.clone(),
+                    source,
+                })?
+                .len();
+            size = size.saturating_add(length);
+            files.push(file_entry(name, length));
+        }
+
+        let piece_length = piece_length_for(size);
+        let pieces = hash_pieces(path, &others, piece_length)?;
+
+        // `create`'s fields, with `files` for `length` and the directory's name
+        // for the file's.
+        let mut info = base_info(request.root_name, piece_length, pieces, request.private);
+        info.insert(b"files".to_vec(), Value::List(files));
+
+        Ok(finish(
+            path,
+            info,
+            request.announce,
+            request.media,
+            piece_length,
             size,
-        })
+        ))
     }
 }
 
-/// SHA-1 every piece of the file at `path`, concatenated, in order.
+/// The size and name of the file a torrent is built over. A path with no printable
+/// filename cannot name the file inside the torrent, so it is rejected before any
+/// hashing starts.
+fn source_file(path: &Path) -> Result<(u64, &str)> {
+    let metadata = std::fs::metadata(path).map_err(|source| TorrentError::Unreadable {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.is_file() {
+        return Err(TorrentError::NotAFile {
+            path: path.to_path_buf(),
+        });
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Err(TorrentError::NoFileName {
+            path: path.to_path_buf(),
+        });
+    };
+    Ok((metadata.len(), name))
+}
+
+fn int_of(value: u64) -> Value {
+    Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+/// The info dictionary's fields shared by every torrent: exactly what BEP 3 needs,
+/// plus BEP 27's private flag when `private` asks for it.
+///
+/// Friend-to-friend sharing defaults to not leaking into the public DHT or PEX; that
+/// flag is the whole reason the tracker exists, and an operator has to opt out of it
+/// explicitly (see `sharerr_core::config::SeedingConfig::private`). Nothing else goes
+/// in here: the info hash is a function of the *file*, and adding metadata to this
+/// dictionary would make two torrents over one unchanged file stop matching, breaking
+/// the "reuse the torrent that already covers this file" path that keeps sharerr from
+/// re-adding media.
+fn base_info(
+    name: &str,
+    piece_length: u64,
+    pieces: Vec<u8>,
+    private: bool,
+) -> BTreeMap<Vec<u8>, Value> {
+    let mut info = BTreeMap::new();
+    info.insert(b"name".to_vec(), Value::string(name));
+    info.insert(b"piece length".to_vec(), int_of(piece_length));
+    info.insert(b"pieces".to_vec(), Value::Bytes(pieces));
+    // Omitted entirely when off, not written as `Value::Int(0)`: present-and-
+    // zero and absent are different bencodings, so writing a literal zero
+    // would still change the info hash relative to a build that never
+    // mentioned the key. Absent is the conventional encoding for "not private".
+    if private {
+        info.insert(b"private".to_vec(), Value::Int(1));
+    }
+    info
+}
+
+/// Wrap a finished info dictionary in the announce fields and comment.
+fn finish(
+    path: &Path,
+    info: BTreeMap<Vec<u8>, Value>,
+    announce: &crate::AnnounceSet,
+    media: Option<&MediaMeta>,
+    piece_length: u64,
+    size: u64,
+) -> BuiltTorrent {
+    let mut extra = BTreeMap::new();
+    // `comment` lives outside the info dictionary by BEP 3, which is also
+    // what keeps it from moving the info hash.
+    if let Some(comment) = media.and_then(describe) {
+        extra.insert(b"comment".to_vec(), Value::string(&comment));
+    }
+
+    let torrent = Torrent {
+        announce: Some(announce.primary.to_string()),
+        // An announce *list* only when there is genuinely more than one
+        // endpoint: BEP 12 clients ignore `announce` the moment the list
+        // exists, so a one-entry list would only add bytes and change
+        // nothing.
+        announce_list: announce.tier_list(),
+        info,
+        extra,
+    };
+
+    let info_hash = torrent.info_hash();
+    let data = torrent.encode();
+
+    tracing::debug!(
+        file = %path.display(),
+        info_hash = %info_hash,
+        piece_length,
+        size,
+        "built torrent"
+    );
+
+    BuiltTorrent {
+        info_hash,
+        data,
+        size,
+    }
+}
+
+/// SHA-1 every piece of the file at `path`, then of each of `others` as one
+/// continuous stream (pieces span file boundaries, per BEP 3), concatenated, in
+/// order.
 ///
 /// Read in piece-sized chunks rather than mapping the whole file: a media
 /// library's files are gigabytes, and this runs on a blocking thread whose
 /// memory footprint should not scale with the file.
-fn hash_pieces(path: &Path, piece_length: u64) -> Result<Vec<u8>> {
+fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec<u8>> {
     let io = |source| TorrentError::Build {
         path: path.to_path_buf(),
         source,
     };
-    let file = std::fs::File::open(path).map_err(io)?;
-    let mut reader = std::io::BufReader::new(file);
+    let mut stream: Box<dyn Read> = Box::new(std::fs::File::open(path).map_err(io)?);
+    for other in others {
+        let file = std::fs::File::open(other).map_err(|source| TorrentError::Build {
+            path: other.clone(),
+            source,
+        })?;
+        stream = Box::new(stream.chain(file));
+    }
+    let mut reader = std::io::BufReader::new(stream);
     let chunk = usize::try_from(piece_length).unwrap_or(usize::MAX);
     let mut buf = vec![0u8; chunk];
     let mut pieces = Vec::new();
@@ -233,29 +334,6 @@ pub fn torrent_file_path(dir: &Path, info_hash: &str) -> PathBuf {
     dir.join(format!("{info_hash}.torrent"))
 }
 
-/// The primary announce URL a stored `.torrent` carries.
-///
-/// This is what decides whether a rotation of the advertised endpoint has left a
-/// torrent pointing somewhere stale — see [`rewrite_announce`].
-pub fn read_announce(data: &[u8]) -> Result<Option<String>> {
-    let torrent =
-        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
-    Ok(torrent.announce)
-}
-
-/// The info hash of a `.torrent` held in memory, lowercase hex.
-///
-/// The counterpart to [`torrent_file_path`], which names a cache entry by this
-/// value: bytes that arrived from somewhere other than [`TorrentFactory`]
-/// have to be asked what they actually describe before being filed under a
-/// hash. Caching the wrong file under the right name serves a friend a torrent
-/// for a different swarm than the one they were pointed at.
-pub fn read_info_hash(data: &[u8]) -> Result<String> {
-    let torrent =
-        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
-    Ok(torrent.info_hash())
-}
-
 /// Rewrite a stored `.torrent`'s announce URL and tiers, leaving everything else
 /// — the info dictionary above all — untouched.
 ///
@@ -265,8 +343,7 @@ pub fn read_info_hash(data: &[u8]) -> Result<String> {
 /// is what makes a rotated gluetun port survivable — the feed serves the
 /// rewritten file, and a friend who re-downloads it gets the live endpoint.
 pub fn rewrite_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Vec<u8>> {
-    let mut torrent =
-        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
+    let mut torrent = Torrent::read_from_bytes(data)?;
 
     torrent.announce = Some(announce.primary.to_string());
     torrent.announce_list = announce.tier_list();
@@ -284,7 +361,9 @@ pub enum Retargeted {
     /// (adopting a torrent sharerr did not cache before) already has its own
     /// input buffer in scope to reuse.
     Current {
-        info_hash: String,
+        /// The parse, for a caller that wants its info hash: computing one means
+        /// hashing the piece list, and the common caller only compares the URL.
+        torrent: Torrent,
         /// The torrent's recorded content length — the file's size at the
         /// moment this torrent was built. A caller can compare it against
         /// `fs::metadata` on the file as it stands now to detect an
@@ -296,7 +375,7 @@ pub enum Retargeted {
     /// `.torrent` and the announce it carried before.
     Updated {
         previous: Option<String>,
-        info_hash: String,
+        torrent: Torrent,
         data: Vec<u8>,
         /// The torrent's recorded content length — see the `Current`
         /// variant's `length` field.
@@ -304,27 +383,23 @@ pub enum Retargeted {
     },
 }
 
-/// [`read_announce`] plus [`rewrite_announce`], as one parse instead of two.
+/// Whether a stored `.torrent` already announces to `announce.primary`, and
+/// [`rewrite_announce`] if not, as one parse instead of two.
 ///
 /// Every caller that needs "is this stale, and if so what should replace
 /// it" was paying to bencode-parse the same `.torrent` twice — once to read
 /// the current announce, once inside `rewrite_announce` to write the new
 /// one — which for a large file means walking its whole piece-hash list a
-/// second time just to compare one URL. This reads it once: the info hash
-/// comes off the same parsed structure `rewrite_announce` would have handed
-/// back after a second parse of its own (announce fields live outside the
-/// info dictionary, so rewriting them never moves it — see
-/// `sharerr::sync::seed::Seeder::adopt`, which used this to fold what were
-/// three parses into one), and the rewrite itself only happens when the
+/// second time just to compare one URL. This reads it once: the parse
+/// comes back for a caller that needs more of it (announce fields live outside
+/// the info dictionary, so rewriting them never moves the hash — see
+/// `sharerr::sync::seed::Seeder::adopt`), and the rewrite itself only happens when the
 /// comparison actually calls for it.
 pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<Retargeted> {
-    let mut torrent =
-        Torrent::read_from_bytes(data).map_err(|source| TorrentError::Reparse { source })?;
-    let info_hash = torrent.info_hash();
+    let mut torrent = Torrent::read_from_bytes(data)?;
     let previous = torrent.announce.clone();
-    // sharerr only ever builds single-file v1 torrents (see `TorrentRequest`'s
-    // doc comment), so this is exactly the file's size when the torrent was
-    // built. A missing or negative value is not producible by anything sharerr
+    // The content's total size when the torrent was built: the file's, or the
+    // sum of a multi-file torrent's. A missing or negative value is not producible by anything sharerr
     // writes; `0` just means a corrupt/hand-edited torrent reads as size zero,
     // which never matches a real file and so still triggers the rebuild its
     // caller falls back to on a mismatch.
@@ -334,7 +409,7 @@ pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<R
         .unwrap_or(0);
 
     if previous.as_deref() == Some(announce.primary.as_str()) {
-        return Ok(Retargeted::Current { info_hash, length });
+        return Ok(Retargeted::Current { torrent, length });
     }
 
     torrent.announce = Some(announce.primary.to_string());
@@ -343,7 +418,7 @@ pub fn retarget_announce(data: &[u8], announce: &crate::AnnounceSet) -> Result<R
 
     Ok(Retargeted::Updated {
         previous,
-        info_hash,
+        torrent,
         data,
         length,
     })
@@ -601,7 +676,10 @@ mod tests {
         let torrent = built(&dir, &set);
 
         assert_eq!(
-            read_announce(&torrent.data).unwrap().as_deref(),
+            Torrent::read_from_bytes(&torrent.data)
+                .unwrap()
+                .announce
+                .as_deref(),
             Some("http://seed.example:51413/announce/tok")
         );
     }
@@ -615,7 +693,10 @@ mod tests {
         let set = announce_set("http://seed.example:51413/announce/tok", &[]);
         let torrent = built(&dir, &set);
 
-        assert_eq!(read_info_hash(&torrent.data).unwrap(), torrent.info_hash);
+        assert_eq!(
+            Torrent::read_from_bytes(&torrent.data).unwrap().info_hash(),
+            torrent.info_hash
+        );
     }
 
     /// The property the whole rotation story rests on. The announce fields sit
@@ -634,12 +715,15 @@ mod tests {
         let after = rewrite_announce(&before.data, &moved).unwrap();
 
         assert_eq!(
-            read_info_hash(&after).unwrap(),
+            Torrent::read_from_bytes(&after).unwrap().info_hash(),
             before.info_hash,
             "the rewrite changed the torrent's identity"
         );
         assert_eq!(
-            read_announce(&after).unwrap().as_deref(),
+            Torrent::read_from_bytes(&after)
+                .unwrap()
+                .announce
+                .as_deref(),
             Some("http://new.example:6881/announce/b"),
             "the rewrite did not move the announce URL"
         );
@@ -655,15 +739,18 @@ mod tests {
 
         let outcome = retarget_announce(&torrent.data, &set).unwrap();
         match outcome {
-            Retargeted::Current { info_hash, length } => {
-                assert_eq!(info_hash, torrent.info_hash);
+            Retargeted::Current {
+                torrent: parsed,
+                length,
+            } => {
+                assert_eq!(parsed.info_hash(), torrent.info_hash);
                 assert_eq!(length, torrent.size);
             }
             Retargeted::Updated { .. } => panic!("an unchanged announce must report Current"),
         }
     }
 
-    /// The single-parse replacement for [`read_announce`] plus
+    /// The single-parse replacement for reading the announce plus
     /// [`rewrite_announce`]: a stale announce reports `Updated` with the
     /// same previous URL, the same rewritten bytes, and the same untouched
     /// info hash those two calls would have produced separately.
@@ -679,7 +766,7 @@ mod tests {
         let outcome = retarget_announce(&before.data, &moved).unwrap();
         let Retargeted::Updated {
             previous,
-            info_hash,
+            torrent,
             data,
             length,
         } = outcome
@@ -693,7 +780,8 @@ mod tests {
             Some("http://old.example:51413/announce/a")
         );
         assert_eq!(
-            info_hash, before.info_hash,
+            torrent.info_hash(),
+            before.info_hash,
             "the rewrite moved the identity"
         );
         assert_eq!(
@@ -740,8 +828,8 @@ mod tests {
     /// input has to come back as an error rather than a panic.
     #[test]
     fn reading_bytes_that_are_not_a_torrent_is_an_error() {
-        assert!(read_info_hash(b"not a torrent at all").is_err());
-        assert!(read_announce(b"not a torrent at all").is_err());
+        assert!(Torrent::read_from_bytes(b"not a torrent at all").is_err());
+        assert!(Torrent::read_from_bytes(b"not a torrent at all").is_err());
         assert!(
             rewrite_announce(
                 b"not a torrent at all",
@@ -755,6 +843,126 @@ mod tests {
     fn torrent_files_are_named_by_info_hash() {
         let path = torrent_file_path(Path::new("/data/torrents"), "abc123");
         assert_eq!(path, Path::new("/data/torrents/abc123.torrent"));
+    }
+
+    /// A multi-file torrent over a media file and its sidecars: the media file
+    /// first, pieces spanning the boundary, and a client finding the data at
+    /// `<save path>/<root_name>/<file>`.
+    #[test]
+    fn a_sidecar_torrent_lists_the_media_first_and_hashes_across_the_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let media_bytes = vec![7u8; 300 * 1024];
+        let sub_bytes = vec![9u8; 1024];
+        let media = dir.path().join("Show.S01E01.mkv");
+        std::fs::write(&media, &media_bytes).unwrap();
+        std::fs::write(dir.path().join("Show.S01E01.en.srt"), &sub_bytes).unwrap();
+        let set = announce_set("http://seed.example:51413/announce/tok", &[]);
+
+        let built = TorrentFactory
+            .create_with_sidecars(&SidecarRequest {
+                path: &media,
+                sidecars: &["Show.S01E01.en.srt".to_owned()],
+                root_name: "Season 01",
+                announce: &set,
+                media: None,
+                private: true,
+            })
+            .unwrap();
+
+        let torrent = Torrent::read_from_bytes(&built.data).unwrap();
+        assert!(!torrent.is_single_file());
+        assert!(torrent.is_private());
+        assert_eq!(torrent.name(), Some("Season 01"));
+        assert_eq!(
+            torrent.file_paths(),
+            vec!["Show.S01E01.mkv", "Show.S01E01.en.srt"]
+        );
+        assert_eq!(built.size, 301 * 1024);
+        assert_eq!(torrent.length(), Some(301 * 1024));
+
+        let whole: Vec<u8> = [media_bytes, sub_bytes].concat();
+        let piece = usize::try_from(piece_length_for(built.size)).unwrap();
+        let expected: Vec<u8> = whole
+            .chunks(piece)
+            .flat_map(|chunk| Sha1::digest(chunk).to_vec())
+            .collect();
+        assert_eq!(
+            torrent.info.get(b"pieces".as_slice()),
+            Some(&Value::Bytes(expected)),
+            "a client verifying the concatenated files must find these hashes"
+        );
+    }
+
+    /// Stable across builds, or a friend's copy of the same content and a rebuild
+    /// after a lost cache would be different swarms.
+    #[test]
+    fn a_sidecar_torrent_has_one_identity_for_one_set_of_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("a.mkv");
+        std::fs::write(&media, vec![1u8; 1024]).unwrap();
+        std::fs::write(dir.path().join("a.srt"), vec![2u8; 16]).unwrap();
+        let sidecars = ["a.srt".to_owned()];
+        let build = |announce: &str, comment: Option<&MediaMeta>| {
+            TorrentFactory
+                .create_with_sidecars(&SidecarRequest {
+                    path: &media,
+                    sidecars: &sidecars,
+                    root_name: "d",
+                    announce: &announce_set(announce, &[]),
+                    media: comment,
+                    private: true,
+                })
+                .unwrap()
+                .info_hash
+        };
+        let described = MediaMeta {
+            resolution: Some("1920x1080".to_owned()),
+            ..MediaMeta::default()
+        };
+        assert_eq!(
+            build("http://a.example/announce", None),
+            build("http://b.example/announce", Some(&described))
+        );
+    }
+
+    #[test]
+    fn a_missing_sidecar_is_an_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("a.mkv");
+        std::fs::write(&media, b"bytes").unwrap();
+        let set = announce_set("http://seed.example/announce", &[]);
+
+        let err = TorrentFactory
+            .create_with_sidecars(&SidecarRequest {
+                path: &media,
+                sidecars: &["gone.srt".to_owned()],
+                root_name: "d",
+                announce: &set,
+                media: None,
+                private: true,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&err, TorrentError::Unreadable { path, .. } if path.ends_with("gone.srt")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_torrent_over_a_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let set = announce_set("http://seed.example/announce", &[]);
+        let err = TorrentFactory
+            .create_with_sidecars(&SidecarRequest {
+                path: dir.path(),
+                sidecars: &[],
+                root_name: "d",
+                announce: &set,
+                media: None,
+                private: true,
+            })
+            .unwrap_err();
+        assert!(matches!(err, TorrentError::NotAFile { .. }), "{err:?}");
     }
 
     /// A name the torrent cannot carry — bytes that are not UTF-8 — is

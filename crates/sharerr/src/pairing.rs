@@ -30,7 +30,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sharerr_client::error_chain;
 use sharerr_core::config::secret_keys;
 use sharerr_core::endpoint::{MAX_FUTURE_SKEW_SECS, now_epoch};
@@ -168,12 +167,6 @@ fn validate_key(key: &str) -> Result<(), String> {
 
 fn is_hex_pubkey(pubkey: &str) -> bool {
     pubkey.len() == 64 && pubkey.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Lowercase hex SHA-256 of a peer key: the value `peers.key_hash` holds, and
-/// so what a reply's `in_reply_to` has to equal.
-pub fn key_hash(key: &str) -> String {
-    hex::encode(Sha256::digest(key.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -409,11 +402,11 @@ mod tests {
     #[test]
     fn a_reply_keeps_what_it_answers() {
         let mut reply = invite();
-        reply.in_reply_to = Some(key_hash("their-key"));
+        reply.in_reply_to = Some(sharerr_lighthouse::hash_key("their-key"));
         let decoded = Invite::decode(&reply.encode()).unwrap();
         assert_eq!(
             decoded.in_reply_to.as_deref(),
-            Some(key_hash("their-key").as_str())
+            Some(sharerr_lighthouse::hash_key("their-key").as_str())
         );
     }
 
@@ -496,7 +489,7 @@ mod tests {
         // `Store::create_peer` hashes the same way; this pins the encoding so
         // a reply's `in_reply_to` keeps finding the row.
         assert_eq!(
-            key_hash("abc"),
+            sharerr_lighthouse::hash_key("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
@@ -593,7 +586,12 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(secrecy::ExposeSecret::expose_secret(&stored), request.key);
-                let endpoints = store.peer_endpoints(sam.id).await.unwrap();
+                let endpoints = store
+                    .peer_endpoints_for(&[sam.id])
+                    .await
+                    .unwrap()
+                    .remove(&sam.id)
+                    .unwrap_or_default();
                 assert_eq!(endpoints.len(), 1, "the record's endpoint was recorded too");
 
                 let (status, body) = post_pair(&state, "sam-key", &request).await;

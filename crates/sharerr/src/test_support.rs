@@ -105,7 +105,7 @@ impl sharerr_client::TorrentClient for AlwaysEmptyQbit {
     async fn add_trackers(&self, _hash: &str, _urls: &[url::Url]) -> sharerr_client::Result<()> {
         unimplemented!("not needed by the fixtures that use this stub")
     }
-    async fn set_limits(
+    async fn apply_limits(
         &self,
         _hash: &str,
         _limits: &sharerr_client::SeedingLimits,
@@ -130,6 +130,8 @@ pub(crate) struct StubClient {
     pub(crate) set_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
     pub(crate) add_trackers_calls: std::sync::Mutex<Vec<(String, Vec<Url>)>>,
     pub(crate) add_calls: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    /// Each add's save path and multi-file root, in the same order.
+    pub(crate) add_locations: std::sync::Mutex<Vec<(String, Option<String>)>>,
     pub(crate) set_limits_calls: std::sync::Mutex<Vec<(String, sharerr_client::SeedingLimits)>>,
     /// `.torrent` bytes `export` hands back, or `None` for a client that
     /// has no such call — the Transmission and rTorrent case.
@@ -179,6 +181,10 @@ impl TorrentClient for StubClient {
             .lock()
             .unwrap()
             .push((request.info_hash.to_owned(), request.data.to_vec()));
+        self.add_locations.lock().unwrap().push((
+            request.save_path.to_owned(),
+            request.root_folder.map(str::to_owned),
+        ));
         Ok(())
     }
     async fn remove(&self, _hash: &str) -> sharerr_client::Result<()> {
@@ -204,7 +210,7 @@ impl TorrentClient for StubClient {
             .push((hash.to_owned(), urls.to_vec()));
         Ok(())
     }
-    async fn set_limits(
+    async fn apply_limits(
         &self,
         hash: &str,
         limits: &sharerr_client::SeedingLimits,

@@ -18,7 +18,8 @@ type Result<T> = std::result::Result<T, StoreError>;
 ///
 /// Enough to span a few of the friend's reconnects; more would be a location
 /// log, which is precisely what this table must not become.
-pub(crate) const MAX_HISTORY: usize = 5;
+#[cfg(test)]
+pub(crate) const MAX_HISTORY: usize = sharerr_core::config::DEFAULT_ENDPOINT_HISTORY as usize;
 
 /// Which of a friend's addresses an observation describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,26 +189,13 @@ impl Store {
         Ok(())
     }
 
-    /// Every recorded sighting for one peer, newest first within each kind.
-    pub async fn peer_endpoints(&self, peer_id: i64) -> Result<Vec<PeerEndpoint>> {
-        let rows = sqlx::query(
-            "SELECT kind, addr, observed_at, via FROM peer_endpoints \
-             WHERE peer_id = ?1 ORDER BY kind, observed_at DESC, id DESC",
-        )
-        .bind(peer_id)
-        .fetch_all(self.pool())
-        .await?;
-
-        Ok(rows.iter().filter_map(row_to_endpoint).collect())
-    }
-
-    /// [`Self::peer_endpoints`] for every id in `peer_ids`, one round trip
-    /// instead of one per friend.
+    /// Every recorded sighting for each id in `peer_ids`, newest first within each
+    /// kind, in one round trip instead of one per friend.
     ///
     /// The Friends page and the topology view both render every friend's
-    /// history on one load. Fanning out a `peer_endpoints` call per friend via
-    /// `join_all` would be concurrent, but still check out one connection and
-    /// one query plan per row of a page that is people, not rows. A peer
+    /// history on one load. Fanning out a query per friend via `join_all` would
+    /// be concurrent, but still check out one connection and one query plan per
+    /// row of a page that is people, not rows. A peer
     /// with no recorded sighting is simply absent from the returned map
     /// rather than present with an empty `Vec`; callers already reach for
     /// this with `.unwrap_or_default()` either way.
@@ -399,7 +387,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(
             endpoints
                 .iter()
@@ -435,7 +428,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(endpoints[0].observed_at, 500);
         assert_eq!(endpoints[0].via, ObservedVia::Direct);
     }
@@ -471,7 +469,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(endpoints[0].observed_at, 100);
         assert_eq!(
             endpoints[0].via,
@@ -497,7 +500,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].addr, "203.0.113.5:1");
         assert_eq!(endpoints[0].via, ObservedVia::Restored);
@@ -522,7 +530,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert!(
             endpoints[0].observed_at < far_future,
             "expected the timestamp to be clamped, got {}",
@@ -558,7 +571,12 @@ mod tests {
             .await
             .unwrap();
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 2);
         assert!(endpoints.iter().any(|e| e.kind == EndpointKind::Api));
         assert!(endpoints.iter().any(|e| e.kind == EndpointKind::Client));
@@ -581,7 +599,12 @@ mod tests {
                 .unwrap();
         }
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), MAX_HISTORY);
         assert_eq!(endpoints[0].observed_at, 19, "the newest must survive");
     }
@@ -607,7 +630,12 @@ mod tests {
                 .unwrap();
         }
 
-        let endpoints = store.peer_endpoints(peer).await.unwrap();
+        let endpoints = store
+            .peer_endpoints_for(&[peer])
+            .await
+            .unwrap()
+            .remove(&peer)
+            .unwrap_or_default();
         assert_eq!(endpoints.len(), 2);
         assert_eq!(endpoints[0].observed_at, 5);
     }
@@ -715,12 +743,22 @@ mod tests {
         assert_eq!(bulk.len(), 2, "blair has no sightings and must be absent");
         assert_eq!(
             bulk[&sam.id],
-            store.peer_endpoints(sam.id).await.unwrap(),
+            store
+                .peer_endpoints_for(&[sam.id])
+                .await
+                .unwrap()
+                .remove(&sam.id)
+                .unwrap_or_default(),
             "must match the single-peer form"
         );
         assert_eq!(
             bulk[&alex.id],
-            store.peer_endpoints(alex.id).await.unwrap(),
+            store
+                .peer_endpoints_for(&[alex.id])
+                .await
+                .unwrap()
+                .remove(&alex.id)
+                .unwrap_or_default(),
             "must match the single-peer form"
         );
         assert!(!bulk.contains_key(&blair.id));
