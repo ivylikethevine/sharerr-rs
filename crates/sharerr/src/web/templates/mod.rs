@@ -495,6 +495,7 @@ pub struct SettingsPage {
     pub seeding_private: bool,
     /// See [`sharerr_core::config::SeedingConfig::sidecars`].
     pub seeding_sidecars: bool,
+    pub seeding_hybrid: bool,
     /// Whether the feeds may advertise a magnet per item. Off by default, and
     /// only takes effect for a non-private item even when on — see
     /// [`sharerr_core::config::FeedConfig::magnet_links`].

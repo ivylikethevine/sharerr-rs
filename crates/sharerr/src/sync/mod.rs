@@ -393,6 +393,7 @@ impl Syncer {
             seeding: config.seeding,
             sidecar_roots: sidecar_roots(config),
             torrent_dir: config.torrent_dir(),
+            confirmed: Default::default(),
         };
 
         let store = store.await?;
@@ -961,11 +962,19 @@ impl Syncer {
         // sharerr's to characterise, so `set_seeding` leaves the stored
         // `private` value exactly as it was rather than guessing. The same
         // goes for the file stamp, which only a torrent sharerr built has.
-        let (step, private, stamp, created) = match outcome {
-            SeedOutcome::Added { private, .. } => {
-                (Step::Added, Some(private), stamp_before_seed, true)
-            }
-            SeedOutcome::Reused { .. } => (Step::Reused, None, None, false),
+        let (step, private, stamp, created, info_hash_v2) = match outcome {
+            SeedOutcome::Added {
+                private,
+                info_hash_v2,
+                ..
+            } => (
+                Step::Added,
+                Some(private),
+                stamp_before_seed,
+                true,
+                info_hash_v2,
+            ),
+            SeedOutcome::Reused { .. } => (Step::Reused, None, None, false, None),
         };
         self.store
             .set_seeding(
@@ -977,6 +986,13 @@ impl Syncer {
                 private,
             )
             .await?;
+        // After `set_seeding`, which clears it: a hybrid torrent's second identity,
+        // so the tracker admits its v2 announces too.
+        if let Some(v2) = info_hash_v2 {
+            self.store
+                .set_info_hash_v2(item.source, item.file_id, &v2)
+                .await?;
+        }
         if let Err(err) = self
             .store
             .set_file_stamp(item.source, item.file_id, stamp)

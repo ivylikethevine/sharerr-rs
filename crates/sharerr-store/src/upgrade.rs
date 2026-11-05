@@ -72,6 +72,8 @@ const TRACK_IDS: &str =
 const MEDIA: &str = r#"{"resolution":"1080p","video_codec":"x264"}"#;
 
 const SEEDING_HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+/// The v2 identity 0018 lets a hybrid torrent carry beside the first.
+const SEEDING_HASH_V2: &str = "89abcdef0123456789abcdef0123456789abcdef";
 
 /// Rows an instance at migration level `version` could have held, written
 /// with that level's columns only. Each block names the migration that made
@@ -194,6 +196,12 @@ async fn seed(pool: &sqlx::SqlitePool, version: i64) {
              WHERE id = 1".to_owned())
             .await;
     }
+    if version >= 18 {
+        run(format!(
+            "UPDATE shared_items SET info_hash_v2 = '{SEEDING_HASH_V2}' WHERE file_id = 1001"
+        ))
+        .await;
+    }
 }
 
 /// What today's code must read back from a database seeded at `version`
@@ -213,6 +221,11 @@ async fn check(store: &Store, version: i64) {
     assert_eq!(movie.state, ShareState::Seeding);
     assert_eq!(movie.info_hash.as_deref(), Some(SEEDING_HASH));
     assert!(store.is_shared(SEEDING_HASH).await.unwrap());
+    assert_eq!(
+        store.is_shared(SEEDING_HASH_V2).await.unwrap(),
+        version >= 18,
+        "v{version}: 0018 admits a hybrid torrent by its v2 identity"
+    );
     assert!(
         matches!(&movie.spec, MediaSpec::Movie { title, year: Some(2019) } if title == "The Gilded Ferry")
     );

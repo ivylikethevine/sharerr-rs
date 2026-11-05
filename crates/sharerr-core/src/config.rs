@@ -232,6 +232,8 @@ pub mod config_paths {
         /// Subtitle files in a directory library's torrents — see
         /// [`super::SeedingConfig::sidecars`].
         SEEDING_SIDECARS = "seeding.sidecars";
+        /// Hybrid v1/v2 torrents — see [`super::SeedingConfig::hybrid`].
+        SEEDING_HYBRID = "seeding.hybrid";
         /// The quiet-hours window — see [`super::SeedingConfig::quiet_hours`].
         SEEDING_QUIET_HOURS = "seeding.quiet_hours";
         /// The cap inside it — see [`super::SeedingConfig::quiet_upload_limit_kib`].
@@ -1045,6 +1047,18 @@ pub struct SeedingConfig {
     /// torrent either way. An *arr's files are out of scope: an *arr imports
     /// its own subtitles, and a friend's would not know this release has any.
     pub sidecars: bool,
+    /// Build single-file torrents as BEP 52 hybrids: the v1 fields plus a v2
+    /// `file tree`, `pieces root` and `piece layers`, so a v2-capable client
+    /// also verifies the file against SHA-256 trees.
+    ///
+    /// Off by default, and only for torrents built after the change: the v2
+    /// keys sit inside the info dictionary, so a hybrid build has a different
+    /// info hash from a plain one and an existing share keeps what it was
+    /// built with. Sidecar (multi-file) torrents stay v1 whatever this says:
+    /// a hybrid multi-file torrent needs BEP 47 padding files, which a client
+    /// without BEP 47 writes beside the media. Ignored for a client that
+    /// identifies a hybrid by its v2 hash (`ClientKind::hybrid_torrents`).
+    pub hybrid: bool,
     /// A daily window, in the container's local time, during which
     /// [`Self::quiet_upload_limit_kib`] replaces [`Self::upload_limit_kib`]
     /// on every torrent sharerr created. Only in force while all three are
@@ -1153,6 +1167,7 @@ impl Default for SeedingConfig {
             // a missing `[seeding]` block with `private: true`, not `false`.
             private: true,
             sidecars: false,
+            hybrid: false,
         }
     }
 }

@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::bencode::{BencodeError, Field, Value, write_dict, write_fields};
 
@@ -111,6 +112,19 @@ impl Torrent {
         let mut out = Vec::new();
         write_dict(&self.info, &mut out);
         hex::encode(Sha1::digest(out))
+    }
+
+    /// The v2 identity of a BEP 52 (v2 or hybrid) torrent, as a tracker sees
+    /// it: SHA-256 of the canonical info dictionary truncated to 20 bytes, hex.
+    /// `None` for a plain v1 torrent.
+    #[must_use]
+    pub fn info_hash_v2(&self) -> Option<String> {
+        if self.info_field("meta version").and_then(Value::as_int) != Some(2) {
+            return None;
+        }
+        let mut out = Vec::new();
+        write_dict(&self.info, &mut out);
+        Some(hex::encode(&Sha256::digest(out)[..20]))
     }
 
     fn info_field(&self, key: &str) -> Option<&Value> {

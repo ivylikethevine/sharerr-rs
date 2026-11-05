@@ -360,6 +360,18 @@ impl ClientKind {
             Self::Deluge => "Deluge",
         }
     }
+
+    /// Whether a BEP 52 hybrid torrent keeps its v1 info hash as this client.s
+    /// identity for it. sharerr joins its store to the client by that hash, so a
+    /// client that reports a hybrid under its v2 hash instead is handed plain v1
+    /// torrents. Deluge does (libtorrent 2 prefers the v2 hash); qBittorrent and
+    /// Transmission keep v1, and rTorrent reads only the v1 half.
+    pub fn hybrid_torrents(self) -> bool {
+        match self {
+            Self::QBittorrent | Self::Transmission | Self::Rtorrent => true,
+            Self::Deluge => false,
+        }
+    }
 }
 
 impl std::fmt::Display for ClientKind {

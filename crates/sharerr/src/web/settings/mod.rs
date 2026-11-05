@@ -623,6 +623,7 @@ pub struct SeedingForm {
     /// `CLAUDE.md`'s note on why every field here needs `#[serde(default)]`.
     private: Option<String>,
     sidecars: Option<String>,
+    hybrid: Option<String>,
     magnet_links: Option<String>,
     quiet_hours: String,
     quiet_upload_limit_kib: String,
@@ -729,6 +730,7 @@ pub async fn save_seeding(
             ),
             Edit::bool(config_paths::SEEDING_PRIVATE, form.private.is_some()),
             Edit::bool(config_paths::SEEDING_SIDECARS, form.sidecars.is_some()),
+            Edit::bool(config_paths::SEEDING_HYBRID, form.hybrid.is_some()),
             Edit::bool(config_paths::FEED_MAGNET_LINKS, form.magnet_links.is_some()),
         ]);
         Ok(())
@@ -1817,6 +1819,7 @@ async fn build_page(
             .unwrap_or_default(),
         seeding_private: config.seeding.private,
         seeding_sidecars: config.seeding.sidecars,
+        seeding_hybrid: config.seeding.hybrid,
         feed_magnet_links: config.feed.magnet_links,
 
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),

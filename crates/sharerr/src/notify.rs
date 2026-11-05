@@ -44,7 +44,7 @@ use secrecy::ExposeSecret;
 use sharerr_core::config::{NotificationTrigger, NotifyKind, secret_keys};
 use sharerr_core::endpoint::now_epoch;
 
-use crate::state::ServeState;
+use crate::state::{NotificationUrl, ServeState};
 
 /// How often the peer-quiet check runs. Peers do not go quiet on a schedule
 /// worth polling faster than this — the threshold itself is measured in days —
@@ -119,27 +119,25 @@ async fn stored_url(state: &ServeState, key: &str) -> Result<url::Url, StoredUrl
     url::Url::parse(configured.expose_secret()).map_err(|_| StoredUrlError::Invalid)
 }
 
-/// [`stored_url`] for a background sender: nothing to send to is the ordinary
-/// state for most instances, so only a URL that will not parse is worth a warning.
-async fn background_url(state: &ServeState, key: &str, setting: &str) -> Option<url::Url> {
-    match stored_url(state, key).await {
+/// A background sender's URL, from [`ServeState::notification_url`]'s cache
+/// rather than a vault open per send: nothing to send to is the ordinary state
+/// for most instances, so only a URL that will not parse is worth a warning.
+/// The test-send handler reads [`stored_url`] fresh instead, so it reports what
+/// the vault holds now.
+async fn background_url(state: &ServeState, which: NotificationUrl) -> Option<url::Url> {
+    let configured = state.notification_url(which).await?;
+    match url::Url::parse(configured.expose_secret()) {
         Ok(url) => Some(url),
-        Err(StoredUrlError::Invalid) => {
-            tracing::warn!("{setting} is not a valid URL — check Settings");
+        Err(_) => {
+            tracing::warn!("{} is not a valid URL — check Settings", which.setting());
             None
         }
-        Err(_) => None,
     }
 }
 
 /// The configured webhook, or `None` when there is none to send through.
 async fn webhook(state: &ServeState) -> Option<Webhook> {
-    let url = background_url(
-        state,
-        secret_keys::NOTIFICATIONS_WEBHOOK_URL,
-        "notifications.webhook_url",
-    )
-    .await?;
+    let url = background_url(state, NotificationUrl::Webhook).await?;
 
     Some(Webhook {
         url,
@@ -473,12 +471,7 @@ async fn is_ready(state: &ServeState) -> bool {
 /// The stored push URL and the shared client, or `None` when there is
 /// nothing to push to (the ordinary state — most instances have no monitor).
 async fn heartbeat_target(state: &ServeState) -> Option<(url::Url, reqwest::Client)> {
-    let url = background_url(
-        state,
-        secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
-        "notifications.heartbeat_url",
-    )
-    .await?;
+    let url = background_url(state, NotificationUrl::Heartbeat).await?;
     Some((url, http_client()?.clone()))
 }
 
@@ -1404,6 +1397,14 @@ mod tests {
                     )
                     .unwrap();
                 drop(vault);
+
+                // Written behind the cache: the absent answer stands until a settings
+                // save (or `vault set` followed by a restart) drops the vault caches.
+                assert!(
+                    heartbeat_target(&state).await.is_none(),
+                    "the cached absence is what a sender sees"
+                );
+                state.invalidate("credentials changed").await;
 
                 let (url, _) = heartbeat_target(&state).await.expect("must resolve");
                 assert_eq!(url.path(), "/api/push/abc");

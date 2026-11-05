@@ -16,8 +16,9 @@
 //!    of the filesystem, so it finds the data in place.
 //! 4. **Never delete.** Unsharing removes the torrent and leaves the media alone.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
@@ -54,7 +55,12 @@ pub enum SeedOutcome {
     /// A new torrent was built and handed to qBittorrent. `private` is
     /// decoded from the actual bytes just built or reused from sharerr's own
     /// cache — see [`Seeder::seed`].
-    Added { info_hash: String, private: bool },
+    Added {
+        info_hash: String,
+        private: bool,
+        /// The v2 identity of a hybrid build, read from the same bytes.
+        info_hash_v2: Option<String>,
+    },
 }
 
 impl SeedOutcome {
@@ -82,6 +88,12 @@ pub struct Seeder {
     pub sidecar_roots: Vec<PathBuf>,
     /// Where sharerr keeps a copy of each `.torrent` it builds.
     pub torrent_dir: PathBuf,
+    /// The announce set each cached `.torrent` was last confirmed or rewritten
+    /// to, by info hash, so [`Self::refresh_announce`] reads a file once per
+    /// announce change rather than once per pass. Lives as long as this
+    /// `Seeder` (a syncer rebuild starts it empty), which is also how long a
+    /// cache file deleted underneath goes unnoticed.
+    pub confirmed: Mutex<HashMap<String, AnnounceSet>>,
 }
 
 impl std::fmt::Debug for Seeder {
@@ -152,6 +164,9 @@ impl Seeder {
         let private = parsed
             .as_ref()
             .is_none_or(sharerr_torrent::Torrent::is_private);
+        let info_hash_v2 = parsed
+            .as_ref()
+            .and_then(sharerr_torrent::Torrent::info_hash_v2);
         let root_folder = parsed
             .as_ref()
             .filter(|t| !t.is_single_file())
@@ -183,7 +198,11 @@ impl Seeder {
             .await
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 
-        Ok(SeedOutcome::Added { info_hash, private })
+        Ok(SeedOutcome::Added {
+            info_hash,
+            private,
+            info_hash_v2,
+        })
     }
 
     /// Take responsibility for a torrent the client already had, without
@@ -447,11 +466,17 @@ impl Seeder {
     /// announce is what the next pass compares against, so if the client
     /// update fails the comparison stays stale and the whole step is retried
     /// — the opposite order would record success it did not achieve.
+    ///
+    /// A file already confirmed against this same `announce` (see
+    /// [`Self::confirmed`]) is `Current` without being read again.
     pub async fn refresh_announce(
         &self,
         info_hash: &str,
         announce: &AnnounceSet,
     ) -> Result<AnnounceRefresh> {
+        if self.is_confirmed(info_hash, announce) {
+            return Ok(AnnounceRefresh::Current);
+        }
         let path = torrent_file_path(&self.torrent_dir, info_hash);
         // Nothing cached means nothing to compare or serve; the torrent in the client
         // still works, so this is not worth failing the item over, but nothing here
@@ -467,7 +492,10 @@ impl Seeder {
         let (previous, rewritten) = match sharerr_torrent::retarget_announce(&data, announce)
             .with_context(|| format!("parsing {}", path.display()))?
         {
-            sharerr_torrent::Retargeted::Current { .. } => return Ok(AnnounceRefresh::Current),
+            sharerr_torrent::Retargeted::Current { .. } => {
+                self.mark_confirmed(info_hash, announce);
+                return Ok(AnnounceRefresh::Current);
+            }
             sharerr_torrent::Retargeted::Updated { previous, data, .. } => (previous, data),
         };
 
@@ -486,7 +514,22 @@ impl Seeder {
             to = %announce.primary(),
             "announce URLs refreshed"
         );
+        self.mark_confirmed(info_hash, announce);
         Ok(AnnounceRefresh::Updated)
+    }
+
+    /// Whether `info_hash`'s cached file was last seen announcing `announce`.
+    fn is_confirmed(&self, info_hash: &str, announce: &AnnounceSet) -> bool {
+        self.confirmed
+            .lock()
+            .is_ok_and(|confirmed| confirmed.get(info_hash) == Some(announce))
+    }
+
+    /// Record that `info_hash`'s cached file announces `announce`, as of now.
+    fn mark_confirmed(&self, info_hash: &str, announce: &AnnounceSet) {
+        if let Ok(mut confirmed) = self.confirmed.lock() {
+            confirmed.insert(info_hash.to_owned(), announce.clone());
+        }
     }
 
     /// Build the `.torrent` and keep a copy on disk.
@@ -500,6 +543,7 @@ impl Seeder {
         let announce = announce.clone();
         let torrent_dir = self.torrent_dir.clone();
         let private = self.seeding.private;
+        let hybrid = self.seeding.hybrid && self.qbit.kind().hybrid_torrents();
         // Owned: the closure below outlives this frame on a blocking thread.
         let media = media.cloned();
         let wants_sidecars = self.sidecar_roots.iter().any(|root| path.starts_with(root));
@@ -537,6 +581,7 @@ impl Seeder {
                     announce: &announce,
                     media: media.as_ref(),
                     private,
+                    hybrid,
                 })?,
             };
 
@@ -666,6 +711,7 @@ mod tests {
             seeding: sharerr_core::config::SeedingConfig::default(),
             sidecar_roots: Vec::new(),
             torrent_dir,
+            confirmed: Default::default(),
         }
     }
 
@@ -734,6 +780,7 @@ mod tests {
                 announce: &old_announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -771,6 +818,60 @@ mod tests {
         assert_eq!(client.set_trackers_calls.lock().unwrap().len(), 1);
     }
 
+    /// Once a cached file has been confirmed against an announce set, later
+    /// passes with the same set answer from memory: deleting the file is not
+    /// noticed until the announce changes and the file has to be read again.
+    #[tokio::test]
+    async fn refresh_announce_skips_the_file_once_confirmed_until_the_announce_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+        let built = TorrentFactory
+            .create(&TorrentRequest {
+                path: &media,
+                announce: &announce,
+                media: None,
+                private: true,
+                hybrid: false,
+            })
+            .unwrap();
+        let torrent_dir = dir.path().join("torrents");
+        std::fs::create_dir(&torrent_dir).unwrap();
+        let cached = torrent_file_path(&torrent_dir, &built.info_hash);
+        std::fs::write(&cached, &built.data).unwrap();
+
+        let seeder = seeder(Arc::new(StubClient::default()), torrent_dir);
+        let first = seeder
+            .refresh_announce(&built.info_hash, &announce)
+            .await
+            .unwrap();
+        assert_eq!(first, AnnounceRefresh::Current, "read and confirmed");
+
+        std::fs::remove_file(&cached).unwrap();
+        let remembered = seeder
+            .refresh_announce(&built.info_hash, &announce)
+            .await
+            .unwrap();
+        assert_eq!(
+            remembered,
+            AnnounceRefresh::Current,
+            "the same announce is answered without the file"
+        );
+
+        let moved = AnnounceSet::single(Url::parse("http://moved.example/announce").unwrap());
+        let reread = seeder
+            .refresh_announce(&built.info_hash, &moved)
+            .await
+            .unwrap();
+        assert_eq!(
+            reread,
+            AnnounceRefresh::NoCachedTorrent,
+            "a changed announce goes back to the file"
+        );
+    }
+
     /// A torrent the client no longer has (a reinstall, a wiped session) must
     /// not be re-hashed from the media file when sharerr's own cache under
     /// `torrent_dir` already has the very `.torrent` that was built for it.
@@ -802,6 +903,7 @@ mod tests {
                 announce: &announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -833,6 +935,7 @@ mod tests {
             SeedOutcome::Added {
                 info_hash: built.info_hash.clone(),
                 private: true,
+                info_hash_v2: None,
             }
         );
 
@@ -864,6 +967,7 @@ mod tests {
                 announce: &old_announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -896,6 +1000,7 @@ mod tests {
             SeedOutcome::Added {
                 info_hash: built.info_hash.clone(),
                 private: true,
+                info_hash_v2: None,
             }
         );
 
@@ -940,6 +1045,7 @@ mod tests {
                 announce: &announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -979,6 +1085,7 @@ mod tests {
                 announce: &announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
         assert_ne!(rebuilt.info_hash, stale.info_hash);
@@ -987,6 +1094,7 @@ mod tests {
             SeedOutcome::Added {
                 info_hash: rebuilt.info_hash.clone(),
                 private: true,
+                info_hash_v2: None,
             }
         );
 
@@ -1033,6 +1141,47 @@ mod tests {
         assert_eq!(client.add_calls.lock().unwrap().len(), 1);
     }
 
+    /// `seeding.hybrid` builds a hybrid torrent, whose v2 identity rides along
+    /// in the outcome for the store, and caches the hybrid bytes.
+    #[tokio::test]
+    async fn seed_builds_a_hybrid_torrent_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, b"pretend media bytes").unwrap();
+
+        let torrent_dir = dir.path().join("torrents");
+        let client = Arc::new(StubClient::default());
+        let mut seeder = seeder(client.clone(), torrent_dir.clone());
+        seeder.seeding.hybrid = true;
+        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+        let paths = ResolvedPaths {
+            arr: media.clone(),
+            sharerr: media.clone(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        };
+
+        let outcome = seeder
+            .seed(&paths, &announce, &[], None, None)
+            .await
+            .unwrap();
+        let SeedOutcome::Added {
+            info_hash,
+            info_hash_v2,
+            ..
+        } = outcome
+        else {
+            panic!("expected a build, got {outcome:?}");
+        };
+        let v2 = info_hash_v2.expect("a hybrid build has a v2 identity");
+        assert_eq!(v2.len(), 40);
+        assert_ne!(v2, info_hash);
+
+        let cached = std::fs::read(torrent_file_path(&torrent_dir, &info_hash)).unwrap();
+        let torrent = sharerr_torrent::Torrent::read_from_bytes(&cached).unwrap();
+        assert_eq!(torrent.info_hash_v2().as_deref(), Some(v2.as_str()));
+    }
+
     /// Adoption, end to end: a torrent the operator already had covers the
     /// file, so `seed` reuses it — and must leave behind the two things a
     /// friend's download needs, which reusing it alone did not.
@@ -1052,6 +1201,7 @@ mod tests {
                 ),
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -1165,6 +1315,7 @@ mod tests {
                 announce: &announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -1323,6 +1474,7 @@ mod tests {
                 announce: &AnnounceSet::single(Url::parse(announce).unwrap()),
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap()
     }

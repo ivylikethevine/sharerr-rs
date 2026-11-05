@@ -129,6 +129,7 @@ fn a_real_torrent(dir: &Path, name: &str) -> Vec<u8> {
             announce: &AnnounceSet::single(Url::parse(FOREIGN_ANNOUNCE).unwrap()),
             media: None,
             private: true,
+            hybrid: false,
         })
         .unwrap()
         .data
@@ -527,6 +528,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         seeding,
         sidecar_roots: Vec::new(),
         torrent_dir: torrents.path().to_path_buf(),
+        confirmed: Default::default(),
     };
 
     let tracker = Arc::new(StubTracker::default());
@@ -573,6 +575,7 @@ impl Harness {
             seeding,
             sidecar_roots: Vec::new(),
             torrent_dir: self.torrents.path().to_path_buf(),
+            confirmed: Default::default(),
         };
         Syncer::new(
             config,
@@ -2701,6 +2704,7 @@ async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
         seeding: SeedingConfig::default(),
         sidecar_roots: Vec::new(),
         torrent_dir: PathBuf::from("/torrents"),
+        confirmed: Default::default(),
     };
     Syncer::new(
         Config::default(),

@@ -96,6 +96,19 @@ seeds unlabelled with the plugin off; upload cap, ratio goal and tracker
 replacement all work; `export` returns `Ok(None)`; and although Deluge can skip
 the hash check, sharerr has no setting for it, so it always verifies on add.
 
+### Hybrid v1/v2 torrents
+
+`seeding.hybrid` builds single-file torrents as BEP 52 hybrids. Every client
+above accepts one: qBittorrent (libtorrent 2) and Transmission 4 read both
+halves and keep the v1 info hash as the torrent's identity, which is the hash
+sharerr joins its store to the client by; rTorrent and Transmission 3 read the
+v1 half and ignore the rest. Deluge is the exception: libtorrent 2 reports a
+hybrid under its v2 hash there, which sharerr would not recognise as the same
+torrent, so with Deluge the setting is ignored and a plain v1 torrent is built.
+The tracker admits announces under either identity (`shared_items.info_hash_v2`
+holds the second). A friend's client needs nothing special: a v1-only one seeds
+the v1 half.
+
 The `export` gap costs every client but qBittorrent one narrow case: a torrent
 that already covers a file, that sharerr did not create and has no cached
 copy of, cannot be shared on those. sharerr fails the item with a message

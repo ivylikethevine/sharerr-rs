@@ -716,6 +716,7 @@ fn settings_page() -> SettingsPage {
         seeding_quiet_upload_limit_kib: "256".to_owned(),
         seeding_private: true,
         seeding_sidecars: false,
+        seeding_hybrid: false,
         feed_magnet_links: false,
 
         tracker_advertised_host: "seed.example.com".to_owned(),
