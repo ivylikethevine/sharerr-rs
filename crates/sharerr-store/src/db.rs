@@ -679,7 +679,8 @@ impl Store {
             source,
             file_id,
         )
-        .await
+        .await?;
+        self.set_item_origin(source, file_id, None).await
     }
 }
 

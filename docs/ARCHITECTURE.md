@@ -60,7 +60,9 @@ flowchart LR
    `sharerr-probe` reads the media file itself. See
    [`docs/COMPATIBILITY.md`](COMPATIBILITY.md) for which formats.
 3. **Torrent construction**: `sharerr-torrent` builds a `.torrent` describing
-   the file **where it already sits**. Never copied, renamed, or re-linked:
+   the file **where it already sits**, unless a friend already shares the same
+   file, in which case their torrent is checked against it and used instead
+   (see [`docs/COMPATIBILITY.md`](COMPATIBILITY.md#joining-a-friends-swarm)). Never copied, renamed, or re-linked:
    the constraint [the design brief](DESIGN.md#what-the-brief-got-right) is
    built around.
 4. **Seeding**: the torrent is added to the configured client through the
@@ -89,7 +91,10 @@ flowchart LR
 - **This instance ↔ a friend**: a friend authenticates with a peer key this
   instance issued them, scoped to what that key can see (`PeerScope`). Gossip
   records are Ed25519-signed by the peer they describe, so a relay in between
-  can drop a record but never forge or replay an older one.
+  can drop a record but never forge or replay an older one. A friend's
+  catalog is never relayed: it is pulled from the friend directly, and its
+  download links are built on the address this instance already gossips
+  with, so a catalog cannot point the sync loop anywhere else.
 - **This instance ↔ the lighthouse**: treated as an untrusted, semi-public
   relay. It holds no proof it could not itself forge for an unauthenticated
   query (see [the lighthouse doc](LIGHTHOUSE.md#telling-a-real-record-from-a-decoy)),

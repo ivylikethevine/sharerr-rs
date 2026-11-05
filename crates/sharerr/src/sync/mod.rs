@@ -25,11 +25,11 @@ use sharerr_core::config::{LibraryKind, secret_keys};
 use sharerr_core::endpoint::AdvertisedEndpoint;
 use sharerr_core::paths::PathResolver;
 use sharerr_core::{Config, MediaSource, ShareState, SharedItem};
-use sharerr_store::{FileStamp, RunSummary, Store, Vault};
+use sharerr_store::{FileStamp, ItemOrigin, RunSummary, Store, Vault};
 use sharerr_torrent::{AnnounceSet, BuiltinTracker, TrackerProvider, title};
 
 use crate::library::DirectoryScanner;
-use seed::{AnnounceRefresh, SeedOutcome, Seeder};
+use seed::{AnnounceRefresh, FriendTorrents, SeedOutcome, Seeder};
 
 /// A short, non-secret fingerprint of a tracker token — truncated SHA-256, hex.
 ///
@@ -201,6 +201,8 @@ struct PassContext<'a> {
     token_fp: Option<String>,
     live: &'a HashMap<String, &'a sharerr_client::TorrentSummary>,
     torrents: &'a [sharerr_client::TorrentSummary],
+    /// Which friend's swarm each item joined, for those that did.
+    origins: &'a HashMap<(MediaSource, i64), ItemOrigin>,
     dry_run: bool,
 }
 
@@ -394,6 +396,10 @@ impl Syncer {
             sidecar_roots: sidecar_roots(config),
             torrent_dir: config.torrent_dir(),
             confirmed: Default::default(),
+            friends_http: sharerr_client::http_client_with_timeout(std::time::Duration::from_secs(
+                60,
+            ))
+            .map_err(|err| anyhow::anyhow!("building the HTTP client for friends: {err}"))?,
         };
 
         let store = store.await?;
@@ -562,12 +568,13 @@ impl Syncer {
         // the seeder's cross-seed search without a refetch per item. This is
         // also what makes the loop self-healing: a torrent removed behind
         // sharerr's back is simply absent here and gets re-added.
-        let (discovery, torrents, known_items, stamps, ends) = tokio::join!(
+        let (discovery, torrents, known_items, stamps, ends, origins) = tokio::join!(
             self.discover(),
             self.seeder.qbit.list(None),
             self.store.all_items(),
             self.store.file_stamps(),
-            self.store.share_ends()
+            self.store.share_ends(),
+            self.store.item_origins()
         );
         // Only the changed-file check reads these, and it is a notification,
         // not a reason to fail the pass.
@@ -590,6 +597,9 @@ impl Syncer {
         // Unlike the stamps, a failure here stops the pass: carrying on would
         // share again what an operator set to stop.
         let ends = ends.context("reading share-until dates")?;
+        // Stopping too: an announce refresh without them would drop a joined
+        // friend's tracker.
+        let origins = origins.context("reading which friends' swarms items joined")?;
         let now = sharerr_core::endpoint::now_epoch();
 
         // Before anything is shared, and stopping the pass on failure: an item
@@ -635,6 +645,7 @@ impl Syncer {
             token_fp: token_fingerprint(&announce),
             live: &live,
             torrents: &torrents,
+            origins: &origins,
             dry_run,
         };
         for item in discovered {
@@ -823,6 +834,7 @@ impl Syncer {
             token_fp,
             live,
             torrents,
+            origins,
             dry_run,
         } = pass;
         let dry_run = *dry_run;
@@ -838,8 +850,7 @@ impl Syncer {
             && let Some(&reported) = live.get(hash)
         {
             if !dry_run {
-                self.confirm_live(item, known, hash, reported, announce, token_fp.as_deref())
-                    .await;
+                self.confirm_live(item, known, hash, reported, pass).await;
             }
             return Ok(Step::Unchanged);
         }
@@ -947,6 +958,22 @@ impl Syncer {
             .ok()
             .as_ref()
             .and_then(FileStamp::of);
+        // A friend's torrent of the same file, to join rather than build.
+        let matches = match self
+            .store
+            .catalog_matches(&item.spec, &item.ids, item.size)
+            .await
+        {
+            Ok(matches) => matches,
+            Err(err) => {
+                tracing::warn!(item = %item.spec, %err, "could not read friends' catalogs");
+                Vec::new()
+            }
+        };
+        let friends = FriendTorrents {
+            matches: &matches,
+            joined: origins.get(&item.key()),
+        };
         let outcome = self
             .seeder
             .seed(
@@ -955,6 +982,7 @@ impl Syncer {
                 torrents,
                 known.and_then(|k| k.info_hash.as_deref()),
                 item.media.as_ref(),
+                friends,
             )
             .await?;
         let info_hash = outcome.info_hash().to_owned();
@@ -962,7 +990,11 @@ impl Syncer {
         // sharerr's to characterise, so `set_seeding` leaves the stored
         // `private` value exactly as it was rather than guessing. The same
         // goes for the file stamp, which only a torrent sharerr built has.
-        let (step, private, stamp, created, info_hash_v2) = match outcome {
+        //
+        // A joined friend's torrent counts as reused: no new swarm was started.
+        // It is sharerr's own, limits and withdrawal included, when sharerr
+        // handed it to the client after checking it piece for piece.
+        let (step, private, stamp, created, info_hash_v2, origin) = match outcome {
             SeedOutcome::Added {
                 private,
                 info_hash_v2,
@@ -973,8 +1005,36 @@ impl Syncer {
                 stamp_before_seed,
                 true,
                 info_hash_v2,
+                None,
             ),
-            SeedOutcome::Reused { .. } => (Step::Reused, None, None, false, None),
+            SeedOutcome::Reused { upstream, .. } => (
+                Step::Reused,
+                None,
+                None,
+                false,
+                None,
+                Some(ItemOrigin {
+                    peer_id: None,
+                    upstream,
+                }),
+            ),
+            SeedOutcome::Joined {
+                origin,
+                added: Some(added),
+                ..
+            } => (
+                Step::Reused,
+                Some(added.private),
+                stamp_before_seed,
+                true,
+                added.info_hash_v2,
+                Some(origin),
+            ),
+            SeedOutcome::Joined {
+                origin,
+                added: None,
+                ..
+            } => (Step::Reused, None, None, false, None, Some(origin)),
         };
         self.store
             .set_seeding(
@@ -993,6 +1053,9 @@ impl Syncer {
                 .set_info_hash_v2(item.source, item.file_id, &v2)
                 .await?;
         }
+        self.store
+            .set_item_origin(item.source, item.file_id, origin.as_ref())
+            .await?;
         if let Err(err) = self
             .store
             .set_file_stamp(item.source, item.file_id, stamp)
@@ -1014,9 +1077,18 @@ impl Syncer {
         known: &SharedItem,
         hash: &str,
         reported: &sharerr_client::TorrentSummary,
-        announce: &AnnounceSet,
-        token_fp: Option<&str>,
+        pass: &PassContext<'_>,
     ) {
+        let (announce, token_fp) = (pass.announce, pass.token_fp.as_deref());
+        let recovered;
+        let upstream = match pass.origins.get(&item.key()) {
+            Some(origin) => origin.upstream.as_slice(),
+            None if !known.created_by_sharerr => {
+                recovered = self.recover_upstream(item, hash, announce).await;
+                recovered.as_slice()
+            }
+            None => &[],
+        };
         let ratio = reported.ratio;
         let mut ratio_limit = reported.ratio_limit;
         // Retroactive seeding limits, for sharerr's own torrents only: an adopted
@@ -1035,7 +1107,7 @@ impl Syncer {
                 ),
             }
         }
-        match self.seeder.refresh_announce(hash, announce).await {
+        match self.seeder.refresh_announce(hash, announce, upstream).await {
             // Either branch means the live torrent now genuinely matches
             // `announce.primary()`: a no-op refresh is still a confirmation. Confirmed
             // fingerprint and reported ratio land in the one write `confirm_seeding`
@@ -1074,6 +1146,42 @@ impl Syncer {
                 self.record_ratio(item, ratio, ratio_limit).await;
             }
         }
+    }
+
+    /// The trackers a torrent adopted before they were recorded carries in
+    /// the client besides ours, recorded once so later passes read them from
+    /// the store. A failure is a warning and an empty answer, retried on the
+    /// next pass; a client that cannot export records an empty set, since
+    /// asking again will not help.
+    async fn recover_upstream(
+        &self,
+        item: &Discovered,
+        hash: &str,
+        announce: &AnnounceSet,
+    ) -> Vec<String> {
+        let upstream = match self.seeder.recover_upstream(hash, announce).await {
+            Ok(upstream) => upstream.unwrap_or_default(),
+            Err(err) => {
+                tracing::warn!(
+                    item = %item.spec,
+                    error = format!("{err:#}"),
+                    "could not read an adopted torrent's own trackers"
+                );
+                return Vec::new();
+            }
+        };
+        let origin = ItemOrigin {
+            peer_id: None,
+            upstream,
+        };
+        if let Err(err) = self
+            .store
+            .set_item_origin(item.source, item.file_id, Some(&origin))
+            .await
+        {
+            tracing::warn!(item = %item.spec, %err, "could not record an adopted torrent's trackers");
+        }
+        origin.upstream
     }
 
     /// Record the client-reported ratio alone, for a fast-path pass whose

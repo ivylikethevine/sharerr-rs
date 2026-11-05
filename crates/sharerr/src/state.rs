@@ -990,6 +990,7 @@ pub(crate) mod fixtures {
             sidecar_roots: Vec::new(),
             torrent_dir: dir.path().to_path_buf(),
             confirmed: Default::default(),
+            friends_http: reqwest::Client::new(),
         };
         // Opened from `config.database_path()`, the same path `ServeState::store`
         // itself lazily opens — two independent `Store`/pool handles sharing one

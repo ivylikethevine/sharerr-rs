@@ -356,6 +356,7 @@ fn hash_pieces_hybrid(path: &Path, piece_length: u64) -> Result<(Vec<u8>, V2Hash
             first_piece_leaves.clone_from(&leaves);
         }
         piece_hashes.push(merkle_root(&leaves, blocks_per_piece, [0; 32]));
+        true
     })?;
 
     let v2 = match piece_hashes.len() {
@@ -413,18 +414,52 @@ fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec
     let mut pieces = Vec::new();
     for_each_piece(path, others, piece_length, |piece| {
         pieces.extend_from_slice(&Sha1::digest(piece));
+        true
     })?;
     Ok(pieces)
 }
 
+/// Whether the file at `path` is exactly the content a single-file `torrent`
+/// describes: the same length, and every piece the same SHA-1. The same read a
+/// build costs, stopping at the first piece that differs.
+///
+/// `false` for a multi-file torrent, or one whose piece fields are missing or
+/// inconsistent: nothing here can vouch for those.
+pub fn verify_single_file(path: &Path, torrent: &Torrent) -> Result<bool> {
+    let (Some(piece_length), Some(expected)) = (torrent.piece_length(), torrent.pieces()) else {
+        return Ok(false);
+    };
+    if !torrent.is_single_file() || piece_length == 0 || expected.len() % 20 != 0 {
+        return Ok(false);
+    }
+    let size = std::fs::metadata(path)
+        .map_err(|source| TorrentError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    let pieces = expected.len() / 20;
+    if size != torrent.content_length() || size.div_ceil(piece_length) != pieces as u64 {
+        return Ok(false);
+    }
+
+    let mut expected = expected.as_chunks::<20>().0.iter();
+    let mut matched = true;
+    for_each_piece(path, &[], piece_length, |piece| {
+        matched = expected.next() == Some(&Sha1::digest(piece).into());
+        matched
+    })?;
+    Ok(matched && expected.next().is_none())
+}
+
 /// Read the file at `path`, then each of `others`, as one stream in
-/// `piece_length` chunks, handing each piece to `on_piece` in order. Every piece
-/// is full except the last.
+/// `piece_length` chunks, handing each piece to `on_piece` in order until it
+/// returns `false`. Every piece is full except the last.
 fn for_each_piece(
     path: &Path,
     others: &[PathBuf],
     piece_length: u64,
-    mut on_piece: impl FnMut(&[u8]),
+    mut on_piece: impl FnMut(&[u8]) -> bool,
 ) -> Result<()> {
     let io = |source| TorrentError::Build {
         path: path.to_path_buf(),
@@ -454,8 +489,7 @@ fn for_each_piece(
         if filled == 0 {
             break;
         }
-        on_piece(&buf[..filled]);
-        if filled < chunk {
+        if !on_piece(&buf[..filled]) || filled < chunk {
             break;
         }
     }
@@ -1305,5 +1339,85 @@ mod hybrid_tests {
         assert_eq!(torrent.info_hash(), built.info_hash);
         assert_eq!(torrent.info_hash_v2(), built.info_hash_v2);
         assert!(torrent.extra.contains_key(b"piece layers".as_slice()));
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn build(path: &Path) -> Torrent {
+        let announce =
+            crate::AnnounceSet::single("http://seed.example:51413/announce".parse().unwrap());
+        let built = TorrentFactory
+            .create(&TorrentRequest {
+                path,
+                announce: &announce,
+                media: None,
+                private: false,
+                hybrid: false,
+            })
+            .unwrap();
+        Torrent::read_from_bytes(&built.data).unwrap()
+    }
+
+    /// Three pieces at the smallest piece length, the last one short.
+    fn content() -> Vec<u8> {
+        (0..(piece_length_for(1) * 2 + 77))
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn the_file_a_torrent_was_built_from_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mkv");
+        std::fs::write(&path, content()).unwrap();
+        assert!(verify_single_file(&path, &build(&path)).unwrap());
+    }
+
+    #[test]
+    fn a_changed_byte_a_changed_length_or_a_multi_file_torrent_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mkv");
+        std::fs::write(&path, content()).unwrap();
+        let torrent = build(&path);
+
+        let mut changed = content();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            !verify_single_file(&path, &torrent).unwrap(),
+            "the last, short piece is checked too"
+        );
+
+        let mut longer = content();
+        longer.push(0);
+        std::fs::write(&path, &longer).unwrap();
+        assert!(!verify_single_file(&path, &torrent).unwrap());
+
+        std::fs::write(&path, content()).unwrap();
+        let mut multi = torrent.clone();
+        multi
+            .info
+            .insert(b"files".to_vec(), Value::List(Vec::new()));
+        assert!(!verify_single_file(&path, &multi).unwrap());
+
+        let mut no_pieces = torrent;
+        no_pieces.info.remove(b"pieces".as_slice());
+        assert!(!verify_single_file(&path, &no_pieces).unwrap());
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_not_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mkv");
+        std::fs::write(&path, content()).unwrap();
+        let torrent = build(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(verify_single_file(&path, &torrent).is_err());
     }
 }

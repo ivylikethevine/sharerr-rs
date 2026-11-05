@@ -37,7 +37,8 @@ mutants` exists and `sharerr-torrent`'s survivors worth killing are killed;
   5. `sharerr`, items and settings: `web/items/mod.rs` (163),
      `web/settings/mod.rs` (134), `web/config_io/mod.rs` (52).
   6. `sharerr`, friends: `web/topology/mod.rs` (203), `web/peers.rs` (121),
-     `gossip.rs` (48), `pairing.rs` (33).
+     `gossip.rs` (48), `pairing.rs` (33), and `catalog.rs`, added since the
+     count.
   7. `sharerr`, feeds and diagnostics: `torznab/mod.rs` (116),
      `web/diagnostics.rs` (79), `web/composition.rs` (55), `checks.rs` (58),
      `api.rs` (27), `jackett.rs` (12).
@@ -56,22 +57,6 @@ mutants` exists and `sharerr-torrent`'s survivors worth killing are killed;
   a friend's season search returns single episodes; a multi-file torrent over
   the existing folder still moves nothing, and `seeding.sidecars` already builds
   one.
-- **Adopting a friend's torrent.** When a friend's Sonarr imports a release
-  and they tag it, their sharerr builds a second info hash for the same data,
-  because the client's copy sits in the download directory and the tagged file
-  in the library, so `Seeder::find_existing` never matches them. Design, not
-  yet started: gossip carries each friend's catalog, filtered the way the
-  feed is (scope, audience and limits), as `(info hash, ids, spec, size,
-private)`; before building, `Syncer::share` looks for a friend's entry with
-  the same ids, spec and size; on a match it fetches that friend's `.torrent`
-  from `/torrents/{hash}.torrent` with the key they issued us, verifies the
-  local file against its pieces (the same cost as a build), rewrites the
-  announce to our tracker as a second tier so both trackers hear every peer,
-  caches it under the friend's hash and adds it to the client as an adoption
-  (`created_by_sharerr` true, since this instance added it). A client that
-  already holds that hash is reused by hash, not only by path. Touches the
-  gossip wire format and its signing, the peers store, `sync`, the tracker's
-  download route and the items page.
 - **Request flow.** Discovery is one-way today. An inbound request queue
   with an approve step is the other half of the original idea. Seerr (the
   merged Overseerr and Jellyseerr) is the request app most friends already

@@ -15,6 +15,10 @@
 //! 3. **`savepath` is the file's existing parent directory**, in qBittorrent's view
 //!    of the filesystem, so it finds the data in place.
 //! 4. **Never delete.** Unsharing removes the torrent and leaves the media alone.
+//!
+//! Before building, a friend's torrent of the same file is preferred: joining
+//! their swarm under their info hash keeps one swarm for one set of bytes. See
+//! [`Seeder::fetch_from_friend`] for what that takes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,11 +26,36 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use sharerr_client::{AddRequest, TorrentClient, TorrentFileEntry, TorrentSummary};
-use sharerr_core::MediaMeta;
 use sharerr_core::paths::ResolvedPaths;
+use sharerr_core::{CatalogEntry, MediaMeta};
+use sharerr_store::ItemOrigin;
 use sharerr_torrent::{
-    AnnounceSet, SidecarRequest, TorrentFactory, TorrentRequest, torrent_file_path,
+    AnnounceSet, SidecarRequest, Torrent, TorrentFactory, TorrentRequest, torrent_file_path,
 };
+use url::Url;
+
+/// The largest `.torrent` taken from a friend. A hybrid torrent's piece layers
+/// put a large file's at a few megabytes.
+const MAX_FRIEND_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// What the sync loop knows about friends' torrents of the file being seeded.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FriendTorrents<'a> {
+    /// Friends' catalog entries matching the file, with each friend's peer id,
+    /// in preference order.
+    pub matches: &'a [(i64, CatalogEntry)],
+    /// The friend's swarm this item joined on an earlier pass, if it did.
+    pub joined: Option<&'a ItemOrigin>,
+}
+
+/// What sharerr knows about a torrent it handed to the client itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedTorrent {
+    /// Decoded from the bytes handed over; see [`Seeder::seed`].
+    pub private: bool,
+    /// The v2 identity of a hybrid torrent, read from the same bytes.
+    pub info_hash_v2: Option<String>,
+}
 
 /// What [`Seeder::refresh_announce`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +80,13 @@ pub enum SeedOutcome {
     /// call per item — an operator's own torrent or a cross-seed, not one
     /// sharerr built — so the caller does not update `shared_items.private`
     /// for this outcome and whatever the row already holds stands.
-    Reused { info_hash: String },
+    Reused {
+        info_hash: String,
+        /// The trackers the client's copy came with, other than ours, kept
+        /// after ours when an endpoint change rewrites its list. Empty when
+        /// sharerr's own cache answered and the client was not asked.
+        upstream: Vec<String>,
+    },
     /// A new torrent was built and handed to qBittorrent. `private` is
     /// decoded from the actual bytes just built or reused from sharerr's own
     /// cache — see [`Seeder::seed`].
@@ -61,12 +96,24 @@ pub enum SeedOutcome {
         /// The v2 identity of a hybrid build, read from the same bytes.
         info_hash_v2: Option<String>,
     },
+    /// A friend's torrent of the same file: their swarm, joined under their
+    /// info hash.
+    Joined {
+        info_hash: String,
+        origin: ItemOrigin,
+        /// `Some` when sharerr handed the friend's torrent to the client, so it
+        /// is sharerr's to withdraw; `None` when the client already held it,
+        /// usually as the download the file came from.
+        added: Option<AddedTorrent>,
+    },
 }
 
 impl SeedOutcome {
     pub fn info_hash(&self) -> &str {
         match self {
-            Self::Reused { info_hash } | Self::Added { info_hash, .. } => info_hash,
+            Self::Reused { info_hash, .. }
+            | Self::Added { info_hash, .. }
+            | Self::Joined { info_hash, .. } => info_hash,
         }
     }
 }
@@ -94,6 +141,8 @@ pub struct Seeder {
     /// `Seeder` (a syncer rebuild starts it empty), which is also how long a
     /// cache file deleted underneath goes unnoticed.
     pub confirmed: Mutex<HashMap<String, AnnounceSet>>,
+    /// Fetches a friend's `.torrent` from the link their catalog gave.
+    pub friends_http: reqwest::Client,
 }
 
 impl std::fmt::Debug for Seeder {
@@ -128,6 +177,10 @@ impl Seeder {
     /// media library is gigabytes of CPU `find_existing` above cannot save
     /// this call from, since the whole reason this path is reached is that
     /// `torrents` no longer contains a match.
+    ///
+    /// `friends` comes between the two: a friend's torrent the client already
+    /// holds is adopted like any other, and one it does not is fetched and
+    /// checked against the file before anything is built.
     pub async fn seed(
         &self,
         paths: &ResolvedPaths,
@@ -135,6 +188,7 @@ impl Seeder {
         torrents: &[TorrentSummary],
         known_info_hash: Option<&str>,
         media: Option<&MediaMeta>,
+        friends: FriendTorrents<'_>,
     ) -> Result<SeedOutcome> {
         if let Some(existing) = self.find_existing(torrents, &paths.qbit).await? {
             tracing::info!(
@@ -142,19 +196,58 @@ impl Seeder {
                 info_hash = %existing,
                 "already covered by an existing torrent — reusing it"
             );
-            self.adopt(&existing, announce).await?;
+            let upstream = self.adopt(&existing, announce).await?;
             return Ok(SeedOutcome::Reused {
                 info_hash: existing,
+                upstream,
             });
         }
 
-        let (info_hash, data) = match self.reuse_cached(known_info_hash, announce, paths).await {
-            Some(reused) => reused,
-            None => {
-                let built = self.build(paths, announce, media).await?;
-                (built.info_hash, built.data)
-            }
-        };
+        // A friend's torrent of this file that the client already holds.
+        let held = friends.matches.iter().find(|(_, entry)| {
+            torrents
+                .iter()
+                .any(|t| t.hash.eq_ignore_ascii_case(&entry.info_hash))
+        });
+        if let Some((peer_id, entry)) = held {
+            tracing::info!(
+                file = %paths.qbit.display(),
+                info_hash = %entry.info_hash,
+                "a friend's torrent of this file is already in the client — joining its swarm"
+            );
+            let upstream = self.adopt(&entry.info_hash, announce).await?;
+            return Ok(SeedOutcome::Joined {
+                info_hash: entry.info_hash.clone(),
+                origin: ItemOrigin {
+                    peer_id: Some(*peer_id),
+                    upstream,
+                },
+                added: None,
+            });
+        }
+
+        let (info_hash, data, joined) =
+            match self.reuse_cached(known_info_hash, announce, paths).await {
+                // A cached friend's torrent goes back with their tracker kept.
+                Some((hash, data)) => match friends.joined {
+                    Some(origin) => (
+                        hash,
+                        with_upstream(&data, announce, &origin.upstream)?,
+                        Some(origin.clone()),
+                    ),
+                    None => (hash, data, None),
+                },
+                None => match self
+                    .fetch_from_friends(paths, announce, friends.matches)
+                    .await
+                {
+                    Some((hash, data, origin)) => (hash, data, Some(origin)),
+                    None => {
+                        let built = self.build(paths, announce, media).await?;
+                        (built.info_hash, built.data, None)
+                    }
+                },
+            };
 
         // Read from the bytes rather than the current config: a cached `.torrent`
         // may predate a later change, and this is what the client is handed. An
@@ -198,11 +291,166 @@ impl Seeder {
             .await
             .with_context(|| format!("adding {} to {}", paths.qbit.display(), self.qbit.kind()))?;
 
-        Ok(SeedOutcome::Added {
-            info_hash,
-            private,
-            info_hash_v2,
+        Ok(match joined {
+            Some(origin) => SeedOutcome::Joined {
+                info_hash,
+                origin,
+                added: Some(AddedTorrent {
+                    private,
+                    info_hash_v2,
+                }),
+            },
+            None => SeedOutcome::Added {
+                info_hash,
+                private,
+                info_hash_v2,
+            },
         })
+    }
+
+    /// The first friend's torrent in `matches` that can seed the file at
+    /// `paths`, as `(info hash, bytes for the client, origin)`. `None` when
+    /// none can, so the caller builds; each refusal is logged, never an error.
+    async fn fetch_from_friends(
+        &self,
+        paths: &ResolvedPaths,
+        announce: &AnnounceSet,
+        matches: &[(i64, CatalogEntry)],
+    ) -> Option<(String, Vec<u8>, ItemOrigin)> {
+        for (peer_id, entry) in matches {
+            match self
+                .fetch_from_friend(paths, announce, *peer_id, entry)
+                .await
+            {
+                Ok(Some(found)) => return Some(found),
+                Ok(None) => {}
+                Err(err) => tracing::warn!(
+                    info_hash = %entry.info_hash,
+                    error = format!("{err:#}"),
+                    "could not use a friend's torrent of this file — building one instead"
+                ),
+            }
+        }
+        None
+    }
+
+    /// Fetch one friend's `.torrent` and take it only if it describes this
+    /// exact file where the client will look for it:
+    ///
+    /// - its info hash is the one the catalog named;
+    /// - it is single-file and its `name` is the file's own name, since the
+    ///   name is the path the client opens and cannot be changed without
+    ///   changing the info hash;
+    /// - it is v1-only when the client reports hybrids by their v2 hash;
+    /// - every piece matches the file on disk, the same read a build costs.
+    ///
+    /// The cache gets the friend's torrent announcing to our tracker alone, the
+    /// same as every other torrent the feed serves: their tracker tiers carry
+    /// our token there and must not reach our friends. The client gets ours
+    /// first and theirs after, so it announces to both swarms.
+    async fn fetch_from_friend(
+        &self,
+        paths: &ResolvedPaths,
+        announce: &AnnounceSet,
+        peer_id: i64,
+        entry: &CatalogEntry,
+    ) -> Result<Option<(String, Vec<u8>, ItemOrigin)>> {
+        let response = self
+            .friends_http
+            .get(&entry.download_url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            // Without the URL: its query carries our token at the friend's
+            // tracker, which has no business in a log.
+            .map_err(|e| anyhow::anyhow!(sharerr_client::error_chain(&e.without_url())))
+            .context("fetching the friend's .torrent")?;
+        if let Some(length) = response.content_length() {
+            anyhow::ensure!(
+                usize::try_from(length).is_ok_and(|length| length <= MAX_FRIEND_TORRENT_BYTES),
+                "the friend's .torrent is {length} bytes, past the \
+                 {MAX_FRIEND_TORRENT_BYTES}-byte cap"
+            );
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("reading the friend's .torrent")?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_FRIEND_TORRENT_BYTES,
+            "the friend's .torrent is {} bytes, past the {MAX_FRIEND_TORRENT_BYTES}-byte cap",
+            bytes.len()
+        );
+        let torrent = Torrent::read_from_bytes(&bytes).context("parsing the friend's .torrent")?;
+        let info_hash = torrent.info_hash();
+        anyhow::ensure!(
+            info_hash.eq_ignore_ascii_case(&entry.info_hash),
+            "the friend's .torrent is {info_hash}, not the {} their catalog named",
+            entry.info_hash
+        );
+
+        let file_name = paths.qbit.file_name().and_then(|name| name.to_str());
+        if !torrent.is_single_file() || torrent.name() != file_name {
+            tracing::info!(
+                info_hash,
+                theirs = torrent.name().unwrap_or("(none)"),
+                ours = file_name.unwrap_or("(none)"),
+                "a friend's torrent of this file names it differently — building one instead"
+            );
+            return Ok(None);
+        }
+        if torrent.info_hash_v2().is_some() && !self.qbit.kind().hybrid_torrents() {
+            tracing::info!(
+                info_hash,
+                client = %self.qbit.kind(),
+                "a friend's torrent of this file is hybrid, which this client reports by \
+                 another hash — building one instead"
+            );
+            return Ok(None);
+        }
+
+        let path = paths.sharerr.clone();
+        let parsed = torrent.clone();
+        let verified = tokio::task::spawn_blocking(move || {
+            sharerr_torrent::verify_single_file(&path, &parsed)
+        })
+        .await
+        .context("verification task panicked")?
+        .with_context(|| format!("verifying {}", paths.sharerr.display()))?;
+        if !verified {
+            tracing::warn!(
+                info_hash,
+                file = %paths.sharerr.display(),
+                "a friend's torrent of this file does not match it piece for piece — \
+                 building one instead"
+            );
+            return Ok(None);
+        }
+
+        let cached = sharerr_torrent::rewrite_announce(&bytes, announce)?;
+        let cache = torrent_file_path(&self.torrent_dir, &info_hash);
+        let target = cache.clone();
+        tokio::task::spawn_blocking(move || write_torrent_file(&target, &cached))
+            .await
+            .context("cache write task panicked")?
+            .with_context(|| format!("writing {}", cache.display()))?;
+
+        let upstream = foreign_tiers(&torrent, announce);
+        let data = with_upstream(&bytes, announce, &upstream)?;
+        tracing::info!(
+            info_hash,
+            file = %paths.qbit.display(),
+            "joining a friend's swarm for this file: their torrent verified and cached"
+        );
+        Ok(Some((
+            info_hash,
+            data,
+            ItemOrigin {
+                peer_id: Some(peer_id),
+                upstream,
+            },
+        )))
     }
 
     /// Take responsibility for a torrent the client already had, without
@@ -231,7 +479,10 @@ impl Seeder {
     /// download from is worse than one the items page marks Failed with a
     /// reason: the feed would carry it either way, and only one of those is
     /// visible to the operator.
-    async fn adopt(&self, info_hash: &str, announce: &AnnounceSet) -> Result<()> {
+    ///
+    /// Returns the tracker tiers the client's own copy came with, other than
+    /// ours, when it had to be exported; empty when sharerr's cache answered.
+    async fn adopt(&self, info_hash: &str, announce: &AnnounceSet) -> Result<Vec<String>> {
         self.qbit
             .add_trackers(info_hash, announce.tiers())
             .await
@@ -275,10 +526,17 @@ impl Seeder {
                 format!("rewriting the announce URLs of {info_hash}")
             }
         })?;
+        let upstream = if from_cache {
+            Vec::new()
+        } else {
+            Torrent::read_from_bytes(&bytes)
+                .map(|exported| foreign_tiers(&exported, announce))
+                .unwrap_or_default()
+        };
         let (rewritten, actual) = match outcome {
             // Already correct: a prior `adopt` already verified and wrote this
             // cache entry, so there is nothing left to do.
-            sharerr_torrent::Retargeted::Current { .. } if from_cache => return Ok(()),
+            sharerr_torrent::Retargeted::Current { .. } if from_cache => return Ok(upstream),
             // Never cached before, so it still needs verifying and writing even
             // though the exported announce already matches.
             sharerr_torrent::Retargeted::Current { torrent } => (bytes, torrent.info_hash()),
@@ -312,7 +570,7 @@ impl Seeder {
             path = %path.display(),
             "adopted an existing torrent: sharerr's tracker added and its .torrent cached"
         );
-        Ok(())
+        Ok(upstream)
     }
 
     /// Read back the `.torrent` sharerr cached for `known_info_hash`, bringing
@@ -469,10 +727,14 @@ impl Seeder {
     ///
     /// A file already confirmed against this same `announce` (see
     /// [`Self::confirmed`]) is `Current` without being read again.
+    ///
+    /// `upstream` is a joined friend's tracker tiers ([`ItemOrigin::upstream`]),
+    /// kept in the client's list after ours so the rewrite does not drop them.
     pub async fn refresh_announce(
         &self,
         info_hash: &str,
         announce: &AnnounceSet,
+        upstream: &[String],
     ) -> Result<AnnounceRefresh> {
         if self.is_confirmed(info_hash, announce) {
             return Ok(AnnounceRefresh::Current);
@@ -499,8 +761,10 @@ impl Seeder {
             sharerr_torrent::Retargeted::Updated { previous, data, .. } => (previous, data),
         };
 
+        let mut tiers = announce.tiers().to_vec();
+        tiers.extend(upstream.iter().filter_map(|url| Url::parse(url).ok()));
         self.qbit
-            .set_trackers(info_hash, announce.tiers())
+            .set_trackers(info_hash, &tiers)
             .await
             .with_context(|| format!("updating trackers in {}", self.qbit.kind()))?;
 
@@ -516,6 +780,43 @@ impl Seeder {
         );
         self.mark_confirmed(info_hash, announce);
         Ok(AnnounceRefresh::Updated)
+    }
+
+    /// The trackers an already-adopted torrent carries in the client besides
+    /// ours, for one adopted before they were recorded: what the client's
+    /// export lists, less every tier sharerr's cached copy or `announce` names.
+    /// `None` when the client cannot export, so nothing can be learned.
+    pub async fn recover_upstream(
+        &self,
+        info_hash: &str,
+        announce: &AnnounceSet,
+    ) -> Result<Option<Vec<String>>> {
+        let Some(exported) = self
+            .qbit
+            .export(info_hash)
+            .await
+            .with_context(|| format!("exporting {info_hash} from {}", self.qbit.kind()))?
+        else {
+            return Ok(None);
+        };
+        let exported = Torrent::read_from_bytes(&exported)
+            .with_context(|| format!("parsing {info_hash} as {} exported it", self.qbit.kind()))?;
+        let path = torrent_file_path(&self.torrent_dir, info_hash);
+        let ours: Vec<String> = match read_cached(&path)
+            .await
+            .with_context(|| format!("reading {}", path.display()))?
+        {
+            Some(data) => Torrent::read_from_bytes(&data)
+                .map(|cached| cached.announce_tiers().into_iter().flatten().collect())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        Ok(Some(
+            foreign_tiers(&exported, announce)
+                .into_iter()
+                .filter(|url| !ours.contains(url))
+                .collect(),
+        ))
     }
 
     /// Whether `info_hash`'s cached file was last seen announcing `announce`.
@@ -650,6 +951,31 @@ async fn content_size(path: &Path, files: &[String]) -> std::io::Result<u64> {
     Ok(total)
 }
 
+/// `torrent`'s announce URLs other than ours, one per tier, in order.
+fn foreign_tiers(torrent: &Torrent, announce: &AnnounceSet) -> Vec<String> {
+    torrent
+        .announce_tiers()
+        .into_iter()
+        .flatten()
+        .filter(|url| !announce.tiers().iter().any(|ours| ours.as_str() == url))
+        .collect()
+}
+
+/// `data` announcing to our tiers first and then `upstream`'s, one URL per
+/// tier: the client's copy of a joined friend's torrent.
+fn with_upstream(data: &[u8], announce: &AnnounceSet, upstream: &[String]) -> Result<Vec<u8>> {
+    let mut torrent = Torrent::read_from_bytes(data).context("parsing a friend's .torrent")?;
+    let tiers: Vec<Vec<String>> = announce
+        .tiers()
+        .iter()
+        .map(|url| vec![url.to_string()])
+        .chain(upstream.iter().map(|url| vec![url.clone()]))
+        .collect();
+    torrent.announce = Some(announce.primary().to_string());
+    torrent.announce_list = (tiers.len() > 1).then_some(tiers);
+    Ok(torrent.encode())
+}
+
 /// Write a `.torrent` into the cache, creating `torrent_dir` if this is the
 /// first one. Blocking; callers run it off the runtime.
 fn write_torrent_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -712,6 +1038,7 @@ mod tests {
             sidecar_roots: Vec::new(),
             torrent_dir,
             confirmed: Default::default(),
+            friends_http: reqwest::Client::new(),
         }
     }
 
@@ -761,7 +1088,7 @@ mod tests {
         let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
 
         let outcome = seeder
-            .refresh_announce("deadbeef", &announce)
+            .refresh_announce("deadbeef", &announce, &[])
             .await
             .unwrap();
         assert_eq!(outcome, AnnounceRefresh::NoCachedTorrent);
@@ -797,7 +1124,7 @@ mod tests {
         let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
 
         let outcome = seeder
-            .refresh_announce(&built.info_hash, &new_announce)
+            .refresh_announce(&built.info_hash, &new_announce, &[])
             .await
             .unwrap();
         assert_eq!(outcome, AnnounceRefresh::Updated);
@@ -811,7 +1138,7 @@ mod tests {
 
         // Running it again against the now-current file must be a no-op.
         let outcome_again = seeder
-            .refresh_announce(&built.info_hash, &new_announce)
+            .refresh_announce(&built.info_hash, &new_announce, &[])
             .await
             .unwrap();
         assert_eq!(outcome_again, AnnounceRefresh::Current);
@@ -844,14 +1171,14 @@ mod tests {
 
         let seeder = seeder(Arc::new(StubClient::default()), torrent_dir);
         let first = seeder
-            .refresh_announce(&built.info_hash, &announce)
+            .refresh_announce(&built.info_hash, &announce, &[])
             .await
             .unwrap();
         assert_eq!(first, AnnounceRefresh::Current, "read and confirmed");
 
         std::fs::remove_file(&cached).unwrap();
         let remembered = seeder
-            .refresh_announce(&built.info_hash, &announce)
+            .refresh_announce(&built.info_hash, &announce, &[])
             .await
             .unwrap();
         assert_eq!(
@@ -862,7 +1189,7 @@ mod tests {
 
         let moved = AnnounceSet::single(Url::parse("http://moved.example/announce").unwrap());
         let reread = seeder
-            .refresh_announce(&built.info_hash, &moved)
+            .refresh_announce(&built.info_hash, &moved, &[])
             .await
             .unwrap();
         assert_eq!(
@@ -926,7 +1253,14 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &announce, &[], Some(&built.info_hash), None)
+            .seed(
+                &paths,
+                &announce,
+                &[],
+                Some(&built.info_hash),
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap();
         std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -991,7 +1325,14 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &new_announce, &[], Some(&built.info_hash), None)
+            .seed(
+                &paths,
+                &new_announce,
+                &[],
+                Some(&built.info_hash),
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap();
         std::fs::set_permissions(&media, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -1072,7 +1413,14 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &announce, &[], Some(&stale.info_hash), None)
+            .seed(
+                &paths,
+                &announce,
+                &[],
+                Some(&stale.info_hash),
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap();
 
@@ -1134,6 +1482,7 @@ mod tests {
                 &[],
                 Some("stale-hash-nothing-cached"),
                 None,
+                FriendTorrents::default(),
             )
             .await
             .unwrap();
@@ -1162,7 +1511,14 @@ mod tests {
         };
 
         let outcome = seeder
-            .seed(&paths, &announce, &[], None, None)
+            .seed(
+                &paths,
+                &announce,
+                &[],
+                None,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap();
         let SeedOutcome::Added {
@@ -1225,13 +1581,21 @@ mod tests {
         )];
 
         let outcome = seeder
-            .seed(&paths, &announce, &existing, None, None)
+            .seed(
+                &paths,
+                &announce,
+                &existing,
+                None,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap();
         assert_eq!(
             outcome,
             SeedOutcome::Reused {
-                info_hash: theirs.info_hash.clone()
+                info_hash: theirs.info_hash.clone(),
+                upstream: vec!["http://their-tracker.example/announce".to_owned()],
             }
         );
         assert!(
@@ -1291,7 +1655,14 @@ mod tests {
         let existing = [summary("deadbeef", "/downloads", "/downloads/movie.mkv")];
 
         let err = seeder
-            .seed(&paths, &announce, &existing, None, None)
+            .seed(
+                &paths,
+                &announce,
+                &existing,
+                None,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap_err();
         let text = format!("{err:#}");
@@ -1344,13 +1715,21 @@ mod tests {
         )];
 
         let outcome = seeder
-            .seed(&paths, &announce, &existing, None, None)
+            .seed(
+                &paths,
+                &announce,
+                &existing,
+                None,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap();
         assert_eq!(
             outcome,
             SeedOutcome::Reused {
-                info_hash: built.info_hash.clone()
+                info_hash: built.info_hash.clone(),
+                upstream: Vec::new(),
             }
         );
         assert_eq!(std::fs::read(&cached_path).unwrap(), built.data);
@@ -1574,7 +1953,14 @@ mod tests {
             mapping_applied: false,
         };
         seeder
-            .seed(&paths, &announce, &[], Some(hash), None)
+            .seed(
+                &paths,
+                &announce,
+                &[],
+                Some(hash),
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap()
     }
@@ -1635,7 +2021,14 @@ mod tests {
         };
         let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
         seeder
-            .seed(&paths, &announce, &[], known_hash, None)
+            .seed(
+                &paths,
+                &announce,
+                &[],
+                known_hash,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap()
     }
@@ -1836,7 +2229,14 @@ mod tests {
         )];
 
         let err = seeder
-            .seed(&paths_for(&media), &announce, &existing, None, None)
+            .seed(
+                &paths_for(&media),
+                &announce,
+                &existing,
+                None,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap_err();
         let text = format!("{err:#}");
@@ -1864,7 +2264,7 @@ mod tests {
         let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
 
         let err = seeder
-            .refresh_announce(&theirs.info_hash, &announce)
+            .refresh_announce(&theirs.info_hash, &announce, &[])
             .await
             .unwrap_err();
         let text = format!("{err:#}");
@@ -1877,9 +2277,405 @@ mod tests {
             "/downloads/movie.mkv",
         )];
         let err = seeder
-            .seed(&paths_for(&media), &announce, &existing, None, None)
+            .seed(
+                &paths_for(&media),
+                &announce,
+                &existing,
+                None,
+                None,
+                FriendTorrents::default(),
+            )
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("reading"), "{err:#}");
+    }
+
+    // ------------------------------------------------------------ friends
+
+    /// A friend's torrent over `media`, announcing to their tracker with our
+    /// token there.
+    fn friends_torrent(media: &Path) -> sharerr_torrent::BuiltTorrent {
+        TorrentFactory
+            .create(&TorrentRequest {
+                path: media,
+                announce: &AnnounceSet::single(
+                    Url::parse("http://friend.example/announce/our-token").unwrap(),
+                ),
+                media: None,
+                private: false,
+                hybrid: false,
+            })
+            .unwrap()
+    }
+
+    fn entry(info_hash: &str, download_url: String) -> CatalogEntry {
+        CatalogEntry {
+            info_hash: info_hash.to_owned(),
+            spec: sharerr_core::MediaSpec::Movie {
+                title: "Copper Vale".to_owned(),
+                year: Some(2001),
+            },
+            ids: sharerr_core::ExternalIds::default(),
+            size: 0,
+            private: false,
+            download_url,
+        }
+    }
+
+    struct FriendCase {
+        _dir: tempfile::TempDir,
+        media: PathBuf,
+        torrent_dir: PathBuf,
+        paths: ResolvedPaths,
+        announce: AnnounceSet,
+    }
+
+    fn friend_case(contents: &[u8]) -> FriendCase {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("movie.mkv");
+        std::fs::write(&media, contents).unwrap();
+        FriendCase {
+            torrent_dir: dir.path().join("torrents"),
+            paths: ResolvedPaths {
+                arr: media.clone(),
+                sharerr: media.clone(),
+                qbit: PathBuf::from("/movies/movie.mkv"),
+                mapping_applied: false,
+            },
+            announce: AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap()),
+            media,
+            _dir: dir,
+        }
+    }
+
+    async fn serve(bytes: Vec<u8>) -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path_regex("^/torrents/"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(bytes))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// The case the catalog exists for: the client still holds the download
+    /// the library file came from, so the item joins that swarm instead of
+    /// starting a second one, and the torrent stays the operator's.
+    #[tokio::test]
+    async fn a_friends_torrent_the_client_already_holds_is_joined_by_hash() {
+        let case = friend_case(b"pretend media bytes");
+        let theirs = friends_torrent(&case.media);
+        let client = Arc::new(StubClient {
+            export_result: Some(theirs.data.clone()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client.clone(), case.torrent_dir.clone());
+        let held = [summary(
+            &theirs.info_hash,
+            "/downloads",
+            "/downloads/movie.mkv",
+        )];
+        let matches = [(7, entry(&theirs.info_hash, "http://unused".to_owned()))];
+
+        let outcome = seeder
+            .seed(
+                &case.paths,
+                &case.announce,
+                &held,
+                None,
+                None,
+                FriendTorrents {
+                    matches: &matches,
+                    joined: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            SeedOutcome::Joined {
+                info_hash: theirs.info_hash.clone(),
+                origin: ItemOrigin {
+                    peer_id: Some(7),
+                    upstream: vec!["http://friend.example/announce/our-token".to_owned()],
+                },
+                added: None,
+            }
+        );
+        assert!(client.add_calls.lock().unwrap().is_empty());
+        assert_eq!(client.add_trackers_calls.lock().unwrap().len(), 1);
+        assert!(torrent_file_path(&case.torrent_dir, &theirs.info_hash).exists());
+    }
+
+    /// Fetched, checked piece for piece, cached announcing to us alone, and
+    /// handed to the client announcing to us and then the friend.
+    #[tokio::test]
+    async fn a_friends_torrent_that_matches_the_file_is_fetched_and_joined() {
+        let case = friend_case(b"pretend media bytes");
+        let theirs = friends_torrent(&case.media);
+        let server = serve(theirs.data.clone()).await;
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), case.torrent_dir.clone());
+        let matches = [(
+            7,
+            entry(
+                &theirs.info_hash,
+                format!("{}/torrents/{}.torrent", server.uri(), theirs.info_hash),
+            ),
+        )];
+
+        let outcome = seeder
+            .seed(
+                &case.paths,
+                &case.announce,
+                &[],
+                None,
+                None,
+                FriendTorrents {
+                    matches: &matches,
+                    joined: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let SeedOutcome::Joined {
+            info_hash,
+            origin,
+            added: Some(added),
+        } = outcome
+        else {
+            panic!("expected a joined, added torrent: {outcome:?}");
+        };
+        assert_eq!(info_hash, theirs.info_hash);
+        assert_eq!(origin.peer_id, Some(7));
+        assert!(!added.private);
+
+        let adds = client.add_calls.lock().unwrap();
+        assert_eq!(adds.len(), 1);
+        let handed = sharerr_torrent::Torrent::read_from_bytes(&adds[0].1).unwrap();
+        assert_eq!(handed.info_hash(), theirs.info_hash);
+        assert_eq!(
+            handed.announce_tiers(),
+            vec![
+                vec!["http://sharerr.example/announce".to_owned()],
+                vec!["http://friend.example/announce/our-token".to_owned()],
+            ]
+        );
+
+        let cached =
+            std::fs::read(torrent_file_path(&case.torrent_dir, &theirs.info_hash)).unwrap();
+        let cached = sharerr_torrent::Torrent::read_from_bytes(&cached).unwrap();
+        assert_eq!(
+            cached.announce_tiers(),
+            vec![vec!["http://sharerr.example/announce".to_owned()]],
+            "our token at the friend's tracker must never reach the feed"
+        );
+    }
+
+    /// Each reason a friend's torrent cannot seed this file falls back to a
+    /// build of our own, never fails the item.
+    #[tokio::test]
+    async fn a_friends_torrent_that_cannot_seed_the_file_falls_back_to_a_build() {
+        let case = friend_case(b"pretend media bytes");
+        let other = case.media.with_file_name("other.mkv");
+        std::fs::write(&other, b"pretend media bytes").unwrap();
+        let renamed = friends_torrent(&other);
+        // Different bytes of the same size: the pieces differ.
+        let same_name_dir = tempfile::tempdir().unwrap();
+        let same_name = same_name_dir.path().join("movie.mkv");
+        std::fs::write(&same_name, b"different bytes!!!!").unwrap();
+        let different_pieces = friends_torrent(&same_name);
+
+        for (why, theirs, catalog_hash) in [
+            (
+                "a different file name",
+                renamed.clone(),
+                renamed.info_hash.clone(),
+            ),
+            (
+                "different pieces",
+                different_pieces.clone(),
+                different_pieces.info_hash.clone(),
+            ),
+            (
+                "a hash other than the catalog's",
+                different_pieces.clone(),
+                "ab".repeat(20),
+            ),
+        ] {
+            let server = serve(theirs.data.clone()).await;
+            let client = Arc::new(StubClient::default());
+            let seeder = seeder(client.clone(), case.torrent_dir.clone());
+            let matches = [(
+                7,
+                entry(
+                    &catalog_hash,
+                    format!("{}/torrents/{catalog_hash}.torrent", server.uri()),
+                ),
+            )];
+            let outcome = seeder
+                .seed(
+                    &case.paths,
+                    &case.announce,
+                    &[],
+                    None,
+                    None,
+                    FriendTorrents {
+                        matches: &matches,
+                        joined: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(outcome, SeedOutcome::Added { .. }),
+                "{why}: {outcome:?}"
+            );
+            assert_ne!(outcome.info_hash(), theirs.info_hash, "{why}");
+        }
+
+        // And a friend who does not answer at all.
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client, case.torrent_dir.clone());
+        let matches = [(
+            7,
+            entry(&"ab".repeat(20), "http://127.0.0.1:0/x".to_owned()),
+        )];
+        let outcome = seeder
+            .seed(
+                &case.paths,
+                &case.announce,
+                &[],
+                None,
+                None,
+                FriendTorrents {
+                    matches: &matches,
+                    joined: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, SeedOutcome::Added { .. }), "{outcome:?}");
+    }
+
+    /// A joined torrent the client lost goes back from the cache with the
+    /// friend's tracker kept, and stays joined.
+    #[tokio::test]
+    async fn a_cached_joined_torrent_goes_back_with_the_friends_tracker() {
+        let case = friend_case(b"pretend media bytes");
+        let theirs = friends_torrent(&case.media);
+        write_torrent_file(
+            &torrent_file_path(&case.torrent_dir, &theirs.info_hash),
+            &sharerr_torrent::rewrite_announce(&theirs.data, &case.announce).unwrap(),
+        )
+        .unwrap();
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), case.torrent_dir.clone());
+        let origin = ItemOrigin {
+            peer_id: Some(7),
+            upstream: vec!["http://friend.example/announce/our-token".to_owned()],
+        };
+
+        let outcome = seeder
+            .seed(
+                &case.paths,
+                &case.announce,
+                &[],
+                Some(&theirs.info_hash),
+                None,
+                FriendTorrents {
+                    matches: &[],
+                    joined: Some(&origin),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&outcome, SeedOutcome::Joined { origin: o, added: Some(_), .. } if *o == origin),
+            "{outcome:?}"
+        );
+        let adds = client.add_calls.lock().unwrap();
+        let handed = sharerr_torrent::Torrent::read_from_bytes(&adds[0].1).unwrap();
+        assert_eq!(handed.announce_tiers().len(), 2);
+    }
+
+    /// An endpoint change rewrites the client's list with the friend's
+    /// tracker still after ours.
+    #[tokio::test]
+    async fn refreshing_a_joined_torrents_announce_keeps_the_friends_tracker() {
+        let case = friend_case(b"pretend media bytes");
+        let theirs = friends_torrent(&case.media);
+        write_torrent_file(
+            &torrent_file_path(&case.torrent_dir, &theirs.info_hash),
+            &sharerr_torrent::rewrite_announce(&theirs.data, &case.announce).unwrap(),
+        )
+        .unwrap();
+        let client = Arc::new(StubClient::default());
+        let seeder = seeder(client.clone(), case.torrent_dir.clone());
+        let moved = AnnounceSet::single(Url::parse("http://moved.example/announce").unwrap());
+        let upstream = ["http://friend.example/announce/our-token".to_owned()];
+
+        let refreshed = seeder
+            .refresh_announce(&theirs.info_hash, &moved, &upstream)
+            .await
+            .unwrap();
+
+        assert_eq!(refreshed, AnnounceRefresh::Updated);
+        let set = client.set_trackers_calls.lock().unwrap();
+        assert_eq!(
+            set[0].1,
+            vec![
+                Url::parse("http://moved.example/announce").unwrap(),
+                Url::parse("http://friend.example/announce/our-token").unwrap(),
+            ]
+        );
+    }
+
+    /// What an adopted torrent carries besides us: the client's export, less
+    /// every tier our cached copy or the current announce names.
+    #[tokio::test]
+    async fn an_adopted_torrents_own_trackers_are_recovered_from_its_export() {
+        let case = friend_case(b"pretend media bytes");
+        let theirs = friends_torrent(&case.media);
+        let old_ours = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
+        write_torrent_file(
+            &torrent_file_path(&case.torrent_dir, &theirs.info_hash),
+            &sharerr_torrent::rewrite_announce(&theirs.data, &old_ours).unwrap(),
+        )
+        .unwrap();
+        let mut exported = sharerr_torrent::Torrent::read_from_bytes(&theirs.data).unwrap();
+        exported.announce_list = Some(vec![
+            vec!["http://old.example/announce".to_owned()],
+            vec!["http://friend.example/announce/our-token".to_owned()],
+            vec!["http://sharerr.example/announce".to_owned()],
+        ]);
+        let client = Arc::new(StubClient {
+            export_result: Some(exported.encode()),
+            ..StubClient::default()
+        });
+        let seeder = seeder(client, case.torrent_dir.clone());
+
+        assert_eq!(
+            seeder
+                .recover_upstream(&theirs.info_hash, &case.announce)
+                .await
+                .unwrap(),
+            Some(vec!["http://friend.example/announce/our-token".to_owned()])
+        );
+
+        let cannot_export = seeder_without_export(case.torrent_dir.clone());
+        assert_eq!(
+            cannot_export
+                .recover_upstream(&theirs.info_hash, &case.announce)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    fn seeder_without_export(torrent_dir: PathBuf) -> Seeder {
+        seeder(Arc::new(StubClient::default()), torrent_dir)
     }
 }

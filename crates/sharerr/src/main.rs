@@ -1,4 +1,5 @@
 mod api;
+mod catalog;
 mod checks;
 mod cli;
 mod commands;

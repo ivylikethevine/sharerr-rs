@@ -396,7 +396,31 @@ async fn writes_still_work(store: &Store, version: i64) {
             .len(),
         1
     );
+    let listed = sharerr_core::CatalogEntry {
+        info_hash: SEEDING_HASH.to_owned(),
+        spec: serde_json::from_str(EPISODE_SPEC).unwrap(),
+        ids: serde_json::from_str(EPISODE_IDS).unwrap(),
+        size: 734_003_200,
+        private: false,
+        download_url: "https://robin.example/torrents/x.torrent".to_owned(),
+    };
+    store
+        .replace_peer_catalog(sam.id, std::slice::from_ref(&listed))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .catalog_matches(&listed.spec, &listed.ids, listed.size)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(store.delete_peer(sam.id).await.unwrap());
+    assert!(
+        store.peer_catalog_sizes().await.unwrap().is_empty(),
+        "the catalog cascade must hold on the upgraded file"
+    );
     assert!(
         store
             .peer_endpoints_for(&[sam.id])

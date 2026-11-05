@@ -401,6 +401,52 @@
         ]
       }
     },
+    "/api/catalog": {
+      "get": {
+        "tags": [
+          "gossip"
+        ],
+        "summary": "`GET /api/catalog` — what this instance seeds that the caller may see.",
+        "operationId": "catalog",
+        "responses": {
+          "200": {
+            "description": "Every torrent the caller's feed would list, as data: the same scope, audience and limits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalog"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `apikey`, or one that matches no active peer.",
+            "content": {
+              "application/xml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database is not open yet.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "peerApiKey": []
+          }
+        ]
+      }
+    },
     "/api/gossip/endpoints": {
       "get": {
         "tags": [
@@ -2160,6 +2206,64 @@
           }
         }
       },
+      "Catalog": {
+        "type": "object",
+        "description": "The catalog as it travels.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's own token, for the `token` parameter of a `.torrent`\ndownload, as the feed's links carry it. Absent when this instance has\nno tracker token, so there is nothing to attribute."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogItem"
+            },
+            "description": "Kept as raw JSON on the way in, so one entry of a kind this version does\nnot know is skipped rather than failing the whole pull."
+          }
+        }
+      },
+      "CatalogItem": {
+        "type": "object",
+        "description": "One torrent this instance seeds and lets the caller see.",
+        "required": [
+          "info_hash",
+          "spec",
+          "ids",
+          "size",
+          "private"
+        ],
+        "properties": {
+          "info_hash": {
+            "type": "string",
+            "description": "The v1 info hash, lowercase hex. The `.torrent` is at\n`/torrents/{info_hash}.torrent`."
+          },
+          "spec": {
+            "type": "object",
+            "description": "What the file is: `kind` (`episode`, `movie`, `track` or `book`) and\nthat kind's fields, the same shape the management API's items carry."
+          },
+          "ids": {
+            "type": "object",
+            "description": "External ids: `tvdb`, `tmdb`, `tvmaze`, `imdb`, `musicbrainz`,\n`goodreads`, `hardcover`, `isbn`."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total content size in bytes.",
+            "minimum": 0
+          },
+          "private": {
+            "type": "boolean",
+            "description": "Whether the torrent sets BEP 27's private flag."
+          }
+        }
+      },
       "DashboardWidget": {
         "type": "object",
         "description": "The dashboard-widget payload — Homepage, Homarr, and Glance all read a\n\"custom API\" JSON endpoint shaped like this. Raw numbers, not the\npre-rendered strings the status page's tiles use: a dashboard widget does\nits own formatting, and the point of building this from [`MetricsSnapshot`]\nrather than the status page's `Glance` is that neither has to parse the\nother's prose.",
@@ -2728,7 +2832,7 @@
     },
     {
       "name": "gossip",
-      "description": "How friends tell each other where they have moved to. Records are signed by the peer they describe, so a relayed one needs no trust in the relayer."
+      "description": "How friends tell each other where they have moved to, and what they share. Records are signed by the peer they describe, so a relayed one needs no trust in the relayer; a catalog is only ever pulled from the friend it describes."
     },
     {
       "name": "tracker",

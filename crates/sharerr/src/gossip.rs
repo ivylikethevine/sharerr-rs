@@ -591,6 +591,13 @@ async fn exchange_with(
             "gossip ingested"
         );
     }
+
+    // The friend answered, so their catalog is worth asking for on the same
+    // pass. Its own failure is logged and leaves the last one in place.
+    match crate::catalog::pull(http, store, peer_id, base, key).await {
+        Ok(entries) => tracing::debug!(peer = peer_id, entries, "catalog pulled"),
+        Err(reason) => tracing::debug!(peer = peer_id, reason, "catalog pull failed"),
+    }
     Ok(())
 }
 

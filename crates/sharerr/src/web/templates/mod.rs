@@ -1289,6 +1289,8 @@ pub struct ItemDetailPage {
     pub title_reads_as: Option<String>,
     /// What would stop that title matching, one sentence each.
     pub title_problems: Vec<&'static str>,
+    /// The friend whose swarm this item joined under their info hash, by name.
+    pub joined_from: Option<String>,
     /// The share-until date as `YYYY-MM-DD` in local time, empty when unset.
     pub share_until: String,
     /// Whether that date has passed, so the share has ended.
