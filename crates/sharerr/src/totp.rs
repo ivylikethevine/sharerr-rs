@@ -194,6 +194,15 @@ mod tests {
             )),
             "aa4ae5e15272d00e95705637ce8a3b55ed402112"
         );
+        // A key of exactly one block is used as it is, not hashed (vector
+        // from Python's `hmac`, which RFC 2104 describes the same way).
+        assert_eq!(
+            hex::encode(hmac_sha1(
+                &[0xaa; 64],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "070a98992c4c1a83474cb780fc564608df3cf503"
+        );
     }
 
     #[test]

@@ -275,6 +275,14 @@ Survivors left on purpose after each crate's last run, at `-j 4`
   timeouts are detections: the lighthouse's `main` and `shutdown_signal`, and
   deleting `parse_response`'s `Eof` arm, which loops forever on a truncated
   reply.
+- **`sharerr`, `web/auth.rs` and `totp.rs`** (by `--file`): 195 mutants in 62
+  minutes, about 19 seconds each, since every mutant runs the crate's whole
+  suite (54 seconds alone in the baseline); 13 left. Equivalent: `|` to `^`
+  in both base32 loops (the shifted buffer's low bits are zero), `||` to
+  `&&` in `totp::verify`'s shape check (a code it then lets through matches
+  no step), and `<` to `<=` on the session, pending-sign-in and throttle
+  expiry comparisons (one instant at the boundary). Left: the
+  `SESSION_TTL` and `PENDING_TTL` constants.
 
 ## Benchmarks and fuzzing
 

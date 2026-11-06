@@ -29,38 +29,31 @@ last:
 - **Unraid and TrueNAS app listings.** Where much of the \*arr audience
   installs from; a Community Applications template and a TrueNAS app.
 - **Mutation survivors in `sharerr`, in phases.** `scripts/check.sh mutants`
-  exists, and every other crate has had its survivors worth killing killed
-  (what is left and why: [`docs/TESTING.md`](TESTING.md#mutation-testing)).
-  The `sharerr` crate is below, cut so each phase is a sitting of about 30
-  minutes at `-j 4` (16CPU/60GB). Counts are from
-  `cargo mutants --list --workspace` on 2026-11-04, before joining a friend's
-  swarm landed: `catalog.rs` is new since, and `sync/seed.rs` and
-  `sync/mod.rs` have grown, so phase 2's counts and phase 4's total are low.
-  Re-list a phase before starting it. Measured rates run from 0.2 seconds a
-  mutant (`sharerr-core`) through 0.45 (the service crates) to 2.9
-  (`sharerr-store`, whose suite opens SQLite per test); the `sharerr` crate's
-  is not measured, so phase 1 times itself and the later phases are re-cut
-  from what it finds. Each phase records its survivors in `docs/TESTING.md`
-  and kills only the ones whose behaviour matters; `MUTANTS_ARGS` takes `-p`
-  for a crate, `--file` for a file, and `--iterate` to re-test only the last
-  run's survivors after adding tests.
-  1. `sharerr`, calibration: `web/auth.rs` (100) and `totp.rs` (95) by
-     `--file`. Note the wall time and the per-mutant cost, then re-cut phases
-     2 to 6 to 30 minutes at that cost before starting them.
-  2. `sharerr`, sync: `sync/mod.rs` (122), `sync/seed.rs` (50), `library.rs`
-     (83), `tracker.rs` (37); `sync/seed.rs` has grown by about half since
-     (1,733 to 2,681 lines).
-  3. `sharerr`, items and settings: `web/items/mod.rs` (163),
+  exists, and every other crate, plus `sharerr`'s `web/auth.rs` and
+  `totp.rs`, has had its survivors worth killing killed (what is left and
+  why: [`docs/TESTING.md`](TESTING.md#mutation-testing)). A `sharerr` mutant
+  costs about 19 seconds at `-j 4` (16CPU/60GB), because each one runs the
+  crate's whole suite, so a 30-minute sitting covers about 95 mutants. The
+  rest of the crate is 2,173 mutants, about 11.5 hours or 23 sittings, below
+  by phase with counts from `cargo mutants --list -p sharerr` on 2026-11-06
+  (they move with the code; re-list a phase before starting it, then split
+  it by file into sittings of about 95). Each phase records its survivors in
+  `docs/TESTING.md` and kills only the ones whose behaviour matters;
+  `MUTANTS_ARGS` takes `-p` for a crate, `--file` for a file, and `--iterate`
+  to re-test only the last run's survivors after adding tests.
+  1. Sync, 340 (4 sittings): `sync/mod.rs` (128), `sync/seed.rs` (92),
+     `library.rs` (83), `tracker.rs` (37).
+  2. Items and settings, 350 (4): `web/items/mod.rs` (164),
      `web/settings/mod.rs` (134), `web/config_io/mod.rs` (52).
-  4. `sharerr`, friends: `web/topology/mod.rs` (203), `web/peers.rs` (121),
-     `gossip.rs` (48), `pairing.rs` (33), `catalog.rs` (not counted).
-  5. `sharerr`, feeds and diagnostics: `torznab/mod.rs` (116),
-     `web/diagnostics.rs` (79), `web/composition.rs` (55), `checks.rs` (58),
+  3. Friends, 415 (5): `web/topology/mod.rs` (203), `web/peers.rs` (121),
+     `gossip.rs` (48), `pairing.rs` (33), `catalog.rs` (10).
+  4. Feeds and diagnostics, 350 (4): `torznab/mod.rs` (119),
+     `web/diagnostics.rs` (79), `checks.rs` (58), `web/composition.rs` (55),
      `api.rs` (27), `jackett.rs` (12).
-  6. `sharerr`, the rest: `commands/doctor/mod.rs` (91), `state.rs` (82),
-     `commands/preview.rs` (71), `notify.rs` (61), `commands/serve.rs` (54),
-     `metrics.rs` (43), `gluetun.rs` (33), and the files under 35 mutants each
-     (about 330 together).
+  5. Commands and state, 435 (5): `commands/doctor/mod.rs` (91), `state.rs`
+     (82), `commands/preview.rs` (71), `notify.rs` (61), `commands/serve.rs`
+     (54), `metrics.rs` (43), `gluetun.rs` (33).
+  6. The rest, 283 (3): the 21 files under 35 mutants each.
 - **Season packs and albums as one torrent.** One media file per torrent means
   a friend's season search returns single episodes; a multi-file torrent over
   the existing folder still moves nothing, and `seeding.sidecars` already builds
