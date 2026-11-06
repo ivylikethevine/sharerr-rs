@@ -1,5 +1,6 @@
 //! Persistence for sharerr: the encrypted credential vault and the SQLite store.
 
+pub mod catalog;
 pub mod db;
 pub mod endpoints;
 pub mod peers;
@@ -15,6 +16,7 @@ mod fault;
 #[cfg(test)]
 mod upgrade;
 
+pub use catalog::ItemOrigin;
 pub use db::{FileStamp, SeedingSummary, Store, StoreError};
 pub use endpoints::{EndpointKind, ObservedVia, PeerEndpoint};
 pub use peers::{Audiences, Peer, PeerLimits, PeerScope, Touch, friend_slug};

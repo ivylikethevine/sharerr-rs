@@ -589,6 +589,14 @@
     built after you change it.
   </p>
 
+  {% call ui::check_field(locks, "seeding.hybrid", "hybrid", seeding_hybrid, "Build new single-file torrents as hybrid v1/v2 (BEP 52)") %}{% endcall %}
+  <p class="hint">
+    Adds BitTorrent v2 hashes beside the v1 ones, so a v2-capable client verifies
+    the file against both. Only applies to torrents built after you change it;
+    subtitle (multi-file) torrents stay v1. Ignored with Deluge, which identifies
+    a hybrid by its v2 hash.
+  </p>
+
   <label class="hint">
     <input type="checkbox" name="magnet_links" value="1" {% if feed_magnet_links %}checked{% endif %}
            {% call ui::lock_attr(locks, "feed.magnet_links") %}{% endcall %}>

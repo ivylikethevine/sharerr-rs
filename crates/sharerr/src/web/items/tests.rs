@@ -789,6 +789,63 @@ async fn detail_shows_the_release_title_and_the_file_name_side_by_side() {
     assert!(html.contains("S01E01.mkv"), "{html}");
 }
 
+/// An item seeding in a friend's swarm says whose, by their current name.
+#[tokio::test]
+async fn detail_names_the_friend_whose_swarm_an_item_joined() {
+    let (_dir, serve) = crate::state::fixtures::unconfigured();
+    let store = serve.store().await.unwrap();
+    store
+        .upsert(&named(MediaSource::Sonarr, "Lanternwick Hollow", 1))
+        .await
+        .unwrap();
+    store
+        .set_seeding(
+            MediaSource::Sonarr,
+            1,
+            &"ab".repeat(20),
+            None,
+            true,
+            Some(false),
+        )
+        .await
+        .unwrap();
+    let sam = store
+        .create_peer(
+            "Sam",
+            &secrecy::SecretString::from("sam-key"),
+            sharerr_store::PeerScope::All,
+        )
+        .await
+        .unwrap();
+    store
+        .set_item_origin(
+            MediaSource::Sonarr,
+            1,
+            Some(&sharerr_store::ItemOrigin {
+                peer_id: Some(sam.id),
+                upstream: Vec::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    let state = web_state(serve);
+
+    let html = body_of(
+        detail(
+            State(state),
+            Path((MediaSource::Sonarr, 1)),
+            Query(DetailQuery::default()),
+        )
+        .await,
+    )
+    .await;
+
+    assert!(
+        html.contains("in Sam&#x27;s swarm") || html.contains("in Sam's swarm"),
+        "{html}"
+    );
+}
+
 /// The title above carries no quality token, which the lint names; a track
 /// is shown as not checked rather than as clean.
 #[tokio::test]

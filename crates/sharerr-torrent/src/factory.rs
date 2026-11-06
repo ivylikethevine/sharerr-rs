@@ -9,7 +9,11 @@ use crate::bencode::Value;
 use crate::error::{Result, TorrentError};
 use crate::metainfo::Torrent;
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use sharerr_core::MediaMeta;
+
+/// BEP 52's leaf size: every v2 hash tree is built over 16 KiB blocks.
+const V2_BLOCK: usize = 16 * 1024;
 
 /// What to build a torrent over.
 ///
@@ -34,6 +38,12 @@ pub struct TorrentRequest<'a> {
     /// off costs: DHT/PEX become available, so revoking a friend no longer
     /// removes them from the swarm.
     pub private: bool,
+    /// Also write BEP 52's v2 fields, making a hybrid v1/v2 torrent: `meta
+    /// version`, a one-file `file tree` with the file's SHA-256 `pieces root`,
+    /// and its `piece layers`. The v2 keys live in the info dictionary, so a
+    /// hybrid build has a different v1 info hash from a plain one of the same
+    /// file; see `sharerr_core::config::SeedingConfig::hybrid`.
+    pub hybrid: bool,
 }
 
 /// What to build a multi-file torrent over: one media file and the sidecar files
@@ -63,6 +73,10 @@ pub struct SidecarRequest<'a> {
 pub struct BuiltTorrent {
     /// Hex-encoded SHA-1 of the info dictionary — the identity qBittorrent uses.
     pub info_hash: String,
+    /// For a hybrid torrent, the v2 identity its swarm announces under: SHA-256
+    /// of the info dictionary truncated to 20 bytes, hex. See
+    /// [`Torrent::info_hash_v2`].
+    pub info_hash_v2: Option<String>,
     /// The bencoded `.torrent`, ready to hand to a client.
     pub data: Vec<u8>,
     pub size: u64,
@@ -91,14 +105,24 @@ impl TorrentFactory {
         let (size, name) = source_file(path)?;
 
         let piece_length = piece_length_for(size);
-        let pieces = hash_pieces(path, &[], piece_length)?;
+        let (pieces, v2) = if request.hybrid {
+            let (pieces, v2) = hash_pieces_hybrid(path, piece_length)?;
+            (pieces, Some(v2))
+        } else {
+            (hash_pieces(path, &[], piece_length)?, None)
+        };
 
         let mut info = base_info(name, piece_length, pieces, request.private);
         info.insert(b"length".to_vec(), int_of(size));
+        let mut extra = BTreeMap::new();
+        if let Some(v2) = v2 {
+            v2.write_into(name, size, &mut info, &mut extra);
+        }
 
         Ok(finish(
             path,
             info,
+            extra,
             request.announce,
             request.media,
             piece_length,
@@ -141,9 +165,13 @@ impl TorrentFactory {
         let mut info = base_info(request.root_name, piece_length, pieces, request.private);
         info.insert(b"files".to_vec(), Value::List(files));
 
+        // v1 only: a hybrid multi-file torrent needs BEP 47 padding files so each
+        // file starts on a piece boundary, and a client without BEP 47 writes
+        // those as real files beside the media.
         Ok(finish(
             path,
             info,
+            BTreeMap::new(),
             request.announce,
             request.media,
             piece_length,
@@ -186,7 +214,9 @@ fn int_of(value: u64) -> Value {
 /// in here: the info hash is a function of the *file*, and adding metadata to this
 /// dictionary would make two torrents over one unchanged file stop matching, breaking
 /// the "reuse the torrent that already covers this file" path that keeps sharerr from
-/// re-adding media.
+/// re-adding media. The one exception is a hybrid build (`TorrentRequest::hybrid`),
+/// whose v2 keys have to be in here by BEP 52 and which is opt-in for exactly that
+/// reason.
 fn base_info(
     name: &str,
     piece_length: u64,
@@ -207,16 +237,18 @@ fn base_info(
     info
 }
 
-/// Wrap a finished info dictionary in the announce fields and comment.
+/// Wrap a finished info dictionary in the announce fields and comment, plus
+/// whatever other top-level fields `extra` already holds (a hybrid's `piece
+/// layers`).
 fn finish(
     path: &Path,
     info: BTreeMap<Vec<u8>, Value>,
+    mut extra: BTreeMap<Vec<u8>, Value>,
     announce: &crate::AnnounceSet,
     media: Option<&MediaMeta>,
     piece_length: u64,
     size: u64,
 ) -> BuiltTorrent {
-    let mut extra = BTreeMap::new();
     // `comment` lives outside the info dictionary by BEP 3, which is also
     // what keeps it from moving the info hash.
     if let Some(comment) = media.and_then(describe) {
@@ -235,11 +267,13 @@ fn finish(
     };
 
     let info_hash = torrent.info_hash();
+    let info_hash_v2 = torrent.info_hash_v2();
     let data = torrent.encode();
 
     tracing::debug!(
         file = %path.display(),
         info_hash = %info_hash,
+        info_hash_v2 = info_hash_v2.as_deref().unwrap_or("(v1 only)"),
         piece_length,
         size,
         "built torrent"
@@ -247,9 +281,126 @@ fn finish(
 
     BuiltTorrent {
         info_hash,
+        info_hash_v2,
         data,
         size,
     }
+}
+
+/// BEP 52's hashes for one file: its `pieces root`, and the `piece layers`
+/// entry a file longer than one piece carries.
+struct V2Hashes {
+    root: Option<[u8; 32]>,
+    /// The layer of the file's hash tree whose nodes each cover one piece,
+    /// truncated to the file's piece count; `None` for a file within one piece,
+    /// whose layer would be the root itself.
+    layer: Option<Vec<u8>>,
+}
+
+impl V2Hashes {
+    /// Write the v2 half of a hybrid single-file torrent: `meta version` and the
+    /// one-file `file tree` into `info`, `piece layers` beside it.
+    fn write_into(
+        &self,
+        name: &str,
+        size: u64,
+        info: &mut BTreeMap<Vec<u8>, Value>,
+        extra: &mut BTreeMap<Vec<u8>, Value>,
+    ) {
+        let mut file = BTreeMap::new();
+        file.insert(b"length".to_vec(), int_of(size));
+        // An empty file has no blocks to hash, so BEP 52 leaves its root out.
+        if let Some(root) = self.root {
+            file.insert(b"pieces root".to_vec(), Value::Bytes(root.to_vec()));
+        }
+        // `file tree` nests directories by name, each file under its name as the
+        // empty key: one file at the top level is `{name: {"": {...}}}`.
+        let mut entry = BTreeMap::new();
+        entry.insert(Vec::new(), Value::Dict(file));
+        let mut tree = BTreeMap::new();
+        tree.insert(name.as_bytes().to_vec(), Value::Dict(entry));
+
+        info.insert(b"meta version".to_vec(), Value::Int(2));
+        info.insert(b"file tree".to_vec(), Value::Dict(tree));
+
+        let mut layers = BTreeMap::new();
+        if let (Some(root), Some(layer)) = (self.root, &self.layer) {
+            layers.insert(root.to_vec(), Value::Bytes(layer.clone()));
+        }
+        extra.insert(b"piece layers".to_vec(), Value::Dict(layers));
+    }
+}
+
+/// [`hash_pieces`] for one file, computing BEP 52's hashes in the same read.
+///
+/// Each piece's 16 KiB blocks are hashed into a subtree padded with zero
+/// leaves to the piece's block count; the piece hashes form the `piece layers`
+/// entry and, padded with the hash of an all-zero piece to a power of two,
+/// reduce to the `pieces root`. A file within one piece has no layer and its
+/// root is the tree over its blocks padded to a power of two, which is the
+/// layout a client verifies against.
+fn hash_pieces_hybrid(path: &Path, piece_length: u64) -> Result<(Vec<u8>, V2Hashes)> {
+    let blocks_per_piece = usize::try_from(piece_length / V2_BLOCK as u64)
+        .unwrap_or(1)
+        .max(1);
+    let mut pieces = Vec::new();
+    let mut piece_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut first_piece_leaves: Vec<[u8; 32]> = Vec::new();
+    for_each_piece(path, &[], piece_length, |piece| {
+        pieces.extend_from_slice(&Sha1::digest(piece));
+        let leaves: Vec<[u8; 32]> = piece
+            .chunks(V2_BLOCK)
+            .map(|block| Sha256::digest(block).into())
+            .collect();
+        if piece_hashes.is_empty() {
+            first_piece_leaves.clone_from(&leaves);
+        }
+        piece_hashes.push(merkle_root(&leaves, blocks_per_piece, [0; 32]));
+        true
+    })?;
+
+    let v2 = match piece_hashes.len() {
+        0 => V2Hashes {
+            root: None,
+            layer: None,
+        },
+        1 => V2Hashes {
+            root: Some(merkle_root(
+                &first_piece_leaves,
+                first_piece_leaves.len().next_power_of_two(),
+                [0; 32],
+            )),
+            layer: None,
+        },
+        count => {
+            let zero_piece = merkle_root(&[], blocks_per_piece, [0; 32]);
+            let root = merkle_root(&piece_hashes, count.next_power_of_two(), zero_piece);
+            V2Hashes {
+                root: Some(root),
+                layer: Some(piece_hashes.concat()),
+            }
+        }
+    };
+    Ok((pieces, v2))
+}
+
+/// The root of a binary SHA-256 merkle tree over `leaves`, padded with `pad`
+/// to `width` leaves (a power of two, at least `leaves.len()` and 1).
+fn merkle_root(leaves: &[[u8; 32]], width: usize, pad: [u8; 32]) -> [u8; 32] {
+    let mut layer: Vec<[u8; 32]> = leaves.to_vec();
+    layer.resize(width.max(1), pad);
+    while layer.len() > 1 {
+        layer = layer
+            .chunks(2)
+            .map(|pair| {
+                let mut hasher = Sha256::new();
+                hasher.update(pair[0]);
+                hasher.update(pair.get(1).unwrap_or(&pair[0]));
+                hasher.finalize().into()
+            })
+            .collect();
+    }
+    layer[0]
 }
 
 /// SHA-1 every piece of the file at `path`, then of each of `others` as one
@@ -260,6 +411,56 @@ fn finish(
 /// library's files are gigabytes, and this runs on a blocking thread whose
 /// memory footprint should not scale with the file.
 fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec<u8>> {
+    let mut pieces = Vec::new();
+    for_each_piece(path, others, piece_length, |piece| {
+        pieces.extend_from_slice(&Sha1::digest(piece));
+        true
+    })?;
+    Ok(pieces)
+}
+
+/// Whether the file at `path` is exactly the content a single-file `torrent`
+/// describes: the same length, and every piece the same SHA-1. The same read a
+/// build costs, stopping at the first piece that differs.
+///
+/// `false` for a multi-file torrent, or one whose piece fields are missing or
+/// inconsistent: nothing here can vouch for those.
+pub fn verify_single_file(path: &Path, torrent: &Torrent) -> Result<bool> {
+    let (Some(piece_length), Some(expected)) = (torrent.piece_length(), torrent.pieces()) else {
+        return Ok(false);
+    };
+    if !torrent.is_single_file() || piece_length == 0 || expected.len() % 20 != 0 {
+        return Ok(false);
+    }
+    let size = std::fs::metadata(path)
+        .map_err(|source| TorrentError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    let pieces = expected.len() / 20;
+    if size != torrent.content_length() || size.div_ceil(piece_length) != pieces as u64 {
+        return Ok(false);
+    }
+
+    let mut expected = expected.as_chunks::<20>().0.iter();
+    let mut matched = true;
+    for_each_piece(path, &[], piece_length, |piece| {
+        matched = expected.next() == Some(&Sha1::digest(piece).into());
+        matched
+    })?;
+    Ok(matched && expected.next().is_none())
+}
+
+/// Read the file at `path`, then each of `others`, as one stream in
+/// `piece_length` chunks, handing each piece to `on_piece` in order until it
+/// returns `false`. Every piece is full except the last.
+fn for_each_piece(
+    path: &Path,
+    others: &[PathBuf],
+    piece_length: u64,
+    mut on_piece: impl FnMut(&[u8]) -> bool,
+) -> Result<()> {
     let io = |source| TorrentError::Build {
         path: path.to_path_buf(),
         source,
@@ -274,7 +475,6 @@ fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec
     }
     let chunk = usize::try_from(piece_length).unwrap_or(usize::MAX);
     let mut buf = vec![0u8; chunk];
-    let mut pieces = Vec::new();
     loop {
         // A piece is `piece_length` bytes except the last, so keep reading
         // until the buffer is full or the file ends.
@@ -289,12 +489,11 @@ fn hash_pieces(path: &Path, others: &[PathBuf], piece_length: u64) -> Result<Vec
         if filled == 0 {
             break;
         }
-        pieces.extend_from_slice(&Sha1::digest(&buf[..filled]));
-        if filled < chunk {
+        if !on_piece(&buf[..filled]) || filled < chunk {
             break;
         }
     }
-    Ok(pieces)
+    Ok(())
 }
 
 /// Choose a piece length for a file of `size` bytes.
@@ -540,6 +739,7 @@ mod tests {
                 announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap()
     }
@@ -590,6 +790,7 @@ mod tests {
                 announce: &set,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap();
         let described = TorrentFactory
@@ -604,6 +805,7 @@ mod tests {
                     ..MediaMeta::default()
                 }),
                 private: true,
+                hybrid: false,
             })
             .unwrap();
 
@@ -957,11 +1159,265 @@ mod tests {
                 announce: &announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap_err();
         assert!(
             matches!(err, TorrentError::NoFileName { .. }),
             "got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod hybrid_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use sha2::Sha256;
+
+    fn announce() -> crate::AnnounceSet {
+        crate::AnnounceSet::single("http://seed.example:51413/announce/tok".parse().unwrap())
+    }
+
+    fn build(path: &Path, hybrid: bool) -> BuiltTorrent {
+        let announce = announce();
+        TorrentFactory
+            .create(&TorrentRequest {
+                path,
+                announce: &announce,
+                media: None,
+                private: true,
+                hybrid,
+            })
+            .unwrap()
+    }
+
+    fn sha256(parts: &[&[u8]]) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        for part in parts {
+            hasher.update(part);
+        }
+        hasher.finalize().into()
+    }
+
+    fn pieces_root(torrent: &Torrent, name: &str) -> Vec<u8> {
+        torrent.info[b"file tree".as_slice()].as_dict().unwrap()[name.as_bytes()]
+            .as_dict()
+            .unwrap()[b"".as_slice()]
+        .as_dict()
+        .unwrap()[b"pieces root".as_slice()]
+        .as_bytes()
+        .unwrap()
+        .to_vec()
+    }
+
+    /// A file within one 16 KiB block has a one-leaf tree: its root is the
+    /// block's own SHA-256, by BEP 52's definition and nothing of this crate's.
+    #[test]
+    fn a_one_block_file_has_its_own_hash_as_root_and_no_piece_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.mkv");
+        let data = vec![3u8; 10_000];
+        std::fs::write(&path, &data).unwrap();
+
+        let built = build(&path, true);
+        let torrent = Torrent::read_from_bytes(&built.data).unwrap();
+        assert_eq!(torrent.info[b"meta version".as_slice()].as_int(), Some(2));
+        assert_eq!(
+            pieces_root(&torrent, "short.mkv"),
+            sha256(&[&data]).to_vec()
+        );
+        assert_eq!(
+            torrent.extra[b"piece layers".as_slice()]
+                .as_dict()
+                .unwrap()
+                .len(),
+            0,
+            "within one piece, no layer"
+        );
+        // The v1 half is intact and the file still identifies as one file.
+        assert_eq!(torrent.length(), Some(10_000));
+        assert!(torrent.is_single_file());
+        assert!(torrent.is_private());
+        assert_eq!(built.info_hash_v2.as_deref().map(str::len), Some(40));
+    }
+
+    /// Three blocks pad to a four-leaf tree with zero hashes, worked out here by
+    /// hand against the spec rather than through `merkle_root`.
+    #[test]
+    fn a_file_within_one_piece_pads_its_blocks_to_a_power_of_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("three-blocks.mkv");
+        let data: Vec<u8> = (0..(2 * V2_BLOCK + 100)).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &data).unwrap();
+
+        let (b0, rest) = data.split_at(V2_BLOCK);
+        let (b1, b2) = rest.split_at(V2_BLOCK);
+        let zero = [0u8; 32];
+        let left = sha256(&[&sha256(&[b0]), &sha256(&[b1])]);
+        let right = sha256(&[&sha256(&[b2]), &zero]);
+        let expected = sha256(&[&left, &right]);
+
+        let torrent = Torrent::read_from_bytes(&build(&path, true).data).unwrap();
+        assert_eq!(pieces_root(&torrent, "three-blocks.mkv"), expected.to_vec());
+    }
+
+    /// A file longer than a piece carries a `piece layers` entry keyed by its
+    /// root, one 32-byte hash per piece; the root is the tree over those piece
+    /// hashes, padded with the hash of an all-zero piece.
+    #[test]
+    fn a_multi_piece_file_has_a_piece_layer_the_root_is_built_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("long.mkv");
+        // 256 KiB pieces (the ladder's smallest): 2.5 pieces, so 3 piece hashes
+        // padded to 4 at the root.
+        let piece = 256 * 1024;
+        let data: Vec<u8> = (0..(2 * piece + piece / 2))
+            .map(|i| (i % 253) as u8)
+            .collect();
+        std::fs::write(&path, &data).unwrap();
+
+        let built = build(&path, true);
+        let torrent = Torrent::read_from_bytes(&built.data).unwrap();
+        let root = pieces_root(&torrent, "long.mkv");
+        let layers = torrent.extra[b"piece layers".as_slice()].as_dict().unwrap();
+        let layer = layers[&root].as_bytes().unwrap();
+        assert_eq!(layer.len(), 3 * 32, "one hash per piece, none for padding");
+
+        // Each piece hash is the tree over its 16 blocks; the half piece pads
+        // with zero leaves.
+        let blocks_per_piece = piece / V2_BLOCK;
+        let piece_hash = |bytes: &[u8]| {
+            let leaves: Vec<[u8; 32]> = bytes.chunks(V2_BLOCK).map(|b| sha256(&[b])).collect();
+            merkle_root(&leaves, blocks_per_piece, [0; 32])
+        };
+        let hashes: Vec<[u8; 32]> = data.chunks(piece).map(piece_hash).collect();
+        assert_eq!(layer, hashes.concat().as_slice());
+        let zero_piece = merkle_root(&[], blocks_per_piece, [0; 32]);
+        let expected_root = sha256(&[
+            &sha256(&[&hashes[0], &hashes[1]]),
+            &sha256(&[&hashes[2], &zero_piece]),
+        ]);
+        assert_eq!(root, expected_root.to_vec());
+    }
+
+    /// The v2 keys sit inside the info dictionary, so a hybrid build is a
+    /// different v1 identity from a plain one; a plain build has no v2 at all.
+    #[test]
+    fn hybrid_is_opt_in_and_changes_the_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movie.mkv");
+        std::fs::write(&path, vec![7u8; 512 * 1024]).unwrap();
+
+        let plain = build(&path, false);
+        let hybrid = build(&path, true);
+        assert_eq!(plain.info_hash_v2, None);
+        assert!(hybrid.info_hash_v2.is_some());
+        assert_ne!(plain.info_hash, hybrid.info_hash);
+        let torrent = Torrent::read_from_bytes(&plain.data).unwrap();
+        assert!(!torrent.info.contains_key(b"meta version".as_slice()));
+        assert!(!torrent.extra.contains_key(b"piece layers".as_slice()));
+    }
+
+    /// Rewriting the announce leaves `piece layers` in place and both
+    /// identities where they were.
+    #[test]
+    fn a_hybrid_survives_an_announce_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movie.mkv");
+        std::fs::write(&path, vec![9u8; 300 * 1024]).unwrap();
+        let built = build(&path, true);
+
+        let moved = crate::AnnounceSet::single("http://moved.example/announce".parse().unwrap());
+        let rewritten = rewrite_announce(&built.data, &moved).unwrap();
+        let torrent = Torrent::read_from_bytes(&rewritten).unwrap();
+        assert_eq!(
+            torrent.announce.as_deref(),
+            Some("http://moved.example/announce")
+        );
+        assert_eq!(torrent.info_hash(), built.info_hash);
+        assert_eq!(torrent.info_hash_v2(), built.info_hash_v2);
+        assert!(torrent.extra.contains_key(b"piece layers".as_slice()));
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn build(path: &Path) -> Torrent {
+        let announce =
+            crate::AnnounceSet::single("http://seed.example:51413/announce".parse().unwrap());
+        let built = TorrentFactory
+            .create(&TorrentRequest {
+                path,
+                announce: &announce,
+                media: None,
+                private: false,
+                hybrid: false,
+            })
+            .unwrap();
+        Torrent::read_from_bytes(&built.data).unwrap()
+    }
+
+    /// Three pieces at the smallest piece length, the last one short.
+    fn content() -> Vec<u8> {
+        (0..(piece_length_for(1) * 2 + 77))
+            .map(|i| (i % 251) as u8)
+            .collect()
+    }
+
+    #[test]
+    fn the_file_a_torrent_was_built_from_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mkv");
+        std::fs::write(&path, content()).unwrap();
+        assert!(verify_single_file(&path, &build(&path)).unwrap());
+    }
+
+    #[test]
+    fn a_changed_byte_a_changed_length_or_a_multi_file_torrent_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mkv");
+        std::fs::write(&path, content()).unwrap();
+        let torrent = build(&path);
+
+        let mut changed = content();
+        let last = changed.len() - 1;
+        changed[last] ^= 1;
+        std::fs::write(&path, &changed).unwrap();
+        assert!(
+            !verify_single_file(&path, &torrent).unwrap(),
+            "the last, short piece is checked too"
+        );
+
+        let mut longer = content();
+        longer.push(0);
+        std::fs::write(&path, &longer).unwrap();
+        assert!(!verify_single_file(&path, &torrent).unwrap());
+
+        std::fs::write(&path, content()).unwrap();
+        let mut multi = torrent.clone();
+        multi
+            .info
+            .insert(b"files".to_vec(), Value::List(Vec::new()));
+        assert!(!verify_single_file(&path, &multi).unwrap());
+
+        let mut no_pieces = torrent;
+        no_pieces.info.remove(b"pieces".as_slice());
+        assert!(!verify_single_file(&path, &no_pieces).unwrap());
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_not_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.mkv");
+        std::fs::write(&path, content()).unwrap();
+        let torrent = build(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(verify_single_file(&path, &torrent).is_err());
     }
 }

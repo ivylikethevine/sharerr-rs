@@ -972,6 +972,46 @@ async fn each_friend_sees_only_what_their_scope_allows() {
     );
 }
 
+/// The catalog lists what the feed would, as data: the same scope, and the
+/// same key refused.
+#[tokio::test]
+async fn the_catalog_lists_what_the_callers_feed_would() {
+    let (_dir, state) = with_both_kinds().await;
+    let store = state.store().await.unwrap();
+    store
+        .create_peer("Tv", &SecretString::from("tv-key"), PeerScope::Tv)
+        .await
+        .unwrap();
+    store
+        .create_peer("Both", &SecretString::from("both-key"), PeerScope::All)
+        .await
+        .unwrap();
+
+    let catalog = |key: &'static str| {
+        let state = std::sync::Arc::clone(&state);
+        async move {
+            let body = body(&state, &format!("/api/catalog?apikey={key}")).await;
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()
+        }
+    };
+    let tv = catalog("tv-key").await;
+    let entries = tv["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["spec"]["kind"], "episode");
+    assert_eq!(entries[0]["info_hash"].as_str().unwrap().len(), 40);
+    assert_eq!(
+        catalog("both-key").await["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        get(&state, "/api/catalog?apikey=guessed").await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 /// Directory items reach the feed like any other item — categorised by
 /// their spec, since the source carries no media kind — and a narrow scope
 /// admits them by their declared kind rather than by source.

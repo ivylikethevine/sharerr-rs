@@ -495,6 +495,7 @@ pub struct SettingsPage {
     pub seeding_private: bool,
     /// See [`sharerr_core::config::SeedingConfig::sidecars`].
     pub seeding_sidecars: bool,
+    pub seeding_hybrid: bool,
     /// Whether the feeds may advertise a magnet per item. Off by default, and
     /// only takes effect for a non-private item even when on — see
     /// [`sharerr_core::config::FeedConfig::magnet_links`].
@@ -1288,6 +1289,8 @@ pub struct ItemDetailPage {
     pub title_reads_as: Option<String>,
     /// What would stop that title matching, one sentence each.
     pub title_problems: Vec<&'static str>,
+    /// The friend whose swarm this item joined under their info hash, by name.
+    pub joined_from: Option<String>,
     /// The share-until date as `YYYY-MM-DD` in local time, empty when unset.
     pub share_until: String,
     /// Whether that date has passed, so the share has ended.

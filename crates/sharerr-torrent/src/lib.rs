@@ -29,7 +29,7 @@ pub use announce::{
 pub use error::{Result, TorrentError};
 pub use factory::{
     BuiltTorrent, Retargeted, SidecarRequest, TorrentFactory, TorrentRequest, piece_length_for,
-    retarget_announce, rewrite_announce, torrent_file_name, torrent_file_path,
+    retarget_announce, rewrite_announce, torrent_file_name, torrent_file_path, verify_single_file,
 };
 pub use metainfo::{MetainfoError, Torrent};
 pub use title::{ParsedTitle, humanize, join_title, parse, resolve, synthesize};

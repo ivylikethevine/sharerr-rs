@@ -49,7 +49,7 @@
       {{ facts.state_label }}
       {% if let Some(hint) = facts.state_hint %}<br><span class="hint">{{ hint }}</span>{% endif %}
       {% if facts.info_hash.is_some() %}
-      <br><span class="hint">{% if facts.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}</span>
+      <br><span class="hint">{% if facts.created_by_sharerr %}sharerr's torrent{% else %}reused an existing torrent{% endif %}{% if let Some(friend) = joined_from %}, in {{ friend }}'s swarm{% endif %}</span>
       {% endif %}
     </dd>
     {% if let Some(reason) = facts.last_error %}

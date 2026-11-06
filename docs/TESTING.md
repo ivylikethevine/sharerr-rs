@@ -236,6 +236,54 @@ Three are known to be equivalent, with no observable difference to test:
 a zero-length read either way), and `||` to `&&` in `title::season_episode`
 (an empty number fails the parse that follows).
 
+Survivors left on purpose after each crate's last run, at `-j 4`
+(16CPU/60GB); counts move with the code:
+
+- **`sharerr-core`**: 243 mutants in 56 seconds, 18 left. `Config`'s
+  delegating accessors (`database_path`, `vault_path`, `torrent_dir`,
+  `sync_every`, `resolver`, `configured_sources`, `advertised_base`), which
+  only the `sharerr` crate's tests reach; display text
+  (`NotificationTrigger::prompt`, `MediaSource`'s `Display`,
+  `TorrentClientConfig::credential_name`); the `5 * 60` of
+  `MAX_FUTURE_SKEW_SECS`; and one equivalent, `<` to `<=` in
+  `QuietHours::contains`, since parsing refuses a window that opens and
+  closes at the same minute.
+- **`sharerr-store`**: 379 mutants in 18 minutes, about 2.9 seconds each
+  against `sharerr-torrent`'s 0.5, 8 left. Equivalent: `hasher()` to
+  `Default` (the argon2 crate's defaults are these parameters), `>` to `>=`
+  on `record_peer_endpoint`'s prune (it is idempotent), and both `-` to `+`
+  in `touch_peer` (the throttle check and the `UPDATE`'s guard each mask the
+  other). Left: `PeerScope::label` (display text), `master_key_from_env`
+  (the environment read around the tested `master_key_from`), and
+  `from_insert`'s unique-violation guard, which needs a database error other
+  than a unique violation that no fixture produces.
+- **The service crates** (`sharerr-arr`, `-client`, `-deluge`, `-lighthouse`,
+  `-probe`, `-qbit`, `-rtorrent`, `-transmission`, one run with a `-p` each):
+  665 mutants in about 5 minutes, 34 left, none in `sharerr-deluge`.
+  Equivalent: `<` to `<=` in `sonarr::numbering_by_file` (a rank tie is the
+  same season and episode), in `SeedingLimits::matches`' float slack, and in
+  the lighthouse's future-skew, sweep-throttle and expiry comparisons (one
+  second at the boundary); `%` to `/` in the lighthouse decoy's offset (still
+  inside the last day); `no_limit` to `0` in `sharerr-qbit` (0 also means no
+  cap); and the rTorrent parser's end-tag guards, since quick-xml refuses a
+  mismatched end tag before they run. Left: the `Debug` impls that redact
+  credentials (a mutant prints less, never more), `http_client`'s builder,
+  the lighthouse's constants, `health` and `api_spec`, the "first video track
+  wins" guards and Matroska's zero-dimension checks in `sharerr-probe` (the
+  hand-built fixtures have one sized video track), and `call_many`'s
+  one-value check, which only a malformed multicall reply reaches. The three
+  timeouts are detections: the lighthouse's `main` and `shutdown_signal`, and
+  deleting `parse_response`'s `Eof` arm, which loops forever on a truncated
+  reply.
+- **`sharerr`, `web/auth.rs` and `totp.rs`** (by `--file`): 195 mutants in 62
+  minutes, about 19 seconds each, since every mutant runs the crate's whole
+  suite (54 seconds alone in the baseline); 13 left. Equivalent: `|` to `^`
+  in both base32 loops (the shifted buffer's low bits are zero), `||` to
+  `&&` in `totp::verify`'s shape check (a code it then lets through matches
+  no step), and `<` to `<=` on the session, pending-sign-in and throttle
+  expiry comparisons (one instant at the boundary). Left: the
+  `SESSION_TTL` and `PENDING_TTL` constants.
+
 ## Benchmarks and fuzzing
 
 Neither exists. `unsafe_code = "forbid"` at the workspace level narrows what

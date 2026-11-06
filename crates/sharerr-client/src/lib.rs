@@ -360,6 +360,18 @@ impl ClientKind {
             Self::Deluge => "Deluge",
         }
     }
+
+    /// Whether a BEP 52 hybrid torrent keeps its v1 info hash as this client.s
+    /// identity for it. sharerr joins its store to the client by that hash, so a
+    /// client that reports a hybrid under its v2 hash instead is handed plain v1
+    /// torrents. Deluge does (libtorrent 2 prefers the v2 hash); qBittorrent and
+    /// Transmission keep v1, and rTorrent reads only the v1 half.
+    pub fn hybrid_torrents(self) -> bool {
+        match self {
+            Self::QBittorrent | Self::Transmission | Self::Rtorrent => true,
+            Self::Deluge => false,
+        }
+    }
 }
 
 impl std::fmt::Display for ClientKind {
@@ -859,8 +871,6 @@ mod tests {
         assert!(!is_auth_rejection(reqwest::StatusCode::NOT_FOUND));
     }
 
-    /// A subpath base must keep its prefix once normalised, or a reverse-proxied
-    /// client would have its last segment replaced by `Url::join`.
     fn reported(upload_limit_kib: Option<u64>, ratio_limit: Option<f64>) -> TorrentSummary {
         TorrentSummary {
             hash: "abc".to_owned(),
@@ -904,6 +914,12 @@ mod tests {
             "a ratio sharerr has no opinion on is the operator's"
         );
 
+        let ratio_only = SeedingLimits {
+            upload_limit_kib: None,
+            ratio_limit: Some(2.0),
+        };
+        assert!(!cap_only.is_empty() && !ratio_only.is_empty());
+
         let none = SeedingLimits::default();
         assert!(none.is_empty());
         assert!(none.matches(&reported(None, None)));
@@ -913,6 +929,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_error_body_is_clamped_by_characters() {
+        assert_eq!(clamp_body("short"), "short");
+        let long = "é".repeat(MAX_ERROR_BODY + 10);
+        assert_eq!(clamp_body(&long).chars().count(), MAX_ERROR_BODY);
+    }
+
+    #[test]
+    fn a_status_is_success_an_auth_rejection_or_an_api_error_naming_the_call() {
+        let kind = ClientKind::Transmission;
+        assert!(check_status(kind, reqwest::StatusCode::OK, "torrent-get").is_ok());
+        assert!(
+            check_status(kind, reqwest::StatusCode::UNAUTHORIZED, "torrent-get")
+                .unwrap_err()
+                .is_auth_failure()
+        );
+        let err = check_status(kind, reqwest::StatusCode::BAD_GATEWAY, "torrent-get")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("HTTP 502") && err.contains("torrent-get"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_small_shared_helpers_keep_their_edge_cases() {
+        assert!(single_tag(String::new()).is_empty());
+        assert_eq!(single_tag("sharerr".to_owned()), vec!["sharerr"]);
+
+        assert_eq!(content_path("/downloads/", "ep.mkv"), "/downloads/ep.mkv");
+        assert_eq!(content_path("", "ep.mkv"), "");
+        assert_eq!(content_path("/downloads", ""), "");
+
+        let wanted = [
+            Url::parse("http://a.example/announce").unwrap(),
+            Url::parse("http://b.example/announce").unwrap(),
+        ];
+        let missing = missing_urls(&wanted, |url| url.starts_with("http://a."));
+        assert_eq!(missing, vec!["http://b.example/announce"]);
+
+        let slot = SessionSlot::default();
+        assert_eq!(slot.get(), None);
+        slot.set("token-1".to_owned());
+        assert_eq!(slot.get().as_deref(), Some("token-1"));
+    }
+
+    #[test]
+    fn only_deluge_is_handed_plain_v1_torrents() {
+        assert!(!ClientKind::Deluge.hybrid_torrents());
+        for kind in [
+            ClientKind::QBittorrent,
+            ClientKind::Transmission,
+            ClientKind::Rtorrent,
+        ] {
+            assert!(kind.hybrid_torrents(), "{kind:?}");
+        }
+    }
+
+    /// Answers `version` with an error and counts `apply_limits` calls, so
+    /// the trait's default methods can be told apart from a no-op.
+    #[derive(Debug, Default)]
+    struct DefaultsProbe {
+        applied: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TorrentClient for DefaultsProbe {
+        fn kind(&self) -> ClientKind {
+            ClientKind::Transmission
+        }
+        async fn version(&self) -> Result<String> {
+            Err(ClientError::AuthRejected { kind: self.kind() })
+        }
+        async fn list(&self, _: Option<&str>) -> Result<Vec<TorrentSummary>> {
+            Ok(Vec::new())
+        }
+        async fn files(&self, _: &str) -> Result<Vec<TorrentFileEntry>> {
+            Ok(Vec::new())
+        }
+        async fn add(&self, _: &AddRequest<'_>) -> Result<()> {
+            Ok(())
+        }
+        async fn remove(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn set_trackers(&self, _: &str, _: &[Url]) -> Result<()> {
+            Ok(())
+        }
+        async fn add_trackers(&self, _: &str, _: &[Url]) -> Result<()> {
+            Ok(())
+        }
+        async fn apply_limits(&self, _: &str, _: &SeedingLimits) -> Result<()> {
+            self.applied
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_methods_log_in_by_version_skip_empty_limits_and_export_nothing() {
+        let client = DefaultsProbe::default();
+        assert!(client.login().await.unwrap_err().is_auth_failure());
+
+        client
+            .set_limits("abc", &SeedingLimits::default())
+            .await
+            .unwrap();
+        let cap = SeedingLimits {
+            upload_limit_kib: Some(500),
+            ratio_limit: None,
+        };
+        client.set_limits("abc", &cap).await.unwrap();
+        assert_eq!(client.applied.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        assert_eq!(client.export("abc").await.unwrap(), None);
+    }
+
+    /// A subpath base must keep its prefix once normalised, or a reverse-proxied
+    /// client would have its last segment replaced by `Url::join`.
     #[test]
     fn a_normalised_subpath_base_keeps_its_prefix() {
         let base = Url::parse("http://host/qbit").unwrap();

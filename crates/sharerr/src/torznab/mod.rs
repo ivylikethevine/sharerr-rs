@@ -606,6 +606,7 @@ pub(crate) fn api_router() -> OpenApiRouter<Arc<ServeState>> {
         // Gossip rides the same per-peer-key authentication as the feed — the
         // whole point of putting it under /api rather than a second surface.
         .routes(routes!(crate::gossip::pull, crate::gossip::push))
+        .routes(routes!(crate::catalog::catalog))
         .routes(routes!(crate::pairing::pair))
         // Jackett's URL shapes, both the Torznab one and the admin surface.
         .merge(crate::jackett::api_router())
@@ -694,6 +695,12 @@ pub(crate) struct Matched {
 }
 
 impl Matched {
+    /// The caller's token for a `.torrent` download, the value
+    /// [`Self::download_url`] embeds, when there is one.
+    pub fn download_token(&self) -> Option<&str> {
+        self.download_token.as_deref()
+    }
+
     /// The URL for one item's `.torrent`.
     pub fn download_url(&self, item: &SharedItem) -> String {
         let path =

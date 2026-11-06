@@ -87,8 +87,9 @@ for clients configured as though sharerr were a Jackett instance. The search \
 runs through the same code as `torznab`, so the two cannot report different \
 libraries."),
         (name = "gossip", description = "\
-How friends tell each other where they have moved to. Records are signed by the \
-peer they describe, so a relayed one needs no trust in the relayer."),
+How friends tell each other where they have moved to, and what they share. \
+Records are signed by the peer they describe, so a relayed one needs no trust in \
+the relayer; a catalog is only ever pulled from the friend it describes."),
         (name = "tracker", description = "\
 The built-in BitTorrent tracker, and the `.torrent` files the feed links to. It \
 admits announces only for torrents this instance is currently sharing, so it \

@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::Form;
 use serde::Deserialize;
 use sharerr_core::{MediaSource, MediaSpec, ShareState, SharedItem};
-use sharerr_store::{Audiences, Peer, Store};
+use sharerr_store::{Audiences, ItemOrigin, Peer, Store};
 
 use std::collections::HashMap;
 
@@ -1023,8 +1023,23 @@ async fn build_detail(
         .ok()
         .flatten();
 
+    // Whose swarm a joined item seeds in, by the friend's current name.
+    let joined_from = match store.item_origin(item.source, item.file_id).await {
+        Ok(Some(ItemOrigin {
+            peer_id: Some(peer_id),
+            ..
+        })) => store
+            .peer(peer_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|peer| peer.label),
+        _ => None,
+    };
+
     ItemDetailPage {
         signed_in: true,
+        joined_from,
         facts: facts(
             &item,
             &context.active,

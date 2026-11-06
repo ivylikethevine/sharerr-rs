@@ -67,13 +67,15 @@ behind the `TorrentClient` trait in `sharerr-client`. The trait is deliberately
 narrow, which is what made every client after the first tractable: clients disagree
 about almost everything except "add this torrent, with the data already at
 this path". Announces always go to sharerr's own tracker, so a client needs
-no tracker of its own.
+no tracker of its own; a torrent [joined from a friend](#joining-a-friends-swarm)
+announces to theirs as well.
 
 Adding another is mostly writing one file. A new client must answer: whether
 it can remove a torrent _without_ deleting the data; how it replaces a
 torrent's tracker list in place (`set_trackers`, for endpoint rotation) and
 adds to one without disturbing the rest (`add_trackers`, for a torrent
-sharerr adopts rather than creates); whether it can hand back a `.torrent` it
+sharerr adopts rather than creates, whose own trackers sharerr records and
+keeps after its own whenever an endpoint change rewrites the list); whether it can hand back a `.torrent` it
 already holds (`export`); and how it expresses `upload_limit_kib` and
 `ratio_limit`, at add time and again on an existing torrent (`set_limits`,
 for a goal that changed), through whatever native mechanism it offers.
@@ -95,6 +97,44 @@ a password and no accounts; one label, through the Label plugin, and a torrent
 seeds unlabelled with the plugin off; upload cap, ratio goal and tracker
 replacement all work; `export` returns `Ok(None)`; and although Deluge can skip
 the hash check, sharerr has no setting for it, so it always verifies on add.
+
+### Hybrid v1/v2 torrents
+
+`seeding.hybrid` builds single-file torrents as BEP 52 hybrids. Every client
+above accepts one: qBittorrent (libtorrent 2) and Transmission 4 read both
+halves and keep the v1 info hash as the torrent's identity, which is the hash
+sharerr joins its store to the client by; rTorrent and Transmission 3 read the
+v1 half and ignore the rest. Deluge is the exception: libtorrent 2 reports a
+hybrid under its v2 hash there, which sharerr would not recognise as the same
+torrent, so with Deluge the setting is ignored and a plain v1 torrent is built.
+The tracker admits announces under either identity (`shared_items.info_hash_v2`
+holds the second). A friend's client needs nothing special: a v1-only one seeds
+the v1 half.
+
+### Joining a friend's swarm
+
+When a friend already shares the same file, sharerr seeds it under the
+friend's info hash instead of building a second torrent, so both instances'
+friends land in one swarm. During each gossip exchange it pulls the friend's
+catalog (`GET /api/catalog`, filtered like their feed) and, before building,
+looks for an entry with the same size to the byte, the same work by its
+external ids, and the same episode, film, track or book. Titles are not
+compared.
+
+- **The client already holds the friend's torrent**, usually as the download
+  the library file was imported from: sharerr adopts it like any other
+  existing torrent, adding its tracker and leaving the torrent the operator's.
+- **Otherwise** sharerr fetches the friend's `.torrent` from the friend's
+  address it already gossips with, and takes it only when it is single-file,
+  names the file exactly as it is named on disk, and matches the file piece
+  for piece. Sharerr then adds it and treats it as its own. A friend's hybrid
+  torrent is skipped with Deluge, for the reason above.
+
+Anything else builds sharerr's own torrent, as before. A joined torrent
+announces to sharerr's tracker first and the friend's after, with the token
+the friend issued; the `.torrent` sharerr serves names its own tracker only,
+so that token never reaches its friends. The item's page names the friend
+whose swarm it joined.
 
 The `export` gap costs every client but qBittorrent one narrow case: a torrent
 that already covers a file, that sharerr did not create and has no cached

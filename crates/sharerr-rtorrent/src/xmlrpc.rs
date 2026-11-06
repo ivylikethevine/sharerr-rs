@@ -425,6 +425,54 @@ mod tests {
     }
 
     #[test]
+    fn fault_message_finds_the_fault_string_whatever_the_member_order() {
+        let value = XmlValue::Struct(vec![
+            ("faultCode".to_owned(), XmlValue::Int(-501)),
+            (
+                "faultString".to_owned(),
+                XmlValue::Str("no such hash".to_owned()),
+            ),
+        ]);
+        assert_eq!(fault_message(&value), "no such hash");
+    }
+
+    /// A real rTorrent indents its replies; whitespace between tags is layout.
+    #[test]
+    fn parse_response_skips_the_whitespace_between_tags() {
+        let body = "<?xml version=\"1.0\"?>\n<methodResponse>\n  <params>\n    <param>\n      \
+                    <value><string>0.16.20</string></value>\n    </param>\n  </params>\n\
+                    </methodResponse>\n";
+        assert_eq!(
+            parse_response(body).unwrap(),
+            XmlValue::Str("0.16.20".to_owned())
+        );
+    }
+
+    /// Each position names the one opening tag it accepts; `<wrong/>` is an
+    /// `Empty` event, so these use a real start tag.
+    #[test]
+    fn a_wrong_opening_tag_is_refused_where_a_specific_one_is_expected() {
+        let mut reader = Reader::from_str("<wrong>x</wrong>");
+        assert!(expect_start(&mut reader, "value").is_err());
+
+        let mut reader = Reader::from_str("<array><wrong/></array>");
+        reader.read_event().unwrap();
+        let err = parse_array(&mut reader).unwrap_err();
+        assert!(err.contains("expected <data>"), "{err}");
+
+        let mut reader = Reader::from_str("<array><data><wrong></wrong></data></array>");
+        reader.read_event().unwrap();
+        let err = parse_array(&mut reader).unwrap_err();
+        assert!(err.contains("unexpected event inside <data>"), "{err}");
+
+        let mut reader =
+            Reader::from_str("<struct><wrong><name>a</name><value>1</value></wrong></struct>");
+        reader.read_event().unwrap();
+        let err = parse_struct(&mut reader).unwrap_err();
+        assert!(err.contains("unexpected event inside <struct>"), "{err}");
+    }
+
+    #[test]
     fn fault_message_falls_back_to_debug_when_faultstring_is_missing() {
         let value = XmlValue::Struct(vec![("faultCode".to_owned(), XmlValue::Int(-1))]);
         assert!(fault_message(&value).contains("faultCode"));

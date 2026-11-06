@@ -18,7 +18,7 @@ method names are stable.
 | ------------ | -------------------------------------------------------------------------------------- |
 | `torznab`    | The indexer feed a friend's Sonarr/Radarr/Lidarr/Prowlarr queries.                     |
 | `jackett`    | The same feed at Jackett's URL shapes, plus its read-only admin routes.                |
-| `gossip`     | How friends tell each other where they have moved to.                                  |
+| `gossip`     | How friends tell each other where they have moved to, and what they share.             |
 | `tracker`    | The built-in BitTorrent tracker, and the `.torrent` files the feed links to.           |
 | `lighthouse` | Key-hash-to-endpoint rendezvous, when both friends' addresses rotated.                 |
 | `ops`        | Liveness, readiness, gluetun's and the \*arr apps' hooks, `/metrics` and `/dashboard`. |

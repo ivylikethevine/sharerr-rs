@@ -63,12 +63,6 @@ impl RtorrentClient {
 
     /// Issue `method` once per entry of `params` as one `system.multicall` request:
     /// one HTTP round trip, executed by rTorrent in the given order.
-    ///
-    /// Unlike [`Self::call`], a per-call failure inside the batch does not
-    /// come back as this module's own `<fault>` (that only covers a fault in
-    /// `system.multicall` itself, e.g. an unknown method); it is a struct in
-    /// the results array, one per failed entry, which is why this reads
-    /// [`fault_message`] rather than relying on [`parse_response`] alone.
     pub(crate) async fn call_batch<const N: usize>(
         &self,
         method: &str,
@@ -76,8 +70,22 @@ impl RtorrentClient {
     ) -> Result<()> {
         let calls: Vec<(&str, &[Param<'_>])> =
             params.iter().map(|p| (method, p.as_slice())).collect();
+        self.call_many(&calls).await
+    }
+
+    /// Issue several distinct calls as one `system.multicall` request: one
+    /// HTTP round trip, executed by rTorrent in array order, every entry run
+    /// whether or not an earlier one faulted.
+    ///
+    /// Unlike [`Self::call`], a per-call failure inside the batch does not
+    /// come back as this module's own `<fault>` (that only covers a fault in
+    /// `system.multicall` itself, e.g. an unknown method); it is a struct in
+    /// the results array, one per failed entry, which is why this reads
+    /// [`fault_message`] rather than relying on [`parse_response`] alone. The
+    /// first fault is the error, named by its own method.
+    pub(crate) async fn call_many(&self, calls: &[(&str, &[Param<'_>])]) -> Result<()> {
         let value = self
-            .send(multicall_request_xml(&calls), "system.multicall")
+            .send(multicall_request_xml(calls), "system.multicall")
             .await?;
 
         let XmlValue::Array(rows) = value else {
@@ -98,7 +106,7 @@ impl RtorrentClient {
             });
         }
 
-        for row in rows {
+        for (row, (method, _)) in rows.into_iter().zip(calls) {
             match row {
                 // The multicall extension wraps each successful return value
                 // in a one-element array.

@@ -57,20 +57,25 @@ impl RtorrentClient {
     /// cap is applied. `throttle.up` is `(name, rate)` with the rate in KiB/s
     /// — the same unit `AddRequest::upload_limit_kib` carries, so no
     /// conversion. See the module docs for the getter/setter trap.
+    ///
+    /// Both calls go in one `system.multicall`, so a cap costs one round trip.
+    /// rTorrent runs every entry regardless, so a refused `throttle.up` still
+    /// assigns the download to the (unchanged) throttle; the error reported is
+    /// the refusal, and the next limits pass re-defines it.
     async fn throttle(&self, hash: &str, kib: u64) -> Result<()> {
         let throttle_name = format!("sharerr-{hash}");
         let rate_kib = kib.to_string();
-        self.call(
-            "throttle.up",
-            &[Param::Str(&throttle_name), Param::Str(&rate_kib)],
-        )
-        .await?;
-        self.call(
-            "d.throttle_name.set",
-            &[Param::Str(hash), Param::Str(&throttle_name)],
-        )
-        .await?;
-        Ok(())
+        self.call_many(&[
+            (
+                "throttle.up",
+                &[Param::Str(&throttle_name), Param::Str(&rate_kib)],
+            ),
+            (
+                "d.throttle_name.set",
+                &[Param::Str(hash), Param::Str(&throttle_name)],
+            ),
+        ])
+        .await
     }
 }
 
@@ -472,12 +477,26 @@ mod tests {
                     "1",
                     "0",
                 ],
+                [
+                    "fedcba",
+                    "c",
+                    "/downloads",
+                    "/downloads/c",
+                    "other",
+                    "1",
+                    "0",
+                    "0",
+                ],
             ])))
             .mount(&server)
             .await;
 
         let all = client(&server).list(None).await.unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 3);
+        assert!(
+            all[2].is_stopped && !all[0].is_stopped,
+            "is_active=0 is stopped"
+        );
         // Lowercased, because sharerr joins on this against its own store.
         assert_eq!(all[0].hash, "abcdef");
         assert_eq!(all[0].content_path, "/downloads/a");
@@ -572,6 +591,20 @@ mod tests {
             body.contains("d.directory_base.set=&quot;/downloads/tv/Season 01&quot;"),
             "{body}"
         );
+    }
+
+    /// rTorrent has one label: the category when there is one, else the tags.
+    #[tokio::test]
+    async fn an_add_with_tags_and_no_category_labels_it_with_the_tags() {
+        let server = MockServer::start().await;
+        mount_scalar(&server).await;
+
+        let request = AddRequest::new(b"x", "abc123", "x.torrent", "/downloads").tags("shared");
+        client(&server).add(&request).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let body = sharerr_testkit::mock::body_text(requests.last().unwrap());
+        assert!(body.contains("d.custom1.set=&quot;shared&quot;"), "{body}");
     }
 
     #[tokio::test]
@@ -832,13 +865,14 @@ mod tests {
     }
 
     /// `set_limits` with a cap re-defines the hash-named throttle at the new
-    /// rate and re-assigns the download to it; without one, and with a ratio
-    /// rTorrent cannot express, nothing reaches the wire.
+    /// rate and re-assigns the download to it, in one `system.multicall` with
+    /// the definition first; without one, and with a ratio rTorrent cannot
+    /// express, nothing reaches the wire.
     #[tokio::test]
     async fn set_limits_redefines_the_throttle_or_sends_nothing() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(scalar_ok())
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
             .mount(&server)
             .await;
 
@@ -861,20 +895,20 @@ mod tests {
             .iter()
             .map(sharerr_testkit::mock::body_text)
             .collect();
-        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        assert_eq!(bodies.len(), 1, "one multicall: {bodies:?}");
+        let body = &bodies[0];
         assert!(
-            bodies
-                .iter()
-                .any(|b| b.contains("<methodName>throttle.up</methodName>")
-                    && b.contains("sharerr-abc123")
-                    && b.contains("<string>250</string>")),
-            "expected the throttle re-defined at 250: {bodies:?}"
+            body.contains("<methodName>system.multicall</methodName>"),
+            "expected a system.multicall: {body}"
         );
+        let define = body.find("throttle.up").expect("the throttle re-defined");
+        let assign = body
+            .find("d.throttle_name.set")
+            .expect("the download assigned to it");
+        assert!(define < assign, "the definition comes first: {body}");
         assert!(
-            bodies
-                .iter()
-                .any(|b| b.contains("d.throttle_name.set") && b.contains("sharerr-abc123")),
-            "expected the download assigned to it: {bodies:?}"
+            body.contains("sharerr-abc123") && body.contains("<string>250</string>"),
+            "expected the lowercased hash's throttle at 250: {body}"
         );
 
         client
@@ -889,8 +923,44 @@ mod tests {
             .unwrap();
         assert_eq!(
             server.received_requests().await.unwrap().len(),
-            2,
+            1,
             "nothing more sent"
+        );
+    }
+
+    /// A refused `throttle.up` surfaces as the error, named by that method,
+    /// even though rTorrent ran the assignment after it.
+    #[tokio::test]
+    async fn a_refused_throttle_definition_is_the_error_reported() {
+        let server = MockServer::start().await;
+        let fault = "<value><struct>\
+             <member><name>faultCode</name><value><i4>-1</i4></value></member>\
+             <member><name>faultString</name><value><string>Invalid throttle rate</string></value></member>\
+             </struct></value>";
+        let ok = "<value><array><data><value><i8>0</i8></value></data></array></value>";
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(scalar_response(&format!(
+                    "<array><data>{fault}{ok}</data></array>"
+                ))),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client(&server)
+            .set_limits(
+                "abc123",
+                &SeedingLimits {
+                    upload_limit_kib: Some(250),
+                    ratio_limit: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("throttle.up") && text.contains("Invalid throttle rate"),
+            "{text}"
         );
     }
 
@@ -902,13 +972,10 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(body_string_contains("<methodName>throttle.up</methodName>"))
-            .respond_with(scalar_ok())
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("d.throttle_name.set"))
-            .respond_with(scalar_ok())
+            .and(body_string_contains(
+                "<methodName>system.multicall</methodName>",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -931,7 +998,7 @@ mod tests {
         assert!(
             bodies
                 .iter()
-                .any(|b| b.contains("<methodName>throttle.up</methodName>")
+                .any(|b| b.contains("<string>throttle.up</string>")
                     && b.contains("sharerr-abc123")
                     && b.contains("<string>500</string>")),
             "expected a throttle.up call naming the lowercased hash: {bodies:?}"

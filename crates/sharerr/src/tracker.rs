@@ -946,6 +946,43 @@ mod tests {
         });
     }
 
+    /// A hybrid torrent announces under its truncated v2 hash as well; the
+    /// store's second identity admits that announce like the first.
+    #[test]
+    fn an_announce_under_a_hybrid_torrents_v2_identity_is_admitted() {
+        with_open_vault(|state| async move {
+            use sharerr_core::model::MediaSource;
+
+            let store = state.store().await.unwrap();
+            store.upsert(&shared_item()).await.unwrap();
+            store
+                .set_seeding(
+                    MediaSource::Sonarr,
+                    1,
+                    &"00".repeat(20),
+                    None,
+                    true,
+                    Some(true),
+                )
+                .await
+                .unwrap();
+            store
+                .set_info_hash_v2(MediaSource::Sonarr, 1, &"11".repeat(20))
+                .await
+                .unwrap();
+
+            let v2_query = "%11".repeat(20);
+            let peer = "%00".repeat(20);
+            let (status, body) = get(
+                &state,
+                &format!("/announce?info_hash={v2_query}&peer_id={peer}&port=6881"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!body.contains("failure reason"), "body was: {body}");
+        });
+    }
+
     /// Every route the tracker claims to serve must actually be wired up. A handler
     /// that exists but was never routed is exactly the class of bug router-level
     /// tests exist to catch.
@@ -1063,6 +1100,7 @@ mod tests {
                 announce: &announce,
                 media: None,
                 private: true,
+                hybrid: false,
             })
             .unwrap()
     }

@@ -991,6 +991,23 @@ mod tests {
         assert!(sessions.touch(&token).await.is_none());
     }
 
+    /// Two sign-ins can wait on a code at once, and a finished one cannot be
+    /// finished again.
+    #[tokio::test]
+    async fn a_pending_sign_in_survives_another_and_ends_when_finished() {
+        let sessions = Sessions::default();
+        let first = sessions.begin_second_factor("operator").await.unwrap();
+        let second = sessions.begin_second_factor("operator").await.unwrap();
+        assert_eq!(
+            sessions.pending_user(&first).await.as_deref(),
+            Some("operator")
+        );
+
+        sessions.finish_second_factor(&first).await;
+        assert!(sessions.pending_user(&first).await.is_none());
+        assert!(sessions.pending_user(&second).await.is_some());
+    }
+
     #[tokio::test]
     async fn an_unknown_token_is_not_a_session() {
         let sessions = Sessions::default();

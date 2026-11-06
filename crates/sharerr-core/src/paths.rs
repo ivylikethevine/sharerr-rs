@@ -193,6 +193,16 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_item_takes_only_the_sharerr_to_qbit_half() {
+        let r = PathResolver::new(vec![map("/tv", "/media/tv", Some("/downloads/tv"))]);
+        let scanned = Path::new("/media/tv/Show/ep.mkv");
+        let dir = r.resolve_for(MediaSource::Directory, scanned).unwrap();
+        assert_eq!(dir.qbit, PathBuf::from("/downloads/tv/Show/ep.mkv"));
+        let arr = r.resolve_for(MediaSource::Sonarr, scanned).unwrap();
+        assert!(!arr.mapping_applied);
+    }
+
+    #[test]
     fn qbit_defaults_to_sharerr_view_when_omitted() {
         let r = PathResolver::new(vec![map("/tv", "/media/tv", None)]);
         let out = r.resolve(Path::new("/tv/Show/ep.mkv")).unwrap();

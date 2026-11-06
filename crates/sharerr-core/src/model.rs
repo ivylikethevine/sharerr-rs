@@ -320,6 +320,34 @@ impl ExternalIds {
     pub fn imdb_numeric(&self) -> Option<&str> {
         self.imdb.as_deref().map(Self::imdb_bare)
     }
+
+    /// Whether two id sets name the same work: at least one id both carry
+    /// agrees, and none both carry disagrees. Two sets with no id in common say
+    /// nothing, so they do not match.
+    pub fn same_work(&self, other: &Self) -> bool {
+        fn compare<T: PartialEq>(a: Option<T>, b: Option<T>) -> Option<bool> {
+            Some(a? == b?)
+        }
+        let text = |a: &Option<String>| a.as_deref().map(|s| s.trim().to_ascii_lowercase());
+        let verdicts = [
+            compare(self.tvdb, other.tvdb),
+            compare(self.tmdb, other.tmdb),
+            compare(self.tvmaze, other.tvmaze),
+            compare(self.imdb_numeric(), other.imdb_numeric()),
+            compare(text(&self.musicbrainz), text(&other.musicbrainz)),
+            compare(text(&self.goodreads), text(&other.goodreads)),
+            compare(text(&self.hardcover), text(&other.hardcover)),
+            compare(text(&self.isbn), text(&other.isbn)),
+        ];
+        let mut agreed = false;
+        for verdict in verdicts.into_iter().flatten() {
+            if !verdict {
+                return false;
+            }
+            agreed = true;
+        }
+        agreed
+    }
 }
 
 /// What a shared file actually contains.
@@ -388,6 +416,31 @@ impl MediaSpec {
         }
     }
 
+    /// Whether two specs name the same episode, film, track or book of a work
+    /// whose identity [`ExternalIds::same_work`] has already settled. Titles are
+    /// not compared: two libraries can spell one series differently, and the
+    /// ids are what decide it.
+    pub fn same_slot(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Episode {
+                    season, episode, ..
+                },
+                Self::Episode {
+                    season: s,
+                    episode: e,
+                    ..
+                },
+            ) => season == s && episode == e,
+            (Self::Movie { year, .. }, Self::Movie { year: y, .. }) => {
+                year.is_none() || y.is_none() || year == y
+            }
+            (Self::Track { track, .. }, Self::Track { track: t, .. }) => track == t,
+            (Self::Book { .. }, Self::Book { .. }) => true,
+            _ => false,
+        }
+    }
+
     /// The credited artist or author, when the medium has one.
     ///
     /// Music and books are searched by *creator* far more than film and television
@@ -424,6 +477,31 @@ impl fmt::Display for MediaSpec {
             Self::Track { artist, album, .. } => write!(f, "{artist} - {album}"),
             Self::Book { author, title } => write!(f, "{author} - {title}"),
         }
+    }
+}
+
+/// One torrent a friend's sharerr seeds and lets us see, as its catalog lists
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogEntry {
+    /// The v1 info hash, lowercase hex.
+    pub info_hash: String,
+    pub spec: MediaSpec,
+    pub ids: ExternalIds,
+    /// The content's total size in bytes.
+    pub size: u64,
+    /// Whether the torrent sets BEP 27's private flag.
+    pub private: bool,
+    /// The friend's own link to the `.torrent`, as their feed renders it for us.
+    pub download_url: String,
+}
+
+impl CatalogEntry {
+    /// Whether this entry is the same file as one of ours: the same size to the
+    /// byte, the same work by its ids, and the same episode, film, track or
+    /// book of it.
+    pub fn matches(&self, spec: &MediaSpec, ids: &ExternalIds, size: u64) -> bool {
+        self.size == size && self.ids.same_work(ids) && self.spec.same_slot(spec)
     }
 }
 
@@ -1011,5 +1089,105 @@ mod tests {
         assert_eq!(shared.last_error, None);
         assert_eq!(shared.created_at, None);
         assert_eq!(shared.release_title, "Copper.Vale.2001");
+    }
+
+    // ------------------------------------------------------------ CatalogEntry
+
+    fn ep(series_title: &str, season: u32, episode: u32) -> MediaSpec {
+        MediaSpec::Episode {
+            series_title: series_title.to_owned(),
+            season,
+            episode,
+        }
+    }
+
+    fn tvdb(id: i64) -> ExternalIds {
+        ExternalIds {
+            tvdb: Some(id),
+            ..ExternalIds::default()
+        }
+    }
+
+    #[test]
+    fn ids_name_the_same_work_only_when_one_agrees_and_none_disagrees() {
+        assert!(tvdb(7).same_work(&tvdb(7)));
+        assert!(!tvdb(7).same_work(&tvdb(8)));
+        assert!(
+            !ExternalIds::default().same_work(&ExternalIds::default()),
+            "no id in common says nothing"
+        );
+
+        let radarr = ExternalIds {
+            imdb: Some("tt0000001".to_owned()),
+            tmdb: Some(5),
+            ..ExternalIds::default()
+        };
+        let sonarr_spelling = ExternalIds {
+            imdb: Some("0000001".to_owned()),
+            ..ExternalIds::default()
+        };
+        assert!(radarr.same_work(&sonarr_spelling));
+        let other_tmdb = ExternalIds {
+            tmdb: Some(6),
+            ..sonarr_spelling.clone()
+        };
+        assert!(
+            !radarr.same_work(&other_tmdb),
+            "an agreeing IMDb id does not outvote a disagreeing TMDB id"
+        );
+
+        let book = |isbn: &str| ExternalIds {
+            isbn: Some(isbn.to_owned()),
+            ..ExternalIds::default()
+        };
+        assert!(book("978X").same_work(&book(" 978x")));
+    }
+
+    #[test]
+    fn specs_share_a_slot_by_number_not_by_title() {
+        assert!(ep("Harbour Lights", 2, 4).same_slot(&ep("Harbor Lights", 2, 4)));
+        assert!(!ep("Harbour Lights", 2, 4).same_slot(&ep("Harbour Lights", 2, 5)));
+        assert!(!ep("Harbour Lights", 2, 4).same_slot(&ep("Harbour Lights", 3, 4)));
+
+        let movie = |year| MediaSpec::Movie {
+            title: "Copper Vale".to_owned(),
+            year,
+        };
+        assert!(movie(Some(2001)).same_slot(&movie(Some(2001))));
+        assert!(movie(None).same_slot(&movie(Some(2001))));
+        assert!(!movie(Some(2001)).same_slot(&movie(Some(2002))));
+        assert!(!movie(None).same_slot(&ep("Copper Vale", 1, 1)));
+
+        let track = |track| MediaSpec::Track {
+            artist: "Quiet Harbour".to_owned(),
+            album: "Low Tide".to_owned(),
+            track,
+        };
+        assert!(track(Some(3)).same_slot(&track(Some(3))));
+        assert!(!track(None).same_slot(&track(Some(3))));
+
+        // A book has one slot: the ids already settled which book it is.
+        let book = |title: &str| MediaSpec::Book {
+            author: "M. Reed".to_owned(),
+            title: title.to_owned(),
+        };
+        assert!(book("Low Tide").same_slot(&book("Low Tide: A Novel")));
+        assert!(!book("Low Tide").same_slot(&movie(None)));
+    }
+
+    #[test]
+    fn a_catalog_entry_matches_the_same_file_to_the_byte() {
+        let entry = CatalogEntry {
+            info_hash: "ab".repeat(20),
+            spec: ep("Harbour Lights", 2, 4),
+            ids: tvdb(77),
+            size: 734_003_200,
+            private: false,
+            download_url: "http://friend.example/torrents/x.torrent".to_owned(),
+        };
+        assert!(entry.matches(&ep("Harbor Lights", 2, 4), &tvdb(77), 734_003_200));
+        assert!(!entry.matches(&ep("Harbour Lights", 2, 4), &tvdb(77), 734_003_201));
+        assert!(!entry.matches(&ep("Harbour Lights", 2, 4), &tvdb(78), 734_003_200));
+        assert!(!entry.matches(&ep("Harbour Lights", 2, 5), &tvdb(77), 734_003_200));
     }
 }

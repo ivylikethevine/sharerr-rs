@@ -227,8 +227,9 @@ impl Store {
     ///
     /// The builtin tracker's admission check: it answers only for torrents sharerr
     /// made, so it never becomes an open tracker that strangers can register
-    /// swarms on. Hits `idx_shared_items_info_hash`, because it runs on every
-    /// announce from every peer.
+    /// swarms on. Either of a hybrid torrent's two identities admits it (see
+    /// [`Self::set_info_hash_v2`]). Hits `idx_shared_items_info_hash`, because
+    /// it runs on every announce from every peer.
     ///
     /// `Unshared` and `Failed` items are excluded deliberately — withdrawing a
     /// share has to stop the tracker introducing peers for it, or the swarm
@@ -236,7 +237,7 @@ impl Store {
     pub async fn is_shared(&self, info_hash: &str) -> Result<bool> {
         let row = sqlx::query(
             "SELECT 1 AS present FROM shared_items \
-             WHERE info_hash = ?1 AND state IN (?2, ?3) LIMIT 1",
+             WHERE (info_hash = ?1 OR info_hash_v2 = ?1) AND state IN (?2, ?3) LIMIT 1",
         )
         .bind(info_hash)
         .bind(ShareState::Seeding.as_str())
@@ -468,7 +469,7 @@ impl Store {
     ) -> Result<()> {
         self.update_item(
             item_update!(
-                "info_hash = ?, announce_token_fp = ?, \
+                "info_hash = ?, info_hash_v2 = NULL, announce_token_fp = ?, \
                  created_by_sharerr = ?, private = COALESCE(?, private), state = ?, \
                  last_error = NULL"
             )
@@ -625,6 +626,24 @@ impl Store {
         Ok(until.flatten())
     }
 
+    /// Record the v2 identity of an item's hybrid torrent, so the tracker admits
+    /// announces under it too. A second write after [`Self::set_seeding`] (which
+    /// clears it, since a new torrent is a new identity) rather than a parameter
+    /// there, because only a hybrid build has one to record.
+    pub async fn set_info_hash_v2(
+        &self,
+        source: MediaSource,
+        file_id: i64,
+        info_hash_v2: &str,
+    ) -> Result<()> {
+        self.update_item(
+            item_update!("info_hash_v2 = ?").bind(info_hash_v2),
+            source,
+            file_id,
+        )
+        .await
+    }
+
     /// Give an item an info hash with no other change, for a test setting up a row.
     /// Production records one through [`Self::set_seeding`].
     #[cfg(any(test, feature = "fault-injection"))]
@@ -652,14 +671,15 @@ impl Store {
     pub async fn reset_for_rebuild(&self, source: MediaSource, file_id: i64) -> Result<()> {
         self.update_item(
             item_update!(
-                "info_hash = NULL, announce_token_fp = NULL, \
+                "info_hash = NULL, info_hash_v2 = NULL, announce_token_fp = NULL, \
                  created_by_sharerr = 0, private = 1, state = ?, last_error = NULL"
             )
             .bind(ShareState::Pending.as_str()),
             source,
             file_id,
         )
-        .await
+        .await?;
+        self.set_item_origin(source, file_id, None).await
     }
 }
 
@@ -1663,6 +1683,16 @@ mod tests {
         assert!(
             !store.is_shared(&"bb".repeat(20)).await.unwrap(),
             "unknown hash"
+        );
+
+        let v2 = "cc".repeat(32);
+        store
+            .set_info_hash_v2(MediaSource::Sonarr, 1, &v2)
+            .await
+            .unwrap();
+        assert!(
+            store.is_shared(&v2).await.unwrap(),
+            "a hybrid's v2 identity"
         );
 
         store

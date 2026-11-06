@@ -364,7 +364,7 @@ mod tests {
     /// writer produces it, so it is byte-stable across machines and contains no
     /// real content. Written rather than committed as a binary so the *shape*
     /// being asserted is visible in the test that asserts it.
-    fn write_mp4(path: &Path, width: u16, height: u16) {
+    fn write_mp4(path: &Path, width: u16, height: u16, language: &str) {
         let file = std::fs::File::create(path).unwrap();
         let mut writer = mp4::Mp4Writer::write_start(
             std::io::BufWriter::new(file),
@@ -385,12 +385,12 @@ mod tests {
                 pic_param_set: vec![0, 0, 0, 1],
             }))
             .unwrap();
-        writer
-            .add_track(&mp4::TrackConfig::from(mp4::AacConfig {
-                chan_conf: mp4::ChannelConfig::FiveOne,
-                ..mp4::AacConfig::default()
-            }))
-            .unwrap();
+        let mut audio = mp4::TrackConfig::from(mp4::AacConfig {
+            chan_conf: mp4::ChannelConfig::FiveOne,
+            ..mp4::AacConfig::default()
+        });
+        language.clone_into(&mut audio.language);
+        writer.add_track(&audio).unwrap();
         writer
             .write_sample(
                 1,
@@ -682,7 +682,7 @@ mod tests {
     fn a_real_container_yields_its_streams() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Gilded Ferry.mp4");
-        write_mp4(&path, 1920, 1080);
+        write_mp4(&path, 1920, 1080, "und");
 
         let meta = probe(&path).expect("a valid container describes itself");
         assert_eq!(meta.resolution.as_deref(), Some("1920x1080"));
@@ -695,13 +695,28 @@ mod tests {
         assert!(meta.runtime.is_some());
     }
 
+    #[test]
+    fn an_mp4_publishes_a_real_language_and_no_half_known_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Harbour Lights.mp4");
+        write_mp4(&path, 1920, 1080, "eng");
+        let meta = probe(&path).unwrap();
+        assert_eq!(meta.audio_languages.as_deref(), Some("eng"));
+
+        for (width, height) in [(1920, 0), (0, 1080)] {
+            write_mp4(&path, width, height, "und");
+            let meta = probe(&path).unwrap();
+            assert_eq!(meta.resolution, None, "{width}x{height}");
+        }
+    }
+
     /// The resolution has to survive into the shorthand a release title uses —
     /// the whole reason `synthesize` was given access to this.
     #[test]
     fn a_probed_resolution_reaches_the_scene_shorthand() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Copper Vale.mp4");
-        write_mp4(&path, 1280, 720);
+        write_mp4(&path, 1280, 720, "und");
 
         let meta = probe(&path).unwrap();
         assert_eq!(meta.scene_resolution(), Some("720p"));

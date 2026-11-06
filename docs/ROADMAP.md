@@ -11,41 +11,54 @@ attached.
 Smallest first, by how much each item touches, with what is blocked upstream
 last:
 
-- **Mutation survivors past `sharerr-torrent`.** `scripts/check.sh mutants`
-  exists and `sharerr-torrent`'s survivors worth killing are killed.
-  `sharerr-core` has had one package-scoped run (46 survivors, not re-measured
-  since; many are likely caught by the `sharerr` crate's tests, which the
-  `--test-workspace` attempt did not settle) and the rest of the workspace
-  none; see [`docs/TESTING.md`](TESTING.md#mutation-testing).
-- **Simplifications that would change behaviour.** Each saves work but needs a
-  decision first: cache the webhook and heartbeat URLs on `ServeState` (a fresh
-  Argon2 derivation each use today, but a `sharerr vault set` against a running
-  process would then go unseen until the next save); hold a lock across web-started
-  sync passes so they cannot overlap the loop's (Retry and Rebuild would wait for a
-  running pass); skip re-reading a cached `.torrent` already confirmed against the
-  current announce (a deleted cache file would go unnoticed); batch rTorrent's
-  `throttle.up` and `d.throttle_name.set` (a refused throttle would still be
-  assigned).
-- **One announce fingerprint per sync pass.** `Syncer::share` recomputes the same
-  SHA-256 per item; passing it down would take that function past clippy's argument
-  limit, so it needs the parameters grouped first.
-- **Unraid and TrueNAS app listings.** Where much of the *arr audience
-  installs from; a Community Applications template and a TrueNAS app.
+- **IPv6 link-local and IPv4-mapped addresses in `is_private_ip`.** Its doc
+  says link-local, but the IPv6 branch covers only loopback and `fc00::/7`, so
+  `fe80::/10` reads as public; and it never canonicalises, so with
+  `server.bind = "[::]:8477"` an IPv4 neighbour arrives as `::ffff:a.b.c.d`
+  and reads as public too. Three callers would change: the gluetun refresh
+  hook (`commands/serve.rs`'s `refuse_public`) would admit those neighbours,
+  the advertised-host check in `web/settings` would refuse a typed `fe80::`
+  address, and an announce from `fe80::` would take the peer's declared IP.
+  Widens who may call the local hooks, so it needs a decision first; the code
+  is a line plus a test case.
 - **A public lighthouse.** The software and a Linode module to host it
   ([`docker/deploy/lighthouse/terraform/linode/`](https://github.com/ivylikethevine/sharerr-rs/tree/main/docker/deploy/lighthouse/terraform/linode))
   are done; what is missing is a running public instance, with its URL in
   [`docs/LIGHTHOUSE.md`](LIGHTHOUSE.md), for a friend group that would
   rather not run their own.
+- **Unraid and TrueNAS app listings.** Where much of the \*arr audience
+  installs from; a Community Applications template and a TrueNAS app.
+- **Mutation survivors in `sharerr`, in phases.** `scripts/check.sh mutants`
+  exists, and every other crate, plus `sharerr`'s `web/auth.rs` and
+  `totp.rs`, has had its survivors worth killing killed (what is left and
+  why: [`docs/TESTING.md`](TESTING.md#mutation-testing)). A `sharerr` mutant
+  costs about 19 seconds at `-j 4` (16CPU/60GB), because each one runs the
+  crate's whole suite, so a 30-minute sitting covers about 95 mutants. The
+  rest of the crate is 2,173 mutants, about 11.5 hours or 23 sittings, below
+  by phase with counts from `cargo mutants --list -p sharerr` on 2026-11-06
+  (they move with the code; re-list a phase before starting it, then split
+  it by file into sittings of about 95). Each phase records its survivors in
+  `docs/TESTING.md` and kills only the ones whose behaviour matters;
+  `MUTANTS_ARGS` takes `-p` for a crate, `--file` for a file, and `--iterate`
+  to re-test only the last run's survivors after adding tests.
+  1. Sync, 340 (4 sittings): `sync/mod.rs` (128), `sync/seed.rs` (92),
+     `library.rs` (83), `tracker.rs` (37).
+  2. Items and settings, 350 (4): `web/items/mod.rs` (164),
+     `web/settings/mod.rs` (134), `web/config_io/mod.rs` (52).
+  3. Friends, 415 (5): `web/topology/mod.rs` (203), `web/peers.rs` (121),
+     `gossip.rs` (48), `pairing.rs` (33), `catalog.rs` (10).
+  4. Feeds and diagnostics, 350 (4): `torznab/mod.rs` (119),
+     `web/diagnostics.rs` (79), `checks.rs` (58), `web/composition.rs` (55),
+     `api.rs` (27), `jackett.rs` (12).
+  5. Commands and state, 435 (5): `commands/doctor/mod.rs` (91), `state.rs`
+     (82), `commands/preview.rs` (71), `notify.rs` (61), `commands/serve.rs`
+     (54), `metrics.rs` (43), `gluetun.rs` (33).
+  6. The rest, 283 (3): the 21 files under 35 mutants each.
 - **Season packs and albums as one torrent.** One media file per torrent means
   a friend's season search returns single episodes; a multi-file torrent over
   the existing folder still moves nothing, and `seeding.sidecars` already builds
-  one.
-- **Hybrid v1/v2 torrents (BEP 52).** Weighed but low value while
-  Transmission's and rTorrent's v2 support stays partial.
-- **Adopting a friend's torrent.** When a friend's Sonarr imports a release
-  and they tag it, their sharerr builds a second info hash for the same data.
-  Gossip carrying info hash → item would let the second instance adopt the
-  original torrent, so both seed one swarm.
+  one. `seeding.hybrid` and joining a friend's swarm take single-file torrents
+  only, so each needs its multi-file case too.
 - **Request flow.** Discovery is one-way today. An inbound request queue
   with an approve step is the other half of the original idea. Seerr (the
   merged Overseerr and Jellyseerr) is the request app most friends already

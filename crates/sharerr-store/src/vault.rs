@@ -619,6 +619,7 @@ mod tests {
             vault.keys().collect::<Vec<_>>(),
             vec!["qbittorrent.password", "sonarr.api_key"]
         );
+        assert!(!vault.is_empty());
     }
 
     /// `Vault::put` must reject an invalid value itself, not rely on every
@@ -812,7 +813,30 @@ mod tests {
             Vault::open(&path, &secret("master")),
             Err(VaultError::Corrupt(_))
         ));
+
+        // One byte short of version plus salt.
+        std::fs::write(&path, &good[..SALT_LEN]).unwrap();
+        assert!(matches!(
+            Vault::open(&path, &secret("master")),
+            Err(VaultError::Corrupt(_))
+        ));
     }
+
+    /// A vault written by an earlier build. The KDF parameters and the file
+    /// layout must keep opening it, or every operator's vault is lost.
+    #[test]
+    fn a_vault_written_by_an_earlier_build_still_opens() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.bin");
+        std::fs::write(&path, hex::decode(GOLDEN_VAULT).unwrap()).unwrap();
+        let vault = Vault::open(&path, &secret("golden master")).unwrap();
+        assert_eq!(vault.get("k").unwrap().unwrap().expose_secret(), "v");
+    }
+
+    /// `k` = `v` under master key `golden master`.
+    const GOLDEN_VAULT: &str = "01686462be569cb646fc53b88c7556f98301006b1b06a5f7374fc5d6257a17\
+                                9eb8d35c23a0802f447a80bd24110000000815ddb62bea7da5aeb0a1a2209882\
+                                7d9f";
 
     #[cfg(unix)]
     #[test]

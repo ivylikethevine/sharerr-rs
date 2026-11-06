@@ -168,6 +168,38 @@ struct VaultCaches {
     /// interval, so a default 60-second poll would pay 1,440 derivations a day.
     tracker_gluetun_key: RwLock<Option<Option<SecretString>>>,
     client_gluetun_key: RwLock<Option<Option<SecretString>>>,
+    /// The notification senders' URLs: the webhook is read on every event sent,
+    /// the heartbeat on every push. Kept as the stored string; `notify` parses
+    /// it, so a value that is not a URL still warns on every use.
+    webhook_url: RwLock<Option<Option<SecretString>>>,
+    heartbeat_url: RwLock<Option<Option<SecretString>>>,
+}
+
+/// Which notification URL [`ServeState::notification_url`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationUrl {
+    /// `notifications.webhook_url`: where every trigger but the heartbeat posts.
+    Webhook,
+    /// `notifications.heartbeat_url`: the push-monitor URL fetched on a timer.
+    Heartbeat,
+}
+
+impl NotificationUrl {
+    /// The vault key holding it.
+    pub fn secret_key(self) -> &'static str {
+        match self {
+            Self::Webhook => secret_keys::NOTIFICATIONS_WEBHOOK_URL,
+            Self::Heartbeat => secret_keys::NOTIFICATIONS_HEARTBEAT_URL,
+        }
+    }
+
+    /// The setting as the Settings page names it, for messages.
+    pub fn setting(self) -> &'static str {
+        match self {
+            Self::Webhook => "notifications.webhook_url",
+            Self::Heartbeat => "notifications.heartbeat_url",
+        }
+    }
 }
 
 /// Everything one gluetun poller reads and writes, one per [`GluetunTarget`].
@@ -553,6 +585,22 @@ impl ServeState {
             vault.get(target.credential_key()).ok().flatten()
         })
         .await
+    }
+
+    /// A notification sender's stored URL, cached after the first read.
+    ///
+    /// `None` when none is stored *or* the vault would not open: the senders
+    /// are best-effort, so neither is worth more than skipping the send. Only
+    /// a settings save drops the cache, so a `sharerr vault set` against a
+    /// running instance is seen at its next save or restart.
+    pub async fn notification_url(&self, which: NotificationUrl) -> Option<SecretString> {
+        let caches = self.vault_caches().await;
+        let cache = match which {
+            NotificationUrl::Webhook => &caches.webhook_url,
+            NotificationUrl::Heartbeat => &caches.heartbeat_url,
+        };
+        self.cached_from_vault(cache, |vault| vault.get(which.secret_key()).ok().flatten())
+            .await
     }
 
     /// This instance's gossip signing identity, cached after the first load.
@@ -941,6 +989,8 @@ pub(crate) mod fixtures {
             },
             sidecar_roots: Vec::new(),
             torrent_dir: dir.path().to_path_buf(),
+            confirmed: Default::default(),
+            friends_http: reqwest::Client::new(),
         };
         // Opened from `config.database_path()`, the same path `ServeState::store`
         // itself lazily opens — two independent `Store`/pool handles sharing one
@@ -1399,6 +1449,21 @@ mod tests {
                         .await
                         .is_none(),
                     "no gluetun key stored yet"
+                );
+
+                assert!(
+                    state
+                        .notification_url(NotificationUrl::Webhook)
+                        .await
+                        .is_none(),
+                    "no webhook URL stored yet"
+                );
+                assert!(
+                    state
+                        .notification_url(NotificationUrl::Webhook)
+                        .await
+                        .is_none(),
+                    "cached: the same answer without the vault"
                 );
 
                 let identity = state.gossip_identity().await;

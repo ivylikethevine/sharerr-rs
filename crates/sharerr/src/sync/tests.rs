@@ -129,6 +129,7 @@ fn a_real_torrent(dir: &Path, name: &str) -> Vec<u8> {
             announce: &AnnounceSet::single(Url::parse(FOREIGN_ANNOUNCE).unwrap()),
             media: None,
             private: true,
+            hybrid: false,
         })
         .unwrap()
         .data
@@ -527,6 +528,8 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         seeding,
         sidecar_roots: Vec::new(),
         torrent_dir: torrents.path().to_path_buf(),
+        confirmed: Default::default(),
+        friends_http: reqwest::Client::new(),
     };
 
     let tracker = Arc::new(StubTracker::default());
@@ -573,6 +576,8 @@ impl Harness {
             seeding,
             sidecar_roots: Vec::new(),
             torrent_dir: self.torrents.path().to_path_buf(),
+            confirmed: Default::default(),
+            friends_http: reqwest::Client::new(),
         };
         Syncer::new(
             config,
@@ -1516,6 +1521,7 @@ async fn a_path_that_cannot_be_resolved_still_leaves_a_row_to_fail() {
                 token_fp: None,
                 live: &HashMap::new(),
                 torrents: &[],
+                origins: &HashMap::new(),
                 dry_run: false,
             },
             None,
@@ -1634,6 +1640,101 @@ async fn a_pre_existing_torrent_is_reused_rather_than_duplicated() {
             .as_deref(),
         Some(STUB_ANNOUNCE),
         "the cached copy must announce to sharerr, not to whoever built it"
+    );
+}
+
+/// An adopted torrent keeps the trackers it came with when sharerr's endpoint
+/// moves: they are recorded at adoption, and kept after sharerr's own when the
+/// client's list is rewritten.
+#[tokio::test]
+async fn an_adopted_torrent_keeps_its_own_trackers_through_an_endpoint_change() {
+    let h = tagged_harness().await;
+    let their_hash = adopt_one(&h);
+    h.syncer.run(false).await.unwrap();
+    assert_eq!(
+        h.syncer
+            .store()
+            .item_origin(MediaSource::Sonarr, 501)
+            .await
+            .unwrap(),
+        Some(sharerr_store::ItemOrigin {
+            peer_id: None,
+            upstream: vec![FOREIGN_ANNOUNCE.to_owned()],
+        })
+    );
+
+    h.tracker.rotate("http://203.0.113.9:41234/announce");
+    h.syncer.run(false).await.unwrap();
+
+    assert_kept_their_tracker(&h, &their_hash);
+}
+
+/// A torrent adopted before its trackers were recorded has them read back from
+/// the client once, so the same endpoint change keeps them too.
+#[tokio::test]
+async fn an_adoption_from_before_trackers_were_recorded_recovers_them() {
+    let h = tagged_harness().await;
+    let their_hash = adopt_one(&h);
+    h.syncer.run(false).await.unwrap();
+    h.syncer
+        .store()
+        .set_item_origin(MediaSource::Sonarr, 501, None)
+        .await
+        .unwrap();
+
+    h.tracker.rotate("http://203.0.113.9:41234/announce");
+    h.syncer.run(false).await.unwrap();
+
+    assert_kept_their_tracker(&h, &their_hash);
+    assert_eq!(
+        h.syncer
+            .store()
+            .item_origin(MediaSource::Sonarr, 501)
+            .await
+            .unwrap()
+            .map(|origin| origin.upstream),
+        Some(vec![FOREIGN_ANNOUNCE.to_owned()]),
+        "recovered once, then read from the store"
+    );
+}
+
+/// Give the client an exportable torrent of its own over file 501, announcing
+/// to [`FOREIGN_ANNOUNCE`], and return its hash.
+fn adopt_one(h: &Harness) -> String {
+    let theirs = a_real_torrent(h.library.root.parent().unwrap(), "theirs.mkv");
+    let hash = sharerr_torrent::Torrent::read_from_bytes(&theirs)
+        .unwrap()
+        .info_hash();
+    h.qbit
+        .state
+        .lock()
+        .unwrap()
+        .torrents
+        .push(AddedTorrent::preexisting_exportable(
+            theirs,
+            &format!("{QBIT_PREFIX}/Lanternwick Hollow/Season 02"),
+            &["lanternwick.s02e01.mkv"],
+        ));
+    hash
+}
+
+fn assert_kept_their_tracker(h: &Harness, their_hash: &str) {
+    let snapshot = h.qbit.snapshot();
+    assert!(
+        snapshot
+            .trackers_added
+            .iter()
+            .any(|body| body.contains(their_hash) && body.contains("203.0.113.9")),
+        "the new endpoint reaches the adopted torrent: {:?}",
+        snapshot.trackers_added
+    );
+    assert!(
+        !snapshot
+            .trackers_removed
+            .iter()
+            .any(|body| body.contains("someone-elses-tracker")),
+        "the adopted torrent's own tracker must survive: {:?}",
+        snapshot.trackers_removed
     );
 }
 
@@ -2701,6 +2802,8 @@ async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
         seeding: SeedingConfig::default(),
         sidecar_roots: Vec::new(),
         torrent_dir: PathBuf::from("/torrents"),
+        confirmed: Default::default(),
+        friends_http: reqwest::Client::new(),
     };
     Syncer::new(
         Config::default(),
@@ -2841,10 +2944,10 @@ async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
     let h = tagged_harness().await;
     h.syncer.run(false).await.unwrap();
     let known_before = known(&h).await;
-    // `begin_run`, the pass's three reads (`all_items`, `file_stamps`,
-    // `share_ends`) and one `replace_audience` per source answer; every
-    // confirmation after fails.
-    let answered = 4 + h.syncer.sources.len();
+    // `begin_run`, the pass's four reads (`all_items`, `file_stamps`,
+    // `share_ends`, `item_origins`) and one `replace_audience` per source
+    // answer; every confirmation after fails.
+    let answered = 5 + h.syncer.sources.len();
     h.syncer.store().fail_after(answered).await.unwrap();
 
     let report = h.syncer.run(false).await.unwrap();
@@ -2858,12 +2961,106 @@ async fn a_confirmation_that_cannot_be_written_leaves_the_pass_green() {
 #[tokio::test]
 async fn a_pass_that_cannot_record_an_audience_stops() {
     let h = tagged_harness().await;
-    // `begin_run` and the pass's three reads answer; the audience write does not.
-    h.syncer.store().fail_after(4).await.unwrap();
+    // `begin_run` and the pass's four reads answer; the audience write does not.
+    h.syncer.store().fail_after(5).await.unwrap();
 
     let err = h.syncer.run(false).await.unwrap_err();
 
     assert!(format!("{err:#}").contains("who"), "{err:#}");
+}
+
+// ------------------------------------------------------------ friends
+
+/// A friend's catalog lists the same episode file, so the pass joins their
+/// swarm under their info hash instead of building a second torrent, and
+/// records whose swarm it is.
+#[tokio::test]
+async fn a_file_a_friend_already_shares_joins_their_swarm() {
+    let h = tagged_harness().await;
+    let file = h
+        .library
+        .files
+        .iter()
+        .find(|f| f.file_id == 501)
+        .unwrap()
+        .clone();
+    let theirs = sharerr_torrent::TorrentFactory
+        .create(&sharerr_torrent::TorrentRequest {
+            path: &file.disk_path,
+            announce: &AnnounceSet::single(
+                url::Url::parse("http://friend.example/announce/our-token").unwrap(),
+            ),
+            media: None,
+            private: false,
+            hybrid: false,
+        })
+        .unwrap();
+    let friend_server = MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::path(format!(
+        "/torrents/{}.torrent",
+        theirs.info_hash
+    )))
+    .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(theirs.data.clone()))
+    .mount(&friend_server)
+    .await;
+
+    let store = h.syncer.store();
+    let sam = store
+        .create_peer(
+            "Sam",
+            &SecretString::from("sam-key"),
+            sharerr_store::PeerScope::All,
+        )
+        .await
+        .unwrap();
+    store
+        .replace_peer_catalog(
+            sam.id,
+            &[sharerr_core::CatalogEntry {
+                info_hash: theirs.info_hash.clone(),
+                spec: sharerr_core::MediaSpec::Episode {
+                    series_title: "Lanternwick Hollow (as Sam's Sonarr spells it)".to_owned(),
+                    season: 2,
+                    episode: 1,
+                },
+                ids: sharerr_core::ExternalIds {
+                    tvdb: Some(library::SERIES_TVDB_ID),
+                    ..Default::default()
+                },
+                size: file.size,
+                private: false,
+                download_url: format!(
+                    "{}/torrents/{}.torrent",
+                    friend_server.uri(),
+                    theirs.info_hash
+                ),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let report = h.syncer.run(false).await.unwrap();
+    assert_eq!(
+        (report.added, report.reused, report.failed),
+        (1, 1, 0),
+        "{report}"
+    );
+
+    let joined = store.get(MediaSource::Sonarr, 501).await.unwrap().unwrap();
+    assert_eq!(joined.info_hash.as_deref(), Some(theirs.info_hash.as_str()));
+    assert!(joined.created_by_sharerr, "sharerr handed it to the client");
+    let origins = store.item_origins().await.unwrap();
+    assert_eq!(
+        origins.get(&(MediaSource::Sonarr, 501)),
+        Some(&sharerr_store::ItemOrigin {
+            peer_id: Some(sam.id),
+            upstream: vec!["http://friend.example/announce/our-token".to_owned()],
+        })
+    );
+    assert!(
+        !origins.contains_key(&(MediaSource::Sonarr, 502)),
+        "a file no friend lists is built as before"
+    );
 }
 
 // ------------------------------------------------------------ quiet hours

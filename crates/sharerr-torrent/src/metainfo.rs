@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::bencode::{BencodeError, Field, Value, write_dict, write_fields};
 
@@ -113,6 +114,19 @@ impl Torrent {
         hex::encode(Sha1::digest(out))
     }
 
+    /// The v2 identity of a BEP 52 (v2 or hybrid) torrent, as a tracker sees
+    /// it: SHA-256 of the canonical info dictionary truncated to 20 bytes, hex.
+    /// `None` for a plain v1 torrent.
+    #[must_use]
+    pub fn info_hash_v2(&self) -> Option<String> {
+        if self.info_field("meta version").and_then(Value::as_int) != Some(2) {
+            return None;
+        }
+        let mut out = Vec::new();
+        write_dict(&self.info, &mut out);
+        Some(hex::encode(&Sha256::digest(out)[..20]))
+    }
+
     fn info_field(&self, key: &str) -> Option<&Value> {
         self.info.get(key.as_bytes())
     }
@@ -171,6 +185,32 @@ impl Torrent {
                 Some(parts?.join("/"))
             })
             .collect()
+    }
+
+    /// The `piece length` inside the info dictionary, when it is a positive
+    /// integer.
+    #[must_use]
+    pub fn piece_length(&self) -> Option<u64> {
+        let length = self.info_field("piece length").and_then(Value::as_int)?;
+        u64::try_from(length).ok().filter(|&length| length > 0)
+    }
+
+    /// The concatenated v1 piece hashes (`pieces`), 20 bytes each.
+    #[must_use]
+    pub fn pieces(&self) -> Option<&[u8]> {
+        self.info_field("pieces").and_then(Value::as_bytes)
+    }
+
+    /// The announce URLs as tiers, BEP 12's list when there is one and
+    /// otherwise the lone `announce`, so a client's view of where it announces
+    /// can be kept alongside other tiers.
+    #[must_use]
+    pub fn announce_tiers(&self) -> Vec<Vec<String>> {
+        match (&self.announce_list, &self.announce) {
+            (Some(tiers), _) if !tiers.is_empty() => tiers.clone(),
+            (_, Some(announce)) => vec![vec![announce.clone()]],
+            _ => Vec::new(),
+        }
     }
 
     /// The BEP 27 private flag.
@@ -267,6 +307,25 @@ mod tests {
                 .file_paths()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn announce_tiers_prefer_the_list_and_fall_back_to_the_lone_announce() {
+        let mut torrent = Torrent::read_from_bytes(MINIMAL).unwrap();
+        assert_eq!(
+            torrent.announce_tiers(),
+            vec![vec!["http://t/announce".to_owned()]]
+        );
+        torrent.announce_list = Some(vec![
+            vec!["http://a".to_owned()],
+            vec!["http://b".to_owned()],
+        ]);
+        assert_eq!(torrent.announce_tiers().len(), 2);
+        torrent.announce_list = None;
+        torrent.announce = None;
+        assert!(torrent.announce_tiers().is_empty());
+        assert_eq!(torrent.piece_length(), Some(16384));
+        assert_eq!(torrent.pieces().map(<[u8]>::len), Some(20));
     }
 
     #[test]

@@ -395,6 +395,40 @@ mod tests {
         assert!(!endpoint.observe(url("http://203.0.113.9:41234")));
     }
 
+    #[test]
+    fn last_observed_reports_the_observation_and_never_the_static_base() {
+        let endpoint = AdvertisedEndpoint::new(Some(url("http://static.example:8477")));
+        assert!(endpoint.last_observed().is_none());
+        endpoint.observe(url("http://203.0.113.9:41234"));
+        let seen = endpoint.last_observed().unwrap();
+        assert_eq!(seen.base, url("http://203.0.113.9:41234"));
+    }
+
+    #[test]
+    fn private_means_rfc1918_loopback_v4_link_local_or_ula() {
+        for ip in [
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.0.1",
+            "::1",
+            "fc00::1",
+            "fd12:3456::1",
+        ] {
+            assert!(is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["8.8.8.8", "203.0.113.9", "2001:db8::1", "fe00::1"] {
+            assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn now_epoch_reads_the_real_clock() {
+        // 2023-11-14: any working clock is past it.
+        assert!(now_epoch() > 1_700_000_000);
+    }
+
     /// The announce list a torrent gets: recent endpoints first, the static base
     /// last, nothing repeated.
     #[test]

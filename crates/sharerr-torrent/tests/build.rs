@@ -23,6 +23,7 @@ fn build(path: &Path) -> sharerr_torrent::BuiltTorrent {
             announce: &announce,
             media: None,
             private: true,
+            hybrid: false,
         })
         .unwrap()
 }
@@ -167,6 +168,7 @@ fn a_missing_file_is_reported_rather_than_panicking() {
             announce: &announce,
             media: None,
             private: true,
+            hybrid: false,
         })
         .unwrap_err();
 
@@ -188,6 +190,7 @@ fn a_directory_is_refused() {
             announce: &announce,
             media: None,
             private: true,
+            hybrid: false,
         })
         .unwrap_err();
 
@@ -223,6 +226,7 @@ fn multiple_endpoints_become_ordered_announce_tiers() {
             announce: &announce,
             media: None,
             private: true,
+            hybrid: false,
         })
         .unwrap();
 
