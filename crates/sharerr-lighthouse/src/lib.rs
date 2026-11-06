@@ -894,6 +894,21 @@ mod tests {
         // Different key hashes must not collide on the same fabricated answer.
         let other = state.lookup(&hash_key("a-different-key"));
         assert_ne!(first.endpoints[0].addr, other.endpoints[0].addr);
+
+        // Signed within the last day, like a live reporter's record.
+        let now = now_epoch();
+        assert!(
+            (now - 86_400..=now).contains(&first.signed_at),
+            "a decoy signed at {} does not look recent",
+            first.signed_at
+        );
+    }
+
+    #[test]
+    fn a_key_hash_is_exactly_64_hex_digits() {
+        assert!(is_hex_32_bytes(&"aB".repeat(32)));
+        assert!(!is_hex_32_bytes(&"ab".repeat(31)));
+        assert!(!is_hex_32_bytes(&"g".repeat(64)));
     }
 
     #[tokio::test]
@@ -1087,7 +1102,32 @@ mod tests {
             "a reporter already held updates in place regardless of the cap"
         );
 
-        let (status, _) = post_report(state, &newcomer, &record).await;
+        let (status, _) = post_report(state.clone(), &newcomer, &record).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        // One record ages out: inside the interval it is not swept, past it it is.
+        {
+            let mut records = state
+                .records
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            let aged = records.map.get_mut(&format!("{:064x}", 1)).unwrap();
+            aged.signed_at = now - RECORD_TTL_SECS - 1;
+        }
+        assert_eq!(
+            state.report(&newcomer, record.clone()),
+            Err(ReportError::Full),
+            "inside the sweep interval even a freeable slot waits"
+        );
+        state
+            .records
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_sweep_at -= SWEEP_INTERVAL_SECS + 1;
+        assert_eq!(
+            state.report(&newcomer, record),
+            Ok(ReportOutcome::Accepted),
+            "past the interval the sweep frees the expired slot"
+        );
     }
 }

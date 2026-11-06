@@ -253,12 +253,21 @@ async fn list_maps_ratio_and_resolves_qbittorrents_sentinels() {
             { "hash": "fixed", "ratio": 1.85, "ratio_limit": 2.0, "up_limit": 512_000 },
             { "hash": "unlimited", "ratio": 0.5, "ratio_limit": -1.0, "up_limit": -1 },
             { "hash": "global", "ratio": 0.1, "ratio_limit": -2.0, "up_limit": 0 },
+            { "hash": "older", "state": "pausedUP" },
         ])))
         .mount(&server)
         .await;
 
     let list = TorrentClient::list(&client(&server), None).await.unwrap();
-    assert_eq!(list.len(), 3);
+    assert_eq!(list.len(), 4);
+    assert_eq!(
+        list[3].upload_limit_kib, None,
+        "a build that omits up_limit has no cap"
+    );
+    assert!(
+        list[3].is_stopped && !list[0].is_stopped,
+        "pausedUP is stopped"
+    );
     assert_eq!(
         list[0].upload_limit_kib,
         Some(500),

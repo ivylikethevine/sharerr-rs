@@ -671,13 +671,20 @@ mod tests {
                 { "hashString": "bb", "name": "b", "downloadDir": "/d", "labels": [], "status": 6,
                   "uploadRatio": -1.0, "seedRatioLimit": 5.0, "seedRatioMode": 2 },
                 { "hashString": "cc", "name": "c", "downloadDir": "/d", "labels": [], "status": 6,
-                  "uploadRatio": -2.0, "seedRatioLimit": 5.0, "seedRatioMode": 0 }
+                  "uploadRatio": -2.0, "seedRatioLimit": 5.0, "seedRatioMode": 0 },
+                { "hashString": "dd", "name": "d", "downloadDir": "/d", "labels": [], "status": 0,
+                  "uploadRatio": 0.5 }
             ]})),
         )
         .await;
 
         let all = client(&server).list(None).await.unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[3].ratio, Some(0.5), "a ratio under 1 is not a sentinel");
+        assert!(
+            all[3].is_stopped && !all[0].is_stopped,
+            "status 0 is stopped"
+        );
         assert_eq!(all[0].ratio, Some(1.85));
         assert_eq!(all[0].ratio_limit, Some(2.0), "mode 1 is a fixed limit");
         assert_eq!(

@@ -477,12 +477,26 @@ mod tests {
                     "1",
                     "0",
                 ],
+                [
+                    "fedcba",
+                    "c",
+                    "/downloads",
+                    "/downloads/c",
+                    "other",
+                    "1",
+                    "0",
+                    "0",
+                ],
             ])))
             .mount(&server)
             .await;
 
         let all = client(&server).list(None).await.unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 3);
+        assert!(
+            all[2].is_stopped && !all[0].is_stopped,
+            "is_active=0 is stopped"
+        );
         // Lowercased, because sharerr joins on this against its own store.
         assert_eq!(all[0].hash, "abcdef");
         assert_eq!(all[0].content_path, "/downloads/a");
@@ -577,6 +591,20 @@ mod tests {
             body.contains("d.directory_base.set=&quot;/downloads/tv/Season 01&quot;"),
             "{body}"
         );
+    }
+
+    /// rTorrent has one label: the category when there is one, else the tags.
+    #[tokio::test]
+    async fn an_add_with_tags_and_no_category_labels_it_with_the_tags() {
+        let server = MockServer::start().await;
+        mount_scalar(&server).await;
+
+        let request = AddRequest::new(b"x", "abc123", "x.torrent", "/downloads").tags("shared");
+        client(&server).add(&request).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        let body = sharerr_testkit::mock::body_text(requests.last().unwrap());
+        assert!(body.contains("d.custom1.set=&quot;shared&quot;"), "{body}");
     }
 
     #[tokio::test]
