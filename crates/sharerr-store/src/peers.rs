@@ -791,6 +791,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn each_kind_scope_admits_its_own_app_and_no_other() {
+        use MediaSource::{Directory, Lidarr, Radarr, Readarr, Sonarr, Whisparr};
+        for (scope, app) in [
+            (PeerScope::Tv, Sonarr),
+            (PeerScope::Movies, Radarr),
+            (PeerScope::Music, Lidarr),
+            (PeerScope::Books, Readarr),
+        ] {
+            assert!(scope.allows(app), "{scope:?}");
+            assert!(!scope.allows(Whisparr), "{scope:?}");
+            assert!(!scope.allows(Directory), "{scope:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn active_peers_leave_out_the_revoked_and_setters_report_a_missing_peer() {
+        let store = store().await;
+        let sam = store
+            .create_peer("Sam", &key("sam-key"), PeerScope::All)
+            .await
+            .unwrap();
+        let alex = store
+            .create_peer("Alex", &key("alex-key"), PeerScope::All)
+            .await
+            .unwrap();
+        store.revoke_peer(sam.id).await.unwrap();
+        let active: Vec<i64> = store
+            .active_peers()
+            .await
+            .unwrap()
+            .iter()
+            .map(|peer| peer.id)
+            .collect();
+        assert_eq!(active, vec![alex.id]);
+
+        assert!(
+            store
+                .set_peer_scope(alex.id, PeerScope::Books)
+                .await
+                .unwrap()
+        );
+        let scope = store.peer(alex.id).await.unwrap().unwrap().scope;
+        assert_eq!(scope, PeerScope::Books);
+        assert!(!store.set_peer_scope(404, PeerScope::Tv).await.unwrap());
+
+        let url = Some("http://alex.example:8477");
+        assert!(store.set_peer_gossip_url(alex.id, url).await.unwrap());
+        assert!(!store.set_peer_gossip_url(404, url).await.unwrap());
+    }
+
     /// The row survives revocation so the operator can still see it happened.
     #[tokio::test]
     async fn a_revoked_peer_is_still_listed() {

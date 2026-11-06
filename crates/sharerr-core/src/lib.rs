@@ -24,3 +24,14 @@ pub use paths::{PathError, PathResolver};
 pub fn saturating_i64<T: TryInto<i64>>(n: T) -> i64 {
     n.try_into().unwrap_or(i64::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::saturating_i64;
+
+    #[test]
+    fn saturating_i64_keeps_what_fits_and_clamps_what_does_not() {
+        assert_eq!(saturating_i64(734_003_200_u64), 734_003_200);
+        assert_eq!(saturating_i64(u64::MAX), i64::MAX);
+    }
+}

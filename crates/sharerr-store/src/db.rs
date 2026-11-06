@@ -228,9 +228,8 @@ impl Store {
     /// The builtin tracker's admission check: it answers only for torrents sharerr
     /// made, so it never becomes an open tracker that strangers can register
     /// swarms on. Either of a hybrid torrent's two identities admits it (see
-    /// [`Self::set_info_hash_v2`]).
-    /// swarms on. Hits `idx_shared_items_info_hash`, because it runs on every
-    /// announce from every peer.
+    /// [`Self::set_info_hash_v2`]). Hits `idx_shared_items_info_hash`, because
+    /// it runs on every announce from every peer.
     ///
     /// `Unshared` and `Failed` items are excluded deliberately — withdrawing a
     /// share has to stop the tracker introducing peers for it, or the swarm
@@ -1684,6 +1683,16 @@ mod tests {
         assert!(
             !store.is_shared(&"bb".repeat(20)).await.unwrap(),
             "unknown hash"
+        );
+
+        let v2 = "cc".repeat(32);
+        store
+            .set_info_hash_v2(MediaSource::Sonarr, 1, &v2)
+            .await
+            .unwrap();
+        assert!(
+            store.is_shared(&v2).await.unwrap(),
+            "a hybrid's v2 identity"
         );
 
         store

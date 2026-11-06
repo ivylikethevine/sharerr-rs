@@ -236,6 +236,28 @@ Three are known to be equivalent, with no observable difference to test:
 a zero-length read either way), and `||` to `&&` in `title::season_episode`
 (an empty number fails the parse that follows).
 
+Survivors left on purpose after each crate's last run, at `-j 4`
+(16CPU/60GB); counts move with the code:
+
+- **`sharerr-core`**: 243 mutants in 56 seconds, 18 left. `Config`'s
+  delegating accessors (`database_path`, `vault_path`, `torrent_dir`,
+  `sync_every`, `resolver`, `configured_sources`, `advertised_base`), which
+  only the `sharerr` crate's tests reach; display text
+  (`NotificationTrigger::prompt`, `MediaSource`'s `Display`,
+  `TorrentClientConfig::credential_name`); the `5 * 60` of
+  `MAX_FUTURE_SKEW_SECS`; and one equivalent, `<` to `<=` in
+  `QuietHours::contains`, since parsing refuses a window that opens and
+  closes at the same minute.
+- **`sharerr-store`**: 379 mutants in 18 minutes, about 2.9 seconds each
+  against `sharerr-torrent`'s 0.5, 8 left. Equivalent: `hasher()` to
+  `Default` (the argon2 crate's defaults are these parameters), `>` to `>=`
+  on `record_peer_endpoint`'s prune (it is idempotent), and both `-` to `+`
+  in `touch_peer` (the throttle check and the `UPDATE`'s guard each mask the
+  other). Left: `PeerScope::label` (display text), `master_key_from_env`
+  (the environment read around the tested `master_key_from`), and
+  `from_insert`'s unique-violation guard, which needs a database error other
+  than a unique violation that no fixture produces.
+
 ## Benchmarks and fuzzing
 
 Neither exists. `unsafe_code = "forbid"` at the workspace level narrows what

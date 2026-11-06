@@ -1850,7 +1850,9 @@ mod tests {
             "1:00-7:00",
             "01:00",
             "24:00-01:00",
-            "01:60-02:00",
+            // Not `01:60-02:00`: with the minute check off by one, `01:60`
+            // reads as 02:00 and the same-minute rule would reject it instead.
+            "01:60-03:00",
             "03:00-03:00",
             "aa:bb-cc:dd",
         ] {
@@ -2301,6 +2303,97 @@ mod tests {
 
         let everything: IpRange = "::/0".parse().unwrap();
         assert!(everything.contains("2001:db8::1".parse().unwrap()));
+
+        let ula: IpRange = "fd00::/8".parse().unwrap();
+        assert!(ula.contains("fd12::1".parse().unwrap()));
+        assert!(!ula.contains("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn each_arr_app_has_its_own_credential_and_url_and_a_directory_has_neither() {
+        use crate::MediaSource::{Directory, Radarr, Sonarr};
+        assert_eq!(
+            secret_keys::credential_for(Sonarr),
+            Some(secret_keys::SONARR_API_KEY)
+        );
+        assert_eq!(
+            secret_keys::credential_for(Radarr),
+            Some(secret_keys::RADARR_API_KEY)
+        );
+        assert_eq!(
+            config_paths::url_for(Radarr),
+            Some(config_paths::RADARR_URL)
+        );
+        assert_eq!(secret_keys::credential_for(Directory), None);
+        assert_eq!(config_paths::url_for(Directory), None);
+    }
+
+    #[test]
+    fn a_tracker_token_must_fit_one_url_segment_and_other_secrets_need_not() {
+        let token = secret_keys::TRACKER_TOKEN;
+        assert!(secret_keys::validate_value(token, "0af9-_.~").is_ok());
+        for bad in ["ab/cd+ef==", "a?b", "a#b", "a%20b"] {
+            assert!(secret_keys::validate_value(token, bad).is_err(), "{bad}");
+        }
+        assert!(secret_keys::validate_value(secret_keys::SONARR_API_KEY, "ab/cd+ef==").is_ok());
+    }
+
+    /// Both spellings are read back from outside this crate: the variable by
+    /// the operator's environment, the key from vaults already written.
+    #[test]
+    fn env_var_names_and_peer_gossip_keys_keep_their_spelling() {
+        assert_eq!(
+            config_paths::env_var("tracker.advertised_host"),
+            "SHARERR_TRACKER__ADVERTISED_HOST"
+        );
+        assert_eq!(secret_keys::peer_gossip_key(7), "peer.gossip.7");
+    }
+
+    #[test]
+    fn the_poll_and_sync_floors_raise_a_short_interval_and_keep_a_long_one() {
+        let gluetun = |poll_secs| GluetunConfig {
+            poll_secs,
+            ..GluetunConfig::default()
+        };
+        assert_eq!(
+            gluetun(1).effective_poll_secs(),
+            GluetunConfig::MIN_POLL_SECS
+        );
+        assert_eq!(gluetun(45).effective_poll_secs(), 45);
+
+        let sync = |interval_secs| SyncConfig {
+            interval_secs,
+            ..SyncConfig::default()
+        };
+        assert_eq!(
+            sync(5).effective_interval_secs(),
+            SyncConfig::MIN_INTERVAL_SECS
+        );
+        assert_eq!(sync(900).effective_interval_secs(), 900);
+    }
+
+    #[test]
+    fn the_gluetun_poller_runs_only_when_enabled_and_pointed_somewhere() {
+        let url = Some(Url::parse("http://127.0.0.1:8000").unwrap());
+        let gluetun = |enabled, control_url| GluetunConfig {
+            enabled,
+            control_url,
+            ..GluetunConfig::default()
+        };
+        assert!(gluetun(true, url.clone()).is_active());
+        assert!(!gluetun(false, url).is_active());
+        assert!(!gluetun(true, None).is_active());
+    }
+
+    #[test]
+    fn a_config_still_naming_the_tracker_backend_says_it_was_removed() {
+        let err = toml_edit::de::from_str::<Config>("[tracker]\nbackend = \"qbittorrent\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("tracker.backend has been removed (was \"qbittorrent\")"),
+            "{err}"
+        );
     }
 
     #[test]

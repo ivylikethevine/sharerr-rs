@@ -1165,6 +1165,14 @@ mod tests {
         };
         assert!(track(Some(3)).same_slot(&track(Some(3))));
         assert!(!track(None).same_slot(&track(Some(3))));
+
+        // A book has one slot: the ids already settled which book it is.
+        let book = |title: &str| MediaSpec::Book {
+            author: "M. Reed".to_owned(),
+            title: title.to_owned(),
+        };
+        assert!(book("Low Tide").same_slot(&book("Low Tide: A Novel")));
+        assert!(!book("Low Tide").same_slot(&movie(None)));
     }
 
     #[test]
