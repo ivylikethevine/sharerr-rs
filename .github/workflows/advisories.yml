@@ -55,9 +55,9 @@ jobs:
 
       # the tools.txt pin ci.yml's audit gate runs; the advisory database is
       # fetched fresh every run
-      - uses: ./.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tools
         with:
-          tool: cargo-deny
+          tools: cargo-deny
 
       # Each tool exits non-zero on a finding and on a failure alike. cargo-deny
       # names an advisory (RUSTSEC-...) or a yanked crate in a finding, and npm
