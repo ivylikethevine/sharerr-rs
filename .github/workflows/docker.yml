@@ -389,6 +389,7 @@ jobs:
             .github/scripts/trivy_scan.sh
             .github/scripts/lib.sh
             .github/actions/setup-tool/
+            .github/actions/setup-tools/
           sparse-checkout-cone-mode: false
 
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
@@ -398,9 +399,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # The tools.txt pin, sha256-verified; the database is fetched fresh.
-      - uses: ./.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tools
         with:
-          tool: trivy
+          tools: trivy
 
       # See .github/scripts/trivy_scan.sh, the same scan image-scan.yml
       # runs. The verdict is recorded rather than failing here, so the SARIF

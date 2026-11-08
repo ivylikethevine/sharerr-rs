@@ -401,20 +401,17 @@ tracking issue, reading the compose files `CI_IMAGE_GLOBS` in
 **Pinned tool versions that dependabot cannot see** are zizmor, actionlint,
 cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck, hadolint,
 trivy, cargo-deny, gitleaks, terraform, yq and cargo-mutants, each installed from a cached, pinned,
-sha256-verified release asset by `.github/actions/setup-tool` (cargo-mutants
+sha256-verified release asset by `.github/actions/setup-tools` (cargo-mutants
 only through `scripts/check.sh --install`: no job runs it).
 `.github/actions/setup-tool/tools.txt` is the one roster (version, URL,
 archive kind, verify flag, sha256, per platform where the asset differs),
-read by that action, by `check_tool_versions.sh`, and by
+read by that action through `setup-tool/install.sh`, by `check_tool_versions.sh`, and by
 `scripts/check.sh --install` (into `target/ci-tools/`); bumping one is a hand
 edit to that file and nothing else. Its `kind` column is `raw`, `tar.gz`,
 `tar.xz`, `zip` (terraform, which HashiCorp ships zipped from
 releases.hashicorp.com rather than as a GitHub asset), or a source build;
-the file's header documents each. `.github/actions/setup-tools` (plural) is
-the batched sibling for a job that needs more than one row at once —
-`ci.yml`'s `workflow-lint` is the only current caller — resolving every pin
-and paying one shared `actions/cache` round trip instead of N; a job needing
-exactly one tool still goes through `setup-tool` (singular). A new tool a
+the file's header documents each. A job lists every tool it needs in one
+`tools:` input, so it pays one shared `actions/cache` round trip. A new tool a
 check uses also needs adding to `scripts/check.sh`'s `pinned` list, or
 `--install` never fetches it.
 

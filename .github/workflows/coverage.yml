@@ -73,9 +73,9 @@ jobs:
 
       # The tools.txt pin, a cached release binary rather than a
       # `cargo install` source build every run.
-      - uses: ./.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tools
         with:
-          tool: cargo-llvm-cov
+          tools: cargo-llvm-cov
 
       # Collects profile data once; the steps below read it without re-running
       # the suite. Teed to a log so the test-count step can sum it without a

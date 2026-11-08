@@ -140,6 +140,7 @@ jobs:
         terraform:
           - 'docker/deploy/lighthouse/terraform/**'
           - '.github/actions/setup-tool/**'
+          - '.github/actions/setup-tools/**'
           - 'scripts/check.sh'
 
   # Push-to-main tree dedupe, three jobs. A push to `main` whose tree a green
@@ -391,9 +392,9 @@ jobs:
       # advisories.yml's to report, not a reason to fail this commit.
       - id: deny-install
         if: ${{ !cancelled() && env.DEPS_CHANGED == 'true' }}
-        uses: ./.github/actions/setup-tool
+        uses: ./.github/actions/setup-tools
         with:
-          tool: cargo-deny
+          tools: cargo-deny
 
       - name: Check advisories, licenses, bans and sources (cargo-deny)
         if: ${{ !cancelled() && steps.deny-install.outcome == 'success' }}
@@ -405,9 +406,9 @@ jobs:
       # only; no credentials, no state.
       - id: terraform-install
         if: ${{ !cancelled() && env.TERRAFORM_CHANGED == 'true' }}
-        uses: ./.github/actions/setup-tool
+        uses: ./.github/actions/setup-tools
         with:
-          tool: terraform
+          tools: terraform
 
       - name: Check formatting and validate every module (terraform)
         if: ${{ !cancelled() && steps.terraform-install.outcome == 'success' }}
@@ -423,9 +424,9 @@ jobs:
       - id: hadolint-install
         if: ${{ !cancelled() && env.CODE_CHANGED == 'true' }}
         continue-on-error: true
-        uses: ./.github/actions/setup-tool
+        uses: ./.github/actions/setup-tools
         with:
-          tool: hadolint
+          tools: hadolint
 
       - if: ${{ !cancelled() && steps.hadolint-install.outcome == 'failure' }}
         uses: ./.github/actions/advisory-note
@@ -542,9 +543,9 @@ jobs:
         run: scripts/check.sh test
 
       - if: ${{ !cancelled() && env.MEASURE == 'true' }}
-        uses: ./.github/actions/setup-tool
+        uses: ./.github/actions/setup-tools
         with:
-          tool: cargo-llvm-cov
+          tools: cargo-llvm-cov
 
       - id: measured
         name: Test (tier 1, under instrumentation)
@@ -786,9 +787,9 @@ jobs:
       # download must surface as an advisory note below, not a red job.
       - id: semver-install
         continue-on-error: true
-        uses: ./.github/actions/setup-tool
+        uses: ./.github/actions/setup-tools
         with:
-          tool: cargo-semver-checks
+          tools: cargo-semver-checks
 
       - if: steps.semver-install.outcome == 'failure'
         uses: ./.github/actions/advisory-note
