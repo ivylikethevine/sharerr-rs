@@ -50,10 +50,18 @@ impl SystemStatus {
 }
 
 /// Resample CPU, memory, and disk usage forever, recording each sample into
-/// `state`'s [`SystemStatus`]. Never returns.
+/// `state`'s [`SystemStatus`]. Never returns: `serve` ends when any of its
+/// loops does, so a platform sysinfo cannot read parks here and the tiles stay
+/// blank.
 pub async fn poll_loop(state: Arc<ServeState>) {
     let status = state.system_status();
-    let mut sys = System::new();
+    let mut sys = match System::new() {
+        Ok(sys) => sys,
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot read CPU and memory usage on this platform");
+            return std::future::pending().await;
+        }
+    };
     let data_dir = state.data_dir().await;
     // The one disk the page reports. Resolved once, off the runtime, and only that
     // disk refreshed per sample: re-listing means re-reading the mount table and a
@@ -127,7 +135,13 @@ fn refresh_disk(held: Option<Disk>, path: &Path) -> Option<Disk> {
         disk.refresh();
         return Some(disk);
     }
-    disk_covering(Vec::from(Disks::new_with_refreshed_list()), path)
+    match Disks::new_with_refreshed_list() {
+        Ok(disks) => disk_covering(Vec::from(disks), path),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not list mounted disks");
+            None
+        }
+    }
 }
 
 /// The disk covering `path` — the mount point that is the longest prefix of
@@ -142,6 +156,8 @@ fn disk_covering(disks: Vec<Disk>, path: &Path) -> Option<Disk> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     fn snapshot(disk: Option<(u64, u64)>) -> SystemSnapshot {
@@ -189,7 +205,7 @@ mod tests {
     /// runs on.
     #[tokio::test]
     async fn sample_reads_real_memory_and_a_disk_covering_tmp() {
-        let mut sys = System::new();
+        let mut sys = System::new().unwrap();
         let disk = refresh_disk(None, std::env::temp_dir().as_path());
         let snapshot = sample(&mut sys, disk.as_ref()).await;
 

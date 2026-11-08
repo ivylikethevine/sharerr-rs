@@ -108,11 +108,11 @@ sha2 = "0.11.1"
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
 # CPU/memory/disk usage for the status page's stat tiles. `default-features =
 # false` drops network/user/component support this project never reads.
-sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "system"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["disk", "system"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
-tokio = "1.53.2"
+tokio = "1.54.1"
 toml_edit = "0.25.15"
 # Dev-only, for `ServiceExt::oneshot`: it drives the assembled axum router in
 #-process, so the handler tests exercise the real middleware stack — the auth
@@ -123,7 +123,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # NFKD decomposition for synthesized release titles: pulls the base letter out
 # of an accented character (`é` -> `e` + combining accent) before the ASCII
 # filter runs, so e.g. `Amélie` transliterates to `Amelie` instead of `Am.lie`.
-unicode-normalization = "0.1.25"
+unicode-normalization = "0.1.26"
 percent-encoding = "2.3.2"
 url = "2.5.8"
 # The OpenAPI spec is generated from the handlers themselves rather than
