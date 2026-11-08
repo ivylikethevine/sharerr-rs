@@ -139,7 +139,7 @@ changed; a PR touching only those shows
 few checks, by design. Inside `quick lint`, `cargo-deny` runs only when a
 manifest, `Cargo.lock` or `deny.toml` changed (`advisories.yml` reports a new
 advisory against a tree nobody touched), and terraform only when the modules, a
-`.github/actions/setup-tool` file or `scripts/check.sh` changed. Everything
+`.github/actions/setup-tool` or `setup-tools` file or `scripts/check.sh` changed. Everything
 runs on every push to `main` and every PR, except a draft PR: `ci.yml`,
 `codeql.yml`, `docker.yml` and `release-note.yml` skip every job until the PR
 is marked ready for review, which starts a full run.
