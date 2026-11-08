@@ -103,7 +103,7 @@ cargo-mutants|27.1.0|tar.gz|https://github.com/sourcefrog/cargo-mutants/releases
 # `terraform` job). HashiCorp publishes binaries on releases.hashicorp.com,
 # zipped, not as GitHub release assets; its GitHub releases still carry the
 # tags the drift check reads.
-terraform|1.17.0|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||c168cab7c637a8769fdb90089ddd19de701bc6ff8aca64dc2e2185fe46f59f67
+terraform|1.17.1|zip|https://releases.hashicorp.com/terraform/%v/terraform_%v_linux_amd64.zip|version|github:hashicorp/terraform||4638628058e71a55212b1c563712eac03b902128f40740f3dc8174df12135061
 # mikefarah's Go yq, for .github/scripts/lint_workflows.sh (which also accepts
 # the Python yq, but CI pins this one).
 # Installed rather than taken from the runner image, and several distros ship
