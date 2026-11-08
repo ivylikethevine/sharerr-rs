@@ -75,6 +75,7 @@ jobs:
             .github/scripts/trivy_scan.sh
             .github/scripts/lib.sh
             .github/actions/setup-tool/
+            .github/actions/setup-tools/
             .github/actions/advisory-note/
           sparse-checkout-cone-mode: false
 
@@ -100,9 +101,9 @@ jobs:
           fi
 
       - if: steps.probe.outputs.exists == '1'
-        uses: ./.github/actions/setup-tool
+        uses: ./.github/actions/setup-tools
         with:
-          tool: trivy
+          tools: trivy
 
       # the release gate's own script and flags: would :latest still pass today
       - if: steps.probe.outputs.exists == '1'
@@ -159,9 +160,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/setup-tool
+      - uses: ./.github/actions/setup-tools
         with:
-          tool: trivy
+          tools: trivy
 
       # The three verdicts (0 clean, 1 a finding no repin improves, 2 a repin
       # that helps) are captured as an output, not collapsed by
