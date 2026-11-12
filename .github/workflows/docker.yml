@@ -249,7 +249,7 @@ jobs:
           - '!REUSE.toml'
           - '!_config.yml'
           - '!lychee.toml'
-          - '!scratch/**'
+          - '!scripts/scratch/**'
         lighthouse:
           - 'crates/sharerr-lighthouse/**'
           - 'docker/Dockerfile'
