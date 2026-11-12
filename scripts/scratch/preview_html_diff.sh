@@ -3,7 +3,7 @@
 # whitespace normalised and tags split per line, so a template refactor can be
 # shown to change nothing a browser sees.
 #
-# Usage: scratch/preview_html_diff.sh BASE_BINARY NEW_BINARY
+# Usage: scripts/scratch/preview_html_diff.sh BASE_BINARY NEW_BINARY
 # Output: local/preview-diff/{base,new}/<page>.html and a diff on stdout.
 set -u
 

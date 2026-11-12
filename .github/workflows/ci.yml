@@ -128,7 +128,7 @@ jobs:
           - '!REUSE.toml'
           - '!_config.yml'
           - '!lychee.toml'
-          - '!scratch/**'
+          - '!scripts/scratch/**'
         # What `cargo-deny` reads: the dependency tree and its own policy.
         deps:
           - 'Cargo.lock'

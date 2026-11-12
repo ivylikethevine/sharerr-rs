@@ -26,8 +26,8 @@ and docs tidying. Run `cargo clippy --workspace --all-targets -- -D warnings` an
 `cargo test --workspace -q --no-fail-fast` after each group.
 
 For anything touching templates or CSS, build the commit before these edits in a
-`local/` worktree and compare with `scratch/preview_html_diff.sh` and
-`scratch/preview_visual_diff.sh`. The invite blob on `/peers` differs on every run.
+`local/` worktree and compare with `scripts/scratch/preview_html_diff.sh` and
+`scripts/scratch/preview_visual_diff.sh`. The invite blob on `/peers` differs on every run.
 
 ## The `cargo` setup
 
@@ -171,7 +171,7 @@ workflows`; `lint_workflows.sh:92` reads the first step through yq and must foll
 3. Delete `docs/plans/repo-simplification.md` once every item is applied or recorded,
    and delete this file.
 4. End with the end-of-task summary: changes, what was verified and not, suggested commit
-   boundaries by group, pending GitHub actions, scripts added to `scratch/` (none so far),
+   boundaries by group, pending GitHub actions, scripts added to `scripts/scratch/` (none so far),
    agents and their tokens, and assumptions.
 
 **Agents used:** 10 read-only reviewers, all finished. Tokens: core and store 269,820;

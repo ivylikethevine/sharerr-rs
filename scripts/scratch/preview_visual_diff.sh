@@ -3,7 +3,7 @@
 # width, in both themes' system default, and prints how many pixels differ, so a
 # stylesheet refactor can be shown to change nothing visible.
 #
-# Usage: scratch/preview_visual_diff.sh BASE_BINARY NEW_BINARY
+# Usage: scripts/scratch/preview_visual_diff.sh BASE_BINARY NEW_BINARY
 # Needs headless Chrome or Chromium and ImageMagick; Chrome's singleton socket
 # means this cannot run inside a sandbox that denies unix sockets.
 # Output: local/preview-diff/shots/{base,new}/<page>-<width>.png.
