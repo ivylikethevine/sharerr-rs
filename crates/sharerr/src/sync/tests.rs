@@ -214,15 +214,14 @@ impl FakeQbit {
                     .url
                     .query_pairs()
                     .find(|(k, _)| k == "hash")
-                    .map(|(_, v)| v.into_owned())
-                    .unwrap_or_default();
+                    .map_or_default(|(_, v)| v.into_owned());
 
                 let state = state.lock().unwrap();
                 let files: Vec<Value> = state
                     .torrents
                     .iter()
                     .find(|t| t.hash == hash)
-                    .map(|t| {
+                    .map_or_default(|t| {
                         t.files
                             .iter()
                             .enumerate()
@@ -230,8 +229,7 @@ impl FakeQbit {
                                 json!({ "index": i, "name": name, "size": 1, "progress": 1.0 })
                             })
                             .collect()
-                    })
-                    .unwrap_or_default();
+                    });
                 ResponseTemplate::new(200).set_body_json(Value::Array(files))
             })
             .mount(server)
@@ -291,8 +289,7 @@ impl FakeQbit {
                     .url
                     .query_pairs()
                     .find(|(k, _)| k == "hash")
-                    .map(|(_, v)| v.into_owned())
-                    .unwrap_or_default();
+                    .map_or_default(|(_, v)| v.into_owned());
                 let state = state.lock().unwrap();
                 let url = match state.torrents.iter().find(|t| t.hash == hash) {
                     Some(t) if !t.data.is_empty() => FOREIGN_ANNOUNCE,
@@ -322,8 +319,7 @@ impl FakeQbit {
                     .url
                     .query_pairs()
                     .find(|(k, _)| k == "hash")
-                    .map(|(_, v)| v.into_owned())
-                    .unwrap_or_default();
+                    .map_or_default(|(_, v)| v.into_owned());
                 let state = state.lock().unwrap();
                 match state.torrents.iter().find(|t| t.hash == hash) {
                     Some(t) if !t.data.is_empty() => {

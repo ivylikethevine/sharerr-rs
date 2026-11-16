@@ -412,7 +412,7 @@ impl ReachWatch {
         if !fell {
             return None;
         }
-        let address = base.map(ToString::to_string).unwrap_or_default();
+        let address = base.map_or_default(ToString::to_string);
         Some(match outcome {
             ReachOutcome::Refused(reason) => {
                 format!("{address} stopped accepting connections ({reason})")

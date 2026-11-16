@@ -33,8 +33,7 @@ fn start_of_day_in(date: &str, zone: &TimeZone) -> Result<i64, String> {
 
 fn date_of_in(timestamp: i64, zone: &TimeZone) -> String {
     jiff::Timestamp::from_second(timestamp)
-        .map(|ts| ts.to_zoned(zone.clone()).date().to_string())
-        .unwrap_or_default()
+        .map_or_default(|ts| ts.to_zoned(zone.clone()).date().to_string())
 }
 
 #[cfg(test)]

@@ -445,7 +445,7 @@ fn facts(
         ratio,
         ratio_hint,
         visible_to: visible_to(item, peers, audience),
-        since: item.created_at.map(ago).unwrap_or_default(),
+        since: item.created_at.map_or_default(ago),
         info_hash: item.info_hash.clone(),
         // The *arr's own identifiers — the join key an operator greps its
         // logs for when a row here and an entry there disagree.
@@ -459,10 +459,7 @@ fn facts(
         ids: ids_summary(&item.ids),
         last_error: item.last_error.clone(),
         created_by_sharerr: item.created_by_sharerr,
-        since_absolute: item
-            .created_at
-            .map(super::peers::absolute)
-            .unwrap_or_default(),
+        since_absolute: item.created_at.map_or_default(super::peers::absolute),
         source: item.source.as_str(),
         file_id: item.file_id,
     }
@@ -1049,9 +1046,8 @@ async fn build_detail(
         ),
         title_reads_as: checked.as_ref().map(|c| c.parsed.summary()),
         title_problems: checked
-            .map(|c| c.problems.iter().map(|p| p.describe()).collect())
-            .unwrap_or_default(),
-        share_until: until.map(crate::localtime::date_of).unwrap_or_default(),
+            .map_or_default(|c| c.problems.iter().map(|p| p.describe()).collect()),
+        share_until: until.map_or_default(crate::localtime::date_of),
         share_ended: until.is_some_and(|until| until <= sharerr_core::endpoint::now_epoch()),
         // The torrent's own name always describes the file where it sits —
         // see `CLAUDE.md`'s first trap — so this and `release_title` are the
