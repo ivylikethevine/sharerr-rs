@@ -1306,8 +1306,7 @@ where
     let was = Option::<String>::deserialize(deserializer)
         .ok()
         .flatten()
-        .map(|value| format!(" (was {value:?})"))
-        .unwrap_or_default();
+        .map_or_default(|value| format!(" (was {value:?})"));
     Err(serde::de::Error::custom(format!(
         "tracker.backend has been removed{was}: sharerr's builtin tracker is now the \
          only tracker, and qBittorrent's embedded tracker is no longer used. Delete \

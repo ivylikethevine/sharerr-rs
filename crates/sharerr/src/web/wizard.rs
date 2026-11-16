@@ -87,11 +87,7 @@ async fn page(state: &WebState, step: WizardStep, saved: Option<String>) -> Wiza
         path_map,
 
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
-        tracker_port: config
-            .tracker
-            .port
-            .map(|p| p.to_string())
-            .unwrap_or_default(),
+        tracker_port: config.tracker.port.map_or_default(|p| p.to_string()),
         tracker_advertised_url: url_or_empty(config.tracker.advertised_url.as_ref()),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
     }

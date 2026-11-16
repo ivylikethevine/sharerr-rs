@@ -1485,8 +1485,7 @@ pub(super) async fn secrets_present(config: &Config) -> BTreeSet<String> {
         .await
         .ok()
         .and_then(std::result::Result::ok)
-        .map(|keys| keys.into_iter().collect())
-        .unwrap_or_default()
+        .map_or_default(|keys| keys.into_iter().collect())
 }
 
 /// Re-render the page with an error rather than redirecting.
@@ -1535,7 +1534,7 @@ pub(crate) fn trigger_rows(
 
 /// An unset URL renders as an empty field, not `None`.
 pub(super) fn url_or_empty(url: Option<&url::Url>) -> String {
-    url.map(url::Url::to_string).unwrap_or_default()
+    url.map_or_default(url::Url::to_string)
 }
 
 /// What gluetun last actually reported for one endpoint, or `None` when
@@ -1690,10 +1689,7 @@ pub(super) fn arr_section(
     Some(ArrSection {
         source: kind.as_str(),
         title: title_case(kind.as_str()),
-        url: config
-            .service(kind)
-            .map(|s| s.url.to_string())
-            .unwrap_or_default(),
+        url: config.service(kind).map_or_default(|s| s.url.to_string()),
         key_set: is_set(key),
         placeholder: url_placeholder(kind),
         docs_url: super::docs::for_source(kind).unwrap_or_default(),
@@ -1800,34 +1796,26 @@ async fn build_page(
         seeding_upload_limit_kib: config
             .seeding
             .upload_limit_kib
-            .map(|kib| kib.to_string())
-            .unwrap_or_default(),
+            .map_or_default(|kib| kib.to_string()),
         seeding_ratio_limit: config
             .seeding
             .ratio_limit
-            .map(|ratio| ratio.to_string())
-            .unwrap_or_default(),
+            .map_or_default(|ratio| ratio.to_string()),
         seeding_quiet_hours: config
             .seeding
             .quiet_hours
-            .map(|window| window.to_string())
-            .unwrap_or_default(),
+            .map_or_default(|window| window.to_string()),
         seeding_quiet_upload_limit_kib: config
             .seeding
             .quiet_upload_limit_kib
-            .map(|kib| kib.to_string())
-            .unwrap_or_default(),
+            .map_or_default(|kib| kib.to_string()),
         seeding_private: config.seeding.private,
         seeding_sidecars: config.seeding.sidecars,
         seeding_hybrid: config.seeding.hybrid,
         feed_magnet_links: config.feed.magnet_links,
 
         tracker_advertised_host: config.tracker.advertised_host.clone().unwrap_or_default(),
-        tracker_port: config
-            .tracker
-            .port
-            .map(|p| p.to_string())
-            .unwrap_or_default(),
+        tracker_port: config.tracker.port.map_or_default(|p| p.to_string()),
         tracker_advertised_url: url_or_empty(config.tracker.advertised_url.as_ref()),
         tracker_token_set: is_set(secret_keys::TRACKER_TOKEN),
         tracker_token_previous_set: is_set(secret_keys::TRACKER_TOKEN_PREVIOUS),

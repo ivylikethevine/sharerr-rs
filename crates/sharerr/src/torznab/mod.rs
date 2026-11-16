@@ -926,8 +926,7 @@ impl axum::extract::FromRequestParts<Arc<ServeState>> for Caller {
         // A query string too malformed to parse cannot be carrying a valid key,
         // so it is treated as an absent one rather than a different error.
         let apikey = axum::extract::Query::<Key>::try_from_uri(&parts.uri)
-            .map(|query| query.0.apikey)
-            .unwrap_or_default();
+            .map_or_default(|query| query.0.apikey);
 
         // The source address, when the server was built with connect-info —
         // observed for peer endpoint memory, never required: authentication

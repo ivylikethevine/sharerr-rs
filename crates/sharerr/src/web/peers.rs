@@ -608,11 +608,9 @@ async fn rows(
             let key_set = stored_secrets.contains(&secret_keys::peer_gossip_key(peer.id));
             let sharing = counts.as_ref().map(|counts| counts[index]);
             PeerRow {
-                friend_tag: peer
-                    .limits()
-                    .friend
-                    .map(|friend| format!("{}-{friend}", config.tag.to_ascii_lowercase()))
-                    .unwrap_or_default(),
+                friend_tag: peer.limits().friend.map_or_default(|friend| {
+                    format!("{}-{friend}", config.tag.to_ascii_lowercase())
+                }),
                 ..row(peer, endpoints, key_set, sharing)
             }
         })
@@ -660,16 +658,14 @@ fn row(
     let setup = setup_steps(peer, endpoints);
     PeerRow {
         sharing: sharing.map(|summary| summary.count.unsigned_abs() as usize),
-        sharing_size: sharing
-            .map(|summary| bytes_or_empty(summary.size))
-            .unwrap_or_default(),
+        sharing_size: sharing.map_or_default(|summary| bytes_or_empty(summary.size)),
         served: bytes_or_empty(peer.downloaded),
         shared_on: bytes_or_empty(peer.uploaded),
         id: peer.id,
         label: peer.label.clone(),
         scope: peer.scope.as_str(),
         scope_label: peer.scope.label(),
-        max_size_gib: peer.max_size_bytes.map(format_gib).unwrap_or_default(),
+        max_size_gib: peer.max_size_bytes.map_or_default(format_gib),
         max_height: peer.max_height.unwrap_or(0),
         friend_tag: String::new(),
         created: ago(peer.created_at),
@@ -680,9 +676,9 @@ fn row(
             // key but has never used it, so they have not finished setting up.
             None => "never".to_owned(),
         },
-        last_seen_absolute: peer.last_seen_at.map(absolute).unwrap_or_default(),
+        last_seen_absolute: peer.last_seen_at.map_or_default(absolute),
         revoked: peer.is_revoked(),
-        revoked_when: peer.revoked_at.map(ago).unwrap_or_default(),
+        revoked_when: peer.revoked_at.map_or_default(ago),
         // Truncated: this is a recogniser, not a copy source — the full key
         // travels peer-to-peer inside signed records, never through this page.
         pubkey_short: peer

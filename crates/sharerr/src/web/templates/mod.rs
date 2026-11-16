@@ -326,11 +326,7 @@ impl From<&sharerr_core::config::PathMapping> for PathRow {
         Self {
             arr: m.arr.display().to_string(),
             sharerr: m.sharerr.display().to_string(),
-            qbit: m
-                .qbit
-                .as_ref()
-                .map(|q| q.display().to_string())
-                .unwrap_or_default(),
+            qbit: m.qbit.as_ref().map_or_default(|q| q.display().to_string()),
         }
     }
 }

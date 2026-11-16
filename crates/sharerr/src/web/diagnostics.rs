@@ -607,8 +607,7 @@ fn describe(kind: MediaSource, config: &Config, outcome: &ArrOutcome) -> Service
         // actionable next to the address that was actually dialled.
         url: config
             .service(kind)
-            .map(|service| service.url.to_string())
-            .unwrap_or_default(),
+            .map_or_default(|service| service.url.to_string()),
     }
 }
 

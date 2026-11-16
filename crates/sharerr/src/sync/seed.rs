@@ -530,8 +530,7 @@ impl Seeder {
             Vec::new()
         } else {
             Torrent::read_from_bytes(&bytes)
-                .map(|exported| foreign_tiers(&exported, announce))
-                .unwrap_or_default()
+                .map_or_default(|exported| foreign_tiers(&exported, announce))
         };
         let (rewritten, actual) = match outcome {
             // Already correct: a prior `adopt` already verified and wrote this
@@ -807,8 +806,7 @@ impl Seeder {
             .with_context(|| format!("reading {}", path.display()))?
         {
             Some(data) => Torrent::read_from_bytes(&data)
-                .map(|cached| cached.announce_tiers().into_iter().flatten().collect())
-                .unwrap_or_default(),
+                .map_or_default(|cached| cached.announce_tiers().into_iter().flatten().collect()),
             None => Vec::new(),
         };
         Ok(Some(

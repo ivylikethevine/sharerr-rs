@@ -340,8 +340,7 @@ impl TorrentClient for TransmissionClient {
             .rpc("torrent-get", json!({ "ids": [hash], "fields": ["files"] }))
             .await?;
         let files = first_torrent::<FilesTorrent>("torrent-get files", arguments)?
-            .map(|torrent| torrent.files)
-            .unwrap_or_default();
+            .map_or_default(|torrent| torrent.files);
 
         Ok(files
             .into_iter()
@@ -454,8 +453,7 @@ impl TorrentClient for TransmissionClient {
             )
             .await?;
         let existing = first_torrent::<TrackerListTorrent>("torrent-get", arguments)?
-            .map(|t| t.tracker_list)
-            .unwrap_or_default();
+            .map_or_default(|t| t.tracker_list);
 
         // The new tiers go first, so the endpoint sharerr knows is live is
         // tried before whatever the torrent already carried — and the existing

@@ -162,8 +162,7 @@ fn entries_from(base: &str, catalog: Catalog) -> Vec<CatalogEntry> {
     let token = catalog
         .token
         .as_deref()
-        .map(|token| format!("?token={}", encode_component(token)))
-        .unwrap_or_default();
+        .map_or_default(|token| format!("?token={}", encode_component(token)));
     catalog
         .entries
         .into_iter()
