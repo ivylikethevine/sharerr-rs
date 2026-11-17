@@ -145,7 +145,9 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 - [ ] preview `SETUP_STEPS`, `title_case`, `arr_section`, `scope_options`
 - [x] openapi one `SecuritySchemes`, inline `doc_to_json`, `random_bytes`, doc count
 - [x] serve mount decision once; `degraded` bool (`serve.rs:108`, `:159`, `:61`)
-- [x] `PrivateCaller` extractor (`serve.rs:408`, `:449`, `:494`)
+- [x] Not applied: a `PrivateCaller` extractor (`serve.rs:408`, `:449`, `:494`).
+      `refuse_public` stays a plain function, since about six tests call those
+      handlers directly.
 - [x] `Config::advertised_base()`, `checks::dial_target`
 
 ## Web auth and peers
@@ -217,3 +219,48 @@ Quality only: no behaviour change, no new precondition. Each group ends with
       would mean editing two workflows to save one `awk` and one `sed`
 - [ ] docs point at the owner for groups, roster, floor, defaults
 - [ ] mesh unused-variable line, `docker compose port`, integration jq filter
+
+## Decided while applying
+
+- Early returns use the `ok_or_return!` macro, not an `Early` newtype: an
+  extractor would change which response wins.
+- `sharerr-deluge` keeps its own connection; only Transmission and rTorrent use
+  `RpcConnection`.
+- `persist`'s `create_dir_all` in the vault stays; a direct-call test pins it.
+- A handler returning `Result<_, Response>` fails clippy's `result_large_err`,
+  so `api.rs` has the small `Unavailable` error type.
+- Two log-only changes are accepted: rTorrent's `add` now also emits
+  `apply_limits`' info line, and `metrics::render` skips the whole last-run
+  block when `finished_at` is `None`, which `gather` already filters out.
+
+## Notes for the open items
+
+Line numbers predate the applied items; grep for the names.
+
+- **Testkit mounts** (the discovery and adapter tests): only stubs with no
+  `.expect` or body matcher fit `mount_json`, `mount_text` and `mount_ok`;
+  check each.
+- **Doctor tests:** move the helpers to the top, add
+  `qbit_check(&config, &vault, fix)` as a twin of `arr_check`, and make
+  `qbit_config` take a `&Url`.
+- **Preview:** `title_case` and `arr_section` need wider visibility.
+- **`Store::fail_after(n)` counts queries**, so a helper that changes a test's
+  query count shifts its budget: check that the assertion still means the same
+  thing, then adjust.
+- **A failing `the_committed_document_is_current` is read before the document
+  is regenerated.** It caught a constant inserted between a route's doc comment
+  and `#[utoipa::path]`, which removed the route's OpenAPI summary; the
+  document stays byte-identical through this work.
+- **CI, scripts and docker:**
+  - In scope: the `ci`, `coverage`, `docker`, `docker-image`, `integration`
+    and `prepare` workflows, `check_tool_versions.local.sh`,
+    `validate_compose.sh` and `actions/rust-toolchain`. The other files under
+    `.github` are shared copies and are not edited here.
+  - No new step or gate on a release, and actions stay SHA-pinned.
+  - Hadolint: `found` means non-empty output there but a non-zero exit for
+    semver; confirm they match before sharing `advisory-check`.
+  - YAML anchors are new to these workflows: run
+    `scripts/check.sh zizmor actionlint workflows`, since `lint_workflows.sh`
+    reads a job's first step through yq and must follow the alias.
+  - The docker test runners need a Docker daemon; without one only shellcheck
+    and `validate_compose.sh` verify them.
