@@ -40,6 +40,7 @@ CLAUDE.local.md
 # values, so it stays tracked.
 .env
 .env.*
+*.env
 !.env.example
 .envrc
 .direnv/
@@ -82,6 +83,15 @@ __pycache__/
 # A local Jekyll build of the docs site; CI builds the real one.
 _site/
 .jekyll-cache/
+# `nix build`'s links to what it built.
+/result
+/result-*
+# OpenTofu and Terraform working state, which can hold addresses, key names
+# and secrets.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
 # Local runtime state: vault, sqlite db, generated torrents.
 /data
 /config/sharerr.toml
@@ -102,12 +112,7 @@ _site/
 # and that must never land on the tracked template.
 /docker/state-mesh
 
-# Terraform working state for the hosted-lighthouse modules under
-# docker/deploy/lighthouse/terraform. State can hold addresses and key names;
-# keep it with the rest of your homelab's, not here.
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
+# The hosted-lighthouse modules under docker/deploy/lighthouse/terraform: their
+# provider locks and generated files stay with your homelab's state, not here.
 .terraform.lock.hcl
 docker/deploy/lighthouse/terraform/fly/.generated/

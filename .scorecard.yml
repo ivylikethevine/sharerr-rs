@@ -3,17 +3,6 @@
 # they never change the score, so a finding this repository will not fix reads
 # as decided rather than unnoticed. Annotate only a finding a run reports; one
 # that matches nothing misleads.
-#
-# Two checks to read against a run's findings before annotating them:
-#   - pinned-dependencies: .github/actions/setup-tool/install.sh verifies each
-#     pinned download against the sha256 in tools.txt before it runs, but
-#     Scorecard's downloadThenRun probe reads the workflow text, not the
-#     script, so it may still not credit the hash check.
-#   - fuzzing: a genuine gap, not a not-applicable one. sharerr-torrent,
-#     sharerr-rtorrent's XML-RPC parsing and sharerr-probe's media-file parsing
-#     are untrusted-input surfaces cargo-fuzz could target. Left unannotated
-#     until it is fixed or decided against, recorded here or in
-#     docs/COMPATIBILITY.md.
 annotations:
   - checks:
       - contributors

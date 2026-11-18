@@ -24,12 +24,10 @@ Link any relevant issues or discussions here.
 
 If one of these cannot be completed, give a justification.
 
-- [ ] The verification loop in [docs/CONTRIBUTING.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#the-verification-loop) passes (`scripts/check.sh`; a check it reports as skipped has not passed)
-- [ ] MSRV 1.98 still holds (CI's `msrv` job checks it; locally, `docker build -f docker/Dockerfile .` is the equivalent, since a newer local toolchain won't catch a breach)
-- [ ] Tier-1 tests stay hermetic: no network, no containers, no database
-- [ ] This adds or extends a test that would have failed without the change, if it's a new feature or a bug fix ([test policy](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#test-policy))
-- [ ] No secret reaches `sharerr.toml` ([settings reference](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/SETTINGS.md#vault-secrets))
-- [ ] Affected docs are updated ([which doc changes with what](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md#which-doc-changes-with-what))
+- [ ] The checks in [docs/CONTRIBUTING.md](https://github.com/ivylikethevine/sharerr-rs/blob/main/docs/CONTRIBUTING.md) pass locally, and the change keeps the rules it sets
+- [ ] A new feature or a bug fix comes with a test
+- [ ] Any disabled linter or code-style rule is explained
+- [ ] Affected docs are updated
 
 ## AI disclosure
 
