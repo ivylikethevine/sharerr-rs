@@ -1544,7 +1544,8 @@ main > p:not([class]), .panel > p:not([class]) { max-width: 70ch; }
   .quicknav--sticky { margin-inline: calc(-1 * var(--sp-4)); padding-inline: var(--sp-4); }
   .bar { padding: var(--sp-3) var(--sp-4); }
   h1 { font-size: var(--text-xl); }
-  .bar nav :is(a, button) svg { display: none; }
+  /* The toggle is glyphs only, so it keeps them. */
+  .bar nav :is(a, button):not(.theme-toggle) svg { display: none; }
   .foot { justify-content: flex-start; }
 }
 

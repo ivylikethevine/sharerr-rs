@@ -33,7 +33,7 @@ Quality only: no behaviour change, no new precondition. Each group ends with
       and `ARR_API_KEY` literals in `S/checks.rs`, doctor tests
 - [x] testkit: delete `movie_json`; `series_json`, `episode_json` free functions;
       use them and `system_status_json` in `crates/sharerr-arr/tests/discovery.rs`
-- [ ] discovery tests: local `discover`, `mount_series_files`, `by_file`
+- [x] discovery tests: local `discover`, `mount_series_files`, `by_file`
 - [x] `crates/sharerr/tests/cli.rs`: `closed_port` for `free_port`, test calls
       `stop_gracefully`, merge `impl Serving`, `write_sync_config`, `MASTER_KEY`,
       `malformed_config`
@@ -65,7 +65,7 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 - [x] misplaced and stale docs: `config.rs:979`, `peers.rs:257`, `:639`,
       `db.rs:1284`, `:372`, `endpoints.rs:90`, `:696`; one-liners: `endpoint.rs:81`,
       `db.rs:726`, `users.rs:290`, `MAX_SAMPLES`, `MAX_HISTORY`, `literal_url`
-- [ ] endpoints tests `sight`, `sightings`; db tests `seeded`; `upgrade.rs` `run`
+- [x] endpoints tests `sight`, `sightings`; db tests `seeded`; `upgrade.rs` `run`
 - [x] `Store::active_peers()` for about nine "not revoked" filters;
       `diagnostics::active_friends` body goes
 
@@ -84,7 +84,7 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 - [x] qbit: drop `tag` parameter and dead guard (`torrents.rs:28`, `:255`)
 - [x] `AnnounceSet` private fields and `primary()`; collect at `tracker.rs:134`
 - [x] `hash_pieces` reads `stream` directly (`factory.rs:275`)
-- [ ] adapter tests: `respond_all`, testkit mounts, sharerr-client default-method
+- [x] adapter tests: `respond_all`, testkit mounts, sharerr-client default-method
       tests, `body_json`, `calls` in testkit, `urls`
 - [x] misplaced docs: sharerr-client's `reported` test helper, `sharerr-qbit/src/adapter.rs:22`
 
@@ -123,7 +123,7 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 - [x] one `SeedOutcome` match; inline `missing` (`S/sync/mod.rs:1044`)
 - [x] `Seeder.seeding: SeedingConfig` (`S/sync/mod.rs:424`)
 - [x] `LimitsMemo` under one mutex (`S/sync/mod.rs:182`)
-- [ ] seed tests `built`, `paths_for`, `announce`; sync tests shared `Seeder`
+- [x] seed tests `built`, `paths_for`, `announce`; sync tests shared `Seeder`
 - [x] tracker tests `SharedItem { .., ..shared_item() }`
 - [x] torznab `groups.contains`, `is_illegal_control` (`S/torznab/mod.rs:141`, `:169`)
 - [x] small: `library.rs:398`, `:387`, `pathsuggest.rs:120`, `tracker.rs:590`,
@@ -132,7 +132,7 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 ## Commands, CLI, API
 
 - [x] api handlers return `Result<Json<T>, Response>`; `with_config` (`S/api.rs:108`, `:238`)
-- [ ] doctor tests: helpers on top, `qbit_check` (the three redundant tests are deleted)
+- [x] doctor tests: helpers on top, `qbit_check` (the three redundant tests are deleted)
 - [x] Not applied: doctor natively async. Keeping the 500 on a panic still needs a
       spawn, so `S/api.rs:289` barely shrinks while async spreads through the vault,
       library and path checks and their tests.
@@ -140,9 +140,9 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 - [x] doctor gluetun loop, drop the dead arm (`doctor/mod.rs:226`, `:877`)
 - [x] `checks(config, error, &DoctorArgs)` (`doctor/mod.rs:157`)
 - [x] `check_vault` uses `credential`; no `noun` compare; `credential_name` (`:326`, `:678`)
-- [ ] serve tests `drive_background_until`
+- [x] serve tests `drive_background_until`
 - [x] preview `mock` route helper, keeping `page`'s inline error (`preview.rs:44`)
-- [ ] preview `SETUP_STEPS`, `title_case`, `arr_section`, `scope_options`
+- [x] preview `SETUP_STEPS`, `title_case`, `arr_section`, `scope_options`
 - [x] openapi one `SecuritySchemes`, inline `doc_to_json`, `random_bytes`, doc count
 - [x] serve mount decision once; `degraded` bool (`serve.rs:108`, `:159`, `:61`)
 - [x] Not applied: a `PrivateCaller` extractor (`serve.rs:408`, `:449`, `:494`).
@@ -204,11 +204,13 @@ Quality only: no behaviour change, no new precondition. Each group ends with
 - [x] Not applied: `scripts/lib_docker_tests.sh`, `poll_until`, one client `case`,
       `check_client_announces`, `check_indexer`. Only `remove_state` is identical across
       the runners, and nothing here can run them.
-- [ ] `docker/compose.stack-base.yml` with `extends`; `validate_compose.sh` skip
-- [ ] docs: TESTING owns tiers, docker/README owns stacks (the `--test e2e` commands
+- [x] `docker/compose.stack-base.yml` with `extends`; `validate_compose.sh` skip;
+      checked with a `docker compose config` diff (mount order only)
+- [x] docs: TESTING owns tiers, docker/README owns stacks (the `--test e2e` commands
       are fixed)
-- [ ] `check_hadolint`; `.github/actions/advisory-check`
-- [ ] path-filter list once; YAML anchors in `docker.yml` for DNS step and egress
+- [x] `check_hadolint`; `.github/actions/advisory-check`
+- [x] path-filter list once (prepare.yml's `not-code` anchor); YAML anchors in
+      `docker.yml` for DNS step and egress
 - [x] `.dockerignore` adds docs, scripts, scratch, local, coverage-html, editor dirs
 - [ ] workflow and Dockerfile headers cut to the why; stale statements fixed
 - [x] Not applied: delete `.tool-versions`. Nothing in the repo reads it, but mise
@@ -217,8 +219,8 @@ Quality only: no behaviour change, no new precondition. Each group ends with
       not applied: one config template, which needs a run of the mesh script
 - [x] `_cov_report`; not applied: `check_coverage-lines`, `--coverage-floor`, which
       would mean editing two workflows to save one `awk` and one `sed`
-- [ ] docs point at the owner for groups, roster, floor, defaults
-- [ ] mesh unused-variable line, `docker compose port`, integration jq filter
+- [x] docs point at the owner for groups, roster, floor, defaults
+- [x] mesh unused-variable line, `docker compose port`, integration jq filter
 
 ## Decided while applying
 

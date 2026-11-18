@@ -1027,24 +1027,8 @@ mod tests {
             "setup: no failures recorded yet"
         );
 
-        // `background` never returns and its future is not `Send` (a
-        // `tracing` macro holds a non-`Send` value across an `.await`
-        // upstream in `ensure_ready`), so it is raced on the current task via
-        // `select!` — exactly how `run` itself drives it — rather than
-        // spawned. The other arm polls for the effect `background` is
-        // expected to have had rather than yielding a fixed number of times,
-        // since a fixed count is exactly the kind of thing that gets flaky
-        // under a loaded test binary; the 5s ceiling is only ever hit if the
-        // wiring is actually broken.
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! {
-                () = background(Arc::clone(&state)) => {}
-                () = async {
-                    while state.sync_retry_delay(interval) >= interval {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
+        drive_background_until(&state, Duration::from_secs(5), || {
+            state.sync_retry_delay(interval) < interval
         })
         .await;
 
@@ -1054,8 +1038,35 @@ mod tests {
         );
     }
 
-    /// `background` with periodic sync off, raced the same way as the test
-    /// above for `window`; whether a pass ran shows as a recorded failure.
+    /// Run `background` until `done` holds or `window` passes.
+    ///
+    /// `background` never returns and its future is not `Send` (a `tracing`
+    /// macro holds a non-`Send` value across an `.await` upstream in
+    /// `ensure_ready`), so it is raced on the current task via `select!`,
+    /// the way `run` drives it, rather than spawned. The other arm polls for
+    /// the effect rather than yielding a fixed number of times, which gets
+    /// flaky under a loaded test binary; `window` is only reached when the
+    /// wiring is broken or nothing is expected to happen.
+    async fn drive_background_until(
+        state: &Arc<ServeState>,
+        window: Duration,
+        done: impl Fn() -> bool,
+    ) {
+        let _ = tokio::time::timeout(window, async {
+            tokio::select! {
+                () = background(Arc::clone(state)) => {}
+                () = async {
+                    while !done() {
+                        tokio::task::yield_now().await;
+                    }
+                } => {}
+            }
+        })
+        .await;
+    }
+
+    /// `background` with periodic sync off for `window`; whether a pass ran
+    /// shows as a recorded failure.
     async fn pass_ran_with_sync_disabled(request: bool, window: Duration) -> bool {
         // `fixtures::ready`'s syncer with `[sync] enabled = false`, built in
         // place: `replace_config` would drop the syncer, and no master key is
@@ -1071,15 +1082,8 @@ mod tests {
         if request {
             state.request_pass();
         }
-        let _ = tokio::time::timeout(window, async {
-            tokio::select! {
-                () = background(Arc::clone(&state)) => {}
-                () = async {
-                    while state.sync_retry_delay(interval) >= interval {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
+        drive_background_until(&state, window, || {
+            state.sync_retry_delay(interval) < interval
         })
         .await;
         state.sync_retry_delay(interval) < interval
@@ -1443,15 +1447,8 @@ mod tests {
             "setup: a failure must be recorded first"
         );
 
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! {
-                () = background(Arc::clone(&state)) => {}
-                () = async {
-                    while state.sync_retry_delay(interval) < interval {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
+        drive_background_until(&state, Duration::from_secs(5), || {
+            state.sync_retry_delay(interval) >= interval
         })
         .await;
 

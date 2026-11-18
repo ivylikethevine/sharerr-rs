@@ -48,6 +48,11 @@ for f in "${files[@]}"; do
     echo "skip $f (fragment; checked via the stacks that extend it)"
     continue
     ;;
+  # The services the test stacks share; each stack `extends` it.
+  docker/compose.stack-base.yml)
+    echo "skip $f (fragment; checked via the stacks that extend it)"
+    continue
+    ;;
   # An override layered on the sibling compose.yaml, never run alone.
   docker/deploy/lighthouse/compose.tls.yaml)
     args=(-f "${f%/*}/compose.yaml" -f "$f")

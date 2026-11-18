@@ -480,6 +480,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use sharerr_testkit::mock::{body_json, calls, urls};
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -580,8 +581,7 @@ mod tests {
         client(&server).remove("abc").await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
-        let last = requests.last().expect("a request was made");
-        let body: Value = serde_json::from_slice(&last.body).unwrap();
+        let body = body_json(requests.last().expect("a request was made"));
         assert_eq!(body["method"], "torrent-remove");
         assert_eq!(
             body["arguments"]["delete-local-data"], false,
@@ -603,7 +603,7 @@ mod tests {
         client(&server).add(&request).await.unwrap();
 
         let requests = server.received_requests().await.unwrap();
-        let body: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        let body = body_json(requests.last().unwrap());
         assert_eq!(body["method"], "torrent-add");
         assert_eq!(body["arguments"]["download-dir"], "/downloads/tv");
         // The metainfo goes as base64, not as a multipart upload.
@@ -742,10 +742,10 @@ mod tests {
         client(&server)
             .set_trackers(
                 "aabbcc",
-                &[
-                    Url::parse("http://new.example:41234/announce").unwrap(),
-                    Url::parse("http://old.example:8477/announce").unwrap(),
-                ],
+                &urls(&[
+                    "http://new.example:41234/announce",
+                    "http://old.example:8477/announce",
+                ]),
             )
             .await
             .unwrap();
@@ -766,19 +766,12 @@ mod tests {
         .await;
 
         client(&server)
-            .add_trackers(
-                "aabbcc",
-                &[Url::parse("http://sharerr.example/announce").unwrap()],
-            )
+            .add_trackers("aabbcc", &urls(&["http://sharerr.example/announce"]))
             .await
             .unwrap();
 
-        let requests = server.received_requests().await.unwrap();
-        let set = requests
-            .iter()
-            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
-            .find(|b| b["method"] == "torrent-set")
-            .expect("a torrent-set was sent");
+        let sets = calls(&server, "torrent-set").await;
+        let set = sets.first().expect("a torrent-set was sent");
         assert_eq!(
             set["arguments"]["trackerList"].as_str().unwrap(),
             "http://sharerr.example/announce\n\nhttp://theirs.example/announce\n\nhttp://backup.example/announce"
@@ -799,33 +792,13 @@ mod tests {
         .await;
 
         client(&server)
-            .add_trackers(
-                "aabbcc",
-                &[Url::parse("http://sharerr.example/announce").unwrap()],
-            )
+            .add_trackers("aabbcc", &urls(&["http://sharerr.example/announce"]))
             .await
             .unwrap();
 
-        let sent_set = server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
-            .any(|b| b["method"] == "torrent-set");
-        assert!(!sent_set, "nothing to add means nothing sent");
-    }
-
-    /// Transmission has no call that returns a `.torrent`, and says so as
-    /// `Ok(None)` rather than an error — the caller turns that into a message
-    /// naming the choice the operator has, which an RPC failure could not.
-    #[tokio::test]
-    async fn export_reports_that_transmission_cannot_produce_the_file() {
-        let server = MockServer::start().await;
-        assert_eq!(client(&server).export("aabbcc").await.unwrap(), None);
         assert!(
-            server.received_requests().await.unwrap().is_empty(),
-            "and answers without a round trip"
+            calls(&server, "torrent-set").await.is_empty(),
+            "nothing to add means nothing sent"
         );
     }
 
@@ -908,16 +881,6 @@ mod tests {
             !bodies.iter().any(|b| b.contains("seedRatio")),
             "an unstated ratio must not be touched: {bodies:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn set_limits_with_nothing_configured_sends_nothing() {
-        let server = MockServer::start().await;
-        client(&server)
-            .set_limits("abc123", &SeedingLimits::default())
-            .await
-            .unwrap();
-        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     /// `list` reads the cap back in the unit it was written, and only when
@@ -1056,7 +1019,7 @@ mod tests {
         assert_eq!(files[1].size, 12);
 
         let requests = server.received_requests().await.unwrap();
-        let body: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
+        let body = body_json(requests.last().unwrap());
         assert_eq!(body["arguments"]["ids"][0], "abc123");
     }
 

@@ -29,7 +29,8 @@
 #   quick lint                               fmt, deny, shellcheck, compose (needs
 #                                            docker), terraform, zizmor, actionlint,
 #                                            workflows, links, typos, markdownlint,
-#                                            prettier, gitleaks
+#                                            prettier, gitleaks; hadolint (in no
+#                                            group: advisory)
 #   clippy + tests                           clippy, test, doc (rustdoc -D warnings);
 #                                            on a pull request, coverage-run and
 #                                            doctest (in no group: test holds it)
@@ -45,8 +46,8 @@
 #                                            coverage-html and coverage-summary
 #                                            render the same profile
 #
-# Not here, because they have no local equivalent: CI's dependency review (a
-# PR-diff API) and quick lint's advisory hadolint step.
+# Not here, because it has no local equivalent: CI's dependency review (a
+# PR-diff API).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -79,7 +80,7 @@ lint=("${fast[@]}" clippy doc deny terraform gitleaks osv)
 all=("${lint[@]}" test msrv coverage)
 
 # Every tools.txt row some check below runs, for --install.
-pinned=(shellcheck lychee typos zizmor actionlint yq cargo-deny gitleaks terraform cargo-llvm-cov cargo-semver-checks cargo-mutants)
+pinned=(shellcheck lychee typos zizmor actionlint yq cargo-deny gitleaks terraform hadolint cargo-llvm-cov cargo-semver-checks cargo-mutants)
 
 in_ci() { [ "${GITHUB_ACTIONS:-}" = true ]; }
 
@@ -225,6 +226,15 @@ check_mutants() {
   return "$rc"
 }
 
+# The Dockerfile's lint, advisory (ci.yml's quick lint reports it without
+# failing): DL3008 and its neighbours are about a Debian mirror's churn, not
+# a defect here. `.hadolint.yaml` gives a reason per silenced rule; any other
+# finding exits non-zero.
+check_hadolint() {
+  _need hadolint || return
+  hadolint -c .hadolint.yaml docker/Dockerfile
+}
+
 # Every tracked shell script, composite-action helpers included, rather than
 # a hand-kept list.
 check_shellcheck() {
@@ -318,9 +328,11 @@ check_osv() {
   osv-scanner scan source --recursive .
 }
 
+# No incremental cache: the instrumented tree is rebuilt whole, never edited
+# in a loop, so the cache would only take disk.
 check_coverage-run() {
   _need cargo-llvm-cov || return
-  cargo llvm-cov --workspace --all-features --locked --no-report
+  CARGO_INCREMENTAL=0 cargo llvm-cov --workspace --all-features --locked --no-report
 }
 
 # The three readers of the profile coverage-run left behind; none reruns

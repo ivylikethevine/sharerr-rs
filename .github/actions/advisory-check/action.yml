@@ -1,0 +1,81 @@
+name: Advisory check
+# One never-blocking check: install its tool, run `scripts/check.sh <check>`,
+# and report through advisory-note either way it can go wrong. A failed
+# install and a non-zero exit (a finding) each become a ::warning plus a step
+# summary; neither fails the job. The caller keeps its own `if:`.
+description: Run a scripts/check.sh check as an advisory, never-blocking step
+
+inputs:
+  tool:
+    description: the setup-tools name of the tool the check runs
+    required: true
+  check:
+    description: the scripts/check.sh check to run
+    required: true
+  title:
+    description: the tool's name in annotations and summary headings
+    required: true
+  subject:
+    description: what the check examines, for the install-failure note ("the Dockerfile")
+    required: true
+  install-warning:
+    description: the ::warning body when the install fails
+    required: true
+  found-warning:
+    description: the ::warning body when the check finds something
+    required: true
+  found-body:
+    description: the summary sentence(s) under a finding
+    required: true
+  summary-lines:
+    description: how many lines of the report the step summary keeps
+    required: false
+    default: "80"
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      continue-on-error: true
+      uses: ./.github/actions/setup-tools
+      with:
+        tools: ${{ inputs.tool }}
+
+    - if: steps.install.outcome == 'failure'
+      uses: ./.github/actions/advisory-note
+      with:
+        title: ${{ inputs.title }}
+        warning-body: ${{ inputs.install-warning }}
+        heading: ${{ inputs.title }} did not run
+        body: >-
+          Advisory only: this check never blocks a merge. The install step
+          failed, so this run says nothing about ${{ inputs.subject }} either way.
+
+    - id: run
+      if: steps.install.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        CHECK: ${{ inputs.check }}
+        LINES: ${{ inputs.summary-lines }}
+      run: |
+        set -uo pipefail
+        scripts/check.sh "$CHECK" >"$RUNNER_TEMP/$CHECK.out" 2>&1
+        status=$?
+        cat "$RUNNER_TEMP/$CHECK.out"
+        if [ "$status" -ne 0 ]; then
+          sed -n "1,${LINES}p" "$RUNNER_TEMP/$CHECK.out" >"$RUNNER_TEMP/$CHECK-summary.out"
+          echo "found=1" >>"$GITHUB_OUTPUT"
+        else
+          echo "found=0" >>"$GITHUB_OUTPUT"
+        fi
+        exit "$status"
+
+    - if: steps.run.outputs.found == '1'
+      uses: ./.github/actions/advisory-note
+      with:
+        title: ${{ inputs.title }}
+        warning-body: ${{ inputs.found-warning }}
+        heading: ${{ inputs.title }} found something
+        body: ${{ inputs.found-body }}
+        report-file: ${{ runner.temp }}/${{ inputs.check }}-summary.out

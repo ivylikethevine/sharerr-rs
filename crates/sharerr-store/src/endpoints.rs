@@ -331,48 +331,43 @@ mod tests {
         (store, peer.id)
     }
 
-    #[tokio::test]
-    async fn sightings_are_recorded_newest_first_and_deduplicated() {
-        let (store, peer) = store_with_peer().await;
+    /// Records one sighting of `addr` by `peer`.
+    async fn sight(
+        store: &Store,
+        peer: i64,
+        kind: EndpointKind,
+        addr: &str,
+        observed_at: Option<i64>,
+        via: ObservedVia,
+    ) {
+        store
+            .record_peer_endpoint(peer, kind, addr, observed_at, via)
+            .await
+            .unwrap();
+    }
 
+    /// Every recorded sighting of `peer`, newest first within each kind.
+    async fn sightings(store: &Store, peer: i64) -> Vec<PeerEndpoint> {
         store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:51413",
-                Some(100),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.9:51413",
-                Some(200),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-        // The same address again, later: refreshed, not duplicated.
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:51413",
-                Some(300),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-
-        let endpoints = store
             .peer_endpoints_for(&[peer])
             .await
             .unwrap()
             .remove(&peer)
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn sightings_are_recorded_newest_first_and_deduplicated() {
+        let (store, peer) = store_with_peer().await;
+
+        let api = EndpointKind::Api;
+        let direct = ObservedVia::Direct;
+        sight(&store, peer, api, "203.0.113.5:51413", Some(100), direct).await;
+        sight(&store, peer, api, "203.0.113.9:51413", Some(200), direct).await;
+        // The same address again, later: refreshed, not duplicated.
+        sight(&store, peer, api, "203.0.113.5:51413", Some(300), direct).await;
+
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(
             endpoints
                 .iter()
@@ -387,33 +382,27 @@ mod tests {
     async fn an_older_sighting_does_not_overwrite_a_newer_one() {
         let (store, peer) = store_with_peer().await;
 
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(500),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(100),
-                ObservedVia::Gossip,
-            )
-            .await
-            .unwrap();
+        let api = EndpointKind::Api;
+        sight(
+            &store,
+            peer,
+            api,
+            "203.0.113.5:1",
+            Some(500),
+            ObservedVia::Direct,
+        )
+        .await;
+        sight(
+            &store,
+            peer,
+            api,
+            "203.0.113.5:1",
+            Some(100),
+            ObservedVia::Gossip,
+        )
+        .await;
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(endpoints[0].observed_at, 500);
         assert_eq!(endpoints[0].via, ObservedVia::Direct);
     }
@@ -428,33 +417,26 @@ mod tests {
     async fn a_restored_sighting_with_no_timestamp_never_overwrites_an_existing_row() {
         let (store, peer) = store_with_peer().await;
 
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(100),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                None,
-                ObservedVia::Restored,
-            )
-            .await
-            .unwrap();
+        sight(
+            &store,
+            peer,
+            EndpointKind::Api,
+            "203.0.113.5:1",
+            Some(100),
+            ObservedVia::Direct,
+        )
+        .await;
+        sight(
+            &store,
+            peer,
+            EndpointKind::Api,
+            "203.0.113.5:1",
+            None,
+            ObservedVia::Restored,
+        )
+        .await;
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(endpoints[0].observed_at, 100);
         assert_eq!(
             endpoints[0].via,
@@ -469,23 +451,17 @@ mod tests {
     async fn a_restored_sighting_with_no_timestamp_still_records_a_new_address() {
         let (store, peer) = store_with_peer().await;
 
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                None,
-                ObservedVia::Restored,
-            )
-            .await
-            .unwrap();
+        sight(
+            &store,
+            peer,
+            EndpointKind::Api,
+            "203.0.113.5:1",
+            None,
+            ObservedVia::Restored,
+        )
+        .await;
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].addr, "203.0.113.5:1");
         assert_eq!(endpoints[0].via, ObservedVia::Restored);
@@ -499,23 +475,10 @@ mod tests {
         let (store, peer) = store_with_peer().await;
         let far_future = now_epoch() + MAX_FUTURE_SKEW_SECS + 3600;
 
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(far_future),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
+        let (api, direct) = (EndpointKind::Api, ObservedVia::Direct);
+        sight(&store, peer, api, "203.0.113.5:1", Some(far_future), direct).await;
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert!(
             endpoints[0].observed_at < far_future,
             "expected the timestamp to be clamped, got {}",
@@ -530,33 +493,27 @@ mod tests {
     async fn kinds_are_recorded_separately() {
         let (store, peer) = store_with_peer().await;
 
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:8477",
-                Some(100),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Client,
-                "198.51.100.7:6881",
-                Some(100),
-                ObservedVia::Gossip,
-            )
-            .await
-            .unwrap();
+        let (api, client) = (EndpointKind::Api, EndpointKind::Client);
+        sight(
+            &store,
+            peer,
+            api,
+            "203.0.113.5:8477",
+            Some(100),
+            ObservedVia::Direct,
+        )
+        .await;
+        sight(
+            &store,
+            peer,
+            client,
+            "198.51.100.7:6881",
+            Some(100),
+            ObservedVia::Gossip,
+        )
+        .await;
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(endpoints.len(), 2);
         assert!(endpoints.iter().any(|e| e.kind == EndpointKind::Api));
         assert!(endpoints.iter().any(|e| e.kind == EndpointKind::Client));
@@ -567,24 +524,19 @@ mod tests {
         let (store, peer) = store_with_peer().await;
 
         for i in 0..20i64 {
-            store
-                .record_peer_endpoint(
-                    peer,
-                    EndpointKind::Api,
-                    &format!("203.0.113.5:{}", 1000 + i),
-                    Some(i),
-                    ObservedVia::Direct,
-                )
-                .await
-                .unwrap();
+            let addr = format!("203.0.113.5:{}", 1000 + i);
+            sight(
+                &store,
+                peer,
+                EndpointKind::Api,
+                &addr,
+                Some(i),
+                ObservedVia::Direct,
+            )
+            .await;
         }
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(
             endpoints.len(),
             sharerr_core::config::DEFAULT_ENDPOINT_HISTORY as usize
@@ -601,24 +553,19 @@ mod tests {
         });
 
         for i in 0..6i64 {
-            store
-                .record_peer_endpoint(
-                    peer,
-                    EndpointKind::Api,
-                    &format!("203.0.113.5:{}", 1000 + i),
-                    Some(i),
-                    ObservedVia::Direct,
-                )
-                .await
-                .unwrap();
+            let addr = format!("203.0.113.5:{}", 1000 + i);
+            sight(
+                &store,
+                peer,
+                EndpointKind::Api,
+                &addr,
+                Some(i),
+                ObservedVia::Direct,
+            )
+            .await;
         }
 
-        let endpoints = store
-            .peer_endpoints_for(&[peer])
-            .await
-            .unwrap()
-            .remove(&peer)
-            .unwrap_or_default();
+        let endpoints = sightings(&store, peer).await;
         assert_eq!(endpoints.len(), 2);
         assert_eq!(endpoints[0].observed_at, 5);
     }
@@ -656,16 +603,15 @@ mod tests {
     #[tokio::test]
     async fn deleting_a_peer_takes_their_endpoint_history_with_them() {
         let (store, peer) = store_with_peer().await;
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(100),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
+        sight(
+            &store,
+            peer,
+            EndpointKind::Api,
+            "203.0.113.5:1",
+            Some(100),
+            ObservedVia::Direct,
+        )
+        .await;
 
         store.delete_peer(peer).await.unwrap();
 
@@ -697,26 +643,25 @@ mod tests {
             .await
             .unwrap();
 
-        store
-            .record_peer_endpoint(
-                sam.id,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(100),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
-        store
-            .record_peer_endpoint(
-                alex.id,
-                EndpointKind::Client,
-                "203.0.113.9:2",
-                Some(200),
-                ObservedVia::Gossip,
-            )
-            .await
-            .unwrap();
+        let (api, client) = (EndpointKind::Api, EndpointKind::Client);
+        sight(
+            &store,
+            sam.id,
+            api,
+            "203.0.113.5:1",
+            Some(100),
+            ObservedVia::Direct,
+        )
+        .await;
+        sight(
+            &store,
+            alex.id,
+            client,
+            "203.0.113.9:2",
+            Some(200),
+            ObservedVia::Gossip,
+        )
+        .await;
 
         let bulk = store
             .peer_endpoints_for(&[sam.id, alex.id, blair.id])
@@ -726,22 +671,12 @@ mod tests {
         assert_eq!(bulk.len(), 2, "blair has no sightings and must be absent");
         assert_eq!(
             bulk[&sam.id],
-            store
-                .peer_endpoints_for(&[sam.id])
-                .await
-                .unwrap()
-                .remove(&sam.id)
-                .unwrap_or_default(),
+            sightings(&store, sam.id).await,
             "must match the single-peer form"
         );
         assert_eq!(
             bulk[&alex.id],
-            store
-                .peer_endpoints_for(&[alex.id])
-                .await
-                .unwrap()
-                .remove(&alex.id)
-                .unwrap_or_default(),
+            sightings(&store, alex.id).await,
             "must match the single-peer form"
         );
         assert!(!bulk.contains_key(&blair.id));
@@ -750,16 +685,15 @@ mod tests {
     #[tokio::test]
     async fn peer_endpoints_for_an_empty_list_is_an_empty_map_not_every_peer() {
         let (store, peer) = store_with_peer().await;
-        store
-            .record_peer_endpoint(
-                peer,
-                EndpointKind::Api,
-                "203.0.113.5:1",
-                Some(100),
-                ObservedVia::Direct,
-            )
-            .await
-            .unwrap();
+        sight(
+            &store,
+            peer,
+            EndpointKind::Api,
+            "203.0.113.5:1",
+            Some(100),
+            ObservedVia::Direct,
+        )
+        .await;
 
         let bulk = store.peer_endpoints_for(&[]).await.unwrap();
         assert!(bulk.is_empty());

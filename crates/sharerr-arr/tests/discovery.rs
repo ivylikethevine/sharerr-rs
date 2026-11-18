@@ -9,7 +9,7 @@
 
 use secrecy::SecretString;
 use serde_json::json;
-use sharerr_arr::{ArrClient, ArrError};
+use sharerr_arr::{ArrClient, ArrError, Discovered};
 use sharerr_core::{MediaSource, MediaSpec, SceneMeta};
 use sharerr_testkit::library::TAG_ID;
 use sharerr_testkit::mock::{ARR_API_KEY as API_KEY, base_url, mount_json};
@@ -30,6 +30,61 @@ async fn mount_tags(server: &MockServer, prefix: &str) {
         sharerr_testkit::library::tag_json(),
     )
     .await;
+}
+
+/// Everything `kind` discovers under the `sharerr` tag on `server`.
+async fn discover(kind: MediaSource, server: &MockServer) -> Vec<Discovered> {
+    client(kind, server).discover("sharerr").await.unwrap()
+}
+
+/// The one discovered item backed by file `id`.
+fn by_file(found: &[Discovered], id: i64) -> &Discovered {
+    found
+        .iter()
+        .find(|d| d.file_id == id)
+        .unwrap_or_else(|| panic!("file {id} discovered"))
+}
+
+/// Mounts one Sonarr series' `episodefile` and `episode` lookups.
+async fn mount_series_files(
+    server: &MockServer,
+    series_id: i64,
+    files: serde_json::Value,
+    episodes: serde_json::Value,
+) {
+    mount_series_files_after(
+        server,
+        series_id,
+        std::time::Duration::ZERO,
+        files,
+        episodes,
+    )
+    .await;
+}
+
+/// [`mount_series_files`], with both answers held back by `delay`.
+async fn mount_series_files_after(
+    server: &MockServer,
+    series_id: i64,
+    delay: std::time::Duration,
+    files: serde_json::Value,
+    episodes: serde_json::Value,
+) {
+    for (route, body) in [
+        ("/api/v3/episodefile", files),
+        ("/api/v3/episode", episodes),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .and(query_param("seriesId", series_id.to_string()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(delay)
+                    .set_body_json(body),
+            )
+            .mount(server)
+            .await;
+    }
 }
 
 // --------------------------------------------------------------- tag resolution
@@ -258,10 +313,10 @@ async fn mount_sonarr_library(server: &MockServer) {
     )
     .await;
 
-    Mock::given(method("GET"))
-        .and(path("/api/v3/episodefile"))
-        .and(query_param("seriesId", "11"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_series_files(
+        server,
+        11,
+        json!([
             {
                 "id": 501,
                 "path": "/tv/Lanternwick Hollow/Season 02/lanternwick.s02e01.mkv",
@@ -280,22 +335,16 @@ async fn mount_sonarr_library(server: &MockServer) {
                 "path": "/tv/Lanternwick Hollow/Season 02/stray.mkv",
                 "size": 1024,
             },
-        ])))
-        .mount(server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/api/v3/episode"))
-        .and(query_param("seriesId", "11"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        ]),
+        json!([
             { "seasonNumber": 2, "episodeNumber": 1, "episodeFileId": 501 },
             // Reversed order on purpose: the lowest episode must still win.
             { "seasonNumber": 2, "episodeNumber": 3, "episodeFileId": 502 },
             { "seasonNumber": 2, "episodeNumber": 2, "episodeFileId": 502 },
             { "seasonNumber": 2, "episodeNumber": 4, "episodeFileId": 0 },
-        ])))
-        .mount(server)
-        .await;
+        ]),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -303,10 +352,7 @@ async fn sonarr_discovers_only_tagged_series() {
     let server = MockServer::start().await;
     mount_sonarr_library(&server).await;
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
 
     assert_eq!(
         found.len(),
@@ -347,46 +393,27 @@ async fn sonarr_pairs_each_series_with_its_own_files_when_responses_race() {
     // Series 11 answers slowly, so series 21's response lands first.
     let slow = std::time::Duration::from_millis(150);
     for (series_id, file_id, delay) in [(11, 501, slow), (21, 601, std::time::Duration::ZERO)] {
-        Mock::given(method("GET"))
-            .and(path("/api/v3/episodefile"))
-            .and(query_param("seriesId", series_id.to_string()))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(delay)
-                    .set_body_json(json!([{
-                        "id": file_id,
-                        "path": format!("/tv/{series_id}/ep.mkv"),
-                        "size": 1024,
-                    }])),
-            )
-            .mount(&server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v3/episode"))
-            .and(query_param("seriesId", series_id.to_string()))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(delay)
-                    .set_body_json(json!([
-                        { "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": file_id },
-                    ])),
-            )
-            .mount(&server)
-            .await;
+        mount_series_files_after(
+            &server,
+            series_id,
+            delay,
+            json!([{
+                "id": file_id,
+                "path": format!("/tv/{series_id}/ep.mkv"),
+                "size": 1024,
+            }]),
+            json!([
+                { "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": file_id },
+            ]),
+        )
+        .await;
     }
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
 
     assert_eq!(found.len(), 2);
     for (file_id, source_id, title) in [(501, 11, "Lanternwick Hollow"), (601, 21, "Harrowmere")] {
-        let item = found
-            .iter()
-            .find(|d| d.file_id == file_id)
-            .unwrap_or_else(|| panic!("file {file_id} discovered"));
+        let item = by_file(&found, file_id);
         assert_eq!(
             item.source_id, source_id,
             "file {file_id} got the wrong series"
@@ -404,14 +431,8 @@ async fn sonarr_carries_metadata_ids_and_the_unmapped_path() {
     let server = MockServer::start().await;
     mount_sonarr_library(&server).await;
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
-    let first = found
-        .iter()
-        .find(|d| d.file_id == 501)
-        .expect("file 501 discovered");
+    let found = discover(MediaSource::Sonarr, &server).await;
+    let first = by_file(&found, 501);
 
     assert_eq!(first.key(), (MediaSource::Sonarr, 501));
     assert_eq!(
@@ -443,14 +464,8 @@ async fn a_multi_episode_file_is_named_by_its_lowest_episode() {
     let server = MockServer::start().await;
     mount_sonarr_library(&server).await;
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
-    let double = found
-        .iter()
-        .find(|d| d.file_id == 502)
-        .expect("file 502 discovered");
+    let found = discover(MediaSource::Sonarr, &server).await;
+    let double = by_file(&found, 502);
 
     assert_eq!(
         double.spec,
@@ -475,10 +490,7 @@ async fn a_tag_that_nothing_carries_yields_an_empty_result_not_an_error() {
     .await;
 
     // Distinct from TagNotFound: the tag exists, nothing carries it yet.
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
     assert!(found.is_empty());
 }
 
@@ -602,10 +614,7 @@ async fn radarr_discovers_tagged_movies_from_the_embedded_file() {
     )
     .await;
 
-    let found = client(MediaSource::Radarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Radarr, &server).await;
 
     assert_eq!(found.len(), 1);
     let movie = &found[0];
@@ -675,30 +684,24 @@ async fn radarr_carries_the_pre_rename_path_when_it_reports_one() {
     )
     .await;
 
-    let found = client(MediaSource::Radarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
-
-    let by_file = |id: i64| {
-        found
-            .iter()
-            .find(|d| d.file_id == id)
-            .expect("every tagged movie has a file")
-    };
+    let found = discover(MediaSource::Radarr, &server).await;
 
     assert_eq!(
-        by_file(900).original_path.as_deref(),
+        by_file(&found, 900).original_path.as_deref(),
         Some(std::path::Path::new(
             "The.Gilded.Ferry.2019.1080p.BluRay.x264-FAKEGRP.mkv"
         ))
     );
     assert_eq!(
-        by_file(901).original_path,
+        by_file(&found, 901).original_path,
         None,
         "an empty string is not a path"
     );
-    assert_eq!(by_file(902).original_path, None, "the field may be absent");
+    assert_eq!(
+        by_file(&found, 902).original_path,
+        None,
+        "the field may be absent"
+    );
 }
 
 /// `mediaInfo` is the free half of the metadata feature: Sonarr and Radarr have
@@ -760,19 +763,12 @@ async fn radarr_carries_the_media_info_it_already_computed() {
     )
     .await;
 
-    let found = client(MediaSource::Radarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Radarr, &server).await;
 
-    let by_file = |id: i64| {
-        found
-            .iter()
-            .find(|d| d.file_id == id)
-            .expect("every tagged movie has a file")
-    };
-
-    let media = by_file(900).media.as_ref().expect("mediaInfo was reported");
+    let media = by_file(&found, 900)
+        .media
+        .as_ref()
+        .expect("mediaInfo was reported");
     assert_eq!(media.resolution.as_deref(), Some("1920x1080"));
     assert_eq!(media.video_codec.as_deref(), Some("x265"));
     assert_eq!(media.dynamic_range.as_deref(), Some("HDR10"));
@@ -782,8 +778,16 @@ async fn radarr_carries_the_media_info_it_already_computed() {
     assert_eq!(media.subtitles.as_deref(), Some("English"));
     assert_eq!(media.runtime.as_deref(), Some("1:56:38"));
 
-    assert_eq!(by_file(901).media, None, "an empty object is not metadata");
-    assert_eq!(by_file(902).media, None, "an absent object is not metadata");
+    assert_eq!(
+        by_file(&found, 901).media,
+        None,
+        "an empty object is not metadata"
+    );
+    assert_eq!(
+        by_file(&found, 902).media,
+        None,
+        "an absent object is not metadata"
+    );
 }
 
 /// Sonarr reports the identical structure, and the sync pass must not be able to
@@ -798,10 +802,10 @@ async fn sonarr_carries_the_media_info_it_already_computed() {
         json!([{ "id": 11, "title": "Lanternwick Hollow", "tags": [TAG_ID] }]),
     )
     .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v3/episodefile"))
-        .and(query_param("seriesId", "11"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+    mount_series_files(
+        &server,
+        11,
+        json!([{
             "id": 501,
             "path": "/tv/lanternwick.s02e01.mkv",
             "size": 10,
@@ -810,22 +814,14 @@ async fn sonarr_carries_the_media_info_it_already_computed() {
                 "audioCodec": "AAC",
                 "audioChannels": 2.0,
             },
-        }])))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v3/episode"))
-        .and(query_param("seriesId", "11"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        }]),
+        json!([
             { "seasonNumber": 2, "episodeNumber": 1, "episodeFileId": 501 },
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
 
     let media = found[0].media.as_ref().expect("mediaInfo was reported");
     assert_eq!(media.resolution.as_deref(), Some("1280x720"));
@@ -863,10 +859,7 @@ async fn radarr_falls_back_to_the_moviefile_endpoint() {
         .mount(&server)
         .await;
 
-    let found = client(MediaSource::Radarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Radarr, &server).await;
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].file_id, 900);
 }
@@ -892,10 +885,7 @@ async fn radarr_placeholder_values_become_none() {
     )
     .await;
 
-    let found = client(MediaSource::Radarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Radarr, &server).await;
     let movie = &found[0];
     assert_eq!(
         movie.spec,
@@ -914,11 +904,8 @@ async fn discovered_items_promote_to_storable_items() {
     let server = MockServer::start().await;
     mount_sonarr_library(&server).await;
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
-    let discovered = found.into_iter().find(|d| d.file_id == 501).unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
+    let discovered = by_file(&found, 501).clone();
     let key = discovered.key();
 
     let item = discovered.into_shared_item("Some.Release.Title-SHARERR".to_owned());
@@ -989,10 +976,7 @@ async fn lidarr_discovers_a_tagged_artists_files() {
     )
     .await;
 
-    let found = client(MediaSource::Lidarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Lidarr, &server).await;
 
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].source, MediaSource::Lidarr);
@@ -1034,10 +1018,7 @@ async fn a_lidarr_file_holding_a_whole_album_carries_no_track_number() {
     )
     .await;
 
-    let found = client(MediaSource::Lidarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Lidarr, &server).await;
 
     assert_eq!(found.len(), 1);
     assert!(
@@ -1116,19 +1097,12 @@ async fn lidarr_carries_the_media_info_it_already_computed() {
     )
     .await;
 
-    let found = client(MediaSource::Lidarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Lidarr, &server).await;
 
-    let by_file = |id: i64| {
-        found
-            .iter()
-            .find(|d| d.file_id == id)
-            .expect("every track file belongs to the listed album")
-    };
-
-    let media = by_file(31).media.as_ref().expect("mediaInfo was reported");
+    let media = by_file(&found, 31)
+        .media
+        .as_ref()
+        .expect("mediaInfo was reported");
     assert_eq!(media.audio_codec.as_deref(), Some("FLAC"));
     assert_eq!(media.audio_channels.as_deref(), Some("2.0"));
     assert_eq!(media.audio_bit_depth.as_deref(), Some("16"));
@@ -1136,7 +1110,10 @@ async fn lidarr_carries_the_media_info_it_already_computed() {
     assert_eq!(media.sample_rate_khz().as_deref(), Some("44.1 kHz"));
     assert_eq!(media.scene_audio_format(), Some("FLAC"));
 
-    let media = by_file(32).media.as_ref().expect("mediaInfo was reported");
+    let media = by_file(&found, 32)
+        .media
+        .as_ref()
+        .expect("mediaInfo was reported");
     assert_eq!(
         media.audio_bit_depth.as_deref(),
         Some("24"),
@@ -1145,15 +1122,23 @@ async fn lidarr_carries_the_media_info_it_already_computed() {
     assert_eq!(media.audio_sample_rate.as_deref(), Some("96000"));
     assert_eq!(media.sample_rate_khz().as_deref(), Some("96 kHz"));
 
-    let media = by_file(33)
+    let media = by_file(&found, 33)
         .media
         .as_ref()
         .expect("the codec alone is metadata");
     assert_eq!(media.audio_bit_depth, None, "`0` bits is not a bit depth");
     assert_eq!(media.audio_sample_rate, None, "`0` Hz is not a sample rate");
 
-    assert_eq!(by_file(34).media, None, "an empty object is not metadata");
-    assert_eq!(by_file(35).media, None, "an absent object is not metadata");
+    assert_eq!(
+        by_file(&found, 34).media,
+        None,
+        "an empty object is not metadata"
+    );
+    assert_eq!(
+        by_file(&found, 35).media,
+        None,
+        "an absent object is not metadata"
+    );
 }
 
 #[tokio::test]
@@ -1189,10 +1174,7 @@ async fn readarr_discovers_a_tagged_authors_books() {
     )
     .await;
 
-    let found = client(MediaSource::Readarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Readarr, &server).await;
 
     assert_eq!(found.len(), 1);
     assert_eq!(
@@ -1236,10 +1218,7 @@ async fn bookshelf_on_hardcover_metadata_reports_hardcover_ids() {
     )
     .await;
 
-    let found = client(MediaSource::Readarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Readarr, &server).await;
 
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].ids.hardcover.as_deref(), Some("428113"));
@@ -1294,26 +1273,20 @@ async fn readarr_carries_media_info_for_an_audiobook_and_none_for_an_ebook() {
     )
     .await;
 
-    let found = client(MediaSource::Readarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Readarr, &server).await;
 
-    let by_file = |id: i64| {
-        found
-            .iter()
-            .find(|d| d.file_id == id)
-            .expect("every book file belongs to a listed book")
-    };
-
-    let media = by_file(61)
+    let media = by_file(&found, 61)
         .media
         .as_ref()
         .expect("an audiobook was analysed");
     assert_eq!(media.audio_codec.as_deref(), Some("AAC"));
     assert_eq!(media.audio_sample_rate.as_deref(), Some("44100"));
 
-    assert_eq!(by_file(62).media, None, "an ebook has nothing to report");
+    assert_eq!(
+        by_file(&found, 62).media,
+        None,
+        "an ebook has nothing to report"
+    );
 }
 
 /// Whisparr v2 is Sonarr's codebase, so it walks series and episode files with
@@ -1348,10 +1321,7 @@ async fn whisparr_v2_walks_like_sonarr() {
     )
     .await;
 
-    let found = client(MediaSource::Whisparr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Whisparr, &server).await;
 
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].source, MediaSource::Whisparr);
@@ -1407,10 +1377,7 @@ async fn whisparr_v3_walks_like_radarr() {
     )
     .await;
 
-    let found = client(MediaSource::Whisparr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Whisparr, &server).await;
 
     assert_eq!(found.len(), 2);
     let item = &found[0];
@@ -1446,28 +1413,20 @@ async fn sonarr_skips_a_series_numbered_in_an_alternate_order() {
     )
     .await;
     for (series, file) in [(11, 501), (12, 502)] {
-        Mock::given(method("GET"))
-            .and(path("/api/v3/episodefile"))
-            .and(query_param("seriesId", series.to_string()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+        mount_series_files(
+            &server,
+            series,
+            json!([
                 { "id": file, "path": format!("/tv/{series}/a.mkv"), "size": 1024_u64 },
-            ])))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v3/episode"))
-            .and(query_param("seriesId", series.to_string()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            ]),
+            json!([
                 { "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": file },
-            ])))
-            .mount(&server)
-            .await;
+            ]),
+        )
+        .await;
     }
 
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
 
     let series: Vec<i64> = found.iter().map(|d| d.source_id).collect();
     assert_eq!(
@@ -1493,20 +1452,14 @@ async fn a_tagged_entity_with_no_files_is_skipped() {
     .await;
     mount_json(&server, "/api/v3/episodefile", json!([])).await;
     mount_json(&server, "/api/v3/episode", json!([])).await;
-    let found = client(MediaSource::Sonarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Sonarr, &server).await;
     assert!(found.is_empty());
 
     let server = MockServer::start().await;
     mount_lidarr(&server).await;
     mount_json(&server, "/api/v1/trackfile", json!([])).await;
     mount_json(&server, "/api/v1/track", json!([])).await;
-    let found = client(MediaSource::Lidarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Lidarr, &server).await;
     assert!(found.is_empty());
 
     let server = MockServer::start().await;
@@ -1519,10 +1472,7 @@ async fn a_tagged_entity_with_no_files_is_skipped() {
     .await;
     mount_json(&server, "/api/v1/book", json!([])).await;
     mount_json(&server, "/api/v1/bookfile", json!([])).await;
-    let found = client(MediaSource::Readarr, &server)
-        .discover("sharerr")
-        .await
-        .unwrap();
+    let found = discover(MediaSource::Readarr, &server).await;
     assert!(found.is_empty());
 }
 

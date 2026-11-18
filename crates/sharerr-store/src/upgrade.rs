@@ -79,18 +79,20 @@ const SEEDING_HASH_V2: &str = "89abcdef0123456789abcdef0123456789abcdef";
 /// with that level's columns only. Each block names the migration that made
 /// it possible.
 async fn seed(pool: &sqlx::SqlitePool, version: i64) {
-    // `AssertSqlSafe`: every string below is this file's own literal.
-    let run = |sql: String| async move {
-        sqlx::raw_sql(AssertSqlSafe(sql))
+    // `AssertSqlSafe`: every string `seed` passes is this file's own literal.
+    async fn run(pool: &sqlx::SqlitePool, sql: impl Into<String>) {
+        sqlx::raw_sql(AssertSqlSafe(sql.into()))
             .execute(pool)
             .await
             .unwrap();
-    };
+    }
 
     // 0001: items and runs. `source` and `state` are inside 0001's CHECK
     // constraints, which 0005 later drops.
-    run(format!(
-        "INSERT INTO shared_items (source, source_id, file_id, spec_json, release_title, \
+    run(
+        pool,
+        format!(
+            "INSERT INTO shared_items (source, source_id, file_id, spec_json, release_title, \
          arr_path, size, ids_json, info_hash, state, last_error, created_at, updated_at) VALUES \
          ('radarr', 31, 1001, '{MOVIE_SPEC}', 'The.Gilded.Ferry.2019.1080p.WEB-DL.x264-FAKEGRP', \
          '/movies/The Gilded Ferry (2019)/gilded.ferry.mkv', 8589934592, '{MOVIE_IDS}', \
@@ -98,40 +100,44 @@ async fn seed(pool: &sqlx::SqlitePool, version: i64) {
          ('sonarr', 12, 2002, '{EPISODE_SPEC}', 'Harbour.Lights.S02E04.720p.WEB-DL-FAKEGRP', \
          '/tv/Harbour Lights/Season 02/s02e04.mkv', 734003200, '{EPISODE_IDS}', \
          NULL, 'failed', 'client refused', 1700000100, 1700000200)"
-    ))
+        ),
+    )
     .await;
-    run("INSERT INTO sync_runs (started_at, finished_at, discovered, added, unshared, failed, error) \
-         VALUES (1700000000, 1700000030, 2, 1, 0, 1, NULL), (1700003600, NULL, 0, 0, 0, 0, NULL)".to_owned())
-        .await;
+    run(
+        pool,
+        "INSERT INTO sync_runs (started_at, finished_at, discovered, added, unshared, failed, error) \
+         VALUES (1700000000, 1700000030, 2, 1, 0, 1, NULL), (1700003600, NULL, 0, 0, 0, 0, NULL)",
+    )
+    .await;
 
     if version >= 2 {
         // 0002: a login. Any PHC string will do for the row; nothing here
         // verifies it.
         run(
+            pool,
             "INSERT INTO users (username, password_hash, created_at, updated_at) VALUES \
              ('ivy', '$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$AAAAAAAAAAAAAAAAAAAAAA', \
-             1700000000, 1700000000)"
-                .to_owned(),
+             1700000000, 1700000000)",
         )
         .await;
     }
     if version >= 3 {
         // 0003: two friends, one of them revoked.
         run(
+            pool,
             "INSERT INTO peers (label, key_hash, created_at, last_seen_at, revoked_at) VALUES \
              ('Sam', 'aa', 1700000000, 1700000500, NULL), \
-             ('Alex', 'bb', 1700000001, NULL, 1700000600)"
-                .to_owned(),
+             ('Alex', 'bb', 1700000001, NULL, 1700000600)",
         )
         .await;
     }
     if version >= 4 {
         // 0004: a scope narrower than the default.
-        run("UPDATE peers SET scope = 'tv' WHERE label = 'Sam'".to_owned()).await;
+        run(pool, "UPDATE peers SET scope = 'tv' WHERE label = 'Sam'").await;
     }
     if version >= 5 {
         // 0005: a source 0001's CHECK would have refused.
-        run(format!(
+        run(pool, format!(
             "INSERT INTO shared_items (source, source_id, file_id, spec_json, release_title, \
              arr_path, size, ids_json, info_hash, state, last_error, created_at, updated_at) VALUES \
              ('lidarr', 5, 3003, '{TRACK_SPEC}', 'Quiet.Harbour-Low.Tide-FLAC-FAKEGRP', \
@@ -144,62 +150,83 @@ async fn seed(pool: &sqlx::SqlitePool, version: i64) {
     if version >= 6 {
         // 0006: an observed address, and a gossip identity.
         run(
+            pool,
             "INSERT INTO peer_endpoints (peer_id, kind, addr, observed_at, via) VALUES \
              ((SELECT id FROM peers WHERE label = 'Sam'), 'client', '203.0.113.9:51413', \
-             1700000500, 'direct')"
-                .to_owned(),
+             1700000500, 'direct')",
         )
         .await;
         run(
+            pool,
             "UPDATE peers SET pubkey = 'cafe', gossip_url = 'https://sam.example:8477', \
-             gossip_record = '{}' WHERE label = 'Sam'"
-                .to_owned(),
+             gossip_record = '{}' WHERE label = 'Sam'",
         )
         .await;
     }
     if version >= 7 {
-        run("UPDATE shared_items SET announce_token_fp = 'fp-1' WHERE file_id = 1001".to_owned())
-            .await;
+        run(
+            pool,
+            "UPDATE shared_items SET announce_token_fp = 'fp-1' WHERE file_id = 1001",
+        )
+        .await;
     }
     if version >= 8 {
-        run("UPDATE shared_items SET created_by_sharerr = 0 WHERE file_id = 1001".to_owned()).await;
+        run(
+            pool,
+            "UPDATE shared_items SET created_by_sharerr = 0 WHERE file_id = 1001",
+        )
+        .await;
     }
     if version >= 9 {
-        run(format!(
-            "UPDATE shared_items SET media_json = '{MEDIA}' WHERE file_id = 1001"
-        ))
+        run(
+            pool,
+            format!("UPDATE shared_items SET media_json = '{MEDIA}' WHERE file_id = 1001"),
+        )
         .await;
     }
     if version >= 10 {
         run(
+            pool,
             "UPDATE shared_items SET achieved_ratio = 1.5, ratio_limit_reported = 2.0 \
-             WHERE file_id = 1001"
-                .to_owned(),
+             WHERE file_id = 1001",
         )
         .await;
     }
     if version >= 11 {
         run(
+            pool,
             "INSERT INTO swarm_samples (sampled_at, swarms, peers, seeders) VALUES \
-             (1700003600, 1, 3, 1)"
-                .to_owned(),
+             (1700003600, 1, 3, 1)",
         )
         .await;
     }
     if version >= 12 {
-        run("UPDATE shared_items SET private = 0 WHERE file_id = 1001".to_owned()).await;
+        run(
+            pool,
+            "UPDATE shared_items SET private = 0 WHERE file_id = 1001",
+        )
+        .await;
     }
     if version >= 13 {
-        run("UPDATE peers SET downloaded = 4096, uploaded = 512 WHERE label = 'Sam'".to_owned())
-            .await;
-        run("UPDATE transfer_totals SET downloaded = 8192, uploaded = 512, updated_at = 1700003600 \
-             WHERE id = 1".to_owned())
-            .await;
+        run(
+            pool,
+            "UPDATE peers SET downloaded = 4096, uploaded = 512 WHERE label = 'Sam'",
+        )
+        .await;
+        run(
+            pool,
+            "UPDATE transfer_totals SET downloaded = 8192, uploaded = 512, updated_at = 1700003600 \
+             WHERE id = 1",
+        )
+        .await;
     }
     if version >= 18 {
-        run(format!(
-            "UPDATE shared_items SET info_hash_v2 = '{SEEDING_HASH_V2}' WHERE file_id = 1001"
-        ))
+        run(
+            pool,
+            format!(
+                "UPDATE shared_items SET info_hash_v2 = '{SEEDING_HASH_V2}' WHERE file_id = 1001"
+            ),
+        )
         .await;
     }
 }

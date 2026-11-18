@@ -99,6 +99,33 @@ pub fn body_text(request: &Request) -> String {
     String::from_utf8_lossy(&request.body).into_owned()
 }
 
+/// A received request's body parsed as JSON.
+pub fn body_json(request: &Request) -> serde_json::Value {
+    #[allow(clippy::expect_used)] // a test asking for JSON fails here if it got none
+    serde_json::from_slice(&request.body).expect("request body is JSON")
+}
+
+/// The JSON body of every request whose `method` is `rpc`, in the order
+/// received: one call to a JSON-RPC client such as Deluge or Transmission.
+pub async fn calls(server: &MockServer, rpc: &str) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+        .filter(|body| body["method"] == rpc)
+        .collect()
+}
+
+/// Each of `raw` parsed as a [`Url`], for a tracker list.
+pub fn urls(raw: &[&str]) -> Vec<Url> {
+    #[allow(clippy::expect_used)] // the literals are the test's own
+    raw.iter()
+        .map(|url| Url::parse(url).expect("a valid test url"))
+        .collect()
+}
+
 /// Pull `name="key"\r\n\r\nvalue` out of a multipart body.
 pub fn multipart_field(body: &str, key: &str) -> Option<String> {
     let marker = format!("name=\"{key}\"");

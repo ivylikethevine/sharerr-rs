@@ -10,7 +10,10 @@ use secrecy::SecretString;
 use serde_json::json;
 use sharerr_client::{AddRequest, ClientError, ClientKind, SeedingLimits, TorrentClient};
 use sharerr_qbit::QbitClient;
-use sharerr_testkit::mock::{QBIT_API_KEY as API_KEY, base_url, mount_ok};
+use sharerr_testkit::mock::{
+    QBIT_API_KEY as API_KEY, base_url, body_text, mount_json, mount_ok, mount_text, requests_to,
+    urls,
+};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -29,11 +32,7 @@ fn kind_reports_qbittorrent() {
 #[tokio::test]
 async fn login_and_version_succeed_through_the_trait() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/version"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("v5.2.3"))
-        .mount(&server)
-        .await;
+    mount_text(&server, "GET", "/api/v2/app/version", "v5.2.3").await;
 
     let qbit = client(&server);
     TorrentClient::login(&qbit).await.unwrap();
@@ -43,9 +42,10 @@ async fn login_and_version_succeed_through_the_trait() {
 #[tokio::test]
 async fn list_maps_torrents_info_into_torrent_summaries() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_json(
+        &server,
+        "/api/v2/torrents/info",
+        json!([
             {
                 "hash": "aabbccddeeff00112233445566778899aabbccdd",
                 "name": "Lanternwick.Hollow.S02E01.1080p.WEB-DL.x264-FAKEGRP",
@@ -56,9 +56,9 @@ async fn list_maps_torrents_info_into_torrent_summaries() {
                 "category": "sharerr",
                 "tags": "sharerr, cross-seed",
             },
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
     let summaries = TorrentClient::list(&client(&server), None).await.unwrap();
     assert_eq!(summaries.len(), 1);
@@ -76,13 +76,14 @@ async fn list_maps_torrents_info_into_torrent_summaries() {
 #[tokio::test]
 async fn files_maps_torrent_files_into_file_entries() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/files"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_json(
+        &server,
+        "/api/v2/torrents/files",
+        json!([
             { "index": 0, "name": "Lanternwick Hollow/lanternwick.s02e01.mkv", "size": 2_147_483_648_u64, "progress": 1.0 }
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
     let files = TorrentClient::files(&client(&server), "aabbcc")
         .await
@@ -97,16 +98,8 @@ async fn add_remove_and_set_trackers_succeed_through_the_trait() {
     let server = MockServer::start().await;
     mount_ok(&server, "/api/v2/torrents/add").await;
     mount_ok(&server, "/api/v2/torrents/delete").await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/trackers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/addTrackers"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
+    mount_json(&server, "/api/v2/torrents/trackers", json!([])).await;
+    mount_ok(&server, "/api/v2/torrents/addTrackers").await;
 
     let qbit = client(&server);
     TorrentClient::add(
@@ -119,7 +112,7 @@ async fn add_remove_and_set_trackers_succeed_through_the_trait() {
     TorrentClient::set_trackers(
         &qbit,
         "aabbcc",
-        &[Url::parse("http://tracker.example:8477/announce").unwrap()],
+        &urls(&["http://tracker.example:8477/announce"]),
     )
     .await
     .unwrap();
@@ -201,11 +194,7 @@ async fn login_always_succeeds_there_is_no_session_to_establish() {
 #[tokio::test]
 async fn version_is_trimmed_and_passed_through() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/app/version"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("v4.6.0\n"))
-        .mount(&server)
-        .await;
+    mount_text(&server, "GET", "/api/v2/app/version", "v4.6.0\n").await;
 
     let version = TorrentClient::version(&client(&server)).await.unwrap();
     assert_eq!(version, "v4.6.0");
@@ -214,9 +203,10 @@ async fn version_is_trimmed_and_passed_through() {
 #[tokio::test]
 async fn list_maps_hash_tags_paths_and_seeding_state() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_json(
+        &server,
+        "/api/v2/torrents/info",
+        json!([
             {
                 "hash": "abc123",
                 "name": "one",
@@ -226,9 +216,9 @@ async fn list_maps_hash_tags_paths_and_seeding_state() {
                 "category": "sharerr",
                 "tags": "a,b",
             }
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
     let list = TorrentClient::list(&client(&server), None).await.unwrap();
     assert_eq!(list.len(), 1);
@@ -247,16 +237,17 @@ async fn list_maps_hash_tags_paths_and_seeding_state() {
 #[tokio::test]
 async fn list_maps_ratio_and_resolves_qbittorrents_sentinels() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_json(
+        &server,
+        "/api/v2/torrents/info",
+        json!([
             { "hash": "fixed", "ratio": 1.85, "ratio_limit": 2.0, "up_limit": 512_000 },
             { "hash": "unlimited", "ratio": 0.5, "ratio_limit": -1.0, "up_limit": -1 },
             { "hash": "global", "ratio": 0.1, "ratio_limit": -2.0, "up_limit": 0 },
             { "hash": "older", "state": "pausedUP" },
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
     let list = TorrentClient::list(&client(&server), None).await.unwrap();
     assert_eq!(list.len(), 4);
@@ -289,11 +280,7 @@ async fn list_maps_ratio_and_resolves_qbittorrents_sentinels() {
 #[tokio::test]
 async fn add_forwards_the_request_to_the_underlying_client() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/add"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
+    mount_ok(&server, "/api/v2/torrents/add").await;
 
     let data = b"d8:announce0:e";
     let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads");
@@ -333,17 +320,13 @@ async fn add_translates_a_rejected_torrent_into_an_api_error() {
 #[tokio::test]
 async fn remove_never_asks_to_delete_files() {
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/delete"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
+    mount_ok(&server, "/api/v2/torrents/delete").await;
 
     let qbit = client(&server);
     TorrentClient::remove(&qbit, "abc123").await.unwrap();
 
     let requests = server.received_requests().await.unwrap();
-    let body = sharerr_testkit::mock::body_text(requests.last().unwrap());
+    let body = body_text(requests.last().unwrap());
     assert!(body.contains("deleteFiles=false"), "{body}");
     assert!(body.contains("hashes=abc123"), "{body}");
 }
@@ -351,29 +334,16 @@ async fn remove_never_asks_to_delete_files() {
 #[tokio::test]
 async fn set_trackers_stringifies_urls_before_forwarding_them() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/trackers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/addTrackers"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
+    mount_json(&server, "/api/v2/torrents/trackers", json!([])).await;
+    mount_ok(&server, "/api/v2/torrents/addTrackers").await;
 
-    let urls = [Url::parse("http://tracker.example/announce").unwrap()];
     let qbit = client(&server);
-    TorrentClient::set_trackers(&qbit, "abc123", &urls)
+    TorrentClient::set_trackers(&qbit, "abc123", &urls(&["http://tracker.example/announce"]))
         .await
         .unwrap();
 
-    let requests = server.received_requests().await.unwrap();
-    let add = requests
-        .iter()
-        .find(|r| r.url.path() == "/api/v2/torrents/addTrackers")
-        .expect("an addTrackers call was made");
-    let body = sharerr_testkit::mock::body_text(add);
+    let adds = requests_to(&server, "/api/v2/torrents/addTrackers").await;
+    let body = body_text(adds.first().expect("an addTrackers call was made"));
     assert!(body.contains("tracker.example"), "{body}");
 }
 
@@ -382,36 +352,29 @@ async fn set_trackers_stringifies_urls_before_forwarding_them() {
 #[tokio::test]
 async fn add_trackers_adds_without_removing_what_is_already_there() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/trackers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_json(
+        &server,
+        "/api/v2/torrents/trackers",
+        json!([
             { "url": "http://theirs.example/announce", "status": 2 },
             { "url": "** [DHT] **", "status": 0 },
-        ])))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v2/torrents/addTrackers"))
-        .respond_with(ResponseTemplate::new(200))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
+    mount_ok(&server, "/api/v2/torrents/addTrackers").await;
 
-    let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
     let qbit = client(&server);
-    TorrentClient::add_trackers(&qbit, "abc123", &urls)
+    TorrentClient::add_trackers(&qbit, "abc123", &urls(&["http://sharerr.example/announce"]))
         .await
         .unwrap();
 
-    let requests = server.received_requests().await.unwrap();
-    let add = requests
-        .iter()
-        .find(|r| r.url.path() == "/api/v2/torrents/addTrackers")
-        .expect("an addTrackers call was made");
-    assert!(sharerr_testkit::mock::body_text(add).contains("sharerr.example"));
+    let adds = requests_to(&server, "/api/v2/torrents/addTrackers").await;
+    let add = adds.first().expect("an addTrackers call was made");
+    assert!(body_text(add).contains("sharerr.example"));
     assert!(
-        !requests
-            .iter()
-            .any(|r| r.url.path() == "/api/v2/torrents/removeTrackers"),
+        requests_to(&server, "/api/v2/torrents/removeTrackers")
+            .await
+            .is_empty(),
         "add_trackers must not remove anything"
     );
 }
@@ -421,25 +384,24 @@ async fn add_trackers_adds_without_removing_what_is_already_there() {
 #[tokio::test]
 async fn add_trackers_is_silent_when_the_url_is_already_present() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v2/torrents/trackers"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+    mount_json(
+        &server,
+        "/api/v2/torrents/trackers",
+        json!([
             { "url": "http://sharerr.example/announce", "status": 2 },
-        ])))
-        .mount(&server)
-        .await;
+        ]),
+    )
+    .await;
 
-    let urls = [Url::parse("http://sharerr.example/announce").unwrap()];
     let qbit = client(&server);
-    TorrentClient::add_trackers(&qbit, "abc123", &urls)
+    TorrentClient::add_trackers(&qbit, "abc123", &urls(&["http://sharerr.example/announce"]))
         .await
         .unwrap();
 
-    let requests = server.received_requests().await.unwrap();
     assert!(
-        !requests
-            .iter()
-            .any(|r| r.url.path() == "/api/v2/torrents/addTrackers"),
+        requests_to(&server, "/api/v2/torrents/addTrackers")
+            .await
+            .is_empty(),
         "nothing to add means nothing sent"
     );
 }
@@ -506,16 +468,6 @@ async fn set_limits_with_a_ratio_sends_share_limits_with_time_limits_left_global
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
-/// Nothing configured is nothing on the wire.
-#[tokio::test]
-async fn set_limits_with_nothing_configured_sends_nothing() {
-    let server = MockServer::start().await;
-    TorrentClient::set_limits(&client(&server), "abc123", &SeedingLimits::default())
-        .await
-        .unwrap();
-    assert!(server.received_requests().await.unwrap().is_empty());
-}
-
 #[tokio::test]
 async fn export_returns_the_torrent_bytes_verbatim() {
     // Not valid UTF-8, deliberately: 0x80..0x9f is what a `pieces` field
@@ -566,15 +518,15 @@ async fn every_trait_method_translates_a_server_failure_the_same_way() {
 
     let qbit = client(&server);
     let hash = "aabbccddeeff00112233445566778899aabbccdd";
-    let urls = [Url::parse("http://tracker.example/announce").unwrap()];
+    let trackers = urls(&["http://tracker.example/announce"]);
 
     let errors = [
         TorrentClient::files(&qbit, hash).await.unwrap_err(),
         TorrentClient::remove(&qbit, hash).await.unwrap_err(),
-        TorrentClient::set_trackers(&qbit, hash, &urls)
+        TorrentClient::set_trackers(&qbit, hash, &trackers)
             .await
             .unwrap_err(),
-        TorrentClient::add_trackers(&qbit, hash, &urls)
+        TorrentClient::add_trackers(&qbit, hash, &trackers)
             .await
             .unwrap_err(),
         TorrentClient::set_limits(

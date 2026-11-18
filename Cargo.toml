@@ -105,7 +105,7 @@ sha2 = "0.11.1"
 # `macros` is what provides `sqlx::migrate!`, which embeds migrations/ into the
 # binary at compile time. Unlike `query!` it never reads DATABASE_URL, so builds
 # still need no live database. One pin here also means one libsqlite3-sys.
-sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["sqlite", "runtime-tokio", "tls-none"] }
 # CPU/memory/disk usage for the status page's stat tiles. `default-features =
 # false` drops network/user/component support this project never reads.
 sysinfo = { version = "0.40.1", default-features = false, features = ["disk", "system"] }
@@ -186,6 +186,12 @@ unnecessary_wraps = "warn"
 # lie to you. Paired with `missing_debug_implementations` above, which only
 # ensures a Debug exists at all.
 missing_fields_in_debug = "warn"
+
+# Dependencies keep file and line for backtraces but drop variable and type
+# debug info, the bulk of target/'s size; the workspace's own crates keep full
+# debug info for a debugger. Test and llvm-cov builds inherit this profile.
+[profile.dev.package."*"]
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

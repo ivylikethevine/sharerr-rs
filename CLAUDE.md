@@ -57,7 +57,7 @@ from there:
 
 **`gossip.exchange_secs`, `lighthouse.interval_secs`, and
 `lighthouse.quiet_secs` are config keys, not constants, specifically so tier
-3 does not have to wait out the production defaults (900/900/3600 seconds)
+3 does not have to wait out the production defaults (`docs/SETTINGS.md`)
 to see a mesh converge.** They deliberately have no settings-page field and
 no `config_paths` entry, unlike every other interval in `Config` — a web
 field with no floor (there is one on purpose; see `GossipConfig`'s own doc

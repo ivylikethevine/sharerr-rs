@@ -1040,6 +1040,34 @@ mod tests {
         }
     }
 
+    /// One tracker URL as an announce set.
+    fn announce_at(url: &str) -> AnnounceSet {
+        AnnounceSet::single(Url::parse(url).unwrap())
+    }
+
+    /// A private, single-file torrent of `media` announcing to `announce`.
+    fn built(media: &Path, announce: &AnnounceSet) -> sharerr_torrent::BuiltTorrent {
+        TorrentFactory
+            .create(&TorrentRequest {
+                path: media,
+                announce,
+                media: None,
+                private: true,
+                hybrid: false,
+            })
+            .unwrap()
+    }
+
+    /// `media`, unmapped, as the client sees it at `/downloads/movie.mkv`.
+    fn paths_for(media: &Path) -> ResolvedPaths {
+        ResolvedPaths {
+            arr: media.to_path_buf(),
+            sharerr: media.to_path_buf(),
+            qbit: PathBuf::from("/downloads/movie.mkv"),
+            mapping_applied: false,
+        }
+    }
+
     #[test]
     fn the_debug_impl_names_the_configuration_without_the_client() {
         let seeder = seeder(Arc::new(StubClient::default()), PathBuf::from("/torrents"));
@@ -1083,7 +1111,7 @@ mod tests {
     async fn refresh_announce_with_no_cached_file_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let seeder = seeder(Arc::new(StubClient::default()), dir.path().to_path_buf());
-        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
+        let announce = announce_at("http://tracker.example/announce");
 
         let outcome = seeder
             .refresh_announce("deadbeef", &announce, &[])
@@ -1098,16 +1126,8 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
-        let built = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &old_announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let old_announce = announce_at("http://old.example/announce");
+        let built = built(&media, &old_announce);
 
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
@@ -1119,7 +1139,7 @@ mod tests {
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
+        let new_announce = announce_at("http://new.example/announce");
 
         let outcome = seeder
             .refresh_announce(&built.info_hash, &new_announce, &[])
@@ -1152,16 +1172,8 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let built = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let announce = announce_at("http://tracker.example/announce");
+        let built = built(&media, &announce);
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
         let cached = torrent_file_path(&torrent_dir, &built.info_hash);
@@ -1185,7 +1197,7 @@ mod tests {
             "the same announce is answered without the file"
         );
 
-        let moved = AnnounceSet::single(Url::parse("http://moved.example/announce").unwrap());
+        let moved = announce_at("http://moved.example/announce");
         let reread = seeder
             .refresh_announce(&built.info_hash, &moved, &[])
             .await
@@ -1221,16 +1233,8 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let built = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let announce = announce_at("http://tracker.example/announce");
+        let built = built(&media, &announce);
 
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
@@ -1243,12 +1247,7 @@ mod tests {
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let paths = paths_for(&media);
 
         let outcome = seeder
             .seed(
@@ -1292,16 +1291,8 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let old_announce = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
-        let built = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &old_announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let old_announce = announce_at("http://old.example/announce");
+        let built = built(&media, &old_announce);
 
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
@@ -1314,13 +1305,8 @@ mod tests {
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let new_announce = AnnounceSet::single(Url::parse("http://new.example/announce").unwrap());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let new_announce = announce_at("http://new.example/announce");
+        let paths = paths_for(&media);
 
         let outcome = seeder
             .seed(
@@ -1377,16 +1363,8 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let stale = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let announce = announce_at("http://tracker.example/announce");
+        let stale = built(&media, &announce);
 
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
@@ -1403,12 +1381,7 @@ mod tests {
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let paths = paths_for(&media);
 
         let outcome = seeder
             .seed(
@@ -1425,15 +1398,7 @@ mod tests {
         // A rebuild over the new bytes has a different info hash than the
         // stale cache entry — that difference is itself the proof the stale
         // cache was not reused.
-        let rebuilt = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let rebuilt = built(&media, &announce);
         assert_ne!(rebuilt.info_hash, stale.info_hash);
         assert_eq!(
             outcome,
@@ -1465,13 +1430,8 @@ mod tests {
         let torrent_dir = dir.path().join("torrents");
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir);
-        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let announce = announce_at("http://tracker.example/announce");
+        let paths = paths_for(&media);
 
         let outcome = seeder
             .seed(
@@ -1500,13 +1460,8 @@ mod tests {
         let client = Arc::new(StubClient::default());
         let mut seeder = seeder(client.clone(), torrent_dir.clone());
         seeder.seeding.hybrid = true;
-        let announce = AnnounceSet::single(Url::parse("http://tracker.example/announce").unwrap());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let announce = announce_at("http://tracker.example/announce");
+        let paths = paths_for(&media);
 
         let outcome = seeder
             .seed(
@@ -1547,17 +1502,10 @@ mod tests {
 
         // Stand in for the operator's own torrent: built against *their*
         // tracker, and never seen by sharerr.
-        let theirs = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &AnnounceSet::single(
-                    Url::parse("http://their-tracker.example/announce").unwrap(),
-                ),
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let theirs = built(
+            &media,
+            &announce_at("http://their-tracker.example/announce"),
+        );
 
         let torrent_dir = dir.path().join("torrents");
         let client = Arc::new(StubClient {
@@ -1565,13 +1513,8 @@ mod tests {
             ..StubClient::default()
         });
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let announce = announce_at("http://sharerr.example/announce");
+        let paths = paths_for(&media);
         let existing = [summary(
             &theirs.info_hash,
             "/downloads",
@@ -1643,13 +1586,8 @@ mod tests {
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), dir.path().join("torrents"));
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let announce = announce_at("http://sharerr.example/announce");
+        let paths = paths_for(&media);
         let existing = [summary("deadbeef", "/downloads", "/downloads/movie.mkv")];
 
         let err = seeder
@@ -1677,16 +1615,8 @@ mod tests {
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
 
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
-        let built = TorrentFactory
-            .create(&TorrentRequest {
-                path: &media,
-                announce: &announce,
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap();
+        let announce = announce_at("http://sharerr.example/announce");
+        let built = built(&media, &announce);
 
         let torrent_dir = dir.path().join("torrents");
         std::fs::create_dir(&torrent_dir).unwrap();
@@ -1700,12 +1630,7 @@ mod tests {
             ..StubClient::default()
         });
         let seeder = seeder(client.clone(), torrent_dir.clone());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let paths = paths_for(&media);
         let existing = [summary(
             &built.info_hash,
             "/downloads",
@@ -1844,18 +1769,6 @@ mod tests {
 
     // ------------------------------------------------------ the long tail
 
-    fn built(media: &Path, announce: &str) -> sharerr_torrent::BuiltTorrent {
-        TorrentFactory
-            .create(&TorrentRequest {
-                path: media,
-                announce: &AnnounceSet::single(Url::parse(announce).unwrap()),
-                media: None,
-                private: true,
-                hybrid: false,
-            })
-            .unwrap()
-    }
-
     /// Adopting a torrent sharerr had cached under a *stale* announce: the
     /// cache is rewritten in place, and the client is still only told to add
     /// the tracker, never to replace its list.
@@ -1864,14 +1777,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
-        let old = built(&media, "http://old.example/announce");
+        let old = built(&media, &announce_at("http://old.example/announce"));
         let torrent_dir = dir.path().join("torrents");
         let cached = torrent_file_path(&torrent_dir, &old.info_hash);
         write_torrent_file(&cached, &old.data).unwrap();
 
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), torrent_dir);
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let announce = announce_at("http://sharerr.example/announce");
 
         seeder.adopt(&old.info_hash, &announce).await.unwrap();
 
@@ -1893,14 +1806,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
-        let theirs = built(&media, "http://sharerr.example/announce");
+        let theirs = built(&media, &announce_at("http://sharerr.example/announce"));
         let torrent_dir = dir.path().join("torrents");
         let client = Arc::new(StubClient {
             export_result: Some(theirs.data.clone()),
             ..StubClient::default()
         });
         let seeder = seeder(client, torrent_dir.clone());
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let announce = announce_at("http://sharerr.example/announce");
 
         seeder.adopt(&theirs.info_hash, &announce).await.unwrap();
 
@@ -1917,15 +1830,21 @@ mod tests {
         std::fs::write(&media, b"pretend media bytes").unwrap();
         let other = dir.path().join("other.mkv");
         std::fs::write(&other, b"entirely different bytes").unwrap();
-        let wrong = built(&other, "http://their-tracker.example/announce");
-        let asked_for = built(&media, "http://their-tracker.example/announce");
+        let wrong = built(
+            &other,
+            &announce_at("http://their-tracker.example/announce"),
+        );
+        let asked_for = built(
+            &media,
+            &announce_at("http://their-tracker.example/announce"),
+        );
         let torrent_dir = dir.path().join("torrents");
         let client = Arc::new(StubClient {
             export_result: Some(wrong.data),
             ..StubClient::default()
         });
         let seeder = seeder(client, torrent_dir.clone());
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let announce = announce_at("http://sharerr.example/announce");
 
         let err = seeder
             .adopt(&asked_for.info_hash, &announce)
@@ -1943,13 +1862,8 @@ mod tests {
         let media = dir.join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
         let seeder = seeder(client, dir.join("torrents"));
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
-        let paths = ResolvedPaths {
-            arr: media.clone(),
-            sharerr: media.clone(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        };
+        let announce = announce_at("http://sharerr.example/announce");
+        let paths = paths_for(&media);
         seeder
             .seed(
                 &paths,
@@ -2017,7 +1931,7 @@ mod tests {
             qbit: PathBuf::from("/downloads/tv/Season 01/Show.S01E01.mkv"),
             mapping_applied: true,
         };
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let announce = announce_at("http://sharerr.example/announce");
         seeder
             .seed(
                 &paths,
@@ -2195,15 +2109,6 @@ mod tests {
         assert!(found.is_none());
     }
 
-    fn paths_for(media: &Path) -> ResolvedPaths {
-        ResolvedPaths {
-            arr: media.to_path_buf(),
-            sharerr: media.to_path_buf(),
-            qbit: PathBuf::from("/downloads/movie.mkv"),
-            mapping_applied: false,
-        }
-    }
-
     /// The client is corrected before the cache is written, so a tracker the
     /// client refuses to add fails the item and leaves nothing cached.
     #[tokio::test]
@@ -2211,7 +2116,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
-        let theirs = built(&media, "http://their-tracker.example/announce");
+        let theirs = built(
+            &media,
+            &announce_at("http://their-tracker.example/announce"),
+        );
         let torrent_dir = dir.path().join("torrents");
         let client = Arc::new(StubClient {
             export_result: Some(theirs.data.clone()),
@@ -2219,7 +2127,7 @@ mod tests {
             ..StubClient::default()
         });
         let seeder = seeder(client, torrent_dir.clone());
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let announce = announce_at("http://sharerr.example/announce");
         let existing = [summary(
             &theirs.info_hash,
             "/downloads",
@@ -2250,7 +2158,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("movie.mkv");
         std::fs::write(&media, b"pretend media bytes").unwrap();
-        let theirs = built(&media, "http://their-tracker.example/announce");
+        let theirs = built(
+            &media,
+            &announce_at("http://their-tracker.example/announce"),
+        );
         let torrent_dir = dir.path().join("torrents");
         let squatter = torrent_file_path(&torrent_dir, &theirs.info_hash);
         std::fs::create_dir_all(&squatter).unwrap();
@@ -2259,7 +2170,7 @@ mod tests {
             ..StubClient::default()
         });
         let seeder = seeder(client, torrent_dir);
-        let announce = AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap());
+        let announce = announce_at("http://sharerr.example/announce");
 
         let err = seeder
             .refresh_announce(&theirs.info_hash, &announce, &[])
@@ -2296,9 +2207,7 @@ mod tests {
         TorrentFactory
             .create(&TorrentRequest {
                 path: media,
-                announce: &AnnounceSet::single(
-                    Url::parse("http://friend.example/announce/our-token").unwrap(),
-                ),
+                announce: &announce_at("http://friend.example/announce/our-token"),
                 media: None,
                 private: false,
                 hybrid: false,
@@ -2340,7 +2249,7 @@ mod tests {
                 qbit: PathBuf::from("/movies/movie.mkv"),
                 mapping_applied: false,
             },
-            announce: AnnounceSet::single(Url::parse("http://sharerr.example/announce").unwrap()),
+            announce: announce_at("http://sharerr.example/announce"),
             media,
             _dir: dir,
         }
@@ -2612,7 +2521,7 @@ mod tests {
         .unwrap();
         let client = Arc::new(StubClient::default());
         let seeder = seeder(client.clone(), case.torrent_dir.clone());
-        let moved = AnnounceSet::single(Url::parse("http://moved.example/announce").unwrap());
+        let moved = announce_at("http://moved.example/announce");
         let upstream = ["http://friend.example/announce/our-token".to_owned()];
 
         let refreshed = seeder
@@ -2637,7 +2546,7 @@ mod tests {
     async fn an_adopted_torrents_own_trackers_are_recovered_from_its_export() {
         let case = friend_case(b"pretend media bytes");
         let theirs = friends_torrent(&case.media);
-        let old_ours = AnnounceSet::single(Url::parse("http://old.example/announce").unwrap());
+        let old_ours = announce_at("http://old.example/announce");
         write_torrent_file(
             &torrent_file_path(&case.torrent_dir, &theirs.info_hash),
             &sharerr_torrent::rewrite_announce(&theirs.data, &old_ours).unwrap(),

@@ -116,12 +116,50 @@ jobs:
       # actually means "some changed file lives outside .github/workflows/**"
       # for callers whose filter uses a negated pattern; it has no effect on a
       # caller (docker.yml's `lighthouse` job) whose filter has none.
+      # The files no caller's `code` counts, kept once here: a caller's key
+      # lists `- *not-code` and paths-filter flattens the alias. Only
+      # negations, so the `not-code` key itself never matches. Not `docs/**`
+      # wholesale: crates/sharerr/src/openapi.rs reads docs/openapi.json in a
+      # test, so that file is code.
+      - if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filters
+        env:
+          CALLER: ${{ inputs.filters }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'yaml<<FILTERS_EOF'
+            cat <<'SHARED'
+          not-code: &not-code
+            - '!**/*.md'
+            - '!docs/screenshots/**'
+            - '!.editorconfig'
+            - '!.gitattributes'
+            - '!.gitignore'
+            - '!.markdownlint.yaml'
+            - '!.moxide.toml'
+            - '!.prettierrc.yaml'
+            - '!.scorecard.yml'
+            - '!.shellcheckrc'
+            - '!.vscode/**'
+            - '!.zed/**'
+            - '!LICENSE.md'
+            - '!LICENSES/**'
+            - '!REUSE.toml'
+            - '!_config.yml'
+            - '!lychee.toml'
+            - '!scripts/scratch/**'
+          SHARED
+            printf '%s\n' "$CALLER"
+            echo 'FILTERS_EOF'
+          } >>"$GITHUB_OUTPUT"
+
       - if: github.event_name == 'push' || github.event_name == 'pull_request'
         id: filter
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           predicate-quantifier: some-with-excludes
-          filters: ${{ inputs.filters }}
+          filters: ${{ steps.filters.outputs.yaml }}
 
       # Collapses the filter's answer and "there was no diff to filter" into
       # one answer each for `code` and `changes`, so every downstream job

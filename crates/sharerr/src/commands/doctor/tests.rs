@@ -15,6 +15,187 @@ use crate::test_support::vault_in;
 // `gossip.rs`'s and `sync/tests.rs`'s tests do: a local key that never
 // touches the process env.
 
+// ----------------------------------------------------------------- helpers
+
+/// A torrent-client config with just the vault keys under test — the URL
+/// and the rest are defaults `check_torrent_credential` never reads.
+fn client(
+    primary_credential: Option<&'static str>,
+    fallback_credential: Option<&'static str>,
+) -> sharerr_core::config::TorrentClientConfig<'static> {
+    static CONFIG: std::sync::LazyLock<Config> = std::sync::LazyLock::new(Config::default);
+    let mut client = CONFIG.torrent_client();
+    client.primary_credential = primary_credential;
+    client.fallback_credential = fallback_credential;
+    client
+}
+
+/// Resolve the credential the way `run` does, so a `check_qbit` test gets
+/// the same input the real command hands it.
+fn stored_credential(config: &Config, vault: &Vault) -> Option<checks::TorrentCredential> {
+    check_torrent_credential(vault, &config.torrent_client(), &mut Report::default())
+}
+
+fn arr_service(url: &Url) -> ServiceConfig {
+    ServiceConfig { url: url.clone() }
+}
+
+fn sonarr_vault(dir: &tempfile::TempDir) -> Vault {
+    let mut vault = vault_in(dir);
+    vault
+        .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
+        .unwrap();
+    vault
+}
+
+/// [`check_arr`] for Sonarr at `server_url`, on a default config.
+async fn arr_check(server_url: &Url, vault: &Vault, fix: bool) -> (Vec<Discovered>, Report) {
+    let mut report = Report::default();
+    let items = check_arr(
+        MediaSource::Sonarr,
+        &arr_service(server_url),
+        &Config::default(),
+        Some(vault),
+        fix,
+        &mut report,
+    )
+    .await;
+    (items, report)
+}
+
+async fn sonarr_status(server: &MockServer) {
+    sharerr_testkit::mock::mount_json(
+        server,
+        "/api/v3/system/status",
+        sharerr_testkit::library::system_status_json("Sonarr"),
+    )
+    .await;
+}
+
+fn qbit_config(url: &Url) -> Config {
+    Config {
+        torrent_backend: TorrentBackend::Qbittorrent,
+        qbittorrent: sharerr_core::config::QbitConfig {
+            url: url.clone(),
+            ..Default::default()
+        },
+        ..Config::default()
+    }
+}
+
+fn qbit_vault(dir: &tempfile::TempDir) -> Vault {
+    let mut vault = vault_in(dir);
+    vault
+        .put(
+            secret_keys::QBITTORRENT_API_KEY,
+            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
+        )
+        .unwrap();
+    vault
+}
+
+async fn qbit_answering(server: &MockServer, route: &str, response: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(route))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+/// [`check_qbit`] with the credential `vault` holds for `config`'s backend.
+async fn qbit_check(config: &Config, vault: &Vault, fix: bool) -> Report {
+    let mut report = Report::default();
+    check_qbit(config, stored_credential(config, vault), fix, &mut report).await;
+    report
+}
+
+fn transmission_config(url: &Url) -> Config {
+    Config {
+        torrent_backend: TorrentBackend::Transmission,
+        transmission: sharerr_core::config::TransmissionConfig {
+            url: url.clone(),
+            ..Default::default()
+        },
+        ..Config::default()
+    }
+}
+
+fn transmission_vault(dir: &tempfile::TempDir) -> Vault {
+    let mut vault = vault_in(dir);
+    vault
+        .put(
+            secret_keys::TRANSMISSION_PASSWORD,
+            &SecretString::from("pw"),
+        )
+        .unwrap();
+    vault
+}
+
+async fn transmission_answering(status: u16, body: serde_json::Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/transmission/rpc"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn gluetun_server(ip: serde_json::Value, port: serde_json::Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/publicip/ip"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(ip))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/openvpn/portforwarded"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(port))
+        .mount(&server)
+        .await;
+    server
+}
+
+fn gluetun_config(control_url: &Url) -> Config {
+    Config {
+        gluetun: sharerr_core::config::GluetunConfig {
+            control_url: Some(control_url.clone()),
+            ..Default::default()
+        },
+        ..Config::default()
+    }
+}
+
+/// [`check_gluetun`] against the control server `config` names.
+async fn gluetun_check(
+    config: &Config,
+    vault: Option<&Vault>,
+    target: crate::gluetun::GluetunTarget,
+    report: &mut Report,
+) {
+    let control = target.config(config).control_url.clone().unwrap();
+    check_gluetun(config, vault, target, &control, report).await;
+}
+
+fn discovered(arr_path: impl Into<std::path::PathBuf>, size: u64) -> Discovered {
+    sharerr_core::Discovered {
+        source: MediaSource::Sonarr,
+        source_id: 1,
+        file_id: 2,
+        spec: sharerr_core::MediaSpec::Movie {
+            title: "Gilded Ferry".to_owned(),
+            year: Some(2019),
+        },
+        arr_path: arr_path.into(),
+        size,
+        ids: sharerr_core::ExternalIds::default(),
+        media: None,
+        scene_name: None,
+        original_path: None,
+        scene: None,
+    }
+}
+
 // --------------------------------------------------------- report_capped
 
 #[test]
@@ -146,25 +327,6 @@ fn credential_reports_a_missing_key_and_a_closed_vault_each_exactly_once() {
 }
 
 // ------------------------------------------------- check_torrent_credential
-
-/// A torrent-client config with just the vault keys under test — the URL
-/// and the rest are defaults `check_torrent_credential` never reads.
-fn client(
-    primary_credential: Option<&'static str>,
-    fallback_credential: Option<&'static str>,
-) -> sharerr_core::config::TorrentClientConfig<'static> {
-    static CONFIG: std::sync::LazyLock<Config> = std::sync::LazyLock::new(Config::default);
-    let mut client = CONFIG.torrent_client();
-    client.primary_credential = primary_credential;
-    client.fallback_credential = fallback_credential;
-    client
-}
-
-/// Resolve the credential the way `run` does, so a `check_qbit` test gets
-/// the same input the real command hands it.
-fn stored_credential(config: &Config, vault: &Vault) -> Option<checks::TorrentCredential> {
-    check_torrent_credential(vault, &config.torrent_client(), &mut Report::default())
-}
 
 #[test]
 fn an_api_key_takes_precedence_over_a_configured_password() {
@@ -420,19 +582,10 @@ async fn check_database_opens_a_fresh_store_and_counts_its_items() {
 
 // ---------------------------------------------------------------- check_arr
 
-fn arr_service(url: &Url) -> ServiceConfig {
-    ServiceConfig { url: url.clone() }
-}
-
 #[tokio::test]
 async fn check_arr_reports_a_ready_source_and_returns_its_items() {
     let server = MockServer::start().await;
-    sharerr_testkit::mock::mount_json(
-        &server,
-        "/api/v3/system/status",
-        sharerr_testkit::library::system_status_json("Sonarr"),
-    )
-    .await;
+    sonarr_status(&server).await;
     sharerr_testkit::mock::mount_json(
         &server,
         "/api/v3/tag",
@@ -442,23 +595,8 @@ async fn check_arr_reports_a_ready_source_and_returns_its_items() {
     sharerr_testkit::mock::mount_json(&server, "/api/v3/series", serde_json::json!([])).await;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
-        .unwrap();
     let url = sharerr_testkit::mock::base_url(&server);
-    let config = Config::default();
-    let mut report = Report::default();
-
-    let items = check_arr(
-        MediaSource::Sonarr,
-        &arr_service(&url),
-        &config,
-        Some(&vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let (items, report) = arr_check(&url, &sonarr_vault(&dir), false).await;
 
     // The tag resolves but nothing carries it yet — `TagUnused`, so no items.
     assert!(items.is_empty());
@@ -490,12 +628,7 @@ async fn check_arr_without_a_stored_credential_fails_once_and_does_not_call_out(
 #[tokio::test]
 async fn check_arr_with_fix_creates_a_missing_tag_instead_of_just_failing() {
     let server = MockServer::start().await;
-    sharerr_testkit::mock::mount_json(
-        &server,
-        "/api/v3/system/status",
-        sharerr_testkit::library::system_status_json("Sonarr"),
-    )
-    .await;
+    sonarr_status(&server).await;
     // No `sharerr` tag exists yet.
     sharerr_testkit::mock::mount_json(&server, "/api/v3/tag", serde_json::json!([])).await;
     Mock::given(method("POST"))
@@ -508,23 +641,8 @@ async fn check_arr_with_fix_creates_a_missing_tag_instead_of_just_failing() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
-        .unwrap();
     let url = sharerr_testkit::mock::base_url(&server);
-    let config = Config::default();
-    let mut report = Report::default();
-
-    let items = check_arr(
-        MediaSource::Sonarr,
-        &arr_service(&url),
-        &config,
-        Some(&vault),
-        true,
-        &mut report,
-    )
-    .await;
+    let (items, report) = arr_check(&url, &sonarr_vault(&dir), true).await;
 
     assert!(items.is_empty(), "a just-created tag carries nothing yet");
     assert_eq!(
@@ -552,30 +670,8 @@ async fn check_qbit_reports_ready_and_lists_the_configured_category() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(
-            secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
-        )
-        .unwrap();
-    let config = Config {
-        torrent_backend: TorrentBackend::Qbittorrent,
-        qbittorrent: sharerr_core::config::QbitConfig {
-            url: sharerr_testkit::mock::base_url(&server),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let config = qbit_config(&sharerr_testkit::mock::base_url(&server));
+    let report = qbit_check(&config, &qbit_vault(&dir), false).await;
 
     assert_eq!(report.failures, 0);
     assert_eq!(report.warnings, 0);
@@ -598,30 +694,8 @@ async fn check_qbit_warns_about_a_version_below_the_security_floor() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(
-            secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
-        )
-        .unwrap();
-    let config = Config {
-        torrent_backend: TorrentBackend::Qbittorrent,
-        qbittorrent: sharerr_core::config::QbitConfig {
-            url: sharerr_testkit::mock::base_url(&server),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let config = qbit_config(&sharerr_testkit::mock::base_url(&server));
+    let report = qbit_check(&config, &qbit_vault(&dir), false).await;
 
     assert_eq!(report.failures, 0, "an old client still seeds");
     assert_eq!(report.warnings, 1);
@@ -646,30 +720,8 @@ async fn check_qbit_offers_to_create_a_missing_category_and_does_so_with_fix() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(
-            secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
-        )
-        .unwrap();
-    let config = Config {
-        torrent_backend: TorrentBackend::Qbittorrent,
-        qbittorrent: sharerr_core::config::QbitConfig {
-            url: sharerr_testkit::mock::base_url(&server),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        true,
-        &mut report,
-    )
-    .await;
+    let config = qbit_config(&sharerr_testkit::mock::base_url(&server));
+    let report = qbit_check(&config, &qbit_vault(&dir), true).await;
 
     assert_eq!(report.failures, 0);
 }
@@ -878,42 +930,6 @@ fn run_reports_every_failure_on_an_empty_config() {
 
 // ----------------------------------------------------------- check_gluetun
 
-async fn gluetun_server(ip: serde_json::Value, port: serde_json::Value) -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/publicip/ip"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(ip))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/v1/openvpn/portforwarded"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(port))
-        .mount(&server)
-        .await;
-    server
-}
-
-fn gluetun_config(control_url: &Url) -> Config {
-    Config {
-        gluetun: sharerr_core::config::GluetunConfig {
-            control_url: Some(control_url.clone()),
-            ..Default::default()
-        },
-        ..Config::default()
-    }
-}
-
-/// [`check_gluetun`] against the control server `config` names.
-async fn gluetun_check(
-    config: &Config,
-    vault: Option<&Vault>,
-    target: crate::gluetun::GluetunTarget,
-    report: &mut Report,
-) {
-    let control = target.config(config).control_url.clone().unwrap();
-    check_gluetun(config, vault, target, &control, report).await;
-}
-
 #[tokio::test]
 async fn check_gluetun_reports_ip_and_port_when_they_agree_with_the_config() {
     let server = gluetun_server(
@@ -1120,25 +1136,6 @@ async fn check_reachability_does_nothing_without_an_advertised_address() {
 
 // ------------------------------------------------------------- check_paths
 
-fn discovered(arr_path: impl Into<std::path::PathBuf>, size: u64) -> Discovered {
-    sharerr_core::Discovered {
-        source: MediaSource::Sonarr,
-        source_id: 1,
-        file_id: 2,
-        spec: sharerr_core::MediaSpec::Movie {
-            title: "Gilded Ferry".to_owned(),
-            year: Some(2019),
-        },
-        arr_path: arr_path.into(),
-        size,
-        ids: sharerr_core::ExternalIds::default(),
-        media: None,
-        scene_name: None,
-        original_path: None,
-        scene: None,
-    }
-}
-
 #[test]
 fn check_paths_covers_a_sample_an_unmapped_file_and_an_invalid_path() {
     use sharerr_core::config::PathMapping;
@@ -1229,30 +1226,8 @@ async fn check_qbit_reports_a_rejected_key() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(
-            secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
-        )
-        .unwrap();
-    let config = Config {
-        torrent_backend: TorrentBackend::Qbittorrent,
-        qbittorrent: sharerr_core::config::QbitConfig {
-            url: sharerr_testkit::mock::base_url(&server),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let config = qbit_config(&sharerr_testkit::mock::base_url(&server));
+    let report = qbit_check(&config, &qbit_vault(&dir), false).await;
 
     assert_eq!(report.failures, 1);
 }
@@ -1260,30 +1235,8 @@ async fn check_qbit_reports_a_rejected_key() {
 #[tokio::test]
 async fn check_qbit_reports_an_unreachable_service() {
     let dir = tempfile::tempdir().unwrap();
-    let mut vault = vault_in(&dir);
-    vault
-        .put(
-            secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
-        )
-        .unwrap();
-    let config = Config {
-        torrent_backend: TorrentBackend::Qbittorrent,
-        qbittorrent: sharerr_core::config::QbitConfig {
-            url: sharerr_testkit::net::closed_url(),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let config = qbit_config(&sharerr_testkit::net::closed_url());
+    let report = qbit_check(&config, &qbit_vault(&dir), false).await;
 
     assert_eq!(report.failures, 1);
 }
@@ -1294,62 +1247,16 @@ async fn check_qbit_falls_back_to_a_password_when_the_backend_has_no_api_key() {
     // its password instead — a different branch than every qBittorrent
     // test above exercises.
     let dir = tempfile::tempdir().unwrap();
-    let vault = vault_in(&dir);
-    let config = Config {
-        torrent_backend: TorrentBackend::Transmission,
-        transmission: sharerr_core::config::TransmissionConfig {
-            url: sharerr_testkit::net::closed_url(),
-            ..Default::default()
-        },
-        ..Config::default()
-    };
-    let mut report = Report::default();
+    let config = transmission_config(&sharerr_testkit::net::closed_url());
 
     // No password stored either: the vault section reported the miss,
     // and `check_qbit` records the skip without ever building a client.
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault_in(&dir), false).await;
 
     assert_eq!(report.failures, 1);
 }
 
 // ------------------------------------------- check_arr, every outcome
-
-fn sonarr_vault(dir: &tempfile::TempDir) -> Vault {
-    let mut vault = vault_in(dir);
-    vault
-        .put(secret_keys::SONARR_API_KEY, &SecretString::from("k"))
-        .unwrap();
-    vault
-}
-
-async fn arr_check(server_url: &Url, vault: &Vault, fix: bool) -> (Vec<Discovered>, Report) {
-    let mut report = Report::default();
-    let items = check_arr(
-        MediaSource::Sonarr,
-        &arr_service(server_url),
-        &Config::default(),
-        Some(vault),
-        fix,
-        &mut report,
-    )
-    .await;
-    (items, report)
-}
-
-async fn sonarr_status(server: &MockServer) {
-    sharerr_testkit::mock::mount_json(
-        server,
-        "/api/v3/system/status",
-        sharerr_testkit::library::system_status_json("Sonarr"),
-    )
-    .await;
-}
 
 #[tokio::test]
 async fn check_arr_reports_tagged_files_and_returns_them() {
@@ -1494,38 +1401,6 @@ fn a_library_with_an_unclassifiable_file_warns_about_the_skip() {
 
 // ------------------------------------------- check_qbit, every outcome
 
-fn transmission_config(url: &Url) -> Config {
-    Config {
-        torrent_backend: TorrentBackend::Transmission,
-        transmission: sharerr_core::config::TransmissionConfig {
-            url: url.clone(),
-            ..Default::default()
-        },
-        ..Config::default()
-    }
-}
-
-fn transmission_vault(dir: &tempfile::TempDir) -> Vault {
-    let mut vault = vault_in(dir);
-    vault
-        .put(
-            secret_keys::TRANSMISSION_PASSWORD,
-            &SecretString::from("pw"),
-        )
-        .unwrap();
-    vault
-}
-
-async fn transmission_answering(status: u16, body: serde_json::Value) -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/transmission/rpc"))
-        .respond_with(ResponseTemplate::new(status).set_body_json(body))
-        .mount(&server)
-        .await;
-    server
-}
-
 #[tokio::test]
 async fn check_qbit_without_a_resolved_credential_records_a_skip() {
     let mut report = Report::default();
@@ -1543,15 +1418,7 @@ async fn check_qbit_signs_in_to_transmission_with_a_password() {
     let dir = tempfile::tempdir().unwrap();
     let vault = transmission_vault(&dir);
     let config = transmission_config(&sharerr_testkit::mock::base_url(&server));
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault, false).await;
 
     assert_eq!(report.failures, 0);
 }
@@ -1563,68 +1430,17 @@ async fn check_qbit_fails_on_a_rejected_password_a_server_error_and_nothing_list
 
     let server = transmission_answering(401, serde_json::json!({})).await;
     let config = transmission_config(&sharerr_testkit::mock::base_url(&server));
-    let mut report = Report::default();
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault, false).await;
     assert_eq!(report.failures, 1, "rejected");
 
     let server = transmission_answering(500, serde_json::json!({})).await;
     let config = transmission_config(&sharerr_testkit::mock::base_url(&server));
-    let mut report = Report::default();
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault, false).await;
     assert_eq!(report.failures, 1, "server error");
 
     let config = transmission_config(&sharerr_testkit::net::closed_url());
-    let mut report = Report::default();
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault, false).await;
     assert_eq!(report.failures, 1, "unreachable");
-}
-
-fn qbit_config(server: &MockServer) -> Config {
-    Config {
-        torrent_backend: TorrentBackend::Qbittorrent,
-        qbittorrent: sharerr_core::config::QbitConfig {
-            url: sharerr_testkit::mock::base_url(server),
-            ..Default::default()
-        },
-        ..Config::default()
-    }
-}
-
-fn qbit_vault(dir: &tempfile::TempDir) -> Vault {
-    let mut vault = vault_in(dir);
-    vault
-        .put(
-            secret_keys::QBITTORRENT_API_KEY,
-            &SecretString::from(sharerr_testkit::mock::QBIT_API_KEY),
-        )
-        .unwrap();
-    vault
-}
-
-async fn qbit_answering(server: &MockServer, route: &str, response: ResponseTemplate) {
-    Mock::given(method("GET"))
-        .and(path(route))
-        .respond_with(response)
-        .mount(server)
-        .await;
 }
 
 /// A listing or category call that fails after sign-in is a warning, not
@@ -1647,16 +1463,8 @@ async fn check_qbit_warns_when_the_listing_or_the_category_list_fails() {
     .await;
     let dir = tempfile::tempdir().unwrap();
     let vault = qbit_vault(&dir);
-    let config = qbit_config(&server);
-    let mut report = Report::default();
-
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let config = qbit_config(&sharerr_testkit::mock::base_url(&server));
+    let report = qbit_check(&config, &vault, false).await;
 
     assert_eq!(report.failures, 0);
     assert_eq!(report.warnings, 2);
@@ -1690,27 +1498,13 @@ async fn check_qbit_warns_about_a_missing_category_and_fails_if_fix_cannot_creat
         .await;
     let dir = tempfile::tempdir().unwrap();
     let vault = qbit_vault(&dir);
-    let config = qbit_config(&server);
+    let config = qbit_config(&sharerr_testkit::mock::base_url(&server));
 
-    let mut report = Report::default();
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        false,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault, false).await;
     assert_eq!(report.failures, 0);
     assert_eq!(report.warnings, 1, "without --fix it is advice");
 
-    let mut report = Report::default();
-    check_qbit(
-        &config,
-        stored_credential(&config, &vault),
-        true,
-        &mut report,
-    )
-    .await;
+    let report = qbit_check(&config, &vault, true).await;
     assert_eq!(
         report.failures, 1,
         "with --fix a failed create is a failure"

@@ -1676,6 +1676,21 @@ pub(super) fn url_placeholder(source: MediaSource) -> &'static str {
     }
 }
 
+/// Every *arr app's section, Sonarr and Radarr as the primary pair, from the
+/// same list everything else iterates, so a hand-typed enumeration cannot
+/// silently leave an app unconfigurable. `ARRS`, not `ALL`: the directory
+/// source has no URL or key and gets the Libraries section instead.
+pub(crate) fn arr_sections(config: &Config, is_set: &impl Fn(&str) -> bool) -> Vec<ArrSection> {
+    MediaSource::ARRS
+        .iter()
+        .copied()
+        .filter_map(|kind| {
+            let primary = matches!(kind, MediaSource::Sonarr | MediaSource::Radarr);
+            arr_section(kind, config, is_set, primary)
+        })
+        .collect()
+}
+
 /// One *arr app's section, as both the Settings page and the wizard render
 /// it. `None` for a source with no URL or API key (the directory source).
 pub(super) fn arr_section(
@@ -1719,18 +1734,7 @@ async fn build_page(
     let is_set = |key: &str| secrets.contains(key);
     let locks = super::config_io::env_overrides();
 
-    // One section per app, from the same list everything else iterates, so a
-    // hand-typed enumeration cannot silently leave an app unconfigurable.
-    // `ARRS`, not `ALL`: the directory source has no URL or key and gets the
-    // Libraries section below.
-    let arrs = MediaSource::ARRS
-        .iter()
-        .copied()
-        .filter_map(|kind| {
-            let primary = matches!(kind, MediaSource::Sonarr | MediaSource::Radarr);
-            arr_section(kind, &config, &is_set, primary)
-        })
-        .collect::<Vec<_>>();
+    let arrs = arr_sections(&config, &is_set);
     let secondary_arr_configured = arrs
         .iter()
         .any(|arr| !arr.primary && (!arr.url.is_empty() || arr.key_set));
