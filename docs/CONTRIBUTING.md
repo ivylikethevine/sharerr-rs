@@ -53,14 +53,12 @@ scripts/check.sh             # everything below, before calling anything done
 
 `scripts/check.sh` is the one local entry point, and every check step in
 `ci.yml` (and `coverage.yml`'s floor) calls it too, so a command lives in one
-place. `--fast` is formatting, shell, compose, workflow, link, spelling and
-Markdown checks; `--lint` adds clippy, rustdoc, cargo-deny, Terraform and
-gitleaks; the default (`--all`) adds the tests, the MSRV check and the
-coverage floor. `scripts/check.sh <check>...` runs just those, and `--list`
-names them all. Two checks are in no group: `semver`, and `mutants`, the
-by-hand mutation run [`docs/TESTING.md`](TESTING.md#mutation-testing)
-describes. `--install` fetches every tool the script uses from its
-sha256-pinned row in `.github/actions/setup-tool/tools.txt` into
+place. `--fast` compiles nothing, `--lint` adds the checks that compile or
+scan without running the tests, and the default (`--all`) adds the tests,
+the MSRV check and the coverage floor; `--list` prints each group's checks,
+and the script's header says which CI job runs each. `scripts/check.sh
+<check>...` runs just those. `--install` fetches every tool the script uses
+from its sha256-pinned row in `.github/actions/setup-tool/tools.txt` into
 `target/ci-tools/` (no sudo), and runs `npm ci --prefix .github` for
 markdownlint and prettier.
 
@@ -198,12 +196,9 @@ dispatch), advisory, and keeps an `integration` tracking issue current the
 same way. `codeql.yml` runs on every push to `main` and weekly as well as on
 PRs.
 
-The third-party tools these jobs run that dependabot cannot see (zizmor,
-actionlint, cargo-llvm-cov, cargo-semver-checks, lychee, typos, shellcheck,
-hadolint, trivy, cargo-deny, gitleaks, terraform and yq) each install from a
-sha256-pinned row
-in `.github/actions/setup-tool/tools.txt`; so does cargo-mutants, which no
-job runs, for `scripts/check.sh --install`. markdownlint and prettier come
+The third-party tools these jobs run that dependabot cannot see each install
+from a sha256-pinned row in `.github/actions/setup-tool/tools.txt`, the one
+roster. markdownlint and prettier come
 from `.github/package-lock.json`. Dependabot opens no version-update pull
 request (`.github/dependabot.yml` sets each ecosystem's limit to 0):
 `tool-versions.yml` reports when a tool, an action SHA, an image digest, a
@@ -304,6 +299,9 @@ body (see [`RELEASING.md`](RELEASING.md#the-github-release)). A `dev` →
 `main` PR is checked the same way, since those are the PRs a release reads:
 its note aggregates the notes of the PRs that went into `dev`. Dependabot's
 PRs are exempt.
+
+**No secret reaches `sharerr.toml`**: every secret lives in the encrypted
+vault ([settings reference](SETTINGS.md#vault-secrets)).
 
 ## AI-assisted contributions
 

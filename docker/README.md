@@ -28,17 +28,9 @@ Everything in `tests/fixtures/media` is synthetic (see
 
 ## Running it
 
-```bash
-./scripts/run_docker_tests.sh                 # plain stack, qBittorrent
-./scripts/run_docker_tests.sh --vpn
-./scripts/run_docker_tests.sh --transmission
-./scripts/run_docker_tests.sh --rtorrent
-./scripts/run_docker_tests.sh --deluge
-./scripts/run_docker_tests.sh --sonarr-v5     # plain stack, Sonarr v5
-./scripts/run_docker_tests_two_instance.sh
-```
-
-That is the whole runbook and the supported path: generate the fixtures,
+The commands, one per stack, and what each tier asserts are in
+[`docs/TESTING.md`](../docs/TESTING.md#tier-2-the-compose-stacks). Each run
+script is the whole runbook and the supported path: generate the fixtures,
 bring the stack up, seed tagged content, load the credentials each app
 generated, run `doctor`, run the opt-in suite, tear down. Every step is
 idempotent and the teardown runs however the script exits. Read the script
@@ -87,14 +79,10 @@ Then add a _Generic Torznab_ indexer pointing at `http://sharerr:8477/api`.
 
 ## The opt-in test suite
 
-```bash
-cargo test -p sharerr --features e2e --test e2e -- --ignored --test-threads=1
-```
-
-The assertion that justifies the whole tier is in
-`crates/sharerr/tests/e2e.rs`: after a sync through a real client, every
-media file has the same **inode, mtime, and length** it started with.
-Serialised with `--test-threads=1` because the tests share one stack.
+`crates/sharerr/tests/e2e.rs`, run by the script against a stack it brought
+up; the command and its one assertion are in
+[`docs/TESTING.md`](../docs/TESTING.md#tier-2-the-compose-stacks).
+`--test-threads=1` because the tests share one stack.
 
 ## Seeding tagged content
 
@@ -244,10 +232,6 @@ by Docker's embedded DNS on the shared network, on port 8477, sharerr's
 internal listen port rather than the host-published one.
 
 ## The mesh stack
-
-```bash
-./scripts/run_docker_tests_mesh.sh
-```
 
 | Service    | Port            |
 | ---------- | --------------- |

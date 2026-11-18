@@ -306,6 +306,7 @@ mod tests {
 
     use base64::Engine as _;
     use secrecy::SecretString;
+    use sharerr_testkit::mock::urls;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -330,12 +331,11 @@ mod tests {
         ResponseTemplate::new(200).set_body_string(scalar_response("<i8>0</i8>"))
     }
 
-    /// Mount [`scalar_ok`] for every POST, unconditionally. For a test that
-    /// needs to route different calls to different responses, mount
-    /// `.respond_with(scalar_ok())` directly with its own matcher instead.
-    async fn mount_scalar(server: &MockServer) {
+    /// Answer every POST with `response`, unconditionally. A test that routes
+    /// different calls to different responses mounts its own matchers.
+    async fn respond_all(server: &MockServer, response: ResponseTemplate) {
         Mock::given(method("POST"))
-            .respond_with(scalar_ok())
+            .respond_with(response)
             .mount(server)
             .await;
     }
@@ -360,13 +360,11 @@ mod tests {
     #[tokio::test]
     async fn version_reads_the_plain_string_reply() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(scalar_response("<string>0.9.8</string>")),
-            )
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(scalar_response("<string>0.9.8</string>")),
+        )
+        .await;
 
         let version = client(&server).version().await.unwrap();
         assert_eq!(version, "0.9.8");
@@ -375,12 +373,11 @@ mod tests {
     #[tokio::test]
     async fn a_fault_response_is_reported_with_its_message() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(fault_response("method not found")),
-            )
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(fault_response("method not found")),
+        )
+        .await;
 
         let err = client(&server).version().await.unwrap_err();
         assert!(err.to_string().contains("method not found"), "{err}");
@@ -389,10 +386,7 @@ mod tests {
     #[tokio::test]
     async fn a_rejected_password_is_reported_as_such() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&server)
-            .await;
+        respond_all(&server, ResponseTemplate::new(401)).await;
 
         let err = client(&server).version().await.unwrap_err();
         assert!(err.is_auth_failure(), "{err}");
@@ -455,8 +449,9 @@ mod tests {
     #[tokio::test]
     async fn listing_maps_hash_paths_category_and_seeding_state() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_body(&[
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(multicall_body(&[
                 [
                     "ABCDEF",
                     "a",
@@ -487,9 +482,9 @@ mod tests {
                     "0",
                     "0",
                 ],
-            ])))
-            .mount(&server)
-            .await;
+            ])),
+        )
+        .await;
 
         let all = client(&server).list(None).await.unwrap();
         assert_eq!(all.len(), 3);
@@ -512,13 +507,14 @@ mod tests {
     #[tokio::test]
     async fn a_category_filter_matches_against_custom1() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_body(&[
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(multicall_body(&[
                 ["aa", "a", "/d", "/d/a", "sharerr", "1", "1", "0"],
                 ["bb", "b", "/d", "/d/b", "something-else", "1", "1", "0"],
-            ])))
-            .mount(&server)
-            .await;
+            ])),
+        )
+        .await;
 
         let filtered = client(&server).list(Some("sharerr")).await.unwrap();
         assert_eq!(filtered.len(), 1);
@@ -531,7 +527,7 @@ mod tests {
     #[tokio::test]
     async fn removal_calls_d_erase_and_nothing_else() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         client(&server).remove("abc").await.unwrap();
 
@@ -547,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn adding_points_at_the_existing_data_and_does_not_move_it() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         let data = b"d8:announce0:e";
         let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads/tv")
@@ -579,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn a_multi_file_add_points_at_its_root_directory() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         let request =
             AddRequest::new(b"x", "abc123", "x.torrent", "/downloads/tv/").root_folder("Season 01");
@@ -597,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn an_add_with_tags_and_no_category_labels_it_with_the_tags() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         let request = AddRequest::new(b"x", "abc123", "x.torrent", "/downloads").tags("shared");
         client(&server).add(&request).await.unwrap();
@@ -610,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn a_stopped_add_uses_load_raw_without_start() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         let data = b"x";
         let request = AddRequest::new(data, "abc123", "x.torrent", "/downloads").stopped(true);
@@ -631,16 +627,14 @@ mod tests {
     #[tokio::test]
     async fn add_trackers_inserts_the_same_way_set_trackers_does() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(1)))
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(multicall_ok_response(1)),
+        )
+        .await;
 
         client(&server)
-            .add_trackers(
-                "aabbcc",
-                &[Url::parse("http://sharerr.example/announce").unwrap()],
-            )
+            .add_trackers("aabbcc", &urls(&["http://sharerr.example/announce"]))
             .await
             .unwrap();
 
@@ -654,33 +648,24 @@ mod tests {
         assert!(body.contains("<string>d.tracker.insert</string>"), "{body}");
     }
 
-    /// `d.loaded_file` names a path on the daemon's filesystem, not bytes on
-    /// the wire, so there is nothing to return — reported as `Ok(None)` rather
-    /// than an error, and without a round trip.
-    #[tokio::test]
-    async fn export_reports_that_rtorrent_cannot_produce_the_file() {
-        let server = MockServer::start().await;
-        assert_eq!(client(&server).export("aabbcc").await.unwrap(), None);
-        assert!(server.received_requests().await.unwrap().is_empty());
-    }
-
     /// rTorrent cannot remove a tracker, so this must insert rather than
     /// error — and must not claim to have replaced anything.
     #[tokio::test]
     async fn set_trackers_inserts_a_new_tier_for_each_url() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)),
+        )
+        .await;
 
         client(&server)
             .set_trackers(
                 "aabbcc",
-                &[
-                    Url::parse("http://new.example:41234/announce").unwrap(),
-                    Url::parse("http://old.example:8477/announce").unwrap(),
-                ],
+                &urls(&[
+                    "http://new.example:41234/announce",
+                    "http://old.example:8477/announce",
+                ]),
             )
             .await
             .unwrap();
@@ -723,18 +708,12 @@ mod tests {
              </struct></value>\
              </data></array>",
         );
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(body))
-            .mount(&server)
-            .await;
+        respond_all(&server, ResponseTemplate::new(200).set_body_string(body)).await;
 
         let err = client(&server)
             .set_trackers(
                 "aabbcc",
-                &[
-                    Url::parse("http://new.example/announce").unwrap(),
-                    Url::parse("http://old.example/announce").unwrap(),
-                ],
+                &urls(&["http://new.example/announce", "http://old.example/announce"]),
             )
             .await
             .unwrap_err();
@@ -744,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_upload_limit_costs_no_extra_calls() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         let data = b"x";
         client(&server)
@@ -774,10 +753,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_success_status_is_reported_as_an_api_error() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
+        respond_all(&server, ResponseTemplate::new(500)).await;
 
         let err = client(&server).version().await.unwrap_err();
         assert!(err.to_string().contains("500"), "{err}");
@@ -786,10 +762,11 @@ mod tests {
     #[tokio::test]
     async fn invalid_utf8_in_the_body_is_reported_as_malformed() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xff, 0xfe, 0xfd]))
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_bytes(vec![0xff, 0xfe, 0xfd]),
+        )
+        .await;
 
         let err = client(&server).version().await.unwrap_err();
         assert!(err.to_string().contains("system.client_version"), "{err}");
@@ -798,13 +775,12 @@ mod tests {
     #[tokio::test]
     async fn call_str_rejects_a_non_string_reply() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(scalar_response("<array><data></data></array>")),
-            )
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200)
+                .set_body_string(scalar_response("<array><data></data></array>")),
+        )
+        .await;
 
         let err = client(&server).version().await.unwrap_err();
         assert!(err.to_string().contains("expected a string"), "{err}");
@@ -813,13 +789,11 @@ mod tests {
     #[tokio::test]
     async fn call_multi_rejects_a_non_array_top_level_reply() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(scalar_response("<string>oops</string>")),
-            )
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(scalar_response("<string>oops</string>")),
+        )
+        .await;
 
         let err = client(&server).list(None).await.unwrap_err();
         assert!(
@@ -832,12 +806,13 @@ mod tests {
     async fn call_multi_rejects_a_row_that_is_not_an_array() {
         let server = MockServer::start().await;
         // One outer array containing a bare string instead of a per-torrent array.
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(scalar_response(
                 "<array><data><value><string>not-a-row</string></value></data></array>",
-            )))
-            .mount(&server)
-            .await;
+            )),
+        )
+        .await;
 
         let err = client(&server).list(None).await.unwrap_err();
         assert!(err.to_string().contains("expected a row array"), "{err}");
@@ -846,17 +821,18 @@ mod tests {
     #[tokio::test]
     async fn files_maps_path_and_size() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(scalar_response(
                 "<array><data>\
                  <value><array><data>\
                  <value><string>show/episode.mkv</string></value>\
                  <value><i8>4096</i8></value>\
                  </data></array></value>\
                  </data></array>",
-            )))
-            .mount(&server)
-            .await;
+            )),
+        )
+        .await;
 
         let files = client(&server).files("abc").await.unwrap();
         assert_eq!(files.len(), 1);
@@ -871,10 +847,11 @@ mod tests {
     #[tokio::test]
     async fn set_limits_redefines_the_throttle_or_sends_nothing() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)),
+        )
+        .await;
 
         let client = client(&server);
         client
@@ -938,14 +915,13 @@ mod tests {
              <member><name>faultString</name><value><string>Invalid throttle rate</string></value></member>\
              </struct></value>";
         let ok = "<value><array><data><value><i8>0</i8></value></data></array></value>";
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(scalar_response(&format!(
-                    "<array><data>{fault}{ok}</data></array>"
-                ))),
-            )
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(scalar_response(&format!(
+                "<array><data>{fault}{ok}</data></array>"
+            ))),
+        )
+        .await;
 
         let err = client(&server)
             .set_limits(
@@ -1049,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn call_batch_rejects_a_non_array_top_level_reply() {
         let server = MockServer::start().await;
-        mount_scalar(&server).await;
+        respond_all(&server, scalar_ok()).await;
 
         let err = client(&server)
             .call_batch("d.name", &[[] as [Param<'_>; 0]])
@@ -1064,10 +1040,11 @@ mod tests {
     #[tokio::test]
     async fn call_batch_rejects_a_result_count_that_does_not_match_the_calls() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)))
-            .mount(&server)
-            .await;
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(multicall_ok_response(2)),
+        )
+        .await;
 
         let err = client(&server)
             .call_batch("d.name", &[[] as [Param<'_>; 0]])
@@ -1084,12 +1061,13 @@ mod tests {
         let server = MockServer::start().await;
         // One row, but a bare integer rather than the one-element array the
         // multicall extension wraps every successful return value in.
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(scalar_response(
+        respond_all(
+            &server,
+            ResponseTemplate::new(200).set_body_string(scalar_response(
                 "<array><data><value><i8>0</i8></value></data></array>",
-            )))
-            .mount(&server)
-            .await;
+            )),
+        )
+        .await;
 
         let err = client(&server)
             .call_batch("d.name", &[[] as [Param<'_>; 0]])
@@ -1102,23 +1080,11 @@ mod tests {
         );
     }
 
-    /// Through the trait, the way the binary calls it: `login` is the
-    /// version probe (rTorrent has no session), and `kind` says which
-    /// client this is.
+    /// `login` is the trait's default version probe, tested in
+    /// `sharerr-client`; `kind` is this client's own.
     #[tokio::test]
-    async fn login_through_the_trait_is_a_version_probe() {
+    async fn kind_reports_rtorrent() {
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(scalar_response("<string>0.9.8</string>")),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client: &dyn TorrentClient = &client(&server);
-        assert_eq!(client.kind(), KIND);
-        client.login().await.unwrap();
+        assert_eq!(TorrentClient::kind(&client(&server)), KIND);
     }
 }

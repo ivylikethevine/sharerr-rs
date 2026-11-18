@@ -97,10 +97,10 @@ The two-instance script drives a real Torznab request/grab exchange between
 two independent sharerr stacks, the one scenario a single-instance stack
 cannot exercise — it creates a peer purely to mint a Torznab key for
 Prowlarr, but never wires the two instances as gossip partners; see
-[Tier 3](#tier-3-the-mesh-stack) for the tier that actually does. See
+[Tier 3](#tier-3-the-mesh-stack) for the tier that actually does.
 [`docker/README.md`](https://github.com/ivylikethevine/sharerr-rs/blob/main/docker/README.md)
-for each stack's services, ports, and how to exercise the feed and tracker by
-hand.
+owns the stacks: each one's services, ports, seeding, and how to exercise the
+feed and tracker by hand.
 
 ## Tier 3: the mesh stack
 
@@ -130,8 +130,9 @@ covers the one thing bash cannot: an actual Ed25519 verification that the
 lighthouse's answer is a real record, not one of its fabricated decoys.
 
 `gossip.exchange_secs`, `lighthouse.interval_secs`, and
-`lighthouse.quiet_secs` default to 900/900/3600 seconds and have no
-settings-page field — a real deployment has no reason to run tighter, and
+`lighthouse.quiet_secs` have defaults in minutes and hours
+([`SETTINGS.md`](SETTINGS.md) lists them) and no settings-page field — a
+real deployment has no reason to run tighter, and
 exposing a floor-less knob in the UI would invite hammering every friend's
 instance. `docker/compose.mesh.yml` sets all three to single-digit seconds
 via `SHARERR_*` environment overrides, which is the one sanctioned reason to
@@ -173,8 +174,7 @@ scripts/check.sh coverage-html                        # render target/../coverag
 
 `coverage` is `coverage-run` (`cargo llvm-cov --workspace --all-features
 --locked --no-report`) followed by `coverage-floor`, which fails when line
-coverage is under `COVERAGE_FLOOR_LINES` in `scripts/check.sh`, currently
-**95%**. Every reader of the profile (`coverage-floor`, `coverage-html`,
+coverage is under `COVERAGE_FLOOR_LINES` in `scripts/check.sh`. Every reader of the profile (`coverage-floor`, `coverage-html`,
 `coverage-summary`) goes through the script, which leaves test scaffolding
 out of the report with one `--ignore-filename-regex`: `sharerr-testkit` and
 `crates/sharerr/src/test_support.rs`, where the trait doubles live. A stub
@@ -290,5 +290,6 @@ Neither exists. `unsafe_code = "forbid"` at the workspace level narrows what
 fuzzing would catch, but the surfaces that parse externally influenced input
 (`sharerr-torrent`'s bencoding, `sharerr-rtorrent`'s XML-RPC responses,
 `sharerr-probe`'s media-file parsing) are real candidates for `cargo-fuzz`.
-`.scorecard.yml`'s header records the same gap against Scorecard's fuzzing
-check, deliberately left unannotated rather than marked not-applicable.
+Scorecard's fuzzing check reports the same gap, deliberately left unannotated
+in `.scorecard.yml` rather than marked not-applicable until fuzzing is added
+or decided against.

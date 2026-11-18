@@ -457,6 +457,26 @@ struct Harness {
     _qbit_server: MockServer,
 }
 
+/// A seeder over `qbit` in the `sharerr` category and tag, with checking on
+/// and no sidecar roots.
+fn test_seeder(
+    qbit: Arc<dyn sharerr_client::TorrentClient>,
+    seeding: SeedingConfig,
+    torrent_dir: PathBuf,
+) -> Seeder {
+    Seeder {
+        qbit,
+        category: "sharerr".to_owned(),
+        tag: "sharerr".to_owned(),
+        skip_checking: false,
+        seeding,
+        sidecar_roots: Vec::new(),
+        torrent_dir,
+        confirmed: Default::default(),
+        friends_http: reqwest::Client::new(),
+    }
+}
+
 /// Build a stack with Sonarr serving `series_json` (the library's own tagged
 /// series when `None`) and the library on disk.
 async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness {
@@ -516,17 +536,7 @@ async fn harness(series_json: Option<Value>, seeding: SeedingConfig) -> Harness 
         ..Config::default()
     };
 
-    let seeder = Seeder {
-        qbit: Arc::clone(&qbit),
-        category: "sharerr".to_owned(),
-        tag: "sharerr".to_owned(),
-        skip_checking: false,
-        seeding,
-        sidecar_roots: Vec::new(),
-        torrent_dir: torrents.path().to_path_buf(),
-        confirmed: Default::default(),
-        friends_http: reqwest::Client::new(),
-    };
+    let seeder = test_seeder(Arc::clone(&qbit), seeding, torrents.path().to_path_buf());
 
     let tracker = Arc::new(StubTracker::default());
     let syncer = Syncer::new(
@@ -564,17 +574,11 @@ impl Harness {
             SecretString::from("test-key"),
         )
         .unwrap();
-        let seeder = Seeder {
-            qbit: Arc::clone(&self.syncer.seeder.qbit),
-            category: "sharerr".to_owned(),
-            tag: "sharerr".to_owned(),
-            skip_checking: false,
+        let seeder = test_seeder(
+            Arc::clone(&self.syncer.seeder.qbit),
             seeding,
-            sidecar_roots: Vec::new(),
-            torrent_dir: self.torrents.path().to_path_buf(),
-            confirmed: Default::default(),
-            friends_http: reqwest::Client::new(),
-        };
+            self.torrents.path().to_path_buf(),
+        );
         Syncer::new(
             config,
             self.syncer.store().clone(),
@@ -2790,17 +2794,7 @@ use crate::test_support::{AlwaysReadyTracker, StubClient};
 /// torrent directory is never written to.
 async fn stub_syncer(client: Arc<StubClient>) -> Syncer {
     crate::test_support::trace();
-    let seeder = Seeder {
-        qbit: client,
-        category: "sharerr".to_owned(),
-        tag: "sharerr".to_owned(),
-        skip_checking: false,
-        seeding: SeedingConfig::default(),
-        sidecar_roots: Vec::new(),
-        torrent_dir: PathBuf::from("/torrents"),
-        confirmed: Default::default(),
-        friends_http: reqwest::Client::new(),
-    };
+    let seeder = test_seeder(client, SeedingConfig::default(), PathBuf::from("/torrents"));
     Syncer::new(
         Config::default(),
         Store::open_in_memory().await.unwrap(),

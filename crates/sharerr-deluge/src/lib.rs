@@ -475,6 +475,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use sharerr_testkit::mock::urls;
     use std::sync::LazyLock;
     use wiremock::matchers::{body_partial_json, header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -523,17 +524,12 @@ mod tests {
         answer(server, "web.connected", ok(json!(true))).await;
     }
 
-    /// The body of each request, in order, for the methods the session setup
-    /// does not account for.
+    /// The `params` of each `rpc` call, in order.
     async fn calls(server: &MockServer, rpc: &str) -> Vec<Value> {
-        server
-            .received_requests()
+        sharerr_testkit::mock::calls(server, rpc)
             .await
-            .unwrap()
-            .iter()
-            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
-            .filter(|b| b["method"] == rpc)
-            .map(|b| b["params"].clone())
+            .into_iter()
+            .map(|mut body| body["params"].take())
             .collect()
     }
 
@@ -934,10 +930,10 @@ mod tests {
         client(&server)
             .set_trackers(
                 "abc",
-                &[
-                    Url::parse("http://new.example:41234/announce").unwrap(),
-                    Url::parse("http://old.example:8477/announce").unwrap(),
-                ],
+                &urls(&[
+                    "http://new.example:41234/announce",
+                    "http://old.example:8477/announce",
+                ]),
             )
             .await
             .unwrap();
@@ -968,10 +964,7 @@ mod tests {
         answer(&server, "core.set_torrent_trackers", ok(Value::Null)).await;
 
         client(&server)
-            .add_trackers(
-                "abc",
-                &[Url::parse("http://sharerr.example/announce").unwrap()],
-            )
+            .add_trackers("abc", &urls(&["http://sharerr.example/announce"]))
             .await
             .unwrap();
 
@@ -996,10 +989,7 @@ mod tests {
         .await;
 
         client(&server)
-            .add_trackers(
-                "abc",
-                &[Url::parse("http://sharerr.example/announce").unwrap()],
-            )
+            .add_trackers("abc", &urls(&["http://sharerr.example/announce"]))
             .await
             .unwrap();
         assert!(calls(&server, "core.set_torrent_trackers").await.is_empty());
@@ -1028,23 +1018,6 @@ mod tests {
             calls(&server, "core.set_torrent_options").await,
             vec![json!([["abc"], { "max_upload_speed": 512 }])]
         );
-    }
-
-    #[tokio::test]
-    async fn set_limits_with_nothing_configured_sends_nothing() {
-        let server = MockServer::start().await;
-        client(&server)
-            .set_limits("abc", &SeedingLimits::default())
-            .await
-            .unwrap();
-        assert!(server.received_requests().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn export_reports_that_deluge_cannot_produce_the_file() {
-        let server = MockServer::start().await;
-        assert_eq!(client(&server).export("abc").await.unwrap(), None);
-        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]

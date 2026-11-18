@@ -987,8 +987,7 @@ mod tests {
     /// nothing, are both "unknown" — and must load rather than fail the read.
     #[tokio::test]
     async fn an_item_with_no_metadata_round_trips_as_none() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1)).await.unwrap();
+        let store = seeded(&[episode(1)]).await;
 
         let back = store.all_items().await.unwrap();
         assert_eq!(back[0].media, None);
@@ -1155,6 +1154,15 @@ mod tests {
         }
     }
 
+    /// A fresh in-memory store holding `items`.
+    async fn seeded(items: &[SharedItem]) -> Store {
+        let store = Store::open_in_memory().await.unwrap();
+        for item in items {
+            store.upsert(item).await.unwrap();
+        }
+        store
+    }
+
     /// `SharedItem` carries no timestamps, so read them back directly.
     async fn timestamps(store: &Store, file_id: i64) -> (i64, i64) {
         let row = sqlx::query("SELECT created_at, updated_at FROM shared_items WHERE file_id = ?1")
@@ -1207,10 +1215,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_is_scoped_by_source_as_well_as_file_id() {
-        let store = Store::open_in_memory().await.unwrap();
         // Same file_id in both apps — only the pair is unique.
-        store.upsert(&episode(500)).await.unwrap();
-        store.upsert(&movie(500)).await.unwrap();
+        let store = seeded(&[episode(500), movie(500)]).await;
 
         let from_sonarr = store.get(MediaSource::Sonarr, 500).await.unwrap().unwrap();
         let from_radarr = store.get(MediaSource::Radarr, 500).await.unwrap().unwrap();
@@ -1241,8 +1247,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_preserves_created_at_and_advances_updated_at() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
 
         // Backdate the row rather than sleeping: `now_epoch` has one-second
         // resolution, so a same-second re-upsert would prove nothing either way.
@@ -1277,8 +1282,7 @@ mod tests {
     /// otherwise.
     #[tokio::test]
     async fn upsert_never_clears_a_known_info_hash() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_info_hash(MediaSource::Sonarr, 1001, "abc123")
             .await
@@ -1295,8 +1299,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_still_applies_a_new_info_hash() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_info_hash(MediaSource::Sonarr, 1001, "old")
             .await
@@ -1316,8 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_seeding_records_the_token_fingerprint_alongside_the_hash() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
 
         store
             .set_seeding(
@@ -1339,8 +1341,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_for_rebuild_clears_the_torrent_identity() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_seeding(
                 MediaSource::Sonarr,
@@ -1381,9 +1382,7 @@ mod tests {
     /// integer, and clearing a stamp drops the row from the map.
     #[tokio::test]
     async fn file_stamps_round_trip_and_clear() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
-        store.upsert(&episode(1002)).await.unwrap();
+        let store = seeded(&[episode(1001), episode(1002)]).await;
         assert!(store.file_stamps().await.unwrap().is_empty());
 
         let stamp = FileStamp {
@@ -1407,8 +1406,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_share_until_date_is_set_listed_and_cleared() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         assert!(store.share_ends().await.unwrap().is_empty());
 
         assert!(
@@ -1459,8 +1457,7 @@ mod tests {
     /// layer.
     #[tokio::test]
     async fn confirm_seeding_touches_the_fingerprint_and_ratio_together() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_seeding(
                 MediaSource::Sonarr,
@@ -1497,8 +1494,7 @@ mod tests {
     /// same COALESCE reasoning as `info_hash`.
     #[tokio::test]
     async fn upsert_never_blanks_an_existing_fingerprint() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_seeding(
                 MediaSource::Sonarr,
@@ -1523,8 +1519,7 @@ mod tests {
     /// at the SQL layer either.
     #[tokio::test]
     async fn set_ratio_touches_only_the_ratio_columns() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_seeding(
                 MediaSource::Sonarr,
@@ -1553,8 +1548,7 @@ mod tests {
     /// COALESCE reasoning as `upsert_never_blanks_an_existing_fingerprint`.
     #[tokio::test]
     async fn upsert_never_blanks_an_existing_ratio() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
         store
             .set_ratio(MediaSource::Sonarr, 1001, Some(1.85), Some(2.0))
             .await
@@ -1570,9 +1564,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_state_and_info_hash_touch_only_their_own_row() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
-        store.upsert(&episode(1002)).await.unwrap();
+        let store = seeded(&[episode(1001), episode(1002)]).await;
 
         store
             .set_state(
@@ -1601,8 +1593,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_state_clears_a_previous_error() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
 
         store
             .set_state(
@@ -1633,8 +1624,7 @@ mod tests {
     /// state.
     #[tokio::test]
     async fn a_state_outside_the_enum_is_malformed_on_read() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
 
         sqlx::query("UPDATE shared_items SET state = 'bogus' WHERE file_id = 1001")
             .execute(store.pool())
@@ -1654,8 +1644,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_malformed_row_is_an_error_not_a_panic() {
-        let store = Store::open_in_memory().await.unwrap();
-        store.upsert(&episode(1001)).await.unwrap();
+        let store = seeded(&[episode(1001)]).await;
 
         sqlx::query("UPDATE shared_items SET spec_json = '{not json' WHERE file_id = 1001")
             .execute(store.pool())

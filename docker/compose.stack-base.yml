@@ -1,0 +1,41 @@
+# The services every tier-2 test stack runs the same way, each stack
+# `extends`-ing them and adding its own container name, state directory,
+# host port and dependencies. Not a project: validate_compose.sh checks it
+# through the stacks that extend it.
+
+x-lsio-env: &lsio-env
+  PUID: "${SHARERR_TEST_UID:-1000}"
+  PGID: "${SHARERR_TEST_GID:-1000}"
+  TZ: Etc/UTC
+
+services:
+  sonarr:
+    # Pinned rather than :latest: `seed-arr` writes Sonarr's database
+    # directly, so a silent major bump would break the fixtures.
+    image: lscr.io/linuxserver/sonarr:4.0.20@sha256:673dc4609a5672bc8e46069c86ffcea283a86b48d34a6c93d8da8c24a1b87571
+    environment:
+      <<: *lsio-env
+    volumes:
+      # Read-only: nothing in a test should write to the fixtures.
+      - ../tests/fixtures/media/tv:/tv:ro
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:6.4.4@sha256:ade5937813c6ae415b29db729386e53fea3ecf067a019849bafbe2d2a6ec02ba
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ../tests/fixtures/media/movies:/movies:ro
+
+  sharerr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      # A throwaway key for a throwaway stack. A real deployment supplies it
+      # as a docker secret via SHARERR_MASTER_KEY_FILE.
+      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
+      RUST_LOG: sharerr=debug,info
+    volumes:
+      # sharerr's own view of the library, read-only: it never writes to the
+      # media it shares.
+      - ../tests/fixtures/media:/media:ro

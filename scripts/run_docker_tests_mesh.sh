@@ -32,13 +32,11 @@ curl() { command curl -q "$@"; }
 
 COMPOSE=(docker compose -f docker/compose.mesh.yml)
 
-# Must match docker/compose.mesh.yml's own published ports, and
-# LIGHTHOUSE_PORT must match crates/sharerr/tests/e2e_mesh.rs's identical
-# constant — the Rust assertion has no other way to find this stack.
+# Must match docker/compose.mesh.yml's published port and
+# crates/sharerr/tests/e2e_mesh.rs's identical constant: the Rust assertion
+# has no other way to find this stack. The nodes' ports are read from the
+# running stack after `up`.
 LIGHTHOUSE_PORT=63878
-PORT_A=63481
-PORT_B=63482
-PORT_C=63483
 
 SETUP_PW=sharerr-test-admin-password
 STATE=docker/state-mesh
@@ -46,17 +44,17 @@ STATE=docker/state-mesh
 # See run_docker_tests.sh's own copy of this function for the reasoning —
 # unchanged here.
 remove_state() {
-    [[ -e $STATE ]] || return 0
-    rm -rf "$STATE" 2>/dev/null && return 0
-    docker run --rm -v "$PWD/docker:/w" alpine:3 rm -rf "/w/$(basename "$STATE")" \
-        >/dev/null 2>&1 || true
+  [[ -e $STATE ]] || return 0
+  rm -rf "$STATE" 2>/dev/null && return 0
+  docker run --rm -v "$PWD/docker:/w" alpine:3 rm -rf "/w/$(basename "$STATE")" \
+    >/dev/null 2>&1 || true
 }
 
 teardown() {
-    local status=$?
-    "${COMPOSE[@]}" down -v --remove-orphans || true
-    remove_state
-    return $status
+  local status=$?
+  "${COMPOSE[@]}" down -v --remove-orphans || true
+  remove_state
+  return $status
 }
 # `DEBUG_NO_TEARDOWN=1 ./run_docker_tests_mesh.sh` skips the trap, leaving the
 # stack up for a live post-mortem — `docker compose -f docker/compose.mesh.yml
@@ -67,34 +65,34 @@ teardown() {
 # Unchanged from run_docker_tests.sh's own copy — see its comment for the
 # full reasoning.
 wait_for() {
-    local name=$1 port=$2 path=$3 accept=${4:-'^2[0-9][0-9]$'} deadline=$((SECONDS + 120)) code
-    printf 'waiting for %s' "$name"
-    while true; do
-        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-            "http://127.0.0.1:$port$path" 2>/dev/null || true)
-        [[ $code =~ $accept ]] && break
-        if ((SECONDS > deadline)); then
-            echo " — gave up after 120s (last status: ${code:-no response})"
-            "${COMPOSE[@]}" logs "$name" | tail -30
-            return 1
-        fi
-        printf .
-        [[ -t 1 ]] || printf '\n'
-        sleep 2
-    done
-    echo " ok"
+  local name=$1 port=$2 path=$3 accept=${4:-'^2[0-9][0-9]$'} deadline=$((SECONDS + 120)) code
+  printf 'waiting for %s' "$name"
+  while true; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "http://127.0.0.1:$port$path" 2>/dev/null || true)
+    [[ $code =~ $accept ]] && break
+    if ((SECONDS > deadline)); then
+      echo " — gave up after 120s (last status: ${code:-no response})"
+      "${COMPOSE[@]}" logs "$name" | tail -30
+      return 1
+    fi
+    printf .
+    [[ -t 1 ]] || printf '\n'
+    sleep 2
+  done
+  echo " ok"
 }
 
 # Claim a fresh instance's operator account, the same `/setup` POST
 # run_docker_tests.sh and run_docker_tests_two_instance.sh both use. The
 # cookie jar is this node's session for the rest of the script.
 claim() {
-    local node=$1 port=$2
-    curl -sf -c "/tmp/sharerr-mesh-cookies-$node" \
-        --data-urlencode "username=admin" \
-        --data-urlencode "password=$SETUP_PW" \
-        --data-urlencode "confirm=$SETUP_PW" \
-        "http://127.0.0.1:$port/setup" -o /dev/null
+  local node=$1 port=$2
+  curl -sf -c "/tmp/sharerr-mesh-cookies-$node" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=$SETUP_PW" \
+    --data-urlencode "confirm=$SETUP_PW" \
+    "http://127.0.0.1:$port/setup" -o /dev/null
 }
 
 # Sign back in after a restart. Sessions live in an in-process map
@@ -104,11 +102,11 @@ claim() {
 # The account itself does survive (it lives in the store, not in memory), so
 # this is a login, never another `/setup`.
 sign_in_again() {
-    local node=$1 port=$2
-    curl -sf -c "/tmp/sharerr-mesh-cookies-$node" \
-        --data-urlencode "username=admin" \
-        --data-urlencode "password=$SETUP_PW" \
-        "http://127.0.0.1:$port/login" -o /dev/null
+  local node=$1 port=$2
+  curl -sf -c "/tmp/sharerr-mesh-cookies-$node" \
+    --data-urlencode "username=admin" \
+    --data-urlencode "password=$SETUP_PW" \
+    "http://127.0.0.1:$port/login" -o /dev/null
 }
 
 # Add a friend labelled $label on $node, and reveal the key this node just
@@ -123,19 +121,19 @@ sign_in_again() {
 # duplicate label (400), which is the one way this can fail against a fresh
 # stack: a leftover peer from a previous, uncleanly-torn-down run.
 add_peer() {
-    local node=$1 port=$2 label=$3 body key id invite
-    body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
-        --data-urlencode "label=$label" \
-        --data-urlencode "scope=all" \
-        "http://127.0.0.1:$port/peers")
-    key=$(sed -n 's/.*<code>\([^<]*\)<\/code>.*/\1/p' <<<"$body" | head -n1)
-    id=$(grep -A10 "<h3>$label</h3>" <<<"$body" | grep -oP '/peers/\K[0-9]+(?=/gossip)' | head -n1)
-    invite=$(grep -oP '<code class="invite">\K[^<]+' <<<"$body" | head -n1)
-    if [[ -z $key || -z $id || -z $invite ]]; then
-        echo "error: node $node could not add friend $label (key=${key:-<none>} id=${id:-<none>} invite=${invite:-<none>})" >&2
-        return 1
-    fi
-    echo "$id $key $invite"
+  local node=$1 port=$2 label=$3 body key id invite
+  body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
+    --data-urlencode "label=$label" \
+    --data-urlencode "scope=all" \
+    "http://127.0.0.1:$port/peers")
+  key=$(sed -n 's/.*<code>\([^<]*\)<\/code>.*/\1/p' <<<"$body" | head -n1)
+  id=$(grep -A10 "<h3>$label</h3>" <<<"$body" | grep -oP '/peers/\K[0-9]+(?=/gossip)' | head -n1)
+  invite=$(grep -oP '<code class="invite">\K[^<]+' <<<"$body" | head -n1)
+  if [[ -z $key || -z $id || -z $invite ]]; then
+    echo "error: node $node could not add friend $label (key=${key:-<none>} id=${id:-<none>} invite=${invite:-<none>})" >&2
+    return 1
+  fi
+  echo "$id $key $invite"
 }
 
 # Paste a friend's invite on $node under the name $label: the one-string
@@ -145,32 +143,32 @@ add_peer() {
 # on one bridge network, is a bug rather than a flaky link. Prints the new
 # peer's id.
 pair_peer() {
-    local node=$1 port=$2 label=$3 invite=$4 body id
-    body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
-        --data-urlencode "invite=$invite" \
-        --data-urlencode "label=$label" \
-        --data-urlencode "scope=all" \
-        "http://127.0.0.1:$port/peers/pair")
-    if ! grep -q "Paired with $label" <<<"$body" || ! grep -q "nothing to send back" <<<"$body"; then
-        echo "error: node $node could not pair with $label from an invite" >&2
-        grep -oE '<p class="(error|warn)"[^>]*>[^<]*' <<<"$body" | head -n3 >&2
-        return 1
-    fi
-    id=$(grep -A30 "<h3>$label</h3>" <<<"$body" | grep -oP '/peers/\K[0-9]+(?=/gossip)' | head -n1)
-    if [[ -z $id ]]; then
-        echo "error: node $node paired with $label but shows no row for them" >&2
-        return 1
-    fi
-    echo "$id"
+  local node=$1 port=$2 label=$3 invite=$4 body id
+  body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
+    --data-urlencode "invite=$invite" \
+    --data-urlencode "label=$label" \
+    --data-urlencode "scope=all" \
+    "http://127.0.0.1:$port/peers/pair")
+  if ! grep -q "Paired with $label" <<<"$body" || ! grep -q "nothing to send back" <<<"$body"; then
+    echo "error: node $node could not pair with $label from an invite" >&2
+    grep -oE '<p class="(error|warn)"[^>]*>[^<]*' <<<"$body" | head -n3 >&2
+    return 1
+  fi
+  id=$(grep -A30 "<h3>$label</h3>" <<<"$body" | grep -oP '/peers/\K[0-9]+(?=/gossip)' | head -n1)
+  if [[ -z $id ]]; then
+    echo "error: node $node paired with $label but shows no row for them" >&2
+    return 1
+  fi
+  echo "$id"
 }
 
 # The gossip URL this node's peers page holds for $label — the value in
 # their card's "Their sharerr URL" field — or nothing if unset.
 peer_gossip_url() {
-    local node=$1 port=$2 label=$3
-    curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers" \
-        | grep -A30 "<h3>$label</h3>" \
-        | grep -oP 'name="url" value="\K[^"]*' | head -n1
+  local node=$1 port=$2 label=$3
+  curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers" |
+    grep -A30 "<h3>$label</h3>" |
+    grep -oP 'name="url" value="\K[^"]*' | head -n1
 }
 
 # Whether this node's peers page shows $label's sharerr as having
@@ -178,11 +176,11 @@ peer_gossip_url() {
 # bound to their row. The table row spans many lines, so the page is
 # flattened first and the row matched from its name cell to its `</tr>`.
 peer_runs_sharerr() {
-    local node=$1 port=$2 label=$3
-    curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers" \
-        | tr -d '\n' \
-        | grep -oP "class=\"peer-name\">\s*$label\s*</td>.*?</tr>" \
-        | grep -q '✓'
+  local node=$1 port=$2 label=$3
+  curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers" |
+    tr -d '\n' |
+    grep -oP "class=\"peer-name\">\s*$label\s*</td>.*?</tr>" |
+    grep -q '✓'
 }
 
 # Configure the outbound half of a friendship: where their sharerr is, and
@@ -191,11 +189,11 @@ peer_runs_sharerr() {
 # the script severs the A<->C link later without deleting either peer row or
 # forgetting the pubkey each side already bound.
 set_gossip() {
-    local node=$1 port=$2 id=$3 url=$4 key=$5
-    curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
-        --data-urlencode "url=$url" \
-        --data-urlencode "key=$key" \
-        "http://127.0.0.1:$port/peers/$id/gossip" -o /dev/null
+  local node=$1 port=$2 id=$3 url=$4 key=$5
+  curl -sf -b "/tmp/sharerr-mesh-cookies-$node" \
+    --data-urlencode "url=$url" \
+    --data-urlencode "key=$key" \
+    "http://127.0.0.1:$port/peers/$id/gossip" -o /dev/null
 }
 
 # The most recent endpoint this node's peers page shows for $label, and how
@@ -208,13 +206,13 @@ set_gossip() {
 # pattern rather than one pattern spanning both — a `sed` expression assuming
 # they shared a line matched nothing here on the first pass of this script.
 peer_endpoint() {
-    local node=$1 port=$2 label=$3 body block addr via
-    body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers")
-    block=$(grep -A8 "<h3>$label</h3>" <<<"$body")
-    addr=$(grep -o '<code>[^<]*</code>' <<<"$block" | head -n1 | sed 's/<code>//;s#</code>##')
-    [[ -z $addr ]] && return 0
-    via=$(grep -oP '\([a-z]+, [^,]+, \K[a-z]+(?=\))' <<<"$block" | head -n1)
-    echo "$addr $via"
+  local node=$1 port=$2 label=$3 body block addr via
+  body=$(curl -sf -b "/tmp/sharerr-mesh-cookies-$node" "http://127.0.0.1:$port/peers")
+  block=$(grep -A8 "<h3>$label</h3>" <<<"$body")
+  addr=$(grep -o '<code>[^<]*</code>' <<<"$block" | head -n1 | sed 's/<code>//;s#</code>##')
+  [[ -z $addr ]] && return 0
+  via=$(grep -oP '\([a-z]+, [^,]+, \K[a-z]+(?=\))' <<<"$block" | head -n1)
+  echo "$addr $via"
 }
 
 # 1. Fresh, live copies of each node's config — never the checked-in
@@ -231,6 +229,12 @@ cp docker/config-mesh-c/sharerr.toml "$STATE/config-c/sharerr.toml"
 #    header for why this stack carries neither an *arr app nor a torrent
 #    client.
 "${COMPOSE[@]}" up -d --build
+
+# The host port each node's 8477 is published on, from the stack itself.
+host_port() { "${COMPOSE[@]}" port "$1" 8477 | cut -d: -f2; }
+PORT_A=$(host_port sharerr-a)
+PORT_B=$(host_port sharerr-b)
+PORT_C=$(host_port sharerr-c)
 
 wait_for lighthouse "$LIGHTHOUSE_PORT" /lighthouse/v1/health
 wait_for sharerr-a "$PORT_A" /health
@@ -260,20 +264,19 @@ claim C "$PORT_C"
 #    would otherwise be what bound them). B<->C and A<->C are wired by hand
 #    through `set_gossip`, so the script still covers the typed path too.
 echo "pairing A<->B from B's invite"
-read -r ID_B_FOR_A KEY_B_FOR_A INVITE_B_FOR_A <<<"$(add_peer B "$PORT_B" A)"
-ID_A_FOR_B=$(pair_peer A "$PORT_A" B "$INVITE_B_FOR_A")
+read -r _ _ INVITE_B_FOR_A <<<"$(add_peer B "$PORT_B" A)"
+pair_peer A "$PORT_A" B "$INVITE_B_FOR_A" >/dev/null
 a_holds_b=$(peer_gossip_url A "$PORT_A" B)
 b_holds_a=$(peer_gossip_url B "$PORT_B" A)
 if [[ $a_holds_b != "http://sharerr-b:8477/" || $b_holds_a != "http://sharerr-a:8477/" ]]; then
-    echo "error: pairing left a side unset (A holds [$a_holds_b] for B, B holds [$b_holds_a] for A)" >&2
-    exit 1
+  echo "error: pairing left a side unset (A holds [$a_holds_b] for B, B holds [$b_holds_a] for A)" >&2
+  exit 1
 fi
 if ! peer_runs_sharerr A "$PORT_A" B || ! peer_runs_sharerr B "$PORT_B" A; then
-    echo "error: pairing did not pin both identities before the first gossip pass" >&2
-    exit 1
+  echo "error: pairing did not pin both identities before the first gossip pass" >&2
+  exit 1
 fi
 echo "A<->B paired: both sides stored, both identities pinned, no gossip pass yet"
-: "$ID_B_FOR_A" "$KEY_B_FOR_A" "$ID_A_FOR_B" # wired by the pairing; kept for symmetry with the pairs below
 
 echo "meshing B<->C and A<->C by hand"
 read -r ID_B_FOR_C KEY_B_FOR_C _ <<<"$(add_peer B "$PORT_B" C)"
@@ -294,25 +297,25 @@ set_gossip C "$PORT_C" "$ID_C_FOR_A" "http://sharerr-a:8477" "$KEY_A_FOR_C"
 printf 'letting the mesh settle'
 settle_deadline=$((SECONDS + 60))
 while true; do
-    a_sees_b=$(peer_endpoint A "$PORT_A" B)
-    a_sees_c=$(peer_endpoint A "$PORT_A" C)
-    b_sees_a=$(peer_endpoint B "$PORT_B" A)
-    b_sees_c=$(peer_endpoint B "$PORT_B" C)
-    c_sees_a=$(peer_endpoint C "$PORT_C" A)
-    c_sees_b=$(peer_endpoint C "$PORT_C" B)
-    if [[ -n $a_sees_b && -n $a_sees_c && -n $b_sees_a && -n $b_sees_c && -n $c_sees_a && -n $c_sees_b ]]; then
-        break
-    fi
-    if ((SECONDS > settle_deadline)); then
-        echo " — gave up after 60s"
-        echo "A: B=[$a_sees_b] C=[$a_sees_c]" >&2
-        echo "B: A=[$b_sees_a] C=[$b_sees_c]" >&2
-        echo "C: A=[$c_sees_a] B=[$c_sees_b]" >&2
-        exit 1
-    fi
-    printf .
-    [[ -t 1 ]] || printf '\n'
-    sleep 3
+  a_sees_b=$(peer_endpoint A "$PORT_A" B)
+  a_sees_c=$(peer_endpoint A "$PORT_A" C)
+  b_sees_a=$(peer_endpoint B "$PORT_B" A)
+  b_sees_c=$(peer_endpoint B "$PORT_B" C)
+  c_sees_a=$(peer_endpoint C "$PORT_C" A)
+  c_sees_b=$(peer_endpoint C "$PORT_C" B)
+  if [[ -n $a_sees_b && -n $a_sees_c && -n $b_sees_a && -n $b_sees_c && -n $c_sees_a && -n $c_sees_b ]]; then
+    break
+  fi
+  if ((SECONDS > settle_deadline)); then
+    echo " — gave up after 60s"
+    echo "A: B=[$a_sees_b] C=[$a_sees_c]" >&2
+    echo "B: A=[$b_sees_a] C=[$b_sees_c]" >&2
+    echo "C: A=[$c_sees_a] B=[$c_sees_b]" >&2
+    exit 1
+  fi
+  printf .
+  [[ -t 1 ]] || printf '\n'
+  sleep 3
 done
 echo " ok — every pair sees the other directly"
 
@@ -335,11 +338,11 @@ set_gossip C "$PORT_C" "$ID_C_FOR_A" "" ""
 #    lighthouse ends up with this exact port too.
 NEW_PORT=9999
 curl -sf -b "/tmp/sharerr-mesh-cookies-A" \
-    --data-urlencode "advertised_host=sharerr-a" \
-    --data-urlencode "port=$NEW_PORT" \
-    --data-urlencode "advertised_url=" \
-    --data-urlencode "token=" \
-    "http://127.0.0.1:$PORT_A/settings/tracker" -o /dev/null
+  --data-urlencode "advertised_host=sharerr-a" \
+  --data-urlencode "port=$NEW_PORT" \
+  --data-urlencode "advertised_url=" \
+  --data-urlencode "token=" \
+  "http://127.0.0.1:$PORT_A/settings/tracker" -o /dev/null
 
 # 8. The real thing. B is still directly linked to A, so it should pick up
 #    the new address on the next exchange pass. C is not — its own view of A
@@ -351,18 +354,18 @@ curl -sf -b "/tmp/sharerr-mesh-cookies-A" \
 printf 'waiting for the mesh to notice A moved to :%s' "$NEW_PORT"
 recover_deadline=$((SECONDS + 60))
 while true; do
-    b_view=$(peer_endpoint B "$PORT_B" A)
-    c_view=$(peer_endpoint C "$PORT_C" A)
-    [[ $b_view == *":$NEW_PORT"* && $c_view == *":$NEW_PORT"* ]] && break
-    if ((SECONDS > recover_deadline)); then
-        echo " — gave up after 60s"
-        echo "B's view of A: [$b_view]" >&2
-        echo "C's view of A: [$c_view]" >&2
-        exit 1
-    fi
-    printf .
-    [[ -t 1 ]] || printf '\n'
-    sleep 3
+  b_view=$(peer_endpoint B "$PORT_B" A)
+  c_view=$(peer_endpoint C "$PORT_C" A)
+  [[ $b_view == *":$NEW_PORT"* && $c_view == *":$NEW_PORT"* ]] && break
+  if ((SECONDS > recover_deadline)); then
+    echo " — gave up after 60s"
+    echo "B's view of A: [$b_view]" >&2
+    echo "C's view of A: [$c_view]" >&2
+    exit 1
+  fi
+  printf .
+  [[ -t 1 ]] || printf '\n'
+  sleep 3
 done
 echo " ok"
 echo "B learned A's new address $(peer_endpoint B "$PORT_B" A | cut -d' ' -f2 | sed 's/^/via /')"
@@ -385,15 +388,15 @@ sign_in_again C "$PORT_C"
 printf 'waiting for C to rejoin and re-converge with B'
 rejoin_deadline=$((SECONDS + 60))
 while true; do
-    c_view_of_b=$(peer_endpoint C "$PORT_C" B)
-    [[ -n $c_view_of_b ]] && break
-    if ((SECONDS > rejoin_deadline)); then
-        echo " — gave up after 60s"
-        exit 1
-    fi
-    printf .
-    [[ -t 1 ]] || printf '\n'
-    sleep 3
+  c_view_of_b=$(peer_endpoint C "$PORT_C" B)
+  [[ -n $c_view_of_b ]] && break
+  if ((SECONDS > rejoin_deadline)); then
+    echo " — gave up after 60s"
+    exit 1
+  fi
+  printf .
+  [[ -t 1 ]] || printf '\n'
+  sleep 3
 done
 echo " ok"
 

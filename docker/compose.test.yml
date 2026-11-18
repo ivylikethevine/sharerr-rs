@@ -45,28 +45,18 @@ x-lsio-env: &lsio-env
 
 services:
   sonarr:
-    # Pinned rather than :latest — the pre-seeding workaround in README.md couples
-    # to Sonarr's database schema, so a silent major bump would be a bad surprise.
-    image: lscr.io/linuxserver/sonarr:4.0.20@sha256:673dc4609a5672bc8e46069c86ffcea283a86b48d34a6c93d8da8c24a1b87571
+    extends: { file: compose.stack-base.yml, service: sonarr }
     container_name: sharerr-test-sonarr
-    environment:
-      <<: *lsio-env
     volumes:
       - ./state/sonarr:/config
-      # Sonarr's view of the library. Read-only: nothing in this test should ever
-      # write to the fixtures, and a bind mount is the cheapest way to prove it.
-      - ../tests/fixtures/media/tv:/tv:ro
     ports:
       - "127.0.0.1:18989:8989"
 
   radarr:
-    image: lscr.io/linuxserver/radarr:6.4.4@sha256:ade5937813c6ae415b29db729386e53fea3ecf067a019849bafbe2d2a6ec02ba
+    extends: { file: compose.stack-base.yml, service: radarr }
     container_name: sharerr-test-radarr
-    environment:
-      <<: *lsio-env
     volumes:
       - ./state/radarr:/config
-      - ../tests/fixtures/media/movies:/movies:ro
     ports:
       - "127.0.0.1:17878:7878"
 
@@ -130,23 +120,12 @@ services:
       - "127.0.0.1:19696:9696"
 
   sharerr:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    extends: { file: compose.stack-base.yml, service: sharerr }
     container_name: sharerr-test-sharerr
     depends_on: [sonarr, radarr, lidarr, readarr, qbittorrent]
-
-    environment:
-      # A throwaway key for a throwaway stack. A real deployment supplies this as
-      # a docker secret via SHARERR_MASTER_KEY_FILE.
-      SHARERR_MASTER_KEY: test-stack-master-key-not-a-real-secret
-      RUST_LOG: sharerr=debug,info
     volumes:
       - ./config:/config
       - sharerr-data:/data
-      # sharerr's own view of the library — a fourth path, and read-only, because
-      # sharerr never needs to write to the media it shares.
-      - ../tests/fixtures/media:/media:ro
     ports:
       - "127.0.0.1:18477:8477"
 

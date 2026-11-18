@@ -13,32 +13,37 @@ attached.
 
 ## Where it stands
 
-As of 2026-11-16, branch `dev`.
+As of 2026-11-17, branch `dev`.
 
-- The repo-wide simplification (2) is applied but for 14 of its 138 items:
-  test helpers, and CI and docs tidying. Four more are held back, since each
-  changes behaviour.
-- Not verified: whether the theme toggle shows at phone width (1).
+- The theme toggle's empty phone-width state is fixed in the tree (the
+  toggle is exempt from the 32rem rule hiding bar glyphs); it has not been
+  seen in a narrow preview.
+- The repo-wide simplification (2) is applied but for one of its 138 items:
+  cutting the workflow and Dockerfile headers to the why. Four more are held
+  back, since each changes behaviour. The test-helper, compose, CI and docs
+  changes of this batch are edited but not yet built or tested; the
+  path-filter `not-code` anchor in `prepare.yml` relies on paths-filter
+  flattening a YAML alias, which only a CI run proves.
+- The dev profile now builds dependencies with line tables only, and the
+  coverage build runs without an incremental cache, to cut the size of
+  `target/`. Neither the disk saving nor the effect on build and mutant times
+  (5) is measured.
 - Open questions: who may call the local hooks (6), and the four held-back
   simplifications (2).
 
 ## Order of work
 
-- The items under Now, smallest first: 1, 2, 3, 4, then 5 a phase at a time.
+- The items under Now, smallest first: 2, 3, 4, then 5 a phase at a time.
+  3 and 4 publish outside the repo, so they start on the maintainer's word.
 - 6 once its decision is made, and 7 once Prowlarr allows it.
 - The items under Later are not scheduled.
 
 ## Now
 
-1. **The theme toggle at phone width.** Unconfirmed: at 32rem and below,
-   `style.css` hides every glyph in the bar's links and buttons
-   (`.bar nav :is(a, button) svg`), which may include the toggle's own and
-   leave it looking empty. Check with a narrow preview before changing
-   anything.
 2. **The repo-wide simplification.** Quality only, with no behaviour change:
    its checklist,
    [`docs/plans/repo-simplification.md`](plans/repo-simplification.md), has
-   the 14 open items, the four held back for a decision, and what was decided
+   the one open item, the four held back for a decision, and what was decided
    and learned while applying the rest. It is deleted, and this item with it,
    once every item is applied or recorded as held back.
 3. **A public lighthouse.** The software and a Linode module to host it
@@ -52,8 +57,9 @@ As of 2026-11-16, branch `dev`.
    exists, and every other crate, plus `sharerr`'s `web/auth.rs` and
    `totp.rs`, has had its survivors worth killing killed (what is left and
    why: [`docs/TESTING.md`](TESTING.md#mutation-testing)). A `sharerr` mutant
-   costs about 19 seconds at `-j 4` (16CPU/60GB), because each one runs the
-   crate's whole suite, so a 30-minute sitting covers about 95 mutants. The
+   costs about 19 seconds at `-j 4` (16CPU/60GB), measured before the dev
+   profile cut dependencies' debug info, because each one runs the crate's
+   whole suite, so a 30-minute sitting covers about 95 mutants. The
    rest of the crate is 2,173 mutants, about 11.5 hours or 23 sittings, below
    by phase with counts from `cargo mutants --list -p sharerr` on 2026-11-06
    (they move with the code; re-list a phase before starting it, then split

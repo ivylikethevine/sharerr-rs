@@ -631,13 +631,7 @@ async fn build(state: &WebState, error: Option<String>) -> PeersPage {
 
     PeersPage {
         signed_in: true,
-        scope_options: PeerScope::ALL
-            .iter()
-            .map(|scope| SelectOption {
-                value: scope.as_str(),
-                label: title_case(scope.label()),
-            })
-            .collect(),
+        scope_options: scope_options(),
         peers,
         error: error.or(list_error),
         revealed: None,
@@ -647,6 +641,17 @@ async fn build(state: &WebState, error: Option<String>) -> PeersPage {
         // must advertise the resolved address here too.
         feed_url: format!("{}/api", state.serve.public_base_url().await),
     }
+}
+
+/// Every scope a friend can be given, for the add and edit forms.
+pub(crate) fn scope_options() -> Vec<SelectOption> {
+    PeerScope::ALL
+        .iter()
+        .map(|scope| SelectOption {
+            value: scope.as_str(),
+            label: title_case(scope.label()),
+        })
+        .collect()
 }
 
 fn row(
@@ -701,12 +706,31 @@ fn row(
     }
 }
 
-/// The four things that happen, in order, as a friend sets up, and what the
-/// row can prove about each. "Feed pulled" is any authenticated use of the
-/// key, the feed or gossip: a friend who runs sharerr pairs through gossip
-/// before Prowlarr ever pulls, and either shows the key works. "First
-/// announce" is their torrent client reaching the tracker with the key,
-/// which the tracker records as a `client` address seen directly.
+/// Each setup step's label and the hint shown while it is not done, in the
+/// order a friend gets through them.
+pub(crate) const SETUP_STEPS: [(&str, &str); 4] = [
+    ("Key issued", ""),
+    (
+        "Feed pulled",
+        "Their Prowlarr has not used the key yet: the indexer is not added, or its test failed.",
+    ),
+    (
+        "First announce",
+        "Their torrent client has not reached the tracker yet: nothing grabbed from the feed, \
+         or the advertised address is not reachable from their side.",
+    ),
+    (
+        "Runs sharerr (optional)",
+        "Only for a friend who runs sharerr: their instance has not introduced itself yet.",
+    ),
+];
+
+/// [`SETUP_STEPS`], with what the row can prove about each. "Feed pulled" is
+/// any authenticated use of the key, the feed or gossip: a friend who runs
+/// sharerr pairs through gossip before Prowlarr ever pulls, and either shows
+/// the key works. "First announce" is their torrent client reaching the
+/// tracker with the key, which the tracker records as a `client` address
+/// seen directly.
 pub(crate) fn setup_steps(
     peer: &Peer,
     endpoints: &[sharerr_store::PeerEndpoint],
@@ -714,31 +738,22 @@ pub(crate) fn setup_steps(
     let announced = endpoints
         .iter()
         .any(|e| e.kind == EndpointKind::Client && e.via == sharerr_store::ObservedVia::Direct);
-    let step = |label, done, hint: &str| SetupStep {
-        label,
-        done,
-        hint: hint.to_owned(),
-        href: "",
-    };
-    vec![
-        step("Key issued", true, ""),
-        step(
-            "Feed pulled",
-            peer.last_seen_at.is_some(),
-            "Their Prowlarr has not used the key yet: the indexer is not added, or its test failed.",
-        ),
-        step(
-            "First announce",
-            announced,
-            "Their torrent client has not reached the tracker yet: nothing grabbed from the feed, \
-             or the advertised address is not reachable from their side.",
-        ),
-        step(
-            "Runs sharerr (optional)",
-            peer.pubkey.is_some(),
-            "Only for a friend who runs sharerr: their instance has not introduced itself yet.",
-        ),
-    ]
+    let done = [
+        true,
+        peer.last_seen_at.is_some(),
+        announced,
+        peer.pubkey.is_some(),
+    ];
+    SETUP_STEPS
+        .iter()
+        .zip(done)
+        .map(|(&(label, hint), done)| SetupStep {
+            label,
+            done,
+            hint: hint.to_owned(),
+            href: "",
+        })
+        .collect()
 }
 
 /// `GET /peers/{id}/guide`: the printable setup guide, with a blank for

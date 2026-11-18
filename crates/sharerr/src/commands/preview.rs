@@ -384,33 +384,39 @@ fn setup_step(label: &'static str, done: bool, href: &'static str) -> SetupStep 
     }
 }
 
-/// A friend's four setup steps with the first `done` of them ticked, the
-/// same labels and order `web::peers::setup_steps` produces.
+/// A friend's setup steps with the first `done` of them ticked.
 fn mock_setup(done: usize) -> Vec<SetupStep> {
-    [
-        ("Key issued", ""),
-        (
-            "Feed pulled",
-            "Their Prowlarr has not used the key yet: the indexer is not added, or its test failed.",
-        ),
-        (
-            "First announce",
-            "Their torrent client has not reached the tracker yet.",
-        ),
-        (
-            "Runs sharerr (optional)",
-            "Only for a friend who runs sharerr: their instance has not introduced itself yet.",
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, (label, hint))| SetupStep {
-        label,
-        done: index < done,
-        hint: hint.to_owned(),
-        href: "",
-    })
-    .collect()
+    crate::web::peers::SETUP_STEPS
+        .iter()
+        .enumerate()
+        .map(|(index, &(label, hint))| SetupStep {
+            label,
+            done: index < done,
+            hint: hint.to_owned(),
+            href: "",
+        })
+        .collect()
+}
+
+/// Every *arr section through the Settings page's own builder: Sonarr and
+/// Radarr with a URL and a key, Lidarr with a URL and no key, the rest empty.
+fn mock_arrs() -> Vec<ArrSection> {
+    let service = |raw: &str| {
+        url::Url::parse(raw)
+            .ok()
+            .map(|url| sharerr_core::config::ServiceConfig { url })
+    };
+    let config = sharerr_core::Config {
+        sonarr: service("http://sonarr.example:8989"),
+        radarr: service("http://radarr.example:7878"),
+        lidarr: service("http://lidarr.example:8686"),
+        ..sharerr_core::Config::default()
+    };
+    let is_set = |key: &str| {
+        use sharerr_core::config::secret_keys::{RADARR_API_KEY, SONARR_API_KEY};
+        key == SONARR_API_KEY || key == RADARR_API_KEY
+    };
+    crate::web::settings::arr_sections(&config, &is_set)
 }
 
 fn peer_guide_page() -> PeerGuidePage {
@@ -630,58 +636,7 @@ fn settings_page() -> SettingsPage {
 
         tag: "sharerr".to_owned(),
 
-        arrs: vec![
-            ArrSection {
-                source: "sonarr",
-                title: "Sonarr".to_owned(),
-                url: "http://sonarr.example:8989".to_owned(),
-                key_set: true,
-                placeholder: "http://sonarr:8989",
-                docs_url: crate::web::docs::SONARR,
-                url_path: "sonarr.url",
-                primary: true,
-            },
-            ArrSection {
-                source: "radarr",
-                title: "Radarr".to_owned(),
-                url: "http://radarr.example:7878".to_owned(),
-                key_set: true,
-                placeholder: "http://radarr:7878",
-                docs_url: crate::web::docs::RADARR,
-                url_path: "radarr.url",
-                primary: true,
-            },
-            ArrSection {
-                source: "lidarr",
-                title: "Lidarr".to_owned(),
-                url: "http://lidarr.example:8686".to_owned(),
-                key_set: false,
-                placeholder: "http://lidarr:8686",
-                docs_url: crate::web::docs::LIDARR,
-                url_path: "lidarr.url",
-                primary: false,
-            },
-            ArrSection {
-                source: "readarr",
-                title: "Readarr".to_owned(),
-                url: String::new(),
-                key_set: false,
-                placeholder: "http://readarr:8787",
-                docs_url: crate::web::docs::READARR,
-                url_path: "readarr.url",
-                primary: false,
-            },
-            ArrSection {
-                source: "whisparr",
-                title: "Whisparr".to_owned(),
-                url: String::new(),
-                key_set: false,
-                placeholder: "http://whisparr:6969",
-                docs_url: crate::web::docs::WHISPARR,
-                url_path: "whisparr.url",
-                primary: false,
-            },
-        ],
+        arrs: mock_arrs(),
         secondary_arr_configured: true,
         library_sources_configured: 4,
 
@@ -806,20 +761,7 @@ fn settings_page() -> SettingsPage {
 
 fn peers_page() -> PeersPage {
     PeersPage {
-        scope_options: vec![
-            SelectOption {
-                value: "all",
-                label: "Everything".to_owned(),
-            },
-            SelectOption {
-                value: "tv",
-                label: "TV only".to_owned(),
-            },
-            SelectOption {
-                value: "movies",
-                label: "Films only".to_owned(),
-            },
-        ],
+        scope_options: crate::web::peers::scope_options(),
         signed_in: true,
         peers: vec![
             PeerRow {
