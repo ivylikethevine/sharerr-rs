@@ -57,6 +57,9 @@ an idle Elastic IP is the one thing here that bills while nothing runs.
 Azure requires an SSH public key (`-var "ssh_public_key=$(cat
 ~/.ssh/id_ed25519.pub)"`); AWS and Linode take one optionally and open port
 22 only when given. Narrow `ssh_cidr` to your own address either way.
+Without a key the Linode gets a generated root password, since Linode
+refuses an image with neither: it stays in the state, and only the Lish
+console would take it.
 OpenTofu runs every module unchanged: `tofu` in place of `terraform`.
 
 ## What runs on the box
