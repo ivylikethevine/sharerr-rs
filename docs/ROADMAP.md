@@ -28,11 +28,9 @@ As of 2026-11-17, branch `dev`.
   coverage build runs without an incremental cache, to cut the size of
   `target/`. Neither the disk saving nor the effect on build and mutant times
   (5) is measured.
-- The Linode lighthouse module (3) could not create its instance without an
-  ssh key: the provider it pins wants a key or a root password with an
-  image. It now generates the password; edited on 2026-11-18, not yet
-  validated (`scripts/check.sh terraform`, which also adds the `random`
-  provider to the target's lock file) or applied.
+- The Linode lighthouse module (3) creates its instance without an ssh key
+  again, with a generated root password: `scripts/check.sh terraform` passes
+  and an apply through it made one on 2026-11-18.
 - Open questions: who may call the local hooks (6), and the four held-back
   simplifications (2).
 
