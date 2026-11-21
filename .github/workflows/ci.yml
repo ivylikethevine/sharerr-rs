@@ -1,19 +1,14 @@
-# The hermetic tier of the test suite, plus the formatting, lint, and
-# secret-scanning gates.
+# The hermetic test tier (no service container, database or network), plus the
+# formatting, lint and secret-scanning gates. The docker-backed tiers are
+# compiled here but run only by integration.yml (docs/TESTING.md).
 #
-# Nothing here needs a service container, a database, or the network: the *arr and
-# qBittorrent clients are exercised against wiremock on loopback, sqlx runs against
-# `sqlite::memory:`, and migrations are embedded at compile time by `sqlx::migrate!`.
-# The tier-2 suite that drives docker/compose.test.yml is deliberately excluded —
-# see the note on `cargo test` in scripts/check.sh; integration.yml runs it weekly.
-#
-# Every check step calls `scripts/check.sh <check>`, the same entry point a
-# contributor runs locally, so a command lives in one place. This file keeps
-# only what is CI-specific: runners, tool installs, caches, and gating.
+# Every check step calls `scripts/check.sh <check>`, the entry point a
+# contributor runs locally, so a command lives in one place; this file holds
+# only runners, tool installs, caches and gating.
 #
 # Required check names. `main`'s ruleset matches these verbatim, so none
-# carries a version, shard number, or matrix value, and renaming a job below
-# is also a ruleset edit:
+# carries a version, shard number or matrix value, and renaming a job below is
+# also a ruleset edit:
 #
 #   quick lint                               (every check that compiles nothing)
 #   clippy + tests                           (also runs rustdoc -D warnings)
@@ -37,8 +32,8 @@ on:
   # a job-level `if:` on `prepare` and on every job that does not read its
   # `code` output; the jobs that do skip with it. A skipped required check does not block anything
   # a draft could do anyway, since a draft cannot merge. codeql.yml uses this
-  # same shape; docker.yml too, except its `if:` sits one level down in
-  # docker-image.yml (its own trigger comment says why).
+  # same shape; docker.yml too, except its `if:` sits on its `prepare` job
+  # alone (its own trigger comment says why).
   pull_request:
     branches: [main, dev] # dev: the sync PRs' commits are graded by this PR
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
@@ -71,17 +66,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Which runner to use, and whether anything but CI's own files changed —
-  # merged into one call (see prepare.yml) so every heavy job below waits on one
-  # VM boot instead of two. Editing this file (or pages.yml, or a shared action)
-  # can't move a Rust lint or a test result, so there is nothing below for those
-  # jobs to re-check on such a change; `quick lint` always runs, since it reads
-  # those files.
-  #
-  # `prepare` itself decides what a schedule or workflow_dispatch run means (see
-  # its own header comment): a job below only ever checks
+  # Which runner to use, and whether anything but CI's own files changed
+  # (prepare.yml's header). Editing this file, pages.yml or a shared action
+  # can't move a Rust lint or a test result, so the jobs that read `code` skip
+  # on such a change; `quick lint` always runs, since it reads those files. A
+  # job below checks
   # `needs.prepare.outputs.code == 'true'` (plus `reuse`'s answer), and `quick
-  # lint` reads the `deps` and `terraform` keys back from `changes` the same way.
+  # lint` reads the `deps` and `terraform` keys back from `changes`.
   prepare:
     name: prepare
     # Draft PRs skip; see the `pull_request:` trigger above.

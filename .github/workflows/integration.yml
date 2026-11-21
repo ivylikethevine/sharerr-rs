@@ -1,19 +1,12 @@
-# The docker-backed test tiers (docs/TESTING.md), which ci.yml compiles but
-# never runs: tier 2 (scripts/run_docker_tests.sh and its variants, plus the
-# two-instance stack) and tier 3 (the mesh). Each drives a real Compose stack
-# on the runner's own Docker daemon.
+# The docker-backed test tiers 2 and 3 (docs/TESTING.md), which ci.yml
+# compiles but never runs, each against a real Compose stack.
 #
-# Advisory, on a schedule rather than per PR: a stack takes minutes to boot and
-# pulls real images, and a flake in a third-party container must not block a
-# merge. So it keeps one `integration` tracking issue current instead: opened
-# (or rewritten) when a scheduled run fails, closed by the scheduled run that
-# passes. A manual dispatch only ever opens or updates the issue, never closes
-# it, since it may have run a different tier from the one that failed.
-#
-# The weekly run covers the default tier. A dispatch picks any one tier, or
-# all of them as a matrix. None needs a secret: the VPN stack terminates its
-# own WireGuard tunnel inside Compose with test-only keys (see
-# docker/compose.vpn.yml).
+# Weekly and advisory rather than per PR: a stack takes minutes to boot, and a
+# flake in a third-party container must not block a merge. A failure keeps one
+# `integration` tracking issue current; only a scheduled pass closes it, since
+# a dispatch may have run a different tier from the one that failed. The
+# weekly run covers the default tier; a dispatch picks one tier or all. None
+# needs a secret (the VPN stack uses test-only WireGuard keys).
 name: Integration
 
 on:

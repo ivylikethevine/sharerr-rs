@@ -1,41 +1,18 @@
-# Two questions every heavy job in ci.yml and docker.yml (one call there, for
-# both its `docker` and `lighthouse` callers of docker-image.yml) needs answered
-# before it can start: which runner to use, and whether this event
-# even touched anything that job cares about. Both used to be separate reusable
-# workflows (`runner.yml`, `changes.yml`) — two VM boots, sequentially `needs:`ed,
-# for what is together a fork check and a `git diff` against a filter. Merged here
-# into one VM so a caller pays that latency once, not twice.
+# The two questions every heavy job in ci.yml and docker.yml asks before it
+# starts, answered in one VM so a caller pays that latency once.
 #
-# runner selection
-# -----------------
-# `vars.RUNNER_LABEL` names a self-hosted machine, and unlike `secrets.*` it is
-# NOT withheld from a `pull_request` run triggered by a fork — GitHub only scopes
-# secrets that way. ci.yml and docker.yml both trigger on `pull_request`, and for
-# that event the workflow file that actually runs is the one on the fork's own
-# branch, not this repo's — so a fork PR that simply read
-# `${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}` in `runs-on:` would still resolve
-# to the real label and get its own job steps scheduled on it. This job is the
-# fix: it is the one place that checks whether the run is a fork PR, and every
-# other job reads its output instead of the raw variable.
+# Which runner. `vars.RUNNER_LABEL` names a self-hosted machine, and unlike a
+# secret it is not withheld from a fork's `pull_request` run, which runs the
+# fork's own workflow file; reading it in `runs-on:` would land fork code on
+# that machine. This is the one place that checks for a fork, and every other
+# job reads its `label` output instead of the variable.
 #
-# changed-files detection
-# ------------------------
-# Whether anything besides CI's own files (or whatever `inputs.filters` names)
-# changed. A caller passes its own filter (ci.yml wants what can move a Rust
-# result; docker.yml wants what can move an image, and a `lighthouse` key for
-# the paths that feed that image) so the "code" key means
-# something different per caller, same as it did in changes.yml. A caller
-# may add more keys and read them back from the `changes` output (ci.yml's
-# `terraform` and `deps` keys, docker.yml's `lighthouse`).
-#
-# Deliberately no `if:` on the `changes` output's job here — whether this should
-# run at all (push/pull_request only, not schedule or workflow_dispatch) is each
-# caller's own call. A caller that skips this entirely (by not gating on it) gets
-# `code` simply unset, which every downstream `if:` below already treats as
-# "assume yes": `needs.prepare.outputs.code == 'true'` is the only condition any
-# job needs now — no separate `result == 'skipped'` branch, because this workflow
-# itself decides that a schedule/dispatch run "changed" everything, once, instead
-# of leaving that decision to N copies of the same ternary in the caller.
+# Whether anything relevant changed. Each caller passes its own filter, so
+# `code` means what can move that caller's result (a Rust result for ci.yml, an
+# image for docker.yml); extra keys come back in `changes` (ci.yml's
+# `terraform` and `deps`, docker.yml's `lighthouse`). With no diff to filter
+# (a schedule or dispatch), every key counts as changed, so a caller checks
+# `needs.prepare.outputs.code == 'true'` and nothing else.
 name: Prepare
 
 on:

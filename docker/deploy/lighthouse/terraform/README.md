@@ -76,8 +76,8 @@ restart, not a credential.
 ## What is deliberately not here
 
 - **A public instance's address.** This directory is how to run one, not
-  where one runs. If the project ever hosts an instance, its URL belongs in
-  [`docs/LIGHTHOUSE.md`](../../../../docs/LIGHTHOUSE.md).
+  where one runs; the project's public instance is in
+  [`docs/LIGHTHOUSE.md`](../../../../docs/LIGHTHOUSE.md#using-one).
 - **Remote state.** Three resources per target is not worth a backend; keep
   the state file wherever you keep the rest of your homelab's.
 - **Azure Container Apps, AWS Fargate, Lightsail.** Considered. Container
